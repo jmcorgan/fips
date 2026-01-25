@@ -6,5 +6,6 @@
 pub mod identity;
 
 pub use identity::{
-    AuthChallenge, AuthResponse, FipsAddress, Identity, IdentityError, NodeId,
+    decode_npub, encode_npub, AuthChallenge, AuthResponse, FipsAddress, Identity, IdentityError,
+    NodeId, PeerIdentity,
 };

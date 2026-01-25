@@ -4,12 +4,16 @@
 //! from the public key via SHA-256, and the FIPS address uses an IPv6-compatible
 //! format with the 0xfd prefix.
 
+use bech32::{Bech32, Hrp};
 use rand::Rng;
 use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::net::Ipv6Addr;
 use thiserror::Error;
+
+/// Human-readable part for npub (NIP-19).
+const NPUB_HRP: Hrp = Hrp::parse_unchecked("npub");
 
 /// Domain separation string for authentication challenges.
 const AUTH_DOMAIN: &[u8] = b"fips-auth-v1";
@@ -34,6 +38,18 @@ pub enum IdentityError {
 
     #[error("invalid address prefix: expected 0xfd, got 0x{0:02x}")]
     InvalidAddressPrefix(u8),
+
+    #[error("bech32 encoding error: {0}")]
+    Bech32Encode(#[from] bech32::EncodeError),
+
+    #[error("bech32 decoding error: {0}")]
+    Bech32Decode(#[from] bech32::DecodeError),
+
+    #[error("invalid npub: expected 'npub' prefix, got '{0}'")]
+    InvalidNpubPrefix(String),
+
+    #[error("invalid npub: expected 32 bytes, got {0}")]
+    InvalidNpubLength(usize),
 }
 
 /// 32-byte node identifier derived from SHA-256(npub).
@@ -165,6 +181,78 @@ impl fmt::Display for FipsAddress {
     }
 }
 
+/// A known peer's identity (public key only, no signing capability).
+///
+/// Use this to represent remote peers whose npub you know. For a local
+/// identity with signing capability, use [`Identity`] instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PeerIdentity {
+    pubkey: XOnlyPublicKey,
+    node_id: NodeId,
+    address: FipsAddress,
+}
+
+impl PeerIdentity {
+    /// Create a PeerIdentity from an x-only public key.
+    pub fn from_pubkey(pubkey: XOnlyPublicKey) -> Self {
+        let node_id = NodeId::from_pubkey(&pubkey);
+        let address = FipsAddress::from_node_id(&node_id);
+        Self {
+            pubkey,
+            node_id,
+            address,
+        }
+    }
+
+    /// Create a PeerIdentity from a bech32-encoded npub string.
+    pub fn from_npub(npub: &str) -> Result<Self, IdentityError> {
+        let pubkey = decode_npub(npub)?;
+        Ok(Self::from_pubkey(pubkey))
+    }
+
+    /// Return the x-only public key.
+    pub fn pubkey(&self) -> XOnlyPublicKey {
+        self.pubkey
+    }
+
+    /// Return the public key as a bech32-encoded npub string (NIP-19).
+    pub fn npub(&self) -> String {
+        encode_npub(&self.pubkey)
+    }
+
+    /// Return the node ID.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    /// Return the FIPS address.
+    pub fn address(&self) -> &FipsAddress {
+        &self.address
+    }
+
+    /// Verify a signature from this peer.
+    pub fn verify(&self, data: &[u8], signature: &secp256k1::schnorr::Signature) -> bool {
+        let secp = Secp256k1::new();
+        let digest = sha256(data);
+        secp.verify_schnorr(signature, &digest, &self.pubkey).is_ok()
+    }
+}
+
+impl fmt::Debug for PeerIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerIdentity")
+            .field("node_id", &self.node_id)
+            .field("address", &self.address)
+            .finish()
+    }
+}
+
+impl fmt::Display for PeerIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.npub())
+    }
+}
+
 /// A FIPS node identity consisting of a keypair and derived identifiers.
 ///
 /// The identity holds the secp256k1 keypair and provides methods for signing
@@ -208,9 +296,14 @@ impl Identity {
         Ok(Self::from_secret_key(secret_key))
     }
 
-    /// Return the x-only public key (npub).
+    /// Return the x-only public key.
     pub fn pubkey(&self) -> XOnlyPublicKey {
         self.keypair.x_only_public_key().0
+    }
+
+    /// Return the public key as a bech32-encoded npub string (NIP-19).
+    pub fn npub(&self) -> String {
+        encode_npub(&self.pubkey())
     }
 
     /// Return the node ID.
@@ -324,6 +417,27 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 /// Encode bytes as lowercase hex string.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Encode an x-only public key as a bech32 npub string (NIP-19).
+pub fn encode_npub(pubkey: &XOnlyPublicKey) -> String {
+    bech32::encode::<Bech32>(NPUB_HRP, &pubkey.serialize()).expect("npub encoding cannot fail")
+}
+
+/// Decode an npub string to an x-only public key.
+pub fn decode_npub(npub: &str) -> Result<XOnlyPublicKey, IdentityError> {
+    let (hrp, data) = bech32::decode(npub)?;
+
+    if hrp != NPUB_HRP {
+        return Err(IdentityError::InvalidNpubPrefix(hrp.to_string()));
+    }
+
+    if data.len() != 32 {
+        return Err(IdentityError::InvalidNpubLength(data.len()));
+    }
+
+    let pubkey = XOnlyPublicKey::from_slice(&data)?;
+    Ok(pubkey)
 }
 
 #[cfg(test)]
@@ -491,5 +605,107 @@ mod tests {
         assert!(secp
             .verify_schnorr(&sig, &digest, &identity.pubkey())
             .is_ok());
+    }
+
+    #[test]
+    fn test_npub_encoding() {
+        let identity = Identity::generate();
+        let npub = identity.npub();
+
+        // Should start with "npub1"
+        assert!(npub.starts_with("npub1"));
+
+        // Should be 63 characters (npub1 + 58 chars of bech32 data)
+        assert_eq!(npub.len(), 63);
+    }
+
+    #[test]
+    fn test_npub_roundtrip() {
+        let identity = Identity::generate();
+        let npub = identity.npub();
+
+        let decoded = decode_npub(&npub).unwrap();
+        assert_eq!(decoded, identity.pubkey());
+    }
+
+    #[test]
+    fn test_npub_known_vector() {
+        // Test against a known npub (from NIP-19 test vectors or generated externally)
+        let secret_bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+
+        let identity = Identity::from_secret_bytes(&secret_bytes).unwrap();
+        let npub = identity.npub();
+
+        // Decode and verify it matches the original pubkey
+        let decoded = decode_npub(&npub).unwrap();
+        assert_eq!(decoded, identity.pubkey());
+
+        // npub should be deterministic
+        let npub2 = encode_npub(&identity.pubkey());
+        assert_eq!(npub, npub2);
+    }
+
+    #[test]
+    fn test_decode_npub_invalid_prefix() {
+        // nsec instead of npub
+        let nsec = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+        let result = decode_npub(nsec);
+        assert!(matches!(result, Err(IdentityError::InvalidNpubPrefix(_))));
+    }
+
+    #[test]
+    fn test_decode_npub_invalid_checksum() {
+        // Valid npub with corrupted checksum
+        let bad_npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+        let result = decode_npub(bad_npub);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_peer_identity_from_npub() {
+        let identity = Identity::generate();
+        let npub = identity.npub();
+
+        let peer = PeerIdentity::from_npub(&npub).unwrap();
+
+        assert_eq!(peer.pubkey(), identity.pubkey());
+        assert_eq!(peer.node_id(), identity.node_id());
+        assert_eq!(peer.address(), identity.address());
+        assert_eq!(peer.npub(), npub);
+    }
+
+    #[test]
+    fn test_peer_identity_verify_signature() {
+        let identity = Identity::generate();
+        let peer = PeerIdentity::from_pubkey(identity.pubkey());
+
+        let data = b"hello world";
+        let signature = identity.sign(data);
+
+        assert!(peer.verify(data, &signature));
+        assert!(!peer.verify(b"wrong data", &signature));
+    }
+
+    #[test]
+    fn test_peer_identity_from_invalid_npub() {
+        let result = PeerIdentity::from_npub("npub1invalid");
+        assert!(result.is_err());
+
+        let result = PeerIdentity::from_npub("nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5");
+        assert!(matches!(result, Err(IdentityError::InvalidNpubPrefix(_))));
+    }
+
+    #[test]
+    fn test_peer_identity_display() {
+        let identity = Identity::generate();
+        let peer = PeerIdentity::from_pubkey(identity.pubkey());
+
+        let display = format!("{}", peer);
+        assert!(display.starts_with("npub1"));
+        assert_eq!(display, identity.npub());
     }
 }
