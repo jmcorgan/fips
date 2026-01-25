@@ -8,6 +8,7 @@ use rand::Rng;
 use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::net::Ipv6Addr;
 use thiserror::Error;
 
 /// Domain separation string for authentication challenges.
@@ -140,28 +141,27 @@ impl FipsAddress {
         &self.0
     }
 
-    /// Format as an IPv6 address string.
-    pub fn to_ipv6_string(&self) -> String {
-        let segments: Vec<String> = (0..8)
-            .map(|i| {
-                let high = self.0[i * 2];
-                let low = self.0[i * 2 + 1];
-                format!("{:02x}{:02x}", high, low)
-            })
-            .collect();
-        segments.join(":")
+    /// Convert to std::net::Ipv6Addr.
+    pub fn to_ipv6(&self) -> Ipv6Addr {
+        Ipv6Addr::from(self.0)
+    }
+}
+
+impl From<FipsAddress> for Ipv6Addr {
+    fn from(addr: FipsAddress) -> Self {
+        Ipv6Addr::from(addr.0)
     }
 }
 
 impl fmt::Debug for FipsAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FipsAddress({})", self.to_ipv6_string())
+        write!(f, "FipsAddress({})", self.to_ipv6())
     }
 }
 
 impl fmt::Display for FipsAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_ipv6_string())
+        write!(f, "{}", self.to_ipv6())
     }
 }
 
@@ -361,17 +361,15 @@ mod tests {
     #[test]
     fn test_fips_address_ipv6_format() {
         let identity = Identity::generate();
-        let addr_str = identity.address().to_ipv6_string();
+        let ipv6 = identity.address().to_ipv6();
+        let addr_str = ipv6.to_string();
 
-        // Should be 8 groups of 4 hex chars separated by colons
-        let parts: Vec<&str> = addr_str.split(':').collect();
-        assert_eq!(parts.len(), 8);
-        for part in parts {
-            assert_eq!(part.len(), 4);
-        }
-
-        // First byte should be fd
+        // Should start with fd (ULA prefix)
         assert!(addr_str.starts_with("fd"));
+
+        // Conversion should be lossless
+        let octets = ipv6.octets();
+        assert_eq!(&octets, identity.address().as_bytes());
     }
 
     #[test]
