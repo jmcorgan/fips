@@ -12,6 +12,7 @@ pub mod peer;
 pub mod protocol;
 pub mod transport;
 pub mod tree;
+pub mod tun;
 
 // Re-export identity types
 pub use identity::{
@@ -20,7 +21,7 @@ pub use identity::{
 };
 
 // Re-export config types
-pub use config::{Config, ConfigError, IdentityConfig};
+pub use config::{Config, ConfigError, IdentityConfig, TunConfig};
 
 // Re-export tree types
 pub use tree::{ParentDeclaration, TreeCoordinate, TreeError, TreeState};
@@ -49,3 +50,6 @@ pub use peer::{Peer, PeerError, PeerState, UpstreamPeer};
 
 // Re-export node types
 pub use node::{Node, NodeError, NodeState};
+
+// Re-export TUN types
+pub use tun::{TunDevice, TunError, TunState};

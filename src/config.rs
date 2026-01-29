@@ -66,12 +66,51 @@ pub struct NodeConfig {
     pub leaf_only: bool,
 }
 
+/// Default TUN device name.
+const DEFAULT_TUN_NAME: &str = "fips0";
+
+/// Default TUN MTU (IPv6 minimum).
+const DEFAULT_TUN_MTU: u16 = 1280;
+
+/// TUN interface configuration (`tun.*`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TunConfig {
+    /// Enable TUN interface (`tun.enabled`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled: bool,
+
+    /// TUN device name (`tun.name`). Defaults to "fips0".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// TUN MTU (`tun.mtu`). Defaults to 1280 (IPv6 minimum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+
+}
+
+impl TunConfig {
+    /// Get the TUN device name, using default if not configured.
+    pub fn name(&self) -> &str {
+        self.name.as_deref().unwrap_or(DEFAULT_TUN_NAME)
+    }
+
+    /// Get the TUN MTU, using default if not configured.
+    pub fn mtu(&self) -> u16 {
+        self.mtu.unwrap_or(DEFAULT_TUN_MTU)
+    }
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Node configuration (`node.*`).
     #[serde(default)]
     pub node: NodeConfig,
+
+    /// TUN interface configuration (`tun.*`).
+    #[serde(default)]
+    pub tun: TunConfig,
 }
 
 impl Config {
@@ -159,6 +198,16 @@ impl Config {
         // Merge node.leaf_only
         if other.node.leaf_only {
             self.node.leaf_only = true;
+        }
+        // Merge tun section
+        if other.tun.enabled {
+            self.tun.enabled = true;
+        }
+        if other.tun.name.is_some() {
+            self.tun.name = other.tun.name;
+        }
+        if other.tun.mtu.is_some() {
+            self.tun.mtu = other.tun.mtu;
         }
     }
 

@@ -9,6 +9,7 @@ use crate::cache::CoordCache;
 use crate::peer::Peer;
 use crate::transport::{Link, LinkId, TransportId};
 use crate::tree::TreeState;
+use crate::tun::{TunDevice, TunError, TunState};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeId};
 use std::collections::HashMap;
 use std::fmt;
@@ -49,6 +50,9 @@ pub enum NodeError {
 
     #[error("identity error: {0}")]
     Identity(#[from] IdentityError),
+
+    #[error("TUN error: {0}")]
+    Tun(#[from] TunError),
 }
 
 /// Node operational state.
@@ -148,6 +152,12 @@ pub struct Node {
     next_link_id: u64,
     /// Next transport ID to allocate.
     next_transport_id: u32,
+
+    // === TUN Interface ===
+    /// TUN device state.
+    tun_state: TunState,
+    /// TUN device (if active).
+    tun_device: Option<TunDevice>,
 }
 
 impl Node {
@@ -155,14 +165,27 @@ impl Node {
     pub fn new(config: Config) -> Result<Self, NodeError> {
         let identity = config.create_identity()?;
         let node_id = *identity.node_id();
+        let is_leaf_only = config.is_leaf_only();
+
+        let bloom_state = if is_leaf_only {
+            BloomState::leaf_only(node_id)
+        } else {
+            BloomState::new(node_id)
+        };
+
+        let tun_state = if config.tun.enabled {
+            TunState::Configured
+        } else {
+            TunState::Disabled
+        };
 
         Ok(Self {
             identity,
             config,
             state: NodeState::Created,
-            is_leaf_only: false,
+            is_leaf_only,
             tree_state: TreeState::new(node_id),
-            bloom_state: BloomState::new(node_id),
+            bloom_state,
             coord_cache: CoordCache::with_defaults(),
             transport_ids: Vec::new(),
             links: HashMap::new(),
@@ -171,12 +194,19 @@ impl Node {
             max_links: 256,
             next_link_id: 1,
             next_transport_id: 1,
+            tun_state,
+            tun_device: None,
         })
     }
 
     /// Create a node with a specific identity.
     pub fn with_identity(identity: Identity, config: Config) -> Self {
         let node_id = *identity.node_id();
+        let tun_state = if config.tun.enabled {
+            TunState::Configured
+        } else {
+            TunState::Disabled
+        };
         Self {
             identity,
             config,
@@ -192,6 +222,8 @@ impl Node {
             max_links: 256,
             next_link_id: 1,
             next_transport_id: 1,
+            tun_state,
+            tun_device: None,
         }
     }
 
@@ -278,6 +310,48 @@ impl Node {
     /// Get mutable coordinate cache.
     pub fn coord_cache_mut(&mut self) -> &mut CoordCache {
         &mut self.coord_cache
+    }
+
+    // === TUN Interface ===
+
+    /// Get the TUN state.
+    pub fn tun_state(&self) -> TunState {
+        self.tun_state
+    }
+
+    /// Get the TUN device if active.
+    pub fn tun_device(&self) -> Option<&TunDevice> {
+        self.tun_device.as_ref()
+    }
+
+    /// Get mutable TUN device if active.
+    pub fn tun_device_mut(&mut self) -> Option<&mut TunDevice> {
+        self.tun_device.as_mut()
+    }
+
+    /// Initialize the TUN interface.
+    ///
+    /// Creates and configures the TUN device based on the node's configuration.
+    /// Requires CAP_NET_ADMIN capability (run with sudo or setcap).
+    ///
+    /// Returns Ok(true) if TUN was initialized, Ok(false) if TUN is disabled.
+    pub async fn init_tun(&mut self) -> Result<bool, NodeError> {
+        if !self.config.tun.enabled {
+            return Ok(false);
+        }
+
+        let address = *self.identity.address();
+        match TunDevice::create(&self.config.tun, address).await {
+            Ok(device) => {
+                self.tun_device = Some(device);
+                self.tun_state = TunState::Active;
+                Ok(true)
+            }
+            Err(e) => {
+                self.tun_state = TunState::Failed;
+                Err(e.into())
+            }
+        }
     }
 
     // === Resource Limits ===
