@@ -346,14 +346,18 @@ hysteresis ensures the tree remains stable under transient conditions.
 
 ### Tree Coordinates
 
-A node's coordinate is its path from root:
+A node's coordinate is its path to root:
 
 ```text
-Coordinate = [root_id, ..., parent_id, self_id]
+Coordinate = [self_id, parent_id, ..., root_id]
 ```
 
+Coordinates are ordered self-to-root, so common ancestry is a suffix. This
+ordering is consistent across all FIPS documents.
+
 **Distance metric**: Tree distance between two nodes is the sum of hops to their
-lowest common ancestor (LCA):
+lowest common ancestor (LCA). With self-to-root ordering, the LCA is found by
+comparing coordinate suffixes:
 
 ```
 dist(A, B) = depth(A) + depth(B) - 2 * depth(LCA(A, B))
@@ -478,80 +482,66 @@ When greedy routing fails (local minimum):
 
 ## 5. Transport Abstraction Layer
 
-### Link Interface
+FIPS is transport-agnostic. Transports are the physical or logical interfaces
+over which FIPS communicates (UDP sockets, Ethernet NICs, Tor clients, etc.).
+Links are connection instances to specific peers over a transport.
 
-```rust
-trait FipsLink: Send + Sync {
-    /// Unique identifier for this link type
-    fn link_type(&self) -> &str;
+> **Note**: The Transport trait definition and detailed transport specifications
+> are in [fips-architecture.md](fips-architecture.md). This section provides a
+> conceptual overview. See [fips-links.md](fips-links.md) for transport
+> characteristics and requirements.
 
-    /// Maximum transmission unit
-    fn mtu(&self) -> usize;
+### Transport Interface Concept
 
-    /// Estimated characteristics
-    fn characteristics(&self) -> LinkCharacteristics;
+Each transport driver provides:
 
-    /// Send packet to peer
-    async fn send(&self, peer: &PeerId, data: &[u8]) -> Result<()>;
+- **Identity**: Transport type identifier and configuration
+- **Lifecycle**: Start/stop the transport interface
+- **I/O**: Send/receive datagrams to/from transport-layer addresses
+- **Discovery**: Find potential peers (transport-specific mechanism)
+- **MTU**: Maximum packet size for this transport
 
-    /// Receive packet from any peer
-    async fn recv(&self) -> Result<(PeerId, Vec<u8>)>;
+Transports handle framing, fragmentation, and any transport-layer encryption
+internally. The FIPS routing layer sees only FIPS packets.
 
-    /// List connected peers
-    fn peers(&self) -> Vec<PeerId>;
+### Transport Types
 
-    /// Link-specific peer discovery (if supported)
-    async fn discover(&self) -> Result<Vec<PeerInfo>>;
-}
-
-struct LinkCharacteristics {
-    latency_ms: u32,
-    bandwidth_bps: u64,
-    reliability: f32,      // 0.0 - 1.0
-    is_metered: bool,
-    is_symmetric: bool,
-    supports_broadcast: bool,
-}
-```
-
-### Transport Implementations
-
-#### TCP/TLS Link
+#### TCP/TLS Transport
 
 Standard Yggdrasil-style IP peering with TLS encryption.
 
-#### QUIC Link
+#### QUIC Transport
 
 UDP-based with built-in encryption and multiplexing.
 
-#### Radio Link (LoRa, HF, VHF/UHF)
+#### Radio Transport (LoRa, HF, VHF/UHF)
 
 - Packet-based with size limits
 - May support broadcast
 - Often asymmetric (different TX/RX capabilities)
 - Requires careful bandwidth management
 
-#### Serial Link (RS-232, USB, etc.)
+#### Serial Transport (RS-232, USB, etc.)
 
 - Point-to-point
 - Framing protocol needed (SLIP, HDLC, etc.)
 - Good for isolated node pairs
 
-#### Onion Link (Tor, I2P)
+#### Onion Transport (Tor, I2P)
 
 - High latency
 - Strong anonymity properties
 - Special handling for circuit setup
 
-#### Bluetooth/BLE Link
+#### Bluetooth/BLE Transport
 
 - Short range
 - Discovery via scanning
 - Pairing considerations
 
-### Multi-Link Routing
+### Multi-Transport Routing
 
-A single node may have multiple links of different types:
+A single node may have multiple transports of different types:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -560,22 +550,23 @@ A single node may have multiple links of different types:
 │  │         Router Core              │   │
 │  └──────────┬──────────┬───────────┘   │
 │             │          │               │
-│      ┌──────┴───┐ ┌────┴────┐         │
-│      │ TCP Link │ │LoRa Link│         │
-│      └────┬─────┘ └────┬────┘         │
-└───────────┼────────────┼───────────────┘
-            │            │
-       ┌────┴────┐  ┌────┴────┐
-       │Internet │  │ Radio   │
-       │  Peers  │  │ Peers   │
-       └─────────┘  └─────────┘
+│      ┌──────┴────┐ ┌───┴─────┐        │
+│      │    TCP    │ │  LoRa   │        │
+│      │ Transport │ │Transport│        │
+│      └────┬──────┘ └────┬────┘        │
+└───────────┼─────────────┼──────────────┘
+            │             │
+       ┌────┴────┐  ┌─────┴────┐
+       │Internet │  │  Radio   │
+       │  Peers  │  │  Peers   │
+       └─────────┘  └──────────┘
 ```
 
-**Link selection for forwarding**:
+**Transport selection for forwarding**:
 
-- Prefer link with best path to destination
-- Consider link characteristics (don't send bulk over LoRa)
-- Support explicit link preferences in routing hints
+- Prefer transport with best path to destination
+- Consider transport characteristics (don't send bulk over LoRa)
+- Support explicit transport preferences in routing hints
 
 ---
 
@@ -641,7 +632,7 @@ Lookup {
 LookupResponse {
     destination: [u8; 32],
     nonce: [u8; 16],         // Echo from request
-    coordinates: Vec<[u8; 32]>,  // Path from root
+    coordinates: Vec<[u8; 32]>,  // Path to root [self, parent, ..., root]
     signature: [u8; 64],
 }
 ```

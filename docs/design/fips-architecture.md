@@ -163,13 +163,13 @@ TreeState
 │   ├── sequence: u64               // monotonic
 │   └── signature: Signature
 ├── my_coords: Vec<NodeId>          // [self, parent, grandparent, ..., root]
-├── root: NodeId                    // elected root (smallest reachable node_id)
-└── coord_cache: HashMap<Ipv6Addr, CachedCoords>  // for data packet routing
+└── root: NodeId                    // elected root (smallest reachable node_id)
 ```
 
 ### Per-Peer State
 
 From each peer, we receive and store:
+
 - Their `ParentDeclaration`
 - Their `ancestry` (path from peer to root)
 
@@ -178,10 +178,12 @@ This provides their tree coordinates for routing decisions.
 ### Bounded State
 
 Each node's TreeState contains O(P × D) entries, not O(N):
+
 - P = direct peer count
 - D = tree depth
 
 A node knows only:
+
 1. Its own parent declaration
 2. Direct peers' parent declarations
 3. Ancestry chains from each peer to root
@@ -205,6 +207,7 @@ BloomState
 ### Per-Peer State
 
 Stored on Peer:
+
 - `inbound_filter`: what they advertise to us (4KB Bloom filter)
 - `filter_sequence`: freshness/dedup
 - `filter_ttl`: remaining propagation hops
@@ -244,6 +247,7 @@ TTL is decremented on contributed entries. Recomputation is cheap (4KB filter,
 - `Failed`: couldn't start
 
 **Events:**
+
 - `Start` (from config policy or API)
 - `Started` / `StartFailed`
 - `Shutdown`
@@ -693,6 +697,7 @@ TransportConfig
 ### Discovery
 
 Discovery is per-transport:
+
 - Transports emit `DiscoveredPeer { addr, hint }` events
 - Node matches against known peer configs or creates "unknown peer" entries
 - Policy (`auto_connect`, per-peer `connect_policy`) determines action
@@ -744,6 +749,9 @@ Discovery is per-transport:
 | `discovery.cache.max_entries` | u32 | 10000 | Route cache size |
 | `discovery.cache.ttl` | duration | 300s | Cached coordinates expiry |
 
+The discovery cache stores coordinates learned from LookupResponses for destinations
+this node wants to reach. This is the primary cache for endpoint nodes.
+
 ### Session Management
 
 | Parameter | Type | Default | Description |
@@ -752,6 +760,11 @@ Discovery is per-transport:
 | `session.cache.max_entries` | u32 | 50000 | Coord cache size (per router) |
 | `session.cache.ttl` | duration | 300s | Cached coordinates expiry |
 | `session.refresh.interval` | duration | 240s | Proactive session refresh |
+
+The session cache stores coordinates learned from SessionSetup packets passing through
+this node as a transit router. Larger than discovery cache since routers see traffic
+for many destinations. Both caches are part of Node.coord_cache; these parameters
+configure the same underlying cache but are grouped by purpose.
 
 ### Peer Defaults
 
@@ -836,6 +849,6 @@ Discovery is per-transport:
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS protocol design
-- [fips-links.md](fips-links.md) — Link layer requirements
+- [fips-links.md](fips-links.md) — Transport protocols and characteristics
 - [fips-routing.md](fips-routing.md) — Routing, Bloom filters, discovery
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol dynamics

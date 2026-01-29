@@ -142,7 +142,7 @@ Immediate actions:
 │   └── Contains: B's declaration (parent=B, seq=1), B's ancestry (just B)
 │
 └── D sends TreeAnnounce to B:
-    └── Contains: D's declaration (parent=A, seq=47), D's ancestry [A, D]
+    └── Contains: D's declaration (parent=A, seq=47), D's ancestry [D, A]
 ```
 
 **T2: B processes D's announcement**
@@ -175,18 +175,18 @@ B's state change:
 
 TreeState_B = { (B, parent=D, seq=2), (D, parent=A, seq=47), (A, parent=A, seq=203) }
 Root_B = A
-Coordinate_B = [A, D, B]
+Coordinate_B = [B, D, A]
 ```
 
 **T4: B announces to D**
 
 ```
 B sends TreeAnnounce to D:
-└── Contains: B's new declaration (parent=D, seq=2), ancestry [A, D, B]
+└── Contains: B's new declaration (parent=D, seq=2), ancestry [B, D, A]
 
 D receives and merges:
 ├── TreeState_D now includes B's entry
-├── D's coordinate unchanged: [A, D]
+├── D's coordinate unchanged: [D, A]
 └── D can now route to B
 ```
 
@@ -333,7 +333,7 @@ Adding a link can:
 
 ```
 Before: A ← B ← C ← D (linear chain, A is root)
-        D's coordinate: [A, B, C, D], depth 3
+        D's coordinate: [D, C, B, A], depth 3
 
 New link: A ←→ D established
 
@@ -342,7 +342,7 @@ D receives A's announcement directly:
 ├── D evaluates: going through A gives depth 1 vs current depth 3
 ├── If improvement > stability threshold:
 │   └── D re-parents to A
-│   └── D's new coordinate: [A, D], depth 1
+│   └── D's new coordinate: [D, A], depth 1
 
 After: A is root
        ├── B (depth 1)
@@ -466,7 +466,7 @@ When connectivity is restored:
 Link C ←→ D restored:
 
 T1: C and D exchange TreeAnnounce
-    C sends: root=A, ancestry [A, B, C]
+    C sends: root=A, ancestry [C, B, A]
     D sends: root=D (assuming D < E), ancestry [D]
 
 T2: D processes C's announcement
@@ -1036,7 +1036,7 @@ T6: E receives B's announcement:
     E selects B as parent
 
 T7: E announces to F:
-    E's new ancestry: [A, B, E]
+    E's new ancestry: [E, B, A]
     F learns about A
     F re-parents (E is still valid parent, now with path to A)
 
