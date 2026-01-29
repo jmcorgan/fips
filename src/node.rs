@@ -501,6 +501,7 @@ mod tests {
         Node::new(config).unwrap()
     }
 
+    #[allow(dead_code)]
     fn make_node_id(val: u8) -> NodeId {
         let mut bytes = [0u8; 32];
         bytes[0] = val;
@@ -646,7 +647,7 @@ mod tests {
 
         let peer_identity = Identity::generate();
         let peer_pub = crate::PeerIdentity::from_pubkey(peer_identity.pubkey());
-        let peer1 = Peer::discovered(peer_pub.clone(), LinkId::new(1));
+        let peer1 = Peer::discovered(peer_pub, LinkId::new(1));
         let peer2 = Peer::discovered(peer_pub, LinkId::new(2));
 
         node.add_peer(peer1).unwrap();

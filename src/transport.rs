@@ -695,7 +695,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_transport_type_constants() {
+        // These assertions verify the constant definitions are correct
         assert!(!TransportType::UDP.connection_oriented);
         assert!(!TransportType::UDP.reliable);
         assert!(TransportType::UDP.is_connectionless());

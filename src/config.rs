@@ -6,6 +6,17 @@
 //! 3. `/etc/fips/fips.yaml` (system - lowest priority)
 //!
 //! Values from higher priority files override those from lower priority files.
+//!
+//! # YAML Structure
+//!
+//! The YAML structure mirrors the sysctl-style paths in the architecture docs.
+//! For example, `node.identity.nsec` in the docs corresponds to:
+//!
+//! ```yaml
+//! node:
+//!   identity:
+//!     nsec: "nsec1..."
+//! ```
 
 use crate::{Identity, IdentityError};
 use serde::{Deserialize, Serialize};
@@ -34,21 +45,33 @@ pub enum ConfigError {
     Identity(#[from] IdentityError),
 }
 
-/// Identity configuration section.
+/// Identity configuration (`node.identity.*`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IdentityConfig {
-    /// Node secret key in nsec (bech32) or hex format.
+    /// Secret key in nsec (bech32) or hex format (`node.identity.nsec`).
     /// If not specified, a new keypair will be generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nsec: Option<String>,
 }
 
+/// Node configuration (`node.*`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeConfig {
+    /// Identity configuration (`node.identity.*`).
+    #[serde(default)]
+    pub identity: IdentityConfig,
+
+    /// Leaf-only mode (`node.leaf_only`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub leaf_only: bool,
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    /// Identity configuration.
+    /// Node configuration (`node.*`).
     #[serde(default)]
-    pub identity: IdentityConfig,
+    pub node: NodeConfig,
 }
 
 impl Config {
@@ -129,9 +152,13 @@ impl Config {
     ///
     /// Values from `other` override values in `self` when present.
     pub fn merge(&mut self, other: Config) {
-        // Merge identity section
-        if other.identity.nsec.is_some() {
-            self.identity.nsec = other.identity.nsec;
+        // Merge node.identity section
+        if other.node.identity.nsec.is_some() {
+            self.node.identity.nsec = other.node.identity.nsec;
+        }
+        // Merge node.leaf_only
+        if other.node.leaf_only {
+            self.node.leaf_only = true;
         }
     }
 
@@ -140,7 +167,7 @@ impl Config {
     /// If an nsec is configured, uses that to create the identity.
     /// Otherwise, generates a new random identity.
     pub fn create_identity(&self) -> Result<Identity, ConfigError> {
-        match &self.identity.nsec {
+        match &self.node.identity.nsec {
             Some(nsec) => Ok(Identity::from_secret_str(nsec)?),
             None => Ok(Identity::generate()),
         }
@@ -148,7 +175,12 @@ impl Config {
 
     /// Check if an identity is configured (vs. will be generated).
     pub fn has_identity(&self) -> bool {
-        self.identity.nsec.is_some()
+        self.node.identity.nsec.is_some()
+    }
+
+    /// Check if leaf-only mode is configured.
+    pub fn is_leaf_only(&self) -> bool {
+        self.node.leaf_only
     }
 
     /// Serialize this configuration to YAML.
@@ -166,29 +198,31 @@ mod tests {
     #[test]
     fn test_empty_config() {
         let config = Config::new();
-        assert!(config.identity.nsec.is_none());
+        assert!(config.node.identity.nsec.is_none());
         assert!(!config.has_identity());
     }
 
     #[test]
     fn test_parse_yaml_with_nsec() {
         let yaml = r#"
-identity:
-  nsec: nsec1qyqsqypqxqszqg9qyqsqypqxqszqg9qyqsqypqxqszqg9qyqsqypqxfnm5g9
+node:
+  identity:
+    nsec: nsec1qyqsqypqxqszqg9qyqsqypqxqszqg9qyqsqypqxqszqg9qyqsqypqxfnm5g9
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.identity.nsec.is_some());
+        assert!(config.node.identity.nsec.is_some());
         assert!(config.has_identity());
     }
 
     #[test]
     fn test_parse_yaml_with_hex() {
         let yaml = r#"
-identity:
-  nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+node:
+  identity:
+    nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.identity.nsec.is_some());
+        assert!(config.node.identity.nsec.is_some());
 
         let identity = config.create_identity().unwrap();
         assert!(!identity.npub().is_empty());
@@ -198,53 +232,51 @@ identity:
     fn test_parse_yaml_empty() {
         let yaml = "";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.identity.nsec.is_none());
+        assert!(config.node.identity.nsec.is_none());
     }
 
     #[test]
     fn test_parse_yaml_partial() {
         let yaml = r#"
-identity: {}
+node:
+  identity: {}
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.identity.nsec.is_none());
+        assert!(config.node.identity.nsec.is_none());
     }
 
     #[test]
     fn test_merge_configs() {
         let mut base = Config::new();
-        base.identity.nsec = Some("base_nsec".to_string());
+        base.node.identity.nsec = Some("base_nsec".to_string());
 
-        let override_config = Config {
-            identity: IdentityConfig {
-                nsec: Some("override_nsec".to_string()),
-            },
-        };
+        let mut override_config = Config::new();
+        override_config.node.identity.nsec = Some("override_nsec".to_string());
 
         base.merge(override_config);
-        assert_eq!(base.identity.nsec, Some("override_nsec".to_string()));
+        assert_eq!(
+            base.node.identity.nsec,
+            Some("override_nsec".to_string())
+        );
     }
 
     #[test]
     fn test_merge_preserves_base_when_override_empty() {
         let mut base = Config::new();
-        base.identity.nsec = Some("base_nsec".to_string());
+        base.node.identity.nsec = Some("base_nsec".to_string());
 
         let override_config = Config::new();
 
         base.merge(override_config);
-        assert_eq!(base.identity.nsec, Some("base_nsec".to_string()));
+        assert_eq!(base.node.identity.nsec, Some("base_nsec".to_string()));
     }
 
     #[test]
     fn test_create_identity_from_nsec() {
-        let config = Config {
-            identity: IdentityConfig {
-                nsec: Some(
-                    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".to_string(),
-                ),
-            },
-        };
+        let mut config = Config::new();
+        config.node.identity.nsec = Some(
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".to_string(),
+        );
 
         let identity = config.create_identity().unwrap();
         assert!(!identity.npub().is_empty());
@@ -263,13 +295,14 @@ identity: {}
         let config_path = temp_dir.path().join("fips.yaml");
 
         let yaml = r#"
-identity:
-  nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+node:
+  identity:
+    nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
 "#;
         fs::write(&config_path, yaml).unwrap();
 
         let config = Config::load_file(&config_path).unwrap();
-        assert!(config.identity.nsec.is_some());
+        assert!(config.node.identity.nsec.is_some());
     }
 
     #[test]
@@ -283,8 +316,9 @@ identity:
         fs::write(
             &low_priority,
             r#"
-identity:
-  nsec: "low_priority_nsec"
+node:
+  identity:
+    nsec: "low_priority_nsec"
 "#,
         )
         .unwrap();
@@ -292,8 +326,9 @@ identity:
         fs::write(
             &high_priority,
             r#"
-identity:
-  nsec: "high_priority_nsec"
+node:
+  identity:
+    nsec: "high_priority_nsec"
 "#,
         )
         .unwrap();
@@ -302,7 +337,10 @@ identity:
         let (config, loaded) = Config::load_from_paths(&paths).unwrap();
 
         assert_eq!(loaded.len(), 2);
-        assert_eq!(config.identity.nsec, Some("high_priority_nsec".to_string()));
+        assert_eq!(
+            config.node.identity.nsec,
+            Some("high_priority_nsec".to_string())
+        );
     }
 
     #[test]
@@ -314,8 +352,9 @@ identity:
         fs::write(
             &existing,
             r#"
-identity:
-  nsec: "existing_nsec"
+node:
+  identity:
+    nsec: "existing_nsec"
 "#,
         )
         .unwrap();
@@ -325,7 +364,7 @@ identity:
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], existing);
-        assert_eq!(config.identity.nsec, Some("existing_nsec".to_string()));
+        assert_eq!(config.node.identity.nsec, Some("existing_nsec".to_string()));
     }
 
     #[test]
@@ -343,13 +382,11 @@ identity:
 
     #[test]
     fn test_to_yaml() {
-        let config = Config {
-            identity: IdentityConfig {
-                nsec: Some("test_nsec".to_string()),
-            },
-        };
+        let mut config = Config::new();
+        config.node.identity.nsec = Some("test_nsec".to_string());
 
         let yaml = config.to_yaml().unwrap();
+        assert!(yaml.contains("node:"));
         assert!(yaml.contains("identity:"));
         assert!(yaml.contains("nsec:"));
         assert!(yaml.contains("test_nsec"));

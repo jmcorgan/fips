@@ -94,6 +94,62 @@ the routing layer.
 **Bandwidth**: Order of magnitude. Affects flow control and congestion
 decisions, but FIPS routing itself is low-bandwidth (control plane only).
 
+## Connection Model
+
+Transports fall into two categories based on whether they require connection
+establishment before data can be exchanged:
+
+### Connectionless Transports
+
+These transports can send datagrams to a peer address without prior setup.
+Links are lightweight—just a `(transport_id, remote_addr)` tuple with implicit
+"established" state.
+
+| Transport | Notes |
+|-----------|-------|
+| UDP/IP | Stateless datagrams; NAT state is implicit |
+| Ethernet | Send to MAC address directly |
+| WiFi | Same as Ethernet (802.11 frame) |
+| DOCSIS | Cable modem layer; uses IP in practice |
+| LoRa | Raw packets to device address |
+| I2P | Datagram mode (not streaming) |
+
+### Connection-Oriented Transports
+
+These transports require explicit connection setup before FIPS traffic can flow.
+Links track real connection state and hold I/O handles. The link must complete
+transport-layer connection before FIPS authentication can proceed.
+
+| Transport | Connection Setup |
+|-----------|------------------|
+| TCP/IP | TCP handshake |
+| WebSocket | HTTP upgrade + TCP |
+| Tor | Circuit establishment (slow: 500ms-5s) |
+| Bluetooth Classic | L2CAP connection |
+| BLE | L2CAP CoC or GATT connection |
+| Zigbee | Network join + binding |
+| Serial | Physical connection (static) |
+| Dialup | PPP negotiation |
+
+### Implications for FIPS
+
+**Link lifecycle**: Connectionless transports use a trivial link model (no state
+machine). Connection-oriented transports require a real state machine:
+`Connecting → Connected → Disconnected`. See
+[fips-architecture.md](fips-architecture.md) for link lifecycle details.
+
+**Startup latency**: Connection-oriented transports add latency before a peer
+becomes usable. Tor is particularly slow (circuit setup). This affects peer
+timeout configuration.
+
+**Failure modes**: Connectionless links "fail" only when the transport itself
+is down or the peer stops responding. Connection-oriented links can fail during
+connection setup, adding more error handling paths.
+
+**Framing**: Connection-oriented stream transports (TCP, WebSocket, Tor) require
+length-prefix framing to delineate FIPS packets. Datagram transports have
+natural packet boundaries.
+
 ## UDP/IP as Primary Internet Transport
 
 For internet-connected nodes, UDP/IP is the recommended transport:
