@@ -604,5 +604,5 @@ When nodes join/leave:
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS architecture
-- [fips-links.md](fips-links.md) — Link layer requirements
+- [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol details

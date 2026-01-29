@@ -488,7 +488,7 @@ Links are connection instances to specific peers over a transport.
 
 > **Note**: The Transport trait definition and detailed transport specifications
 > are in [fips-architecture.md](fips-architecture.md). This section provides a
-> conceptual overview. See [fips-links.md](fips-links.md) for transport
+> conceptual overview. See [fips-transports.md](fips-transports.md) for transport
 > characteristics and requirements.
 
 ### Transport Interface Concept

@@ -55,7 +55,8 @@ Transport addresses and FIPS identity are fully decoupled.
 
 ### Transport
 
-A physical or logical interface over which links can be established.
+A physical or logical interface over which links can be established. Transports
+are statically configured and exist for the lifetime of the node after startup.
 
 ```
 Transport (trait)
@@ -86,7 +87,9 @@ internally. The FIPS routing layer sees only FIPS packets.
 
 ### Link
 
-A communication channel to a specific remote endpoint over a transport.
+A communication channel to a specific remote endpoint over a transport. Links are
+created on demand when connecting to a peer and torn down when the peer connection
+terminates. Link lifecycle is driven by the peer lifecycle.
 
 ```
 Link
@@ -100,10 +103,12 @@ Link
 ```
 
 For connectionless transports (UDP, Ethernet, WiFi), links are lightweight—just
-`(transport_id, remote_addr)` with implicit "always connected" state.
+`(transport_id, remote_addr)` with implicit "established" state (no connection
+setup required).
 
 For connection-oriented transports (Tor), links track real connection state and
-hold I/O handles.
+hold I/O handles. The link must complete transport-layer connection setup before
+FIPS session establishment can proceed.
 
 **Link statistics (measured):**
 
@@ -145,9 +150,28 @@ Peer
 └── link_stats: LinkStats
 ```
 
-There is a one-to-one mapping between peers and links. If the same remote node
-is reachable via multiple transports, that would be multiple Peer entries (though
-for initial implementation, we assume single transport per peer).
+**Peer/Link Lifecycle:**
+
+Links and peers have a one-to-one mapping with coupled lifecycles:
+
+1. **Outbound connection**: Desire to connect to a peer triggers link creation
+   over the appropriate transport. For connection-oriented transports (Tor), the
+   link goes through connection setup; for connectionless (UDP), it immediately
+   becomes established. Once the link is ready, FIPS authentication proceeds.
+
+2. **Inbound connection**: Incoming data on a transport creates a link, then
+   authentication creates the peer.
+
+3. **Peer references link**: An authenticated peer always references exactly one
+   active link.
+
+4. **Termination**: When a peer connection terminates, the associated link is
+   torn down. For connectionless transports this is trivial cleanup; for
+   connection-oriented transports this closes the underlying connection.
+
+If the same remote node is reachable via multiple transports, that would be
+multiple Peer entries (though for initial implementation, we assume single
+transport per peer).
 
 ---
 
@@ -719,6 +743,21 @@ Discovery is per-transport:
 | `node.tun.device` | string | "fips0" | TUN device name |
 | `node.tun.mtu` | u16 | 1280 | TUN interface MTU |
 
+### Resource Limits
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limits.max_peers` | u32 | 128 | Maximum concurrent authenticated peers |
+| `limits.max_transports` | u8 | 8 | Maximum configured transports |
+| `limits.max_pending_auth` | u32 | 32 | Maximum connections awaiting authentication |
+| `limits.max_pending_lookups` | u32 | 1000 | Maximum in-flight discovery lookups |
+| `limits.memory_budget` | u64 | 0 | Soft memory limit in bytes (0 = unlimited) |
+
+Limits are enforced at connection time. Exceeding `max_pending_auth` rejects new
+inbound connections; exceeding `max_peers` prevents new outbound connections.
+The `memory_budget` is advisory—implementations should shed load when approaching
+the limit but need not enforce it strictly.
+
 ### Spanning Tree
 
 | Parameter | Type | Default | Description |
@@ -849,6 +888,6 @@ configure the same underlying cache but are grouped by purpose.
 ## References
 
 - [fips-design.md](fips-design.md) — Overall FIPS protocol design
-- [fips-links.md](fips-links.md) — Transport protocols and characteristics
+- [fips-transports.md](fips-transports.md) — Transport protocol characteristics
 - [fips-routing.md](fips-routing.md) — Routing, Bloom filters, discovery
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Tree protocol dynamics

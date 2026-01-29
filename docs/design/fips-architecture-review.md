@@ -1,193 +1,32 @@
 # FIPS Architecture Document Review
 
-**Date**: 2025-01-29
 **Document reviewed**: fips-architecture.md
+**Last updated**: 2025-01-29
 
-This file captures critique and open issues identified during architecture review.
-Items should be addressed before implementation begins or marked as intentionally
-deferred.
-
----
-
-## High Priority (Implementation Blockers)
-
-### 1. Coordinate Ordering Inconsistency
-
-**Issue**: Architecture says `[self, parent, ..., root]` but spanning-tree-dynamics.md
-sometimes uses `[root, ..., self]` ordering.
-
-**Location**: fips-architecture.md line 165, spanning-tree-dynamics.md line 346-349
-
-**Resolution needed**: Standardize on one ordering across all documents.
-
-**Status**: RESOLVED
-
-**Resolution**: Standardized on `[self, parent, ..., root]` (node→root) ordering.
-Updated all coordinate/ancestry references in spanning-tree-dynamics.md.
+This document tracks open issues and deferred items for the FIPS architecture.
+Issues are organized by priority. Resolved items have been archived.
 
 ---
 
-### 2. Authentication Protocol Not Referenced
+## Summary
 
-**Issue**: Architecture references "FIPS auth handshake" but doesn't define it or
-reference where it's defined.
+| #  | Issue                  | Priority | Status   | Notes                |
+| -- | ---------------------- | -------- | -------- | -------------------- |
+| 11 | Config validation      | Low      | OPEN     | Add validation rules |
+| 12 | Default rationales     | Low      | OPEN     | Document reasoning   |
+| 14 | Gateway details        | Low      | OPEN     | Incomplete spec      |
+| 15 | DiscoveredPeer hint    | Low      | OPEN     | Type mismatch        |
+| 2  | Auth protocol ref      | High     | DEFERRED | Wire protocol work   |
+| 3  | Concurrency model      | High     | DEFERRED | Future iteration     |
+| 4  | Keepalive format       | High     | DEFERRED | Wire protocol work   |
+| 7  | Error handling         | Medium   | DEFERRED | Future iteration     |
+| 10 | Init/shutdown          | Medium   | DEFERRED | Future iteration     |
 
-**Location**: fips-architecture.md line 285
-
-**Resolution needed**: Add reference to fips-design.md lines 115-205, or include
-summary in architecture document.
-
-**Status**: DEFERRED (wire protocol)
-
-**Note**: Will be addressed when wire protocol section is developed. Not a blocker
-for current architecture iteration.
-
----
-
-### 3. Concurrency Model Unspecified
-
-**Issue**: Document doesn't specify whether implementation should be:
-
-- Single-threaded async
-- Multi-threaded with message passing
-- How state machines are driven (polling, callbacks, async/await)
-- Whether transports run in separate threads/tasks
-
-**Location**: Entire document
-
-**Resolution needed**: Add "Concurrency Model" section specifying the expected
-runtime architecture.
-
-**Status**: DEFERRED (future iteration)
-
-**Note**: Architecture document is a work-in-progress. Concurrency model section
-will be added in a future design iteration.
+**Resolved (archived):** 1, 5, 6, 8, 9, 13
 
 ---
 
-### 4. Keepalive Message Format Unspecified
-
-**Issue**: Configuration specifies `peer.keepalive.interval` but no message type
-is defined for keepalives. RTT measurement mechanism is unclear.
-
-**Location**: fips-architecture.md line 762
-
-**Resolution needed**: Clarify whether Dummy (0x00) message from fips-design.md
-is used, and how RTT is measured (request/response probing or passive observation).
-
-**Status**: DEFERRED (wire protocol)
-
-**Note**: Will be addressed when wire protocol section is developed.
-
----
-
-### 5. Cache Naming Confusion
-
-**Issue**: Multiple cache references that may or may not be the same thing:
-
-- `coord_cache: CoordCache` on Node (line 35)
-- `coord_cache: HashMap<Ipv6Addr, CachedCoords>` on TreeState (line 167)
-- `discovery.cache.max_entries` configuration (line 745)
-- `session.cache.max_entries` configuration (line 751)
-
-**Resolution needed**: Clarify whether these are the same cache or different caches.
-If different, explain the distinction.
-
-**Status**: RESOLVED
-
-**Resolution**: Removed misplaced `coord_cache` from TreeState (it belongs only on
-Node). Added clarifying text in config section explaining that `discovery.cache`
-and `session.cache` configure the same underlying `Node.coord_cache` but are grouped
-by purpose (endpoint discovery vs transit routing).
-
----
-
-## Medium Priority (Design Clarity)
-
-### 6. Peer vs Link Relationship
-
-**Issue**: Document states "one-to-one mapping between peers and links" (line 148)
-but Links can exist before authentication completes, meaning Links exist without
-Peers temporarily.
-
-**Resolution needed**: Clarify the relationship lifecycle:
-
-- Link created on connection (before auth)
-- Peer created on successful auth
-- Peer always references exactly one Link
-- Link can exist without Peer (during auth or after auth failure)
-
-**Status**: OPEN
-
----
-
-### 7. Error Handling Strategy Absent
-
-**Issue**: No systematic error handling definitions:
-
-- Signature verification failure handling
-- Malformed packet handling
-- Error codes and response formats
-- Logging/reporting strategy
-
-**Resolution needed**: Add "Error Handling" section or reference to protocol spec.
-
-**Status**: DEFERRED (future iteration)
-
-**Note**: Error handling section will be added in a future design iteration.
-
----
-
-### 8. Memory Bounds Missing
-
-**Issue**: Configuration specifies cache sizes but no limits for:
-
-- Maximum peers
-- Maximum transports
-- Maximum pending operations/queues
-- Overall memory budget
-
-**Resolution needed**: Add resource limit configuration or document that these
-are implementation-defined.
-
-**Status**: OPEN
-
----
-
-### 9. Timer Management at Scale
-
-**Issue**: Multiple timers per peer (auth timeout, keepalive, reconnect delay,
-filter debounce). For 100 peers, this could be hundreds of timers.
-
-**Resolution needed**: Note that timer wheel or hierarchical timing wheel may
-be needed for efficient implementation at scale.
-
-**Status**: OPEN
-
----
-
-### 10. Initialization/Shutdown Sequences
-
-**Issue**: No startup sequence defined:
-
-- Transport start order
-- TUN interface initialization relative to peering
-- Behavior when configured peers are unreachable
-- When node is "ready" to route
-
-No shutdown procedure defined:
-
-- Should nodes announce departure?
-- Session termination
-- TUN interface cleanup
-
-**Resolution needed**: Add "Initialization" and "Shutdown" sections.
-
-**Status**: OPEN
-
----
-
-## Lower Priority (Polish)
+## Open Issues - Low Priority
 
 ### 11. Configuration Validation Rules
 
@@ -197,7 +36,7 @@ No shutdown procedure defined:
 - What if `peer.keepalive.timeout` < `peer.keepalive.interval`?
 - What if `timeout.adaptive.min` > `timeout.adaptive.max`?
 
-**Status**: OPEN
+**Resolution needed**: Add validation rules or defer to implementation.
 
 ---
 
@@ -209,29 +48,7 @@ No shutdown procedure defined:
 - `tree.parent.hold_time = 10s`: Why 10 seconds?
 - `filter.stale.threshold = 300s`: Based on what analysis?
 
-**Status**: OPEN
-
----
-
-### 13. Terminology Inconsistency Across Documents
-
-**Issue**: "Link" and "Transport" meanings differ between documents:
-
-- fips-links.md uses "link" to mean underlying transport protocol
-- fips-architecture.md uses "Link" to mean connection over Transport
-- fips-design.md has `FipsLink` trait which is really a transport interface
-
-**Resolution needed**: Standardize terminology or add glossary.
-
-**Status**: RESOLVED
-
-**Resolution**: Updated fips-design.md and fips-links.md to use consistent terminology:
-
-- Transport = interface/medium (UDP socket, Ethernet NIC, Tor client)
-- Link = connection instance to a specific peer over a transport
-- Renamed `trait FipsLink` section to reference architecture doc
-- Renamed `trait LinkDriver` section to reference architecture doc
-- Updated section headers and examples throughout both documents
+**Resolution needed**: Add brief rationale comments or design rationale document.
 
 ---
 
@@ -243,7 +60,8 @@ No shutdown procedure defined:
 - How gateway prefixes are advertised in Bloom filters
 - Configuration for gateway mode
 
-**Status**: OPEN
+**Resolution needed**: Expand gateway section or reference future gateway
+design document.
 
 ---
 
@@ -255,77 +73,65 @@ The discover() return type doesn't show the hint field.
 
 **Resolution needed**: Align trait signature with event structure.
 
-**Status**: OPEN
+---
+
+## Deferred Items
+
+### Wire Protocol (Future Work)
+
+These items will be addressed when the wire protocol section is developed:
+
+| #   | Issue                   | Description                                                                               |
+| --- | ----------------------- | ----------------------------------------------------------------------------------------- |
+| 2   | Auth protocol reference | Architecture references "FIPS auth handshake" but doesn't define or reference fips-design |
+| 4   | Keepalive format        | `peer.keepalive.interval` configured but no message type defined; RTT measurement unclear |
+
+### Future Architecture Iterations
+
+These items are deferred to future design iterations:
+
+| #   | Issue             | Description                                                                                  |
+| --- | ----------------- | -------------------------------------------------------------------------------------------- |
+| 3   | Concurrency model | No specification for threading model, state machine driving, or transport isolation          |
+| 7   | Error handling    | No systematic error handling definitions for signature failures, malformed packets, or codes |
+| 10  | Init/shutdown     | Startup sequence, transport ordering, shutdown procedure, departure announcement             |
 
 ---
 
-## Edge Cases Not Addressed
+## Edge Cases for Future Consideration
 
-### Root Node Failure
+### Network Dynamics
 
-- How long until new root is elected?
-- How are in-flight sessions affected?
-- Any proactive root backup mechanism?
+- **Root node failure**: Election timing, in-flight session impact, proactive backup
+- **Rapid peer churn**: 500ms debounce may cause filter oscillation
+- **Network partition healing**: Session conflicts, stale cache recovery
 
-### Rapid Peer Churn
+### Transport Edge Cases
 
-- Debounce (500ms) may not be sufficient
-- Could lead to Bloom filter oscillation or announcement storms
+- **Startup timing**: Tor takes 30s-2min while UDP is instant; node status during window
+- **MTU mismatch**: Path includes links with different MTUs (Ethernet 1500 vs LoRa 222)
+- **Clock skew**: TreeAnnounce timestamps; 5-minute tolerance from fips-design.md
 
-### Network Partition Healing
+### Security Considerations
 
-- What happens to sessions that existed in both partitions?
-- How do routers with stale cache entries recover?
+- **Memory exhaustion**: Many fake peers
+- **CPU exhaustion**: Signature verification flooding
+- **Bandwidth exhaustion**: Bloom filter spam
 
-### Transport Startup Timing
+### Configuration Edge Cases
 
-- If Tor takes 180s but UDP is instant, what's node status during window?
-- Are Tor-only peers unreachable during Tor bootstrap?
-
-### MTU Mismatch Across Path
-
-- Path includes links with different MTUs (Ethernet 1500 vs LoRa 222)
-- No path MTU discovery or fragmentation strategy defined
-
-### Clock Skew
-
-- TreeAnnounce timestamps with significant clock skew
-- 5-minute tolerance in auth (fips-design.md) should be reflected here
-
-### Resource Exhaustion Attacks
-
-- Memory exhaustion via many fake peers
-- CPU exhaustion via signature verification flooding
-- Bandwidth exhaustion via Bloom filter spam
-
-### Conflicting Peer Configurations
-
-- Two configured peers with same npub but different addresses
-- Discovered peer conflicts with configured peer
-
-### TUN Interface Unavailable
-
-- TUN creation fails (permissions, kernel module)
-- Can node run in "relay-only" mode without TUN?
+- **Conflicting peers**: Same npub with different addresses; discovered vs configured conflict
+- **TUN unavailable**: Permissions, kernel module; relay-only mode possibility
 
 ---
 
-## Resolution Tracking
+## Resolved Items (Archived)
 
-| #  | Issue                  | Priority | Status   | Resolution                    |
-|----|------------------------|----------|----------|-------------------------------|
-| 1  | Coordinate ordering    | High     | RESOLVED | node→root standardized        |
-| 2  | Auth protocol ref      | High     | DEFERRED | wire protocol (future)        |
-| 3  | Concurrency model      | High     | DEFERRED | future iteration              |
-| 4  | Keepalive format       | High     | DEFERRED | wire protocol (future)        |
-| 5  | Cache naming           | High     | RESOLVED | clarified in architecture     |
-| 6  | Peer/Link relationship | Medium   | OPEN     |                               |
-| 7  | Error handling         | Medium   | DEFERRED | future iteration              |
-| 8  | Memory bounds          | Medium   | OPEN     |                               |
-| 9  | Timer management       | Medium   | OPEN     |                               |
-| 10 | Init/shutdown          | Medium   | OPEN     |                               |
-| 11 | Config validation      | Low      | OPEN     |                               |
-| 12 | Default rationales     | Low      | OPEN     |                               |
-| 13 | Terminology            | Low      | RESOLVED | fips-design, fips-links updated|
-| 14 | Gateway details        | Low      | OPEN     |                               |
-| 15 | DiscoveredPeer hint    | Low      | OPEN     |                               |
+| #   | Issue               | Resolution                                                                             |
+| --- | ------------------- | -------------------------------------------------------------------------------------- |
+| 1   | Coordinate ordering | Standardized on `[self, parent, ..., root]` (node→root) in all documents               |
+| 5   | Cache naming        | Removed misplaced `coord_cache` from TreeState; clarified config sections              |
+| 6   | Peer/Link lifecycle | Clarified: transports static, links on-demand driven by peer lifecycle                 |
+| 8   | Memory bounds       | Added Resource Limits config: max_peers, max_transports, pending limits, memory budget  |
+| 9   | Timer management    | Non-issue: async runtimes (tokio) handle hundreds of timers efficiently at this scale  |
+| 13  | Terminology         | Standardized Transport/Link terminology in fips-design.md and fips-transports.md       |
