@@ -273,6 +273,7 @@ dependencies = [
  "dirs",
  "futures",
  "hex",
+ "libc",
  "rand",
  "rtnetlink",
  "secp256k1",

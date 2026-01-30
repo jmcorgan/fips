@@ -2,21 +2,46 @@
 //!
 //! Loads configuration and creates the top-level node instance.
 
-use fips::{log_ipv6_packet, shutdown_tun_interface, Config, Node, TunDevice};
-use tracing::{error, info, warn, Level};
+use fips::{
+    build_dest_unreachable, log_ipv6_packet, should_send_icmp_error, shutdown_tun_interface,
+    Config, DestUnreachableCode, FipsAddress, Node, TunDevice, TunTx,
+};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::{fmt, EnvFilter};
 
 /// TUN packet reader loop.
 ///
-/// Reads packets from the TUN device and logs them at DEBUG level.
+/// Reads packets from the TUN device, logs them, and sends ICMPv6
+/// Destination Unreachable responses for packets we can't route.
+///
 /// This runs in a separate thread since TUN reads are blocking.
-fn run_tun_reader(mut device: TunDevice, mtu: u16) {
+fn run_tun_reader(mut device: TunDevice, mtu: u16, our_addr: FipsAddress, tun_tx: TunTx) {
     let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
 
     loop {
         match device.read_packet(&mut buf) {
             Ok(n) if n > 0 => {
-                log_ipv6_packet(&buf[..n]);
+                let packet = &buf[..n];
+                log_ipv6_packet(packet);
+
+                // Currently no routing capability - send ICMPv6 Destination Unreachable
+                // for all packets that qualify for an error response
+                if should_send_icmp_error(packet) {
+                    if let Some(response) = build_dest_unreachable(
+                        packet,
+                        DestUnreachableCode::NoRoute,
+                        our_addr.to_ipv6(),
+                    ) {
+                        debug!(
+                            len = response.len(),
+                            "Sending ICMPv6 Destination Unreachable"
+                        );
+                        if tun_tx.send(response).is_err() {
+                            info!("TUN writer channel closed, reader stopping");
+                            break;
+                        }
+                    }
+                }
             }
             Ok(_) => {
                 // Zero-length read, continue
@@ -124,8 +149,11 @@ async fn main() {
                 match output {
                     Ok(out) => {
                         if out.status.success() {
-                            info!("ip link show {}:\n{}", device.name(),
-                                String::from_utf8_lossy(&out.stdout));
+                            info!(
+                                "ip link show {}:\n{}",
+                                device.name(),
+                                String::from_utf8_lossy(&out.stdout)
+                            );
                         }
                     }
                     Err(e) => {
@@ -145,14 +173,31 @@ async fn main() {
 
     info!("FIPS initialized successfully");
 
-    // Spawn TUN reader task if TUN is active
+    // Spawn TUN reader and writer threads if TUN is active
     let tun_name = if let Some(tun_device) = node.take_tun_device() {
         let mtu = tun_device.mtu();
         let name = tun_device.name().to_string();
-        info!(mtu, name = %name, "Starting TUN packet reader");
+        let our_addr = *tun_device.address();
 
+        // Create writer (dups the fd for independent write access)
+        let (writer, tun_tx) = match tun_device.create_writer() {
+            Ok(w) => w,
+            Err(e) => {
+                error!("Failed to create TUN writer: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        info!(mtu, name = %name, "Starting TUN reader and writer");
+
+        // Spawn writer thread
         std::thread::spawn(move || {
-            run_tun_reader(tun_device, mtu);
+            writer.run();
+        });
+
+        // Spawn reader thread
+        std::thread::spawn(move || {
+            run_tun_reader(tun_device, mtu, our_addr, tun_tx);
         });
 
         Some(name)

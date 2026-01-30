@@ -6,6 +6,7 @@
 pub mod bloom;
 pub mod cache;
 pub mod config;
+pub mod icmp;
 pub mod identity;
 pub mod node;
 pub mod peer;
@@ -52,4 +53,7 @@ pub use peer::{Peer, PeerError, PeerState, UpstreamPeer};
 pub use node::{Node, NodeError, NodeState};
 
 // Re-export TUN types
-pub use tun::{log_ipv6_packet, shutdown_tun_interface, TunDevice, TunError, TunState};
+pub use tun::{log_ipv6_packet, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx, TunWriter};
+
+// Re-export ICMPv6 types
+pub use icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode, Icmpv6Type};

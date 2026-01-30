@@ -7,11 +7,17 @@
 use crate::{FipsAddress, TunConfig};
 use futures::TryStreamExt;
 use rtnetlink::{new_connection, Handle};
-use std::io::Read;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::net::Ipv6Addr;
+use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::sync::mpsc;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tun::Layer;
+
+/// Channel sender for packets to be written to TUN.
+pub type TunTx = mpsc::Sender<Vec<u8>>;
 
 /// Errors that can occur with TUN operations.
 #[derive(Debug, Error)]
@@ -149,6 +155,72 @@ impl TunDevice {
     pub async fn shutdown(&self) -> Result<(), TunError> {
         info!(name = %self.name, "Deleting TUN device");
         delete_interface(&self.name).await
+    }
+
+    /// Create a TunWriter for this device.
+    ///
+    /// This duplicates the underlying file descriptor so that reads and writes
+    /// can happen independently on separate threads. Returns the writer and
+    /// a channel sender for submitting packets to be written.
+    pub fn create_writer(&self) -> Result<(TunWriter, TunTx), TunError> {
+        let fd = self.device.as_raw_fd();
+
+        // Duplicate the file descriptor for writing
+        let write_fd = unsafe { libc::dup(fd) };
+        if write_fd < 0 {
+            return Err(TunError::Configure(format!(
+                "failed to dup fd: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let write_file = unsafe { File::from_raw_fd(write_fd) };
+        let (tx, rx) = mpsc::channel();
+
+        Ok((
+            TunWriter {
+                file: write_file,
+                rx,
+                name: self.name.clone(),
+            },
+            tx,
+        ))
+    }
+}
+
+/// Writer thread for TUN device.
+///
+/// Services a queue of outbound packets and writes them to the TUN device.
+/// Multiple producers can send packets via the TunTx channel.
+pub struct TunWriter {
+    file: File,
+    rx: mpsc::Receiver<Vec<u8>>,
+    name: String,
+}
+
+impl TunWriter {
+    /// Run the writer loop.
+    ///
+    /// Blocks forever, reading packets from the channel and writing them
+    /// to the TUN device. Returns when the channel is closed (all senders dropped).
+    pub fn run(mut self) {
+        info!(name = %self.name, "TUN writer starting");
+
+        for packet in self.rx {
+            if let Err(e) = self.file.write_all(&packet) {
+                // "Bad address" is expected during shutdown when interface is deleted
+                let err_str = e.to_string();
+                if err_str.contains("Bad address") {
+                    info!(name = %self.name, "TUN interface deleted, writer stopping");
+                    break;
+                }
+                error!(name = %self.name, error = %e, "TUN write error");
+            } else {
+                debug!(name = %self.name, len = packet.len(), "TUN packet written");
+            }
+        }
+
+        info!(name = %self.name, "TUN writer stopped");
     }
 }
 
