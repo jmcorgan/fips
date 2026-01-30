@@ -6,13 +6,8 @@ use fips::{Config, Node};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::{fmt, EnvFilter};
 
-fn parse_args() -> bool {
-    std::env::args().any(|arg| arg == "--wait" || arg == "-w")
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let wait_mode = parse_args();
     // Initialize logging
     let filter = EnvFilter::builder()
         .with_default_directive(Level::INFO.into())
@@ -122,12 +117,5 @@ async fn main() {
     info!("FIPS initialized successfully");
 
     // TODO: Start event loop, transports, etc.
-    if wait_mode {
-        info!("Running in wait mode (--wait). Press Ctrl+C to exit.");
-        info!("Attach debugger with: sudo ./scripts/lldb-attach-fips.sh");
-        // Block forever (until signal)
-        std::thread::park();
-    } else {
-        info!("No transports configured, nothing to do");
-    }
+    info!("No transports configured, nothing to do");
 }
