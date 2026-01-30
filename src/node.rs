@@ -329,6 +329,14 @@ impl Node {
         self.tun_device.as_mut()
     }
 
+    /// Take ownership of the TUN device.
+    ///
+    /// This removes the TUN device from the node, transferring ownership
+    /// to the caller. Useful for moving the device into a reader task.
+    pub fn take_tun_device(&mut self) -> Option<TunDevice> {
+        self.tun_device.take()
+    }
+
     /// Initialize the TUN interface.
     ///
     /// Creates and configures the TUN device based on the node's configuration.

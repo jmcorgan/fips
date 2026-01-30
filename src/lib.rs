@@ -52,4 +52,4 @@ pub use peer::{Peer, PeerError, PeerState, UpstreamPeer};
 pub use node::{Node, NodeError, NodeState};
 
 // Re-export TUN types
-pub use tun::{TunDevice, TunError, TunState};
+pub use tun::{log_ipv6_packet, shutdown_tun_interface, TunDevice, TunError, TunState};

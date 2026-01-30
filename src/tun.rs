@@ -7,8 +7,10 @@
 use crate::{FipsAddress, TunConfig};
 use futures::TryStreamExt;
 use rtnetlink::{new_connection, Handle};
+use std::io::Read;
 use std::net::Ipv6Addr;
 use thiserror::Error;
+use tracing::{debug, info};
 use tun::Layer;
 
 /// Errors that can occur with TUN operations.
@@ -66,7 +68,10 @@ pub struct TunDevice {
 }
 
 impl TunDevice {
-    /// Create and configure a new TUN device.
+    /// Create or open a TUN device.
+    ///
+    /// If the interface already exists, opens it and reconfigures it.
+    /// Otherwise, creates a new TUN device.
     ///
     /// This requires CAP_NET_ADMIN capability (run with sudo or setcap).
     pub async fn create(config: &TunConfig, address: FipsAddress) -> Result<Self, TunError> {
@@ -78,7 +83,15 @@ impl TunDevice {
         let name = config.name();
         let mtu = config.mtu();
 
-        // Create the TUN device without address (we'll set it via netlink)
+        // Delete existing interface if present (TUN devices are exclusive)
+        if interface_exists(name).await {
+            info!(name, "Deleting existing TUN interface");
+            if let Err(e) = delete_interface(name).await {
+                debug!(name, error = %e, "Failed to delete existing interface");
+            }
+        }
+
+        // Create the TUN device
         let mut tun_config = tun::Configuration::default();
 
         #[allow(deprecated)]
@@ -87,11 +100,7 @@ impl TunDevice {
         let device = tun::create(&tun_config)?;
 
         // Configure address and bring up via netlink
-        if let Err(e) = configure_interface(name, address.to_ipv6(), mtu).await {
-            // If netlink fails, the device was created but not configured.
-            // Drop will clean up the device.
-            return Err(e);
-        }
+        configure_interface(name, address.to_ipv6(), mtu).await?;
 
         Ok(Self {
             device,
@@ -125,6 +134,71 @@ impl TunDevice {
     pub fn device_mut(&mut self) -> &mut tun::Device {
         &mut self.device
     }
+
+    /// Read a packet from the TUN device.
+    ///
+    /// Returns the number of bytes read into the buffer, or an error.
+    /// The buffer should be at least MTU + header size (typically 1500+ bytes).
+    pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, TunError> {
+        self.device.read(buf).map_err(|e| TunError::Configure(format!("read failed: {}", e)))
+    }
+
+    /// Shutdown and delete the TUN device.
+    ///
+    /// This deletes the interface entirely.
+    pub async fn shutdown(&self) -> Result<(), TunError> {
+        info!(name = %self.name, "Deleting TUN device");
+        delete_interface(&self.name).await
+    }
+}
+
+/// Log basic information about an IPv6 packet at DEBUG level.
+pub fn log_ipv6_packet(packet: &[u8]) {
+    if packet.len() < 40 {
+        debug!(len = packet.len(), "Received undersized packet");
+        return;
+    }
+
+    let version = packet[0] >> 4;
+    if version != 6 {
+        debug!(version, len = packet.len(), "Received non-IPv6 packet");
+        return;
+    }
+
+    let payload_len = u16::from_be_bytes([packet[4], packet[5]]);
+    let next_header = packet[6];
+    let hop_limit = packet[7];
+
+    let src = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).unwrap());
+    let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap());
+
+    let protocol = match next_header {
+        6 => "TCP",
+        17 => "UDP",
+        58 => "ICMPv6",
+        _ => "other",
+    };
+
+    debug!(
+        %src,
+        %dst,
+        protocol,
+        next_header,
+        payload_len,
+        hop_limit,
+        total_len = packet.len(),
+        "TUN packet received"
+    );
+}
+
+/// Shutdown and delete a TUN interface by name.
+///
+/// This deletes the interface, which will cause any blocking reads
+/// to return an error. Use this for graceful shutdown when the TUN device
+/// has been moved to another thread.
+pub async fn shutdown_tun_interface(name: &str) -> Result<(), TunError> {
+    info!(name, "shutdown_tun_interface called");
+    delete_interface(name).await
 }
 
 impl std::fmt::Debug for TunDevice {
@@ -135,6 +209,31 @@ impl std::fmt::Debug for TunDevice {
             .field("address", &self.address)
             .finish()
     }
+}
+
+/// Check if a network interface already exists.
+async fn interface_exists(name: &str) -> bool {
+    let Ok((connection, handle, _)) = new_connection() else {
+        return false;
+    };
+    tokio::spawn(connection);
+
+    get_interface_index(&handle, name).await.is_ok()
+}
+
+/// Delete a network interface by name.
+async fn delete_interface(name: &str) -> Result<(), TunError> {
+    info!(name, "delete_interface: starting");
+    let (connection, handle, _) = new_connection()
+        .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
+    tokio::spawn(connection);
+
+    let index = get_interface_index(&handle, name).await?;
+    info!(name, index, "delete_interface: got index, deleting");
+    handle.link().del(index).execute().await?;
+
+    info!(name, "delete_interface: done");
+    Ok(())
 }
 
 /// Configure a network interface with an IPv6 address via netlink.

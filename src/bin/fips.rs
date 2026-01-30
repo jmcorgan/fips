@@ -2,9 +2,38 @@
 //!
 //! Loads configuration and creates the top-level node instance.
 
-use fips::{Config, Node};
+use fips::{log_ipv6_packet, shutdown_tun_interface, Config, Node, TunDevice};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::{fmt, EnvFilter};
+
+/// TUN packet reader loop.
+///
+/// Reads packets from the TUN device and logs them at DEBUG level.
+/// This runs in a separate thread since TUN reads are blocking.
+fn run_tun_reader(mut device: TunDevice, mtu: u16) {
+    let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
+
+    loop {
+        match device.read_packet(&mut buf) {
+            Ok(n) if n > 0 => {
+                log_ipv6_packet(&buf[..n]);
+            }
+            Ok(_) => {
+                // Zero-length read, continue
+            }
+            Err(e) => {
+                // "Bad address" (EFAULT) is expected during shutdown when interface is deleted
+                let err_str = e.to_string();
+                if err_str.contains("Bad address") {
+                    info!("TUN interface deleted, reader stopping");
+                } else {
+                    error!("TUN read error: {}", e);
+                }
+                break;
+            }
+        }
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -116,6 +145,41 @@ async fn main() {
 
     info!("FIPS initialized successfully");
 
-    // TODO: Start event loop, transports, etc.
-    info!("No transports configured, nothing to do");
+    // Spawn TUN reader task if TUN is active
+    let tun_name = if let Some(tun_device) = node.take_tun_device() {
+        let mtu = tun_device.mtu();
+        let name = tun_device.name().to_string();
+        info!(mtu, name = %name, "Starting TUN packet reader");
+
+        std::thread::spawn(move || {
+            run_tun_reader(tun_device, mtu);
+        });
+
+        Some(name)
+    } else {
+        None
+    };
+
+    // TODO: Spawn additional event-driven tasks here:
+    // - Transport listeners/senders
+    // - Periodic timers (tree announcements, keepalives, etc.)
+
+    info!("FIPS running, press Ctrl+C to exit");
+
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => info!("Shutdown signal received"),
+        Err(e) => error!("Failed to listen for shutdown signal: {}", e),
+    }
+
+    info!("FIPS shutting down");
+
+    // Shutdown TUN interface if active
+    if let Some(name) = tun_name {
+        info!(name = %name, "Shutting down TUN interface");
+        if let Err(e) = shutdown_tun_interface(&name).await {
+            warn!("Failed to shutdown TUN interface: {}", e);
+        }
+    }
+
+    info!("FIPS shutdown complete");
 }
