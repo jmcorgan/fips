@@ -249,6 +249,136 @@ impl TransportsConfig {
     }
 }
 
+// ============================================================================
+// Peer Configuration
+// ============================================================================
+
+/// Connection policy for a peer.
+///
+/// Determines when and how to establish a connection to a peer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectPolicy {
+    /// Connect to this peer automatically on node startup.
+    /// This is the only policy supported in the initial implementation.
+    #[default]
+    AutoConnect,
+
+    /// Connect only when traffic needs to be routed through this peer (future).
+    OnDemand,
+
+    /// Wait for explicit API call to connect (future).
+    Manual,
+}
+
+/// A transport-specific address for reaching a peer.
+///
+/// Each peer can have multiple addresses across different transports,
+/// allowing fallback if one transport is unavailable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerAddress {
+    /// Transport type (e.g., "udp", "tor", "ethernet").
+    pub transport: String,
+
+    /// Transport-specific address string.
+    ///
+    /// Format depends on transport type:
+    /// - UDP: "host:port" (e.g., "192.168.1.1:4000")
+    /// - Tor: "onion_address:port" (e.g., "xyz...abc.onion:4000")
+    /// - Ethernet: "interface/mac" (future)
+    pub addr: String,
+
+    /// Priority for address selection (lower = preferred).
+    /// When multiple addresses are available, lower priority addresses
+    /// are tried first.
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+}
+
+fn default_priority() -> u8 {
+    100
+}
+
+impl PeerAddress {
+    /// Create a new peer address.
+    pub fn new(transport: impl Into<String>, addr: impl Into<String>) -> Self {
+        Self {
+            transport: transport.into(),
+            addr: addr.into(),
+            priority: default_priority(),
+        }
+    }
+
+    /// Create a new peer address with priority.
+    pub fn with_priority(transport: impl Into<String>, addr: impl Into<String>, priority: u8) -> Self {
+        Self {
+            transport: transport.into(),
+            addr: addr.into(),
+            priority,
+        }
+    }
+}
+
+/// Configuration for a known peer.
+///
+/// Peers are identified by their Nostr public key (npub) and can have
+/// multiple transport addresses for reaching them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerConfig {
+    /// The peer's Nostr public key in npub (bech32) or hex format.
+    pub npub: String,
+
+    /// Human-readable alias for the peer (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+
+    /// Transport addresses for reaching this peer.
+    /// At least one address is required.
+    pub addresses: Vec<PeerAddress>,
+
+    /// Connection policy for this peer.
+    #[serde(default)]
+    pub connect_policy: ConnectPolicy,
+}
+
+impl PeerConfig {
+    /// Create a new peer config with a single address.
+    pub fn new(npub: impl Into<String>, transport: impl Into<String>, addr: impl Into<String>) -> Self {
+        Self {
+            npub: npub.into(),
+            alias: None,
+            addresses: vec![PeerAddress::new(transport, addr)],
+            connect_policy: ConnectPolicy::default(),
+        }
+    }
+
+    /// Set an alias for the peer.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// Add an additional address for the peer.
+    pub fn with_address(mut self, addr: PeerAddress) -> Self {
+        self.addresses.push(addr);
+        self
+    }
+
+    /// Get addresses sorted by priority (lowest first).
+    pub fn addresses_by_priority(&self) -> Vec<&PeerAddress> {
+        let mut addrs: Vec<_> = self.addresses.iter().collect();
+        addrs.sort_by_key(|a| a.priority);
+        addrs
+    }
+
+    /// Check if this peer should auto-connect on startup.
+    pub fn is_auto_connect(&self) -> bool {
+        matches!(self.connect_policy, ConnectPolicy::AutoConnect)
+    }
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -263,6 +393,10 @@ pub struct Config {
     /// Transport instances (`transports.*`).
     #[serde(default, skip_serializing_if = "TransportsConfig::is_empty")]
     pub transports: TransportsConfig,
+
+    /// Static peers to connect to (`peers`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<PeerConfig>,
 }
 
 impl Config {
@@ -363,6 +497,10 @@ impl Config {
         }
         // Merge transports section
         self.transports.merge(other.transports);
+        // Merge peers (replace if non-empty)
+        if !other.peers.is_empty() {
+            self.peers = other.peers;
+        }
     }
 
     /// Create an Identity from this configuration.
@@ -384,6 +522,16 @@ impl Config {
     /// Check if leaf-only mode is configured.
     pub fn is_leaf_only(&self) -> bool {
         self.node.leaf_only
+    }
+
+    /// Get the configured peers.
+    pub fn peers(&self) -> &[PeerConfig] {
+        &self.peers
+    }
+
+    /// Get peers that should auto-connect on startup.
+    pub fn auto_connect_peers(&self) -> impl Iterator<Item = &PeerConfig> {
+        self.peers.iter().filter(|p| p.is_auto_connect())
     }
 
     /// Serialize this configuration to YAML.
@@ -678,5 +826,90 @@ transports: {}
         assert_eq!(items.len(), 2);
         // All named instances should have Some(name)
         assert!(items.iter().all(|(name, _)| name.is_some()));
+    }
+
+    #[test]
+    fn test_parse_peer_config() {
+        let yaml = r#"
+peers:
+  - npub: "npub1abc123"
+    alias: "gateway"
+    addresses:
+      - transport: udp
+        addr: "192.168.1.1:4000"
+        priority: 1
+      - transport: tor
+        addr: "xyz.onion:4000"
+        priority: 2
+    connect_policy: auto_connect
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.peers.len(), 1);
+        let peer = &config.peers[0];
+        assert_eq!(peer.npub, "npub1abc123");
+        assert_eq!(peer.alias, Some("gateway".to_string()));
+        assert_eq!(peer.addresses.len(), 2);
+        assert!(peer.is_auto_connect());
+
+        // Check addresses are sorted by priority
+        let sorted = peer.addresses_by_priority();
+        assert_eq!(sorted[0].transport, "udp");
+        assert_eq!(sorted[0].priority, 1);
+        assert_eq!(sorted[1].transport, "tor");
+        assert_eq!(sorted[1].priority, 2);
+    }
+
+    #[test]
+    fn test_parse_peer_minimal() {
+        let yaml = r#"
+peers:
+  - npub: "npub1xyz"
+    addresses:
+      - transport: udp
+        addr: "10.0.0.1:4000"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.peers.len(), 1);
+        let peer = &config.peers[0];
+        assert_eq!(peer.npub, "npub1xyz");
+        assert!(peer.alias.is_none());
+        // Default connect_policy is auto_connect
+        assert!(peer.is_auto_connect());
+        // Default priority is 100
+        assert_eq!(peer.addresses[0].priority, 100);
+    }
+
+    #[test]
+    fn test_parse_multiple_peers() {
+        let yaml = r#"
+peers:
+  - npub: "npub1peer1"
+    addresses:
+      - transport: udp
+        addr: "10.0.0.1:4000"
+  - npub: "npub1peer2"
+    addresses:
+      - transport: udp
+        addr: "10.0.0.2:4000"
+    connect_policy: on_demand
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.peers.len(), 2);
+        assert_eq!(config.auto_connect_peers().count(), 1);
+    }
+
+    #[test]
+    fn test_peer_config_builder() {
+        let peer = PeerConfig::new("npub1test", "udp", "192.168.1.1:4000")
+            .with_alias("test-peer")
+            .with_address(PeerAddress::with_priority("tor", "xyz.onion:4000", 50));
+
+        assert_eq!(peer.npub, "npub1test");
+        assert_eq!(peer.alias, Some("test-peer".to_string()));
+        assert_eq!(peer.addresses.len(), 2);
+        assert!(peer.is_auto_connect());
     }
 }

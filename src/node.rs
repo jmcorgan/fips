@@ -6,19 +6,22 @@
 
 use crate::bloom::BloomState;
 use crate::cache::CoordCache;
+use crate::config::PeerConfig;
 use crate::peer::Peer;
 use crate::transport::{
-    packet_channel, Link, LinkId, PacketRx, PacketTx, TransportHandle, TransportId,
+    packet_channel, Link, LinkDirection, LinkId, PacketRx, PacketTx, TransportAddr,
+    TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
-use crate::{Config, ConfigError, Identity, IdentityError, NodeId};
+use crate::{Config, ConfigError, Identity, IdentityError, NodeId, PeerIdentity};
 use std::collections::HashMap;
 use std::fmt;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Errors related to node operations.
 #[derive(Debug, Error)]
@@ -35,6 +38,9 @@ pub enum NodeError {
     #[error("transport not found: {0}")]
     TransportNotFound(TransportId),
 
+    #[error("no transport available for type: {0}")]
+    NoTransportForType(String),
+
     #[error("link not found: {0}")]
     LinkNotFound(LinkId),
 
@@ -43,6 +49,9 @@ pub enum NodeError {
 
     #[error("peer already exists: {0:?}")]
     PeerAlreadyExists(NodeId),
+
+    #[error("invalid peer npub '{npub}': {reason}")]
+    InvalidPeerNpub { npub: String, reason: String },
 
     #[error("max peers exceeded: {max}")]
     MaxPeersExceeded { max: usize },
@@ -313,6 +322,129 @@ impl Node {
         // for (name, tcp_config) in self.config.transports.tcp.iter() { ... }
 
         transports
+    }
+
+    /// Find an operational transport that matches the given transport type name.
+    fn find_transport_for_type(&self, transport_type: &str) -> Option<TransportId> {
+        self.transports
+            .iter()
+            .find(|(_, handle)| {
+                handle.transport_type().name == transport_type && handle.is_operational()
+            })
+            .map(|(id, _)| *id)
+    }
+
+    /// Initiate connections to configured static peers.
+    ///
+    /// For each peer configured with AutoConnect policy, creates a link and
+    /// peer entry. The peer starts in Connecting state; authentication
+    /// handshake will be handled by the event loop.
+    fn initiate_peer_connections(&mut self) {
+        // Collect peer configs to avoid borrow conflicts
+        let peer_configs: Vec<_> = self.config.auto_connect_peers().cloned().collect();
+
+        if peer_configs.is_empty() {
+            debug!("No static peers configured");
+            return;
+        }
+
+        info!(count = peer_configs.len(), "Initiating static peer connections");
+
+        for peer_config in peer_configs {
+            if let Err(e) = self.initiate_peer_connection(&peer_config) {
+                warn!(
+                    npub = %peer_config.npub,
+                    alias = ?peer_config.alias,
+                    error = %e,
+                    "Failed to initiate peer connection"
+                );
+            }
+        }
+    }
+
+    /// Initiate a connection to a single peer.
+    fn initiate_peer_connection(&mut self, peer_config: &PeerConfig) -> Result<(), NodeError> {
+        // Parse the peer's npub to get their identity
+        let peer_identity = PeerIdentity::from_npub(&peer_config.npub).map_err(|e| {
+            NodeError::InvalidPeerNpub {
+                npub: peer_config.npub.clone(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        let peer_node_id = *peer_identity.node_id();
+
+        // Check if peer already exists
+        if self.peers.contains_key(&peer_node_id) {
+            debug!(
+                npub = %peer_config.npub,
+                "Peer already exists, skipping"
+            );
+            return Ok(());
+        }
+
+        // Try addresses in priority order until one works
+        for addr in peer_config.addresses_by_priority() {
+            // Find a transport matching this address type
+            let transport_id = match self.find_transport_for_type(&addr.transport) {
+                Some(id) => id,
+                None => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        "No operational transport for address type"
+                    );
+                    continue;
+                }
+            };
+
+            // Allocate link ID and create link
+            let link_id = self.allocate_link_id();
+            let remote_addr = TransportAddr::from_string(&addr.addr);
+
+            // For UDP, links are immediately "connected" (connectionless)
+            // TODO: For connection-oriented transports, state would be Connecting
+            let link = Link::connectionless(
+                link_id,
+                transport_id,
+                remote_addr,
+                LinkDirection::Outbound,
+                Duration::from_millis(100), // Base RTT estimate for UDP
+            );
+
+            self.links.insert(link_id, link);
+
+            // Create peer in Connecting state
+            let mut peer = Peer::discovered(peer_identity.clone(), link_id);
+            peer.set_connecting();
+
+            let alias_display = peer_config
+                .alias
+                .as_deref()
+                .map(|a| format!(" ({})", a))
+                .unwrap_or_default();
+
+            info!(
+                npub = %peer_config.npub,
+                node_id = %peer_node_id,
+                transport = %addr.transport,
+                addr = %addr.addr,
+                link_id = %link_id,
+                "Peer connection initiated{}",
+                alias_display
+            );
+
+            self.peers.insert(peer_node_id, peer);
+
+            // Successfully initiated connection via this address
+            return Ok(());
+        }
+
+        // No address worked
+        Err(NodeError::NoTransportForType(format!(
+            "no operational transport for any of {}'s addresses",
+            peer_config.npub
+        )))
     }
 
     // === Identity Accessors ===
@@ -655,8 +787,16 @@ impl Node {
             }
         }
 
+        // Connect to static peers (step 5 per architecture doc)
+        self.initiate_peer_connections();
+
         self.state = NodeState::Running;
-        info!(state = %self.state, "Node started");
+        info!(
+            state = %self.state,
+            transports = self.transports.len(),
+            peers = self.peers.len(),
+            "Node started"
+        );
         Ok(())
     }
 
