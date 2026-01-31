@@ -424,15 +424,12 @@ impl Node {
                 .map(|a| format!(" ({})", a))
                 .unwrap_or_default();
 
-            info!(
-                npub = %peer_config.npub,
-                node_id = %peer_node_id,
-                transport = %addr.transport,
-                addr = %addr.addr,
-                link_id = %link_id,
-                "Peer connection initiated{}",
-                alias_display
-            );
+            info!("Peer connection initiated{}", alias_display);
+            info!("  npub: {}", peer_config.npub);
+            info!("  node_id: {}", peer_node_id);
+            info!("  transport: {}", addr.transport);
+            info!("  addr: {}", addr.addr);
+            info!("  link_id: {}", link_id);
 
             self.peers.insert(peer_node_id, peer);
 

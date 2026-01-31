@@ -2,9 +2,20 @@
 //!
 //! Loads configuration and creates the top-level node instance.
 
+use clap::Parser;
 use fips::{Config, Node, TunState};
+use std::path::PathBuf;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::{fmt, EnvFilter};
+
+/// FIPS mesh network daemon
+#[derive(Parser, Debug)]
+#[command(name = "fips", version, about)]
+struct Args {
+    /// Path to configuration file (overrides default search paths)
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -18,15 +29,29 @@ async fn main() {
         .with_target(true)
         .init();
 
+    let args = Args::parse();
+
     info!("FIPS starting");
 
     // Load configuration
     info!("Loading configuration");
-    let (config, loaded_paths) = match Config::load() {
-        Ok(result) => result,
-        Err(e) => {
-            error!("Failed to load configuration: {}", e);
-            std::process::exit(1);
+    let (config, loaded_paths) = if let Some(config_path) = &args.config {
+        // Explicit config file specified - load only that file
+        match Config::load_file(config_path) {
+            Ok(config) => (config, vec![config_path.clone()]),
+            Err(e) => {
+                error!("Failed to load configuration from {}: {}", config_path.display(), e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Use default search paths
+        match Config::load() {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Failed to load configuration: {}", e);
+                std::process::exit(1);
+            }
         }
     };
 

@@ -66,6 +66,7 @@ const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADE
 /// - Not IPv6
 /// - An ICMPv6 error message itself
 /// - Has a multicast source address
+/// - Has a multicast destination address
 /// - Has an unspecified source address (::)
 pub fn should_send_icmp_error(packet: &[u8]) -> bool {
     // Must have at least an IPv6 header
@@ -89,6 +90,15 @@ pub fn should_send_icmp_error(packet: &[u8]) -> bool {
 
     // Don't send errors for multicast source (first byte 0xff)
     if src.octets()[0] == 0xff {
+        return false;
+    }
+
+    // Extract destination address
+    let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap());
+
+    // Don't send errors for multicast destination (first byte 0xff)
+    // e.g., ff02::2 (all-routers) from Router Solicitation
+    if dst.octets()[0] == 0xff {
         return false;
     }
 
@@ -287,6 +297,15 @@ mod tests {
     fn test_should_not_send_error_multicast_source() {
         let src = "ff02::1".parse().unwrap();
         let dst = "fd00::2".parse().unwrap();
+        let packet = make_ipv6_packet(src, dst, 17, &[0u8; 8]);
+
+        assert!(!should_send_icmp_error(&packet));
+    }
+
+    #[test]
+    fn test_should_not_send_error_multicast_destination() {
+        let src = "fe80::1".parse().unwrap();
+        let dst = "ff02::2".parse().unwrap(); // all-routers multicast
         let packet = make_ipv6_packet(src, dst, 17, &[0u8; 8]);
 
         assert!(!should_send_icmp_error(&packet));
