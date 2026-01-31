@@ -680,12 +680,73 @@ this should be updated to reflect AEAD-only authentication.
 
 ---
 
-## 7. Document Reconciliation
+## 7. Peer Connection Establishment
+
+Before any of the traffic flows described above can occur, nodes must establish
+authenticated peer connections. This section provides a brief overview; see
+[fips-design.md](fips-design.md) §1 for the full peer authentication protocol
+and [fips-architecture.md](fips-architecture.md) for the startup sequence.
+
+### 7.1 Connection Flow Summary
+
+**Outbound (to static peer):**
+
+```text
+Config: npub + transport hint (e.g., "udp:192.168.1.1:4000")
+    │
+    ▼
+Create link via transport
+    │
+    ▼
+Send AuthInit { our_npub, nonce }
+    │
+    ▼
+Receive AuthChallenge { peer_npub, peer_nonce, signature }
+    │
+    ▼
+Verify signature, send AuthComplete { signature }
+    │
+    ▼
+Peer authenticated → begins tree gossip
+```
+
+**Inbound (peer connects to us):**
+
+```text
+Transport receives data from unknown address
+    │
+    ▼
+Receive AuthInit { peer_npub, nonce }
+    │
+    ▼
+Send AuthChallenge { our_npub, our_nonce, signature }
+    │
+    ▼
+Receive AuthComplete { signature }
+    │
+    ▼
+Verify signature → peer authenticated → begins tree gossip
+```
+
+### 7.2 Post-Authentication
+
+After successful peer authentication:
+
+1. **TreeAnnounce exchange**: Both peers send their current tree state
+2. **FilterAnnounce exchange**: Both peers send their bloom filters
+3. **Peer is Active**: Can now participate in routing and forwarding
+
+The first TreeAnnounce from a new peer may trigger parent reselection if that
+peer offers a better path to root.
+
+---
+
+## 8. Document Reconciliation
 
 This section tracks items that need reconciliation with existing design docs
 or earlier sections of this document.
 
-### 7.1 Completed Updates (Session 40)
+### 8.1 Completed Updates (Session 40)
 
 | Location | Status | Notes |
 |----------|--------|-------|
@@ -697,7 +758,7 @@ or earlier sections of this document.
 | fips-design.md §1 Peer Auth | ✓ Done | Added terminology note distinguishing peer auth from crypto sessions |
 | fips-architecture.md Config | ✓ Done | Renamed to "Routing Session", added "Crypto Session" section |
 
-### 7.2 Cross-References Added
+### 8.2 Cross-References Added
 
 All design docs now reference fips-protocol-flow.md in their References sections:
 
@@ -705,7 +766,7 @@ All design docs now reference fips-protocol-flow.md in their References sections
 - fips-routing.md
 - fips-architecture.md
 
-### 7.3 Design Doc Alignment Summary
+### 8.3 Design Doc Alignment Summary
 
 The following decisions from this document have been propagated:
 

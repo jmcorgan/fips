@@ -308,17 +308,57 @@ Inbound:
 ### Peer Lifecycle
 
 ```
-     Discovered ──► Connecting ──► Authenticating ──► Active ──► Disconnected
-          │              │               │                            ▲
-          │              v               v                            │
-          └──────── [timeout/fail] ──────────────────────────────────┘
+                        ┌─────────────────────────────────────────┐
+                        │              Disconnected               │
+                        └─────────────────────────────────────────┘
+                             │                           │
+                  [outbound] │                           │ [inbound data]
+                             ▼                           ▼
+                  ┌──────────────────┐        ┌──────────────────┐
+                  │    Connecting    │        │AwaitingAuthInit  │
+                  │(conn-oriented)   │        │                  │
+                  └──────────────────┘        └──────────────────┘
+                             │                           │
+              [link ready]   │               [recv AuthInit]
+                             ▼                           ▼
+                  ┌──────────────────┐        ┌──────────────────┐
+                  │AwaitingChallenge │        │AwaitingComplete  │
+                  │ (sent AuthInit)  │        │(sent AuthChallenge)│
+                  └──────────────────┘        └──────────────────┘
+                             │                           │
+        [recv AuthChallenge] │                           │ [recv AuthComplete]
+        [verify, send        │                           │ [verify]
+         AuthComplete]       │                           │
+                             ▼                           ▼
+                        ┌─────────────────────────────────────────┐
+                        │                 Active                  │
+                        │    (tree gossip, filter exchange)       │
+                        └─────────────────────────────────────────┘
+                                            │
+                                            │ [link down / timeout]
+                                            ▼
+                        ┌─────────────────────────────────────────┐
+                        │              Disconnected               │
+                        │         (retry if static peer)          │
+                        └─────────────────────────────────────────┘
 ```
 
-- `Discovered`: known via discovery or config, no link yet
-- `Connecting`: link establishment in progress (connection-oriented only)
-- `Authenticating`: FIPS auth handshake in progress
-- `Active`: fully integrated (has declaration, ancestry, filter)
-- `Disconnected`: was active, now gone
+**State descriptions:**
+
+- `Disconnected`: No active connection; for static peers, retry with backoff
+- `Connecting`: Link establishment in progress (connection-oriented transports only)
+- `AwaitingAuthInit`: Inbound connection, waiting for peer's AuthInit
+- `AwaitingChallenge`: Sent AuthInit, waiting for AuthChallenge
+- `AwaitingComplete`: Sent AuthChallenge, waiting for AuthComplete
+- `Active`: Authenticated; participating in tree gossip and filter exchange
+
+**Crossing connection handling:**
+
+When in `AwaitingChallenge` and we receive an AuthInit from the same peer:
+
+- If local npub < remote npub: Ignore incoming AuthInit, remain initiator
+- If local npub > remote npub: Switch to responder role, send AuthChallenge,
+  transition to `AwaitingComplete`
 
 **Events:**
 
@@ -327,9 +367,10 @@ PeerEvent
 ├── Discovered { link_id, transport_addr, hint: Option<PublicKey> }
 ├── LinkConnected
 ├── LinkFailed { reason }
-├── AuthChallengeReceived { challenge }
-├── AuthResponseReceived { response }
-├── AuthSuccess
+├── AuthInitReceived { npub, nonce }
+├── AuthChallengeReceived { npub, nonce, signature }
+├── AuthCompleteReceived { signature }
+├── AuthSuccess { npub, node_id }
 ├── AuthFailed { reason }
 ├── TreeAnnounceReceived { declaration, ancestry }
 ├── FilterAnnounceReceived { filter, sequence, ttl }
@@ -683,28 +724,119 @@ transport.*.auto_connect        # single configured peer
 
 ---
 
+## Node Startup Sequence
+
+The startup sequence initializes components in dependency order:
+
+```text
+1. Load configuration
+   ├── Parse config files (system, user, local)
+   ├── Validate transport and peer configurations
+   └── Merge with defaults
+
+2. Initialize identity
+   ├── Load nsec from config (or generate if absent)
+   ├── Derive npub, node_id, and FIPS address
+   └── Log identity information
+
+3. Initialize transports
+   ├── Create transport instances from config
+   └── Transports in Configured state
+
+4. Start transports (begin listening)
+   ├── Bind sockets, open interfaces
+   ├── Transports transition to Up state
+   └── Ready to accept inbound connections
+
+5. Connect to static peers
+   ├── For each configured peer with AutoConnect policy:
+   │   ├── Create link via appropriate transport
+   │   ├── Send AuthInit to initiate authentication
+   │   └── On success: peer joins tree gossip
+   └── Failed connections enter retry with backoff
+
+6. Node operational
+   ├── Participating in spanning tree (even with 0 peers)
+   ├── Processing inbound connections
+   └── Retrying unreachable static peers in background
+```
+
+**Notes:**
+
+- Transports start listening (step 4) before outbound connections (step 5) to
+  accept inbound connections from peers who have us configured
+- The node is "operational" as soon as any peer authenticates successfully
+- Static peer connection attempts continue in background with retry policy
+- With 0 authenticated peers, the node considers itself a potential root
+
+### Static Peer Retry Policy
+
+When a static peer is unreachable or authentication fails:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Initial delay | 1s | First retry delay |
+| Max delay | 300s | Cap on exponential backoff |
+| Backoff factor | 2.0 | Multiplier per attempt |
+| Jitter | ±25% | Randomization to avoid thundering herd |
+| Max attempts | unlimited | Static peers retry indefinitely |
+
+The retry timer resets to initial delay after a successful connection that
+later disconnects.
+
+### Inbound Connection Acceptance
+
+For initial implementation, all inbound connections that successfully
+authenticate are accepted. Future versions may add:
+
+- Peer allowlists/blocklists
+- Connection limits per transport
+- Rate limiting on authentication attempts
+- Reputation-based acceptance
+
+---
+
 ## Configuration
 
 ### Peer Configuration
 
-Peers are configured separately from transports:
+Peers are configured at the node level, separately from transports. For initial
+implementation, only static peers with `AutoConnect` policy are supported;
+discovery-based and on-demand peering are future enhancements.
 
-```
+```text
 PeerConfig
 ├── npub: PublicKey                 // required: who is this
 ├── alias: Option<String>           // human-readable label
 ├── addresses: Vec<PeerAddress>     // how to reach them
-└── connect_policy: ConnectPolicy
+└── connect_policy: ConnectPolicy   // AutoConnect for initial impl
 
 PeerAddress
 ├── transport_type: TransportType   // "udp", "ethernet", "tor", etc.
 ├── addr: String                    // transport-specific, parsed by driver
-└── priority: u8                    // preference order
+└── priority: u8                    // preference order (lower = preferred)
 
 ConnectPolicy
-├── AutoConnect                     // connect on startup
-├── OnDemand                        // connect when traffic needs routing
-└── Manual                          // wait for explicit API call
+├── AutoConnect                     // connect on startup (initial impl)
+├── OnDemand                        // connect when traffic needs routing (future)
+└── Manual                          // wait for explicit API call (future)
+```
+
+**Example configuration (YAML):**
+
+```yaml
+node:
+  peers:
+    - npub: "npub1abc..."
+      alias: "gateway"
+      addresses:
+        - transport: udp
+          addr: "192.168.1.1:4000"
+          priority: 1
+        - transport: tor
+          addr: "xyz...abc.onion:4000"
+          priority: 2
+      connect_policy: auto_connect
 ```
 
 ### Transport Configuration

@@ -121,8 +121,8 @@ adversary claims to be a node it doesn't control.
 > relies on transport-layer security (TLS/QUIC) for identity binding. FIPS
 > requires an explicit application-layer protocol because it supports transports
 > without built-in encryption or key exchange (radio links, serial connections).
-> On transports that provide identity-binding encryption, this protocol may be
-> skipped if the transport key is bound to the peer's npub.
+> For initial implementation, peer authentication is always performed regardless
+> of transport capabilities; this may be optimized in future versions.
 >
 > **Terminology note**: *Peer authentication* (this section) is hop-by-hop—it
 > verifies that a direct peer is who they claim to be. This is distinct from
@@ -134,13 +134,15 @@ adversary claims to be a node it doesn't control.
 ```text
 Initiator (A)                                  Responder (B)
      │                                              │
-     │──────────── HELLO(npub_A) ─────────────────►│
+     │───── AuthInit { a_npub, nonce_a } ─────────►│
      │                                              │
-     │◄───────── CHALLENGE(npub_B, challenge_B) ───│
+     │◄──── AuthChallenge { b_npub, nonce_b,       │
+     │          sig_b(nonce_a | a_npub) } ─────────│
      │                                              │
-     │── AUTH(challenge_A, response_A, response_B)─►│
+     │───── AuthComplete {                          │
+     │          sig_a(nonce_b | b_npub) } ────────►│
      │                                              │
-     │◄─────────── AUTH_ACK(response_A') ──────────│
+   [A verifies B after msg 2]          [B verifies A after msg 3]
      │                                              │
      ▼                                              ▼
    Authenticated                              Authenticated
@@ -148,41 +150,87 @@ Initiator (A)                                  Responder (B)
 
 **Protocol flow:**
 
-1. **HELLO**: Initiator sends its npub to responder
-2. **CHALLENGE**: Responder generates a 32-byte random challenge and sends it
-   along with its own npub and a challenge for the initiator
-3. **AUTH**: Initiator signs both challenges and sends both responses
-4. **AUTH_ACK**: Responder verifies initiator's response to its challenge,
-   then sends its response to the initiator's challenge
+1. **AuthInit**: Initiator sends its npub and a 32-byte random nonce
+2. **AuthChallenge**: Responder sends its npub, its own nonce, and a signature
+   proving it controls its nsec (signing the initiator's nonce and npub)
+3. **AuthComplete**: Initiator sends a signature proving it controls its nsec
+   (signing the responder's nonce and npub)
 
-After successful mutual authentication, both nodes have proven they control
-their claimed private keys.
+After message 2, the initiator can verify the responder's identity. After
+message 3, the responder can verify the initiator's identity. Both nodes have
+now proven they control their claimed private keys.
 
-### Challenge-Response Construction
+### Crossing Connection Handling
 
-The challenge response is constructed with domain separation to prevent
-cross-protocol signature reuse:
+When both nodes have each other as static peers, both may initiate authentication
+simultaneously ("crossing hellos"). This is resolved using deterministic
+tie-breaking based on npub ordering:
 
 ```text
-challenge = random(32)
-timestamp = current_unix_time()
-digest = SHA256("fips-auth-v1" || challenge || timestamp)
-response = schnorr_sign(nsec, digest)
+A (lower npub)                             B (higher npub)
+     │                                           │
+     │─── AuthInit { a_npub, nonce_a } ────────►│
+     │◄── AuthInit { b_npub, nonce_b } ─────────│  (crossing)
+     │                                           │
+  A < B: ignore B's init,               B > A: switch to responder,
+  wait for challenge                    send AuthChallenge
+     │                                           │
+     │◄── AuthChallenge { b_npub, ... } ────────│
+     │─── AuthComplete { ... } ────────────────►│
+     │                                           │
+     ▼                                           ▼
+  Authenticated                            Authenticated
 ```
 
-**Domain separation**: The `"fips-auth-v1"` prefix ensures that signatures
-created for FIPS authentication cannot be replayed in other contexts (e.g.,
-a Nostr event signature). If the authentication protocol is revised, the
-version string changes (e.g., `"fips-auth-v2"`).
+**Rules:**
 
-**Timestamp binding**: The timestamp is included in the signed digest and
-transmitted alongside the response. The verifier checks that the timestamp
-is within an acceptable window (e.g., ±5 minutes) to prevent replay attacks
-where an attacker captures and later reuses a valid response.
+- If a node receives AuthInit while its own AuthInit is pending to the same peer:
+  - If local npub < remote npub: Continue as initiator, ignore incoming AuthInit
+  - If local npub > remote npub: Abort own initiation, switch to responder role
 
-**Nonce freshness**: The 32-byte random challenge ensures that even if an
-attacker can predict the timestamp, they cannot pre-compute valid responses.
-Each authentication attempt requires a fresh signature.
+This ensures exactly one handshake completes with minimal wasted effort.
+
+### Authentication Message Structures
+
+```rust
+struct AuthInit {
+    npub: [u8; 32],      // Initiator's public key (x-only)
+    nonce: [u8; 32],     // Random challenge
+}
+
+struct AuthChallenge {
+    npub: [u8; 32],      // Responder's public key (x-only)
+    nonce: [u8; 32],     // Responder's challenge
+    signature: [u8; 64], // sig(initiator_nonce || initiator_npub)
+}
+
+struct AuthComplete {
+    signature: [u8; 64], // sig(responder_nonce || responder_npub)
+}
+```
+
+### Signature Construction
+
+Signatures are constructed with domain separation to prevent cross-protocol
+signature reuse:
+
+```text
+digest = SHA256("fips-peer-auth-v1" || peer_nonce || peer_npub)
+signature = schnorr_sign(nsec, digest)
+```
+
+**Domain separation**: The `"fips-peer-auth-v1"` prefix ensures that signatures
+created for FIPS peer authentication cannot be replayed in other contexts (e.g.,
+a Nostr event signature or FIPS crypto session). If the authentication protocol
+is revised, the version string changes (e.g., `"fips-peer-auth-v2"`).
+
+**Nonce freshness**: The 32-byte random nonce from the peer ensures that
+signatures cannot be pre-computed. Each authentication attempt requires a
+fresh signature over the peer's unique challenge.
+
+**Binding to peer identity**: The signature includes the peer's npub, binding
+the response to that specific peer. This prevents relay attacks where an
+adversary forwards a challenge from one node and uses the response with another.
 
 ### Authentication Failure Handling
 
@@ -601,6 +649,9 @@ A single node may have multiple transports of different types:
 | 0x06 | SessionSetup | Routing session + crypto handshake init |
 | 0x07 | SessionAck | Routing session ack + crypto response |
 | 0x08 | CoordsRequired | Router cache miss notification |
+| 0x09 | AuthInit | Peer authentication initiation |
+| 0x0a | AuthChallenge | Peer authentication challenge + response |
+| 0x0b | AuthComplete | Peer authentication completion |
 | 0x10 | Traffic | Encrypted application data |
 | 0x11 | TrafficAck | Delivery acknowledgement |
 
