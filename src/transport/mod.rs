@@ -7,6 +7,7 @@
 pub mod udp;
 
 use secp256k1::XOnlyPublicKey;
+use udp::UdpTransport;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -750,6 +751,76 @@ pub trait Transport {
 
     /// Discover potential peers (if supported).
     fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError>;
+}
+
+// ============================================================================
+// Transport Handle
+// ============================================================================
+
+/// Wrapper enum for concrete transport implementations.
+///
+/// This enables polymorphic transport handling without trait objects,
+/// supporting async methods that the sync Transport trait cannot express.
+pub enum TransportHandle {
+    /// UDP/IP transport.
+    Udp(UdpTransport),
+    // Future: Tcp(TcpTransport), Tor(TorTransport), etc.
+}
+
+impl TransportHandle {
+    /// Start the transport asynchronously.
+    pub async fn start(&mut self) -> Result<(), TransportError> {
+        match self {
+            TransportHandle::Udp(t) => t.start_async().await,
+        }
+    }
+
+    /// Stop the transport asynchronously.
+    pub async fn stop(&mut self) -> Result<(), TransportError> {
+        match self {
+            TransportHandle::Udp(t) => t.stop_async().await,
+        }
+    }
+
+    /// Send data to a remote address asynchronously.
+    pub async fn send(&self, addr: &TransportAddr, data: &[u8]) -> Result<usize, TransportError> {
+        match self {
+            TransportHandle::Udp(t) => t.send_async(addr, data).await,
+        }
+    }
+
+    /// Get the transport ID.
+    pub fn transport_id(&self) -> TransportId {
+        match self {
+            TransportHandle::Udp(t) => t.transport_id(),
+        }
+    }
+
+    /// Get the transport type metadata.
+    pub fn transport_type(&self) -> &TransportType {
+        match self {
+            TransportHandle::Udp(t) => t.transport_type(),
+        }
+    }
+
+    /// Get current transport state.
+    pub fn state(&self) -> TransportState {
+        match self {
+            TransportHandle::Udp(t) => t.state(),
+        }
+    }
+
+    /// Get the transport MTU.
+    pub fn mtu(&self) -> u16 {
+        match self {
+            TransportHandle::Udp(t) => t.mtu(),
+        }
+    }
+
+    /// Check if transport is operational.
+    pub fn is_operational(&self) -> bool {
+        self.state().is_operational()
+    }
 }
 
 // ============================================================================

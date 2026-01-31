@@ -288,7 +288,6 @@ mod tests {
 
     fn make_config(port: u16) -> UdpConfig {
         UdpConfig {
-            enabled: true,
             bind_addr: Some(format!("127.0.0.1:{}", port)),
             mtu: Some(1280),
         }

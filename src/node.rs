@@ -7,7 +7,10 @@
 use crate::bloom::BloomState;
 use crate::cache::CoordCache;
 use crate::peer::Peer;
-use crate::transport::{Link, LinkId, TransportId};
+use crate::transport::{
+    packet_channel, Link, LinkId, PacketRx, PacketTx, TransportHandle, TransportId,
+};
+use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeId};
@@ -15,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Errors related to node operations.
 #[derive(Debug, Error)]
@@ -134,10 +137,16 @@ pub struct Node {
     coord_cache: CoordCache,
 
     // === Transports & Links ===
-    /// Active transport IDs.
-    transport_ids: Vec<TransportId>,
+    /// Active transports (owned by Node).
+    transports: HashMap<TransportId, TransportHandle>,
     /// Active links.
     links: HashMap<LinkId, Link>,
+
+    // === Packet Channel ===
+    /// Packet sender for transports.
+    packet_tx: Option<PacketTx>,
+    /// Packet receiver (for event loop).
+    packet_rx: Option<PacketRx>,
 
     // === Peers ===
     /// Authenticated peers.
@@ -207,8 +216,10 @@ impl Node {
             tree_state,
             bloom_state,
             coord_cache: CoordCache::with_defaults(),
-            transport_ids: Vec::new(),
+            transports: HashMap::new(),
             links: HashMap::new(),
+            packet_tx: None,
+            packet_rx: None,
             peers: HashMap::new(),
             max_peers: 128,
             max_links: 256,
@@ -251,8 +262,10 @@ impl Node {
             tree_state,
             bloom_state: BloomState::new(node_id),
             coord_cache: CoordCache::with_defaults(),
-            transport_ids: Vec::new(),
+            transports: HashMap::new(),
             links: HashMap::new(),
+            packet_tx: None,
+            packet_rx: None,
             peers: HashMap::new(),
             max_peers: 128,
             max_links: 256,
@@ -272,6 +285,55 @@ impl Node {
         node.is_leaf_only = true;
         node.bloom_state = BloomState::leaf_only(*node.identity.node_id());
         Ok(node)
+    }
+
+    /// Create transport instances from configuration.
+    ///
+    /// Returns a vector of TransportHandles for all configured transports.
+    fn create_transports(&mut self, packet_tx: &PacketTx) -> Vec<TransportHandle> {
+        let mut transports = Vec::new();
+
+        // Collect UDP configs with optional names to avoid borrow conflicts
+        let udp_instances: Vec<_> = self
+            .config
+            .transports
+            .udp
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+
+        // Create UDP transport instances
+        for (name, udp_config) in udp_instances {
+            let transport_id = self.allocate_transport_id();
+            let bind_addr = udp_config.bind_addr().to_string();
+            let udp = UdpTransport::new(
+                transport_id,
+                udp_config,
+                packet_tx.clone(),
+            );
+            transports.push(TransportHandle::Udp(udp));
+
+            // Log with name only if present (named instance)
+            if let Some(ref n) = name {
+                debug!(
+                    transport_id = %transport_id,
+                    name = %n,
+                    bind_addr = %bind_addr,
+                    "Created UDP transport"
+                );
+            } else {
+                debug!(
+                    transport_id = %transport_id,
+                    bind_addr = %bind_addr,
+                    "Created UDP transport"
+                );
+            }
+        }
+
+        // Future transports follow same pattern:
+        // for (name, tcp_config) in self.config.transports.tcp.iter() { ... }
+
+        transports
     }
 
     // === Identity Accessors ===
@@ -383,9 +445,9 @@ impl Node {
         self.links.len()
     }
 
-    /// Number of transports.
+    /// Number of active transports.
     pub fn transport_count(&self) -> usize {
-        self.transport_ids.len()
+        self.transports.len()
     }
 
     // === Transport Management ===
@@ -397,21 +459,24 @@ impl Node {
         id
     }
 
-    /// Register a transport.
-    pub fn add_transport(&mut self, transport_id: TransportId) {
-        if !self.transport_ids.contains(&transport_id) {
-            self.transport_ids.push(transport_id);
-        }
+    /// Get a transport by ID.
+    pub fn get_transport(&self, id: &TransportId) -> Option<&TransportHandle> {
+        self.transports.get(id)
     }
 
-    /// Unregister a transport.
-    pub fn remove_transport(&mut self, transport_id: &TransportId) {
-        self.transport_ids.retain(|id| id != transport_id);
+    /// Get mutable transport by ID.
+    pub fn get_transport_mut(&mut self, id: &TransportId) -> Option<&mut TransportHandle> {
+        self.transports.get_mut(id)
     }
 
-    /// Get all transport IDs.
-    pub fn transport_ids(&self) -> &[TransportId] {
-        &self.transport_ids
+    /// Iterate over transport IDs.
+    pub fn transport_ids(&self) -> impl Iterator<Item = &TransportId> {
+        self.transports.keys()
+    }
+
+    /// Get the packet receiver for the event loop.
+    pub fn packet_rx(&mut self) -> Option<&mut PacketRx> {
+        self.packet_rx.as_mut()
     }
 
     // === Link Management ===
@@ -579,7 +644,42 @@ impl Node {
             }
         }
 
-        // TODO: Initialize transports here
+        // Create packet channel for transport -> Node communication
+        const PACKET_BUFFER_SIZE: usize = 1024;
+        let (packet_tx, packet_rx) = packet_channel(PACKET_BUFFER_SIZE);
+        self.packet_tx = Some(packet_tx.clone());
+        self.packet_rx = Some(packet_rx);
+
+        // Initialize transports
+        let transport_handles = self.create_transports(&packet_tx);
+
+        for mut handle in transport_handles {
+            let transport_id = handle.transport_id();
+            let transport_type = handle.transport_type().name;
+
+            match handle.start().await {
+                Ok(()) => {
+                    info!(
+                        transport_id = %transport_id,
+                        transport_type,
+                        "Transport started"
+                    );
+                    self.transports.insert(transport_id, handle);
+                }
+                Err(e) => {
+                    warn!(
+                        transport_id = %transport_id,
+                        transport_type,
+                        error = %e,
+                        "Transport failed to start, continuing without it"
+                    );
+                }
+            }
+        }
+
+        if !self.transports.is_empty() {
+            info!(count = self.transports.len(), "Transports initialized");
+        }
 
         self.state = NodeState::Running;
         info!(state = %self.state, "Node started");
@@ -596,6 +696,31 @@ impl Node {
         }
         self.state = NodeState::Stopping;
         info!(state = %self.state, "Node stopping");
+
+        // Shutdown transports first (they're packet producers)
+        let transport_ids: Vec<_> = self.transports.keys().cloned().collect();
+        for transport_id in transport_ids {
+            if let Some(mut handle) = self.transports.remove(&transport_id) {
+                let transport_type = handle.transport_type().name;
+                match handle.stop().await {
+                    Ok(()) => {
+                        info!(transport_id = %transport_id, transport_type, "Transport stopped");
+                    }
+                    Err(e) => {
+                        warn!(
+                            transport_id = %transport_id,
+                            transport_type,
+                            error = %e,
+                            "Transport stop failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Drop packet channels
+        self.packet_tx.take();
+        self.packet_rx.take();
 
         // Shutdown TUN interface
         if let Some(name) = self.tun_name.take() {
@@ -619,8 +744,6 @@ impl Node {
 
             self.tun_state = TunState::Disabled;
         }
-
-        // TODO: Shutdown transports here
 
         self.state = NodeState::Stopped;
         info!(state = %self.state, "Node stopped");
@@ -856,19 +979,20 @@ mod tests {
     fn test_node_transport_management() {
         let mut node = make_node();
 
+        // Initially no transports (transports are created during start())
+        assert_eq!(node.transport_count(), 0);
+
+        // Allocating IDs still works
         let id1 = node.allocate_transport_id();
         let id2 = node.allocate_transport_id();
+        assert_ne!(id1, id2);
 
-        node.add_transport(id1);
-        node.add_transport(id2);
-        assert_eq!(node.transport_count(), 2);
+        // get_transport returns None when transport doesn't exist
+        assert!(node.get_transport(&id1).is_none());
+        assert!(node.get_transport(&id2).is_none());
 
-        // Adding same ID again doesn't duplicate
-        node.add_transport(id1);
-        assert_eq!(node.transport_count(), 2);
-
-        node.remove_transport(&id1);
-        assert_eq!(node.transport_count(), 1);
+        // transport_ids() iterator is empty
+        assert_eq!(node.transport_ids().count(), 0);
     }
 
     #[test]

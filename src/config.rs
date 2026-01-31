@@ -107,18 +107,15 @@ impl TunConfig {
     }
 }
 
-/// UDP transport configuration (`udp.*`).
+/// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UdpConfig {
-    /// Enable UDP transport (`udp.enabled`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub enabled: bool,
-
-    /// Bind address (`udp.bind_addr`). Defaults to "0.0.0.0:4000".
+    /// Bind address (`bind_addr`). Defaults to "0.0.0.0:4000".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_addr: Option<String>,
 
-    /// UDP MTU (`udp.mtu`). Defaults to 1280 (IPv6 minimum).
+    /// UDP MTU (`mtu`). Defaults to 1280 (IPv6 minimum).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 }
@@ -135,6 +132,123 @@ impl UdpConfig {
     }
 }
 
+// ============================================================================
+// Transport Configuration
+// ============================================================================
+
+use std::collections::HashMap;
+
+/// Transport instances - either a single config or named instances.
+///
+/// Allows both simple single-instance config:
+/// ```yaml
+/// transports:
+///   udp:
+///     bind_addr: "0.0.0.0:4000"
+/// ```
+///
+/// And multiple named instances:
+/// ```yaml
+/// transports:
+///   udp:
+///     main:
+///       bind_addr: "0.0.0.0:4000"
+///     backup:
+///       bind_addr: "192.168.1.100:4001"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TransportInstances<T> {
+    /// Single unnamed instance (config fields directly under transport type).
+    Single(T),
+    /// Multiple named instances.
+    Named(HashMap<String, T>),
+}
+
+impl<T> TransportInstances<T> {
+    /// Get the number of instances.
+    pub fn len(&self) -> usize {
+        match self {
+            TransportInstances::Single(_) => 1,
+            TransportInstances::Named(map) => map.len(),
+        }
+    }
+
+    /// Check if there are no instances.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            TransportInstances::Single(_) => false,
+            TransportInstances::Named(map) => map.is_empty(),
+        }
+    }
+
+    /// Iterate over all instances as (name, config) pairs.
+    ///
+    /// Single instances have `None` as the name.
+    /// Named instances have `Some(name)`.
+    pub fn iter(&self) -> impl Iterator<Item = (Option<&str>, &T)> {
+        match self {
+            TransportInstances::Single(config) => {
+                vec![(None, config)].into_iter()
+            }
+            TransportInstances::Named(map) => {
+                map.iter()
+                    .map(|(k, v)| (Some(k.as_str()), v))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+        }
+    }
+}
+
+impl<T> Default for TransportInstances<T> {
+    fn default() -> Self {
+        TransportInstances::Named(HashMap::new())
+    }
+}
+
+/// Transports configuration section.
+///
+/// Each transport type can have either a single instance (config directly
+/// under the type name) or multiple named instances.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransportsConfig {
+    /// UDP transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub udp: TransportInstances<UdpConfig>,
+
+    // Future transport types:
+    // #[serde(default, skip_serializing_if = "is_transport_empty")]
+    // pub tcp: TransportInstances<TcpConfig>,
+    //
+    // #[serde(default, skip_serializing_if = "is_transport_empty")]
+    // pub tor: TransportInstances<TorConfig>,
+}
+
+/// Helper for skip_serializing_if on TransportInstances.
+fn is_transport_empty<T>(instances: &TransportInstances<T>) -> bool {
+    instances.is_empty()
+}
+
+impl TransportsConfig {
+    /// Check if any transports are configured.
+    pub fn is_empty(&self) -> bool {
+        self.udp.is_empty()
+        // && self.tcp.is_empty()
+        // && self.tor.is_empty()
+    }
+
+    /// Merge another TransportsConfig into this one.
+    ///
+    /// Non-empty transport sections from `other` replace those in `self`.
+    pub fn merge(&mut self, other: TransportsConfig) {
+        if !other.udp.is_empty() {
+            self.udp = other.udp;
+        }
+        // Future: same for tcp, tor, etc.
+    }
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -146,9 +260,9 @@ pub struct Config {
     #[serde(default)]
     pub tun: TunConfig,
 
-    /// UDP transport configuration (`udp.*`).
-    #[serde(default)]
-    pub udp: UdpConfig,
+    /// Transport instances (`transports.*`).
+    #[serde(default, skip_serializing_if = "TransportsConfig::is_empty")]
+    pub transports: TransportsConfig,
 }
 
 impl Config {
@@ -247,16 +361,8 @@ impl Config {
         if other.tun.mtu.is_some() {
             self.tun.mtu = other.tun.mtu;
         }
-        // Merge udp section
-        if other.udp.enabled {
-            self.udp.enabled = true;
-        }
-        if other.udp.bind_addr.is_some() {
-            self.udp.bind_addr = other.udp.bind_addr;
-        }
-        if other.udp.mtu.is_some() {
-            self.udp.mtu = other.udp.mtu;
-        }
+        // Merge transports section
+        self.transports.merge(other.transports);
     }
 
     /// Create an Identity from this configuration.
@@ -496,5 +602,81 @@ node:
 
         // Empty nsec should not be serialized
         assert!(!yaml.contains("nsec:"));
+    }
+
+    #[test]
+    fn test_parse_transport_single_instance() {
+        let yaml = r#"
+transports:
+  udp:
+    bind_addr: "0.0.0.0:4000"
+    mtu: 1400
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.transports.udp.len(), 1);
+        let instances: Vec<_> = config.transports.udp.iter().collect();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].0, None); // Single instance has no name
+        assert_eq!(instances[0].1.bind_addr(), "0.0.0.0:4000");
+        assert_eq!(instances[0].1.mtu(), 1400);
+    }
+
+    #[test]
+    fn test_parse_transport_named_instances() {
+        let yaml = r#"
+transports:
+  udp:
+    main:
+      bind_addr: "0.0.0.0:4000"
+    backup:
+      bind_addr: "192.168.1.100:4001"
+      mtu: 1280
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.transports.udp.len(), 2);
+
+        let instances: std::collections::HashMap<_, _> =
+            config.transports.udp.iter().map(|(k, v)| (k, v)).collect();
+
+        // Named instances have Some(name)
+        assert!(instances.contains_key(&Some("main")));
+        assert!(instances.contains_key(&Some("backup")));
+        assert_eq!(instances[&Some("main")].bind_addr(), "0.0.0.0:4000");
+        assert_eq!(instances[&Some("backup")].bind_addr(), "192.168.1.100:4001");
+        assert_eq!(instances[&Some("backup")].mtu(), 1280);
+    }
+
+    #[test]
+    fn test_parse_transport_empty() {
+        let yaml = r#"
+transports: {}
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.transports.udp.is_empty());
+        assert!(config.transports.is_empty());
+    }
+
+    #[test]
+    fn test_transport_instances_iter() {
+        // Single instance - no name
+        let single = TransportInstances::Single(UdpConfig {
+            bind_addr: Some("0.0.0.0:4000".to_string()),
+            mtu: None,
+        });
+        let items: Vec<_> = single.iter().collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, None);
+
+        // Named instances - have names
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), UdpConfig::default());
+        map.insert("b".to_string(), UdpConfig::default());
+        let named = TransportInstances::Named(map);
+        let items: Vec<_> = named.iter().collect();
+        assert_eq!(items.len(), 2);
+        // All named instances should have Some(name)
+        assert!(items.iter().all(|(name, _)| name.is_some()));
     }
 }
