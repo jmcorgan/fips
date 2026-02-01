@@ -1,6 +1,4 @@
-# FIPS Protocol Traffic Flow
-
-Design discussion from Session 39.
+# FIPS Session Protocol Flow
 
 ## Overview
 
@@ -85,32 +83,18 @@ Cache entry expires
 ### 1.5 Traffic Without Prior DNS Lookup
 
 A packet may arrive at the TUN for an `fd::/8` destination without a prior
-DNS lookup. Scenarios:
+DNS lookup (cached address, manual configuration, etc.). Since address
+derivation is one-way (SHA-256), the npub cannot be recovered from the address,
+and without the npub we cannot determine the node_id needed for routing.
 
-- Application has cached/hardcoded address from previous session
-- Manual configuration bypassing DNS
-- Reply packets (covered separately - source already known from outbound)
-
-Options for handling cold-cache outbound packets:
-
-1. **Drop with ICMPv6**: Return Destination Unreachable, require DNS lookup
-2. **Reverse derive**: Attempt to derive npub from address (not possible -
-   address is hash of npub, not reversible)
-3. **Query protocol**: Initiate network query to discover identity for address
-4. **Hold and query**: Buffer packet while performing discovery
-
-The address derivation is one-way (SHA-256), so reverse derivation is impossible.
-Without the npub, we cannot determine the node_id needed for routing.
-
-**Decision**: Return ICMPv6 Destination Unreachable (Code 0: No route to
-destination) for packets to unknown addresses. The identity cache MUST be
-populated through some mechanism before traffic can be routed.
+FIPS returns ICMPv6 Destination Unreachable (Code 0: No route to destination)
+for packets to unknown addresses. The identity cache must be populated before
+traffic can be routed.
 
 Known cache population mechanisms:
 
 - DNS lookup (primary path, described above)
-- Inbound traffic from authenticated peers (described in §X)
-- Additional mechanisms TBD as design progresses
+- Inbound traffic from authenticated peers
 
 ---
 
@@ -155,9 +139,15 @@ On receiving a packet, the TUN reader:
    - **Hit**: Use existing session for encryption/signing
    - **Miss**: Initiate session establishment (see §3)
 
-6. **Route determination**: Using node_id, determine next hop (covered in §X)
+6. **Route determination**: Using node_id, determine the next hop peer:
+   - Check route cache for destination's spanning tree coordinates
+   - If cache miss, initiate route discovery (see §4.4)
+   - Select next hop via greedy routing toward destination coordinates
 
-7. **Packet forwarding**: Encapsulate and send via appropriate transport
+7. **Packet forwarding**: Encapsulate and send via appropriate transport:
+   - Encrypt payload with session keys (end-to-end)
+   - Wrap in link-layer frame for next hop peer
+   - Encrypt with link keys and transmit via peer's transport
 
 ---
 
@@ -196,18 +186,8 @@ TUN reader
     └─► Initiate session establishment
 ```
 
-The original packet that triggered session establishment must be handled:
-
-- ~~**Option A**: Drop packet, let application retry (simple, may cause timeout)~~
-- **Option B**: Queue packet, send after session established
-- **Option C**: Send packet optimistically during handshake (may fail)
-
-**Decision**: Either queue or optimistic send. Dropping is not acceptable as it
-causes unnecessary latency and potential application timeouts.
-
-Queuing is simpler to reason about but requires bounded buffer management.
-Optimistic send (0-RTT style) improves latency but requires careful replay
-protection.
+Packets that trigger session establishment are queued (with bounded buffer
+management) and transmitted after the session is established.
 
 ### 3.3 Session Independence from Transport
 
@@ -216,62 +196,30 @@ survives:
 
 - Transport failover (UDP → Tor → back to UDP)
 - Route changes (different intermediate hops)
-- IP address changes on either end
+- Transport address changes on either end
 
-The session is bound to **npub identities**, not network addresses or transport
-paths. This is similar to QUIC's connection migration but at the FIPS layer.
+The session is bound to **npub identities**, not transport addresses or routing
+paths.
 
 ### 3.4 Session Establishment Flow
 
-TBD - handshake protocol for mutual authentication and key exchange.
+FIPS uses Noise KK for session establishment. Both parties know each other's
+static keys: the initiator from DNS lookup, the responder from the source
+address in the SessionSetup. The KK pattern provides mutual authentication
+from the first message.
 
-Considerations:
-
-- Must work over unreliable transports (UDP)
-- Must handle packet loss/reordering during handshake
-- Should minimize round trips for latency
-- Must bind session to both npub identities cryptographically
+The handshake is carried inside SessionSetup/SessionAck messages (see §5.5),
+which also establish routing session state at intermediate nodes.
 
 ### 3.5 Simultaneous Session Initiation (Crossing Hellos)
 
-When both nodes attempt to establish a session simultaneously, we have
-"crossing hellos" - two handshakes in flight at once.
-
-Options:
-
-1. **Deterministic tie-breaker**: Lower npub (lexicographically) is always
-   the "initiator." When a node receives an initiation from a higher npub
-   while it has an outbound initiation pending to that same npub, it defers
-   to the lower npub's handshake.
-
-2. **Both complete, then deduplicate**: Let both handshakes run to completion.
-   Both sides end up with the same session key (if protocol is designed for
-   this). Discard the "extra" session state using tie-breaker.
-
-3. **Detect and merge**: When receiving an initiation while one is pending,
-   recognize the crossing and merge into a single handshake with contributions
-   from both sides.
-
-**Considerations**:
-
-- Option 1 is simplest but may add latency (one side backs off)
-- Option 2 wastes bandwidth but is robust
-- Option 3 is elegant but complex to implement correctly
-
-The npub comparison provides a consistent, globally-agreed ordering without
-any coordination.
-
-**Decision**: Option 1 - deterministic tie-breaker using npub ordering.
-
-When a node detects a crossing hello (receives initiation while its own
-initiation to the same peer is pending):
+When both nodes attempt to establish a session simultaneously, a deterministic
+tie-breaker resolves the conflict using npub ordering:
 
 - If local npub < remote npub: Continue as initiator, ignore incoming initiation
 - If local npub > remote npub: Abort own initiation, switch to responder role
 
-This ensures exactly one handshake completes with minimal wasted effort. The
-latency cost is bounded to one round-trip in the crossing case, which should
-be rare.
+This ensures exactly one handshake completes with minimal wasted effort.
 
 ---
 
@@ -279,216 +227,78 @@ be rare.
 
 Below the session layer, all FIPS packets (session handshake messages, encrypted
 payloads, control traffic) must be routed through the mesh to their destination.
+See [fips-routing.md](fips-routing.md) for the full routing design.
 
-### 4.1 Routing Layer Entry Points
+### 4.1 Routing Overview
 
-The routing layer handles packets from two sources:
+FIPS routing combines three mechanisms:
 
-1. **Session establishment**: Handshake packets for new sessions
-2. **Session data**: Encrypted payloads over established sessions
+1. **Bloom filters**: Fast reachability lookup for nearby destinations
+2. **Discovery protocol**: Query-based lookup for distant destinations
+3. **Greedy tree routing**: Coordinate-based forwarding using spanning tree position
 
-Both require determining how to reach the destination node_id.
+The routing layer maintains a route cache mapping `node_id → (coordinates,
+next_hop_peer)`. Cache hits enable immediate greedy routing; cache misses
+trigger route discovery via bloom filter queries or LookupRequest flooding.
 
-### 4.2 Route Cache
+### 4.2 Packet Handling During Discovery
 
-The routing layer maintains a route cache mapping:
+Packets are queued (with bounded buffer) while route discovery is in progress
+and transmitted once coordinates are obtained.
 
-```text
-node_id → (coordinates, next_hop_peer)
-```
+### 4.3 Route Cache Lifetime
 
-Where:
-
-- `coordinates`: The destination's spanning tree coordinates
-- `next_hop_peer`: A direct peer for greedy forwarding toward those coordinates
-
-### 4.3 Routing Decision Flow
-
-When sending a packet to a destination node_id:
-
-```text
-Packet to send (dest = node_id)
-    │
-    ├─► Route cache lookup
-    │     ├─► HIT: Coordinates known → greedy route via next_hop
-    │     └─► MISS: Proceed to discovery
-    │
-    └─► Route discovery (see §4.4)
-```
-
-If the route cache has coordinates for the destination, greedy routing proceeds
-immediately - no discovery needed.
-
-### 4.4 Route Discovery Protocol
-
-When the route cache has no entry for the destination, discovery must determine
-how to reach node_id X.
-
-**Discovery flow**:
-
-```text
-Route discovery for node_id X
-    │
-    ├─► Check peer bloom filters
-    │     ├─► Match in peer P's filter → query P for coordinates
-    │     └─► No match in any filter → proceed to flooding
-    │
-    └─► Send LookupRequest (flooding with TTL)
-          └─► Await LookupResponse with coordinates
-```
-
-**Bloom filter role**: Bloom filters don't provide routes directly - they
-indicate which peers *might* know about a destination. A bloom match triggers
-a targeted query to that peer rather than blind flooding.
-
-**LookupRequest flooding**: When no bloom filter matches, flood the query
-through the spanning tree with bounded TTL. Nodes that know the destination
-(have it in their bloom filter or route cache) respond with coordinates.
-
-### 4.5 Packet Handling During Discovery
-
-Packets arriving while route discovery is in progress:
-
-- **Queue**: Buffer packets while discovery completes (bounded queue)
-- **Drop with error**: Return to session layer, which may retry
-
-**Decision needed**: Packet handling during route discovery?
-
-### 4.6 Route Cache Population
-
-Routes are learned through:
-
-- Successful route discovery (explicit)
-- Receiving packets from a source (reverse path learning)
-- Spanning tree announcements (implicit reachability for nearby nodes)
-- Bloom filter updates combined with coordinate queries
-
-### 4.7 Route Cache Lifetime
-
-Route cache entries should:
+Route cache entries:
 
 - Expire after configurable timeout
 - Refresh on successful packet delivery
-- Invalidate when peer link goes down
-- Invalidate on spanning tree topology changes affecting the path
+- Invalidate when peer link goes down or spanning tree topology changes
 
 ---
 
-## 5. Terminology Reconciliation
+## 5. Session Terminology
 
-The existing design docs ([fips-routing.md](design/fips-routing.md)) and this
-document use "session" differently. This section clarifies the terminology.
+FIPS uses two distinct session concepts at different layers:
 
-### 5.1 Two Distinct Concepts
+| Term                | Layer       | Purpose                      | Endpoints              |
+|---------------------|-------------|------------------------------|------------------------|
+| **Crypto Session**  | End-to-end  | Authentication + encryption  | Source ↔ Destination   |
+| **Routing Session** | Hop-by-hop  | Cache coordinates at routers | Along the path         |
 
-| Term | Layer | Purpose | Endpoints |
-|------|-------|---------|-----------|
-| **Crypto Session** (§3) | End-to-end | Authentication + encryption | Source ↔ Destination |
-| **Routing Session** (existing doc §4) | Hop-by-hop | Cache coordinates at routers | Along the path |
-
-**Crypto Session** (what §3 of this document describes):
+### 5.1 Crypto Session
 
 - Established between two npub identities
-- Provides confidentiality (encryption) and authenticity (signatures)
+- Provides confidentiality and authenticity via Noise KK
 - Survives route changes and transport failover
 - Keyed by: `(local_npub, remote_npub)`
 
-**Routing Session** (what fips-routing.md §Part 4 describes):
+### 5.2 Routing Session
 
 - Warms coordinate caches at intermediate routers
 - Enables minimal 36-byte data packet headers
 - Must be re-established when router caches expire
 - Keyed by: `(src_addr, dest_addr)` at each router
 
-### 5.2 Relationship Between Sessions
+### 5.3 Combined Establishment
 
-These are complementary, not conflicting:
-
-```text
-┌─────────────────────────────────────────────────────────────────────┐
-│  Crypto Session (end-to-end)                                        │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  Routing Session (hop-by-hop cache state)                     │  │
-│  │                                                               │  │
-│  │  Source ──► Router1 ──► Router2 ──► ... ──► Destination      │  │
-│  │            (cache)      (cache)                               │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│  Encrypted payload travels inside routing session                   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### 5.3 Establishment Order
-
-**Option A: Sequential (Crypto first, then Routing)**
+Both sessions are established together: the routing session setup carries the
+crypto handshake, minimizing round-trips.
 
 ```text
-1. Discover destination coordinates (LookupRequest/Response)
-2. Establish crypto session (handshake for keys)
-3. Send SessionSetup to warm router caches
-4. Send encrypted data packets (minimal headers)
-```
-
-Pros: Clean separation, crypto session exists before any data flows
-Cons: Additional round-trips before first data
-
-**Option B: Combined (Routing carries Crypto handshake)**
-
-```text
-1. Discover destination coordinates (LookupRequest/Response)
-2. Send SessionSetup carrying crypto handshake initiation
-3. Routers cache coordinates; destination receives handshake
-4. Destination responds with SessionAck + crypto response
-5. Send encrypted data packets
-```
-
-Pros: Fewer round-trips, single establishment phase
-Cons: Couples two concerns, SessionSetup becomes more complex
-
-**Option C: Crypto-only (No Routing Session)**
-
-```text
-1. Discover destination coordinates
-2. Establish crypto session
-3. Every data packet carries full coordinates
-```
-
-Pros: Simplest, no router cache state
-Cons: Larger packets (~400 bytes vs 36 bytes), more bandwidth
-
-### 5.4 Recommended Terminology
-
-To avoid confusion going forward:
-
-| Use This | Instead Of | Meaning |
-|----------|------------|---------|
-| **Crypto session** | "FIPS session" | End-to-end authenticated encryption |
-| **Routing session** | "Session" (from routing doc) | Router cache state for a flow |
-| **Route discovery** | — | Finding destination coordinates |
-| **Session setup** | — | Warming router caches (routing session) |
-
-### 5.5 Decision: Option B - Combined Establishment
-
-**Decision**: Use combined establishment where routing session setup carries
-the crypto handshake.
-
-```text
-Combined Establishment Flow:
-
 1. Route discovery (if needed)
    └─► LookupRequest/Response → obtain destination coordinates
 
 2. SessionSetup + Crypto Init
    └─► Source sends SessionSetup containing:
        - src/dest coordinates (for router caching)
-       - Crypto handshake initiation (for destination)
+       - Noise KK handshake initiation (for destination)
    └─► Routers cache coordinates as packet transits
    └─► Destination receives crypto init, begins handshake
 
 3. SessionAck + Crypto Response
    └─► Destination sends SessionAck containing:
        - Its coordinates (for reverse path caching)
-       - Crypto handshake response
+       - Noise KK handshake response
    └─► Routers cache reverse path
    └─► Source completes crypto handshake
 
@@ -497,22 +307,10 @@ Combined Establishment Flow:
    └─► Both crypto session and routing session now active
 ```
 
-**Benefits of combined approach**:
-
-- Single round-trip establishes both sessions
-- Router caches warm as handshake transits
-- No additional latency vs crypto-only
-- Bidirectional routing session from the start (SessionAck warms return path)
-
-**Message structure implications**:
-
-SessionSetup and SessionAck messages must carry both:
-
-- Routing information (coordinates for router caching)
-- Crypto payload (handshake messages, opaque to routers)
-
-Routers process the routing portion and forward; only endpoints process
-the crypto portion.
+SessionSetup and SessionAck messages carry both routing information (coordinates
+for router caching) and crypto payload (handshake messages, opaque to routers).
+Routers process the routing portion and forward; only endpoints process the
+crypto portion.
 
 ---
 
@@ -523,7 +321,7 @@ FIPS uses two independent Noise Protocol handshakes at different layers:
 | Layer   | Scope       | Pattern  | Purpose                                   |
 |---------|-------------|----------|-------------------------------------------|
 | Link    | Hop-by-hop  | Noise IK | Authenticate peers, encrypt link          |
-| Session | End-to-end  | Noise IK | Authenticate endpoints, encrypt payload   |
+| Session | End-to-end  | Noise KK | Authenticate endpoints, encrypt payload   |
 
 Both use `Noise_IK_secp256k1_ChaChaPoly_SHA256` with the same cryptographic
 primitives, but with separate keys and sessions.
@@ -538,21 +336,21 @@ nodes forward opaque ciphertext without being able to read the contents.
 
 ### 6.2 Session Noise Handshake
 
-The session-layer Noise IK handshake is carried inside `SessionSetup`/`SessionAck`
+The session-layer Noise KK handshake is carried inside `SessionSetup`/`SessionAck`
 messages, which themselves travel through the link-encrypted channel:
 
 ```text
 Initiator knows destination npub (from DNS lookup)
     │
     ▼
-SessionSetup { coords, handshake_payload: Noise IK msg1 }
+SessionSetup { coords, handshake_payload: Noise KK msg1 }
     │
     ▼  (travels through link-encrypted hops)
     │
 Responder processes msg1, learns initiator identity
     │
     ▼
-SessionAck { coords, handshake_payload: Noise IK msg2 }
+SessionAck { coords, handshake_payload: Noise KK msg2 }
     │
     ▼
 Session keys established (independent of link keys)
@@ -560,7 +358,7 @@ Session keys established (independent of link keys)
 
 ### 6.3 Cryptographic Primitives
 
-Both link and session layers use the same stack:
+Both link and session layers use the same cryptographic stack:
 
 | Component      | Choice              | Notes                      |
 |----------------|---------------------|----------------------------|
@@ -570,19 +368,12 @@ Both link and session layers use the same stack:
 | Hash           | SHA-256             | Nostr-native               |
 | Key derivation | HKDF-SHA256         | Standard Noise KDF         |
 
-### 6.4 Cryptographic Primitives
+These choices prioritize compatibility with existing Nostr infrastructure.
+Secp256k1 and SHA-256 are already used for Nostr identities, and
+ChaCha20-Poly1305 matches NIP-44 encryption. Lightning's BOLT 8 provides a
+proven reference for adapting Noise Protocol to secp256k1.
 
-Following Lightning's BOLT 8 adaptation:
-
-| Component | Choice | Notes |
-|-----------|--------|-------|
-| Curve | secp256k1 | Nostr-native |
-| DH | ECDH on secp256k1 | Standard EC Diffie-Hellman |
-| Cipher | ChaCha20-Poly1305 | AEAD, same as NIP-44 |
-| Hash | SHA-256 | Nostr-native |
-| Key derivation | HKDF-SHA256 | Standard Noise KDF |
-
-### 6.5 Handshake Integration with SessionSetup
+### 6.4 Handshake Integration with SessionSetup
 
 The Noise handshake messages embed in SessionSetup/SessionAck:
 
@@ -607,7 +398,7 @@ SessionAck {
 }
 ```
 
-### 6.6 Session Keys
+### 6.5 Session Keys
 
 After handshake completion, Noise produces two symmetric keys:
 
@@ -616,21 +407,14 @@ After handshake completion, Noise produces two symmetric keys:
 
 These are used with ChaCha20-Poly1305 for all subsequent data packets.
 
-### 6.7 Nonce Management
+### 6.6 Nonce Management
 
-ChaCha20-Poly1305 requires unique nonces. Options:
+FIPS uses counter-based nonces for ChaCha20-Poly1305. Each side maintains a
+64-bit send counter, incremented per packet. No coordination is needed since
+keys are directional. The counter also enables replay detection by rejecting
+packets with nonce ≤ last seen.
 
-1. **Counter-based**: Each side maintains a 64-bit send counter, incremented
-   per packet. Nonce = counter (no coordination needed since keys are
-   directional).
-
-2. **Random nonces**: 96-bit random nonce per packet, included in header.
-   Simpler but adds 12 bytes per packet.
-
-**Recommendation**: Counter-based nonces (like WireGuard/Lightning). The
-counter also enables replay detection - reject packets with nonce ≤ last seen.
-
-### 6.8 Forward Secrecy
+### 6.7 Forward Secrecy
 
 The ephemeral keys (`e` in Noise notation) provide forward secrecy:
 
@@ -638,7 +422,7 @@ The ephemeral keys (`e` in Noise notation) provide forward secrecy:
 - Each session has unique ephemeral keys
 - Session keys derived from ephemeral-ephemeral DH (`ee`)
 
-### 6.9 Reference: Lightning BOLT 8
+### 6.8 Reference: Lightning BOLT 8
 
 Lightning's adaptation of Noise for secp256k1 (BOLT 8) provides a proven
 reference implementation:
@@ -651,7 +435,7 @@ reference implementation:
 FIPS can reference BOLT 8's cryptographic details while using the KK pattern
 appropriate for our mutual-knowledge scenario.
 
-### 6.10 Data Packet Authentication
+### 6.9 Data Packet Authentication
 
 **Decision**: Use AEAD authentication only (no per-packet signatures).
 
@@ -778,10 +562,10 @@ or earlier sections of this document.
 The following decisions from this document have been propagated:
 
 1. **Two-layer architecture**: Link layer (Noise IK peer auth) and session layer
-   (Noise IK end-to-end) operate independently with separate keys
+   (Noise KK end-to-end) operate independently with separate keys
 2. **Session terminology** (§5.4): "Routing Session" vs "Crypto Session" distinction
    now consistent across all docs
 3. **Combined establishment** (§5.5): SessionSetup/SessionAck carry optional
-   `handshake_payload` for session-layer Noise IK handshake
+   `handshake_payload` for session-layer Noise KK handshake
 4. **Message type split**: LinkMessageType for hop-by-hop, SessionMessageType for
    end-to-end (carried inside SessionDatagram)

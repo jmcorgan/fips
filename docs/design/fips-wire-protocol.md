@@ -1,13 +1,20 @@
-# FIPS Packet Dispatch and Session Management
+# FIPS Wire Protocol and Transport Layer Management
 
-This document specifies the packet dispatch mechanism for FIPS, including:
+This document describes the FIPS wire protocol message flow at the transport level:
+how peers establish and maintain cryptographic sessions with each other.
 
-- Wire format with session indices for O(1) dispatch
-- Index-based session lookup enabling transport-layer roaming
+The transport layer provides the link-level communications path for a node to each
+of its outbound and inbound peers, delivering an authenticated, encrypted, and
+roaming-friendly peer-to-peer mesh connection over which both link-layer routing
+control messages and end-to-end FIPS session layer data flow.
+
+Topics include:
+
+- Wire format with session indices for O(1) packet dispatch
+- Handshake and session lifecycle
+- Transport-layer roaming via index-based session lookup
 - Security properties: rate limiting, replay protection, state machine strictness
-- Transport-specific considerations
-
-This document supersedes the wire format section in fips-design.md §6.
+- Adaptation to different transport types (UDP, TCP, Tor, Ethernet, radio)
 
 ---
 
@@ -567,23 +574,15 @@ Each received packet is validated against expected state:
 ### 7.3 Reconnection Handling
 
 When msg1 arrives for an already-authenticated peer (identified by npub in the
-decrypted static key):
+decrypted static key), the new handshake is accepted alongside the existing
+session. If the new handshake completes successfully within a timeout, it
+replaces the old session; otherwise it is discarded.
 
-**Option A: Reject** - Existing session is authoritative, ignore new handshake.
-Simple but prevents legitimate reconnection after network change.
-
-**Option B: Replace** - New handshake supersedes existing session. Accepts
-reconnection but allows DoS via handshake flooding.
-
-**Option C: Validate first** - Accept new handshake alongside existing session.
-If it completes successfully, replace old session. Provides graceful migration.
-
-**Recommendation**: Option C with the caveat that the new handshake must
-complete within a timeout. This handles:
+This approach handles:
 
 - Legitimate reconnection (network changed, process restarted)
 - NAT rebinding (source port changed)
-- Cross-connection resolution (both sides initiated)
+- Cross-connection resolution (both sides initiated simultaneously)
 
 ---
 
@@ -653,7 +652,8 @@ is far beyond expected peer counts. If index exhaustion becomes a concern:
 
 ### 9.1 UDP
 
-UDP is the primary transport for FIPS and the design target for this document.
+UDP transport is expected to be the majority of deployments in the initial
+stages of development.
 
 **Address semantics**: `TransportAddr` is `SocketAddr` (IP:port string).
 
