@@ -376,6 +376,30 @@ the tree is properly formed.
 
 No global routing tables. Each node makes purely local decisions.
 
+### Privacy Considerations
+
+Intermediate routers can observe `src_addr` and `dest_addr` in transiting packets.
+This enables traffic analysis (who is communicating with whom) but not content
+inspection (the payload is end-to-end encrypted with session keys).
+
+**Why source address is visible**: The source address is required for routers to
+send error messages (CoordsRequired, PathBroken) back to the sender. This is a
+deliberate design choice: rather than silently dropping unroutable packets and
+relying on application-layer timeouts to detect failures, FIPS provides explicit
+feedback that allows rapid route recovery. The tradeoff favors responsiveness
+over metadata privacy.
+
+**Partial mitigation**: FIPS addresses are derived from `SHA-256(npub)`, not the
+npub itself. An observer learns that `fd12:3456:...` is communicating with
+`fd78:9abc:...`, but cannot directly determine the Nostr identities without
+additional information (e.g., DNS lookup correlation, prior knowledge of the
+address-to-npub mapping).
+
+**Alternative considered**: Onion routing (like Tor) hides routing metadata from
+intermediate nodes but requires the sender to know the full path upfront and
+prevents per-hop error feedback. FIPS prioritizes low-latency greedy routing
+with explicit error signaling over metadata privacy.
+
 ---
 
 ## Part 4: Route Cache Management
