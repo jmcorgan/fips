@@ -66,20 +66,105 @@ traffic tunnels through that peer.
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Filter size | 4 KB (32,768 bits) | Balances accuracy vs. memory |
-| Hash functions | 7 | Near-optimal for expected fill ratio |
+| Filter size | 1 KB (8,192 bits) | Sized for expected occupancy with margin |
+| Hash functions | 5 | Optimal for 800-1,600 entries at this size |
 | Scope (K) | 2 | Effective ~4-hop reach with TTL propagation |
 
-### False Positive Rates
+### Mathematical Foundation
 
-| Nodes in Filter | FPR |
-|-----------------|-----|
-| 1,000 | ~0.05% |
-| 2,000 | ~0.5% |
-| 5,000 | ~1.3% |
-| 10,000 | ~8% |
+**False Positive Rate (FPR):**
 
-With K=2 and average degree d=8, expected nodes in scope ≈ d^(2K) ≈ 4,096.
+```text
+FPR = (1 - e^(-kn/m))^k
+```
+
+Where m = bits, n = entries, k = hash functions.
+
+**Optimal hash count:**
+
+```text
+k_opt = (m/n) × ln(2) ≈ 0.693 × (m/n)
+```
+
+For m=8,192 and expected n=800: k_opt ≈ 7. We use k=5 to accommodate higher
+occupancy scenarios (up to ~1,600 entries) while maintaining acceptable FPR.
+
+**Required bits for target FPR:**
+
+```text
+m = -1.44 × n × ln(p)
+```
+
+For 1% FPR: m ≈ 9.6n bits. For 5% FPR: m ≈ 6.2n bits.
+
+### Expected Filter Occupancy
+
+Filter occupancy depends on K-hop scope and node degree, **not** total network
+size. The TTL mechanism bounds entries regardless of network scale.
+
+**Nodes within h hops in a tree (branching factor b = d-1):**
+
+```text
+nodes_within_h_hops = (b^(h+1) - 1) / (b - 1)
+```
+
+For d=8 (b=7), K=2: each peer's 2-hop neighborhood ≈ 57 nodes.
+
+**Outgoing filter to peer Q contains:**
+
+- Self (1 entry)
+- Entries from (d-1) other peers' filters, with overlap
+
+**Expected occupancy by node degree:**
+
+| Degree (d) | Expected Entries | Notes |
+|------------|------------------|-------|
+| 5 | 100-200 | Constrained/IoT |
+| 8 | 250-400 | Typical node |
+| 12 | 500-800 | Well-connected |
+| 20+ | 1,200-1,800 | Hub node |
+
+### False Positive Rates (1 KB filter, k=5)
+
+| Entries | FPR | Scenario |
+|---------|-----|----------|
+| 200 | 0.02% | Low-degree node |
+| 400 | 0.3% | Typical node |
+| 800 | 2.4% | Well-connected |
+| 1,200 | 7.5% | Hub node |
+| 1,600 | 15% | Heavily loaded hub |
+
+FPR above 5% triggers more LookupRequests but the discovery protocol handles
+this gracefully. Hub nodes may benefit from larger filters in future protocol
+versions (see §1.6).
+
+### Size Classes (Forward Compatibility)
+
+Filter sizes are powers of 2 to enable **folding** — a technique for shrinking
+filters by ORing halves:
+
+```rust
+fn fold(filter: &[u8]) -> Vec<u8> {
+    let half = filter.len() / 2;
+    (0..half).map(|i| filter[i] | filter[i + half]).collect()
+}
+```
+
+Folding preserves correctness (no false negatives) but increases FPR.
+
+| size_class | Bits | Bytes | Status |
+|------------|------|-------|--------|
+| 0 | 4,096 | 512 | Reserved (future) |
+| 1 | 8,192 | 1,024 | **Current default** |
+| 2 | 16,384 | 2,048 | Reserved (future) |
+| 3 | 32,768 | 4,096 | Reserved (future) |
+
+**v1 protocol**: All nodes MUST use size_class=1. The field is present in the
+wire format for forward compatibility.
+
+**Future versions**: Nodes may negotiate larger filters. Receivers fold down
+to their preferred size if sender's filter is larger. This allows hub nodes
+to maintain higher precision while constrained nodes use smaller filters.
 
 ### Filter Contents
 
@@ -470,7 +555,7 @@ enum RouteState {
 
 | Type | Purpose | Size | When Used |
 |------|---------|------|-----------|
-| FilterAnnounce | Bloom filter propagation | ~4.1 KB | Topology changes |
+| FilterAnnounce | Bloom filter propagation | ~1 KB | Topology changes |
 | LookupRequest | Discover coordinates | ~300 bytes | First contact with distant node |
 | LookupResponse | Return coordinates | ~400 bytes | Reply to discovery |
 | SessionSetup | Warm router caches + crypto init | ~400-700 bytes | Before data transfer |
@@ -506,7 +591,7 @@ When nodes join/leave:
 
 | Resource | Full Participant | Leaf-Only |
 |----------|------------------|-----------|
-| Bloom filter storage | d × 4 KB (d = peer count) | None |
+| Bloom filter storage | d × 1 KB (d = peer count) | None |
 | Coordinate cache | 10K-100K entries | None |
 | Route cache | 1K-10K entries | Minimal |
 | Bandwidth (idle) | < 1 KB/sec | Near zero |

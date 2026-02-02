@@ -906,12 +906,15 @@ the limit but need not enforce it strictly.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `filter.size` | u32 | 32768 | Filter size in bits (4KB) |
-| `filter.hash_count` | u8 | 7 | Number of hash functions |
+| `filter.size_class` | u8 | 1 | Size class: 0=512B, 1=1KB, 2=2KB, 3=4KB |
+| `filter.hash_count` | u8 | 5 | Number of hash functions |
 | `filter.scope` | u8 | 2 | TTL for filter propagation (K) |
 | `filter.refresh.interval` | duration | 60s | Periodic FilterAnnounce refresh |
 | `filter.update.debounce` | duration | 500ms | Min interval between updates |
 | `filter.stale.threshold` | duration | 300s | Consider peer's filter stale |
+
+v1 protocol requires `size_class=1` (1 KB filters). The size_class field is
+present in the wire format for forward compatibility with larger filters.
 
 ### Discovery Protocol
 

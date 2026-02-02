@@ -135,27 +135,57 @@ node's filter indicates which destinations are reachable through it.
 
 ```text
 FilterAnnounce {
-    filter: BloomFilter,        // 4096 bytes (32,768 bits)
-    ttl: u8,                    // Remaining propagation hops
     sequence: u64,              // For freshness/deduplication
+    ttl: u8,                    // Remaining propagation hops
+    filter: BloomFilter,        // Variable size based on size_class
 }
 
 BloomFilter {
-    bits: [u8; 4096],           // Bit array
-    hash_count: u8,             // Number of hash functions (typically 7)
+    hash_count: u8,             // Number of hash functions (5 for v1)
+    size_class: u8,             // Filter size: bytes = 512 << size_class
+    bits: [u8; 512 << size_class],  // Bit array (1024 bytes for v1)
 }
 ```
 
-### 3.2 Field Semantics
+### 3.2 Size Classes
 
-**filter**: Contains node_ids reachable through this peer. Uses k=7 hash
-functions for near-optimal false positive rate at expected fill levels.
+Filter sizes are powers of 2 to enable folding (shrinking by ORing halves):
+
+| size_class | Bits   | Bytes | Status              |
+|------------|--------|-------|---------------------|
+| 0          | 4,096  | 512   | Reserved (future)   |
+| 1          | 8,192  | 1,024 | **v1 default**      |
+| 2          | 16,384 | 2,048 | Reserved (future)   |
+| 3          | 32,768 | 4,096 | Reserved (future)   |
+
+**v1 protocol**: All nodes MUST use size_class=1 (1 KB filters). Nodes MUST
+reject FilterAnnounce with size_class ≠ 1.
+
+**Future versions**: Nodes may negotiate larger filters via capability exchange.
+Receivers can fold larger filters down to their preferred size.
+
+### 3.3 Field Semantics
+
+**sequence**: Monotonic counter for this node's filter. Allows receivers to
+detect stale or duplicate announcements.
 
 **ttl**: Remaining propagation depth. Starts at K (typically 2), decremented
 each hop. At TTL=0, entries are not propagated further.
 
-**sequence**: Monotonic counter for this node's filter. Allows receivers to
-detect stale or duplicate announcements.
+**hash_count**: Number of hash functions used. v1 uses k=5, which is optimal
+for 800-1,600 entries in a 1 KB filter.
+
+**size_class**: Indicates filter size as `512 << size_class` bytes. Allows
+forward-compatible extension to larger filters.
+
+**bits**: The Bloom filter bit array. To test membership:
+
+```text
+for i in 0..hash_count:
+    bit_index = hash(node_id, i) % (8 * bits.len())
+    if !bits[bit_index]: return false
+return true  // "maybe present"
+```
 
 ### 3.3 Filter Contents
 
@@ -486,43 +516,57 @@ Propagates Bloom filter reachability information.
 │  │   0    │ msg_type         │ 1 byte    │ 0x11                          │  │
 │  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
 │  │   9    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
-│  │  10    │ hash_count       │ 1 byte    │ Number of hash functions (7)  │  │
-│  │  11    │ filter_bits      │ 4096 bytes│ Bloom filter bit array        │  │
+│  │  10    │ hash_count       │ 1 byte    │ Number of hash functions (5)  │  │
+│  │  11    │ size_class       │ 1 byte    │ Filter size: 512 << class     │  │
+│  │  12    │ filter_bits      │ variable  │ 512 << size_class bytes       │  │
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
-│  Total payload: 4107 bytes (fixed size)                                     │
-│  With link overhead: 4136 bytes                                             │
+│  Size classes (powers of 2 for foldability):                                │
+│    0 = 512 bytes (4,096 bits)   - Reserved for future                       │
+│    1 = 1,024 bytes (8,192 bits) - v1 default                                │
+│    2 = 2,048 bytes (16,384 bits) - Reserved for future                      │
+│    3 = 4,096 bytes (32,768 bits) - Reserved for future                      │
+│                                                                             │
+│  v1 total payload: 1 + 8 + 1 + 1 + 1 + 1024 = 1036 bytes                    │
+│  With link overhead: 1065 bytes                                             │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                         BLOOM FILTER STRUCTURE                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  filter_bits[4096]:                                                         │
+│  filter_bits[1024] (v1, size_class=1):                                      │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │ Byte 0    │ Byte 1    │ ... │ Byte 4095                            │    │
-│  │ bits 0-7  │ bits 8-15 │     │ bits 32760-32767                     │    │
+│  │ Byte 0    │ Byte 1    │ ... │ Byte 1023                            │    │
+│  │ bits 0-7  │ bits 8-15 │     │ bits 8184-8191                       │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 │  To test membership of node_id:                                             │
+│    filter_bits = 8 * (512 << size_class)  // 8192 for v1                    │
 │    for i in 0..hash_count:                                                  │
-│      bit_index = hash(node_id, i) % 32768                                   │
-│      if !filter_bits[bit_index]: return false                               │
+│      bit_index = hash(node_id, i) % filter_bits                             │
+│      if !bits[bit_index]: return false                                      │
 │    return true  // "maybe present"                                          │
+│                                                                             │
+│  Folding (for future heterogeneous sizes):                                  │
+│    To shrink a filter by half, OR its two halves:                           │
+│    small[i] = large[i] | large[i + small.len()]                             │
+│    This increases FPR but preserves correctness (no false negatives).       │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Concrete example**:
+**Concrete example** (v1 with size_class=1):
 
 ```text
 PLAINTEXT BYTES:
 11                               ← msg_type = FilterAnnounce
 2A 00 00 00 00 00 00 00          ← sequence = 42
 02                               ← ttl = 2 (will propagate 2 more hops)
-07                               ← hash_count = 7
-[4096 bytes of filter bits]      ← Bloom filter
+05                               ← hash_count = 5
+01                               ← size_class = 1 (1 KB filter)
+[1024 bytes of filter bits]      ← Bloom filter
 
-Total: 4107 bytes
+Total: 1036 bytes
 ```
 
 ### A.3 LookupRequest (0x12)
