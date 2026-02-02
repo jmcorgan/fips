@@ -495,3 +495,228 @@ After successful Noise IK handshake:
 The first TreeAnnounce from a new peer may trigger parent reselection if that
 peer offers a better path to root. See [fips-gossip-protocol.md](fips-gossip-protocol.md)
 for TreeAnnounce and FilterAnnounce wire formats.
+
+---
+
+## 8. Session Layer Wire Format
+
+Session layer messages are carried inside `SessionDatagram` (type 0x40) at the
+link layer. The session datagram is encrypted hop-by-hop with link keys, but
+the inner payload is encrypted end-to-end with session keys.
+
+### 8.1 Message Type Codes
+
+| Type Code | Message        | Direction | Purpose                           |
+|-----------|----------------|-----------|-----------------------------------|
+| 0x00      | SessionSetup   | S → D     | Establish session + warm caches   |
+| 0x01      | SessionAck     | D → S     | Confirm session establishment     |
+| 0x10      | DataPacket     | Both      | Application data                  |
+| 0x20      | CoordsRequired | R → S     | Router cache miss                 |
+| 0x21      | PathBroken     | R → S     | Greedy routing failed             |
+
+### 8.2 SessionSetup (0x00)
+
+Establishes a crypto session and warms router coordinate caches along the path.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SESSION SETUP PACKET                                │
+├────────┬──────────────────┬───────────┬─────────────────────────────────────┤
+│ Offset │ Field            │ Size      │ Description                         │
+├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
+│   0    │ msg_type         │ 1 byte    │ 0x00                                │
+│   1    │ flags            │ 1 byte    │ Bit 0: REQUEST_ACK                  │
+│        │                  │           │ Bit 1: BIDIRECTIONAL                │
+│   2    │ src_addr         │ 16 bytes  │ Source fd::/8 address               │
+│  18    │ dest_addr        │ 16 bytes  │ Destination fd::/8 address          │
+│  34    │ src_coords_count │ 2 bytes   │ u16 LE, number of src coord entries │
+│  36    │ src_coords       │ 32 × n    │ NodeId array (self → root)          │
+│  ...   │ dest_coords_count│ 2 bytes   │ u16 LE, number of dest coord entries│
+│  ...   │ dest_coords      │ 32 × m    │ NodeId array (dest → root)          │
+│  ...   │ handshake_len    │ 2 bytes   │ u16 LE, Noise payload length        │
+│  ...   │ handshake_payload│ variable  │ Noise IK msg1 (82 bytes typical)    │
+└────────┴──────────────────┴───────────┴─────────────────────────────────────┘
+```
+
+**Example** (depth 3 source, depth 4 destination, with Noise handshake):
+
+```text
+┌──────┬───────┬──────────────────┬──────────────────┬───────┬─────────────┐
+│ 0x00 │ 0x01  │ src_addr         │ dest_addr        │ 0x03  │ src_coords  │
+│ type │ flags │ 16 bytes         │ 16 bytes         │ count │ 3 × 32 bytes│
+├──────┴───────┴──────────────────┴──────────────────┴───────┴─────────────┤
+│ 0x04  │ dest_coords   │ 0x52  │ handshake_payload                        │
+│ count │ 4 × 32 bytes  │ len=82│ 82 bytes (Noise IK msg1)                 │
+└───────┴───────────────┴───────┴──────────────────────────────────────────┘
+
+Total: 1 + 1 + 16 + 16 + 2 + 96 + 2 + 128 + 2 + 82 = 346 bytes
+```
+
+### 8.3 SessionAck (0x01)
+
+Confirms session establishment and completes the Noise handshake.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          SESSION ACK PACKET                                 │
+├────────┬──────────────────┬───────────┬─────────────────────────────────────┤
+│ Offset │ Field            │ Size      │ Description                         │
+├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
+│   0    │ msg_type         │ 1 byte    │ 0x01                                │
+│   1    │ flags            │ 1 byte    │ Reserved                            │
+│   2    │ src_addr         │ 16 bytes  │ Acknowledger's address              │
+│  18    │ dest_addr        │ 16 bytes  │ Original sender's address           │
+│  34    │ src_coords_count │ 2 bytes   │ u16 LE                              │
+│  36    │ src_coords       │ 32 × n    │ Acknowledger's coords (for caching) │
+│  ...   │ handshake_len    │ 2 bytes   │ u16 LE, Noise payload length        │
+│  ...   │ handshake_payload│ variable  │ Noise IK msg2 (33 bytes typical)    │
+└────────┴──────────────────┴───────────┴─────────────────────────────────────┘
+```
+
+### 8.4 DataPacket (0x10)
+
+Carries encrypted application data (typically IPv6 payloads).
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      DATA PACKET (Minimal Header)                           │
+├────────┬──────────────────┬───────────┬─────────────────────────────────────┤
+│ Offset │ Field            │ Size      │ Description                         │
+├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
+│   0    │ msg_type         │ 1 byte    │ 0x10                                │
+│   1    │ flags            │ 1 byte    │ Bit 0: COORDS_PRESENT               │
+│   2    │ hop_limit        │ 1 byte    │ Decremented each hop                │
+│   3    │ reserved         │ 1 byte    │ Alignment padding                   │
+│   4    │ payload_length   │ 2 bytes   │ u16 LE                              │
+│   6    │ src_addr         │ 16 bytes  │ Source fd::/8 address               │
+│  22    │ dest_addr        │ 16 bytes  │ Destination fd::/8 address          │
+│  38    │ payload          │ variable  │ Encrypted application data          │
+└────────┴──────────────────┴───────────┴─────────────────────────────────────┘
+
+Minimal header: 38 bytes (comparable to IPv6's 40 bytes)
+```
+
+When `COORDS_PRESENT` flag is set (route warming after CoordsRequired):
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    DATA PACKET (With Coordinates)                           │
+├────────┬──────────────────┬───────────┬─────────────────────────────────────┤
+│ Offset │ Field            │ Size      │ Description                         │
+├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
+│   0    │ msg_type         │ 1 byte    │ 0x10                                │
+│   1    │ flags            │ 1 byte    │ 0x01 (COORDS_PRESENT)               │
+│   2    │ hop_limit        │ 1 byte    │ Decremented each hop                │
+│   3    │ reserved         │ 1 byte    │ Alignment padding                   │
+│   4    │ payload_length   │ 2 bytes   │ u16 LE                              │
+│   6    │ src_addr         │ 16 bytes  │ Source fd::/8 address               │
+│  22    │ dest_addr        │ 16 bytes  │ Destination fd::/8 address          │
+│  38    │ src_coords_count │ 2 bytes   │ u16 LE                              │
+│  40    │ src_coords       │ 32 × n    │ Source coordinates                  │
+│  ...   │ dest_coords_count│ 2 bytes   │ u16 LE                              │
+│  ...   │ dest_coords      │ 32 × m    │ Destination coordinates             │
+│  ...   │ payload          │ variable  │ Encrypted application data          │
+└────────┴──────────────────┴───────────┴─────────────────────────────────────┘
+
+With depth-4 coords both directions: 38 + 2 + 128 + 2 + 128 = 298 bytes header
+```
+
+### 8.5 CoordsRequired (0x20)
+
+Sent by an intermediate router when it cannot forward a DataPacket due to
+coordinate cache miss.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        COORDS REQUIRED PACKET                               │
+├────────┬──────────────────┬───────────┬─────────────────────────────────────┤
+│ Offset │ Field            │ Size      │ Description                         │
+├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
+│   0    │ msg_type         │ 1 byte    │ 0x20                                │
+│   1    │ flags            │ 1 byte    │ Reserved                            │
+│   2    │ dest_addr        │ 16 bytes  │ The address we couldn't route       │
+│  18    │ reporter         │ 32 bytes  │ NodeId of reporting router          │
+└────────┴──────────────────┴───────────┴─────────────────────────────────────┘
+
+Total: 50 bytes
+```
+
+### 8.6 PathBroken (0x21)
+
+Sent when greedy routing fails (no peer is closer to destination).
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PATH BROKEN PACKET                                  │
+├────────┬──────────────────┬───────────┬─────────────────────────────────────┤
+│ Offset │ Field            │ Size      │ Description                         │
+├────────┼──────────────────┼───────────┼─────────────────────────────────────┤
+│   0    │ msg_type         │ 1 byte    │ 0x21                                │
+│   1    │ flags            │ 1 byte    │ Reserved                            │
+│   2    │ dest_addr        │ 16 bytes  │ The unreachable destination         │
+│  18    │ reporter         │ 32 bytes  │ NodeId of reporting router          │
+│  50    │ last_coords_count│ 2 bytes   │ u16 LE                              │
+│  52    │ last_known_coords│ 32 × n    │ Stale coords that failed            │
+└────────┴──────────────────┴───────────┴─────────────────────────────────────┘
+```
+
+### 8.7 Full Packet Layout Example
+
+A DataPacket from source S to destination D, transiting router R:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           UDP DATAGRAM                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │              FIPS LINK LAYER (S→R encrypted)                          │  │
+│  ├───────────┬──────────────┬────────────┬───────────────────────────────┤  │
+│  │ 0x00      │ R's recv_idx │ counter    │ ciphertext + tag              │  │
+│  │ 1 byte    │ 4 bytes LE   │ 8 bytes LE │ N + 16 bytes                  │  │
+│  └───────────┴──────────────┴────────────┴───────────────────────────────┘  │
+│                                            │                                │
+│                    ┌───────────────────────┘                                │
+│                    │ Decrypt with S↔R link keys                             │
+│                    ▼                                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │              LINK MESSAGE (plaintext for R)                           │  │
+│  ├───────────┬───────────────────────────────────────────────────────────┤  │
+│  │ 0x40      │ SessionDatagram payload                                   │  │
+│  │ msg_type  │ (routable by R, encrypted end-to-end)                     │  │
+│  └───────────┴───────────────────────────────────────────────────────────┘  │
+│                    │                                                        │
+│                    ▼                                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │              SESSION LAYER (S↔D encrypted)                            │  │
+│  ├───────────┬───────┬──────────┬──────────┬─────────────────────────────┤  │
+│  │ 0x10      │ flags │ hop_limit│ pay_len  │ src_addr     │ dest_addr    │  │
+│  │ DataPacket│ 0x00  │ 64       │ 1400     │ 16 bytes     │ 16 bytes     │  │
+│  ├───────────┴───────┴──────────┴──────────┴──────────────┴──────────────┤  │
+│  │                                                                       │  │
+│  │                    ENCRYPTED PAYLOAD (S↔D session keys)               │  │
+│  │                    ┌─────────────────────────────────────────────┐    │  │
+│  │                    │ IPv6 packet or application data             │    │  │
+│  │                    │ (+ 16-byte AEAD tag)                        │    │  │
+│  │                    └─────────────────────────────────────────────┘    │  │
+│  │                                                                       │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Router R can see: dest_addr (for routing decision)
+Router R cannot see: payload contents (encrypted with S↔D keys)
+```
+
+### 8.8 Encoding Rules
+
+- All multi-byte integers are **little-endian**
+- NodeId is 32 bytes (SHA-256 hash of npub)
+- IPv6 addresses are 16 bytes (network byte order)
+- Variable-length coordinate arrays use 2-byte u16 count prefix
+
+```text
+Vec<NodeId> encoding:
+  count: u16 (little-endian)
+  items: [u8; 32] × count
+```

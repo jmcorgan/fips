@@ -368,6 +368,314 @@ Vec<T> encoding:
 
 ---
 
+## Appendix A: Detailed Packet Layouts
+
+All gossip messages are link-layer messages carried inside encrypted frames
+(discriminator 0x00). The layouts below show the plaintext structure after
+link-layer decryption.
+
+### A.1 TreeAnnounce (0x10)
+
+Propagates spanning tree state between directly connected peers.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    FULL PACKET (Link Layer + TreeAnnounce)                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    LINK LAYER FRAME (encrypted)                       │  │
+│  ├───────────┬──────────────┬────────────┬───────────────────────────────┤  │
+│  │ 0x00      │ receiver_idx │ counter    │ ciphertext + tag              │  │
+│  │ 1 byte    │ 4 bytes LE   │ 8 bytes LE │ N + 16 bytes                  │  │
+│  └───────────┴──────────────┴────────────┴───────────────────────────────┘  │
+│                                            │                                │
+│                    ┌───────────────────────┘                                │
+│                    │ Decrypt                                                │
+│                    ▼                                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    TREE ANNOUNCE (plaintext)                          │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x10                          │  │
+│  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
+│  │   9    │ timestamp        │ 8 bytes   │ u64 LE, Unix seconds          │  │
+│  │  17    │ parent           │ 32 bytes  │ NodeId of selected parent     │  │
+│  │  49    │ ancestry_count   │ 2 bytes   │ u16 LE, number of entries     │  │
+│  │  51    │ ancestry[0..n]   │ 112 × n   │ AncestryEntry array           │  │
+│  │  ...   │ signature        │ 64 bytes  │ Schnorr sig over all above    │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    ANCESTRY ENTRY (112 bytes each)                    │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ node_id          │ 32 bytes  │ SHA-256(npub) of this node    │  │
+│  │  32    │ sequence         │ 8 bytes   │ u64 LE, node's seq number     │  │
+│  │  40    │ timestamp        │ 8 bytes   │ u64 LE, node's timestamp      │  │
+│  │  48    │ signature        │ 64 bytes  │ Node's sig over its decl      │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Size calculation**: `1 + 8 + 8 + 32 + 2 + (depth × 112) + 64` bytes
+
+| Tree Depth | Payload Size | With Link Overhead |
+|------------|--------------|-------------------|
+| 1 (root)   | 227 bytes    | 256 bytes         |
+| 3          | 451 bytes    | 480 bytes         |
+| 5          | 675 bytes    | 704 bytes         |
+| 10         | 1235 bytes   | 1264 bytes        |
+
+**Concrete example** (node D at depth 3, ancestry = [D, P1, P2, Root]):
+
+```text
+PLAINTEXT BYTES (hex layout):
+10                               ← msg_type = TreeAnnounce
+05 00 00 00 00 00 00 00          ← sequence = 5
+C3 B2 A1 67 00 00 00 00          ← timestamp (Unix seconds)
+[32 bytes P1's node_id]          ← parent
+04 00                            ← ancestry_count = 4
+
+ANCESTRY[0] - Self (D):
+  [32 bytes D's node_id]
+  05 00 00 00 00 00 00 00        ← D's sequence
+  C3 B2 A1 67 00 00 00 00        ← D's timestamp
+  [64 bytes D's signature]
+
+ANCESTRY[1] - Parent (P1):
+  [32 bytes P1's node_id]
+  0A 00 00 00 00 00 00 00        ← P1's sequence
+  00 B0 A1 67 00 00 00 00        ← P1's timestamp
+  [64 bytes P1's signature]
+
+ANCESTRY[2] - Grandparent (P2):
+  [32 bytes P2's node_id]
+  03 00 00 00 00 00 00 00        ← P2's sequence
+  00 A0 A1 67 00 00 00 00        ← P2's timestamp
+  [64 bytes P2's signature]
+
+ANCESTRY[3] - Root:
+  [32 bytes Root's node_id]
+  01 00 00 00 00 00 00 00        ← Root's sequence
+  00 90 A1 67 00 00 00 00        ← Root's timestamp
+  [64 bytes Root's signature]
+
+[64 bytes D's outer signature]   ← signs entire message
+
+Total payload: 1 + 8 + 8 + 32 + 2 + (4 × 112) + 64 = 563 bytes
+```
+
+### A.2 FilterAnnounce (0x11)
+
+Propagates Bloom filter reachability information.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FILTER ANNOUNCE (0x11)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         WIRE FORMAT                                   │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x11                          │  │
+│  │   1    │ sequence         │ 8 bytes   │ u64 LE, monotonic counter     │  │
+│  │   9    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
+│  │  10    │ hash_count       │ 1 byte    │ Number of hash functions (7)  │  │
+│  │  11    │ filter_bits      │ 4096 bytes│ Bloom filter bit array        │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Total payload: 4107 bytes (fixed size)                                     │
+│  With link overhead: 4136 bytes                                             │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                         BLOOM FILTER STRUCTURE                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  filter_bits[4096]:                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │ Byte 0    │ Byte 1    │ ... │ Byte 4095                            │    │
+│  │ bits 0-7  │ bits 8-15 │     │ bits 32760-32767                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  To test membership of node_id:                                             │
+│    for i in 0..hash_count:                                                  │
+│      bit_index = hash(node_id, i) % 32768                                   │
+│      if !filter_bits[bit_index]: return false                               │
+│    return true  // "maybe present"                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Concrete example**:
+
+```text
+PLAINTEXT BYTES:
+11                               ← msg_type = FilterAnnounce
+2A 00 00 00 00 00 00 00          ← sequence = 42
+02                               ← ttl = 2 (will propagate 2 more hops)
+07                               ← hash_count = 7
+[4096 bytes of filter bits]      ← Bloom filter
+
+Total: 4107 bytes
+```
+
+### A.3 LookupRequest (0x12)
+
+Discovers tree coordinates for distant destinations.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         LOOKUP REQUEST (0x12)                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         WIRE FORMAT                                   │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x12                          │  │
+│  │   1    │ request_id       │ 8 bytes   │ u64 LE, unique identifier     │  │
+│  │   9    │ target           │ 32 bytes  │ NodeId being searched for     │  │
+│  │  41    │ origin           │ 32 bytes  │ NodeId of requester           │  │
+│  │  73    │ ttl              │ 1 byte    │ Remaining propagation hops    │  │
+│  │  74    │ origin_coords_cnt│ 2 bytes   │ u16 LE                        │  │
+│  │  76    │ origin_coords    │ 32 × n    │ Requester's ancestry          │  │
+│  │  ...   │ visited_hash_cnt │ 1 byte    │ Hash functions for visited    │  │
+│  │  ...   │ visited_bits     │ 256 bytes │ Compact bloom of visited nodes│  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Size calculation**: `1 + 8 + 32 + 32 + 1 + 2 + (depth × 32) + 1 + 256` bytes
+
+| Origin Depth | Payload Size |
+|--------------|--------------|
+| 3            | 429 bytes    |
+| 5            | 493 bytes    |
+| 10           | 653 bytes    |
+
+**Concrete example** (origin at depth 4):
+
+```text
+PLAINTEXT BYTES:
+12                               ← msg_type = LookupRequest
+[8 bytes request_id]             ← random unique ID
+[32 bytes target node_id]        ← who we're looking for
+[32 bytes origin node_id]        ← who's asking
+08                               ← ttl = 8
+04 00                            ← origin_coords_count = 4
+[32 bytes] × 4                   ← origin's ancestry (128 bytes)
+07                               ← visited hash_count = 7
+[256 bytes visited bloom]        ← nodes that have seen this request
+
+Total: 1 + 8 + 32 + 32 + 1 + 2 + 128 + 1 + 256 = 461 bytes
+```
+
+### A.4 LookupResponse (0x13)
+
+Returns target's coordinates to the requester.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         LOOKUP RESPONSE (0x13)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         WIRE FORMAT                                   │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ msg_type         │ 1 byte    │ 0x13                          │  │
+│  │   1    │ request_id       │ 8 bytes   │ u64 LE, echoes request        │  │
+│  │   9    │ target           │ 32 bytes  │ NodeId that was found         │  │
+│  │  41    │ target_coords_cnt│ 2 bytes   │ u16 LE                        │  │
+│  │  43    │ target_coords    │ 32 × n    │ Target's ancestry to root     │  │
+│  │  ...   │ proof            │ 64 bytes  │ Target's signature            │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Proof signature covers: (request_id || target || target_coords)            │
+│  Prevents malicious nodes from claiming reachability for any target.        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Size calculation**: `1 + 8 + 32 + 2 + (depth × 32) + 64` bytes
+
+| Target Depth | Payload Size |
+|--------------|--------------|
+| 3            | 203 bytes    |
+| 5            | 267 bytes    |
+| 10           | 427 bytes    |
+
+**Concrete example** (target at depth 5):
+
+```text
+PLAINTEXT BYTES:
+13                               ← msg_type = LookupResponse
+[8 bytes request_id]             ← echoed from request
+[32 bytes target node_id]        ← confirms who was found
+05 00                            ← target_coords_count = 5
+[32 bytes] × 5                   ← target's ancestry (160 bytes)
+[64 bytes proof signature]       ← target signs to prove existence
+
+Total: 1 + 8 + 32 + 2 + 160 + 64 = 267 bytes
+```
+
+### A.5 Message Flow Example
+
+Complete lookup flow showing packet nesting:
+
+```text
+Source S wants to reach distant destination D (not in local filters)
+
+1. S creates LookupRequest, sends to peer P1:
+
+   UDP DATAGRAM
+   ┌──────────────────────────────────────────────────────────────┐
+   │ LINK FRAME (S→P1 encrypted)                                  │
+   │ ┌──────┬────────────┬─────────┬─────────────────────────────┐│
+   │ │ 0x00 │ P1_recv_idx│ counter │ ciphertext + tag            ││
+   │ └──────┴────────────┴─────────┴─────────────────────────────┘│
+   │                                │                             │
+   │                    ┌───────────┘                             │
+   │                    ▼                                         │
+   │              ┌──────┬───────────────────────────────────┐    │
+   │              │ 0x12 │ LookupRequest payload             │    │
+   │              │      │ (target=D, origin=S, ttl=8, ...)  │    │
+   │              └──────┴───────────────────────────────────┘    │
+   └──────────────────────────────────────────────────────────────┘
+
+2. Request propagates through network, reaches D
+
+3. D creates LookupResponse, routes back via greedy routing:
+
+   UDP DATAGRAM
+   ┌──────────────────────────────────────────────────────────────┐
+   │ LINK FRAME (D→Pn encrypted)                                  │
+   │ ┌──────┬────────────┬─────────┬─────────────────────────────┐│
+   │ │ 0x00 │ Pn_recv_idx│ counter │ ciphertext + tag            ││
+   │ └──────┴────────────┴─────────┴─────────────────────────────┘│
+   │                                │                             │
+   │                    ┌───────────┘                             │
+   │                    ▼                                         │
+   │              ┌──────┬───────────────────────────────────┐    │
+   │              │ 0x13 │ LookupResponse payload            │    │
+   │              │      │ (target=D, coords=[D,P1,P2,Root]) │    │
+   │              └──────┴───────────────────────────────────┘    │
+   └──────────────────────────────────────────────────────────────┘
+
+4. S receives response, caches D's coordinates, can now route directly
+```
+
+---
+
 ## References
 
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) - Tree protocol behavior

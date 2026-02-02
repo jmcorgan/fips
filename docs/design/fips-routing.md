@@ -293,20 +293,19 @@ No global routing tables. Each node makes purely local decisions.
 
 ---
 
-## Part 4: Routing Session Establishment
+## Part 4: Route Cache Management
 
-> **Terminology note**: This section describes *routing sessions*—hop-by-hop
-> cached state at intermediate routers. FIPS also has *crypto sessions*—end-to-end
-> authenticated encryption between source and destination. See
-> [fips-session-protocol.md](fips-session-protocol.md) §3 for crypto session details
-> and §5 for route cache warming.
+> **Wire formats**: For session layer message wire formats (SessionSetup,
+> SessionAck, DataPacket, CoordsRequired, PathBroken), see
+> [fips-session-protocol.md](fips-session-protocol.md) §8.
 
-### Routing Session Purpose
+### Route Cache Purpose
 
-Establish cached coordinate state along a path so that subsequent data packets
-can omit coordinates, minimizing per-packet overhead.
+Intermediate routers cache coordinate mappings so that data packets can use
+minimal headers (addresses only, no coordinates). This reduces per-packet
+overhead from ~300 bytes to 38 bytes.
 
-### Routing Session Lifecycle
+### Cache Lifecycle
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -318,74 +317,7 @@ can omit coordinates, minimizing per-packet overhead.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Routing Session Message Formats
-
-```rust
-/// Establishes cached state along path; optionally carries crypto handshake
-struct SessionSetup {
-    src_addr: Ipv6Addr,
-    dest_addr: Ipv6Addr,
-    src_coords: Vec<NodeId>,   // For return path caching
-    dest_coords: Vec<NodeId>,  // For forward path routing
-    flags: SessionFlags,
-
-    // Crypto session establishment (see fips-session-protocol.md §6)
-    // Opaque to routers; only processed by destination
-    handshake_payload: Option<Vec<u8>>,  // Noise IK message 1
-}
-
-struct SessionFlags {
-    request_ack: bool,         // Ask destination to confirm
-    bidirectional: bool,       // Set up both directions
-}
-
-/// Confirms session establishment; optionally carries crypto response
-struct SessionAck {
-    src_addr: Ipv6Addr,
-    dest_addr: Ipv6Addr,
-    src_coords: Vec<NodeId>,   // Acknowledger's coords (for return caching)
-
-    // Crypto session response (see fips-session-protocol.md §6)
-    handshake_payload: Option<Vec<u8>>,  // Noise IK message 2
-}
-
-/// Data packet with optional coordinates
-struct DataPacket {
-    flags: u8,                 // Bit 0: COORDS_PRESENT
-    hop_limit: u8,
-    payload_length: u16,
-    src_addr: Ipv6Addr,        // 16 bytes
-    dest_addr: Ipv6Addr,       // 16 bytes
-
-    // Optional: present only if COORDS_PRESENT flag is set
-    src_coords: Option<Vec<NodeId>>,
-    dest_coords: Option<Vec<NodeId>>,
-
-    payload: Vec<u8>,
-}
-
-/// Error when router cannot route (cache miss)
-struct CoordsRequired {
-    dest_addr: Ipv6Addr,
-    reporter: NodeId,          // Which router had the miss
-}
-```
-
-### Data Packet Overhead
-
-| Field | Size |
-|-------|------|
-| flags | 1 byte |
-| hop_limit | 1 byte |
-| payload_length | 2 bytes |
-| src_addr | 16 bytes |
-| dest_addr | 16 bytes |
-| **Minimal header** | **36 bytes** |
-
-Comparable to IPv6 (40 bytes). When COORDS_PRESENT flag is set, coordinates
-add variable overhead based on tree depth (typically 200-400 bytes).
-
-### Routing Session Setup Flow
+### Session Setup Flow
 
 ```text
 S                       R1                      R2                      D
@@ -460,7 +392,7 @@ impl Router {
 }
 ```
 
-### Cache Management
+### Cache Data Structure
 
 ```rust
 struct CoordCache {
@@ -485,7 +417,7 @@ by:
 - SessionRefresh message (lightweight, just touches expiry)
 - Data packet transit (optional: refresh on use)
 
-### Handling Cache Eviction
+### Cache Miss Recovery
 
 When a router's cache entry is evicted mid-session:
 
@@ -501,7 +433,7 @@ When a router's cache entry is evicted mid-session:
 The crypto session remains active throughout—only routing state is refreshed.
 From application perspective: one packet delayed, transparent recovery.
 
-### Sender Behavior
+### Sender State Machine
 
 ```rust
 impl Sender {

@@ -803,7 +803,222 @@ protocol layers apply additional policy.
 
 ---
 
-## Appendix A: Message Size Summary
+## Appendix A: Detailed Packet Layouts
+
+### A.1 Encrypted Frame (0x00)
+
+Post-handshake data packets between authenticated peers.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ENCRYPTED FRAME (0x00)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         WIRE FORMAT                                   │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ discriminator    │ 1 byte    │ 0x00                          │  │
+│  │   1    │ receiver_idx     │ 4 bytes   │ u32 LE, receiver's session idx│  │
+│  │   5    │ counter          │ 8 bytes   │ u64 LE, monotonic nonce       │  │
+│  │  13    │ ciphertext       │ N bytes   │ ChaCha20 encrypted payload    │  │
+│  │ 13+N   │ tag              │ 16 bytes  │ Poly1305 auth tag             │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Total overhead: 29 bytes (1 + 4 + 8 + 16)                                  │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                         PLAINTEXT STRUCTURE                                 │
+│                         (after decryption)                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌────────┬──────────────────┬───────────┬───────────────────────────────┐  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ msg_type         │ 1 byte    │ Link message type (see below) │  │
+│  │   1    │ payload          │ variable  │ Message-specific payload      │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Link message types:                                                        │
+│    0x10 = TreeAnnounce       0x12 = LookupRequest                          │
+│    0x11 = FilterAnnounce     0x13 = LookupResponse                         │
+│    0x40 = SessionDatagram                                                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Concrete example** (TreeAnnounce inside encrypted frame):
+
+```text
+WIRE BYTES (hex):
+00                            ← discriminator
+78 56 34 12                   ← receiver_idx = 0x12345678 (LE)
+2A 00 00 00 00 00 00 00       ← counter = 42 (LE)
+[N bytes ciphertext]          ← encrypted link message
+[16 bytes tag]                ← Poly1305 authentication tag
+
+DECRYPTED PLAINTEXT:
+10                            ← msg_type = TreeAnnounce
+[TreeAnnounce payload]        ← see fips-gossip-protocol.md
+```
+
+### A.2 Noise IK Message 1 (0x01)
+
+Handshake initiation from connecting party (initiator → responder).
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       NOISE IK MESSAGE 1 (0x01)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         WIRE FORMAT                                   │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ discriminator    │ 1 byte    │ 0x01                          │  │
+│  │   1    │ sender_idx       │ 4 bytes   │ u32 LE, initiator's session idx│  │
+│  │   5    │ noise_msg1       │ 82 bytes  │ Noise IK first message        │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Total: 87 bytes                                                            │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                      NOISE MSG1 BREAKDOWN                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌────────┬──────────────────┬───────────┬───────────────────────────────┐  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ ephemeral_pubkey │ 33 bytes  │ Initiator's ephemeral pubkey  │  │
+│  │        │                  │           │ (compressed secp256k1)        │  │
+│  │  33    │ encrypted_static │ 33 bytes  │ Initiator's static pubkey     │  │
+│  │        │                  │           │ (encrypted with es key)       │  │
+│  │  66    │ tag              │ 16 bytes  │ AEAD tag for encrypted_static │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Noise pattern: -> e, es, s, ss                                             │
+│  - e: ephemeral pubkey sent in clear                                        │
+│  - es: DH(ephemeral, responder_static) → mix into key                       │
+│  - s: static pubkey encrypted with current key                              │
+│  - ss: DH(static, responder_static) → mix into key                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Concrete example**:
+
+```text
+WIRE BYTES (hex):
+01                            ← discriminator
+78 56 34 12                   ← sender_idx = 0x12345678 (LE)
+02 [32 bytes]                 ← ephemeral pubkey (compressed, 02/03 prefix)
+[33 bytes]                    ← encrypted static pubkey
+[16 bytes]                    ← AEAD tag
+
+Total: 87 bytes
+```
+
+### A.3 Noise IK Message 2 (0x02)
+
+Handshake response from responder (responder → initiator).
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       NOISE IK MESSAGE 2 (0x02)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         WIRE FORMAT                                   │  │
+│  ├────────┬──────────────────┬───────────┬───────────────────────────────┤  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ discriminator    │ 1 byte    │ 0x02                          │  │
+│  │   1    │ sender_idx       │ 4 bytes   │ u32 LE, responder's session idx│  │
+│  │   5    │ receiver_idx     │ 4 bytes   │ u32 LE, echo of initiator's idx│  │
+│  │   9    │ noise_msg2       │ 33 bytes  │ Noise IK second message       │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Total: 42 bytes                                                            │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                      NOISE MSG2 BREAKDOWN                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌────────┬──────────────────┬───────────┬───────────────────────────────┐  │
+│  │ Offset │ Field            │ Size      │ Description                   │  │
+│  ├────────┼──────────────────┼───────────┼───────────────────────────────┤  │
+│  │   0    │ ephemeral_pubkey │ 33 bytes  │ Responder's ephemeral pubkey  │  │
+│  │        │                  │           │ (compressed secp256k1)        │  │
+│  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
+│                                                                             │
+│  Noise pattern: <- e, ee, se                                                │
+│  - e: ephemeral pubkey sent in clear                                        │
+│  - ee: DH(responder_ephemeral, initiator_ephemeral) → mix into key          │
+│  - se: DH(responder_ephemeral, initiator_static) → mix into key             │
+│                                                                             │
+│  After msg2, both parties derive identical session keys.                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Concrete example**:
+
+```text
+WIRE BYTES (hex):
+02                            ← discriminator
+01 EF CD AB                   ← sender_idx = 0xABCDEF01 (LE)
+78 56 34 12                   ← receiver_idx = 0x12345678 (LE, echoed)
+03 [32 bytes]                 ← ephemeral pubkey (compressed, 02/03 prefix)
+
+Total: 42 bytes
+```
+
+### A.4 Complete Handshake Flow
+
+```text
+Initiator (A)                                              Responder (B)
+─────────────                                              ─────────────
+generates sender_idx = 0x12345678
+generates ephemeral keypair
+
+         ┌──────────────────────────────────────────────────────┐
+         │ 0x01 | 0x12345678 | [82 bytes noise_msg1]            │
+         └──────────────────────────────────────────────────────┘
+                                    ──────────────────────────────►
+
+                                         validates msg1
+                                         learns A's static pubkey
+                                         generates sender_idx = 0xABCDEF01
+                                         generates ephemeral keypair
+
+         ┌──────────────────────────────────────────────────────┐
+         │ 0x02 | 0xABCDEF01 | 0x12345678 | [33 bytes noise_msg2]│
+         └──────────────────────────────────────────────────────┘
+                                    ◄──────────────────────────────
+
+validates msg2
+derives session keys
+
+═══════════════════════ HANDSHAKE COMPLETE ═══════════════════════
+
+A's view:                              B's view:
+  our_index = 0x12345678                 our_index = 0xABCDEF01
+  their_index = 0xABCDEF01               their_index = 0x12345678
+
+A sends to B:                          B sends to A:
+  receiver_idx = 0xABCDEF01              receiver_idx = 0x12345678
+
+         ┌──────────────────────────────────────────────────────┐
+         │ 0x00 | 0xABCDEF01 | counter=0 | [ciphertext+tag]     │
+         └──────────────────────────────────────────────────────┘
+                                    ──────────────────────────────►
+```
+
+---
+
+## Appendix B: Message Size Summary
 
 | Packet Type | Size | Overhead |
 |-------------|------|----------|
