@@ -61,6 +61,149 @@ pub const HANDSHAKE_MSG1_SIZE: usize = PUBKEY_SIZE + PUBKEY_SIZE + TAG_SIZE;
 /// Size of handshake message 2: ephemeral only.
 pub const HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE;
 
+/// Replay window size in packets (matching WireGuard).
+pub const REPLAY_WINDOW_SIZE: usize = 2048;
+
+// ============================================================================
+// Replay Window
+// ============================================================================
+
+/// Sliding window for replay protection.
+///
+/// Tracks which packet counters have been received within a window of
+/// REPLAY_WINDOW_SIZE. Packets with counters below the window or already
+/// seen within the window are rejected.
+///
+/// Based on WireGuard's anti-replay mechanism (RFC 6479 style).
+#[derive(Clone)]
+pub struct ReplayWindow {
+    /// Highest counter value seen.
+    highest: u64,
+    /// Bitmap tracking which counters in the window have been seen.
+    /// Bit i corresponds to counter (highest - i).
+    bitmap: [u64; REPLAY_WINDOW_SIZE / 64],
+}
+
+impl ReplayWindow {
+    /// Create a new replay window.
+    pub fn new() -> Self {
+        Self {
+            highest: 0,
+            bitmap: [0; REPLAY_WINDOW_SIZE / 64],
+        }
+    }
+
+    /// Check if a counter is valid (not replayed, not too old).
+    ///
+    /// Returns true if the counter is acceptable, false if it should be rejected.
+    /// Does NOT update the window - call `accept` after successful decryption.
+    pub fn check(&self, counter: u64) -> bool {
+        if counter > self.highest {
+            // New highest - always acceptable
+            return true;
+        }
+
+        // Counter is <= highest, check if it's within the window
+        let diff = self.highest - counter;
+        if diff as usize >= REPLAY_WINDOW_SIZE {
+            // Too old (outside window)
+            return false;
+        }
+
+        // Check bitmap - bit is set if counter was already seen
+        let word_idx = (diff as usize) / 64;
+        let bit_idx = (diff as usize) % 64;
+        (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0
+    }
+
+    /// Accept a counter into the window.
+    ///
+    /// Call this only after successful decryption to prevent
+    /// DoS attacks that exhaust the window.
+    pub fn accept(&mut self, counter: u64) {
+        if counter > self.highest {
+            // Shift the window
+            let shift = counter - self.highest;
+            if shift as usize >= REPLAY_WINDOW_SIZE {
+                // Complete reset
+                self.bitmap = [0; REPLAY_WINDOW_SIZE / 64];
+            } else {
+                // Shift bitmap
+                self.shift_bitmap(shift as usize);
+            }
+            self.highest = counter;
+            // Mark counter 0 (which is now the highest) as seen
+            self.bitmap[0] |= 1;
+        } else {
+            // Mark the counter as seen
+            let diff = self.highest - counter;
+            let word_idx = (diff as usize) / 64;
+            let bit_idx = (diff as usize) % 64;
+            self.bitmap[word_idx] |= 1u64 << bit_idx;
+        }
+    }
+
+    /// Shift the bitmap by the given number of positions.
+    ///
+    /// This moves old counters to higher bit positions to make room for the
+    /// new highest counter at position 0.
+    fn shift_bitmap(&mut self, shift: usize) {
+        if shift >= REPLAY_WINDOW_SIZE {
+            self.bitmap = [0; REPLAY_WINDOW_SIZE / 64];
+            return;
+        }
+
+        let word_shift = shift / 64;
+        let bit_shift = shift % 64;
+
+        // Shift entire words first (from high to low to avoid overwriting)
+        if word_shift > 0 {
+            for i in (word_shift..self.bitmap.len()).rev() {
+                self.bitmap[i] = self.bitmap[i - word_shift];
+            }
+            for i in 0..word_shift {
+                self.bitmap[i] = 0;
+            }
+        }
+
+        // Shift bits within words (from low to high so carry propagates correctly)
+        if bit_shift > 0 {
+            let mut carry = 0u64;
+            for i in 0..self.bitmap.len() {
+                let new_carry = self.bitmap[i] >> (64 - bit_shift);
+                self.bitmap[i] = (self.bitmap[i] << bit_shift) | carry;
+                carry = new_carry;
+            }
+        }
+    }
+
+    /// Get the highest counter seen.
+    pub fn highest(&self) -> u64 {
+        self.highest
+    }
+
+    /// Reset the window (use when rekeying).
+    pub fn reset(&mut self) {
+        self.highest = 0;
+        self.bitmap = [0; REPLAY_WINDOW_SIZE / 64];
+    }
+}
+
+impl Default for ReplayWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for ReplayWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplayWindow")
+            .field("highest", &self.highest)
+            .field("window_size", &REPLAY_WINDOW_SIZE)
+            .finish()
+    }
+}
+
 /// Errors from Noise protocol operations.
 #[derive(Debug, Error)]
 pub enum NoiseError {
@@ -90,6 +233,9 @@ pub enum NoiseError {
 
     #[error("nonce overflow")]
     NonceOverflow,
+
+    #[error("replay detected: counter {0} already seen or too old")]
+    ReplayDetected(u64),
 
     #[error("secp256k1 error: {0}")]
     Secp256k1(#[from] secp256k1::Error),
@@ -197,6 +343,9 @@ impl CipherState {
     }
 
     /// Decrypt ciphertext (with appended tag), returning plaintext.
+    ///
+    /// Uses the internal nonce counter. For transport phase with explicit
+    /// counters from the wire format, use `decrypt_with_counter` instead.
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
         if !self.has_key {
             // No key means no encryption
@@ -219,6 +368,45 @@ impl CipherState {
             .map_err(|_| NoiseError::DecryptionFailed)?;
 
         Ok(plaintext)
+    }
+
+    /// Decrypt with an explicit counter value (for transport phase).
+    ///
+    /// This is used when the counter comes from the wire format rather than
+    /// an internal counter. The counter must be validated by a replay window
+    /// before calling this method.
+    pub fn decrypt_with_counter(
+        &self,
+        ciphertext: &[u8],
+        counter: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        if !self.has_key {
+            return Ok(ciphertext.to_vec());
+        }
+
+        if ciphertext.len() < TAG_SIZE {
+            return Err(NoiseError::MessageTooShort {
+                expected: TAG_SIZE,
+                got: ciphertext.len(),
+            });
+        }
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| NoiseError::DecryptionFailed)?;
+
+        let nonce = Self::counter_to_nonce(counter);
+        let plaintext = cipher
+            .decrypt(&nonce, ciphertext)
+            .map_err(|_| NoiseError::DecryptionFailed)?;
+
+        Ok(plaintext)
+    }
+
+    /// Convert a counter value to a nonce.
+    fn counter_to_nonce(counter: u64) -> Nonce {
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[4..12].copy_from_slice(&counter.to_le_bytes());
+        *Nonce::from_slice(&nonce_bytes)
     }
 
     /// Get the next nonce, incrementing the counter.
@@ -675,6 +863,7 @@ impl HandshakeState {
             recv_cipher,
             handshake_hash,
             remote_static,
+            replay_window: ReplayWindow::new(),
         })
     }
 
@@ -697,6 +886,10 @@ impl fmt::Debug for HandshakeState {
 }
 
 /// Completed Noise session for transport encryption.
+///
+/// Provides bidirectional authenticated encryption with replay protection.
+/// The send counter is monotonically incremented; received counters are
+/// validated against a sliding window to prevent replay attacks.
 pub struct NoiseSession {
     /// Our role in the original handshake.
     role: HandshakeRole,
@@ -708,17 +901,82 @@ pub struct NoiseSession {
     handshake_hash: [u8; 32],
     /// Remote peer's static public key.
     remote_static: PublicKey,
+    /// Replay window for received packets.
+    replay_window: ReplayWindow,
 }
 
 impl NoiseSession {
-    /// Encrypt a message for sending.
+    /// Encrypt a message for sending (using internal counter).
+    ///
+    /// Returns the ciphertext. The current send counter should be included
+    /// in the wire format before calling this method.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, NoiseError> {
         self.send_cipher.encrypt(plaintext)
     }
 
-    /// Decrypt a received message.
+    /// Get the current send counter (before incrementing).
+    ///
+    /// Use this to get the counter to include in the wire format.
+    /// The counter will be incremented when `encrypt` is called.
+    pub fn current_send_counter(&self) -> u64 {
+        self.send_cipher.nonce
+    }
+
+    /// Decrypt a received message (using internal counter).
+    ///
+    /// This is for handshake-phase decryption. For transport phase with
+    /// explicit counters, use `decrypt_with_replay_check` instead.
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
         self.recv_cipher.decrypt(ciphertext)
+    }
+
+    /// Check if a counter passes the replay window.
+    ///
+    /// Returns Ok(()) if the counter is acceptable, Err if it should be rejected.
+    /// Call this before attempting decryption to avoid wasting CPU on replay attacks.
+    pub fn check_replay(&self, counter: u64) -> Result<(), NoiseError> {
+        if self.replay_window.check(counter) {
+            Ok(())
+        } else {
+            Err(NoiseError::ReplayDetected(counter))
+        }
+    }
+
+    /// Decrypt with explicit counter and replay protection.
+    ///
+    /// This is the primary decryption method for transport phase.
+    /// The counter comes from the wire format and is validated against
+    /// the replay window before and after decryption.
+    ///
+    /// On success, the counter is accepted into the replay window.
+    pub fn decrypt_with_replay_check(
+        &mut self,
+        ciphertext: &[u8],
+        counter: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        // Check replay window first (cheap)
+        if !self.replay_window.check(counter) {
+            return Err(NoiseError::ReplayDetected(counter));
+        }
+
+        // Attempt decryption (expensive)
+        let plaintext = self.recv_cipher.decrypt_with_counter(ciphertext, counter)?;
+
+        // Only accept into window after successful decryption
+        // This prevents DoS attacks that exhaust the window
+        self.replay_window.accept(counter);
+
+        Ok(plaintext)
+    }
+
+    /// Get the highest received counter.
+    pub fn highest_received_counter(&self) -> u64 {
+        self.replay_window.highest()
+    }
+
+    /// Reset the replay window (use when rekeying).
+    pub fn reset_replay_window(&mut self) {
+        self.replay_window.reset();
     }
 
     /// Get the handshake hash for channel binding.
@@ -987,5 +1245,140 @@ mod tests {
         assert_eq!(discovered_initiator, &initiator_keypair.public_key());
 
         // The discovered key can be used to look up peer config, verify against allow-list, etc.
+    }
+
+    // ===== ReplayWindow Tests =====
+
+    #[test]
+    fn test_replay_window_basic() {
+        let mut window = ReplayWindow::new();
+
+        // First packet is always acceptable
+        assert!(window.check(0));
+        window.accept(0);
+        assert_eq!(window.highest(), 0);
+
+        // Replay of 0 should fail
+        assert!(!window.check(0));
+
+        // New higher counter is acceptable
+        assert!(window.check(1));
+        window.accept(1);
+        assert_eq!(window.highest(), 1);
+
+        // Out-of-order within window is acceptable
+        // (after accepting 10, 2 is still in window)
+        window.accept(10);
+        assert!(window.check(5));
+        window.accept(5);
+
+        // Replay of 5 should now fail
+        assert!(!window.check(5));
+    }
+
+    #[test]
+    fn test_replay_window_large_jump() {
+        let mut window = ReplayWindow::new();
+
+        // Accept counter 0
+        window.accept(0);
+
+        // Jump to a large counter
+        window.accept(REPLAY_WINDOW_SIZE as u64 + 100);
+
+        // Old counter should be outside window
+        assert!(!window.check(0));
+        assert!(!window.check(50));
+
+        // Counters within window should work
+        assert!(window.check(REPLAY_WINDOW_SIZE as u64 + 99));
+        assert!(window.check(REPLAY_WINDOW_SIZE as u64 + 50));
+    }
+
+    #[test]
+    fn test_replay_window_boundary() {
+        let mut window = ReplayWindow::new();
+
+        // Accept at boundary
+        window.accept(REPLAY_WINDOW_SIZE as u64 - 1);
+
+        // Counter 0 should be exactly at the edge of the window
+        assert!(window.check(0));
+        window.accept(0);
+
+        // Move window forward by 1
+        window.accept(REPLAY_WINDOW_SIZE as u64);
+
+        // Counter 0 is now outside the window
+        assert!(!window.check(0));
+
+        // Counter 1 is still in the window
+        assert!(window.check(1));
+    }
+
+    #[test]
+    fn test_replay_window_sequential() {
+        let mut window = ReplayWindow::new();
+
+        // Accept counters 0-999 in order
+        for i in 0..1000 {
+            assert!(window.check(i), "Counter {} should be acceptable", i);
+            window.accept(i);
+        }
+
+        // All should be marked as seen
+        for i in 0..1000 {
+            assert!(!window.check(i), "Counter {} should be rejected as replay", i);
+        }
+
+        assert_eq!(window.highest(), 999);
+    }
+
+    #[test]
+    fn test_replay_window_reset() {
+        let mut window = ReplayWindow::new();
+
+        window.accept(100);
+        assert_eq!(window.highest(), 100);
+        assert!(!window.check(100));
+
+        window.reset();
+
+        assert_eq!(window.highest(), 0);
+        assert!(window.check(100));
+    }
+
+    #[test]
+    fn test_session_replay_protection() {
+        let keypair1 = generate_keypair();
+        let keypair2 = generate_keypair();
+
+        let mut init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+        let mut resp = HandshakeState::new_responder(keypair2);
+
+        let msg1 = init.write_message_1().unwrap();
+        resp.read_message_1(&msg1).unwrap();
+        let msg2 = resp.write_message_2().unwrap();
+        init.read_message_2(&msg2).unwrap();
+
+        let mut sender = init.into_session().unwrap();
+        let mut receiver = resp.into_session().unwrap();
+
+        // Encrypt a message
+        let counter = sender.current_send_counter();
+        let ciphertext = sender.encrypt(b"test message").unwrap();
+
+        // First decryption should succeed
+        let plaintext = receiver
+            .decrypt_with_replay_check(&ciphertext, counter)
+            .unwrap();
+        assert_eq!(plaintext, b"test message");
+
+        // Replay should fail
+        let result = receiver.decrypt_with_replay_check(&ciphertext, counter);
+        assert!(matches!(result, Err(NoiseError::ReplayDetected(_))));
+
+        // Check method alone also detects replay
+        assert!(receiver.check_replay(counter).is_err());
     }
 }

@@ -277,6 +277,17 @@ impl TreeAnnounce {
 ///
 /// Sent to peers to advertise which destinations are reachable.
 /// The TTL controls propagation depth (decremented at each hop).
+///
+/// ## Wire Format (v1)
+///
+/// | Offset | Field       | Size     | Notes                           |
+/// |--------|-------------|----------|----------------------------------|
+/// | 0      | msg_type    | 1 byte   | 0x20                            |
+/// | 1      | sequence    | 8 bytes  | LE u64                          |
+/// | 9      | ttl         | 1 byte   | Remaining hops                  |
+/// | 10     | hash_count  | 1 byte   | Number of hash functions        |
+/// | 11     | size_class  | 1 byte   | Filter size: 512 << size_class  |
+/// | 12     | filter_bits | variable | 512 << size_class bytes         |
 #[derive(Clone, Debug)]
 pub struct FilterAnnounce {
     /// The bloom filter contents.
@@ -285,12 +296,35 @@ pub struct FilterAnnounce {
     pub ttl: u8,
     /// Sequence number for freshness/dedup.
     pub sequence: u64,
+    /// Number of hash functions used by the filter.
+    pub hash_count: u8,
+    /// Size class: filter size in bytes = 512 << size_class.
+    /// v1 protocol requires size_class=1 (1 KB filters).
+    pub size_class: u8,
 }
 
 impl FilterAnnounce {
-    /// Create a new FilterAnnounce message.
+    /// Create a new FilterAnnounce message with v1 defaults.
     pub fn new(filter: BloomFilter, ttl: u8, sequence: u64) -> Self {
         Self {
+            hash_count: filter.hash_count(),
+            size_class: crate::bloom::V1_SIZE_CLASS,
+            filter,
+            ttl,
+            sequence,
+        }
+    }
+
+    /// Create with explicit size_class (for testing or future protocol versions).
+    pub fn with_size_class(
+        filter: BloomFilter,
+        ttl: u8,
+        sequence: u64,
+        size_class: u8,
+    ) -> Self {
+        Self {
+            hash_count: filter.hash_count(),
+            size_class,
             filter,
             ttl,
             sequence,
@@ -311,7 +345,25 @@ impl FilterAnnounce {
             filter: self.filter.clone(),
             ttl: self.ttl - 1,
             sequence: self.sequence,
+            hash_count: self.hash_count,
+            size_class: self.size_class,
         })
+    }
+
+    /// Get the expected filter size in bytes for this size_class.
+    pub fn filter_size_bytes(&self) -> usize {
+        512 << self.size_class
+    }
+
+    /// Validate the filter matches the declared size_class.
+    pub fn is_valid(&self) -> bool {
+        self.filter.num_bytes() == self.filter_size_bytes()
+            && self.filter.hash_count() == self.hash_count
+    }
+
+    /// Check if this is a v1-compliant filter (size_class=1).
+    pub fn is_v1_compliant(&self) -> bool {
+        self.size_class == crate::bloom::V1_SIZE_CLASS
     }
 }
 
@@ -605,26 +657,59 @@ impl SessionAck {
 // ============ Data Messages ============
 
 /// Data packet flags.
+///
+/// ## Flag Bits
+///
+/// | Bit | Name           | Description                              |
+/// |-----|----------------|------------------------------------------|
+/// | 0   | COORDS_PRESENT | Coordinates follow the fixed header      |
+/// | 1-7 | reserved       | Reserved for future use                  |
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DataFlags {
-    /// Reserved bits for future use.
+    /// When set, source and destination coordinates follow the header.
+    /// Used to warm router caches after receiving CoordsRequired.
+    pub coords_present: bool,
+    /// Reserved bits (preserved for forward compatibility).
     reserved: u8,
 }
 
+/// Bit 0: coordinates follow the header.
+pub const DATA_FLAG_COORDS_PRESENT: u8 = 0x01;
+
 impl DataFlags {
-    /// Create default flags.
+    /// Create default flags (no coordinates).
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create flags with COORDS_PRESENT set.
+    pub fn with_coords() -> Self {
+        Self {
+            coords_present: true,
+            reserved: 0,
+        }
+    }
+
+    /// Set the coords_present flag.
+    pub fn set_coords_present(&mut self, value: bool) {
+        self.coords_present = value;
+    }
+
     /// Convert to a byte.
     pub fn to_byte(&self) -> u8 {
-        self.reserved
+        let mut flags = self.reserved & !DATA_FLAG_COORDS_PRESENT;
+        if self.coords_present {
+            flags |= DATA_FLAG_COORDS_PRESENT;
+        }
+        flags
     }
 
     /// Convert from a byte.
     pub fn from_byte(byte: u8) -> Self {
-        Self { reserved: byte }
+        Self {
+            coords_present: byte & DATA_FLAG_COORDS_PRESENT != 0,
+            reserved: byte & !DATA_FLAG_COORDS_PRESENT,
+        }
     }
 }
 
@@ -925,6 +1010,34 @@ mod tests {
         assert_eq!(packet.flags.to_byte(), 0x80);
     }
 
+    #[test]
+    fn test_data_flags_coords_present() {
+        // Default: no coords
+        let flags = DataFlags::new();
+        assert!(!flags.coords_present);
+        assert_eq!(flags.to_byte(), 0x00);
+
+        // With coords
+        let flags = DataFlags::with_coords();
+        assert!(flags.coords_present);
+        assert_eq!(flags.to_byte(), 0x01);
+
+        // Round-trip preserves flag
+        let flags = DataFlags::from_byte(0x01);
+        assert!(flags.coords_present);
+        assert_eq!(flags.to_byte(), 0x01);
+
+        // Reserved bits preserved
+        let flags = DataFlags::from_byte(0x81); // coords + reserved bit 7
+        assert!(flags.coords_present);
+        assert_eq!(flags.to_byte(), 0x81);
+
+        // Coords bit toggles independently
+        let flags = DataFlags::from_byte(0x80); // only reserved bit 7
+        assert!(!flags.coords_present);
+        assert_eq!(flags.to_byte(), 0x80);
+    }
+
     // ===== LookupRequest Tests =====
 
     #[test]
@@ -1001,6 +1114,36 @@ mod tests {
         assert!(!forwarded2.can_forward());
 
         assert!(forwarded2.forwarded().is_none());
+    }
+
+    #[test]
+    fn test_filter_announce_size_class() {
+        let filter = BloomFilter::new();
+        let announce = FilterAnnounce::new(filter.clone(), 2, 100);
+
+        // v1 defaults
+        assert_eq!(announce.size_class, 1);
+        assert_eq!(announce.hash_count, 5);
+        assert!(announce.is_v1_compliant());
+        assert!(announce.is_valid());
+        assert_eq!(announce.filter_size_bytes(), 1024);
+
+        // Forwarded preserves size_class
+        let forwarded = announce.forwarded().unwrap();
+        assert_eq!(forwarded.size_class, 1);
+        assert_eq!(forwarded.hash_count, 5);
+    }
+
+    #[test]
+    fn test_filter_announce_with_size_class() {
+        let filter = BloomFilter::with_params(2048 * 8, 7).unwrap();
+        let announce = FilterAnnounce::with_size_class(filter, 2, 100, 2);
+
+        assert_eq!(announce.size_class, 2);
+        assert_eq!(announce.hash_count, 7);
+        assert!(!announce.is_v1_compliant());
+        assert!(announce.is_valid());
+        assert_eq!(announce.filter_size_bytes(), 2048);
     }
 
     // ===== SessionSetup Tests =====

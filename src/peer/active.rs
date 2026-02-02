@@ -4,7 +4,9 @@
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
 use crate::bloom::BloomFilter;
-use crate::transport::{LinkId, LinkStats};
+use crate::index::SessionIndex;
+use crate::noise::NoiseSession;
+use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use crate::{FipsAddress, NodeId, PeerIdentity};
 use secp256k1::XOnlyPublicKey;
@@ -58,7 +60,11 @@ impl fmt::Display for ConnectivityState {
 ///
 /// Created only after successful Noise KK handshake. The identity is
 /// cryptographically verified at this point.
-#[derive(Clone, Debug)]
+///
+/// Note: ActivePeer intentionally does not implement Clone because it
+/// contains NoiseSession, which cannot be safely cloned (cloning would
+/// risk nonce reuse, a catastrophic security failure).
+#[derive(Debug)]
 pub struct ActivePeer {
     // === Identity (Verified) ===
     /// Cryptographic identity (verified via handshake).
@@ -69,6 +75,18 @@ pub struct ActivePeer {
     link_id: LinkId,
     /// Current connectivity state.
     connectivity: ConnectivityState,
+
+    // === Session (Wire Protocol) ===
+    /// Noise session for encryption/decryption (None if legacy peer).
+    noise_session: Option<NoiseSession>,
+    /// Our session index (they include this when sending TO us).
+    our_index: Option<SessionIndex>,
+    /// Their session index (we include this when sending TO them).
+    their_index: Option<SessionIndex>,
+    /// Transport ID for this peer's link.
+    transport_id: Option<TransportId>,
+    /// Current transport address (for roaming support).
+    current_addr: Option<TransportAddr>,
 
     // === Spanning Tree ===
     /// Their latest parent declaration.
@@ -101,11 +119,17 @@ impl ActivePeer {
     /// Create a new active peer from verified identity.
     ///
     /// Called after successful authentication handshake.
+    /// For peers with Noise sessions, use `with_session` instead.
     pub fn new(identity: PeerIdentity, link_id: LinkId, authenticated_at: u64) -> Self {
         Self {
             identity,
             link_id,
             connectivity: ConnectivityState::Connected,
+            noise_session: None,
+            our_index: None,
+            their_index: None,
+            transport_id: None,
+            current_addr: None,
             declaration: None,
             ancestry: None,
             inbound_filter: None,
@@ -122,6 +146,7 @@ impl ActivePeer {
     /// Create from verified identity with existing link stats.
     ///
     /// Used when promoting from PeerConnection, preserving handshake stats.
+    /// For peers with Noise sessions, use `with_session` instead.
     pub fn with_stats(
         identity: PeerIdentity,
         link_id: LinkId,
@@ -131,6 +156,44 @@ impl ActivePeer {
         let mut peer = Self::new(identity, link_id, authenticated_at);
         peer.link_stats = link_stats;
         peer
+    }
+
+    /// Create from verified identity with Noise session and index tracking.
+    ///
+    /// This is the primary constructor for the wire protocol path.
+    /// The NoiseSession provides encryption/decryption and replay protection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_session(
+        identity: PeerIdentity,
+        link_id: LinkId,
+        authenticated_at: u64,
+        noise_session: NoiseSession,
+        our_index: SessionIndex,
+        their_index: SessionIndex,
+        transport_id: TransportId,
+        current_addr: TransportAddr,
+        link_stats: LinkStats,
+    ) -> Self {
+        Self {
+            identity,
+            link_id,
+            connectivity: ConnectivityState::Connected,
+            noise_session: Some(noise_session),
+            our_index: Some(our_index),
+            their_index: Some(their_index),
+            transport_id: Some(transport_id),
+            current_addr: Some(current_addr),
+            declaration: None,
+            ancestry: None,
+            inbound_filter: None,
+            filter_sequence: 0,
+            filter_ttl: 0,
+            filter_received_at: 0,
+            pending_filter_update: true,
+            link_stats,
+            authenticated_at,
+            last_seen: authenticated_at,
+        }
     }
 
     // === Identity Accessors ===
@@ -185,6 +248,51 @@ impl ActivePeer {
     /// Check if peer is disconnected.
     pub fn is_disconnected(&self) -> bool {
         self.connectivity.is_terminal()
+    }
+
+    // === Session Accessors ===
+
+    /// Check if this peer has a Noise session.
+    pub fn has_session(&self) -> bool {
+        self.noise_session.is_some()
+    }
+
+    /// Get the Noise session, if present.
+    pub fn noise_session(&self) -> Option<&NoiseSession> {
+        self.noise_session.as_ref()
+    }
+
+    /// Get mutable access to the Noise session.
+    pub fn noise_session_mut(&mut self) -> Option<&mut NoiseSession> {
+        self.noise_session.as_mut()
+    }
+
+    /// Get our session index (they use this to send TO us).
+    pub fn our_index(&self) -> Option<SessionIndex> {
+        self.our_index
+    }
+
+    /// Get their session index (we use this to send TO them).
+    pub fn their_index(&self) -> Option<SessionIndex> {
+        self.their_index
+    }
+
+    /// Get the transport ID for this peer.
+    pub fn transport_id(&self) -> Option<TransportId> {
+        self.transport_id
+    }
+
+    /// Get the current transport address.
+    pub fn current_addr(&self) -> Option<&TransportAddr> {
+        self.current_addr.as_ref()
+    }
+
+    /// Update the current address (for roaming support).
+    ///
+    /// Called when we receive a valid authenticated packet from a new address.
+    pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) {
+        self.transport_id = Some(transport_id);
+        self.current_addr = Some(addr);
     }
 
     // === Tree Accessors ===

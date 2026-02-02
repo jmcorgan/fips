@@ -7,16 +7,22 @@
 use crate::bloom::BloomState;
 use crate::cache::CoordCache;
 use crate::config::PeerConfig;
+use crate::index::IndexAllocator;
 use crate::peer::{
     cross_connection_winner, ActivePeer, PeerConnection, PromotionResult,
 };
+use crate::rate_limit::HandshakeRateLimiter;
 use crate::transport::{
-    packet_channel, Link, LinkDirection, LinkId, PacketRx, PacketTx, TransportAddr,
-    TransportHandle, TransportId,
+    packet_channel, Link, LinkDirection, LinkId, PacketRx, PacketTx, ReceivedPacket,
+    TransportAddr, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
+use crate::wire::{
+    build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
+    DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2,
+};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeId, PeerIdentity};
 use std::collections::HashMap;
 use std::fmt;
@@ -217,6 +223,20 @@ pub struct Node {
     tun_reader_handle: Option<JoinHandle<()>>,
     /// TUN writer thread handle.
     tun_writer_handle: Option<JoinHandle<()>>,
+
+    // === Index-Based Session Dispatch ===
+    /// Allocator for session indices.
+    index_allocator: IndexAllocator,
+    /// O(1) lookup: (transport_id, our_index) → NodeId.
+    /// This maps our session index to the peer that uses it.
+    peers_by_index: HashMap<(TransportId, u32), NodeId>,
+    /// Pending outbound handshakes by our sender_idx.
+    /// Tracks which LinkId corresponds to which session index.
+    pending_outbound: HashMap<(TransportId, u32), LinkId>,
+
+    // === Rate Limiting ===
+    /// Rate limiter for msg1 processing (DoS protection).
+    msg1_rate_limiter: HandshakeRateLimiter,
 }
 
 impl Node {
@@ -269,6 +289,10 @@ impl Node {
             tun_tx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            index_allocator: IndexAllocator::new(),
+            peers_by_index: HashMap::new(),
+            pending_outbound: HashMap::new(),
+            msg1_rate_limiter: HandshakeRateLimiter::new(),
         })
     }
 
@@ -312,6 +336,10 @@ impl Node {
             tun_tx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            index_allocator: IndexAllocator::new(),
+            peers_by_index: HashMap::new(),
+            pending_outbound: HashMap::new(),
+            msg1_rate_limiter: HandshakeRateLimiter::new(),
         }
     }
 
@@ -467,15 +495,14 @@ impl Node {
                 .unwrap_or(0);
             let mut connection = PeerConnection::outbound(link_id, peer_identity.clone(), current_time_ms);
 
-            // Start the Noise handshake and get message 1
-            let our_keypair = self.identity.keypair();
-            let handshake_msg = match connection.start_handshake(our_keypair, current_time_ms) {
-                Ok(msg) => msg,
+            // Allocate a session index for this handshake
+            let our_index = match self.index_allocator.allocate() {
+                Ok(idx) => idx,
                 Err(e) => {
                     warn!(
                         npub = %peer_config.npub,
                         error = %e,
-                        "Failed to start handshake"
+                        "Failed to allocate session index"
                     );
                     // Clean up the link we just created
                     self.links.remove(&link_id);
@@ -483,6 +510,32 @@ impl Node {
                     continue;
                 }
             };
+
+            // Start the Noise handshake and get message 1
+            let our_keypair = self.identity.keypair();
+            let noise_msg1 = match connection.start_handshake(our_keypair, current_time_ms) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!(
+                        npub = %peer_config.npub,
+                        error = %e,
+                        "Failed to start handshake"
+                    );
+                    // Clean up the index and link
+                    let _ = self.index_allocator.free(our_index);
+                    self.links.remove(&link_id);
+                    self.addr_to_link.remove(&(transport_id, remote_addr));
+                    continue;
+                }
+            };
+
+            // Set index and transport info on the connection
+            connection.set_our_index(our_index);
+            connection.set_transport_id(transport_id);
+            connection.set_source_addr(remote_addr.clone());
+
+            // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
+            let wire_msg1 = build_msg1(our_index, &noise_msg1);
 
             let alias_display = peer_config
                 .alias
@@ -496,17 +549,21 @@ impl Node {
             info!("  transport: {}", addr.transport);
             info!("  addr: {}", addr.addr);
             info!("  link_id: {}", link_id);
+            info!("  our_index: {}", our_index);
 
+            // Track in pending_outbound for msg2 dispatch
+            self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
             self.connections.insert(link_id, connection);
 
-            // Send the handshake message
+            // Send the wire format handshake message
             if let Some(transport) = self.transports.get(&transport_id) {
-                match transport.send(&remote_addr, &handshake_msg).await {
+                match transport.send(&remote_addr, &wire_msg1).await {
                     Ok(bytes) => {
                         debug!(
                             link_id = %link_id,
+                            our_index = %our_index,
                             bytes,
-                            "Sent Noise handshake message 1"
+                            "Sent Noise handshake message 1 (wire format)"
                         );
                     }
                     Err(e) => {
@@ -825,7 +882,7 @@ impl Node {
                     connection.link_stats().clone(),
                 );
 
-                self.peers.insert(peer_node_id, new_peer.clone());
+                self.peers.insert(peer_node_id, new_peer);
 
                 info!(
                     node_id = %peer_node_id,
@@ -836,7 +893,7 @@ impl Node {
 
                 Ok(PromotionResult::CrossConnectionWon {
                     loser_link_id,
-                    peer: new_peer,
+                    node_id: peer_node_id,
                 })
             } else {
                 // This connection loses, keep existing
@@ -864,7 +921,7 @@ impl Node {
                 connection.link_stats().clone(),
             );
 
-            self.peers.insert(peer_node_id, new_peer.clone());
+            self.peers.insert(peer_node_id, new_peer);
 
             info!(
                 node_id = %peer_node_id,
@@ -872,7 +929,7 @@ impl Node {
                 "Connection promoted to active peer"
             );
 
-            Ok(PromotionResult::Promoted(new_peer))
+            Ok(PromotionResult::Promoted(peer_node_id))
         }
     }
 
@@ -1025,6 +1082,431 @@ impl Node {
         info!("  transports: {}", self.transports.len());
         info!(" connections: {}", self.connections.len());
         Ok(())
+    }
+
+    // === RX Event Loop ===
+
+    /// Run the receive event loop.
+    ///
+    /// Processes packets from all transports, dispatching based on
+    /// the discriminator byte in the wire protocol:
+    /// - 0x00: Encrypted frame (session data)
+    /// - 0x01: Handshake message 1 (initiator -> responder)
+    /// - 0x02: Handshake message 2 (responder -> initiator)
+    ///
+    /// This method takes ownership of the packet_rx channel and runs
+    /// until the channel is closed (typically when stop() is called).
+    pub async fn run_rx_loop(&mut self) -> Result<(), NodeError> {
+        let mut packet_rx = self.packet_rx.take()
+            .ok_or(NodeError::NotStarted)?;
+
+        info!("RX event loop started");
+
+        while let Some(packet) = packet_rx.recv().await {
+            self.process_packet(packet).await;
+        }
+
+        info!("RX event loop stopped (channel closed)");
+        Ok(())
+    }
+
+    /// Process a single received packet.
+    ///
+    /// Dispatches based on the discriminator byte.
+    async fn process_packet(&mut self, packet: ReceivedPacket) {
+        if packet.data.is_empty() {
+            return; // Drop empty packets
+        }
+
+        let discriminator = packet.data[0];
+        match discriminator {
+            DISCRIMINATOR_ENCRYPTED => {
+                self.handle_encrypted_frame(packet).await;
+            }
+            DISCRIMINATOR_MSG1 => {
+                self.handle_msg1(packet).await;
+            }
+            DISCRIMINATOR_MSG2 => {
+                self.handle_msg2(packet).await;
+            }
+            _ => {
+                // Unknown discriminator, drop silently
+                debug!(
+                    discriminator = discriminator,
+                    transport_id = %packet.transport_id,
+                    "Unknown packet discriminator, dropping"
+                );
+            }
+        }
+    }
+
+    /// Handle an encrypted frame (discriminator 0x00).
+    ///
+    /// This is the hot path for established sessions. We use O(1)
+    /// index-based lookup to find the session, then decrypt.
+    async fn handle_encrypted_frame(&mut self, packet: ReceivedPacket) {
+        // Parse header (fail fast)
+        let header = match EncryptedHeader::parse(&packet.data) {
+            Some(h) => h,
+            None => return, // Malformed, drop silently
+        };
+
+        // O(1) session lookup by our receiver index
+        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        let node_id = match self.peers_by_index.get(&key) {
+            Some(id) => *id,
+            None => {
+                // Unknown index - could be stale session or attack
+                debug!(
+                    receiver_idx = %header.receiver_idx,
+                    transport_id = %packet.transport_id,
+                    "Unknown session index, dropping"
+                );
+                return;
+            }
+        };
+
+        let peer = match self.peers.get_mut(&node_id) {
+            Some(p) => p,
+            None => {
+                // Peer removed but index not cleaned up - fix it
+                self.peers_by_index.remove(&key);
+                return;
+            }
+        };
+
+        // Get the session (peer must have one for index-based lookup)
+        let session = match peer.noise_session_mut() {
+            Some(s) => s,
+            None => {
+                warn!(
+                    node_id = %node_id,
+                    "Peer in index map has no session"
+                );
+                return;
+            }
+        };
+
+        // Decrypt with replay check (this is the expensive part)
+        let ciphertext = &packet.data[header.ciphertext_offset..];
+        let plaintext = match session.decrypt_with_replay_check(ciphertext, header.counter) {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(
+                    node_id = %node_id,
+                    counter = header.counter,
+                    error = %e,
+                    "Decryption failed"
+                );
+                return;
+            }
+        };
+
+        // === PACKET IS AUTHENTIC ===
+
+        // Update address for roaming support
+        peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
+
+        // Update statistics
+        peer.link_stats_mut().record_recv(packet.data.len(), packet.timestamp_ms);
+        peer.touch(packet.timestamp_ms);
+
+        // Dispatch to link message handler
+        self.dispatch_link_message(&node_id, &plaintext).await;
+    }
+
+    /// Handle handshake message 1 (discriminator 0x01).
+    ///
+    /// This creates a new inbound connection. Rate limiting is applied
+    /// before any expensive crypto operations.
+    async fn handle_msg1(&mut self, packet: ReceivedPacket) {
+        // === RATE LIMITING (before any processing) ===
+        if !self.msg1_rate_limiter.start_handshake() {
+            debug!(
+                transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                "Msg1 rate limited"
+            );
+            return;
+        }
+
+        // Parse header
+        let header = match Msg1Header::parse(&packet.data) {
+            Some(h) => h,
+            None => {
+                self.msg1_rate_limiter.complete_handshake();
+                debug!("Invalid msg1 header");
+                return;
+            }
+        };
+
+        // Check for existing connection from this address
+        let addr_key = (packet.transport_id, packet.remote_addr.clone());
+        if self.addr_to_link.contains_key(&addr_key) {
+            self.msg1_rate_limiter.complete_handshake();
+            debug!(
+                transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                "Already have connection from this address"
+            );
+            return;
+        }
+
+        // === CRYPTO COST PAID HERE ===
+        let link_id = self.allocate_link_id();
+        let mut conn = PeerConnection::inbound_with_transport(
+            link_id,
+            packet.transport_id,
+            packet.remote_addr.clone(),
+            packet.timestamp_ms,
+        );
+
+        let our_keypair = self.identity.keypair();
+        let noise_msg1 = &packet.data[header.noise_msg1_offset..];
+        let msg2_response = match conn.receive_handshake_init(our_keypair, noise_msg1, packet.timestamp_ms) {
+            Ok(m) => m,
+            Err(e) => {
+                self.msg1_rate_limiter.complete_handshake();
+                debug!(
+                    error = %e,
+                    "Failed to process msg1"
+                );
+                return;
+            }
+        };
+
+        // Learn peer identity from msg1
+        let peer_identity = match conn.expected_identity() {
+            Some(id) => id.clone(),
+            None => {
+                self.msg1_rate_limiter.complete_handshake();
+                warn!("Identity not learned from msg1");
+                return;
+            }
+        };
+        let peer_node_id = *peer_identity.node_id();
+
+        // Check if this peer is already connected
+        if self.peers.contains_key(&peer_node_id) {
+            // TODO: Handle reconnection case (future: session replacement)
+            self.msg1_rate_limiter.complete_handshake();
+            debug!(
+                node_id = %peer_node_id,
+                "Peer already connected, ignoring msg1"
+            );
+            return;
+        }
+
+        // Allocate our session index
+        let our_index = match self.index_allocator.allocate() {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.msg1_rate_limiter.complete_handshake();
+                warn!(error = %e, "Failed to allocate session index for inbound");
+                return;
+            }
+        };
+
+        conn.set_our_index(our_index);
+        conn.set_their_index(header.sender_idx);
+
+        // Create link
+        let link = Link::connectionless(
+            link_id,
+            packet.transport_id,
+            packet.remote_addr.clone(),
+            LinkDirection::Inbound,
+            Duration::from_millis(100),
+        );
+
+        self.links.insert(link_id, link);
+        self.addr_to_link.insert(addr_key, link_id);
+        self.connections.insert(link_id, conn);
+
+        // Build and send msg2 response
+        let wire_msg2 = build_msg2(our_index, header.sender_idx, &msg2_response);
+
+        if let Some(transport) = self.transports.get(&packet.transport_id) {
+            match transport.send(&packet.remote_addr, &wire_msg2).await {
+                Ok(bytes) => {
+                    debug!(
+                        link_id = %link_id,
+                        our_index = %our_index,
+                        their_index = %header.sender_idx,
+                        bytes,
+                        "Sent msg2 response"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        link_id = %link_id,
+                        error = %e,
+                        "Failed to send msg2"
+                    );
+                    // Clean up on failure
+                    self.connections.remove(&link_id);
+                    self.links.remove(&link_id);
+                    self.addr_to_link.remove(&(packet.transport_id, packet.remote_addr));
+                    let _ = self.index_allocator.free(our_index);
+                    self.msg1_rate_limiter.complete_handshake();
+                    return;
+                }
+            }
+        }
+
+        info!(
+            node_id = %peer_node_id,
+            link_id = %link_id,
+            our_index = %our_index,
+            "Inbound handshake initiated"
+        );
+
+        // Note: rate limiter completed when handshake completes or times out
+    }
+
+    /// Handle handshake message 2 (discriminator 0x02).
+    ///
+    /// This completes an outbound handshake we initiated.
+    async fn handle_msg2(&mut self, packet: ReceivedPacket) {
+        // Parse header
+        let header = match Msg2Header::parse(&packet.data) {
+            Some(h) => h,
+            None => {
+                debug!("Invalid msg2 header");
+                return;
+            }
+        };
+
+        // Look up our pending handshake by our sender_idx (receiver_idx in msg2)
+        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        let link_id = match self.pending_outbound.get(&key) {
+            Some(id) => *id,
+            None => {
+                debug!(
+                    receiver_idx = %header.receiver_idx,
+                    "No pending outbound handshake for index"
+                );
+                return;
+            }
+        };
+
+        let conn = match self.connections.get_mut(&link_id) {
+            Some(c) => c,
+            None => {
+                // Connection removed, clean up pending_outbound
+                self.pending_outbound.remove(&key);
+                return;
+            }
+        };
+
+        // Process Noise msg2
+        let noise_msg2 = &packet.data[header.noise_msg2_offset..];
+        if let Err(e) = conn.complete_handshake(noise_msg2, packet.timestamp_ms) {
+            warn!(
+                link_id = %link_id,
+                error = %e,
+                "Handshake completion failed"
+            );
+            conn.mark_failed();
+            return;
+        }
+
+        // Store their index
+        conn.set_their_index(header.sender_idx);
+        conn.set_source_addr(packet.remote_addr.clone());
+
+        // Get peer identity for promotion
+        let peer_identity = match conn.expected_identity() {
+            Some(id) => id.clone(),
+            None => {
+                warn!(link_id = %link_id, "No identity after handshake");
+                return;
+            }
+        };
+
+        info!(
+            node_id = %peer_identity.node_id(),
+            link_id = %link_id,
+            their_index = %header.sender_idx,
+            "Outbound handshake completed"
+        );
+
+        // Promote to active peer (TODO: implement with session transfer)
+        // For now, just use the existing promote_connection
+        match self.promote_connection(link_id, peer_identity.clone(), packet.timestamp_ms) {
+            Ok(result) => {
+                // Clean up pending_outbound
+                self.pending_outbound.remove(&key);
+
+                match result {
+                    PromotionResult::Promoted(node_id) => {
+                        info!(
+                            node_id = %node_id,
+                            "Peer promoted to active"
+                        );
+                    }
+                    PromotionResult::CrossConnectionWon { loser_link_id, node_id } => {
+                        info!(
+                            node_id = %node_id,
+                            loser_link_id = %loser_link_id,
+                            "Cross-connection won"
+                        );
+                    }
+                    PromotionResult::CrossConnectionLost { winner_link_id } => {
+                        info!(
+                            winner_link_id = %winner_link_id,
+                            "Cross-connection lost"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    link_id = %link_id,
+                    error = %e,
+                    "Failed to promote connection"
+                );
+            }
+        }
+    }
+
+    /// Dispatch a decrypted link message to the appropriate handler.
+    ///
+    /// Link messages are protocol messages exchanged between authenticated peers.
+    async fn dispatch_link_message(&mut self, _from: &NodeId, plaintext: &[u8]) {
+        if plaintext.is_empty() {
+            return;
+        }
+
+        let msg_type = plaintext[0];
+        let _payload = &plaintext[1..];
+
+        // TODO: Implement link message handlers
+        match msg_type {
+            0x10 => {
+                // TreeAnnounce
+                debug!("Received TreeAnnounce (not yet implemented)");
+            }
+            0x20 => {
+                // FilterAnnounce
+                debug!("Received FilterAnnounce (not yet implemented)");
+            }
+            0x30 => {
+                // LookupRequest
+                debug!("Received LookupRequest (not yet implemented)");
+            }
+            0x31 => {
+                // LookupResponse
+                debug!("Received LookupResponse (not yet implemented)");
+            }
+            0x40 => {
+                // SessionDatagram
+                debug!("Received SessionDatagram (not yet implemented)");
+            }
+            _ => {
+                debug!(msg_type = msg_type, "Unknown link message type");
+            }
+        }
     }
 
     /// Stop the node.
@@ -1458,5 +1940,103 @@ mod tests {
         let sendable: Vec<_> = node.sendable_peers().collect();
         assert_eq!(sendable.len(), 2);
         assert!(sendable.iter().any(|p| p.node_id() == &node_id1));
+    }
+
+    // === RX Loop Tests ===
+
+    #[test]
+    fn test_node_index_allocator_initialized() {
+        let node = make_node();
+        // Index allocator should be empty on creation
+        assert_eq!(node.index_allocator.count(), 0);
+    }
+
+    #[test]
+    fn test_node_pending_outbound_tracking() {
+        let mut node = make_node();
+        let transport_id = TransportId::new(1);
+        let link_id = LinkId::new(1);
+
+        // Allocate an index
+        let index = node.index_allocator.allocate().unwrap();
+
+        // Track in pending_outbound
+        node.pending_outbound.insert((transport_id, index.as_u32()), link_id);
+
+        // Verify we can look it up
+        let found = node.pending_outbound.get(&(transport_id, index.as_u32()));
+        assert_eq!(found, Some(&link_id));
+
+        // Clean up
+        node.pending_outbound.remove(&(transport_id, index.as_u32()));
+        let _ = node.index_allocator.free(index);
+
+        assert_eq!(node.index_allocator.count(), 0);
+        assert!(node.pending_outbound.is_empty());
+    }
+
+    #[test]
+    fn test_node_peers_by_index_tracking() {
+        let mut node = make_node();
+        let transport_id = TransportId::new(1);
+        let node_id = make_node_id(42);
+
+        // Allocate an index
+        let index = node.index_allocator.allocate().unwrap();
+
+        // Track in peers_by_index
+        node.peers_by_index.insert((transport_id, index.as_u32()), node_id);
+
+        // Verify lookup
+        let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
+        assert_eq!(found, Some(&node_id));
+
+        // Clean up
+        node.peers_by_index.remove(&(transport_id, index.as_u32()));
+        let _ = node.index_allocator.free(index);
+
+        assert!(node.peers_by_index.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_node_rx_loop_requires_start() {
+        let mut node = make_node();
+
+        // RX loop should fail if node not started (no packet_rx)
+        let result = node.run_rx_loop().await;
+        assert!(matches!(result, Err(NodeError::NotStarted)));
+    }
+
+    #[tokio::test]
+    async fn test_node_rx_loop_takes_channel() {
+        let mut node = make_node();
+        node.start().await.unwrap();
+
+        // packet_rx should be available after start
+        assert!(node.packet_rx.is_some());
+
+        // After run_rx_loop takes ownership, it should be None
+        // We can't actually run the loop (it blocks), but we can test the take
+        let rx = node.packet_rx.take();
+        assert!(rx.is_some());
+        assert!(node.packet_rx.is_none());
+
+        node.stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_rate_limiter_initialized() {
+        let mut node = make_node();
+
+        // Rate limiter should allow handshakes initially
+        assert!(node.msg1_rate_limiter.can_start_handshake());
+
+        // Start a handshake
+        assert!(node.msg1_rate_limiter.start_handshake());
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 1);
+
+        // Complete it
+        node.msg1_rate_limiter.complete_handshake();
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 0);
     }
 }

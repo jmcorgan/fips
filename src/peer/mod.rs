@@ -65,10 +65,14 @@ pub enum PeerError {
 /// When a handshake completes, we may discover that we already have a
 /// connection to this peer (cross-connection). The tie-breaker rule
 /// determines which connection survives.
-#[derive(Debug)]
+///
+/// Note: Returns NodeId instead of ActivePeer because ActivePeer cannot
+/// be cloned (it contains NoiseSession which has cryptographic state).
+/// Callers can look up the peer from the peers map using the NodeId.
+#[derive(Debug, Clone, Copy)]
 pub enum PromotionResult {
     /// New peer created successfully.
-    Promoted(ActivePeer),
+    Promoted(NodeId),
 
     /// Cross-connection detected. This connection lost the tie-breaker
     /// and should be closed.
@@ -82,17 +86,17 @@ pub enum PromotionResult {
     CrossConnectionWon {
         /// The link that lost (previous connection, now closed).
         loser_link_id: LinkId,
-        /// The new active peer.
-        peer: ActivePeer,
+        /// The node ID of the peer.
+        node_id: NodeId,
     },
 }
 
 impl PromotionResult {
-    /// Get the active peer if promotion succeeded.
-    pub fn peer(&self) -> Option<&ActivePeer> {
+    /// Get the node ID if promotion succeeded.
+    pub fn node_id(&self) -> Option<NodeId> {
         match self {
-            PromotionResult::Promoted(peer) => Some(peer),
-            PromotionResult::CrossConnectionWon { peer, .. } => Some(peer),
+            PromotionResult::Promoted(node_id) => Some(*node_id),
+            PromotionResult::CrossConnectionWon { node_id, .. } => Some(*node_id),
             PromotionResult::CrossConnectionLost { .. } => None,
         }
     }
@@ -328,10 +332,11 @@ mod tests {
     #[test]
     fn test_promotion_result_promoted() {
         let identity = make_peer_identity();
-        let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
-        let result = PromotionResult::Promoted(peer);
+        let node_id = *identity.node_id();
+        let result = PromotionResult::Promoted(node_id);
 
-        assert!(result.peer().is_some());
+        assert!(result.node_id().is_some());
+        assert_eq!(result.node_id(), Some(node_id));
         assert!(!result.should_close_this_connection());
         assert!(result.link_to_close().is_none());
     }
@@ -342,7 +347,7 @@ mod tests {
             winner_link_id: LinkId::new(1),
         };
 
-        assert!(result.peer().is_none());
+        assert!(result.node_id().is_none());
         assert!(result.should_close_this_connection());
         assert!(result.link_to_close().is_none()); // Caller closes their own
     }
@@ -350,13 +355,14 @@ mod tests {
     #[test]
     fn test_promotion_result_cross_won() {
         let identity = make_peer_identity();
-        let peer = ActivePeer::new(identity, LinkId::new(2), 2000);
+        let node_id = *identity.node_id();
         let result = PromotionResult::CrossConnectionWon {
             loser_link_id: LinkId::new(1),
-            peer,
+            node_id,
         };
 
-        assert!(result.peer().is_some());
+        assert!(result.node_id().is_some());
+        assert_eq!(result.node_id(), Some(node_id));
         assert!(!result.should_close_this_connection());
         assert_eq!(result.link_to_close(), Some(LinkId::new(1)));
     }

@@ -4,8 +4,9 @@
 //! PeerConnection tracks the Noise IK handshake state and transitions to
 //! ActivePeer upon successful authentication.
 
+use crate::index::SessionIndex;
 use crate::noise::{self, NoiseError, NoiseSession};
-use crate::transport::{LinkDirection, LinkId, LinkStats};
+use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::PeerIdentity;
 use secp256k1::Keypair;
 use std::fmt;
@@ -101,6 +102,23 @@ pub struct PeerConnection {
     // === Statistics ===
     /// Link statistics during handshake.
     link_stats: LinkStats,
+
+    // === Wire Protocol Index Tracking ===
+    /// Our sender_idx for this handshake (chosen by us).
+    /// For outbound: included in msg1, used as receiver_idx in msg2 echo.
+    /// For inbound: chosen after processing msg1, included in msg2.
+    our_index: Option<SessionIndex>,
+
+    /// Their sender_idx (learned from their messages).
+    /// For outbound: learned from msg2.
+    /// For inbound: learned from msg1.
+    their_index: Option<SessionIndex>,
+
+    /// Transport ID (for index namespace).
+    transport_id: Option<TransportId>,
+
+    /// Current source address (updated on packet receipt).
+    source_addr: Option<TransportAddr>,
 }
 
 impl PeerConnection {
@@ -124,6 +142,10 @@ impl PeerConnection {
             last_activity: current_time_ms,
             retry_count: 0,
             link_stats: LinkStats::new(),
+            our_index: None,
+            their_index: None,
+            transport_id: None,
+            source_addr: None,
         }
     }
 
@@ -143,6 +165,37 @@ impl PeerConnection {
             last_activity: current_time_ms,
             retry_count: 0,
             link_stats: LinkStats::new(),
+            our_index: None,
+            their_index: None,
+            transport_id: None,
+            source_addr: None,
+        }
+    }
+
+    /// Create a new inbound connection with transport information.
+    ///
+    /// Used when processing msg1 where we know the transport and source address.
+    pub fn inbound_with_transport(
+        link_id: LinkId,
+        transport_id: TransportId,
+        source_addr: TransportAddr,
+        current_time_ms: u64,
+    ) -> Self {
+        Self {
+            link_id,
+            direction: LinkDirection::Inbound,
+            handshake_state: HandshakeState::Initial,
+            expected_identity: None,
+            noise_handshake: None,
+            noise_session: None,
+            started_at: current_time_ms,
+            last_activity: current_time_ms,
+            retry_count: 0,
+            link_stats: LinkStats::new(),
+            our_index: None,
+            their_index: None,
+            transport_id: Some(transport_id),
+            source_addr: Some(source_addr),
         }
     }
 
@@ -226,6 +279,48 @@ impl PeerConnection {
     /// Get mutable link statistics.
     pub fn link_stats_mut(&mut self) -> &mut LinkStats {
         &mut self.link_stats
+    }
+
+    // === Index Accessors ===
+
+    /// Get our session index (if set).
+    pub fn our_index(&self) -> Option<SessionIndex> {
+        self.our_index
+    }
+
+    /// Set our session index.
+    pub fn set_our_index(&mut self, index: SessionIndex) {
+        self.our_index = Some(index);
+    }
+
+    /// Get their session index (if known).
+    pub fn their_index(&self) -> Option<SessionIndex> {
+        self.their_index
+    }
+
+    /// Set their session index.
+    pub fn set_their_index(&mut self, index: SessionIndex) {
+        self.their_index = Some(index);
+    }
+
+    /// Get the transport ID (if set).
+    pub fn transport_id(&self) -> Option<TransportId> {
+        self.transport_id
+    }
+
+    /// Set the transport ID.
+    pub fn set_transport_id(&mut self, id: TransportId) {
+        self.transport_id = Some(id);
+    }
+
+    /// Get the source address (if known).
+    pub fn source_addr(&self) -> Option<&TransportAddr> {
+        self.source_addr.as_ref()
+    }
+
+    /// Set the source address.
+    pub fn set_source_addr(&mut self, addr: TransportAddr) {
+        self.source_addr = Some(addr);
     }
 
     // === Noise Handshake Operations ===
@@ -402,6 +497,9 @@ impl fmt::Debug for PeerConnection {
             .field("expected_identity", &self.expected_identity)
             .field("has_noise_handshake", &self.noise_handshake.is_some())
             .field("has_noise_session", &self.noise_session.is_some())
+            .field("our_index", &self.our_index)
+            .field("their_index", &self.their_index)
+            .field("transport_id", &self.transport_id)
             .field("started_at", &self.started_at)
             .field("last_activity", &self.last_activity)
             .field("retry_count", &self.retry_count)

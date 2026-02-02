@@ -8,13 +8,16 @@ pub mod cache;
 pub mod config;
 pub mod icmp;
 pub mod identity;
+pub mod index;
 pub mod noise;
 pub mod node;
 pub mod peer;
 pub mod protocol;
+pub mod rate_limit;
 pub mod transport;
 pub mod tree;
 pub mod tun;
+pub mod wire;
 
 // Re-export identity types
 pub use identity::{
@@ -66,3 +69,16 @@ pub use icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCo
 
 // Re-export Noise types (HandshakeState not re-exported to avoid conflict with peer::HandshakeState)
 pub use noise::{CipherState, HandshakeRole, NoiseError, NoiseSession};
+
+// Re-export index types
+pub use index::{IndexAllocator, IndexError, SessionIndex};
+
+// Re-export rate limiting types
+pub use rate_limit::{HandshakeRateLimiter, TokenBucket};
+
+// Re-export wire format types
+pub use wire::{
+    build_encrypted, build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
+    DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2, ENCRYPTED_MIN_SIZE,
+    ENCRYPTED_OVERHEAD, MSG1_WIRE_SIZE, MSG2_WIRE_SIZE,
+};
