@@ -276,29 +276,38 @@ routing of the response back to origin.
 **ttl**: Propagation limit. Prevents unbounded flooding.
 
 **visited**: Compact Bloom filter tracking nodes that have seen this request.
-Prevents redundant processing and loops.
+Prevents loops (revisiting a node on the same path). Note: does NOT prevent
+convergent duplicates arriving via different paths — `request_id` dedup
+(section 4.4) is required for that.
 
 ### 4.3 Propagation Rules
 
 When receiving LookupRequest:
 
 ```text
-1. Check visited filter - if self likely present, drop (already processed)
-2. Add self to visited filter
-3. Decrement TTL
+1. Check request_id against recent-request cache - if present, drop (duplicate
+   via convergent path). This is REQUIRED, not optional — the visited filter
+   alone does not prevent duplicates arriving via different paths.
+2. Add request_id to recent-request cache
+3. Check visited filter - if self likely present, drop (already processed)
+4. Add self to visited filter
+5. Decrement TTL
 
-4. Check if target is local:
+6. Check if target is local:
    - If target == self.node_addr: generate LookupResponse
    - If target in local peer_filters: may respond on behalf (optional)
 
-5. If TTL > 0 and not found locally:
+7. If TTL > 0 and not found locally:
    - Forward to peers not in visited filter
    - Optionally prioritize peers whose filter indicates target "maybe" present
 ```
 
+The recent-request cache need only retain entries for a few seconds (long
+enough for the flood to complete across the TTL scope) and is bounded by the
+rate limit on incoming requests.
+
 ### 4.4 Rate Limiting
 
-- Track recently seen request_ids, drop duplicates
 - Limit requests per origin per time window
 - Limit total outstanding requests
 

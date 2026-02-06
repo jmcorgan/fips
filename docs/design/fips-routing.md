@@ -262,7 +262,11 @@ For wire formats, see [fips-gossip-protocol.md](fips-gossip-protocol.md) §4-5.
 - Send to all peers not in `visited` filter
 - Each hop decrements TTL, adds self to `visited`
 - At TTL=0, stop propagating
-- `visited` filter prevents redundant processing
+- `visited` filter prevents loops (a packet revisiting a node on its own
+  path), but does NOT prevent convergent duplicates — the same request
+  arriving at a node via different paths with different visited filters.
+  See [Known Limitation: Flood
+  Convergence](#known-limitation-flood-convergence).
 
 **Bloom filter assistance (optional optimization):**
 
@@ -621,6 +625,115 @@ When nodes join/leave:
 | Bandwidth (idle) | < 1 KB/sec | Near zero |
 
 ---
+
+## Known Limitations
+
+### Known Limitation: Flood Convergence
+
+The visited Bloom filter in LookupRequest prevents **loops** (a packet
+revisiting a node on its own path) but does not prevent **convergent
+duplicates** — the same request arriving at a node via different paths, each
+carrying a different visited filter.
+
+Example: Source S floods to peers B and C. Both forward to node D. D receives
+two copies — one with visited={S,B}, one with visited={S,C}. Neither copy's
+visited filter contains D, so D processes both. This redundancy compounds at
+every well-connected node in the flood path, and the destination may generate
+multiple LookupResponses.
+
+**Required fix**: Nodes MUST maintain a short-lived cache of recently-seen
+`request_id` values (retention: a few seconds, bounded by request rate limit).
+On receiving a LookupRequest, check this cache first and drop duplicates before
+consulting the visited filter. This is referenced in the gossip protocol spec
+(section 4.4, rate limiting) but needs to be elevated to a protocol
+requirement, not an optimization.
+
+### Known Limitation: Capacity-Blind Greedy Routing
+
+Greedy routing selects the next hop by minimizing tree distance, which is
+purely topological (hop count through the LCA). It does not account for link
+capacity, latency, or loss.
+
+This creates a problem when a topologically short but low-capacity link exists
+alongside a longer but high-capacity path. Greedy routing will prefer the short
+path, potentially saturating the slow link while the high-capacity path goes
+underutilized.
+
+**Proposed mitigation**: Each node locally measures the quality of its direct
+peer links (RTT, bandwidth, loss) and applies a cost adjustment to the
+forwarding decision:
+
+```text
+effective_distance(peer, dest) =
+    tree_distance(peer, dest) × local_link_cost(peer)
+```
+
+This requires no protocol changes — link quality is measured locally, not
+advertised. Self-reported cost claims are intentionally excluded from the
+protocol to prevent adversarial traffic attraction (a node advertising
+artificially low costs to become a transit point for surveillance or
+disruption). Only locally-measured, first-hop metrics are used.
+
+## Enhancement Opportunity: Discovery Path Accumulation
+
+The LookupRequest flood naturally finds the lowest-latency path to the
+destination — the first copy to arrive traveled the fastest route. Currently
+this path information is discarded; only the destination's tree coordinates
+survive in the LookupResponse.
+
+### Concept
+
+Each node forwarding a LookupRequest appends a signed path entry:
+
+```text
+PathEntry {
+    node_addr: NodeAddr,        // 16 bytes, forwarding node
+    signature: Signature,       // 64 bytes, signs
+                                // (request_id || position || node_addr)
+}
+```
+
+The destination includes the accumulated path in the LookupResponse alongside
+the existing `target_coords`. Per-hop signatures prevent path fabrication — a
+malicious node cannot insert fake hops or claim a path it didn't traverse.
+
+### Potential Uses
+
+**Source peer bias**: The source examines the first hop of the discovered path
+to learn which of its direct peers leads to the empirically fastest route to
+the destination. This biases forwarding for that destination toward that peer,
+complementing tree distance and local link quality measurements. The source can
+verify this directly since the first hop is a direct peer.
+
+**Intermediate router hints**: Routers along the path can verify their own
+position and adjacent hops (which should be direct peers). This gives them
+empirical data about which peer directions lead toward specific destinations,
+potentially informing their own forwarding decisions for future packets.
+
+**Coordinate cache seeding**: Intermediate routers on the discovered path learn
+about both endpoints before data traffic begins, enabling pre-warming of
+coordinate caches and reducing CoordsRequired errors on the first data packets.
+
+### Tradeoffs
+
+- **Size overhead**: 80 bytes per hop in the LookupRequest. An 8-hop path adds
+  640 bytes. Acceptable for a one-time discovery message, not suitable for data
+  packets.
+- **Staleness**: The path is a snapshot. Nodes may disconnect or links may
+  degrade after discovery. The path should be treated as a hint, not a
+  commitment. Greedy coordinate-based routing remains the primary forwarding
+  mechanism.
+- **Latency vs capacity**: The fastest flood path is the lowest-latency path,
+  which is not necessarily the highest-capacity path. For bulk transfers, a
+  slower but higher-bandwidth path may be preferable. The path signal is most
+  useful for latency-sensitive traffic.
+
+### Interaction with Request Deduplication
+
+With strict `request_id` dedup at every node, the destination receives exactly
+one request via the fastest path. If multiple candidate paths are desired (for
+failover or load balancing), the destination could be exempted from dedup to
+accept the first N arrivals, at the cost of generating multiple responses.
 
 ## Open Questions
 
