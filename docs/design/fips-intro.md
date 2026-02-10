@@ -196,17 +196,17 @@ traffic.
 
 FIPS uses independent encryption at two layers:
 
-| Layer       | Scope       | Pattern  | Purpose                              |
-|-------------|-------------|----------|--------------------------------------|
-| **Link**    | Hop-by-hop  | Noise IK | Encrypt all traffic on each link    |
-| **Session** | End-to-end  | Noise IK | Encrypt payload across multiple hops |
+| Layer       | Scope       | Pattern  | Purpose                                        |
+|-------------|-------------|----------|------------------------------------------------|
+| **Link**    | Hop-by-hop  | Noise IK | Encrypt all traffic on each link               |
+| **Session** | End-to-end  | Noise IK | Encrypt application payload between endpoints  |
 
-### Link Layer (Peer-to-Peer)
+### Link Layer (Hop-by-Hop)
 
 When two nodes establish a direct connection, they perform a Noise IK handshake.
 This authenticates both parties and establishes symmetric keys for encrypting
 all traffic on that link. Every packet between direct peers is encrypted—gossip
-messages, routing queries, and forwarded traffic alike.
+messages, routing queries, and forwarded session datagrams alike.
 
 The IK pattern is used because outbound connections know the peer's npub from
 configuration, while inbound connections learn the initiator's identity from
@@ -214,15 +214,31 @@ the first handshake message.
 
 ### Session Layer (End-to-End)
 
-For traffic between non-adjacent nodes, FIPS establishes end-to-end encrypted
-sessions using Noise IK. The initiator knows the destination's npub; the
+FIPS establishes end-to-end encrypted sessions between any two communicating
+nodes using Noise IK, regardless of whether they are direct peers or separated
+by intermediate routers. The initiator knows the destination's npub; the
 responder learns the initiator's identity from the handshake—the same asymmetry
 as link-layer connections.
+
+Both layers always apply. For adjacent peers, application traffic is encrypted
+twice: once by the session layer (end-to-end) and once by the link layer
+(hop-by-hop). This uniform model means:
+
+- No special case for "local peer" vs "remote destination"
+- Topology changes (a direct peer becomes reachable only through intermediaries)
+  don't affect sessions
+- The link layer remains purely a transport concern
+
+A packet from A to adjacent peer B:
+
+1. A encrypts payload with A↔B session key
+2. A wraps in SessionDatagram, encrypts with A↔B link key, sends to B
+3. B decrypts link layer, then decrypts session layer to get payload
 
 A packet from A to D through intermediate node B:
 
 1. A encrypts payload with A↔D session key
-2. A encrypts that with A↔B link key, sends to B
+2. A wraps in SessionDatagram, encrypts with A↔B link key, sends to B
 3. B decrypts link layer, sees destination, re-encrypts with B↔D link key
 4. D decrypts link layer, then decrypts session layer to get payload
 
