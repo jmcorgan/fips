@@ -411,6 +411,16 @@ Secp256k1 and SHA-256 are already used for Nostr identities, and
 ChaCha20-Poly1305 matches NIP-44 encryption. Lightning's BOLT 8 provides a
 proven reference for adapting Noise Protocol to secp256k1.
 
+**secp256k1 parity normalization**: Nostr npubs encode x-only public keys
+(32 bytes, no y-coordinate parity). The Noise IK pre-message mixes the
+responder's static key as a 33-byte compressed key, and the default
+secp256k1 ECDH hash includes a parity-dependent version byte. Since the
+initiator may only have the x-only key, both operations are normalized to be
+parity-independent: the pre-message hash uses even parity (`0x02` prefix),
+and ECDH hashes only the x-coordinate of the result point. This ensures
+handshakes succeed regardless of the responder's actual key parity. See
+`secp256k1-parity-fix.md` for detailed analysis.
+
 ### 6.4 Handshake Integration with SessionSetup
 
 The Noise handshake messages embed in SessionSetup/SessionAck:

@@ -465,10 +465,11 @@ Exchanged between directly connected peers, encrypted with link session keys:
 | Type | Name           | Purpose                                    |
 |------|----------------|--------------------------------------------|
 | 0x10 | TreeAnnounce   | Spanning tree state (parent, ancestry)     |
-| 0x11 | FilterAnnounce | Bloom filter reachability update           |
-| 0x12 | LookupRequest  | Query for node's tree coordinates          |
-| 0x13 | LookupResponse | Response with coordinates and proof        |
+| 0x20 | FilterAnnounce | Bloom filter reachability update           |
+| 0x30 | LookupRequest  | Query for node's tree coordinates          |
+| 0x31 | LookupResponse | Response with coordinates and proof        |
 | 0x40 | SessionDatagram| Carries end-to-end encrypted payloads      |
+| 0x50 | Disconnect     | Orderly disconnect notification            |
 
 ### Session Layer Messages
 

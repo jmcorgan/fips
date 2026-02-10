@@ -116,6 +116,10 @@ pub enum LinkMessageType {
     /// Encapsulated session-layer datagram for forwarding.
     /// Payload is opaque to intermediate nodes (end-to-end encrypted).
     SessionDatagram = 0x40,
+
+    // Link Control (0x50-0x5F)
+    /// Orderly disconnect notification before link closure.
+    Disconnect = 0x50,
 }
 
 impl LinkMessageType {
@@ -127,6 +131,7 @@ impl LinkMessageType {
             0x30 => Some(LinkMessageType::LookupRequest),
             0x31 => Some(LinkMessageType::LookupResponse),
             0x40 => Some(LinkMessageType::SessionDatagram),
+            0x50 => Some(LinkMessageType::Disconnect),
             _ => None,
         }
     }
@@ -145,8 +150,123 @@ impl fmt::Display for LinkMessageType {
             LinkMessageType::LookupRequest => "LookupRequest",
             LinkMessageType::LookupResponse => "LookupResponse",
             LinkMessageType::SessionDatagram => "SessionDatagram",
+            LinkMessageType::Disconnect => "Disconnect",
         };
         write!(f, "{}", name)
+    }
+}
+
+// ============================================================================
+// Disconnect Reason Codes
+// ============================================================================
+
+/// Reason for an orderly disconnect notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DisconnectReason {
+    /// Normal shutdown (operator requested).
+    Shutdown = 0x00,
+    /// Restarting (may reconnect soon).
+    Restart = 0x01,
+    /// Protocol error encountered.
+    ProtocolError = 0x02,
+    /// Transport failure.
+    TransportFailure = 0x03,
+    /// Resource exhaustion (memory, connections).
+    ResourceExhaustion = 0x04,
+    /// Authentication or security policy violation.
+    SecurityViolation = 0x05,
+    /// Configuration change (peer removed from config).
+    ConfigurationChange = 0x06,
+    /// Timeout or keepalive failure.
+    Timeout = 0x07,
+    /// Unspecified reason.
+    Other = 0xFF,
+}
+
+impl DisconnectReason {
+    /// Try to convert from a byte.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(DisconnectReason::Shutdown),
+            0x01 => Some(DisconnectReason::Restart),
+            0x02 => Some(DisconnectReason::ProtocolError),
+            0x03 => Some(DisconnectReason::TransportFailure),
+            0x04 => Some(DisconnectReason::ResourceExhaustion),
+            0x05 => Some(DisconnectReason::SecurityViolation),
+            0x06 => Some(DisconnectReason::ConfigurationChange),
+            0x07 => Some(DisconnectReason::Timeout),
+            0xFF => Some(DisconnectReason::Other),
+            _ => None,
+        }
+    }
+
+    /// Convert to a byte.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+impl fmt::Display for DisconnectReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            DisconnectReason::Shutdown => "Shutdown",
+            DisconnectReason::Restart => "Restart",
+            DisconnectReason::ProtocolError => "ProtocolError",
+            DisconnectReason::TransportFailure => "TransportFailure",
+            DisconnectReason::ResourceExhaustion => "ResourceExhaustion",
+            DisconnectReason::SecurityViolation => "SecurityViolation",
+            DisconnectReason::ConfigurationChange => "ConfigurationChange",
+            DisconnectReason::Timeout => "Timeout",
+            DisconnectReason::Other => "Other",
+        };
+        write!(f, "{}", name)
+    }
+}
+
+// ============================================================================
+// Disconnect Message
+// ============================================================================
+
+/// Orderly disconnect notification sent before closing a peer link.
+///
+/// Sent as a link-layer message (type 0x50) inside an encrypted frame.
+/// Allows the receiving peer to immediately clean up state rather than
+/// waiting for timeout-based detection.
+///
+/// ## Wire Format
+///
+/// | Offset | Field    | Size   | Notes                  |
+/// |--------|----------|--------|------------------------|
+/// | 0      | msg_type | 1 byte | 0x50                   |
+/// | 1      | reason   | 1 byte | DisconnectReason value |
+#[derive(Clone, Debug)]
+pub struct Disconnect {
+    /// Reason for disconnection.
+    pub reason: DisconnectReason,
+}
+
+impl Disconnect {
+    /// Create a new Disconnect message.
+    pub fn new(reason: DisconnectReason) -> Self {
+        Self { reason }
+    }
+
+    /// Encode as link-layer plaintext (msg_type + reason).
+    pub fn encode(&self) -> [u8; 2] {
+        [LinkMessageType::Disconnect.to_byte(), self.reason.to_byte()]
+    }
+
+    /// Decode from link-layer payload (after msg_type byte has been consumed).
+    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+        if payload.is_empty() {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 1,
+                got: 0,
+            });
+        }
+        let reason = DisconnectReason::from_byte(payload[0]).unwrap_or(DisconnectReason::Other);
+        Ok(Self { reason })
     }
 }
 
@@ -902,6 +1022,7 @@ mod tests {
             LinkMessageType::LookupRequest,
             LinkMessageType::LookupResponse,
             LinkMessageType::SessionDatagram,
+            LinkMessageType::Disconnect,
         ];
 
         for ty in types {
@@ -915,6 +1036,83 @@ mod tests {
     fn test_link_message_type_invalid() {
         assert!(LinkMessageType::from_byte(0xFF).is_none());
         assert!(LinkMessageType::from_byte(0x00).is_none());
+    }
+
+    // ===== DisconnectReason Tests =====
+
+    #[test]
+    fn test_disconnect_reason_roundtrip() {
+        let reasons = [
+            DisconnectReason::Shutdown,
+            DisconnectReason::Restart,
+            DisconnectReason::ProtocolError,
+            DisconnectReason::TransportFailure,
+            DisconnectReason::ResourceExhaustion,
+            DisconnectReason::SecurityViolation,
+            DisconnectReason::ConfigurationChange,
+            DisconnectReason::Timeout,
+            DisconnectReason::Other,
+        ];
+
+        for reason in reasons {
+            let byte = reason.to_byte();
+            let restored = DisconnectReason::from_byte(byte);
+            assert_eq!(restored, Some(reason));
+        }
+    }
+
+    #[test]
+    fn test_disconnect_reason_unknown_byte() {
+        // Unrecognized bytes return None
+        assert!(DisconnectReason::from_byte(0x08).is_none());
+        assert!(DisconnectReason::from_byte(0x80).is_none());
+        assert!(DisconnectReason::from_byte(0xFE).is_none());
+    }
+
+    // ===== Disconnect Message Tests =====
+
+    #[test]
+    fn test_disconnect_encode_decode() {
+        let msg = Disconnect::new(DisconnectReason::Shutdown);
+        let encoded = msg.encode();
+
+        assert_eq!(encoded.len(), 2);
+        assert_eq!(encoded[0], 0x50); // LinkMessageType::Disconnect
+        assert_eq!(encoded[1], 0x00); // DisconnectReason::Shutdown
+
+        // Decode from payload (after msg_type byte)
+        let decoded = Disconnect::decode(&encoded[1..]).unwrap();
+        assert_eq!(decoded.reason, DisconnectReason::Shutdown);
+    }
+
+    #[test]
+    fn test_disconnect_all_reasons() {
+        let reasons = [
+            DisconnectReason::Shutdown,
+            DisconnectReason::Restart,
+            DisconnectReason::ProtocolError,
+            DisconnectReason::Other,
+        ];
+
+        for reason in reasons {
+            let msg = Disconnect::new(reason);
+            let encoded = msg.encode();
+            let decoded = Disconnect::decode(&encoded[1..]).unwrap();
+            assert_eq!(decoded.reason, reason);
+        }
+    }
+
+    #[test]
+    fn test_disconnect_decode_empty_payload() {
+        let result = Disconnect::decode(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_disconnect_decode_unknown_reason() {
+        // Unknown reason codes fall back to Other
+        let decoded = Disconnect::decode(&[0x80]).unwrap();
+        assert_eq!(decoded.reason, DisconnectReason::Other);
     }
 
     // ===== SessionMessageType Tests =====

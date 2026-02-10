@@ -1,6 +1,7 @@
 //! RX event loop and message handlers.
 
 use super::*;
+use crate::rate_limit::HANDSHAKE_TIMEOUT_SECS;
 
 impl Node {
     // === RX Event Loop ===
@@ -13,16 +14,32 @@ impl Node {
     /// - 0x01: Handshake message 1 (initiator -> responder)
     /// - 0x02: Handshake message 2 (responder -> initiator)
     ///
+    /// Also runs a periodic tick (1s) to clean up stale handshake connections
+    /// that never received a response. This prevents resource leaks when peers
+    /// are unreachable.
+    ///
     /// This method takes ownership of the packet_rx channel and runs
     /// until the channel is closed (typically when stop() is called).
     pub async fn run_rx_loop(&mut self) -> Result<(), NodeError> {
         let mut packet_rx = self.packet_rx.take()
             .ok_or(NodeError::NotStarted)?;
 
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+
         info!("RX event loop started");
 
-        while let Some(packet) = packet_rx.recv().await {
-            self.process_packet(packet).await;
+        loop {
+            tokio::select! {
+                packet = packet_rx.recv() => {
+                    match packet {
+                        Some(p) => self.process_packet(p).await,
+                        None => break, // channel closed
+                    }
+                }
+                _ = tick.tick() => {
+                    self.check_timeouts();
+                }
+            }
         }
 
         info!("RX event loop stopped (channel closed)");
@@ -159,16 +176,32 @@ impl Node {
             }
         };
 
-        // Check for existing connection from this address
+        // Check for existing connection from this address.
+        //
+        // If we already have an *inbound* link from this address, drop the msg1
+        // (duplicate or replay). But if we have an *outbound* link to this address
+        // (we initiated to them AND they initiated to us), this is a cross-connection.
+        // Allow it to proceed — promote_connection() will resolve via tie-breaker.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
-        if self.addr_to_link.contains_key(&addr_key) {
-            self.msg1_rate_limiter.complete_handshake();
-            debug!(
-                transport_id = %packet.transport_id,
-                remote_addr = %packet.remote_addr,
-                "Already have connection from this address"
-            );
-            return;
+        if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key) {
+            if let Some(link) = self.links.get(&existing_link_id) {
+                if link.direction() == LinkDirection::Inbound {
+                    self.msg1_rate_limiter.complete_handshake();
+                    debug!(
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        "Already have inbound connection from this address"
+                    );
+                    return;
+                }
+                // Outbound link to this address — cross-connection, allow msg1
+                debug!(
+                    transport_id = %packet.transport_id,
+                    remote_addr = %packet.remote_addr,
+                    existing_link_id = %existing_link_id,
+                    "Cross-connection detected: have outbound, received inbound msg1"
+                );
+            }
         }
 
         // === CRYPTO COST PAID HERE ===
@@ -279,13 +312,22 @@ impl Node {
                         );
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
+                        // Clean up the losing connection's link
+                        self.remove_link(&loser_link_id);
                         info!(
                             node_addr = %node_addr,
                             loser_link_id = %loser_link_id,
-                            "Inbound cross-connection won"
+                            "Inbound cross-connection won, loser link cleaned up"
                         );
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
+                        // This connection lost — clean up its link
+                        self.remove_link(&link_id);
+                        // Restore addr_to_link for the winner's link
+                        self.addr_to_link.insert(
+                            (packet.transport_id, packet.remote_addr.clone()),
+                            winner_link_id,
+                        );
                         info!(
                             winner_link_id = %winner_link_id,
                             "Inbound cross-connection lost, keeping existing"
@@ -300,9 +342,7 @@ impl Node {
                     "Failed to promote inbound connection"
                 );
                 // Clean up on promotion failure
-                self.links.remove(&link_id);
-                self.addr_to_link
-                    .remove(&(packet.transport_id, packet.remote_addr));
+                self.remove_link(&link_id);
                 let _ = self.index_allocator.free(our_index);
             }
         }
@@ -392,16 +432,30 @@ impl Node {
                         );
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
+                        // Clean up the losing connection's link
+                        self.remove_link(&loser_link_id);
+                        // Ensure addr_to_link points to the winning link
+                        self.addr_to_link.insert(
+                            (packet.transport_id, packet.remote_addr.clone()),
+                            link_id,
+                        );
                         info!(
                             node_addr = %node_addr,
                             loser_link_id = %loser_link_id,
-                            "Cross-connection won"
+                            "Outbound cross-connection won, loser link cleaned up"
                         );
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
+                        // This connection lost — clean up its link
+                        self.remove_link(&link_id);
+                        // Ensure addr_to_link points to the winner's link
+                        self.addr_to_link.insert(
+                            (packet.transport_id, packet.remote_addr.clone()),
+                            winner_link_id,
+                        );
                         info!(
                             winner_link_id = %winner_link_id,
-                            "Cross-connection lost"
+                            "Outbound cross-connection lost, keeping existing"
                         );
                     }
                 }
@@ -575,15 +629,15 @@ impl Node {
     /// Dispatch a decrypted link message to the appropriate handler.
     ///
     /// Link messages are protocol messages exchanged between authenticated peers.
-    async fn dispatch_link_message(&mut self, _from: &NodeAddr, plaintext: &[u8]) {
+    async fn dispatch_link_message(&mut self, from: &NodeAddr, plaintext: &[u8]) {
         if plaintext.is_empty() {
             return;
         }
 
         let msg_type = plaintext[0];
-        let _payload = &plaintext[1..];
+        let payload = &plaintext[1..];
 
-        // TODO: Implement link message handlers
+        // TODO: Implement remaining link message handlers
         match msg_type {
             0x10 => {
                 // TreeAnnounce
@@ -605,9 +659,134 @@ impl Node {
                 // SessionDatagram
                 debug!("Received SessionDatagram (not yet implemented)");
             }
+            0x50 => {
+                // Disconnect
+                self.handle_disconnect(from, payload);
+            }
             _ => {
                 debug!(msg_type = msg_type, "Unknown link message type");
             }
+        }
+    }
+
+    /// Handle a Disconnect notification from a peer.
+    ///
+    /// The peer is signaling an orderly departure. We immediately remove
+    /// them from all state rather than waiting for timeout detection.
+    fn handle_disconnect(&mut self, from: &NodeAddr, payload: &[u8]) {
+        let disconnect = match crate::protocol::Disconnect::decode(payload) {
+            Ok(msg) => msg,
+            Err(e) => {
+                debug!(from = %from, error = %e, "Malformed disconnect message");
+                return;
+            }
+        };
+
+        info!(
+            node_addr = %from,
+            reason = %disconnect.reason,
+            "Peer sent disconnect notification"
+        );
+
+        self.remove_active_peer(from);
+    }
+
+    /// Remove an active peer and clean up all associated state.
+    ///
+    /// Frees session index, removes link and address mappings. Used for
+    /// both graceful disconnect and timeout-based eviction.
+    pub(super) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
+        let peer = match self.peers.remove(node_addr) {
+            Some(p) => p,
+            None => {
+                debug!(node_addr = %node_addr, "Peer already removed");
+                return;
+            }
+        };
+
+        let link_id = peer.link_id();
+
+        // Free session index
+        if let (Some(tid), Some(idx)) = (peer.transport_id(), peer.our_index()) {
+            self.peers_by_index.remove(&(tid, idx.as_u32()));
+            let _ = self.index_allocator.free(idx);
+        }
+
+        // Remove link and address mapping
+        self.remove_link(&link_id);
+
+        info!(
+            node_addr = %node_addr,
+            link_id = %link_id,
+            "Peer removed and state cleaned up"
+        );
+    }
+
+    // === Timeout Management ===
+
+    /// Check for timed-out handshake connections and clean them up.
+    ///
+    /// Called periodically by the RX event loop. Removes connections that have
+    /// been idle longer than HANDSHAKE_TIMEOUT_SECS or are in Failed state.
+    pub(super) fn check_timeouts(&mut self) {
+        if self.connections.is_empty() {
+            return;
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let timeout_ms = HANDSHAKE_TIMEOUT_SECS * 1000;
+
+        let stale: Vec<LinkId> = self.connections.iter()
+            .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())
+            .map(|(link_id, _)| *link_id)
+            .collect();
+
+        for link_id in stale {
+            self.cleanup_stale_connection(link_id, now_ms);
+        }
+    }
+
+    /// Remove a stale or failed handshake connection and all associated state.
+    ///
+    /// Frees the session index, removes pending_outbound entry, and cleans up
+    /// the link and address mapping.
+    fn cleanup_stale_connection(&mut self, link_id: LinkId, now_ms: u64) {
+        let conn = match self.connections.remove(&link_id) {
+            Some(c) => c,
+            None => return,
+        };
+
+        let direction = conn.direction();
+        let idle_ms = conn.idle_time(now_ms);
+        let is_failed = conn.is_failed();
+
+        // Free session index and pending_outbound if allocated
+        if let Some(idx) = conn.our_index() {
+            if let Some(tid) = conn.transport_id() {
+                self.pending_outbound.remove(&(tid, idx.as_u32()));
+            }
+            let _ = self.index_allocator.free(idx);
+        }
+
+        // Remove link and addr_to_link
+        self.remove_link(&link_id);
+
+        if is_failed {
+            info!(
+                link_id = %link_id,
+                direction = %direction,
+                "Failed handshake connection cleaned up"
+            );
+        } else {
+            info!(
+                link_id = %link_id,
+                direction = %direction,
+                idle_secs = idle_ms / 1000,
+                "Stale handshake connection timed out"
+            );
         }
     }
 }

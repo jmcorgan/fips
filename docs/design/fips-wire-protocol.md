@@ -156,6 +156,53 @@ Indices SHOULD be:
 4. **Rotated on rekey**: When a session rekeys, allocate new indices to prevent
    cross-session correlation.
 
+### 2.6 Link Control Messages
+
+Link control messages are sent inside encrypted frames (discriminator 0x00) and
+use the 0x50–0x5F message type range. The first defined control message is
+Disconnect (0x50).
+
+#### Disconnect (0x50)
+
+Orderly disconnect notification sent before closing a peer link:
+
+```text
+ENCRYPTED FRAME (discriminator 0x00):
+  [receiver_idx][counter][ENCRYPTED_PAYLOAD + tag]
+
+DECRYPTED PLAINTEXT:
+┌──────────┬──────────┐
+│ 0x50     │ reason   │
+│ 1 byte   │ 1 byte   │
+└──────────┴──────────┘
+
+Total plaintext: 2 bytes
+```
+
+**Reason codes:**
+
+| Code | Name                | Description                              |
+|------|---------------------|------------------------------------------|
+| 0x00 | Shutdown            | Normal operator-requested stop           |
+| 0x01 | Restart             | Restarting, may reconnect soon           |
+| 0x02 | ProtocolError       | Protocol error encountered               |
+| 0x03 | TransportFailure    | Transport failure                        |
+| 0x04 | ResourceExhaustion  | Memory or connection limit               |
+| 0x05 | SecurityViolation   | Authentication or policy violation       |
+| 0x06 | ConfigurationChange | Peer removed from configuration          |
+| 0x07 | Timeout             | Keepalive or stale detection timeout     |
+| 0xFF | Other               | Unspecified reason                       |
+
+**Semantics:**
+
+- **Best-effort delivery**: If the transport is broken, the message won't arrive.
+  Timeout-based detection (stale peer, keepalive failure) remains the fallback.
+- **Receiver action**: Immediately remove the peer from the peer table, free the
+  session index, remove the link, and clean up address mappings. If the departed
+  peer was a tree parent, trigger parent reselection.
+- **Shutdown sequence**: On node shutdown, Disconnect is sent to all active peers
+  *before* transports are stopped.
+
 ---
 
 ## 3. Packet Dispatch
@@ -846,9 +893,9 @@ Post-handshake data packets between authenticated peers.
 │  └────────┴──────────────────┴───────────┴───────────────────────────────┘  │
 │                                                                             │
 │  Link message types:                                                        │
-│    0x10 = TreeAnnounce       0x12 = LookupRequest                          │
-│    0x11 = FilterAnnounce     0x13 = LookupResponse                         │
-│    0x40 = SessionDatagram                                                   │
+│    0x10 = TreeAnnounce       0x30 = LookupRequest                          │
+│    0x20 = FilterAnnounce     0x31 = LookupResponse                         │
+│    0x40 = SessionDatagram    0x50 = Disconnect                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

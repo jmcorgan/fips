@@ -1,6 +1,7 @@
 //! Node lifecycle management: start, stop, and peer connection initiation.
 
 use super::*;
+use crate::protocol::{Disconnect, DisconnectReason};
 
 impl Node {
     /// Initiate connections to configured static peers.
@@ -316,7 +317,10 @@ impl Node {
         self.state = NodeState::Stopping;
         info!(state = %self.state, "Node stopping");
 
-        // Shutdown transports first (they're packet producers)
+        // Send disconnect notifications to all active peers before closing transports
+        self.send_disconnect_to_all_peers(DisconnectReason::Shutdown).await;
+
+        // Shutdown transports (they're packet producers)
         let transport_ids: Vec<_> = self.transports.keys().cloned().collect();
         for transport_id in transport_ids {
             if let Some(mut handle) = self.transports.remove(&transport_id) {
@@ -367,5 +371,44 @@ impl Node {
         self.state = NodeState::Stopped;
         info!(state = %self.state, "Node stopped");
         Ok(())
+    }
+
+    /// Send disconnect notifications to all active peers.
+    ///
+    /// Best-effort: send failures are logged and ignored since the transport
+    /// may already be degraded. This runs before transports are shut down.
+    async fn send_disconnect_to_all_peers(&mut self, reason: DisconnectReason) {
+        let disconnect = Disconnect::new(reason);
+        let plaintext = disconnect.encode();
+
+        // Collect node_addrs to avoid borrow conflict with send helper
+        let peer_addrs: Vec<NodeAddr> = self.peers.iter()
+            .filter(|(_, peer)| peer.can_send() && peer.has_session())
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        if peer_addrs.is_empty() {
+            debug!(
+                total_peers = self.peers.len(),
+                "No sendable peers for disconnect notification"
+            );
+            return;
+        }
+
+        let mut sent = 0usize;
+        for node_addr in &peer_addrs {
+            match self.send_encrypted_link_message(node_addr, &plaintext).await {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    debug!(
+                        node_addr = %node_addr,
+                        error = %e,
+                        "Failed to send disconnect (transport may be down)"
+                    );
+                }
+            }
+        }
+
+        info!(sent, total = peer_addrs.len(), reason = %reason, "Sent disconnect notifications");
     }
 }

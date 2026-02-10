@@ -232,9 +232,9 @@ PeerSlot::Connecting(PeerConnection)
     ▼
 PeerSlot::Active(ActivePeer)
     │
-    │ Link failure / explicit disconnect
+    │ Disconnect message (0x50) / link failure / timeout
     ▼
-[removed from peers map]
+[removed from peers map, index freed, link cleaned up]
 ```
 
 **PeerConnection** contains:

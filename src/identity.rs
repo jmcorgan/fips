@@ -897,3 +897,33 @@ mod tests {
         assert_eq!(identity.node_addr(), identity_from_bytes.node_addr());
     }
 }
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    #[test]
+    fn test_hex_conversion_case1() {
+        let hex_str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let identity = Identity::from_secret_str(hex_str).unwrap();
+        let npub = identity.npub();
+        println!("Hex: {}", hex_str);
+        println!("NPub: {}", npub);
+        println!("NodeAddr: {}", identity.node_addr());
+        println!("FipsAddress: {}", identity.address());
+        assert!(npub.starts_with("npub1"));
+    }
+
+    #[test]
+    fn test_hex_conversion_case2() {
+        let hex_str = "b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0";
+        let identity = Identity::from_secret_str(hex_str).unwrap();
+        let npub = identity.npub();
+        println!("Hex: {}", hex_str);
+        println!("NPub: {}", npub);
+        println!("NodeAddr: {}", identity.node_addr());
+        println!("FipsAddress: {}", identity.address());
+        assert!(npub.starts_with("npub1"));
+    }
+
+}

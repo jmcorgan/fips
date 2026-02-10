@@ -24,7 +24,7 @@ use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunError, TunState, TunTx};
 use crate::wire::{
-    build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
+    build_encrypted, build_msg1, build_msg2, EncryptedHeader, Msg1Header, Msg2Header,
     DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2,
 };
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
@@ -88,6 +88,9 @@ pub enum NodeError {
 
     #[error("promotion failed for link {link_id}: {reason}")]
     PromotionFailed { link_id: LinkId, reason: String },
+
+    #[error("send failed to {node_addr}: {reason}")]
+    SendFailed { node_addr: NodeAddr, reason: String },
 
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
@@ -594,11 +597,17 @@ impl Node {
     }
 
     /// Remove a link.
+    ///
+    /// Only removes the addr_to_link reverse lookup if it still points to this
+    /// link. In cross-connection scenarios, a newer link may have replaced the
+    /// entry for the same address.
     pub fn remove_link(&mut self, link_id: &LinkId) -> Option<Link> {
         if let Some(link) = self.links.remove(link_id) {
-            // Clean up reverse lookup
+            // Clean up reverse lookup only if it still maps to this link
             let key = (link.transport_id(), link.remote_addr().clone());
-            self.addr_to_link.remove(&key);
+            if self.addr_to_link.get(&key) == Some(link_id) {
+                self.addr_to_link.remove(&key);
+            }
             Some(link)
         } else {
             None
@@ -707,6 +716,68 @@ impl Node {
     /// Returns None if TUN is not active or the node hasn't been started.
     pub fn tun_tx(&self) -> Option<&TunTx> {
         self.tun_tx.as_ref()
+    }
+
+    // === Sending ===
+
+    /// Encrypt and send a link-layer message to an authenticated peer.
+    ///
+    /// The plaintext should include the message type byte followed by the
+    /// message-specific payload (e.g., `[0x50, reason]` for Disconnect).
+    ///
+    /// This is the standard path for sending any link-layer control message
+    /// to a peer over their encrypted Noise session.
+    pub(super) async fn send_encrypted_link_message(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+    ) -> Result<(), NodeError> {
+        let peer = self.peers.get_mut(node_addr)
+            .ok_or(NodeError::PeerNotFound(*node_addr))?;
+
+        let their_index = peer.their_index().ok_or_else(|| NodeError::SendFailed {
+            node_addr: *node_addr,
+            reason: "no their_index".into(),
+        })?;
+        let transport_id = peer.transport_id().ok_or_else(|| NodeError::SendFailed {
+            node_addr: *node_addr,
+            reason: "no transport_id".into(),
+        })?;
+        let remote_addr = peer.current_addr().cloned().ok_or_else(|| NodeError::SendFailed {
+            node_addr: *node_addr,
+            reason: "no current_addr".into(),
+        })?;
+
+        let session = peer.noise_session_mut().ok_or_else(|| NodeError::SendFailed {
+            node_addr: *node_addr,
+            reason: "no noise session".into(),
+        })?;
+
+        // Get counter before encrypt (encrypt increments it)
+        let counter = session.current_send_counter();
+        let ciphertext = session.encrypt(plaintext).map_err(|e| NodeError::SendFailed {
+            node_addr: *node_addr,
+            reason: format!("encryption failed: {}", e),
+        })?;
+
+        let wire_packet = build_encrypted(their_index, counter, &ciphertext);
+
+        // Re-borrow peer for stats update after sending
+        let transport = self.transports.get(&transport_id)
+            .ok_or(NodeError::TransportNotFound(transport_id))?;
+
+        let bytes_sent = transport.send(&remote_addr, &wire_packet).await
+            .map_err(|e| NodeError::SendFailed {
+                node_addr: *node_addr,
+                reason: format!("transport send: {}", e),
+            })?;
+
+        // Update send statistics
+        if let Some(peer) = self.peers.get_mut(node_addr) {
+            peer.link_stats_mut().record_sent(bytes_sent);
+        }
+
+        Ok(())
     }
 }
 

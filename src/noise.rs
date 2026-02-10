@@ -37,7 +37,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use rand::RngCore;
-use secp256k1::{ecdh::SharedSecret, Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{ecdh::shared_secret_point, Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
@@ -561,6 +561,22 @@ pub struct HandshakeState {
 }
 
 impl HandshakeState {
+    /// Normalize a compressed public key to even parity for pre-message hashing.
+    ///
+    /// Nostr npubs encode x-only keys (no parity). The Noise IK pre-message
+    /// mixes the responder's static key into the hash before any messages.
+    /// Both sides must mix identical bytes. Since the initiator may only have
+    /// the x-only key (from an npub), we normalize to even parity (0x02 prefix)
+    /// so the hash chain matches regardless of the key's actual parity.
+    ///
+    /// This does NOT affect ECDH operations (which use x-coordinate-only output)
+    /// or the keys sent in handshake messages (which use actual parity).
+    fn normalize_for_premessage(pubkey: &PublicKey) -> [u8; PUBKEY_SIZE] {
+        let mut bytes = pubkey.serialize();
+        bytes[0] = 0x02; // Force even parity
+        bytes
+    }
+
     /// Create a new handshake as initiator.
     ///
     /// The initiator knows the responder's static key and will send first.
@@ -578,8 +594,10 @@ impl HandshakeState {
         };
 
         // Mix in pre-message: <- s (responder's static is known)
-        let remote_static_bytes = remote_static.serialize();
-        state.symmetric.mix_hash(&remote_static_bytes);
+        // Normalize to even parity so initiator and responder hash chains match
+        // even when the initiator only has the x-only key (from npub).
+        let normalized = Self::normalize_for_premessage(&remote_static);
+        state.symmetric.mix_hash(&normalized);
 
         state
     }
@@ -602,8 +620,9 @@ impl HandshakeState {
         };
 
         // Mix in pre-message: <- s (our static, since we're responder)
-        let our_static_pubkey = state.static_keypair.public_key().serialize();
-        state.symmetric.mix_hash(&our_static_pubkey);
+        // Normalize to even parity to match initiator's hash chain.
+        let normalized = Self::normalize_for_premessage(&state.static_keypair.public_key());
+        state.symmetric.mix_hash(&normalized);
 
         state
     }
@@ -640,10 +659,22 @@ impl HandshakeState {
     }
 
     /// Perform ECDH between our secret and their public key.
+    ///
+    /// Uses x-only hashing (SHA-256 of just the x-coordinate) to produce
+    /// a parity-independent shared secret. This is necessary because Nostr
+    /// npubs encode x-only keys without parity information, so the initiator
+    /// may have the wrong parity for the responder's static key. Since P and
+    /// -P produce ECDH result points with the same x-coordinate, hashing
+    /// only x ensures both sides derive the same shared secret.
     fn ecdh(&self, our_secret: &SecretKey, their_public: &PublicKey) -> [u8; 32] {
-        let shared = SharedSecret::new(their_public, our_secret);
+        // Get raw (x, y) coordinates (64 bytes) without any hashing
+        let point = shared_secret_point(their_public, our_secret);
+        // Hash only the x-coordinate (first 32 bytes), ignoring y/parity
+        let mut hasher = Sha256::new();
+        hasher.update(&point[..32]);
+        let hash = hasher.finalize();
         let mut result = [0u8; 32];
-        result.copy_from_slice(shared.as_ref());
+        result.copy_from_slice(&hash);
         result
     }
 
@@ -1024,6 +1055,7 @@ impl fmt::Debug for NoiseSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secp256k1::Parity;
 
     fn generate_keypair() -> Keypair {
         let secp = Secp256k1::new();
@@ -1380,5 +1412,64 @@ mod tests {
 
         // Check method alone also detects replay
         assert!(receiver.check_replay(counter).is_err());
+    }
+
+    #[test]
+    fn test_handshake_with_odd_parity_responder() {
+        // Node B's secret key produces an odd-parity public key (0x03 prefix).
+        // When the initiator only has the npub (x-only), PeerIdentity::pubkey_full()
+        // returns even parity (0x02). The pre-message mix_hash must normalize
+        // parity so both sides produce matching hash chains.
+        let secp = Secp256k1::new();
+
+        // Node B (responder) - odd parity key
+        let sk_b = SecretKey::from_slice(
+            &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0")
+                .unwrap(),
+        )
+        .unwrap();
+        let kp_b = Keypair::from_secret_key(&secp, &sk_b);
+        let (xonly_b, parity_b) = kp_b.public_key().x_only_public_key();
+        assert_eq!(parity_b, Parity::Odd, "Test requires odd-parity responder key");
+
+        // Node A (initiator) - even parity key
+        let sk_a = SecretKey::from_slice(
+            &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+                .unwrap(),
+        )
+        .unwrap();
+        let kp_a = Keypair::from_secret_key(&secp, &sk_a);
+
+        // Simulate the production path: initiator gets responder's key via npub
+        // (x-only → assumed even parity)
+        let assumed_even_b = xonly_b.public_key(Parity::Even);
+        assert_ne!(
+            assumed_even_b, kp_b.public_key(),
+            "Even assumption should differ from actual odd key"
+        );
+
+        // Handshake using assumed-even key (as production code does)
+        let mut initiator = HandshakeState::new_initiator(kp_a, assumed_even_b);
+        let mut responder = HandshakeState::new_responder(kp_b);
+
+        let msg1 = initiator.write_message_1().unwrap();
+        responder.read_message_1(&msg1).unwrap();
+
+        let msg2 = responder.write_message_2().unwrap();
+        initiator.read_message_2(&msg2).unwrap();
+
+        assert!(initiator.is_complete());
+        assert!(responder.is_complete());
+
+        // Verify sessions can communicate
+        let mut sender = initiator.into_session().unwrap();
+        let mut receiver = responder.into_session().unwrap();
+
+        let counter = sender.current_send_counter();
+        let ciphertext = sender.encrypt(b"parity test").unwrap();
+        let plaintext = receiver
+            .decrypt_with_replay_check(&ciphertext, counter)
+            .unwrap();
+        assert_eq!(plaintext, b"parity test");
     }
 }
