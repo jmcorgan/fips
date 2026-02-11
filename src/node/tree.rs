@@ -216,6 +216,41 @@ impl Node {
             );
 
             self.send_tree_announce_to_all().await;
+        } else if !self.tree_state.is_root()
+            && *self.tree_state.my_declaration().parent_id() == *from
+        {
+            // Our parent's ancestry changed but we're keeping the same parent.
+            // Recompute our own coordinates (which derive from parent's ancestry)
+            // and re-announce so downstream nodes stay current.
+            let old_root = *self.tree_state.root();
+            let old_depth = self.tree_state.my_coords().depth();
+
+            let new_seq = self.tree_state.my_declaration().sequence() + 1;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            self.tree_state.set_parent(*from, new_seq, timestamp);
+            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                warn!(error = %e, "Failed to sign declaration after parent update");
+                return;
+            }
+            self.tree_state.recompute_coords();
+
+            let new_root = *self.tree_state.root();
+            let new_depth = self.tree_state.my_coords().depth();
+
+            if new_root != old_root || new_depth != old_depth {
+                info!(
+                    parent = %from,
+                    old_root = %old_root,
+                    new_root = %new_root,
+                    new_depth = new_depth,
+                    "Parent ancestry changed, re-announcing"
+                );
+                self.send_tree_announce_to_all().await;
+            }
         }
     }
 
