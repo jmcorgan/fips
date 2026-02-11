@@ -1,25 +1,46 @@
 # FIPS Routing Design
 
 This document describes the routing architecture for FIPS, including Bloom
-filter reachability, discovery protocol, greedy tree routing, and routing
-session establishment.
+filter routing, greedy tree routing, discovery protocol, and routing session
+establishment.
 
 For wire formats and exchange rules, see [fips-gossip-protocol.md](fips-gossip-protocol.md).
 For spanning tree dynamics and convergence, see [spanning-tree-dynamics.md](spanning-tree-dynamics.md).
 
 ## Overview
 
-FIPS routing combines three mechanisms:
+FIPS uses a layered routing strategy where each mechanism handles different
+situations. In steady state, bloom filter routing handles the vast majority
+of forwarding decisions.
 
-1. **Bloom filters**: Fast reachability lookup for destinations reachable
-   through peers
-2. **Discovery protocol**: Query-based lookup for distant destinations
-3. **Greedy tree routing**: Coordinate-based forwarding using spanning tree
-   position
+### Next-Hop Selection (in priority order)
 
-The design separates discovery (finding where a destination is) from routing
-(getting packets there). Bloom filters and discovery handle the former; tree
-coordinates handle the latter.
+1. **Local delivery** — destination is self
+2. **Direct peer** — destination is an authenticated peer
+3. **Bloom filter routing** — one or more peers' bloom filters contain the
+   destination; select the best candidate by `(link_cost, tree_distance,
+   node_addr)`. Since filters propagate unboundedly through the network,
+   every reachable destination eventually appears in at least one peer's
+   filter. This is the **primary routing path** for most traffic.
+4. **Greedy tree routing** — fallback when bloom filters haven't yet
+   converged (transient condition during topology changes). Requires the
+   destination's tree coordinates to be in the local coordinate cache,
+   populated by a prior SessionSetup or LookupResponse.
+5. **No route** — destination unreachable
+
+### Role of Each Mechanism
+
+- **Bloom filters**: Primary forwarding — tell each node which peer to
+  send through for a given destination. Propagate unboundedly via
+  split-horizon merge, so they cover the entire reachable network at
+  steady state.
+- **Greedy tree routing**: Fallback forwarding during convergence windows
+  when bloom filters are incomplete. Also used for routing LookupResponse
+  messages back to the origin.
+- **Discovery protocol**: Populates the coordinate cache to enable greedy
+  tree routing and to provide intermediate routers with coordinate data
+  for more efficient path selection. Not required for basic reachability
+  once bloom filters have converged.
 
 ## Design Goals
 
@@ -33,11 +54,15 @@ coordinates handle the latter.
 
 | Scale | Nodes | Bloom Filter Role |
 |-------|-------|-------------------|
-| Small private network | 100-1,000 | Covers entire network |
-| Modest public network | ~1,000,000 | Covers transitive peer neighborhood |
+| Small private network | 100-1,000 | Covers entire network with low FPR |
+| Modest public network | ~1,000,000 | Covers entire network but FPR increases at hub nodes due to filter saturation |
 | Internet-scale | Billions | Out of scope (requires different architecture) |
 
-The primary design target is networks up to ~1M nodes.
+The primary design target is networks up to ~1M nodes. Since bloom filters
+propagate unboundedly (no TTL), they converge to represent the entire
+reachable network. At large scale, the fixed 1KB filter size means higher
+false positive rates at well-connected hub nodes, which may trigger
+unnecessary discovery queries but does not affect correctness.
 
 ## Node Participation Modes
 
@@ -127,9 +152,12 @@ the node's reachable neighborhood.
 | 1,200 | 7.5% | Hub node |
 | 1,600 | 15% | Heavily loaded hub |
 
-FPR above 5% triggers more LookupRequests but the discovery protocol handles
-this gracefully. Hub nodes may benefit from larger filters in future protocol
-versions (see §1.6).
+Since filters propagate unboundedly, hub nodes with many peers will have
+higher occupancy (more entries merged from more peers). FPR above 5% means
+bloom filter routing may occasionally select a peer that can't actually
+reach the destination (false positive), requiring fallback to greedy tree
+routing or error recovery. Hub nodes may benefit from larger filters in
+future protocol versions (see §1.6).
 
 ### Size Classes (Forward Compatibility)
 
@@ -220,14 +248,16 @@ Bloom filters cannot remove individual entries. Expiration is handled via:
 
 ### Purpose
 
-Discover the tree coordinates of distant destinations not covered by local
-Bloom filters.
+Discover the tree coordinates of a destination to enable greedy tree routing
+and to populate coordinate caches at intermediate routers for more efficient
+forwarding. In steady state, bloom filters handle reachability; discovery
+provides the coordinate information that improves path selection quality.
 
 ### When Used
 
-- Destination not found in any peer's Bloom filter
-- Route cache miss
-- After cached route failure
+- During bloom filter convergence (destination not yet in any peer's filter)
+- To populate coordinate caches for greedy tree routing (optimization)
+- After cached route failure (coordinates may be stale)
 
 For wire formats, see [fips-gossip-protocol.md](fips-gossip-protocol.md) §4-5.
 
@@ -299,6 +329,13 @@ struct CachedCoords {
 
 ## Part 3: Tree Coordinates and Greedy Routing
 
+Tree coordinates and greedy routing serve two roles:
+
+1. **Fallback forwarding** during bloom filter convergence windows
+2. **Tie-breaking** among bloom filter candidates — tree distance between
+   a candidate peer and the destination helps select the best path when
+   multiple peers advertise reachability
+
 ### Tree Coordinates
 
 A node's coordinates are its ancestry path from self to root:
@@ -326,39 +363,48 @@ Note: Coordinates are ordered self-to-root, so common ancestry is a suffix.
 
 ### Greedy Routing Algorithm
 
+When used as a fallback (no bloom filter hits), greedy routing forwards to
+the peer that minimizes tree distance to the destination. A self-distance
+check ensures progress — the packet is only forwarded if the chosen peer is
+strictly closer than the current node.
+
 ```rust
-fn greedy_next_hop(&self, dest_coords: &[NodeAddr]) -> NodeAddr {
-    // Check if we are the destination
-    if dest_coords[0] == self.node_addr {
-        return LOCAL_DELIVERY;
+fn greedy_next_hop(&self, dest_coords: &TreeCoordinate) -> Option<NodeAddr> {
+    if self.my_coords.root_id() != dest_coords.root_id() {
+        return None; // different tree
     }
 
-    // Check if destination is a direct peer
-    for peer in &self.peers {
-        if peer.node_addr == dest_coords[0] {
-            return peer.node_addr;
+    let my_distance = self.my_coords.distance_to(dest_coords);
+
+    // Find peer with minimum distance, tie-break by smallest node_addr
+    let best = self.peer_ancestry.iter()
+        .min_by(|(id_a, coords_a), (id_b, coords_b)| {
+            coords_a.distance_to(dest_coords)
+                .cmp(&coords_b.distance_to(dest_coords))
+                .then_with(|| id_a.cmp(id_b))
+        });
+
+    match best {
+        Some((peer_id, coords)) if coords.distance_to(dest_coords) < my_distance => {
+            Some(*peer_id)
         }
+        _ => None, // no peer is closer (local minimum)
     }
-
-    // Forward to peer closest to destination
-    self.peers
-        .iter()
-        .min_by_key(|p| tree_distance(&p.coords, dest_coords))
-        .map(|p| p.node_addr)
-        .expect("no peers")
 }
 ```
 
-### Guaranteed Progress
+### Progress Guarantee
 
-Greedy routing makes progress as long as:
+When the coordinate cache is populated, greedy routing makes progress as
+long as:
 
 1. Tree is connected
 2. Destination's coordinates are accurate
-3. Current node is not the destination
+3. A peer is closer to the destination than the current node
 
-Unlike DHT routing, greedy tree routing cannot get stuck in local minima if
-the tree is properly formed.
+If no peer is closer (local minimum), routing returns `None` and the caller
+generates a PathBroken error. In a properly formed tree this should not
+occur, but the self-distance check provides a safety net.
 
 ### What Each Node Knows
 
@@ -404,9 +450,13 @@ with explicit error signaling over metadata privacy.
 
 ### Route Cache Purpose
 
-Intermediate routers cache coordinate mappings so that data packets can use
-minimal headers (addresses only, no coordinates). This reduces per-packet
-overhead from ~300 bytes to 38 bytes.
+The coordinate cache serves two functions:
+
+1. **Greedy routing fallback** — when bloom filters haven't converged,
+   cached coordinates enable tree-distance-based forwarding.
+2. **Reduced packet overhead** — once coordinates are cached at intermediate
+   routers, data packets can carry addresses only (38 bytes) rather than
+   full coordinates (~300 bytes).
 
 ### Cache Lifecycle
 
@@ -476,7 +526,15 @@ impl Router {
             }
         }
 
-        // Route using cache (now populated if coords were present)
+        // Primary: bloom filter routing
+        let candidates = self.destination_in_filters(&packet.dest_addr);
+        if !candidates.is_empty() {
+            let next = self.select_best_candidate(&candidates);
+            self.forward(next, packet);
+            return;
+        }
+
+        // Fallback: greedy tree routing via cached coordinates
         match self.coord_cache.get(&packet.dest_addr) {
             Some(entry) => {
                 entry.last_used = now();
@@ -484,7 +542,7 @@ impl Router {
                 self.forward(next, packet);
             }
             None => {
-                // Cache miss — request coordinates
+                // No bloom filter hit and no cached coordinates
                 self.send_error(from, CoordsRequired {
                     dest_addr: packet.dest_addr,
                     reporter: self.node_addr,
@@ -638,25 +696,28 @@ consulting the visited filter. This is referenced in the gossip protocol spec
 (section 4.4, rate limiting) but needs to be elevated to a protocol
 requirement, not an optimization.
 
-### Known Limitation: Capacity-Blind Greedy Routing
+### Known Limitation: Capacity-Blind Routing
 
-Greedy routing selects the next hop by minimizing tree distance, which is
-purely topological (hop count through the LCA). It does not account for link
-capacity, latency, or loss.
+Both bloom filter candidate selection and greedy tree routing currently
+select next hops without considering link quality. When multiple peers
+can reach a destination, the selection is based on tree distance and
+node address tie-breaking — purely topological metrics that ignore link
+capacity, latency, and loss.
 
-This creates a problem when a topologically short but low-capacity link exists
-alongside a longer but high-capacity path. Greedy routing will prefer the short
-path, potentially saturating the slow link while the high-capacity path goes
-underutilized.
+This creates a problem when a topologically short but low-capacity link
+exists alongside a longer but high-capacity path. The routing algorithm
+will prefer the topologically closer peer, potentially saturating a slow
+link while a higher-capacity path goes underutilized.
 
-**Proposed mitigation**: Each node locally measures the quality of its direct
-peer links (RTT, bandwidth, loss) and applies a cost adjustment to the
-forwarding decision:
+**Proposed mitigation**: Each node locally measures the quality of its
+direct peer links (RTT, bandwidth, loss) and incorporates this into a
+`link_cost()` metric. The next-hop selection uses a composite ordering
+of `(link_cost, tree_distance, node_addr)` — link quality takes priority
+over topological distance.
 
-```text
-effective_distance(peer, dest) =
-    tree_distance(peer, dest) × local_link_cost(peer)
-```
+The `link_cost()` interface is implemented (currently returning a constant),
+ready to be populated with real measurements using an established link
+quality algorithm (ETX, Babel composite metric, etc.).
 
 This requires no protocol changes — link quality is measured locally, not
 advertised. Self-reported cost claims are intentionally excluded from the

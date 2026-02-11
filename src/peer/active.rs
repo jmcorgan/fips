@@ -391,6 +391,15 @@ impl ActivePeer {
         &mut self.link_stats
     }
 
+    /// Link cost for routing decisions.
+    ///
+    /// Returns a scalar cost where lower is better. Currently returns a
+    /// constant (all links equal). Future versions will compute from RTT,
+    /// loss rate, and throughput measurements.
+    pub fn link_cost(&self) -> f64 {
+        1.0
+    }
+
     /// When this peer was authenticated.
     pub fn authenticated_at(&self) -> u64 {
         self.authenticated_at

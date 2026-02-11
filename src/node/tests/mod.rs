@@ -6,6 +6,7 @@ use std::time::Duration;
 
 mod bloom;
 mod handshake;
+mod routing;
 mod spanning_tree;
 mod unit;
 
