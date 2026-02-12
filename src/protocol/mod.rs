@@ -31,13 +31,15 @@ mod tree;
 pub use error::ProtocolError;
 pub use link::{
     Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType, SessionDatagram,
+    SESSION_DATAGRAM_HEADER_SIZE,
 };
 pub use tree::TreeAnnounce;
 pub use filter::FilterAnnounce;
 pub use discovery::{LookupRequest, LookupResponse};
 pub use session::{
     CoordsRequired, DataFlags, DataPacket, PathBroken, SessionAck, SessionFlags,
-    SessionMessageType, SessionSetup, DATA_FLAG_COORDS_PRESENT, DATA_HEADER_SIZE,
+    SessionMessageType, SessionSetup, COORDS_REQUIRED_SIZE, DATA_FLAG_COORDS_PRESENT,
+    DATA_HEADER_SIZE,
 };
 
 /// Protocol version for message compatibility.

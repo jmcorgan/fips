@@ -5,6 +5,7 @@ use crate::PeerIdentity;
 use std::time::Duration;
 
 mod bloom;
+mod disconnect;
 mod handshake;
 mod routing;
 mod spanning_tree;

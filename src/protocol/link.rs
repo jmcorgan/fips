@@ -278,6 +278,9 @@ pub struct SessionDatagram {
     pub payload: Vec<u8>,
 }
 
+/// SessionDatagram fixed header size: msg_type(1) + src_addr(16) + dest_addr(16) + hop_limit(1).
+pub const SESSION_DATAGRAM_HEADER_SIZE: usize = 34;
+
 impl SessionDatagram {
     /// Create a new session datagram.
     pub fn new(src_addr: NodeAddr, dest_addr: NodeAddr, payload: Vec<u8>) -> Self {
@@ -308,6 +311,41 @@ impl SessionDatagram {
     /// Check if the datagram can be forwarded.
     pub fn can_forward(&self) -> bool {
         self.hop_limit > 0
+    }
+
+    /// Encode as link-layer message (msg_type + src_addr + dest_addr + hop_limit + payload).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(SESSION_DATAGRAM_HEADER_SIZE + self.payload.len());
+        buf.push(LinkMessageType::SessionDatagram.to_byte());
+        buf.extend_from_slice(self.src_addr.as_bytes());
+        buf.extend_from_slice(self.dest_addr.as_bytes());
+        buf.push(self.hop_limit);
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
+
+    /// Decode from link-layer payload (after msg_type byte has been consumed).
+    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+        // src_addr(16) + dest_addr(16) + hop_limit(1) = 33
+        if payload.len() < 33 {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 33,
+                got: payload.len(),
+            });
+        }
+        let mut src_bytes = [0u8; 16];
+        src_bytes.copy_from_slice(&payload[0..16]);
+        let mut dest_bytes = [0u8; 16];
+        dest_bytes.copy_from_slice(&payload[16..32]);
+        let hop_limit = payload[32];
+        let inner_payload = payload[33..].to_vec();
+
+        Ok(Self {
+            src_addr: NodeAddr::from_bytes(src_bytes),
+            dest_addr: NodeAddr::from_bytes(dest_bytes),
+            hop_limit,
+            payload: inner_payload,
+        })
     }
 }
 
@@ -449,5 +487,62 @@ mod tests {
     fn test_disconnect_decode_unknown_reason() {
         let decoded = Disconnect::decode(&[0x80]).unwrap();
         assert_eq!(decoded.reason, DisconnectReason::Other);
+    }
+
+    // ===== SessionDatagram Tests =====
+
+    fn make_node_addr(val: u8) -> NodeAddr {
+        let mut bytes = [0u8; 16];
+        bytes[0] = val;
+        NodeAddr::from_bytes(bytes)
+    }
+
+    #[test]
+    fn test_session_datagram_encode_decode() {
+        let src = make_node_addr(0xAA);
+        let dest = make_node_addr(0xBB);
+        let payload = vec![0x10, 0x00, 0x05, 0x00, 1, 2, 3, 4, 5]; // DataPacket payload
+        let dg = SessionDatagram::new(src, dest, payload.clone())
+            .with_hop_limit(32);
+
+        let encoded = dg.encode();
+        assert_eq!(encoded[0], 0x40); // msg_type
+        assert_eq!(encoded.len(), SESSION_DATAGRAM_HEADER_SIZE + payload.len());
+
+        // Decode (after msg_type)
+        let decoded = SessionDatagram::decode(&encoded[1..]).unwrap();
+        assert_eq!(decoded.src_addr, src);
+        assert_eq!(decoded.dest_addr, dest);
+        assert_eq!(decoded.hop_limit, 32);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn test_session_datagram_empty_payload() {
+        let dg = SessionDatagram::new(make_node_addr(1), make_node_addr(2), Vec::new());
+
+        let encoded = dg.encode();
+        assert_eq!(encoded.len(), SESSION_DATAGRAM_HEADER_SIZE);
+
+        let decoded = SessionDatagram::decode(&encoded[1..]).unwrap();
+        assert!(decoded.payload.is_empty());
+    }
+
+    #[test]
+    fn test_session_datagram_decode_too_short() {
+        assert!(SessionDatagram::decode(&[]).is_err());
+        assert!(SessionDatagram::decode(&[0x00; 20]).is_err());
+    }
+
+    #[test]
+    fn test_session_datagram_hop_limit_roundtrip() {
+        for hop in [0u8, 1, 64, 128, 255] {
+            let dg = SessionDatagram::new(make_node_addr(1), make_node_addr(2), vec![0x42])
+                .with_hop_limit(hop);
+
+            let encoded = dg.encode();
+            let decoded = SessionDatagram::decode(&encoded[1..]).unwrap();
+            assert_eq!(decoded.hop_limit, hop);
+        }
     }
 }
