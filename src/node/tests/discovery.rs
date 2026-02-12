@@ -8,7 +8,10 @@ use super::*;
 use crate::node::RecentRequest;
 use crate::protocol::{LookupRequest, LookupResponse};
 use crate::tree::TreeCoordinate;
-use spanning_tree::{cleanup_nodes, process_available_packets, run_tree_test};
+use spanning_tree::{
+    cleanup_nodes, generate_random_edges, process_available_packets, run_tree_test,
+    verify_tree_convergence,
+};
 
 // ============================================================================
 // Unit Tests — LookupRequest Handler
@@ -356,6 +359,133 @@ async fn test_request_dedup_convergent_paths() {
 
     // The request should appear exactly once in each node's recent_requests
     // (dedup prevents duplicate processing via convergent paths)
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// Integration Tests — 100-Node Discovery
+// ============================================================================
+
+#[tokio::test]
+async fn test_discovery_100_nodes() {
+    // Set up a 100-node random topology (same seed as other 100-node tests).
+    // Each node initiates lookups to a sample of other nodes in batches,
+    // processing packets between batches to avoid flooding the network.
+    const NUM_NODES: usize = 100;
+    const TARGET_EDGES: usize = 250;
+    const SEED: u64 = 42;
+    const TTL: u8 = 15; // generous TTL for network diameter
+    let edges = generate_random_edges(NUM_NODES, TARGET_EDGES, SEED);
+    let mut nodes = run_tree_test(NUM_NODES, &edges, false).await;
+    verify_tree_convergence(&nodes);
+
+    // Collect all node addresses for lookup targets
+    let all_addrs: Vec<NodeAddr> = nodes
+        .iter()
+        .map(|tn| *tn.node.node_addr())
+        .collect();
+
+    // Each node looks up every 10th other node (~10 targets per node).
+    // Build the full list of (src, dst) pairs.
+    let mut lookup_pairs: Vec<(usize, usize)> = Vec::new();
+    for src in 0..NUM_NODES {
+        for dst in (0..NUM_NODES).step_by(10) {
+            if src == dst {
+                continue;
+            }
+            lookup_pairs.push((src, dst));
+        }
+    }
+    let total_lookups = lookup_pairs.len();
+
+    // Process one source node at a time. Each node initiates ~10 lookups,
+    // which flood through the network. We drain until quiescent before
+    // moving to the next node. This avoids overwhelming UDP buffers
+    // while still testing concurrent lookups from the same origin.
+    for src in 0..NUM_NODES {
+        // Initiate all lookups for this source node
+        let mut initiated = false;
+        for &(s, dst) in &lookup_pairs {
+            if s == src {
+                nodes[src]
+                    .node
+                    .initiate_lookup(&all_addrs[dst], TTL)
+                    .await;
+                initiated = true;
+            }
+        }
+        if !initiated {
+            continue;
+        }
+
+        // Drain packets until quiescent
+        let mut idle_rounds = 0;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let count = process_available_packets(&mut nodes).await;
+            if count == 0 {
+                idle_rounds += 1;
+                if idle_rounds >= 2 {
+                    break;
+                }
+            } else {
+                idle_rounds = 0;
+            }
+        }
+    }
+
+    // Verify: each originator should have the target's coords in route_cache
+    let mut resolved = 0usize;
+    let mut failed = 0usize;
+    let mut failed_pairs: Vec<(usize, usize)> = Vec::new();
+
+    for &(src, dst) in &lookup_pairs {
+        if nodes[src].node.route_cache.contains(&all_addrs[dst]) {
+            resolved += 1;
+        } else {
+            failed += 1;
+            if failed_pairs.len() < 20 {
+                failed_pairs.push((src, dst));
+            }
+        }
+    }
+
+    eprintln!(
+        "\n  === Discovery 100-Node Test ===",
+    );
+    eprintln!(
+        "  Lookups: {} | Resolved: {} | Failed: {} | Success rate: {:.1}%",
+        total_lookups,
+        resolved,
+        failed,
+        resolved as f64 / total_lookups as f64 * 100.0
+    );
+
+    // Report route_cache stats across all nodes
+    let total_cached: usize = nodes.iter().map(|tn| tn.node.route_cache.len()).sum();
+    let min_cached = nodes.iter().map(|tn| tn.node.route_cache.len()).min().unwrap();
+    let max_cached = nodes.iter().map(|tn| tn.node.route_cache.len()).max().unwrap();
+    eprintln!(
+        "  Route cache entries: total={} min={} max={} avg={:.1}",
+        total_cached,
+        min_cached,
+        max_cached,
+        total_cached as f64 / NUM_NODES as f64
+    );
+
+    if !failed_pairs.is_empty() {
+        eprintln!("  First {} failures:", failed_pairs.len());
+        for &(src, dst) in &failed_pairs {
+            eprintln!("    node {} -> node {}", src, dst);
+        }
+    }
+
+    assert_eq!(
+        failed, 0,
+        "All {} lookups should resolve, but {} failed",
+        total_lookups, failed
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
