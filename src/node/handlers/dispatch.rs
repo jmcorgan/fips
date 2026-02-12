@@ -36,7 +36,7 @@ impl Node {
             }
             0x40 => {
                 // SessionDatagram
-                debug!("Received SessionDatagram (not yet implemented)");
+                self.handle_session_datagram(from, payload).await;
             }
             0x50 => {
                 // Disconnect
