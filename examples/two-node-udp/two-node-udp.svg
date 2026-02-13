@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" font-family="monospace" font-size="12">
+  <style>
+    rect.ns       { fill: #151525; stroke: #505070; stroke-width: 2; rx: 6; }
+    rect.node     { fill: #1a3a2a; stroke: #40a060; stroke-width: 1.5; rx: 4; }
+    rect.iface    { fill: #1a2a3a; stroke: #4080c0; stroke-width: 1; rx: 3; }
+    rect.veth     { fill: #2a1a1a; stroke: #c06040; stroke-width: 1; rx: 3; }
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.ns-label { font-size: 12px; fill: #909090; font-style: italic; }
+    text.label    { font-size: 13px; font-weight: bold; }
+    text.detail   { font-size: 10px; fill: #909090; }
+    text.addr     { font-size: 10px; fill: #70a0d0; }
+    text.note     { font-size: 10px; fill: #c0c0c0; }
+    line.udp      { stroke: #c06040; stroke-width: 2; }
+    line.mesh     { stroke: #d0a040; stroke-width: 2; stroke-dasharray: 6,3; }
+    line.conn     { stroke: #606080; stroke-width: 1.5; }
+  </style>
+
+  <!-- Background -->
+  <rect width="800" height="420" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="400" y="28" text-anchor="middle" class="title">Two-Node UDP Example</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">Network namespaces with veth pair transport</text>
+
+  <!-- ═══ Namespace A ═══ -->
+  <rect x="30" y="64" width="340" height="270" class="ns"/>
+  <text x="200" y="82" text-anchor="middle" class="ns-label">Namespace: fips-a</text>
+
+  <!-- FIPS Node A -->
+  <rect x="70" y="94" width="260" height="62" class="node"/>
+  <text x="200" y="114" text-anchor="middle" class="label">FIPS Node A</text>
+  <text x="200" y="130" text-anchor="middle" class="addr">fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b</text>
+  <text x="200" y="148" text-anchor="middle" class="detail">npub1sjlh2c...awh57m</text>
+
+  <!-- fips0 TUN -->
+  <rect x="70" y="176" width="120" height="44" class="iface"/>
+  <text x="130" y="196" text-anchor="middle" class="label">fips0</text>
+  <text x="130" y="210" text-anchor="middle" class="detail">TUN device</text>
+
+  <!-- DNS -->
+  <rect x="210" y="176" width="120" height="44" class="iface"/>
+  <text x="270" y="196" text-anchor="middle" class="label">DNS</text>
+  <text x="270" y="210" text-anchor="middle" class="detail">127.0.0.1:5354</text>
+
+  <!-- Connections: Node → fips0, Node → DNS -->
+  <line x1="130" y1="156" x2="130" y2="176" class="conn"/>
+  <line x1="270" y1="156" x2="270" y2="176" class="conn"/>
+
+  <!-- veth-a -->
+  <rect x="70" y="250" width="260" height="44" class="veth"/>
+  <text x="200" y="268" text-anchor="middle" class="label">veth-a</text>
+  <text x="200" y="282" text-anchor="middle" class="addr">10.0.0.1/24</text>
+
+  <!-- Node → veth connection -->
+  <line x1="200" y1="156" x2="200" y2="250" class="conn"/>
+
+  <!-- ═══ Namespace B ═══ -->
+  <rect x="430" y="64" width="340" height="270" class="ns"/>
+  <text x="600" y="82" text-anchor="middle" class="ns-label">Namespace: fips-b</text>
+
+  <!-- FIPS Node B -->
+  <rect x="470" y="94" width="260" height="62" class="node"/>
+  <text x="600" y="114" text-anchor="middle" class="label">FIPS Node B</text>
+  <text x="600" y="130" text-anchor="middle" class="addr">fd8e:302c:287e:b48d:6268:122f:da76:0b77</text>
+  <text x="600" y="148" text-anchor="middle" class="detail">npub1tdwa4v...d84le</text>
+
+  <!-- fips0 TUN -->
+  <rect x="470" y="176" width="120" height="44" class="iface"/>
+  <text x="530" y="196" text-anchor="middle" class="label">fips0</text>
+  <text x="530" y="210" text-anchor="middle" class="detail">TUN device</text>
+
+  <!-- DNS -->
+  <rect x="610" y="176" width="120" height="44" class="iface"/>
+  <text x="670" y="196" text-anchor="middle" class="label">DNS</text>
+  <text x="670" y="210" text-anchor="middle" class="detail">127.0.0.1:5354</text>
+
+  <!-- Connections: Node → fips0, Node → DNS -->
+  <line x1="530" y1="156" x2="530" y2="176" class="conn"/>
+  <line x1="670" y1="156" x2="670" y2="176" class="conn"/>
+
+  <!-- veth-b -->
+  <rect x="470" y="250" width="260" height="44" class="veth"/>
+  <text x="600" y="268" text-anchor="middle" class="label">veth-b</text>
+  <text x="600" y="282" text-anchor="middle" class="addr">10.0.0.2/24</text>
+
+  <!-- Node → veth connection -->
+  <line x1="600" y1="156" x2="600" y2="250" class="conn"/>
+
+  <!-- ═══ UDP link between veths ═══ -->
+  <line x1="330" y1="272" x2="470" y2="272" class="udp"/>
+  <text x="400" y="264" text-anchor="middle" font-size="11" font-weight="bold" fill="#c06040">UDP :4000</text>
+
+  <!-- ═══ Mesh session (dashed gold) ═══ -->
+  <line x1="330" y1="125" x2="470" y2="125" class="mesh"/>
+  <text x="400" y="118" text-anchor="middle" font-size="11" font-weight="bold" fill="#d0a040">Encrypted session</text>
+
+  <!-- ═══ Legend ═══ -->
+  <rect x="30" y="352" width="740" height="56" fill="#151520" stroke="#404060" stroke-width="1" rx="4"/>
+
+  <line x1="50" y1="374" x2="90" y2="374" class="udp"/>
+  <text x="96" y="378" class="note">Transport layer: UDP over IPv4 veth pair</text>
+
+  <line x1="50" y1="394" x2="90" y2="394" class="mesh"/>
+  <text x="96" y="398" class="note">Data plane: IPv6 over FIPS mesh (fd::/8 via fips0 TUN)</text>
+
+  <rect x="450" y="366" width="14" height="14" class="iface"/>
+  <text x="470" y="378" class="note">DNS: &lt;npub&gt;.fips → FIPS IPv6 address</text>
+</svg>

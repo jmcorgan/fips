@@ -7,31 +7,7 @@ can `ping6` between nodes using raw IPv6 addresses.
 
 ## Network Diagram
 
-```text
-            Namespace: fips-a                    Namespace: fips-b
-        ┌─────────────────────┐              ┌─────────────────────┐
-        │                     │              │                     │
-        │  ┌───────────────┐  │              │  ┌───────────────┐  │
-        │  │  FIPS Node A  │  │              │  │  FIPS Node B  │  │
-        │  │               │  │              │  │               │  │
-        │  │  fd69:e08d:.. │  │              │  │  fd8e:302c:.. │  │
-        │  └──┬─────────┬──┘  │              │  └──┬─────────┬──┘  │
-        │     │         │     │              │     │         │     │
-        │  ┌──┴──┐  ┌───┴──┐  │              │  ┌──┴──┐  ┌───┴──┐  │
-        │  │fips0│  │  DNS │  │              │  │fips0│  │  DNS │  │
-        │  │ TUN │  │:5354 │  │              │  │ TUN │  │:5354 │  │
-        │  └─────┘  └──────┘  │              │  └─────┘  └──────┘  │
-        │                     │              │                     │
-        │  ┌────────────────┐ │              │ ┌────────────────┐  │
-        │  │  veth-a        │ │   UDP :4000  │ │        veth-b  │  │
-        │  │  10.0.0.1/24   ├─┼──────────────┼─┤  10.0.0.2/24  │  │
-        │  └────────────────┘ │              │ └────────────────┘  │
-        └─────────────────────┘              └─────────────────────┘
-
-  Transport layer: UDP over IPv4 veth pair (10.0.0.0/24)
-  Data plane:      IPv6 over FIPS mesh (fd::/8 via fips0 TUN)
-  DNS:             <npub>.fips → FIPS IPv6 address (127.0.0.1:5354)
-```
+![Two-Node UDP](two-node-udp.svg)
 
 ## Prerequisites
 
