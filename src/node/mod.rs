@@ -286,6 +286,12 @@ pub struct Node {
     /// TUN writer thread handle.
     tun_writer_handle: Option<JoinHandle<()>>,
 
+    // === DNS Responder ===
+    /// Receiver for resolved identities from the DNS responder.
+    dns_identity_rx: Option<crate::dns::DnsIdentityRx>,
+    /// DNS responder task handle.
+    dns_task: Option<tokio::task::JoinHandle<()>>,
+
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
@@ -368,6 +374,8 @@ impl Node {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            dns_identity_rx: None,
+            dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -423,6 +431,8 @@ impl Node {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            dns_identity_rx: None,
+            dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),

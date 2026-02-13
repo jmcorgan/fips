@@ -18,6 +18,8 @@ impl Node {
     /// Also processes outbound IPv6 packets from the TUN reader for session
     /// encapsulation and routing through the mesh.
     ///
+    /// Also processes DNS-resolved identities for identity cache population.
+    ///
     /// Also runs a periodic tick (1s) to clean up stale handshake connections
     /// that never received a response. This prevents resource leaks when peers
     /// are unreachable.
@@ -39,6 +41,16 @@ impl Node {
             }
         };
 
+        // Take the DNS identity receiver, or create a dummy channel (when DNS
+        // is disabled). Same pattern as TUN outbound.
+        let (mut dns_identity_rx, _dns_guard) = match self.dns_identity_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
         let mut tick = tokio::time::interval(Duration::from_secs(1));
 
         info!("RX event loop started");
@@ -53,6 +65,13 @@ impl Node {
                 }
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {
                     self.handle_tun_outbound(ipv6_packet).await;
+                }
+                Some(identity) = dns_identity_rx.recv() => {
+                    debug!(
+                        node_addr = %identity.node_addr,
+                        "Registering identity from DNS resolution"
+                    );
+                    self.register_identity(identity.node_addr, identity.pubkey);
                 }
                 _ = tick.tick() => {
                     self.check_timeouts();

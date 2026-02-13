@@ -426,6 +426,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "sha2",
+ "simple-dns",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1109,6 +1110,15 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "simple-dns"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dee851d0e5e7af3721faea1843e8015e820a234f81fda3dea9247e15bac9a86a"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]

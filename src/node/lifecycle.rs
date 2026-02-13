@@ -310,6 +310,23 @@ impl Node {
             }
         }
 
+        // Initialize DNS responder (independent of TUN)
+        if self.config.dns.enabled {
+            let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
+            match tokio::net::UdpSocket::bind(&bind).await {
+                Ok(socket) => {
+                    let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(64);
+                    let handle = tokio::spawn(crate::dns::run_dns_responder(socket, identity_tx));
+                    self.dns_identity_rx = Some(identity_rx);
+                    self.dns_task = Some(handle);
+                    info!(bind = %bind, "DNS responder started for .fips domain");
+                }
+                Err(e) => {
+                    warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+                }
+            }
+        }
+
         self.state = NodeState::Running;
         info!("Node started:");
         info!("       state: {}", self.state);
@@ -328,6 +345,12 @@ impl Node {
         }
         self.state = NodeState::Stopping;
         info!(state = %self.state, "Node stopping");
+
+        // Stop DNS responder
+        if let Some(handle) = self.dns_task.take() {
+            handle.abort();
+            debug!("DNS responder stopped");
+        }
 
         // Send disconnect notifications to all active peers before closing transports
         self.send_disconnect_to_all_peers(DisconnectReason::Shutdown).await;

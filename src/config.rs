@@ -107,6 +107,40 @@ const DEFAULT_TUN_NAME: &str = "fips0";
 /// Default TUN MTU (IPv6 minimum).
 const DEFAULT_TUN_MTU: u16 = 1280;
 
+/// Default DNS responder bind address.
+const DEFAULT_DNS_BIND_ADDR: &str = "127.0.0.1";
+
+/// Default DNS responder port.
+const DEFAULT_DNS_PORT: u16 = 5354;
+
+/// DNS responder configuration (`dns.*`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DnsConfig {
+    /// Enable DNS responder (`dns.enabled`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled: bool,
+
+    /// Bind address (`dns.bind_addr`). Defaults to "127.0.0.1".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_addr: Option<String>,
+
+    /// Listen port (`dns.port`). Defaults to 5354.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+impl DnsConfig {
+    /// Get the bind address, using default if not configured.
+    pub fn bind_addr(&self) -> &str {
+        self.bind_addr.as_deref().unwrap_or(DEFAULT_DNS_BIND_ADDR)
+    }
+
+    /// Get the port, using default if not configured.
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or(DEFAULT_DNS_PORT)
+    }
+}
+
 /// Default UDP bind address.
 const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:4000";
 
@@ -425,6 +459,10 @@ pub struct Config {
     #[serde(default)]
     pub tun: TunConfig,
 
+    /// DNS responder configuration (`dns.*`).
+    #[serde(default)]
+    pub dns: DnsConfig,
+
     /// Transport instances (`transports.*`).
     #[serde(default, skip_serializing_if = "TransportsConfig::is_empty")]
     pub transports: TransportsConfig,
@@ -529,6 +567,16 @@ impl Config {
         }
         if other.tun.mtu.is_some() {
             self.tun.mtu = other.tun.mtu;
+        }
+        // Merge dns section
+        if other.dns.enabled {
+            self.dns.enabled = true;
+        }
+        if other.dns.bind_addr.is_some() {
+            self.dns.bind_addr = other.dns.bind_addr;
+        }
+        if other.dns.port.is_some() {
+            self.dns.port = other.dns.port;
         }
         // Merge transports section
         self.transports.merge(other.transports);

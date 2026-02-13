@@ -6,6 +6,7 @@
 pub mod bloom;
 pub mod cache;
 pub mod config;
+pub mod dns;
 pub mod icmp;
 pub mod identity;
 pub mod index;
@@ -26,7 +27,10 @@ pub use identity::{
 };
 
 // Re-export config types
-pub use config::{Config, ConfigError, IdentityConfig, TunConfig, UdpConfig};
+pub use config::{Config, ConfigError, DnsConfig, IdentityConfig, TunConfig, UdpConfig};
+
+// Re-export DNS types
+pub use dns::{DnsIdentityRx, DnsIdentityTx, DnsResolvedIdentity};
 
 // Re-export tree types
 pub use tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
