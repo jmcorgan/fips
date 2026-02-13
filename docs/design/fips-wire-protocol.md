@@ -844,7 +844,7 @@ protocol layers apply additional policy.
 
 - [fips-intro.md](fips-intro.md) - Overall protocol design
 - [fips-session-protocol.md](fips-session-protocol.md) - Session establishment flow
-- [fips-architecture.md](fips-architecture.md) - Software architecture
+- [fips-software-architecture.md](fips-software-architecture.md) - Software architecture
 
 ### External References
 

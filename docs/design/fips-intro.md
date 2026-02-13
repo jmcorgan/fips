@@ -79,6 +79,18 @@ encryption transparently in either case.
 
 See [fips-transports.md](fips-transports.md) for transport options and characteristics.
 
+![Node Architecture](fips-node-architecture.svg)
+
+Internally, each node is organized in three layers. At the top, two application
+interfaces provide access to the mesh: a native datagram API addressed by npub,
+and an IPv6 TUN adapter that maps npubs to `fd::/8` addresses so unmodified
+IP applications can use the network transparently. The router core in the middle
+implements spanning tree maintenance, bloom filter exchange, greedy routing,
+session management, and Noise IK encryption. At the bottom, transport plugins
+handle the physical diversity — each plugin implements the same interface, so the
+router treats UDP, Ethernet, LoRa, Tor, and serial links identically. Adding a
+new transport requires no changes to the routing or session layers.
+
 ## Prior Work
 
 FIPS builds on proven designs rather than inventing new cryptography or routing
@@ -402,8 +414,6 @@ A **transport** is a physical or logical interface: a UDP socket, an Ethernet
 NIC, a Tor client, a radio modem. A **link** is a connection instance to a
 specific peer over a transport.
 
-![Transport Abstraction](fips-transport-abstraction.svg)
-
 ### Multi-Transport Bridging
 
 A node with multiple transports automatically bridges between networks. Peers
@@ -566,7 +576,7 @@ maintaining control over their own identities and peering relationships.
 | [fips-routing.md](fips-routing.md) | Bloom filters, discovery, greedy routing |
 | [spanning-tree-dynamics.md](spanning-tree-dynamics.md) | Tree protocol dynamics and convergence |
 | [fips-transports.md](fips-transports.md) | Transport protocol characteristics |
-| [fips-architecture.md](fips-architecture.md) | Software architecture, configuration |
+| [fips-software-architecture.md](fips-software-architecture.md) | Software architecture, configuration |
 
 ### External References
 

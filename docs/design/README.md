@@ -36,11 +36,11 @@ concepts, and finally the wire-level protocol details.
 
 ## Implementation
 
-| Document                                         | Description                                                      |
-|--------------------------------------------------|------------------------------------------------------------------|
-| [fips-architecture.md](fips-architecture.md)     | Software architecture: entities, state machines, configuration   |
-| [fips-tun-driver.md](fips-tun-driver.md)         | TUN interface driver: reader/writer threads, ICMPv6, packet flow |
-| [fips-state-machines.md](fips-state-machines.md) | Phase-based state machine pattern: peer lifecycle, transitions   |
+| Document                                                         | Description                                                      |
+|------------------------------------------------------------------|------------------------------------------------------------------|
+| [fips-software-architecture.md](fips-software-architecture.md)   | Software architecture: entities, state machines, configuration   |
+| [fips-tun-driver.md](fips-tun-driver.md)                         | TUN interface driver: reader/writer threads, ICMPv6, packet flow |
+| [fips-state-machines.md](fips-state-machines.md)                 | Phase-based state machine pattern: peer lifecycle, transitions   |
 
 ## Document Cross-References
 
@@ -49,7 +49,7 @@ concepts, and finally the wire-level protocol details.
                            │
               ┌────────────┴────────────┐
               ▼                         ▼
-    fips-session-protocol.md    fips-architecture.md
+    fips-session-protocol.md    fips-software-architecture.md
               │                         │
     ┌─────────┴─────────┐               ▼
     ▼                   ▼         fips-transports.md

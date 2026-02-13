@@ -11,7 +11,7 @@ that FIPS can operate over.
 - **Link**: A connection instance to a specific peer over a transport
 
 This document describes transport-level characteristics. See
-[fips-architecture.md](fips-architecture.md) for the Transport trait definition.
+[fips-software-architecture.md](fips-software-architecture.md) for the Transport trait definition.
 
 ## Design Principles
 
@@ -136,7 +136,7 @@ transport-layer connection before FIPS authentication can proceed.
 **Link lifecycle**: Connectionless transports use a trivial link model (no state
 machine). Connection-oriented transports require a real state machine:
 `Connecting → Connected → Disconnected`. See
-[fips-architecture.md](fips-architecture.md) for link lifecycle details.
+[fips-software-architecture.md](fips-software-architecture.md) for link lifecycle details.
 
 **Startup latency**: Connection-oriented transports add latency before a peer
 becomes usable. Tor is particularly slow (circuit setup). This affects peer
@@ -168,7 +168,7 @@ NAT devices and firewalls, limiting deployment to networks without NAT.
 ## Transport Driver Interface
 
 > **Note**: The definitive Transport trait is defined in
-> [fips-architecture.md](fips-architecture.md). This section provides a
+> [fips-software-architecture.md](fips-software-architecture.md). This section provides a
 > simplified conceptual view.
 
 Each transport driver provides:
