@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 370" font-family="monospace" font-size="12">
+  <style>
+    rect.box      { rx: 4; stroke-width: 1.5; }
+    rect.source   { fill: #1a3a2a; stroke: #40a060; }
+    rect.derived  { fill: #1a2a3a; stroke: #4080c0; }
+    rect.encoding { fill: #2a2040; stroke: #8060c0; }
+    rect.compat   { fill: #2a1a1a; stroke: #c06040; }
+    rect.use      { fill: #151520; stroke: #404060; stroke-width: 1; rx: 3; }
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.label    { font-size: 13px; font-weight: bold; }
+    text.detail   { font-size: 10px; fill: #909090; }
+    text.op       { font-size: 10px; fill: #b0b0b0; font-style: italic; }
+    text.use-text { font-size: 10px; fill: #c0c0c0; }
+    line.arrow    { stroke: #606080; stroke-width: 1.5; }
+    line.derive   { stroke: #4080c0; stroke-width: 1.5; }
+    line.encode   { stroke: #8060c0; stroke-width: 1.5; stroke-dasharray: 4,3; }
+    polygon.head  { fill: #606080; }
+    polygon.dhead { fill: #4080c0; }
+    polygon.ehead { fill: #8060c0; }
+  </style>
+
+  <!-- Background -->
+  <rect width="800" height="370" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="400" y="28" text-anchor="middle" class="title">FIPS Identity Derivation</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">From Nostr keypair to protocol identifiers</text>
+
+  <!-- ═══ Source: pubkey ═══ -->
+  <rect x="280" y="70" width="240" height="50" class="box source"/>
+  <text x="400" y="92" text-anchor="middle" class="label">pubkey</text>
+  <text x="400" y="106" text-anchor="middle" class="detail">Nostr cryptographic identity</text>
+
+  <!-- ═══ Left branch: bech32 encoding → npub ═══ -->
+
+  <!-- Arrow: pubkey left edge → npub -->
+  <line x1="280" y1="95" x2="180" y2="95" class="encode"/>
+  <polygon points="182,91 172,95 182,99" class="ehead"/>
+  <text x="226" y="87" text-anchor="middle" class="op">encode</text>
+
+  <!-- npub box -->
+  <rect x="30" y="70" width="150" height="50" class="box encoding"/>
+  <text x="105" y="92" text-anchor="middle" class="label">npub</text>
+  <text x="105" y="106" text-anchor="middle" class="detail">human-readable form</text>
+
+  <!-- npub use box -->
+  <rect x="20" y="144" width="170" height="50" class="use"/>
+  <text x="105" y="162" text-anchor="middle" class="use-text">Display &amp; configuration</text>
+  <text x="105" y="176" text-anchor="middle" class="use-text">User-facing identifiers</text>
+  <text x="105" y="190" text-anchor="middle" class="use-text">DNS queries (npub.fips)</text>
+
+  <!-- npub → use arrow -->
+  <line x1="105" y1="120" x2="105" y2="144" class="arrow"/>
+  <polygon points="101,142 105,150 109,142" class="head"/>
+
+  <!-- ═══ Right branch: pubkey → session encryption ═══ -->
+
+  <!-- Arrow: pubkey right edge → use -->
+  <line x1="520" y1="95" x2="620" y2="95" class="arrow"/>
+  <polygon points="618,91 628,95 618,99" class="head"/>
+
+  <!-- pubkey use box -->
+  <rect x="620" y="70" width="160" height="50" class="use"/>
+  <text x="700" y="88" text-anchor="middle" class="use-text">Endpoint authentication</text>
+  <text x="700" y="102" text-anchor="middle" class="use-text">Link &amp; session encryption</text>
+  <text x="700" y="116" text-anchor="middle" class="use-text">Known only to endpoints</text>
+
+  <!-- ═══ Down: pubkey → one-way hash → node_addr ═══ -->
+
+  <!-- Arrow down from pubkey -->
+  <line x1="400" y1="120" x2="400" y2="170" class="derive"/>
+  <polygon points="396,168 400,176 404,168" class="dhead"/>
+  <text x="416" y="148" class="op">one-way hash</text>
+
+  <!-- node_addr box -->
+  <rect x="280" y="176" width="240" height="50" class="box derived"/>
+  <text x="400" y="198" text-anchor="middle" class="label">node_addr</text>
+  <text x="400" y="212" text-anchor="middle" class="detail">opaque routing identifier</text>
+
+  <!-- ═══ Right branch: node_addr → routing use ═══ -->
+
+  <!-- Arrow: node_addr right edge → use -->
+  <line x1="520" y1="201" x2="620" y2="201" class="arrow"/>
+  <polygon points="618,197 628,201 618,205" class="head"/>
+
+  <!-- node_addr use box -->
+  <rect x="620" y="176" width="160" height="50" class="use"/>
+  <text x="700" y="194" text-anchor="middle" class="use-text">Packet header addressing</text>
+  <text x="700" y="208" text-anchor="middle" class="use-text">Spanning tree coordinates</text>
+  <text x="700" y="222" text-anchor="middle" class="use-text">Bloom filter entries</text>
+
+  <!-- ═══ Down: node_addr → derive → IPv6 address ═══ -->
+
+  <!-- Arrow down from node_addr -->
+  <line x1="400" y1="226" x2="400" y2="276" class="derive"/>
+  <polygon points="396,274 400,282 404,274" class="dhead"/>
+  <text x="416" y="254" class="op">add fd::/8 prefix</text>
+
+  <!-- IPv6 address box -->
+  <rect x="280" y="282" width="240" height="50" class="box compat"/>
+  <text x="400" y="304" text-anchor="middle" class="label">IPv6 address</text>
+  <text x="400" y="318" text-anchor="middle" class="detail">overlay address for IP compatibility</text>
+
+  <!-- ═══ Right branch: IPv6 → application use ═══ -->
+
+  <!-- Arrow: IPv6 right edge → use -->
+  <line x1="520" y1="307" x2="620" y2="307" class="arrow"/>
+  <polygon points="618,303 628,307 618,311" class="head"/>
+
+  <!-- IPv6 use box -->
+  <rect x="620" y="282" width="160" height="50" class="use"/>
+  <text x="700" y="298" text-anchor="middle" class="use-text">TUN interface (fips0)</text>
+  <text x="700" y="312" text-anchor="middle" class="use-text">Unmodified IP applications</text>
+  <text x="700" y="326" text-anchor="middle" class="use-text">ping, curl, ssh, etc.</text>
+
+  <!-- ═══ Left: privacy annotation ═══ -->
+  <rect x="20" y="218" width="230" height="62" fill="#151520" stroke="#505040" stroke-width="1" rx="3"/>
+  <text x="135" y="236" text-anchor="middle" font-size="11" font-weight="bold" fill="#d0a040">Privacy boundary</text>
+  <text x="135" y="252" text-anchor="middle" class="use-text">Intermediate routers see only</text>
+  <text x="135" y="266" text-anchor="middle" class="use-text">node_addr — never the pubkey.</text>
+
+  <!-- Dashed line connecting privacy box to node_addr -->
+  <line x1="250" y1="249" x2="280" y2="201" stroke="#505040" stroke-width="1" stroke-dasharray="3,3"/>
+</svg>

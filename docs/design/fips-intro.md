@@ -131,28 +131,17 @@ from npub to this address for traditional software.
 
 ### Node Address Derivation
 
-The pubkey is hashed to derive a node_addr used for routing:
+![Identity Derivation](fips-identity-derivation.svg)
 
-```
-pubkey (secp256k1 x-only, 32 bytes)
-  → SHA-256
-  → node_addr (16 bytes)
-  → truncate with prefix
-  → IPv6 address (128 bits, fd::/8)
-```
-
-**Separation of concerns**: The keypair handles cryptographic operations (signing,
-encryption). The node_addr derived from the pubkey handles routing. This keeps
-cryptographic material out of routing tables and packet headers—the node_addr is
-the only identifier used at the protocol level, and the pubkey cannot be derived
-from it.
-
-The one-way hash also provides privacy from intermediate routing nodes. Routers
-see only node_addrs in packet headers—they can route traffic without learning
-the Nostr identities of the endpoints. An observer can verify "does this
-node_addr belong to pubkey X?" but cannot enumerate which pubkeys are
-communicating by inspecting traffic. Only the endpoints, which complete the
-Noise IK handshake, learn each other's pubkeys.
+The pubkey is the node's cryptographic identity, used in Noise IK handshakes for
+both link and session encryption. It is never exposed beyond the endpoints of an
+encrypted channel. The node_addr, a one-way SHA-256 hash truncated to 16 bytes,
+serves as the routing identifier in packet headers and bloom filters. Intermediate
+routers see only node_addrs — they can forward traffic without learning the Nostr
+identities of the endpoints. An observer can verify "does this node_addr belong
+to pubkey X?" but cannot enumerate which pubkeys are communicating by inspecting
+traffic. The IPv6 address prepends `fd` to the first 15 bytes of the node_addr,
+providing an overlay address for unmodified IP applications via the TUN interface.
 
 ### Address Format
 
