@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" font-family="monospace" font-size="13">
+  <style>
+    circle.node { fill: #1a1a2e; stroke: #e0e0e0; stroke-width: 2; }
+    text { fill: #e0e0e0; }
+    text.name { font-size: 14px; font-weight: bold; }
+    text.ip { font-size: 10px; fill: #808890; }
+    text.fips-addr { font-size: 9px; fill: #607090; }
+    text.title { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 11px; fill: #909090; }
+    text.legend { font-size: 11px; }
+    text.net-label { font-size: 10px; fill: #606880; }
+    text.hop-label { font-size: 10px; fill: #909090; }
+    line.link { stroke: #506090; stroke-width: 2; }
+    line.path { stroke: #d0a040; stroke-width: 1.2; stroke-dasharray: 5 3; }
+    rect.legend-box { fill: #151520; stroke: #404060; stroke-width: 1; rx: 4; }
+    rect.net-box { fill: none; stroke: #303050; stroke-width: 1; stroke-dasharray: 6 3; rx: 8; }
+    marker { fill: #d0a040; }
+  </style>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3"
+            markerWidth="8" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3 L 0 6 z"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="700" height="400" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="30" text-anchor="middle" class="title">Docker Chain Topology</text>
+  <text x="350" y="48" text-anchor="middle" class="subtitle">Linear chain — A–B–C–D–E, multi-hop routing via discovery</text>
+
+  <!-- Docker network boundary -->
+  <rect x="30" y="65" width="640" height="175" class="net-box"/>
+  <text x="40" y="82" class="net-label">172.20.0.0/24  (docker: fips-net)</text>
+
+  <!--
+    Horizontal chain layout:
+      A (110, 170)  B (230, 170)  C (350, 170)  D (470, 170)  E (590, 170)
+  -->
+
+  <!-- === Links === -->
+
+  <!-- A—B -->
+  <line x1="138" y1="170" x2="202" y2="170" class="link"/>
+  <text x="170" y="160" text-anchor="middle" class="hop-label">UDP</text>
+
+  <!-- B—C -->
+  <line x1="258" y1="170" x2="322" y2="170" class="link"/>
+  <text x="290" y="160" text-anchor="middle" class="hop-label">UDP</text>
+
+  <!-- C—D -->
+  <line x1="378" y1="170" x2="442" y2="170" class="link"/>
+  <text x="410" y="160" text-anchor="middle" class="hop-label">UDP</text>
+
+  <!-- D—E -->
+  <line x1="498" y1="170" x2="562" y2="170" class="link"/>
+  <text x="530" y="160" text-anchor="middle" class="hop-label">UDP</text>
+
+  <!-- === Multi-hop path illustration (A→E, 4 hops) === -->
+  <line x1="110" y1="210" x2="590" y2="210" class="path"
+        marker-end="url(#arrow)"/>
+  <text x="350" y="228" text-anchor="middle" class="hop-label">
+    A → E  (4 hops, discovery-routed)
+  </text>
+
+  <!-- === Nodes === -->
+
+  <!-- Node A -->
+  <circle cx="110" cy="170" r="28" class="node"/>
+  <text x="110" y="166" text-anchor="middle" class="name">A</text>
+  <text x="110" y="179" text-anchor="middle" class="ip">.10</text>
+  <text x="110" y="130" text-anchor="middle" class="fips-addr">fd69:e08d:...</text>
+
+  <!-- Node B -->
+  <circle cx="230" cy="170" r="28" class="node"/>
+  <text x="230" y="166" text-anchor="middle" class="name">B</text>
+  <text x="230" y="179" text-anchor="middle" class="ip">.11</text>
+  <text x="230" y="130" text-anchor="middle" class="fips-addr">fd8e:302c:...</text>
+
+  <!-- Node C -->
+  <circle cx="350" cy="170" r="28" class="node"/>
+  <text x="350" y="166" text-anchor="middle" class="name">C</text>
+  <text x="350" y="179" text-anchor="middle" class="ip">.12</text>
+  <text x="350" y="130" text-anchor="middle" class="fips-addr">fdac:a221:...</text>
+
+  <!-- Node D -->
+  <circle cx="470" cy="170" r="28" class="node"/>
+  <text x="470" y="166" text-anchor="middle" class="name">D</text>
+  <text x="470" y="179" text-anchor="middle" class="ip">.13</text>
+  <text x="470" y="130" text-anchor="middle" class="fips-addr">fdb6:8411:...</text>
+
+  <!-- Node E -->
+  <circle cx="590" cy="170" r="28" class="node"/>
+  <text x="590" y="166" text-anchor="middle" class="name">E</text>
+  <text x="590" y="179" text-anchor="middle" class="ip">.14</text>
+  <text x="590" y="130" text-anchor="middle" class="fips-addr">fded:7dee:...</text>
+
+  <!-- === Legend === -->
+  <rect x="30" y="260" width="640" height="120" class="legend-box"/>
+
+  <line x1="50" y1="282" x2="90" y2="282" stroke="#506090" stroke-width="2"/>
+  <text x="100" y="286" class="legend">Direct UDP peer link (port 4000, auto_connect)</text>
+
+  <line x1="50" y1="304" x2="90" y2="304" stroke="#d0a040" stroke-width="1.2"
+        stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="100" y="308" class="legend">Multi-hop path (discovery + session establishment)</text>
+
+  <text x="50" y="332" class="legend" fill="#808890">Routing flow: TUN packet → identity cache → initiate_session()</text>
+  <text x="50" y="347" class="legend" fill="#808890">  → find_next_hop() fails → discovery flood → route_cache populated</text>
+  <text x="50" y="362" class="legend" fill="#808890">  → session retry → Noise IK handshake → encrypted data delivery</text>
+</svg>

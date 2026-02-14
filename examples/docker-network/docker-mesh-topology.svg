@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 560" font-family="monospace" font-size="13">
+  <style>
+    circle.node { fill: #1a1a2e; stroke: #e0e0e0; stroke-width: 2; }
+    circle.root { fill: #1a1a2e; stroke: #60a0e0; stroke-width: 2.5; }
+    text { fill: #e0e0e0; }
+    text.name { font-size: 14px; font-weight: bold; }
+    text.root-label { font-size: 9px; fill: #60a0e0; }
+    text.npub { font-size: 9px; fill: #808890; }
+    text.title { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 11px; fill: #909090; }
+    text.legend { font-size: 11px; }
+    text.net-label { font-size: 10px; fill: #606880; }
+    text.test-label { font-size: 10px; fill: #909090; }
+    line.link { stroke: #404860; stroke-width: 1.5; }
+    line.link-tree { stroke: #60a0e0; stroke-width: 2; }
+    rect.legend-box { fill: #151520; stroke: #404060; stroke-width: 1; rx: 4; }
+    rect.net-box { fill: none; stroke: #303050; stroke-width: 1;
+                   stroke-dasharray: 6 3; rx: 8; }
+  </style>
+
+  <defs>
+    <marker id="tree-arrow" viewBox="0 0 10 6" refX="38" refY="3"
+            markerWidth="10" markerHeight="7" orient="auto-start-reverse"
+            markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10 3 L 0 6 z" fill="#60a0e0"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="700" height="560" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="30" text-anchor="middle" class="title">Docker Mesh Topology</text>
+  <text x="350" y="48" text-anchor="middle" class="subtitle">Sparse mesh — 5 nodes, 6 bidirectional UDP links</text>
+
+  <!-- Docker network boundary -->
+  <rect x="40" y="62" width="620" height="310" class="net-box"/>
+  <text x="52" y="78" class="net-label">172.20.0.0/24  (docker: fips-net)</text>
+
+  <!--
+    Pentagon layout (centered at 350,225):
+      A = top           (350, 110)
+      B = upper-right   (550, 195)
+      C = lower-right   (480, 335)
+      D = lower-left    (220, 335)
+      E = upper-left    (150, 195)
+
+    Links: B-C, C-D, D-E, E-A, A-D, C-E
+
+    Spanning tree (root=A, lowest NodeAddr):
+      A → D, A → E
+      D → C
+      C → B
+    Tree edges highlighted; non-tree edges dim.
+  -->
+
+  <!-- === Peer links (6 edges) === -->
+  <!-- Non-tree edges (dim) -->
+  <!-- D — E -->
+  <line x1="220" y1="335" x2="150" y2="195" class="link"/>
+  <!-- C — E -->
+  <line x1="480" y1="335" x2="150" y2="195" class="link"/>
+
+  <!-- Tree edges (highlighted, arrow toward parent/root) -->
+  <!-- B → C (parent) -->
+  <line x1="550" y1="195" x2="480" y2="335" class="link-tree"
+        marker-end="url(#tree-arrow)"/>
+  <!-- C → D (parent) -->
+  <line x1="480" y1="335" x2="220" y2="335" class="link-tree"
+        marker-end="url(#tree-arrow)"/>
+  <!-- E → A (parent) -->
+  <line x1="150" y1="195" x2="350" y2="110" class="link-tree"
+        marker-end="url(#tree-arrow)"/>
+  <!-- D → A (parent) -->
+  <line x1="220" y1="335" x2="350" y2="110" class="link-tree"
+        marker-end="url(#tree-arrow)"/>
+
+  <!-- === Nodes (on top of links) === -->
+
+  <!-- Node A — root (2 peers: D, E) -->
+  <circle cx="350" cy="110" r="26" class="root"/>
+  <text x="350" y="108" text-anchor="middle" class="name">A</text>
+  <text x="350" y="121" text-anchor="middle" class="npub">.10</text>
+  <text x="350" y="75" text-anchor="middle" class="npub">npub1sjlh2c3...</text>
+  <text x="350" y="148" text-anchor="middle" class="root-label">root</text>
+
+  <!-- Node B (1 peer: C) -->
+  <circle cx="550" cy="195" r="26" class="node"/>
+  <text x="550" y="193" text-anchor="middle" class="name">B</text>
+  <text x="550" y="206" text-anchor="middle" class="npub">.11</text>
+  <text x="550" y="162" text-anchor="middle" class="npub">npub1tdwa4vj...</text>
+
+  <!-- Node C (3 peers: B, D, E) -->
+  <circle cx="480" cy="335" r="26" class="node"/>
+  <text x="480" y="333" text-anchor="middle" class="name">C</text>
+  <text x="480" y="346" text-anchor="middle" class="npub">.12</text>
+  <text x="516" y="357" text-anchor="start" class="npub">npub1cld9yay...</text>
+
+  <!-- Node D (3 peers: A, C, E) -->
+  <circle cx="220" cy="335" r="26" class="node"/>
+  <text x="220" y="333" text-anchor="middle" class="name">D</text>
+  <text x="220" y="346" text-anchor="middle" class="npub">.13</text>
+  <text x="112" y="357" text-anchor="start" class="npub">npub1n9lpnv0...</text>
+
+  <!-- Node E (3 peers: A, C, D) -->
+  <circle cx="150" cy="195" r="26" class="node"/>
+  <text x="150" y="193" text-anchor="middle" class="name">E</text>
+  <text x="150" y="206" text-anchor="middle" class="npub">.14</text>
+  <text x="150" y="162" text-anchor="middle" class="npub">npub1wf8akf8...</text>
+
+  <!-- Test info -->
+  <text x="350" y="390" text-anchor="middle" class="test-label">
+    All-pairs ping test: 20 directed paths (direct + multi-hop via discovery)
+  </text>
+
+  <!-- === Legend === -->
+  <rect x="40" y="410" width="620" height="130" class="legend-box"/>
+
+  <line x1="60" y1="435" x2="100" y2="435" stroke="#404860" stroke-width="1.5"/>
+  <text x="110" y="439" class="legend">UDP peer link (port 4000, auto_connect)</text>
+
+  <line x1="55" y1="457" x2="100" y2="457" stroke="#60a0e0" stroke-width="2"/>
+  <path d="M 90 454 L 100 457 L 90 460 z" fill="#60a0e0"/>
+  <text x="110" y="461" class="legend">Spanning tree edge (arrow toward parent/root)</text>
+
+  <circle cx="72" cy="479" r="8" fill="#1a1a2e" stroke="#60a0e0" stroke-width="2"/>
+  <text x="110" y="483" class="legend">Tree root (lowest NodeAddr = SHA-256(pubkey)[:16])</text>
+
+  <text x="60" y="525" class="legend" fill="#808890">Each container: CAP_NET_ADMIN, /dev/net/tun, DNS on 127.0.0.1:53</text>
+</svg>

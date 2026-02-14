@@ -1,0 +1,31 @@
+# FIPS Node A configuration (chain topology: A-B-C-D-E)
+#
+# Identity: npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m
+# FIPS address: fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b
+
+node:
+  identity:
+    nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+  port: 53
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:4000"
+    mtu: 1280
+
+peers:
+  - npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
+    alias: "node-b"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.11:4000"
+    connect_policy: auto_connect

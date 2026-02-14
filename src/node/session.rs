@@ -42,12 +42,15 @@ impl EndToEndState {
 /// The state is `None` only transiently during handler processing.
 pub(crate) struct SessionEntry {
     /// Remote node's address (session table key).
+    #[allow(dead_code)]
     remote_addr: NodeAddr,
     /// Remote node's static public key (for Noise IK).
+    #[allow(dead_code)]
     remote_pubkey: PublicKey,
     /// Current session state. `None` only during state transitions.
     state: Option<EndToEndState>,
     /// When the session was created (Unix milliseconds).
+    #[cfg_attr(not(test), allow(dead_code))]
     created_at: u64,
     /// Last activity timestamp (Unix milliseconds).
     last_activity: u64,
@@ -68,16 +71,6 @@ impl SessionEntry {
             created_at: now_ms,
             last_activity: now_ms,
         }
-    }
-
-    /// Get the remote node address.
-    pub(crate) fn remote_addr(&self) -> &NodeAddr {
-        &self.remote_addr
-    }
-
-    /// Get the remote node's public key.
-    pub(crate) fn remote_pubkey(&self) -> &PublicKey {
-        &self.remote_pubkey
     }
 
     /// Get the current session state.
@@ -114,11 +107,13 @@ impl SessionEntry {
     }
 
     /// Get creation time.
+    #[cfg(test)]
     pub(crate) fn created_at(&self) -> u64 {
         self.created_at
     }
 
     /// Get last activity time.
+    #[cfg(test)]
     pub(crate) fn last_activity(&self) -> u64 {
         self.last_activity
     }

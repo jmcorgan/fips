@@ -1,0 +1,43 @@
+# FIPS Node E configuration (mesh topology)
+#
+# Identity: npub1wf8akf8lu2zdkjkmwhl75pqvven654mpv4sz2x2tprl5265mgrzq8nhak4
+# FIPS address: fded:7dee:d386:a546:2a43:5103:16d8:4f3c
+
+node:
+  identity:
+    nsec: "e102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fe0"
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+  port: 53
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:4000"
+    mtu: 1280
+
+peers:
+  - npub: "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
+    alias: "node-a"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.10:4000"
+    connect_policy: auto_connect
+  - npub: "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
+    alias: "node-c"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.12:4000"
+    connect_policy: auto_connect
+  - npub: "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+    alias: "node-d"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.13:4000"
+    connect_policy: auto_connect

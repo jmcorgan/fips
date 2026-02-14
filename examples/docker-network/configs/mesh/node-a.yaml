@@ -1,4 +1,4 @@
-# FIPS Node A configuration
+# FIPS Node A configuration (mesh topology)
 #
 # Identity: npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m
 # FIPS address: fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b
@@ -15,18 +15,23 @@ tun:
 dns:
   enabled: true
   bind_addr: "127.0.0.1"
-  port: 5354
+  port: 53
 
 transports:
   udp:
-    bind_addr: "10.0.0.1:4000"
+    bind_addr: "0.0.0.0:4000"
     mtu: 1280
 
 peers:
-  - npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
-    alias: "node-b"
+  - npub: "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+    alias: "node-d"
     addresses:
       - transport: udp
-        addr: "10.0.0.2:4000"
-        priority: 1
+        addr: "172.20.0.13:4000"
+    connect_policy: auto_connect
+  - npub: "npub1wf8akf8lu2zdkjkmwhl75pqvven654mpv4sz2x2tprl5265mgrzq8nhak4"
+    alias: "node-e"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.14:4000"
     connect_policy: auto_connect

@@ -1,0 +1,142 @@
+networks:
+  fips-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+x-fips-common: &fips-common
+  build:
+    context: .
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+  restart: "no"
+  environment:
+    - RUST_LOG=info
+
+services:
+  # ── Mesh topology ──────────────────────────────────────────────
+  node-a:
+    <<: *fips-common
+    profiles: ["mesh"]
+    container_name: fips-node-a
+    hostname: node-a
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/mesh/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.10
+
+  node-b:
+    <<: *fips-common
+    profiles: ["mesh"]
+    container_name: fips-node-b
+    hostname: node-b
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/mesh/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.11
+
+  node-c:
+    <<: *fips-common
+    profiles: ["mesh"]
+    container_name: fips-node-c
+    hostname: node-c
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/mesh/node-c.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.12
+
+  node-d:
+    <<: *fips-common
+    profiles: ["mesh"]
+    container_name: fips-node-d
+    hostname: node-d
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/mesh/node-d.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.13
+
+  node-e:
+    <<: *fips-common
+    profiles: ["mesh"]
+    container_name: fips-node-e
+    hostname: node-e
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/mesh/node-e.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.14
+
+  # ── Chain topology (A-B-C-D-E) ────────────────────────────────
+  chain-a:
+    <<: *fips-common
+    profiles: ["chain"]
+    container_name: fips-node-a
+    hostname: node-a
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/chain/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.10
+
+  chain-b:
+    <<: *fips-common
+    profiles: ["chain"]
+    container_name: fips-node-b
+    hostname: node-b
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/chain/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.11
+
+  chain-c:
+    <<: *fips-common
+    profiles: ["chain"]
+    container_name: fips-node-c
+    hostname: node-c
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/chain/node-c.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.12
+
+  chain-d:
+    <<: *fips-common
+    profiles: ["chain"]
+    container_name: fips-node-d
+    hostname: node-d
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/chain/node-d.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.13
+
+  chain-e:
+    <<: *fips-common
+    profiles: ["chain"]
+    container_name: fips-node-e
+    hostname: node-e
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./configs/chain/node-e.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.14
