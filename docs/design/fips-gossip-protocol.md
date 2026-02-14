@@ -319,8 +319,8 @@ duplicates.
 
 **origin**: The node_addr of the original requester. Used for response routing.
 
-**origin_coords**: The requester's current tree coordinates. Enables greedy
-routing of the response back to origin.
+**origin_coords**: The requester's current tree coordinates. Used by the target
+for the first hop of response routing (via `find_next_hop`).
 
 **ttl**: Propagation limit. Prevents unbounded flooding.
 
@@ -384,21 +384,29 @@ LookupResponse {
 **target**: Confirms the identity found.
 
 **target_coords**: The target's current tree coordinates. This is the primary
-payload - enables greedy routing to the target.
+payload — cached by the originator to enable routing to the target.
 
 **proof**: Target's signature over `(request_id || target || target_coords)`.
 Prevents malicious nodes from claiming reachability and blackholing traffic.
 
 ### 5.3 Routing
 
-LookupResponse uses greedy tree routing based on `origin_coords` from the
-request:
+LookupResponse uses a two-phase routing mechanism:
 
 ```text
 1. Response created at target (or node with target in filter)
-2. Each hop forwards toward origin using tree distance
-3. Origin receives response, caches target_coords
+2. First hop: target routes toward origin via find_next_hop
+   (standard bloom filter → tree routing path)
+3. Subsequent hops: reverse-path forwarding via recent_requests
+   (each transit node recorded which peer sent the request)
+4. Origin receives response, caches target_coords in RouteCache
 ```
+
+The first hop from the target uses `find_next_hop(origin)` because
+the target was not a transit node for the request (it was the
+destination). All transit nodes that forwarded the request stored a
+`(request_id → from_peer)` entry in `recent_requests`, enabling
+reverse-path forwarding for the response.
 
 ### 5.4 Security
 
@@ -435,8 +443,8 @@ for the full link message type table.
 | ROOT_TIMEOUT | 60 min | Root declaration considered stale |
 | TREE_ENTRY_TTL | 5-10 min | Individual entry expiration |
 | ANNOUNCE_MIN_INTERVAL | 500 ms | Rate limit for announcements |
-| LOOKUP_TTL | 8 | Discovery request propagation limit |
-| LOOKUP_TIMEOUT | 5 sec | Time to wait for response |
+| LOOKUP_TTL | 64 | Discovery request propagation limit |
+| LOOKUP_TIMEOUT | 10 sec | Time to wait for response |
 
 ---
 
@@ -669,7 +677,7 @@ PLAINTEXT BYTES:
 [8 bytes request_id]             ← random unique ID
 [16 bytes target node_addr]        ← who we're looking for
 [16 bytes origin node_addr]        ← who's asking
-08                               ← ttl = 8
+40                               ← ttl = 64
 04 00                            ← origin_coords_count = 4
 [16 bytes] × 4                   ← origin's ancestry (64 bytes)
 07                               ← visited hash_count = 7
@@ -748,13 +756,13 @@ Source S wants to reach distant destination D (not in local filters)
    │                    ▼                                         │
    │              ┌──────┬───────────────────────────────────┐    │
    │              │ 0x30 │ LookupRequest payload             │    │
-   │              │      │ (target=D, origin=S, ttl=8, ...)  │    │
+   │              │      │ (target=D, origin=S, ttl=64, ...) │    │
    │              └──────┴───────────────────────────────────┘    │
    └──────────────────────────────────────────────────────────────┘
 
 2. Request propagates through network, reaches D
 
-3. D creates LookupResponse, routes back via greedy routing:
+3. D creates LookupResponse, routes back via find_next_hop + reverse-path:
 
    UDP DATAGRAM
    ┌──────────────────────────────────────────────────────────────┐

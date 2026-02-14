@@ -372,8 +372,8 @@ handshake where the initiator knows the responder's static key. See
 When in `AwaitingMsg2` and we receive a msg1 from the same peer (both sides
 initiated simultaneously):
 
-- If local npub < remote npub: Ignore incoming msg1, remain initiator
-- If local npub > remote npub: Switch to responder role, send msg2,
+- If local node_addr < remote node_addr: Ignore incoming msg1, remain initiator
+- If local node_addr > remote node_addr: Switch to responder role, send msg2,
   transition to `ReceivedMsg1`
 
 **Events:**
@@ -585,6 +585,14 @@ per-message reliability over unreliable links.
 
 ## Leaf-Only Operation
 
+> **Implementation status**: Leaf-only mode is partially implemented. The
+> `node.leaf_only` config flag and `BloomState::leaf_only()` (bloom filter
+> suppression) exist. The following are **not yet implemented**: routing tunnel
+> to upstream peer, tree announcement suppression, simplified peer structure,
+> `leaf_dependents` tracking on the upstream side, and LookupRequest proxying.
+> A leaf-only node currently runs the full Node code path with bloom filters
+> disabled.
+
 Leaf-only mode enables constrained devices (sensors, battery-powered nodes, mobile
 devices) to participate in FIPS without the overhead of full mesh routing.
 
@@ -720,14 +728,15 @@ transport.*.auto_connect        # single configured peer
 
 ### Resource Comparison
 
-| Resource            | Full Participant    | Leaf-Only |
-|---------------------|---------------------|-----------|
-| RAM (Bloom filters) | d × 4KB (d = peers) | 0         |
-| RAM (coord cache)   | 10K-100K entries    | 0         |
-| RAM (tree state)    | O(P × D) entries    | 0         |
-| Bandwidth (idle)    | < 1 KB/sec          | Near zero |
-| CPU (filter ops)    | Moderate            | None      |
-| Peers               | Multiple            | One       |
+| Resource            | Full Participant      | Leaf-Only |
+|---------------------|-----------------------|-----------|
+| RAM (Bloom filters) | d × 4KB (d = peers)   | 0         |
+| RAM (CoordCache)    | 50K entries, 300s TTL | 0         |
+| RAM (RouteCache)    | 10K entries, LRU      | 0         |
+| RAM (tree state)    | O(P × D) entries      | 0         |
+| Bandwidth (idle)    | < 1 KB/sec            | Near zero |
+| CPU (filter ops)    | Moderate              | None      |
+| Peers               | Multiple              | One       |
 
 ### Use Cases
 
@@ -932,14 +941,14 @@ present in the wire format for forward compatibility with larger filters.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `discovery.lookup.ttl` | u8 | 8 | Initial TTL for LookupRequest |
+| `discovery.lookup.ttl` | u8 | 64 | Initial TTL for LookupRequest |
 | `discovery.lookup.timeout` | duration | 10s | Timeout waiting for response |
 | `discovery.lookup.retry_count` | u8 | 3 | Retries before giving up |
 | `discovery.cache.max_entries` | u32 | 10000 | Route cache size |
-| `discovery.cache.ttl` | duration | 300s | Cached coordinates expiry |
 
-The discovery cache stores coordinates learned from LookupResponses for destinations
-this node wants to reach. This is the primary cache for endpoint nodes.
+The discovery route cache (`RouteCache`) stores coordinates learned from
+LookupResponses for destinations this node wants to reach. It uses LRU eviction
+only (no automatic TTL expiration). This is the primary cache for endpoint nodes.
 
 ### Routing Session Management
 
@@ -956,10 +965,10 @@ this node wants to reach. This is the primary cache for endpoint nodes.
 | `session.cache.ttl` | duration | 300s | Cached coordinates expiry |
 | `session.refresh.interval` | duration | 240s | Proactive session refresh |
 
-The session cache stores coordinates learned from SessionSetup packets passing through
-this node as a transit router. Larger than discovery cache since routers see traffic
-for many destinations. Both caches are part of Node.coord_cache; these parameters
-configure the same underlying cache but are grouped by purpose.
+The session coordinate cache (`CoordCache`) stores coordinates learned from
+SessionSetup/SessionAck packets passing through this node as a transit router.
+Larger than the discovery route cache since routers see traffic for many
+destinations. Uses TTL-based expiration (300s) with LRU fallback.
 
 ### Crypto Session Management
 

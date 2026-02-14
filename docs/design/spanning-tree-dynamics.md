@@ -18,7 +18,7 @@ The protocol is based on Yggdrasil v0.5's CRDT gossip design.
 5. [Topology Changes and Reconvergence](#5-topology-changes-and-reconvergence)
 6. [Partition Detection and Handling](#6-partition-detection-and-handling)
 7. [Link Failure Detection](#7-link-failure-detection)
-8. [Cost Metrics and Parent Selection](#8-cost-metrics-and-parent-selection)
+8. [Parent Selection](#8-parent-selection)
 9. [Steady State Behavior](#9-steady-state-behavior)
 10. [Worked Examples](#10-worked-examples)
 11. [Known Limitations (v1 Implementation)](#known-limitations-v1-implementation)
@@ -384,15 +384,9 @@ Link B ←→ C fails:
 
 ### Reconvergence Dynamics
 
-**Stability threshold**: To prevent flapping, a node only changes parent when:
-
-```
-improvement = current_cost - new_cost
-if improvement > stability_threshold:
-    change_parent()
-```
-
-This hysteresis prevents oscillation when two paths have similar costs.
+**Stability threshold**: To prevent flapping, a node only changes parent when
+the improvement exceeds a threshold. In v1, this is a depth difference of at
+least `PARENT_SWITCH_THRESHOLD` (1 hop). See §8 for details.
 
 **Sequence number advancement**: Each parent change increments the sequence
 number. Nodes observing rapid sequence increases can detect instability and
@@ -589,39 +583,76 @@ see traffic to consider the link alive.
 
 ---
 
-## 8. Cost Metrics and Parent Selection
+## 8. Parent Selection
 
 Parent selection determines tree structure and routing efficiency.
 
-### Cost Components
+### v1 Implementation: Depth-Only Selection
 
-**Latency** (primary metric):
+The current implementation uses tree depth as the sole selection metric, with a
+threshold to prevent thrashing between equivalent-depth paths.
 
-```
-cost_latency = round_trip_time_ms
-```
-
-Measured via protocol message exchange timing. Lower is better.
-
-**Packet loss** (reliability):
+**Algorithm** (`TreeState::evaluate_parent()` in `tree.rs`):
 
 ```
-cost_loss = 1 / (1 - loss_rate)
+evaluate_parent():
+    // 1. Find smallest root reachable through any peer
+    smallest_root = min(peer.root for peer in peers_with_coords)
+
+    if self == smallest_root and is_root:
+        return None  // Already root, no change
+
+    // 2. Among peers reaching smallest_root, find shallowest
+    best_peer = min(
+        [p for p in peers if p.root == smallest_root],
+        key=lambda p: p.depth
+    )
+    proposed_depth = best_peer.depth + 1
+
+    if best_peer == current_parent:
+        return None  // Already using best
+
+    // 3. Always switch if parent is gone or root is changing
+    if current_parent not in peers:
+        return best_peer  // Path broken
+    if current_root != smallest_root:
+        return best_peer  // Better root found
+
+    // 4. For same root: require depth improvement ≥ threshold
+    current_depth = my_coords.depth()
+    if current_depth >= proposed_depth + PARENT_SWITCH_THRESHOLD:
+        return best_peer
+
+    return None  // Not enough improvement
 ```
 
-Transforms loss rate into multiplicative cost. 10% loss → cost 1.11, 50% loss → cost 2.
-
-**Bandwidth** (capacity):
+**Constants**:
 
 ```
-cost_bandwidth = reference_bandwidth / actual_bandwidth
+PARENT_SWITCH_THRESHOLD = 1  // Minimum depth improvement to switch parents
 ```
 
-Normalizes bandwidth to a reference value. Lower capacity → higher cost.
+This means a proposed parent must offer a path at least 1 hop shallower than
+the current parent (under the same root) to trigger a switch. Root changes
+always trigger a switch regardless of depth.
 
-### Combined Cost
+**What this means for tree structure**: The v1 algorithm produces minimum-depth
+trees, which minimizes coordinate path length and hop count for greedy routing.
+However, it does not account for link quality—a high-latency or lossy link at
+depth 1 is preferred over a fast link at depth 2.
 
-A weighted combination:
+### v2 Planned: Cost Metrics
+
+The following cost-based parent selection is planned but not yet implemented.
+
+**Cost components**:
+
+- **Latency** (primary): `cost_latency = round_trip_time_ms`
+- **Packet loss** (reliability): `cost_loss = 1 / (1 - loss_rate)` —
+  transforms loss rate into multiplicative cost (10% loss → 1.11, 50% → 2.0)
+- **Bandwidth** (capacity): `cost_bandwidth = reference_bandwidth / actual_bandwidth`
+
+**Combined cost**: Weighted combination with application-tunable weights:
 
 ```
 effective_cost = w_latency * cost_latency
@@ -629,91 +660,27 @@ effective_cost = w_latency * cost_latency
                + w_bandwidth * cost_bandwidth
 ```
 
-Weights depend on application priorities. Real-time traffic weights latency
-heavily; bulk transfer weights bandwidth heavily.
-
-### Path Cost to Root
-
-The cost to reach the root through a peer:
+**Path cost to root**: Recursive — each node advertises its cumulative cost,
+allowing neighbors to compute total path cost:
 
 ```
 path_cost(peer) = link_cost(self, peer) + peer.path_cost_to_root
 ```
 
-This is recursive—each node advertises its path cost to root, allowing
-neighbors to compute their total path cost through that peer.
-
-### Parent Selection Algorithm
-
-```
-select_parent():
-    candidates = [p for p in peers if p.has_path_to_root]
-
-    if not candidates:
-        return self  // Become own root
-
-    best = min(candidates, key=lambda p: path_cost(p))
-
-    if current_parent is not None:
-        current_cost = path_cost(current_parent)
-        new_cost = path_cost(best)
-        improvement = current_cost - new_cost
-
-        if improvement < stability_threshold:
-            return current_parent  // Stay with current
-
-    return best
-```
-
-### Stability Threshold
-
-Prevents flapping when paths have similar costs:
+**Stability threshold**: Hysteresis with both absolute and relative components:
 
 ```
 stability_threshold = base_threshold + current_cost * relative_threshold
-
-Example:
-    base_threshold = 5ms
-    relative_threshold = 0.1 (10%)
-    current_cost = 50ms
-
-    threshold = 5 + 50 * 0.1 = 10ms
-
-    New path must be >10ms better to trigger switch
 ```
 
-### Cost Measurement
+**Cost measurement**: Active probing (periodic RTT measurement), passive
+observation (inferred from protocol message timing), and exponential smoothing
+(`alpha = 0.1–0.3`) to balance responsiveness with stability.
 
-**Active probing**:
-
-```
-Every probe_interval:
-    for peer in peers:
-        send_probe(peer)
-        record_send_time()
-
-On probe_response:
-    rtt = now - send_time
-    update_latency_estimate(peer, rtt)
-```
-
-**Passive observation**:
-
-```
-On protocol_message_exchange:
-    infer_rtt_from_request_response_timing()
-
-On packet_loss_detected:
-    update_loss_estimate()
-```
-
-**Exponential smoothing**:
-
-```
-estimate = alpha * new_sample + (1 - alpha) * estimate
-
-alpha = 0.1-0.3 typical (higher = more responsive, less stable)
-```
+**Implementation prerequisites**: The cost-based algorithm requires changes to
+the TreeAnnounce wire format to carry path cost values, and a measurement
+subsystem for link quality metrics. See Section 10, Example 2 for how
+cost-based selection would affect tree structure in heterogeneous networks.
 
 ---
 

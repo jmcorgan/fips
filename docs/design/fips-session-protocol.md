@@ -238,10 +238,11 @@ which also establish routing session state at intermediate nodes.
 ### 3.5 Simultaneous Session Initiation (Crossing Hellos)
 
 When both nodes attempt to establish a session simultaneously, a deterministic
-tie-breaker resolves the conflict using npub ordering:
+tie-breaker resolves the conflict using node_addr ordering (consistent
+with the link-layer cross-connection tie-breaker):
 
-- If local npub < remote npub: Continue as initiator, ignore incoming initiation
-- If local npub > remote npub: Abort own initiation, switch to responder role
+- If local node_addr < remote node_addr: Continue as initiator, ignore incoming setup
+- If local node_addr > remote node_addr: Abort own initiation, switch to responder role
 
 This ensures exactly one handshake completes with minimal wasted effort.
 
@@ -261,8 +262,9 @@ FIPS routing combines three mechanisms:
 2. **Discovery protocol**: Query-based lookup for distant destinations
 3. **Greedy tree routing**: Coordinate-based forwarding using spanning tree position
 
-The routing layer maintains a route cache mapping `node_addr → (coordinates,
-next_hop_peer)`. Cache hits enable immediate greedy routing; cache misses
+The routing layer maintains coordinate caches mapping `node_addr →
+TreeCoordinate` (see [fips-routing.md](fips-routing.md) §4 for details).
+Cache hits enable immediate routing via `find_next_hop()`; cache misses
 trigger route discovery via bloom filter queries or LookupRequest flooding.
 
 ### 4.2 Packet Handling During Discovery
@@ -270,13 +272,16 @@ trigger route discovery via bloom filter queries or LookupRequest flooding.
 Packets are queued (with bounded buffer) while route discovery is in progress
 and transmitted once coordinates are obtained.
 
-### 4.3 Route Cache Lifetime
+### 4.3 Coordinate Cache Lifetime
 
-Route cache entries:
+Two caches store `node_addr → TreeCoordinate` mappings (see
+[fips-routing.md](fips-routing.md) §4):
 
-- Expire after configurable timeout
-- Refresh on successful packet delivery
-- Invalidate when peer link goes down or spanning tree topology changes
+- **CoordCache** (session-populated): TTL-based eviction (300s default), 50K entries
+- **RouteCache** (discovery-populated): LRU eviction only, 10K entries
+
+Neither cache stores next-hop information — routing decisions are computed at
+lookup time by `find_next_hop()` using cached coordinates.
 
 ---
 
@@ -286,9 +291,9 @@ Route cache entries:
 
 The crypto session handshake (SessionSetup/SessionAck) warms route caches at
 intermediate routers as it transits. Each message carries the sender's
-coordinates; routers extract and cache `(src_addr, dest_addr) → next_hop` for
-both directions. After the handshake completes, data packets use minimal
-36-byte headers and routers forward based on cached routes.
+coordinates; routers extract and cache `node_addr → TreeCoordinate` in the
+CoordCache. After the handshake completes, data packets use minimal 38-byte
+headers (34 envelope + 4 DataPacket) and routers forward via `find_next_hop()`.
 
 ### 5.2 Cache Miss Recovery
 

@@ -35,8 +35,8 @@ of forwarding decisions.
   split-horizon merge, so they cover the entire reachable network at
   steady state.
 - **Greedy tree routing**: Fallback forwarding during convergence windows
-  when bloom filters are incomplete. Also used for routing LookupResponse
-  messages back to the origin.
+  when bloom filters are incomplete. Also serves as tie-breaker among
+  bloom filter candidates (closest tree distance wins).
 - **Discovery protocol**: Populates the coordinate cache to enable greedy
   tree routing and to provide intermediate routers with coordinate data
   for more efficient path selection. Not required for basic reachability
@@ -307,23 +307,26 @@ signature proves the target authorized the route.
 
 ### Caching
 
-Discovered coordinates are cached:
+Discovered coordinates are stored in the route cache (`RouteCache`):
 
 ```rust
 struct RouteCache {
     entries: HashMap<NodeAddr, CachedCoords>,
+    max_entries: usize,  // default: 10,000
 }
 
 struct CachedCoords {
-    coords: Vec<NodeAddr>,
+    coords: TreeCoordinate,
     discovered_at: Timestamp,
     last_used: Timestamp,
 }
 ```
 
-- **Eviction**: LRU when cache full
-- **Expiration**: TTL-based (coordinates may go stale if target moves in tree)
+- **Eviction**: LRU when cache full (no automatic TTL expiration)
 - **Invalidation**: On route failure, evict and re-discover
+
+This is distinct from the `CoordCache` used for session-populated
+coordinates (see Part 4 for the full dual-cache architecture).
 
 ---
 
@@ -446,15 +449,33 @@ with explicit error signaling over metadata privacy.
 
 ---
 
-## Part 4: Route Cache Management
+## Part 4: Coordinate Cache Architecture
 
 > **Wire formats**: For session layer message wire formats (SessionSetup,
 > SessionAck, DataPacket, CoordsRequired, PathBroken), see
 > [fips-session-protocol.md](fips-session-protocol.md) §8.
 
-### Route Cache Purpose
+### Dual Cache Architecture
 
-The coordinate cache serves two functions:
+FIPS uses two coordinate caches with different lifecycles:
+
+- **CoordCache** (session-populated): Stores coordinates learned from
+  SessionSetup and SessionAck coordinate fields during session establishment.
+  TTL-based expiration (300s). 50,000 entries max. Consulted first by
+  `find_next_hop()`.
+
+- **RouteCache** (discovery-populated): Stores coordinates learned from
+  LookupResponse during discovery protocol completion. LRU eviction only
+  (no automatic TTL). 10,000 entries max. Consulted as fallback when
+  CoordCache misses.
+
+Both caches store `TreeCoordinate` values (node_addr → coordinates). Neither
+stores next-hop information — routing decisions are computed at lookup time by
+`find_next_hop()` using the cached coordinates.
+
+### Cache Purpose
+
+The coordinate caches serve two functions:
 
 1. **Greedy routing fallback** — when bloom filters haven't converged,
    cached coordinates enable tree-distance-based forwarding.
@@ -575,30 +596,42 @@ impl Router {
 }
 ```
 
-### Cache Data Structure
+### Cache Data Structures
 
 ```rust
+/// Session-populated coordinate cache (TTL-based).
 struct CoordCache {
     entries: HashMap<NodeAddr, CacheEntry>,
-    max_entries: usize,
+    max_entries: usize,      // default: 50,000
+    ttl_ms: u64,             // default: 300,000 (5 minutes)
 }
 
 struct CacheEntry {
-    coords: Vec<NodeAddr>,
-    created: Timestamp,
-    last_used: Timestamp,
-    expires: Timestamp,
+    coords: TreeCoordinate,
+    created_at: u64,         // Unix milliseconds
+    last_used: u64,
+    expires_at: u64,
+}
+
+/// Discovery-populated coordinate cache (LRU-based, no TTL).
+struct RouteCache {
+    entries: HashMap<NodeAddr, CachedCoords>,
+    max_entries: usize,      // default: 10,000
+}
+
+struct CachedCoords {
+    coords: TreeCoordinate,
+    discovered_at: u64,
+    last_used: u64,
 }
 ```
 
-**Eviction policy**: LRU (least recently used) when cache exceeds max_entries.
+**CoordCache eviction**: Expired entries removed first, then LRU when cache
+exceeds max_entries. Entries expire after TTL (300 seconds). Refreshed by
+subsequent SessionSetup/SessionAck or DataPacket with COORDS_PRESENT.
 
-**Expiration**: Entries expire after TTL (e.g., 300 seconds). Can be refreshed
-by:
-
-- Subsequent SessionSetup
-- SessionRefresh message (lightweight, just touches expiry)
-- Data packet transit (optional: refresh on use)
+**RouteCache eviction**: Pure LRU when cache exceeds max_entries. No automatic
+TTL expiration. Invalidated explicitly on route failure.
 
 ### Cache Miss Recovery
 
@@ -697,7 +730,7 @@ hop_limit). Sizes below include the SessionDatagram header.
 - **Bloom filter traffic**: Near zero (event-driven, no changes)
 - **Discovery traffic**: Rare (warm caches)
 - **Session traffic**: Rare (established sessions)
-- **Data traffic**: Minimal overhead (36-byte header)
+- **Data traffic**: Minimal overhead (38-byte header: 34 envelope + 4 DataPacket)
 
 ### Network Churn
 
@@ -712,8 +745,8 @@ When nodes join/leave:
 | Resource | Full Participant | Leaf-Only |
 |----------|------------------|-----------|
 | Bloom filter storage | d × 1 KB (d = peer count) | None |
-| Coordinate cache | 10K-100K entries | None |
-| Route cache | 1K-10K entries | Minimal |
+| CoordCache (session) | 50K entries, 300s TTL | None |
+| RouteCache (discovery) | 10K entries, LRU | Minimal |
 | Bandwidth (idle) | < 1 KB/sec | Near zero |
 
 ---
