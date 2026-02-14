@@ -82,6 +82,7 @@ impl Node {
                     self.process_pending_retries(now_ms).await;
                     self.check_tree_state().await;
                     self.check_bloom_state().await;
+                    self.purge_stale_lookups(now_ms);
                 }
             }
         }

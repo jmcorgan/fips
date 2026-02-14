@@ -186,6 +186,11 @@ type AddrKey = (TransportId, TransportAddr);
 ///
 /// The `addr_to_link` map enables dispatching incoming packets to the right
 /// connection before authentication completes.
+///
+/// Discovery lookup constants used across handler modules.
+const LOOKUP_TIMEOUT_MS: u64 = 10_000;
+const DISCOVERY_TTL: u8 = 64;
+
 pub struct Node {
     // === Identity ===
     /// This node's cryptographic identity.
@@ -257,6 +262,11 @@ pub struct Node {
     /// Packets queued while waiting for session establishment.
     /// Keyed by destination NodeAddr, bounded per-dest and total.
     pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
+
+    // === Pending Discovery Lookups ===
+    /// Tracks in-flight discovery lookups. Maps target NodeAddr to the
+    /// initiation timestamp (Unix ms). Prevents duplicate flood queries.
+    pending_lookups: HashMap<NodeAddr, u64>,
 
     // === Resource Limits ===
     /// Maximum connections (0 = unlimited).
@@ -363,6 +373,7 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
+            pending_lookups: HashMap::new(),
             max_connections: 256,
             max_peers: 128,
             max_links: 256,
@@ -420,6 +431,7 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
+            pending_lookups: HashMap::new(),
             max_connections: 256,
             max_peers: 128,
             max_links: 256,
@@ -849,7 +861,8 @@ impl Node {
     /// 5. No route → `None`
     ///
     /// Both the bloom filter and tree routing paths require cached destination
-    /// coordinates. Without coordinates, the node cannot make loop-free
+    /// coordinates (checked in `coord_cache` first, then `route_cache` as
+    /// fallback). Without coordinates, the node cannot make loop-free
     /// forwarding decisions. The caller should signal `CoordsRequired` back
     /// to the source when `None` is returned for a non-local destination.
     pub fn find_next_hop(&self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
@@ -865,12 +878,14 @@ impl Node {
             }
         }
 
-        // Look up destination coords (required by both bloom and tree paths)
+        // Look up destination coords (required by both bloom and tree paths).
+        // Try coord_cache first (session-based), then route_cache (discovery-based).
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_coords = self.coord_cache.get(dest_node_addr, now_ms)?;
+        let dest_coords = self.coord_cache.get(dest_node_addr, now_ms)
+            .or_else(|| self.route_cache.get(dest_node_addr).map(|c| c.coords()))?;
 
         // 3. Bloom filter candidates — requires dest_coords for loop-free selection
         let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);

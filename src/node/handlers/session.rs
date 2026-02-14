@@ -45,7 +45,7 @@ impl Node {
                 self.handle_data_packet(src_addr, inner).await;
             }
             Some(SessionMessageType::CoordsRequired) => {
-                self.handle_coords_required(inner);
+                self.handle_coords_required(inner).await;
             }
             Some(SessionMessageType::PathBroken) => {
                 self.handle_path_broken(inner);
@@ -322,9 +322,9 @@ impl Node {
     /// Handle a CoordsRequired error signal from a transit router.
     ///
     /// The router couldn't route our packet because it lacks cached
-    /// coordinates for the destination. Future packets should include
-    /// coordinates (set COORDS_PRESENT flag).
-    fn handle_coords_required(&mut self, inner: &[u8]) {
+    /// coordinates for the destination. Trigger discovery to populate
+    /// the route cache so subsequent routing attempts succeed.
+    async fn handle_coords_required(&mut self, inner: &[u8]) {
         let msg = match CoordsRequired::decode(inner) {
             Ok(m) => m,
             Err(e) => {
@@ -336,8 +336,10 @@ impl Node {
         debug!(
             dest = %msg.dest_addr,
             reporter = %msg.reporter,
-            "CoordsRequired: transit router needs coordinates"
+            "CoordsRequired: transit router needs coordinates, initiating discovery"
         );
+
+        self.maybe_initiate_lookup(&msg.dest_addr).await;
     }
 
     /// Handle a PathBroken error signal from a transit router.
@@ -555,17 +557,20 @@ impl Node {
             return;
         }
 
-        // No session: initiate one and queue the packet
+        // No session: initiate one and queue the packet.
+        // If session initiation fails (no route), trigger discovery and
+        // queue the packet for retry when discovery completes.
         if let Err(e) = self.initiate_session(dest_addr, dest_pubkey).await {
-            debug!(dest = %dest_addr, error = %e, "Failed to initiate session for TUN packet");
-            self.send_icmpv6_dest_unreachable(&ipv6_packet);
+            debug!(dest = %dest_addr, error = %e, "Failed to initiate session, trying discovery");
+            self.maybe_initiate_lookup(&dest_addr).await;
+            self.queue_pending_packet(dest_addr, ipv6_packet);
             return;
         }
         self.queue_pending_packet(dest_addr, ipv6_packet);
     }
 
     /// Send ICMPv6 Destination Unreachable back through TUN.
-    fn send_icmpv6_dest_unreachable(&self, original_packet: &[u8]) {
+    pub(in crate::node) fn send_icmpv6_dest_unreachable(&self, original_packet: &[u8]) {
         use crate::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
         use crate::FipsAddress;
 
@@ -612,6 +617,40 @@ impl Node {
             if let Err(e) = self.send_session_data(dest_addr, &packet).await {
                 debug!(dest = %dest_addr, error = %e, "Failed to send queued TUN packet");
                 break;
+            }
+        }
+    }
+
+    /// Retry session initiation after discovery provided coordinates.
+    ///
+    /// Called when a LookupResponse arrives and we have pending TUN packets
+    /// for the discovered target. The route_cache now has coords, so
+    /// `find_next_hop()` should succeed and the SessionSetup can be sent.
+    pub(in crate::node) async fn retry_session_after_discovery(&mut self, dest_addr: NodeAddr) {
+        // Look up the destination's public key from the identity cache
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
+        let dest_pubkey = match self.lookup_by_fips_prefix(&prefix) {
+            Some(&(_, pk)) => pk,
+            None => {
+                debug!(dest = %dest_addr, "Discovery complete but no identity for session retry");
+                return;
+            }
+        };
+
+        // Skip if a session already exists
+        if let Some(existing) = self.sessions.get(&dest_addr) {
+            if existing.state().is_established() || existing.state().is_initiating() {
+                return;
+            }
+        }
+
+        match self.initiate_session(dest_addr, dest_pubkey).await {
+            Ok(()) => {
+                debug!(dest = %dest_addr, "Session initiated after discovery");
+            }
+            Err(e) => {
+                debug!(dest = %dest_addr, error = %e, "Session retry after discovery failed");
             }
         }
     }

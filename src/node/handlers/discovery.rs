@@ -4,7 +4,7 @@
 //! visited filter for loop prevention, and reverse-path forwarding for
 //! responses.
 
-use crate::node::{Node, RecentRequest};
+use crate::node::{Node, RecentRequest, DISCOVERY_TTL, LOOKUP_TIMEOUT_MS};
 use crate::protocol::{LookupRequest, LookupResponse};
 use crate::NodeAddr;
 use tracing::{debug, trace};
@@ -138,11 +138,22 @@ impl Node {
                 "Received LookupResponse, caching route"
             );
 
+            let target = response.target;
             self.route_cache.insert(
-                response.target,
+                target,
                 response.target_coords,
                 now_ms,
             );
+
+            // Clean up pending lookup tracking
+            self.pending_lookups.remove(&target);
+
+            // If we have pending TUN packets for this target, retry session
+            // initiation. The route_cache now has coords, so find_next_hop()
+            // should succeed.
+            if self.pending_tun_packets.contains_key(&target) {
+                self.retry_session_after_discovery(target).await;
+            }
         }
     }
 
@@ -251,7 +262,6 @@ impl Node {
     /// does NOT record the request_id in recent_requests, so when the
     /// response arrives, it's recognized as "our request" and the
     /// target's coordinates are cached in route_cache.
-    #[allow(dead_code)] // Called from integration tests; will be used from event loop
     pub(in crate::node) async fn initiate_lookup(&mut self, target: &NodeAddr, ttl: u8) {
         let origin = *self.node_addr();
         let origin_coords = self.tree_state().my_coords().clone();
@@ -279,6 +289,44 @@ impl Node {
                     error = %e,
                     "Failed to send LookupRequest to peer"
                 );
+            }
+        }
+    }
+
+    /// Initiate a discovery lookup if one is not already pending for this target.
+    ///
+    /// Deduplicates lookups using `pending_lookups` with a timeout. If a
+    /// lookup was recently initiated and hasn't timed out, this is a no-op.
+    pub(in crate::node) async fn maybe_initiate_lookup(&mut self, dest: &NodeAddr) {
+        let now_ms = Self::now_ms();
+        if let Some(&initiated_at) = self.pending_lookups.get(dest) {
+            if now_ms.saturating_sub(initiated_at) < LOOKUP_TIMEOUT_MS {
+                return;
+            }
+        }
+        self.pending_lookups.insert(*dest, now_ms);
+        self.initiate_lookup(dest, DISCOVERY_TTL).await;
+    }
+
+    /// Remove timed-out pending lookups and drain their queued packets.
+    ///
+    /// Called periodically from the tick handler. For each timed-out lookup,
+    /// sends ICMPv6 Destination Unreachable for any queued TUN packets and
+    /// removes them from the pending queue.
+    pub(in crate::node) fn purge_stale_lookups(&mut self, now_ms: u64) {
+        let timed_out: Vec<NodeAddr> = self
+            .pending_lookups
+            .iter()
+            .filter(|&(_, &ts)| now_ms.saturating_sub(ts) >= LOOKUP_TIMEOUT_MS)
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        for addr in timed_out {
+            self.pending_lookups.remove(&addr);
+            if let Some(packets) = self.pending_tun_packets.remove(&addr) {
+                for pkt in &packets {
+                    self.send_icmpv6_dest_unreachable(pkt);
+                }
             }
         }
     }

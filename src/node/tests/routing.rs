@@ -258,6 +258,65 @@ fn test_routing_bloom_hit_without_coords_returns_none() {
     assert!(node.find_next_hop(&dest).is_none());
 }
 
+// === Route cache fallback ===
+
+#[test]
+fn test_routing_route_cache_fallback() {
+    // Verify that find_next_hop() falls back to route_cache when
+    // coord_cache has no entry. This is the key change that enables
+    // discovery-based routing: initiate_lookup() populates route_cache,
+    // and find_next_hop() now consults it.
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
+
+    // Create a peer
+    let link_id = LinkId::new(1);
+    let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let peer_addr = *id.node_addr();
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, id, 2000).unwrap();
+
+    // Set up tree: we are root, peer is our child
+    let peer_coords = TreeCoordinate::from_addrs(vec![peer_addr, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(peer_addr, my_addr, 1, 1000),
+        peer_coords,
+    );
+
+    // Create a destination "behind" the peer in the tree
+    let dest = make_node_addr(99);
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, peer_addr, my_addr]).unwrap();
+
+    // Put dest in peer's bloom filter so there's a candidate
+    let peer = node.get_peer_mut(&peer_addr).unwrap();
+    let mut filter = BloomFilter::new();
+    filter.insert(&dest);
+    peer.update_filter(filter, 1, 3000);
+
+    // Verify: coord_cache has nothing for dest
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    assert!(node.coord_cache().get(&dest, now_ms).is_none());
+
+    // Without route_cache entry, should return None (same as before)
+    assert!(node.find_next_hop(&dest).is_none());
+
+    // Now populate route_cache (as discovery would do)
+    node.route_cache_mut().insert(dest, dest_coords, now_ms);
+
+    // find_next_hop should succeed via route_cache fallback
+    let result = node.find_next_hop(&dest);
+    assert!(result.is_some(), "Should route via route_cache fallback");
+    assert_eq!(
+        result.unwrap().node_addr(),
+        &peer_addr,
+        "Should pick peer with bloom filter hit"
+    );
+}
+
 // === Integration: converged network ===
 
 #[tokio::test]
