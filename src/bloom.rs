@@ -306,6 +306,8 @@ pub struct BloomState {
     pending_updates: HashSet<NodeAddr>,
     /// Current sequence number for outgoing filters.
     sequence: u64,
+    /// Last outgoing filter sent to each peer (for change detection).
+    last_sent_filters: HashMap<NodeAddr, BloomFilter>,
 }
 
 impl BloomState {
@@ -319,6 +321,7 @@ impl BloomState {
             last_update_sent: HashMap::new(),
             pending_updates: HashSet::new(),
             sequence: 0,
+            last_sent_filters: HashMap::new(),
         }
     }
 
@@ -416,6 +419,44 @@ impl BloomState {
     /// Clear all pending updates.
     pub fn clear_pending_updates(&mut self) {
         self.pending_updates.clear();
+    }
+
+    /// Record the outgoing filter that was sent to a peer.
+    pub fn record_sent_filter(&mut self, peer_id: NodeAddr, filter: BloomFilter) {
+        self.last_sent_filters.insert(peer_id, filter);
+    }
+
+    /// Remove stored filter state for a peer that was removed.
+    pub fn remove_peer_state(&mut self, peer_id: &NodeAddr) {
+        self.last_sent_filters.remove(peer_id);
+        self.last_update_sent.remove(peer_id);
+        self.pending_updates.remove(peer_id);
+    }
+
+    /// Mark only peers whose outgoing filter has actually changed.
+    ///
+    /// Computes the outgoing filter for each peer and compares it
+    /// against what was last sent. Only marks peers where the filter
+    /// differs. This prevents cascading update loops in steady state.
+    pub fn mark_changed_peers(
+        &mut self,
+        exclude_from: &NodeAddr,
+        peer_addrs: &[NodeAddr],
+        peer_filters: &HashMap<NodeAddr, BloomFilter>,
+    ) {
+        for peer_addr in peer_addrs {
+            if peer_addr == exclude_from {
+                continue;
+            }
+            let new_filter = self.compute_outgoing_filter(peer_addr, peer_filters);
+            let changed = match self.last_sent_filters.get(peer_addr) {
+                Some(last) => *last != new_filter,
+                None => true, // never sent → must send
+            };
+            if changed {
+                self.pending_updates.insert(*peer_addr);
+            }
+        }
     }
 
     /// Compute the outgoing filter for a specific peer.

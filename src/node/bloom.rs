@@ -61,6 +61,7 @@ impl Node {
 
         // Build and encode
         let announce = self.build_filter_announce(peer_addr);
+        let sent_filter = announce.filter.clone();
         let encoded = announce.encode().map_err(|e| NodeError::SendFailed {
             node_addr: *peer_addr,
             reason: format!("FilterAnnounce encode failed: {}", e),
@@ -69,8 +70,9 @@ impl Node {
         // Send
         self.send_encrypted_link_message(peer_addr, &encoded).await?;
 
-        // Record send
+        // Record send and store the filter for change detection
         self.bloom_state.record_update_sent(*peer_addr, now_ms);
+        self.bloom_state.record_sent_filter(*peer_addr, sent_filter);
         if let Some(peer) = self.peers.get_mut(peer_addr) {
             peer.clear_filter_update_needed();
         }
@@ -165,14 +167,11 @@ impl Node {
             "Received FilterAnnounce"
         );
 
-        // Our outgoing filter changed — mark all other peers for update
-        let other_peers: Vec<NodeAddr> = self
-            .peers
-            .keys()
-            .filter(|addr| *addr != from)
-            .copied()
-            .collect();
-        self.bloom_state.mark_all_updates_needed(other_peers);
+        // Check which peers' outgoing filters actually changed
+        let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
+        let peer_filters = self.peer_inbound_filters();
+        self.bloom_state
+            .mark_changed_peers(from, &peer_addrs, &peer_filters);
     }
 
     /// Check bloom filter state on tick (called from event loop).
