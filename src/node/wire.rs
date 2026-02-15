@@ -11,7 +11,7 @@
 //! | 0x01 | Noise IK msg1   | 87 bytes  | Handshake initiation           |
 //! | 0x02 | Noise IK msg2   | 42 bytes  | Handshake response             |
 
-use crate::index::SessionIndex;
+use crate::utils::index::SessionIndex;
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, TAG_SIZE};
 
 // ============================================================================

@@ -4,7 +4,7 @@
 //! PeerConnection tracks the Noise IK handshake state and transitions to
 //! ActivePeer upon successful authentication.
 
-use crate::index::SessionIndex;
+use crate::utils::index::SessionIndex;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::PeerIdentity;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::index::SessionIndex;
+use crate::utils::index::SessionIndex;
 use crate::transport::{packet_channel, LinkDirection, TransportAddr};
 use crate::PeerIdentity;
 use std::time::Duration;

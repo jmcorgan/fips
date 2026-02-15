@@ -7,8 +7,8 @@ pub mod bloom;
 pub mod cache;
 pub mod config;
 pub mod identity;
-pub mod index;
 pub mod noise;
+pub mod utils;
 pub mod node;
 pub mod peer;
 pub mod protocol;
@@ -23,7 +23,8 @@ pub use identity::{
 };
 
 // Re-export config types
-pub use config::{Config, ConfigError, DnsConfig, IdentityConfig, TunConfig, UdpConfig};
+pub use config::{Config, ConfigError, IdentityConfig, UdpConfig};
+pub use upper::config::{DnsConfig, TunConfig};
 
 // Re-export tree types
 pub use tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};

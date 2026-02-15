@@ -4,7 +4,7 @@
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
 use crate::bloom::BloomFilter;
-use crate::index::SessionIndex;
+use crate::utils::index::SessionIndex;
 use crate::noise::NoiseSession;
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};

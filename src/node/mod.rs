@@ -17,7 +17,7 @@ mod tests;
 
 use crate::bloom::BloomState;
 use crate::cache::{CoordCache, RouteCache};
-use crate::index::IndexAllocator;
+use crate::utils::index::IndexAllocator;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use self::rate_limit::HandshakeRateLimiter;

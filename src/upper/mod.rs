@@ -5,6 +5,7 @@
 //! responder (.fips domain resolution), and ICMPv6 handling (error
 //! signaling and neighbor discovery).
 
+pub mod config;
 pub mod dns;
 pub mod icmp;
 pub mod tun;
