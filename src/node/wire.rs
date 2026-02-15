@@ -36,9 +36,6 @@ pub const MSG2_WIRE_SIZE: usize = 1 + 4 + 4 + HANDSHAKE_MSG2_SIZE; // 42 bytes
 /// Minimum size for encrypted frame: discriminator + receiver_idx + counter + tag.
 pub const ENCRYPTED_MIN_SIZE: usize = 1 + 4 + 8 + TAG_SIZE; // 29 bytes
 
-/// Overhead added by encrypted frame wrapper.
-pub const ENCRYPTED_OVERHEAD: usize = ENCRYPTED_MIN_SIZE;
-
 // ============================================================================
 // Encrypted Frame Header
 // ============================================================================
@@ -85,6 +82,7 @@ impl EncryptedHeader {
     }
 
     /// Get the ciphertext slice from the original packet.
+    #[cfg(test)]
     pub fn ciphertext<'a>(&self, data: &'a [u8]) -> &'a [u8] {
         &data[self.ciphertext_offset..]
     }
@@ -130,6 +128,7 @@ impl Msg1Header {
     }
 
     /// Get the Noise msg1 payload from the original packet.
+    #[cfg(test)]
     pub fn noise_msg1<'a>(&self, data: &'a [u8]) -> &'a [u8] {
         &data[self.noise_msg1_offset..]
     }
@@ -179,6 +178,7 @@ impl Msg2Header {
     }
 
     /// Get the Noise msg2 payload from the original packet.
+    #[cfg(test)]
     pub fn noise_msg2<'a>(&self, data: &'a [u8]) -> &'a [u8] {
         &data[self.noise_msg2_offset..]
     }

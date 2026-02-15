@@ -2,7 +2,7 @@
 
 use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
-use crate::wire::{DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2};
+use crate::node::wire::{DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2};
 use std::time::Duration;
 use tracing::{debug, info};
 

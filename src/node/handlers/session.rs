@@ -379,10 +379,10 @@ impl Node {
         dest_pubkey: PublicKey,
     ) -> Result<(), NodeError> {
         // Check for existing session
-        if let Some(existing) = self.sessions.get(&dest_addr) {
-            if existing.state().is_established() || existing.state().is_initiating() {
-                return Ok(());
-            }
+        if let Some(existing) = self.sessions.get(&dest_addr)
+            && (existing.state().is_established() || existing.state().is_initiating())
+        {
+            return Ok(());
         }
 
         // Create Noise IK initiator handshake
@@ -638,10 +638,10 @@ impl Node {
         };
 
         // Skip if a session already exists
-        if let Some(existing) = self.sessions.get(&dest_addr) {
-            if existing.state().is_established() || existing.state().is_initiating() {
-                return;
-            }
+        if let Some(existing) = self.sessions.get(&dest_addr)
+            && (existing.state().is_established() || existing.state().is_initiating())
+        {
+            return;
         }
 
         match self.initiate_session(dest_addr, dest_pubkey).await {

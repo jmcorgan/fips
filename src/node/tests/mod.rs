@@ -46,7 +46,7 @@ pub(super) fn make_completed_connection(
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
     // Create outbound connection
-    let mut conn = PeerConnection::outbound(link_id, peer_identity.clone(), current_time_ms);
+    let mut conn = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
 
     // Run initiator side of handshake
     let our_keypair = node.identity.keypair();

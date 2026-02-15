@@ -5,7 +5,7 @@ use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
 use crate::transport::{packet_channel, Link, LinkDirection, TransportAddr};
 use crate::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
-use crate::wire::build_msg1;
+use crate::node::wire::build_msg1;
 use crate::{NodeAddr, PeerIdentity};
 use std::thread;
 use std::time::Duration;
@@ -116,7 +116,7 @@ impl Node {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let mut connection = PeerConnection::outbound(link_id, peer_identity.clone(), current_time_ms);
+            let mut connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
 
             // Allocate a session index for this handshake
             let our_index = match self.index_allocator.allocate() {
@@ -319,7 +319,7 @@ impl Node {
                     let dns_channel_size = self.config.node.buffers.dns_channel;
                     let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
                     let dns_ttl = self.config.dns.ttl();
-                    let handle = tokio::spawn(crate::dns::run_dns_responder(socket, identity_tx, dns_ttl));
+                    let handle = tokio::spawn(crate::node::dns::run_dns_responder(socket, identity_tx, dns_ttl));
                     self.dns_identity_rx = Some(identity_rx);
                     self.dns_task = Some(handle);
                     info!(bind = %bind, "DNS responder started for .fips domain");

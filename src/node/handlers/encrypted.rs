@@ -2,7 +2,7 @@
 
 use crate::node::Node;
 use crate::transport::ReceivedPacket;
-use crate::wire::EncryptedHeader;
+use crate::node::wire::EncryptedHeader;
 use tracing::{debug, warn};
 
 impl Node {

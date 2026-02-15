@@ -562,7 +562,7 @@ async fn test_routing_reachability_100_nodes() {
         .collect();
 
     for node in &mut nodes {
-        for &(ref addr, ref coords) in &all_coords {
+        for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
                 node.node.coord_cache_mut().insert(*addr, coords.clone(), now_ms);
             }
@@ -696,7 +696,7 @@ async fn test_routing_stops_after_peer_removal() {
         .collect();
 
     for node in &mut nodes {
-        for &(ref addr, ref coords) in &all_coords {
+        for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
                 node.node.coord_cache_mut().insert(*addr, coords.clone(), now_ms);
             }
@@ -931,7 +931,7 @@ async fn test_routing_source_only_coords_100_nodes() {
 
     // Now compare: inject coords at ALL nodes (full cache) and verify 100%
     for node in &mut nodes {
-        for &(ref addr, ref coords) in &all_coords {
+        for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
                 node.node.coord_cache_mut().insert(*addr, coords.clone(), now_ms);
             }

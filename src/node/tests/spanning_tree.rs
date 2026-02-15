@@ -48,7 +48,7 @@ pub(super) async fn make_test_node() -> TestNode {
 /// Sends msg1 over UDP. The drain loop will handle msg1 processing,
 /// msg2 response, and subsequent TreeAnnounce exchange.
 pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usize) {
-    use crate::wire::build_msg1;
+    use crate::node::wire::build_msg1;
 
     // Extract responder info before mutably borrowing initiator
     let responder_addr = nodes[j].addr.clone();
@@ -203,19 +203,19 @@ pub(super) fn print_tree_snapshot(label: &str, nodes: &[TestNode]) {
 ///
 /// Returns the number of packets processed.
 pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
-    use crate::wire::{DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2};
+    use crate::node::wire::{DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2};
 
     let mut count = 0;
-    for i in 0..nodes.len() {
-        while let Ok(packet) = nodes[i].packet_rx.try_recv() {
+    for node in nodes.iter_mut() {
+        while let Ok(packet) = node.packet_rx.try_recv() {
             if packet.data.is_empty() {
                 continue;
             }
             match packet.data[0] {
-                DISCRIMINATOR_MSG1 => nodes[i].node.handle_msg1(packet).await,
-                DISCRIMINATOR_MSG2 => nodes[i].node.handle_msg2(packet).await,
+                DISCRIMINATOR_MSG1 => node.node.handle_msg1(packet).await,
+                DISCRIMINATOR_MSG2 => node.node.handle_msg2(packet).await,
                 DISCRIMINATOR_ENCRYPTED => {
-                    nodes[i].node.handle_encrypted_frame(packet).await
+                    node.node.handle_encrypted_frame(packet).await
                 }
                 _ => {}
             }

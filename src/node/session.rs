@@ -103,7 +103,7 @@ impl SessionEntry {
 
     /// Check if the session is established.
     pub(crate) fn is_established(&self) -> bool {
-        self.state.as_ref().map_or(false, |s| s.is_established())
+        self.state.as_ref().is_some_and(|s| s.is_established())
     }
 
     /// Get creation time.

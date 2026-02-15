@@ -120,11 +120,12 @@ async fn test_bloom_filter_star() {
         let filter = peer.inbound_filter().unwrap();
 
         // Filter from hub should contain all OTHER spokes
-        for other in 1..5 {
+        for (other, other_node) in nodes[1..5].iter().enumerate() {
+            let other = other + 1; // adjust for slice offset
             if other == spoke {
                 continue;
             }
-            let other_addr = *nodes[other].node.node_addr();
+            let other_addr = *other_node.node.node_addr();
             assert!(
                 filter.contains(&other_addr),
                 "Spoke {}'s filter from hub should contain spoke {} (addr={})",
@@ -168,12 +169,12 @@ async fn test_bloom_filter_chain_propagation() {
     // Entries propagate through the full chain because each
     // intermediate node merges its peer's filter into its outgoing
     // filter. Verify all nodes are reachable from the endpoints.
-    for i in 2..8 {
+    for (i, addr) in addrs[2..8].iter().enumerate() {
         assert!(
-            filter.contains(&addrs[i]),
+            filter.contains(addr),
             "Node 0's filter from node 1 should contain node {} \
              (chain merge propagation)",
-            i
+            i + 2
         );
     }
 

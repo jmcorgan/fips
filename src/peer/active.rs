@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn test_active_peer_creation() {
         let identity = make_peer_identity();
-        let peer = ActivePeer::new(identity.clone(), LinkId::new(1), 1000);
+        let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
 
         assert_eq!(peer.identity().node_addr(), identity.node_addr());
         assert_eq!(peer.link_id(), LinkId::new(1));

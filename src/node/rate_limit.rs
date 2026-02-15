@@ -16,19 +16,13 @@
 //! - Refill rate: 10 tokens/second (sustained handshake rate)
 //! - This allows handling burst traffic while limiting sustained attack impact
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Default burst capacity (max tokens).
 pub const DEFAULT_BURST_CAPACITY: u32 = 100;
 
 /// Default refill rate (tokens per second).
 pub const DEFAULT_REFILL_RATE: f64 = 10.0;
-
-/// Maximum pending inbound connections.
-pub const MAX_PENDING_INBOUND: usize = 1000;
-
-/// Handshake timeout in seconds.
-pub const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 
 /// Token bucket rate limiter.
 ///
@@ -95,25 +89,23 @@ impl TokenBucket {
     }
 
     /// Check if tokens are available without consuming them.
+    #[cfg(test)]
     pub fn available(&mut self) -> bool {
         self.refill();
         self.tokens >= 1.0
     }
 
     /// Get the current number of available tokens.
+    #[cfg(test)]
     pub fn tokens(&mut self) -> f64 {
         self.refill();
         self.tokens
     }
 
     /// Get the capacity (max tokens).
+    #[cfg(test)]
     pub fn capacity(&self) -> u32 {
         self.capacity
-    }
-
-    /// Get the refill rate (tokens per second).
-    pub fn refill_rate(&self) -> f64 {
-        self.refill_rate
     }
 
     /// Refill tokens based on elapsed time.
@@ -134,37 +126,26 @@ impl TokenBucket {
     }
 
     /// Reset to full capacity.
+    #[cfg(test)]
     pub fn reset(&mut self) {
         self.tokens = self.capacity as f64;
         self.last_refill = Instant::now();
-    }
-
-    /// Set a new capacity.
-    pub fn set_capacity(&mut self, capacity: u32) {
-        self.capacity = capacity;
-        if self.tokens > capacity as f64 {
-            self.tokens = capacity as f64;
-        }
-    }
-
-    /// Set a new refill rate.
-    pub fn set_refill_rate(&mut self, rate: f64) {
-        self.refill_rate = rate;
     }
 
     /// Time until the next token is available.
     ///
     /// Returns `Duration::ZERO` if tokens are available, otherwise the
     /// estimated time until one token will be available.
-    pub fn time_until_available(&mut self) -> Duration {
+    #[cfg(test)]
+    pub fn time_until_available(&mut self) -> std::time::Duration {
         self.refill();
 
         if self.tokens >= 1.0 {
-            Duration::ZERO
+            std::time::Duration::ZERO
         } else {
             let needed = 1.0 - self.tokens;
             let secs = needed / self.refill_rate;
-            Duration::from_secs_f64(secs)
+            std::time::Duration::from_secs_f64(secs)
         }
     }
 }
@@ -190,16 +171,7 @@ pub struct HandshakeRateLimiter {
 }
 
 impl HandshakeRateLimiter {
-    /// Create a new handshake rate limiter with default parameters.
-    pub fn new() -> Self {
-        Self {
-            bucket: TokenBucket::new(),
-            pending_count: 0,
-            max_pending: MAX_PENDING_INBOUND,
-        }
-    }
-
-    /// Create with custom parameters.
+    /// Create a handshake rate limiter with the given parameters.
     pub fn with_params(bucket: TokenBucket, max_pending: usize) -> Self {
         Self {
             bucket,
@@ -215,6 +187,7 @@ impl HandshakeRateLimiter {
     /// - Pending connection count is below maximum
     ///
     /// Does NOT consume a token - call `start_handshake` for that.
+    #[cfg(test)]
     pub fn can_start_handshake(&mut self) -> bool {
         self.bucket.available() && self.pending_count < self.max_pending
     }
@@ -245,42 +218,25 @@ impl HandshakeRateLimiter {
     }
 
     /// Get the current pending connection count.
+    #[cfg(test)]
     pub fn pending_count(&self) -> usize {
         self.pending_count
     }
 
-    /// Get the maximum pending connections.
-    pub fn max_pending(&self) -> usize {
-        self.max_pending
-    }
-
-    /// Set the maximum pending connections.
-    pub fn set_max_pending(&mut self, max: usize) {
-        self.max_pending = max;
-    }
-
     /// Get a reference to the token bucket.
+    #[cfg(test)]
     pub fn bucket(&self) -> &TokenBucket {
         &self.bucket
     }
 
-    /// Get a mutable reference to the token bucket.
-    pub fn bucket_mut(&mut self) -> &mut TokenBucket {
-        &mut self.bucket
-    }
-
     /// Reset the rate limiter.
+    #[cfg(test)]
     pub fn reset(&mut self) {
         self.bucket.reset();
         self.pending_count = 0;
     }
 }
 
-impl Default for HandshakeRateLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -321,7 +277,7 @@ mod tests {
 
         // Should have tokens now
         let tokens = bucket.tokens();
-        assert!(tokens >= 4.0 && tokens <= 6.0, "tokens: {}", tokens);
+        assert!((4.0..=6.0).contains(&tokens), "tokens: {}", tokens);
     }
 
     #[test]
@@ -374,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_handshake_rate_limiter_basic() {
-        let mut limiter = HandshakeRateLimiter::new();
+        let mut limiter = HandshakeRateLimiter::with_params(TokenBucket::new(), 100);
 
         assert!(limiter.can_start_handshake());
         assert_eq!(limiter.pending_count(), 0);
@@ -432,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_handshake_rate_limiter_reset() {
-        let mut limiter = HandshakeRateLimiter::new();
+        let mut limiter = HandshakeRateLimiter::with_params(TokenBucket::new(), 100);
 
         // Start some handshakes
         limiter.start_handshake();

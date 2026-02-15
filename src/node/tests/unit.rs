@@ -152,7 +152,7 @@ fn test_node_connection_duplicate() {
 
     let identity = make_peer_identity();
     let link_id = LinkId::new(1);
-    let conn1 = PeerConnection::outbound(link_id, identity.clone(), 1000);
+    let conn1 = PeerConnection::outbound(link_id, identity, 1000);
     let conn2 = PeerConnection::outbound(link_id, identity, 2000);
 
     node.add_connection(conn1).unwrap();
@@ -206,7 +206,7 @@ fn test_node_cross_connection_resolution() {
     let node_addr = *identity.node_addr();
 
     node.add_connection(conn1).unwrap();
-    node.promote_connection(link_id1, identity.clone(), 1500).unwrap();
+    node.promote_connection(link_id1, identity, 1500).unwrap();
 
     assert_eq!(node.peer_count(), 1);
     assert_eq!(node.get_peer(&node_addr).unwrap().link_id(), link_id1);
@@ -447,7 +447,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let pending_link_id = LinkId::new(1);
     let pending_time_ms = 1000;
     let mut pending_conn =
-        PeerConnection::outbound(pending_link_id, peer_b_identity.clone(), pending_time_ms);
+        PeerConnection::outbound(pending_link_id, peer_b_identity, pending_time_ms);
 
     let our_keypair = node.identity.keypair();
     let _msg1 = pending_conn.start_handshake(our_keypair, pending_time_ms).unwrap();
@@ -485,7 +485,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
 
     let mut completing_conn = PeerConnection::outbound(
         completing_link_id,
-        peer_b_identity.clone(),
+        peer_b_identity,
         completing_time_ms,
     );
 
@@ -519,7 +519,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
 
     // --- Promote the completing connection ---
     let result = node
-        .promote_connection(completing_link_id, peer_b_identity.clone(), completing_time_ms)
+        .promote_connection(completing_link_id, peer_b_identity, completing_time_ms)
         .unwrap();
 
     assert!(matches!(result, PromotionResult::Promoted(_)));

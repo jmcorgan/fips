@@ -300,10 +300,10 @@ impl Node {
     pub(in crate::node) async fn maybe_initiate_lookup(&mut self, dest: &NodeAddr) {
         let now_ms = Self::now_ms();
         let lookup_timeout_ms = self.config.node.discovery.timeout_secs * 1000;
-        if let Some(&initiated_at) = self.pending_lookups.get(dest) {
-            if now_ms.saturating_sub(initiated_at) < lookup_timeout_ms {
-                return;
-            }
+        if let Some(&initiated_at) = self.pending_lookups.get(dest)
+            && now_ms.saturating_sub(initiated_at) < lookup_timeout_ms
+        {
+            return;
         }
         self.pending_lookups.insert(*dest, now_ms);
         let ttl = self.config.node.discovery.ttl;

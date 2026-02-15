@@ -211,8 +211,8 @@ fn icmpv6_checksum(icmpv6_message: &[u8], src: &Ipv6Addr, dst: &Ipv6Addr) -> u16
 
     // Pseudo-header: upper-layer packet length (4 bytes, as u32)
     let len = icmpv6_message.len() as u32;
-    sum += (len >> 16) as u32;
-    sum += (len & 0xffff) as u32;
+    sum += len >> 16;
+    sum += len & 0xffff;
 
     // Pseudo-header: next header (padded to 4 bytes)
     sum += IPPROTO_ICMPV6 as u32;

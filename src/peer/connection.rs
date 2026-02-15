@@ -384,10 +384,9 @@ impl PeerConnection {
         hs.read_message_1(message)?;
 
         // Extract the discovered identity
-        let remote_static = hs
+        let remote_static = *hs
             .remote_static()
-            .expect("remote static available after msg1")
-            .clone();
+            .expect("remote static available after msg1");
         self.expected_identity = Some(PeerIdentity::from_pubkey_full(remote_static));
 
         // Generate message 2
@@ -519,7 +518,7 @@ mod tests {
     #[test]
     fn test_outbound_connection() {
         let identity = make_peer_identity();
-        let conn = PeerConnection::outbound(LinkId::new(1), identity.clone(), 1000);
+        let conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
 
         assert!(conn.is_outbound());
         assert!(!conn.is_inbound());
@@ -617,9 +616,9 @@ mod tests {
         let keypair = make_keypair();
 
         // Outbound can't receive_handshake_init
-        let mut outbound = PeerConnection::outbound(LinkId::new(1), identity.clone(), 1000);
+        let mut outbound = PeerConnection::outbound(LinkId::new(1), identity, 1000);
         assert!(outbound
-            .receive_handshake_init(keypair.clone(), &[0u8; 82], 1100)
+            .receive_handshake_init(keypair, &[0u8; 82], 1100)
             .is_err());
 
         // Inbound can't start_handshake

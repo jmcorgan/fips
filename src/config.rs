@@ -1189,7 +1189,7 @@ transports:
         assert_eq!(config.transports.udp.len(), 2);
 
         let instances: std::collections::HashMap<_, _> =
-            config.transports.udp.iter().map(|(k, v)| (k, v)).collect();
+            config.transports.udp.iter().collect();
 
         // Named instances have Some(name)
         assert!(instances.contains_key(&Some("main")));

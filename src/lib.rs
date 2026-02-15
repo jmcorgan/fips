@@ -6,7 +6,6 @@
 pub mod bloom;
 pub mod cache;
 pub mod config;
-pub mod dns;
 pub mod icmp;
 pub mod identity;
 pub mod index;
@@ -14,11 +13,9 @@ pub mod noise;
 pub mod node;
 pub mod peer;
 pub mod protocol;
-pub mod rate_limit;
 pub mod transport;
 pub mod tree;
 pub mod tun;
-pub mod wire;
 
 // Re-export identity types
 pub use identity::{
@@ -28,9 +25,6 @@ pub use identity::{
 
 // Re-export config types
 pub use config::{Config, ConfigError, DnsConfig, IdentityConfig, TunConfig, UdpConfig};
-
-// Re-export DNS types
-pub use dns::{DnsIdentityRx, DnsIdentityTx, DnsResolvedIdentity};
 
 // Re-export tree types
 pub use tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};

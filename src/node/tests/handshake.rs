@@ -6,7 +6,7 @@ use super::*;
 async fn test_two_node_handshake_udp() {
     use crate::config::UdpConfig;
     use crate::transport::udp::UdpTransport;
-    use crate::wire::{build_encrypted, build_msg1};
+    use crate::node::wire::{build_encrypted, build_msg1};
     use tokio::time::{timeout, Duration};
 
     // === Setup: Two nodes with UDP transports on localhost ===
@@ -55,7 +55,7 @@ async fn test_two_node_handshake_udp() {
     let link_id_a = node_a.allocate_link_id();
     let mut conn_a = PeerConnection::outbound(
         link_id_a,
-        peer_b_identity.clone(),
+        peer_b_identity,
         1000,
     );
 
@@ -233,7 +233,7 @@ async fn test_two_node_handshake_udp() {
 async fn test_run_rx_loop_handshake() {
     use crate::config::UdpConfig;
     use crate::transport::udp::UdpTransport;
-    use crate::wire::build_msg1;
+    use crate::node::wire::build_msg1;
     use tokio::time::Duration;
 
     // === Setup: Two nodes with UDP transports on localhost ===
@@ -287,7 +287,7 @@ async fn test_run_rx_loop_handshake() {
     let link_id_a = node_a.allocate_link_id();
     let mut conn_a = PeerConnection::outbound(
         link_id_a,
-        peer_b_identity.clone(),
+        peer_b_identity,
         1000,
     );
 
@@ -423,7 +423,7 @@ async fn test_run_rx_loop_handshake() {
 async fn test_cross_connection_both_initiate() {
     use crate::config::UdpConfig;
     use crate::transport::udp::UdpTransport;
-    use crate::wire::build_msg1;
+    use crate::node::wire::build_msg1;
     use tokio::time::{timeout, Duration};
 
     // === Setup: Two nodes with UDP transports on localhost ===
@@ -474,7 +474,7 @@ async fn test_cross_connection_both_initiate() {
 
     // Node A initiates to Node B
     let link_id_a_out = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a_out, peer_b_identity.clone(), 1000);
+    let mut conn_a = PeerConnection::outbound(link_id_a_out, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let our_keypair_a = node_a.identity.keypair();
     let noise_msg1_a = conn_a.start_handshake(our_keypair_a, 1000).unwrap();
@@ -495,7 +495,7 @@ async fn test_cross_connection_both_initiate() {
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
-    let mut conn_b = PeerConnection::outbound(link_id_b_out, peer_a_identity.clone(), 1000);
+    let mut conn_b = PeerConnection::outbound(link_id_b_out, peer_a_identity, 1000);
     let our_index_b = node_b.index_allocator.allocate().unwrap();
     let our_keypair_b = node_b.identity.keypair();
     let noise_msg1_b = conn_b.start_handshake(our_keypair_b, 1000).unwrap();
@@ -595,7 +595,7 @@ async fn test_stale_connection_cleanup() {
     // Create outbound connection with a timestamp far in the past
     let past_time_ms = 1000; // A very early timestamp
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity.clone(), past_time_ms);
+    let mut conn = PeerConnection::outbound(link_id, peer_identity, past_time_ms);
 
     // Allocate session index and set transport info
     let our_index = node.index_allocator.allocate().unwrap();
@@ -631,7 +631,7 @@ async fn test_stale_connection_cleanup() {
     assert!(!node.pending_outbound.contains_key(&(transport_id, our_index.as_u32())),
         "pending_outbound should be cleaned up");
     assert_eq!(node.index_allocator.count(), 0, "Session index should be freed");
-    assert!(node.addr_to_link.get(&(transport_id, remote_addr)).is_none(),
+    assert!(!node.addr_to_link.contains_key(&(transport_id, remote_addr)),
         "addr_to_link should be cleaned up");
 }
 
@@ -650,7 +650,7 @@ async fn test_failed_connection_cleanup() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity.clone(), now_ms);
+    let mut conn = PeerConnection::outbound(link_id, peer_identity, now_ms);
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();

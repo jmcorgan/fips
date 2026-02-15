@@ -5,10 +5,13 @@
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
 mod bloom;
+pub(crate) mod dns;
 mod handlers;
 mod lifecycle;
 mod retry;
+mod rate_limit;
 pub(crate) mod session;
+pub(crate) mod wire;
 mod tree;
 #[cfg(test)]
 mod tests;
@@ -18,14 +21,14 @@ use crate::cache::{CoordCache, RouteCache};
 use crate::index::IndexAllocator;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
-use crate::rate_limit::HandshakeRateLimiter;
+use self::rate_limit::HandshakeRateLimiter;
 use crate::transport::{
     Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::tun::{TunError, TunOutboundRx, TunState, TunTx};
-use crate::wire::build_encrypted;
+use self::wire::build_encrypted;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -186,9 +189,7 @@ type AddrKey = (TransportId, TransportAddr);
 ///
 /// The `addr_to_link` map enables dispatching incoming packets to the right
 /// connection before authentication completes.
-///
 // Discovery lookup constants moved to config: node.discovery.timeout_secs, node.discovery.ttl
-
 pub struct Node {
     // === Identity ===
     /// This node's cryptographic identity.
@@ -296,7 +297,7 @@ pub struct Node {
 
     // === DNS Responder ===
     /// Receiver for resolved identities from the DNS responder.
-    dns_identity_rx: Option<crate::dns::DnsIdentityRx>,
+    dns_identity_rx: Option<dns::DnsIdentityRx>,
     /// DNS responder task handle.
     dns_task: Option<tokio::task::JoinHandle<()>>,
 
@@ -360,7 +361,7 @@ impl Node {
         let route_cache = RouteCache::new(config.node.cache.route_size);
         let rl = &config.node.rate_limit;
         let msg1_rate_limiter = HandshakeRateLimiter::with_params(
-            crate::rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
+            rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
             config.node.limits.max_pending_inbound,
         );
 
@@ -437,7 +438,7 @@ impl Node {
         let route_cache = RouteCache::new(config.node.cache.route_size);
         let rl = &config.node.rate_limit;
         let msg1_rate_limiter = HandshakeRateLimiter::with_params(
-            crate::rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
+            rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
             config.node.limits.max_pending_inbound,
         );
 
@@ -903,10 +904,10 @@ impl Node {
         }
 
         // 2. Direct peer
-        if let Some(peer) = self.peers.get(dest_node_addr) {
-            if peer.can_send() {
-                return Some(peer);
-            }
+        if let Some(peer) = self.peers.get(dest_node_addr)
+            && peer.can_send()
+        {
+            return Some(peer);
         }
 
         // Look up destination coords (required by both bloom and tree paths).

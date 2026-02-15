@@ -5,7 +5,7 @@ use crate::peer::{
     cross_connection_winner, ActivePeer, PeerConnection, PromotionResult,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
-use crate::wire::{build_msg2, Msg1Header, Msg2Header};
+use crate::node::wire::{build_msg2, Msg1Header, Msg2Header};
 use crate::PeerIdentity;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -43,25 +43,25 @@ impl Node {
         // (we initiated to them AND they initiated to us), this is a cross-connection.
         // Allow it to proceed — promote_connection() will resolve via tie-breaker.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
-        if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key) {
-            if let Some(link) = self.links.get(&existing_link_id) {
-                if link.direction() == LinkDirection::Inbound {
-                    self.msg1_rate_limiter.complete_handshake();
-                    debug!(
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        "Already have inbound connection from this address"
-                    );
-                    return;
-                }
-                // Outbound link to this address — cross-connection, allow msg1
+        if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key)
+            && let Some(link) = self.links.get(&existing_link_id)
+        {
+            if link.direction() == LinkDirection::Inbound {
+                self.msg1_rate_limiter.complete_handshake();
                 debug!(
                     transport_id = %packet.transport_id,
                     remote_addr = %packet.remote_addr,
-                    existing_link_id = %existing_link_id,
-                    "Cross-connection detected: have outbound, received inbound msg1"
+                    "Already have inbound connection from this address"
                 );
+                return;
             }
+            // Outbound link to this address — cross-connection, allow msg1
+            debug!(
+                transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                existing_link_id = %existing_link_id,
+                "Cross-connection detected: have outbound, received inbound msg1"
+                );
         }
 
         // === CRYPTO COST PAID HERE ===
@@ -89,7 +89,7 @@ impl Node {
 
         // Learn peer identity from msg1
         let peer_identity = match conn.expected_identity() {
-            Some(id) => id.clone(),
+            Some(id) => *id,
             None => {
                 self.msg1_rate_limiter.complete_handshake();
                 warn!("Identity not learned from msg1");
@@ -275,7 +275,7 @@ impl Node {
 
         // Get peer identity for promotion
         let peer_identity = match conn.expected_identity() {
-            Some(id) => id.clone(),
+            Some(id) => *id,
             None => {
                 warn!(link_id = %link_id, "No identity after handshake");
                 return;
@@ -398,7 +398,7 @@ impl Node {
         }
 
         // Normal path: promote to active peer
-        match self.promote_connection(link_id, peer_identity.clone(), packet.timestamp_ms) {
+        match self.promote_connection(link_id, peer_identity, packet.timestamp_ms) {
             Ok(result) => {
                 // Clean up pending_outbound
                 self.pending_outbound.remove(&key);

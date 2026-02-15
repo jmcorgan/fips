@@ -639,13 +639,13 @@ async fn test_session_100_nodes() {
         let fwd_payload = format!("fwd-{}", pair_idx).into_bytes();
         let rev_payload = format!("rev-{}", pair_idx).into_bytes();
 
-        if delivered_per_node[dst].iter().any(|p| *p == fwd_payload) {
+        if delivered_per_node[dst].contains(&fwd_payload) {
             fwd_delivered += 1;
         } else if fwd_missing.len() < 20 {
             fwd_missing.push((src, dst));
         }
 
-        if delivered_per_node[src].iter().any(|p| *p == rev_payload) {
+        if delivered_per_node[src].contains(&rev_payload) {
             rev_delivered += 1;
         } else if rev_missing.len() < 20 {
             rev_missing.push((src, dst));

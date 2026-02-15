@@ -46,10 +46,10 @@ impl Node {
                 }
 
                 // Schedule retry for failed outbound auto-connect peers
-                if conn.is_outbound() {
-                    if let Some(identity) = conn.expected_identity() {
-                        self.schedule_retry(*identity.node_addr(), now_ms);
-                    }
+                if conn.is_outbound()
+                    && let Some(identity) = conn.expected_identity()
+                {
+                    self.schedule_retry(*identity.node_addr(), now_ms);
                 }
             }
             self.cleanup_stale_connection(link_id, now_ms);

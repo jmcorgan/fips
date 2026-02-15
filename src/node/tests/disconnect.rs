@@ -100,20 +100,21 @@ async fn test_disconnect_star_hub_departs() {
     process_available_packets(&mut nodes).await;
 
     // All spokes should have removed the hub
-    for spoke_idx in 1..4 {
+    for (spoke_idx, spoke) in nodes[1..4].iter().enumerate() {
+        let spoke_idx = spoke_idx + 1; // adjust for slice offset
         assert!(
-            nodes[spoke_idx].node.get_peer(&hub_addr).is_none(),
+            spoke.node.get_peer(&hub_addr).is_none(),
             "Spoke {} should have removed hub",
             spoke_idx
         );
         assert_eq!(
-            nodes[spoke_idx].node.peer_count(),
+            spoke.node.peer_count(),
             0,
             "Spoke {} should have no peers (no spoke-spoke links)",
             spoke_idx
         );
         assert!(
-            nodes[spoke_idx].node.tree_state().is_root(),
+            spoke.node.tree_state().is_root(),
             "Isolated spoke {} should become root",
             spoke_idx
         );

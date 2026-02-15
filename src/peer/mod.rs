@@ -153,25 +153,25 @@ pub fn cross_connection_winner(
 #[derive(Debug)]
 pub enum PeerSlot {
     /// Connection in handshake phase.
-    Connecting(PeerConnection),
+    Connecting(Box<PeerConnection>),
     /// Authenticated peer.
-    Active(ActivePeer),
+    Active(Box<ActivePeer>),
 }
 
 impl PeerSlot {
     /// Create a new connecting slot (outbound).
     pub fn outbound(conn: PeerConnection) -> Self {
-        PeerSlot::Connecting(conn)
+        PeerSlot::Connecting(Box::new(conn))
     }
 
     /// Create a new connecting slot (inbound).
     pub fn inbound(conn: PeerConnection) -> Self {
-        PeerSlot::Connecting(conn)
+        PeerSlot::Connecting(Box::new(conn))
     }
 
     /// Create a new active slot.
     pub fn active(peer: ActivePeer) -> Self {
-        PeerSlot::Active(peer)
+        PeerSlot::Active(Box::new(peer))
     }
 
     /// Check if this is a connecting slot.
@@ -307,7 +307,7 @@ mod tests {
     fn test_peer_slot_connecting() {
         let identity = make_peer_identity();
         let conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
-        let slot = PeerSlot::Connecting(conn);
+        let slot = PeerSlot::Connecting(Box::new(conn));
 
         assert!(slot.is_connecting());
         assert!(!slot.is_active());
@@ -320,7 +320,7 @@ mod tests {
     fn test_peer_slot_active() {
         let identity = make_peer_identity();
         let peer = ActivePeer::new(identity, LinkId::new(2), 2000);
-        let slot = PeerSlot::Active(peer);
+        let slot = PeerSlot::Active(Box::new(peer));
 
         assert!(!slot.is_connecting());
         assert!(slot.is_active());
@@ -373,19 +373,19 @@ mod tests {
         let identity = make_peer_identity();
         let expected_node_addr = *identity.node_addr();
         let conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
-        let slot = PeerSlot::Connecting(conn);
+        let slot = PeerSlot::Connecting(Box::new(conn));
         assert_eq!(slot.node_addr(), Some(&expected_node_addr));
 
         // Inbound connection doesn't know identity yet
         let conn_inbound = PeerConnection::inbound(LinkId::new(2), 2000);
-        let slot_inbound = PeerSlot::Connecting(conn_inbound);
+        let slot_inbound = PeerSlot::Connecting(Box::new(conn_inbound));
         assert!(slot_inbound.node_addr().is_none());
 
         // Active peer always knows identity
         let identity2 = make_peer_identity();
         let active_node_addr = *identity2.node_addr();
         let peer = ActivePeer::new(identity2, LinkId::new(3), 3000);
-        let slot_active = PeerSlot::Active(peer);
+        let slot_active = PeerSlot::Active(Box::new(peer));
         assert_eq!(slot_active.node_addr(), Some(&active_node_addr));
     }
 }
