@@ -102,14 +102,13 @@ Connection retry with exponential backoff.
 
 ### Cache Parameters (`node.cache.*`)
 
-Controls the dual-cache architecture (CoordCache for session-learned
-coordinates, RouteCache for discovery-learned routes).
+Controls caching of tree coordinates and identity mappings.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.cache.coord_size` | usize | `50000` | Max entries in coordinate cache |
 | `node.cache.coord_ttl_secs` | u64 | `300` | Coordinate cache entry TTL (5 minutes) |
-| `node.cache.route_size` | usize | `10000` | Max entries in route cache |
+| `node.cache.identity_size` | usize | `10000` | Max entries in identity cache (LRU, no TTL) |
 
 ### Discovery Protocol (`node.discovery.*`)
 
@@ -149,6 +148,8 @@ Controls end-to-end session behavior and packet queuing.
 | `node.session.default_hop_limit` | u8 | `64` | Default SessionDatagram hop limit |
 | `node.session.pending_packets_per_dest` | usize | `16` | Queue depth per destination during session establishment |
 | `node.session.pending_max_destinations` | usize | `256` | Max destinations with pending packets |
+| `node.session.idle_timeout_secs` | u64 | `90` | Idle session timeout; established sessions with no activity for this duration are removed |
+| `node.session.coords_warmup_packets` | u8 | `5` | Number of initial DataPackets per session that include COORDS_PRESENT for transit cache warmup; also the reset count on CoordsRequired receipt |
 
 The anti-replay window size (2048 packets) is a compile-time constant and not
 configurable.
@@ -286,7 +287,7 @@ node:
   cache:
     coord_size: 50000
     coord_ttl_secs: 300
-    route_size: 10000
+    identity_size: 10000
   discovery:
     ttl: 64
     timeout_secs: 10
@@ -301,6 +302,8 @@ node:
     default_hop_limit: 64
     pending_packets_per_dest: 16
     pending_max_destinations: 256
+    idle_timeout_secs: 90
+    coords_warmup_packets: 5
   buffers:
     packet_channel: 1024
     tun_channel: 1024
@@ -320,7 +323,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:4000"
-    mtu: 1197
+    mtu: 1280
 
 peers: []
 ```
