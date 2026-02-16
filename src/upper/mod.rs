@@ -8,4 +8,6 @@
 pub mod config;
 pub mod dns;
 pub mod icmp;
+pub mod icmp_rate_limit;
+pub mod tcp_mss;
 pub mod tun;

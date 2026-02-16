@@ -522,9 +522,20 @@ impl Node {
     /// Extracts the destination FipsAddress, looks up the NodeAddr and PublicKey
     /// from the identity cache, and either sends through an established session
     /// or initiates a new one (queuing the packet until established).
+    ///
+    /// Also performs MTU checking: if the packet (plus FIPS overhead) exceeds
+    /// the transport MTU, an ICMP Packet Too Big message is sent back to the
+    /// source and the packet is dropped.
     pub(in crate::node) async fn handle_tun_outbound(&mut self, ipv6_packet: Vec<u8>) {
         // Validate IPv6 header
         if ipv6_packet.len() < 40 || ipv6_packet[0] >> 4 != 6 {
+            return;
+        }
+
+        // Check if packet will fit after FIPS encapsulation
+        let effective_mtu = self.effective_ipv6_mtu() as usize;
+        if ipv6_packet.len() > effective_mtu {
+            self.send_icmpv6_packet_too_big(&ipv6_packet, effective_mtu as u16);
             return;
         }
 
@@ -582,6 +593,47 @@ impl Node {
             DestUnreachableCode::NoRoute,
             our_ipv6,
         ) && let Some(tun_tx) = &self.tun_tx {
+            let _ = tun_tx.send(response);
+        }
+    }
+
+    /// Send ICMPv6 Packet Too Big back through TUN.
+    ///
+    /// Rate-limited per source address to prevent ICMP floods from
+    /// misconfigured applications sending repeated oversized packets.
+    pub(in crate::node) fn send_icmpv6_packet_too_big(&mut self, original_packet: &[u8], mtu: u16) {
+        use crate::upper::icmp::build_packet_too_big;
+        use crate::FipsAddress;
+        use std::net::Ipv6Addr;
+
+        // Extract source address for rate limiting
+        if original_packet.len() < 40 {
+            return;
+        }
+        let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
+
+        // Rate limit ICMP PTB messages per source
+        if !self.icmp_rate_limiter.should_send(src_addr) {
+            debug!(
+                src = %src_addr,
+                "Rate limiting ICMP Packet Too Big"
+            );
+            return;
+        }
+
+        let our_ipv6 = FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
+        if let Some(response) = build_packet_too_big(original_packet, mtu, our_ipv6)
+            && let Some(tun_tx) = &self.tun_tx
+        {
+            debug!(
+                src = %src_addr,
+                dst = %our_ipv6,
+                packet_size = original_packet.len(),
+                reported_mtu = mtu,
+                "Sending ICMP Packet Too Big (ICMP src={}, dst={})",
+                our_ipv6,
+                src_addr
+            );
             let _ = tun_tx.send(response);
         }
     }

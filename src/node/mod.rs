@@ -26,6 +26,7 @@ use crate::transport::{
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
+use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use self::wire::build_encrypted;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
@@ -313,6 +314,8 @@ pub struct Node {
     // === Rate Limiting ===
     /// Rate limiter for msg1 processing (DoS protection).
     msg1_rate_limiter: HandshakeRateLimiter,
+    /// Rate limiter for ICMP Packet Too Big messages.
+    icmp_rate_limiter: IcmpRateLimiter,
 
     // === Tree Announce Timing ===
     /// Last time we refreshed our root announcement (Unix seconds).
@@ -406,6 +409,7 @@ impl Node {
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
+            icmp_rate_limiter: IcmpRateLimiter::new(),
             last_root_refresh_secs: 0,
             retry_pending: HashMap::new(),
         })
@@ -483,6 +487,7 @@ impl Node {
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
+            icmp_rate_limiter: IcmpRateLimiter::new(),
             last_root_refresh_secs: 0,
             retry_pending: HashMap::new(),
         }
@@ -556,6 +561,29 @@ impl Node {
     /// Get the configuration.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Calculate the effective IPv6 MTU that can be sent over FIPS.
+    ///
+    /// Delegates to `upper::icmp::effective_ipv6_mtu()` with this node's
+    /// transport MTU. Returns the maximum IPv6 packet size (including
+    /// IPv6 header) that can be transmitted through the FIPS mesh.
+    pub fn effective_ipv6_mtu(&self) -> u16 {
+        crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
+    }
+
+    /// Get the transport MTU from configuration.
+    ///
+    /// Returns the MTU of the first configured UDP transport, or 1280
+    /// (IPv6 minimum) as fallback.
+    pub fn transport_mtu(&self) -> u16 {
+        self.config
+            .transports
+            .udp
+            .iter()
+            .next()
+            .map(|(_, cfg)| cfg.mtu())
+            .unwrap_or(1280)
     }
 
     // === State ===

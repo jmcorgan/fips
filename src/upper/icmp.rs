@@ -59,6 +59,25 @@ const ICMPV6_HEADER_LEN: usize = 8;
 /// Maximum original packet bytes to include in ICMPv6 error.
 const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADER_LEN;
 
+/// Total FIPS encapsulation overhead (worst case).
+///
+/// Breakdown:
+/// - Noise encryption tag: 16 bytes
+/// - Encrypted frame header: 13 bytes
+/// - SessionDatagram header: 34 bytes
+/// - DataPacket header: 4 bytes
+/// - Coordinates (worst case): ~60 bytes (2 coords with depth 3 each)
+pub const FIPS_OVERHEAD: u16 = 16 + 13 + 34 + 4 + 60; // 127 bytes
+
+/// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
+///
+/// Given a transport MTU (e.g., UDP payload size), returns the maximum
+/// IPv6 packet size (including IPv6 header) that can be transmitted
+/// through the FIPS mesh after encapsulation overhead.
+pub fn effective_ipv6_mtu(transport_mtu: u16) -> u16 {
+    transport_mtu.saturating_sub(FIPS_OVERHEAD)
+}
+
 /// Check if we should send an ICMPv6 error for this packet.
 ///
 /// Returns false if the packet is:
@@ -188,6 +207,124 @@ pub fn build_dest_unreachable(
 
     // Calculate checksum
     let checksum = icmpv6_checksum(&response[icmp_start..], &our_addr, &dest_addr);
+    response[icmp_start + 2..icmp_start + 4].copy_from_slice(&checksum.to_be_bytes());
+
+    Some(response)
+}
+
+/// Build an ICMPv6 Packet Too Big response.
+///
+/// RFC 4443 Section 3.2: Packet Too Big Message
+///
+/// ## Wire Format
+/// ```text
+/// 0                   1                   2                   3
+/// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |     Type=2    |     Code=0    |          Checksum             |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                             MTU                               |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                    As much of invoking packet                 |
+/// +               as possible without exceeding 1280              +
+/// |                                                               |
+/// ```
+///
+/// ## Parameters
+/// - `original_packet`: The oversized IPv6 packet that triggered this error
+/// - `mtu`: The MTU value to report (effective IPv6 MTU after FIPS overhead)
+/// - `our_addr`: Our FIPS IPv6 address (source of ICMP message)
+///
+/// ## Returns
+/// Complete IPv6 packet containing the ICMP Packet Too Big message,
+/// ready to be written to the TUN interface.
+pub fn build_packet_too_big(
+    original_packet: &[u8],
+    mtu: u16,
+    our_addr: Ipv6Addr,
+) -> Option<Vec<u8>> {
+    // Validate original packet
+    if original_packet.len() < IPV6_HEADER_LEN {
+        return None;
+    }
+
+    // Must be IPv6
+    let version = original_packet[0] >> 4;
+    if version != 6 {
+        return None;
+    }
+
+    // Extract source address from original packet (becomes ICMP destination)
+    let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
+
+    // Don't send ICMP in response to:
+    // - Multicast sources (ff00::/8)
+    // - Unspecified source (::)
+    if src_addr.is_unspecified() || src_addr.octets()[0] == 0xff {
+        return None;
+    }
+
+    // Don't send ICMP in response to ICMP errors (avoid loops)
+    let next_header = original_packet[6];
+    if next_header == IPPROTO_ICMPV6 && original_packet.len() > IPV6_HEADER_LEN {
+        let icmp_type = original_packet[IPV6_HEADER_LEN];
+        // ICMPv6 error messages are types 0-127
+        if icmp_type < 128 {
+            return None;
+        }
+    }
+
+    // Calculate how much of the original packet to include
+    // RFC 4443: "as much of invoking packet as possible without exceeding 1280"
+    let original_len = original_packet.len().min(MAX_ORIGINAL_PACKET);
+    let icmpv6_len = ICMPV6_HEADER_LEN + original_len;
+    let total_len = IPV6_HEADER_LEN + icmpv6_len;
+
+    let mut response = vec![0u8; total_len];
+
+    // === IPv6 Header ===
+    // Version (4) + Traffic Class (8) + Flow Label (20)
+    response[0] = 0x60; // Version 6, TC high bits = 0
+    // response[1..4] = 0 (TC low bits + flow label)
+
+    // Payload length (ICMPv6 header + body)
+    let payload_len = icmpv6_len as u16;
+    response[4..6].copy_from_slice(&payload_len.to_be_bytes());
+
+    // Next header = ICMPv6
+    response[6] = IPPROTO_ICMPV6;
+
+    // Hop limit
+    response[7] = 64;
+
+    // Source = our address
+    response[8..24].copy_from_slice(&our_addr.octets());
+
+    // Destination = original source
+    response[24..40].copy_from_slice(&src_addr.octets());
+
+    // === ICMPv6 Header ===
+    let icmp_start = IPV6_HEADER_LEN;
+
+    // Type = Packet Too Big
+    response[icmp_start] = Icmpv6Type::PacketTooBig as u8;
+
+    // Code = 0 (always 0 for Packet Too Big)
+    response[icmp_start + 1] = 0;
+
+    // Checksum placeholder (calculated below)
+    // response[icmp_start + 2..icmp_start + 4] = 0
+
+    // MTU (4 bytes, but only first 2 bytes used, last 2 are unused/zero)
+    response[icmp_start + 4..icmp_start + 6].copy_from_slice(&mtu.to_be_bytes());
+    // response[icmp_start + 6..icmp_start + 8] = 0 (unused)
+
+    // === ICMPv6 Body ===
+    // As much of original packet as fits
+    response[icmp_start + ICMPV6_HEADER_LEN..].copy_from_slice(&original_packet[..original_len]);
+
+    // Calculate checksum
+    let checksum = icmpv6_checksum(&response[icmp_start..], &our_addr, &src_addr);
     response[icmp_start + 2..icmp_start + 4].copy_from_slice(&checksum.to_be_bytes());
 
     Some(response)
@@ -386,6 +523,128 @@ mod tests {
 
         let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
         let response = build_dest_unreachable(&original, DestUnreachableCode::NoRoute, our_addr);
+
+        assert!(response.is_some());
+        let response = response.unwrap();
+
+        // Response must not exceed minimum MTU
+        assert!(response.len() <= MIN_IPV6_MTU);
+    }
+
+    #[test]
+    fn test_build_packet_too_big() {
+        let src: Ipv6Addr = "fd00::1".parse().unwrap();
+        let dst: Ipv6Addr = "fd00::2".parse().unwrap();
+        let original = make_ipv6_packet(src, dst, 17, &[0u8; 1200]); // Large UDP packet
+
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+        let mtu = 1070u16;
+        let response = build_packet_too_big(&original, mtu, our_addr);
+
+        assert!(response.is_some());
+        let response = response.unwrap();
+
+        // Check IPv6 header
+        assert_eq!(response[0] >> 4, 6); // Version
+        assert_eq!(response[6], IPPROTO_ICMPV6); // Next header
+
+        // Check source is our address
+        let resp_src = Ipv6Addr::from(<[u8; 16]>::try_from(&response[8..24]).unwrap());
+        assert_eq!(resp_src, our_addr);
+
+        // Check destination is original source
+        let resp_dst = Ipv6Addr::from(<[u8; 16]>::try_from(&response[24..40]).unwrap());
+        assert_eq!(resp_dst, src);
+
+        // Check ICMPv6 type and code
+        assert_eq!(response[IPV6_HEADER_LEN], 2); // Type = Packet Too Big
+        assert_eq!(response[IPV6_HEADER_LEN + 1], 0); // Code = 0
+
+        // Check MTU value
+        let reported_mtu = u16::from_be_bytes([
+            response[IPV6_HEADER_LEN + 4],
+            response[IPV6_HEADER_LEN + 5],
+        ]);
+        assert_eq!(reported_mtu, mtu);
+
+        // Response must not exceed minimum MTU
+        assert!(response.len() <= MIN_IPV6_MTU);
+    }
+
+    #[test]
+    fn test_build_packet_too_big_invalid_input() {
+        let short_packet = vec![0u8; 20];
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+
+        let response = build_packet_too_big(&short_packet, 1280, our_addr);
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_build_packet_too_big_multicast_source() {
+        let src: Ipv6Addr = "ff02::1".parse().unwrap(); // Multicast
+        let dst: Ipv6Addr = "fd00::2".parse().unwrap();
+        let original = make_ipv6_packet(src, dst, 17, &[0u8; 1200]);
+
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+        let response = build_packet_too_big(&original, 1280, our_addr);
+
+        // Should not send ICMP for multicast source
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_build_packet_too_big_unspecified_source() {
+        let src = Ipv6Addr::UNSPECIFIED;
+        let dst: Ipv6Addr = "fd00::2".parse().unwrap();
+        let original = make_ipv6_packet(src, dst, 17, &[0u8; 1200]);
+
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+        let response = build_packet_too_big(&original, 1280, our_addr);
+
+        // Should not send ICMP for unspecified source
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_build_packet_too_big_for_icmp_error() {
+        let src: Ipv6Addr = "fd00::1".parse().unwrap();
+        let dst: Ipv6Addr = "fd00::2".parse().unwrap();
+        // ICMPv6 Destination Unreachable (type 1) - an error message
+        let icmp_payload = [1u8, 0, 0, 0, 0, 0, 0, 0];
+        let original = make_ipv6_packet(src, dst, IPPROTO_ICMPV6, &icmp_payload);
+
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+        let response = build_packet_too_big(&original, 1280, our_addr);
+
+        // Should not send ICMP in response to ICMP error
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_build_packet_too_big_for_icmp_echo() {
+        let src: Ipv6Addr = "fd00::1".parse().unwrap();
+        let dst: Ipv6Addr = "fd00::2".parse().unwrap();
+        // ICMPv6 Echo Request (type 128) - informational, not error
+        let icmp_payload = [128u8, 0, 0, 0, 0, 0, 0, 0];
+        let original = make_ipv6_packet(src, dst, IPPROTO_ICMPV6, &icmp_payload);
+
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+        let response = build_packet_too_big(&original, 1280, our_addr);
+
+        // Should send ICMP for informational messages
+        assert!(response.is_some());
+    }
+
+    #[test]
+    fn test_build_packet_too_big_truncates_large_packet() {
+        let src: Ipv6Addr = "fd00::1".parse().unwrap();
+        let dst: Ipv6Addr = "fd00::2".parse().unwrap();
+        // Very large payload
+        let original = make_ipv6_packet(src, dst, 17, &[0u8; 2000]);
+
+        let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
+        let response = build_packet_too_big(&original, 1070, our_addr);
 
         assert!(response.is_some());
         let response = response.unwrap();

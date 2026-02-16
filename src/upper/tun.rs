@@ -167,7 +167,9 @@ impl TunDevice {
     /// This duplicates the underlying file descriptor so that reads and writes
     /// can happen independently on separate threads. Returns the writer and
     /// a channel sender for submitting packets to be written.
-    pub fn create_writer(&self) -> Result<(TunWriter, TunTx), TunError> {
+    ///
+    /// The max_mss parameter is used for TCP MSS clamping on inbound packets.
+    pub fn create_writer(&self, max_mss: u16) -> Result<(TunWriter, TunTx), TunError> {
         let fd = self.device.as_raw_fd();
 
         // Duplicate the file descriptor for writing
@@ -187,6 +189,7 @@ impl TunDevice {
                 file: write_file,
                 rx,
                 name: self.name.clone(),
+                max_mss,
             },
             tx,
         ))
@@ -197,10 +200,13 @@ impl TunDevice {
 ///
 /// Services a queue of outbound packets and writes them to the TUN device.
 /// Multiple producers can send packets via the TunTx channel.
+///
+/// Also performs TCP MSS clamping on inbound SYN-ACK packets.
 pub struct TunWriter {
     file: File,
     rx: mpsc::Receiver<Vec<u8>>,
     name: String,
+    max_mss: u16,
 }
 
 impl TunWriter {
@@ -209,9 +215,20 @@ impl TunWriter {
     /// Blocks forever, reading packets from the channel and writing them
     /// to the TUN device. Returns when the channel is closed (all senders dropped).
     pub fn run(mut self) {
-        debug!(name = %self.name, "TUN writer starting");
+        use super::tcp_mss::clamp_tcp_mss;
 
-        for packet in self.rx {
+        debug!(name = %self.name, max_mss = self.max_mss, "TUN writer starting");
+
+        for mut packet in self.rx {
+            // Clamp TCP MSS on inbound SYN-ACK packets
+            if clamp_tcp_mss(&mut packet, self.max_mss) {
+                debug!(
+                    name = %self.name,
+                    max_mss = self.max_mss,
+                    "Clamped TCP MSS in inbound SYN-ACK packet"
+                );
+            }
+
             if let Err(e) = self.file.write_all(&packet) {
                 // "Bad address" is expected during shutdown when interface is deleted
                 let err_str = e.to_string();
@@ -233,6 +250,8 @@ impl TunWriter {
 /// encapsulation and routing. Non-FIPS packets receive ICMPv6 Destination
 /// Unreachable responses.
 ///
+/// Also performs TCP MSS clamping on SYN packets to prevent oversized segments.
+///
 /// This is designed to run in a dedicated thread since TUN reads are blocking.
 /// The loop exits when the TUN interface is deleted (EFAULT) or an unrecoverable
 /// error occurs.
@@ -242,18 +261,35 @@ pub fn run_tun_reader(
     our_addr: FipsAddress,
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
+    transport_mtu: u16,
 ) {
-    use super::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+    use super::icmp::{build_dest_unreachable, effective_ipv6_mtu, should_send_icmp_error, DestUnreachableCode};
+    use super::tcp_mss::clamp_tcp_mss;
 
     let name = device.name().to_string();
     let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
 
-    debug!(name = %name, "TUN reader starting");
+    // Calculate maximum safe TCP MSS from the effective IPv6 MTU
+    const IPV6_HEADER: u16 = 40;
+    const TCP_HEADER: u16 = 20;
+    let effective_mtu = effective_ipv6_mtu(transport_mtu);
+    let max_mss = effective_mtu
+        .saturating_sub(IPV6_HEADER)
+        .saturating_sub(TCP_HEADER);
+
+    debug!(
+        name = %name,
+        tun_mtu = mtu,
+        transport_mtu = transport_mtu,
+        effective_mtu = effective_mtu,
+        max_mss = max_mss,
+        "TUN reader starting"
+    );
 
     loop {
         match device.read_packet(&mut buf) {
             Ok(n) if n > 0 => {
-                let packet = &buf[..n];
+                let packet = &mut buf[..n];
                 log_ipv6_packet(packet);
 
                 // Must be a valid IPv6 packet
@@ -263,6 +299,15 @@ pub fn run_tun_reader(
 
                 // Check if destination is a FIPS address (fd::/8 prefix)
                 if packet[24] == crate::identity::FIPS_ADDRESS_PREFIX {
+                    // Clamp TCP MSS if this is a SYN packet
+                    if clamp_tcp_mss(packet, max_mss) {
+                        debug!(
+                            name = %name,
+                            max_mss = max_mss,
+                            "Clamped TCP MSS in SYN packet"
+                        );
+                    }
+
                     // Forward to Node for session encapsulation and routing
                     if outbound_tx.blocking_send(packet.to_vec()).is_err() {
                         break; // Channel closed, shutdown

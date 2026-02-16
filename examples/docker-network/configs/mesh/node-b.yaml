@@ -20,7 +20,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:4000"
-    mtu: 1280
+    mtu: 1472
 
 peers:
   - npub: "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"

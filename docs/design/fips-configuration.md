@@ -232,7 +232,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:4000"
-    mtu: 1280
+    mtu: 1197
 
 peers:
   - npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
@@ -320,7 +320,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:4000"
-    mtu: 1280
+    mtu: 1197
 
 peers: []
 ```

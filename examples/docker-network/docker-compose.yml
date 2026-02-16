@@ -16,7 +16,7 @@ x-fips-common: &fips-common
     - net.ipv6.conf.all.disable_ipv6=0
   restart: "no"
   environment:
-    - RUST_LOG=info
+    - RUST_LOG=trace
 
 services:
   # ── Mesh topology ──────────────────────────────────────────────

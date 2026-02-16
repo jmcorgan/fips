@@ -277,8 +277,15 @@ impl Node {
                     info!("  address: {}", device.address());
                     info!("      mtu: {}", mtu);
 
+                    // Calculate max MSS for TCP clamping
+                    let effective_mtu = self.effective_ipv6_mtu();
+                    let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
+                    
+                    info!("effective MTU: {} bytes", effective_mtu);
+                    info!("   max TCP MSS: {} bytes", max_mss);
+
                     // Create writer (dups the fd for independent write access)
-                    let (writer, tun_tx) = device.create_writer()?;
+                    let (writer, tun_tx) = device.create_writer(max_mss)?;
 
                     // Spawn writer thread
                     let writer_handle = thread::spawn(move || {
@@ -293,8 +300,9 @@ impl Node {
                     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
 
                     // Spawn reader thread
+                    let transport_mtu = self.transport_mtu();
                     let reader_handle = thread::spawn(move || {
-                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx);
+                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu);
                     });
 
                     self.tun_state = TunState::Active;
