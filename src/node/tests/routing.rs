@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 #[test]
 fn test_routing_local_delivery() {
-    let node = make_node();
+    let mut node = make_node();
     let my_addr = *node.node_addr();
     assert!(node.find_next_hop(&my_addr).is_none());
 }
@@ -43,7 +43,7 @@ fn test_routing_direct_peer() {
 
 #[test]
 fn test_routing_unknown_destination() {
-    let node = make_node();
+    let mut node = make_node();
     let unknown = make_node_addr(99);
     assert!(node.find_next_hop(&unknown).is_none());
 }
@@ -222,6 +222,51 @@ fn test_routing_tree_no_coords_in_cache() {
     assert!(node.find_next_hop(&dest).is_none());
 }
 
+// === Active routing refreshes coord_cache TTL ===
+
+#[test]
+fn test_routing_refreshes_coord_cache_ttl() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
+
+    // Create a peer
+    let link_id = LinkId::new(1);
+    let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let peer_addr = *id.node_addr();
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, id, 2000).unwrap();
+
+    // Set up tree coordinates
+    let dest = make_node_addr(99);
+    let dest_coords =
+        TreeCoordinate::from_addrs(vec![dest, peer_addr, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(peer_addr, my_addr, 1, 1000),
+        TreeCoordinate::from_addrs(vec![peer_addr, my_addr]).unwrap(),
+    );
+
+    // Insert with a short TTL (10s) — enough to survive until find_next_hop runs
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let short_ttl = 10_000; // 10 seconds
+    node.coord_cache_mut().insert_with_ttl(dest, dest_coords, now_ms, short_ttl);
+    let original_expiry = node.coord_cache().get_entry(&dest).unwrap().expires_at();
+
+    // find_next_hop should succeed and refresh TTL to now + default_ttl (300s)
+    assert!(node.find_next_hop(&dest).is_some());
+
+    // The refresh should have extended expires_at beyond the original
+    let new_expiry = node.coord_cache().get_entry(&dest).unwrap().expires_at();
+    assert!(
+        new_expiry > original_expiry,
+        "find_next_hop should refresh the coord_cache TTL: original={}, new={}",
+        original_expiry, new_expiry,
+    );
+}
+
 // === Bloom filter without coords → no route (loop prevention) ===
 
 #[test]
@@ -369,9 +414,10 @@ async fn test_routing_chain_topology() {
 
     // Node 0 should be able to route toward node 3.
     // The next hop should be node 1 (only peer of node 0).
+    let node1_addr = *nodes[1].node.node_addr();
+    let node2_addr = *nodes[2].node.node_addr();
     let hop = nodes[0].node.find_next_hop(&node3_addr);
     assert!(hop.is_some(), "Node 0 should find route to node 3");
-    let node1_addr = *nodes[1].node.node_addr();
     assert_eq!(
         hop.unwrap().node_addr(),
         &node1_addr,
@@ -381,7 +427,6 @@ async fn test_routing_chain_topology() {
     // Node 3 should route toward node 0 via node 2.
     let hop = nodes[3].node.find_next_hop(&node0_addr);
     assert!(hop.is_some(), "Node 3 should find route to node 0");
-    let node2_addr = *nodes[2].node.node_addr();
     assert_eq!(
         hop.unwrap().node_addr(),
         &node2_addr,
@@ -466,7 +511,7 @@ fn build_addr_index(nodes: &[TestNode]) -> std::collections::HashMap<NodeAddr, u
 /// the result to the next node. Terminates on delivery, routing failure,
 /// or loop detection.
 fn simulate_forwarding(
-    nodes: &[TestNode],
+    nodes: &mut [TestNode],
     addr_index: &std::collections::HashMap<NodeAddr, usize>,
     src: usize,
     dst: usize,
@@ -586,7 +631,7 @@ async fn test_routing_reachability_100_nodes() {
 
             total_pairs += 1;
 
-            match simulate_forwarding(&nodes, &addr_index, src, dst) {
+            match simulate_forwarding(&mut nodes, &addr_index, src, dst) {
                 ForwardResult::Delivered(hops) => {
                     total_hops += hops;
                     if hops > max_hops {
@@ -705,7 +750,7 @@ async fn test_routing_stops_after_peer_removal() {
 
     // Verify routing works before removal: node 0 → node 3
     let addr_index = build_addr_index(&nodes);
-    match simulate_forwarding(&nodes, &addr_index, 0, 3) {
+    match simulate_forwarding(&mut nodes, &addr_index, 0, 3) {
         ForwardResult::Delivered(_) => {}
         other => panic!("Expected delivery before removal, got {:?}", other),
     }
@@ -746,7 +791,7 @@ async fn test_routing_stops_after_peer_removal() {
     // still attempt forwarding — but the self-distance check prevents loops.
     // Either NoRoute or Loop-with-stale-coords is acceptable here; what
     // matters is that delivery does NOT succeed.
-    match simulate_forwarding(&nodes, &addr_index, 0, 3) {
+    match simulate_forwarding(&mut nodes, &addr_index, 0, 3) {
         ForwardResult::NoRoute { .. } => {} // Expected: can't reach node 3
         ForwardResult::Loop { .. } => {} // Also acceptable: stale coords cause loop detection
         ForwardResult::Delivered(hops) => {
@@ -755,7 +800,7 @@ async fn test_routing_stops_after_peer_removal() {
     }
 
     // But routing within the same component still works: node 2 → node 3
-    match simulate_forwarding(&nodes, &addr_index, 2, 3) {
+    match simulate_forwarding(&mut nodes, &addr_index, 2, 3) {
         ForwardResult::Delivered(_) => {}
         other => panic!("Expected delivery within component, got {:?}", other),
     }
@@ -898,7 +943,7 @@ async fn test_routing_source_only_coords_100_nodes() {
             .coord_cache_mut()
             .insert(*dest_addr, dest_coords.clone(), now_ms);
 
-        match simulate_forwarding(&nodes, &addr_index, src, dst) {
+        match simulate_forwarding(&mut nodes, &addr_index, src, dst) {
             ForwardResult::Delivered(_) => source_only_delivered += 1,
             ForwardResult::NoRoute { .. } => source_only_failed += 1,
             ForwardResult::Loop { .. } => {
@@ -940,7 +985,7 @@ async fn test_routing_source_only_coords_100_nodes() {
 
     let mut full_cache_failures = 0usize;
     for &(src, dst) in &sample_pairs {
-        match simulate_forwarding(&nodes, &addr_index, src, dst) {
+        match simulate_forwarding(&mut nodes, &addr_index, src, dst) {
             ForwardResult::Delivered(_) => {}
             _ => full_cache_failures += 1,
         }

@@ -896,7 +896,7 @@ impl Node {
     /// fallback). Without coordinates, the node cannot make loop-free
     /// forwarding decisions. The caller should signal `CoordsRequired` back
     /// to the source when `None` is returned for a non-local destination.
-    pub fn find_next_hop(&self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
+    pub fn find_next_hop(&mut self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
         // 1. Local delivery
         if dest_node_addr == self.node_addr() {
             return None;
@@ -915,17 +915,17 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_coords = self.coord_cache.get(dest_node_addr, now_ms)
-            .or_else(|| self.route_cache.get(dest_node_addr).map(|c| c.coords()))?;
+        let dest_coords = self.coord_cache.get_and_touch(dest_node_addr, now_ms)
+            .or_else(|| self.route_cache.get(dest_node_addr).map(|c| c.coords()))?.clone();
 
         // 3. Bloom filter candidates — requires dest_coords for loop-free selection
         let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);
         if !candidates.is_empty() {
-            return self.select_best_candidate(&candidates, dest_coords);
+            return self.select_best_candidate(&candidates, &dest_coords);
         }
 
         // 4. Greedy tree routing fallback
-        let next_hop_id = self.tree_state.find_next_hop(dest_coords)?;
+        let next_hop_id = self.tree_state.find_next_hop(&dest_coords)?;
 
         self.peers.get(&next_hop_id).filter(|p| p.can_send())
     }

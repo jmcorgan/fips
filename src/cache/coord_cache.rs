@@ -111,7 +111,7 @@ impl CoordCache {
         })
     }
 
-    /// Look up coordinates and touch (update last_used).
+    /// Look up coordinates and refresh (update last_used and extend TTL).
     pub fn get_and_touch(
         &mut self,
         addr: &NodeAddr,
@@ -125,9 +125,9 @@ impl CoordCache {
             return None;
         }
 
-        // Touch and return
+        // Refresh TTL and return
         if let Some(entry) = self.entries.get_mut(addr) {
-            entry.touch(current_time_ms);
+            entry.refresh(current_time_ms, self.default_ttl_ms);
             Some(entry.coords())
         } else {
             None
