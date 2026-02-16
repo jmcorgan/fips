@@ -113,7 +113,6 @@ impl SessionEntry {
     }
 
     /// Get last activity time.
-    #[cfg(test)]
     pub(crate) fn last_activity(&self) -> u64 {
         self.last_activity
     }

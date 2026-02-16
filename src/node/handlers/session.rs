@@ -535,7 +535,7 @@ impl Node {
 
         // Look up in identity cache
         let (dest_addr, dest_pubkey) = match self.lookup_by_fips_prefix(&prefix) {
-            Some(&(addr, pk)) => (addr, pk),
+            Some((addr, pk)) => (addr, pk),
             None => {
                 self.send_icmpv6_dest_unreachable(&ipv6_packet);
                 return;
@@ -630,7 +630,7 @@ impl Node {
         let mut prefix = [0u8; 15];
         prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
         let dest_pubkey = match self.lookup_by_fips_prefix(&prefix) {
-            Some(&(_, pk)) => pk,
+            Some((_, pk)) => pk,
             None => {
                 debug!(dest = %dest_addr, "Discovery complete but no identity for session retry");
                 return;

@@ -254,7 +254,7 @@ pub struct Node {
     // === Identity Cache ===
     /// Maps FipsAddress prefix bytes (bytes 1-15) to (NodeAddr, PublicKey).
     /// Enables reverse lookup from IPv6 destination to session/routing identity.
-    identity_cache: HashMap<[u8; 15], (NodeAddr, secp256k1::PublicKey)>,
+    identity_cache: HashMap<[u8; 15], (NodeAddr, secp256k1::PublicKey, u64)>,
 
     // === Pending TUN Packets ===
     /// Packets queued while waiting for session establishment.
@@ -862,12 +862,23 @@ impl Node {
     pub(crate) fn register_identity(&mut self, node_addr: NodeAddr, pubkey: secp256k1::PublicKey) {
         let mut prefix = [0u8; 15];
         prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
-        self.identity_cache.insert(prefix, (node_addr, pubkey));
+        self.identity_cache.insert(prefix, (node_addr, pubkey, Self::now_ms()));
     }
 
     /// Look up a destination by FipsAddress prefix (bytes 1-15 of the IPv6 address).
-    pub(crate) fn lookup_by_fips_prefix(&self, prefix: &[u8; 15]) -> Option<&(NodeAddr, secp256k1::PublicKey)> {
-        self.identity_cache.get(prefix)
+    /// Returns None if the entry has expired (lazy expiry).
+    pub(crate) fn lookup_by_fips_prefix(&mut self, prefix: &[u8; 15]) -> Option<(NodeAddr, secp256k1::PublicKey)> {
+        let ttl_ms = self.config.node.cache.identity_ttl_secs * 1000;
+        let now_ms = Self::now_ms();
+        if let Some(&(addr, pk, registered_at)) = self.identity_cache.get(prefix) {
+            if now_ms.saturating_sub(registered_at) > ttl_ms {
+                self.identity_cache.remove(prefix);
+                return None;
+            }
+            Some((addr, pk))
+        } else {
+            None
+        }
     }
 
     /// Number of identity cache entries.

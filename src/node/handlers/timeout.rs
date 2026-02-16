@@ -1,8 +1,8 @@
-//! Timeout management for stale handshake connections.
+//! Timeout management for stale handshake connections and idle sessions.
 
 use crate::node::Node;
 use crate::transport::LinkId;
-use tracing::info;
+use tracing::{debug, info};
 
 impl Node {
     /// Check for timed-out handshake connections and clean them up.
@@ -77,5 +77,34 @@ impl Node {
 
         // Remove link and addr_to_link
         self.remove_link(&link_id);
+    }
+
+    /// Remove established sessions that have been idle too long.
+    ///
+    /// Only targets sessions in the Established state. Initiating/Responding
+    /// sessions are handled by the handshake timeout.
+    pub(in crate::node) fn purge_idle_sessions(&mut self, now_ms: u64) {
+        let timeout_ms = self.config.node.session.idle_timeout_secs * 1000;
+        if timeout_ms == 0 {
+            return; // disabled
+        }
+
+        let idle: Vec<_> = self.sessions.iter()
+            .filter(|(_, entry)| {
+                entry.is_established()
+                    && now_ms.saturating_sub(entry.last_activity()) > timeout_ms
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        for addr in idle {
+            self.sessions.remove(&addr);
+            self.pending_tun_packets.remove(&addr);
+            debug!(
+                dest = %addr,
+                idle_secs = timeout_ms / 1000,
+                "Idle session removed"
+            );
+        }
     }
 }

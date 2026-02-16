@@ -925,8 +925,8 @@ fn test_identity_cache_populated_on_promote() {
     let cached = node.lookup_by_fips_prefix(&prefix);
     assert!(cached.is_some(), "Identity cache should contain promoted peer");
     let (cached_addr, cached_pk) = cached.unwrap();
-    assert_eq!(*cached_addr, peer_addr);
-    assert_eq!(*cached_pk, peer_identity.pubkey_full());
+    assert_eq!(cached_addr, peer_addr);
+    assert_eq!(cached_pk, peer_identity.pubkey_full());
 }
 
 #[tokio::test]
@@ -1144,4 +1144,213 @@ async fn test_tun_outbound_pending_queue_flush() {
     }
 
     cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// Unit tests: Session idle timeout
+// ============================================================================
+
+/// Helper: complete a Noise IK handshake and return the initiator's NoiseSession.
+fn make_noise_session(
+    our_identity: &Identity,
+    remote_identity: &Identity,
+) -> crate::noise::NoiseSession {
+    use crate::noise::HandshakeState;
+
+    let mut initiator = HandshakeState::new_initiator(
+        our_identity.keypair(),
+        remote_identity.pubkey_full(),
+    );
+    let mut responder = HandshakeState::new_responder(remote_identity.keypair());
+
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+
+    initiator.into_session().unwrap()
+}
+
+#[test]
+fn test_purge_idle_sessions_removes_expired() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000, // created at t=1000ms
+    );
+
+    node.sessions.insert(remote_addr, entry);
+    assert_eq!(node.session_count(), 1);
+    assert!(node.get_session(&remote_addr).unwrap().is_established());
+
+    // Purge at t=92s — should exceed default 90s idle timeout
+    let now_ms = 1000 + 92_000;
+    node.purge_idle_sessions(now_ms);
+
+    assert_eq!(node.session_count(), 0, "Idle session should be purged");
+}
+
+#[test]
+fn test_purge_idle_sessions_keeps_active() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let mut entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+    );
+
+    // Touch at t=80s — recent activity
+    entry.touch(81_000);
+
+    node.sessions.insert(remote_addr, entry);
+
+    // Purge at t=92s — only 11s since last activity, well within 90s timeout
+    let now_ms = 92_000;
+    node.purge_idle_sessions(now_ms);
+
+    assert_eq!(node.session_count(), 1, "Active session should survive purge");
+}
+
+#[test]
+fn test_purge_idle_sessions_ignores_initiating() {
+    use crate::noise::HandshakeState;
+
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let handshake = HandshakeState::new_initiator(
+        node.identity().keypair(),
+        remote.pubkey_full(),
+    );
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+    );
+
+    node.sessions.insert(remote_addr, entry);
+
+    // Purge well past the idle timeout — Initiating sessions should not be touched
+    let now_ms = 1000 + 200_000;
+    node.purge_idle_sessions(now_ms);
+
+    assert_eq!(node.session_count(), 1, "Initiating session should not be purged by idle timeout");
+}
+
+#[test]
+fn test_purge_idle_sessions_cleans_pending_packets() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+    );
+
+    node.sessions.insert(remote_addr, entry);
+
+    // Insert some pending packets for this destination
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(vec![1, 2, 3]);
+    node.pending_tun_packets.insert(remote_addr, queue);
+    assert!(node.pending_tun_packets.contains_key(&remote_addr));
+
+    // Purge after idle timeout
+    let now_ms = 1000 + 92_000;
+    node.purge_idle_sessions(now_ms);
+
+    assert_eq!(node.session_count(), 0);
+    assert!(!node.pending_tun_packets.contains_key(&remote_addr),
+        "Pending packets should be cleaned up with idle session");
+}
+
+#[test]
+fn test_purge_idle_sessions_disabled_when_zero() {
+    let mut node = make_node();
+    node.config.node.session.idle_timeout_secs = 0;
+
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let session = make_noise_session(node.identity(), &remote);
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+    );
+
+    node.sessions.insert(remote_addr, entry);
+
+    // Even way past any timeout, sessions should survive when disabled
+    let now_ms = 1000 + 1_000_000;
+    node.purge_idle_sessions(now_ms);
+
+    assert_eq!(node.session_count(), 1, "Sessions should not be purged when idle timeout is disabled");
+}
+
+// ============================================================================
+// Unit tests: Identity cache expiry
+// ============================================================================
+
+#[test]
+fn test_identity_cache_expiry() {
+    let mut node = make_node();
+    // Use a short TTL (1s) and insert with an old timestamp
+    node.config.node.cache.identity_ttl_secs = 1;
+
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    let mut prefix = [0u8; 15];
+    prefix.copy_from_slice(&remote_addr.as_bytes()[0..15]);
+
+    // Insert directly with a timestamp far in the past (time 0)
+    node.identity_cache.insert(prefix, (remote_addr, remote.pubkey_full(), 0));
+
+    // Lookup should find the entry expired (registered_at=0, TTL=1s, now >> 1s)
+    let result = node.lookup_by_fips_prefix(&prefix);
+    assert!(result.is_none(), "Expired identity should return None");
+
+    // Entry should have been removed from cache
+    assert!(!node.identity_cache.contains_key(&prefix),
+        "Expired entry should be removed from cache");
+}
+
+#[test]
+fn test_identity_cache_survives_before_ttl() {
+    let mut node = make_node();
+    // Default 60s TTL — just registered, should be available
+
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+
+    node.register_identity(remote_addr, remote.pubkey_full());
+
+    let mut prefix = [0u8; 15];
+    prefix.copy_from_slice(&remote_addr.as_bytes()[0..15]);
+
+    let result = node.lookup_by_fips_prefix(&prefix);
+    assert!(result.is_some(), "Fresh identity should be available");
+
+    let (addr, pk) = result.unwrap();
+    assert_eq!(addr, remote_addr);
+    assert_eq!(pk, remote.pubkey_full());
 }

@@ -119,6 +119,9 @@ pub struct CacheConfig {
     /// Max entries in route cache (`node.cache.route_size`).
     #[serde(default = "CacheConfig::default_route_size")]
     pub route_size: usize,
+    /// Identity cache entry TTL in seconds (`node.cache.identity_ttl_secs`).
+    #[serde(default = "CacheConfig::default_identity_ttl_secs")]
+    pub identity_ttl_secs: u64,
 }
 
 impl Default for CacheConfig {
@@ -127,6 +130,7 @@ impl Default for CacheConfig {
             coord_size: 50_000,
             coord_ttl_secs: 300,
             route_size: 10_000,
+            identity_ttl_secs: 60,
         }
     }
 }
@@ -135,6 +139,7 @@ impl CacheConfig {
     fn default_coord_size() -> usize { 50_000 }
     fn default_coord_ttl_secs() -> u64 { 300 }
     fn default_route_size() -> usize { 10_000 }
+    fn default_identity_ttl_secs() -> u64 { 60 }
 }
 
 /// Discovery protocol (`node.discovery.*`).
@@ -227,6 +232,10 @@ pub struct SessionConfig {
     /// Max destinations with pending packets (`node.session.pending_max_destinations`).
     #[serde(default = "SessionConfig::default_pending_max_destinations")]
     pub pending_max_destinations: usize,
+    /// Idle session timeout in seconds (`node.session.idle_timeout_secs`).
+    /// Established sessions with no activity for this duration are removed.
+    #[serde(default = "SessionConfig::default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for SessionConfig {
@@ -235,6 +244,7 @@ impl Default for SessionConfig {
             default_hop_limit: 64,
             pending_packets_per_dest: 16,
             pending_max_destinations: 256,
+            idle_timeout_secs: 90,
         }
     }
 }
@@ -243,6 +253,7 @@ impl SessionConfig {
     fn default_hop_limit() -> u8 { 64 }
     fn default_pending_packets_per_dest() -> usize { 16 }
     fn default_pending_max_destinations() -> usize { 256 }
+    fn default_idle_timeout_secs() -> u64 { 90 }
 }
 
 /// Internal buffers (`node.buffers.*`).
