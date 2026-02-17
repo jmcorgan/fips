@@ -5,7 +5,10 @@ operational behavior under various mesh conditions. This document complements
 [fips-intro.md](fips-intro.md) with step-by-step walkthroughs of protocol
 dynamics rather than message formats and data structures.
 
-For wire formats, see [fips-gossip-protocol.md](fips-gossip-protocol.md) §2 (TreeAnnounce).
+For wire formats, see [fips-wire-formats.md](fips-wire-formats.md) (TreeAnnounce section).
+For spanning tree algorithms and data structures, see
+[fips-spanning-tree.md](fips-spanning-tree.md). For how the spanning tree fits
+into mesh routing, see [fips-mesh-operation.md](fips-mesh-operation.md).
 
 The protocol is based on Yggdrasil v0.5's CRDT gossip design.
 
@@ -69,13 +72,6 @@ The root is deterministic: the node with the lexicographically smallest node_add
 among all reachable nodes. No explicit election protocol exists—each node
 independently derives the same answer from its local TreeState.
 
-### Announcement Timing (from Yggdrasil v0.5)
-
-- Root timestamp refresh: every 30 minutes
-- Root timeout: 60 minutes without refresh
-- Peer keepalive: triggered by data activity, not periodic
-- TTL on tree entries: implementation-specific, typically minutes
-
 ---
 
 ## 2. Single Node Startup
@@ -109,9 +105,7 @@ At this point, node A is a fully functional single-node FIPS network. It can:
 
 While isolated, A's state only changes on:
 
-1. **Periodic refresh**: A regenerates its announcement with incremented sequence
-   and fresh timestamp (maintains liveness for future peers)
-2. **Peer connection**: A new peer triggers gossip exchange (covered in Section 3)
+1. **Peer connection**: A new peer triggers gossip exchange (covered in Section 3)
 
 ---
 
@@ -220,11 +214,12 @@ The propagation time is O(tree depth), not O(network size). In the example:
 
 - B's coordinates are known immediately (B computes from D's ancestry)
 - B's reachability propagates via bloom filter: D → A (1 hop to root)
-- Any node wanting to reach B does a bloom filter lookup
+- Any node wanting to reach B does a bloom filter lookup for candidate selection
 - Total: 1-2 gossip rounds for B to be locatable
 
 Note: Nodes A, C, E never add B to their TreeState. They can still route to B
-by using bloom filter lookup to get B's coordinates, then greedy forwarding.
+by using bloom filter lookup for candidate selection to get B's coordinates,
+then coordinate-based greedy routing.
 
 ---
 
@@ -291,8 +286,8 @@ T7: Converged state
 - Any two nodes can compute accurate distance via their coordinates
 
 Nodes do *not* have global knowledge—a leaf node knows nothing about distant
-subtrees. But any node can locate any other node via bloom filter lookup and
-then route using coordinates.
+subtrees. But any node can locate any other node via Bloom-guided candidate
+selection and then route using tree coordinate distance.
 
 **Convergence time**: Bounded by tree depth × gossip interval. For a tree of
 depth D with gossip interval G:
@@ -312,7 +307,7 @@ During convergence, the network may temporarily have:
 
 - **Multiple roots**: Different partitions with different root beliefs
 - **Inconsistent coordinates**: Nodes computing distances from stale state
-- **Routing failures**: Greedy routing may fail until coordinates stabilize
+- **Routing failures**: Coordinate-based greedy routing may fail until coordinates stabilize
 
 These are transient. The protocol guarantees eventual convergence, not instant
 consistency.
@@ -424,18 +419,15 @@ Nodes detect they're partitioned when:
 
 1. **Parent unreachable**: Direct link to parent fails
 2. **Root unreachable**: No peer has path to current root
-3. **Stale root timestamp**: Root's announcement exceeds timeout (60 min)
 
-**Detection via gossip staleness**:
+**Detection via gossip staleness** (not currently implemented — see
+[Known Limitations](#known-limitations-v1-implementation)):
 
-```
-For each entry in TreeState:
-    if now - entry.timestamp > TTL:
-        expire(entry)
-
-If root entry expires:
-    re-evaluate root from remaining entries
-```
+In principle, nodes would also detect partitions through root entry staleness:
+if no fresh root announcements arrive within a timeout, the root is presumed
+departed. This requires tracking root entry timestamps and enforcing expiration,
+which is not yet implemented. Currently, only direct parent loss (case 1) and
+absence of any peer with a path to root (case 2) trigger partition detection.
 
 ### Independent Operation
 
@@ -551,14 +543,14 @@ link_failed(peer):
 - Short timeout: Quick failure detection, but transient issues cause flapping
 - Long timeout: Stable under jitter, but slow to respond to real failures
 
-**Typical values**:
+**Typical values** (see [fips-spanning-tree.md](fips-spanning-tree.md) for
+current FIPS-specific parameters):
 
 ```
 peer_timeout: 10-30 seconds
 keepalive_interval: peer_timeout / 3
-gossip_interval: 1-5 seconds (or on-change)
-tree_entry_ttl: 5-10 minutes
-root_timeout: 60 minutes
+gossip_interval: on topology change (no periodic refresh)
+tree_entry_ttl: not currently enforced (see Known Limitations)
 ```
 
 ### Asymmetric Failures
@@ -637,9 +629,9 @@ the current parent (under the same root) to trigger a switch. Root changes
 always trigger a switch regardless of depth.
 
 **What this means for tree structure**: The v1 algorithm produces minimum-depth
-trees, which minimizes coordinate path length and hop count for greedy routing.
-However, it does not account for link quality—a high-latency or lossy link at
-depth 1 is preferred over a fast link at depth 2.
+trees, which minimizes coordinate path length and hop count for coordinate-based
+greedy routing. However, it does not account for link quality—a high-latency or
+lossy link at depth 1 is preferred over a fast link at depth 2.
 
 ### v2 Planned: Cost Metrics
 
@@ -699,32 +691,33 @@ Once converged, what does the network look like and how does it behave?
 
 **Quiescent gossip**:
 
-- Announcements only on periodic refresh (every few minutes)
-- Delta encoding minimizes redundant information
+- TreeAnnounce messages sent only on topology changes, not periodically
+- No periodic root refresh — the tree is maintained purely by change-driven gossip
+- In a stable network, gossip traffic drops to zero
 - Bandwidth usage proportional to tree depth, not network size
 
 **Consistent coordinates**:
 
 - Every node knows its full path to root
 - Distance calculations are accurate
-- Greedy routing succeeds
+- Coordinate-based greedy routing succeeds
 
 ### Steady State Gossip Pattern
 
 ```
 Normal operation (no topology changes):
 
-Root A: Refreshes timestamp every 30 minutes
-        └── Gossips refresh to children
+Root A: No periodic announcements — announces only if topology changes
+        └── Root does not refresh its timestamp periodically
 
-Each node: Forwards root's refresh when received
-           └── Only sends if peer's view is stale
+Each node: Sends TreeAnnounce only when its own state changes
+           └── Parent change, new peer, or peer departure
 
-Typical gossip per node:
-├── Receive refresh from parent (periodic)
-├── Forward to children if needed
-├── Send own refresh periodically (separate from root's)
-└── No gossip if nothing changed and peer is up-to-date
+Typical gossip per node in steady state:
+├── No periodic sends — tree gossip is entirely change-driven
+├── Announce on parent selection change
+├── Announce on peer link up/down
+└── Zero gossip traffic when topology is stable
 ```
 
 ### Expected Steady State Properties
@@ -732,15 +725,14 @@ Typical gossip per node:
 **Gossip volume**:
 
 ```
-Per link, per refresh cycle:
-├── Root timestamp update: ~100 bytes
-├── Own declaration (if changed): ~100 bytes
+Per topology change event:
+├── Own declaration update: ~100 bytes
 ├── Delta of changed ancestors: varies
 └── Total: O(100 bytes) to O(depth * 100 bytes)
 
-For 1000-node network with depth ~10:
-├── Each node sends O(1 KB) per refresh cycle
-├── With 30-minute refresh: ~0.5 bytes/second per link
+In steady state (no topology changes):
+├── Zero gossip traffic — no periodic refreshes
+├── Traffic resumes only when links change or nodes join/depart
 └── Negligible compared to application traffic
 ```
 
@@ -774,10 +766,10 @@ In steady state with infrequent updates:
 
 Indicators the network has converged:
 
-1. **Root stability**: Same root for multiple refresh cycles
+1. **Root stability**: Same root over extended period
 2. **Parent stability**: No parent changes in recent interval
-3. **Sequence number stability**: Sequence numbers increment slowly (refresh only)
-4. **Routing success**: Greedy routing doesn't hit local minima
+3. **Sequence number stability**: Sequence numbers increment only on topology changes
+4. **Routing success**: Coordinate-based greedy routing doesn't hit local minima
 
 Warning signs of instability:
 
@@ -832,10 +824,10 @@ T3: Converged tree (assuming equal link costs):
 
 **Steady state**:
 
-- A is root, refreshes every 30 min
+- A is root
 - B, C, D are direct children of A
 - E is child of C (one hop to A through C)
-- Gossip: Each refresh cycle propagates through 2 levels
+- No periodic gossip — TreeAnnounce only on topology changes
 
 **Link failure scenario**:
 
@@ -1035,9 +1027,8 @@ work.
 
 ### Known Limitation: Root Timeout Not Enforced
 
-The design specifies a 60-minute root timeout (§1 timing parameters, §6
-partition detection) after which nodes should treat the root as departed and
-re-elect. The current implementation does not track root entry timestamps or
+The design specifies a 60-minute root timeout (§6 partition detection) after
+which nodes should treat the root as departed and re-elect. The current implementation does not track root entry timestamps or
 perform staleness checks.
 
 **Impact**: If the root node disappears permanently without a graceful
@@ -1137,8 +1128,9 @@ through:
 7. **Stability thresholds** - Hysteresis prevents flapping on similar-cost paths
 
 Each node maintains only its own ancestry and direct peer information—not global
-topology. Reachability to arbitrary destinations is provided by bloom filters
-propagating up the tree, with coordinate discovery via lookup protocol.
+topology. Reachability to arbitrary destinations is provided by Bloom-guided
+candidate selection (bloom filters propagating up the tree), with coordinate
+discovery via lookup protocol and coordinate-based greedy routing for forwarding.
 
 The protocol handles partitions gracefully (independent operation), heals
 automatically when connectivity returns, and adapts to heterogeneous link
@@ -1147,6 +1139,12 @@ costs to form efficient tree structures.
 ---
 
 ## References
+
+### FIPS Internal Documentation
+
+- [fips-spanning-tree.md](fips-spanning-tree.md) — Spanning tree algorithms and data structures
+- [fips-mesh-operation.md](fips-mesh-operation.md) — How the spanning tree fits into mesh routing
+- [fips-wire-formats.md](fips-wire-formats.md) — TreeAnnounce wire format
 
 ### Yggdrasil Documentation
 

@@ -207,7 +207,7 @@ Static peer list. Each entry defines a peer to connect to.
 | `peers[].alias` | string | *(none)* | Human-readable name for logging |
 | `peers[].addresses[].transport` | string | *(required)* | Transport type (`udp`) |
 | `peers[].addresses[].addr` | string | *(required)* | Transport address (e.g., `"10.0.0.2:4000"`) |
-| `peers[].addresses[].priority` | u16 | `100` | Address priority (lower = preferred) |
+| `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
 
 ## Minimal Example
