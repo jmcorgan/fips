@@ -104,6 +104,43 @@ impl NoiseSession {
         Ok(plaintext)
     }
 
+    /// Encrypt a message with Additional Authenticated Data (AAD).
+    ///
+    /// Returns the ciphertext. The current send counter should be included
+    /// in the wire format before calling this method.
+    pub fn encrypt_with_aad(
+        &mut self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
+        self.send_cipher.encrypt_with_aad(plaintext, aad)
+    }
+
+    /// Decrypt with explicit counter, replay protection, and AAD.
+    ///
+    /// This is the primary decryption method for the FLP transport phase
+    /// with AAD binding. The AAD (typically the 16-byte outer header) must
+    /// match what was used during encryption.
+    pub fn decrypt_with_replay_check_and_aad(
+        &mut self,
+        ciphertext: &[u8],
+        counter: u64,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
+        // Check replay window first (cheap)
+        if !self.replay_window.check(counter) {
+            return Err(NoiseError::ReplayDetected(counter));
+        }
+
+        // Attempt decryption with AAD (expensive)
+        let plaintext = self.recv_cipher.decrypt_with_counter_and_aad(ciphertext, counter, aad)?;
+
+        // Only accept into window after successful decryption
+        self.replay_window.accept(counter);
+
+        Ok(plaintext)
+    }
+
     /// Get the highest received counter.
     pub fn highest_received_counter(&self) -> u64 {
         self.replay_window.highest()

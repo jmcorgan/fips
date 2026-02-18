@@ -75,8 +75,9 @@ handles all medium-specific details. FLP sees only "send bytes to address" and
 ### MTU Reporting
 
 The maximum datagram size for a given link. FLP needs this to determine how
-much payload fits in a single packet after link encryption overhead (29 bytes
-for the encrypted frame wrapper).
+much payload fits in a single packet after link encryption overhead (37 bytes
+for the encrypted frame wrapper: 16-byte outer header + 5-byte inner header +
+16-byte AEAD tag).
 
 ### Connection Lifecycle
 
@@ -137,13 +138,18 @@ notifications — passes through Noise's ChaCha20-Poly1305 AEAD.
 ### Encrypted Frame Structure
 
 Post-handshake packets are wrapped in an encrypted frame consisting of:
-- A discriminator byte identifying the frame type
+
+- A 4-byte common prefix (version, phase, flags, payload length)
 - A receiver index for O(1) session lookup
 - An explicit counter used as the AEAD nonce
 - The ciphertext with a Poly1305 authentication tag
 
-The plaintext inside the encrypted frame begins with a message type byte
-followed by the message-specific payload.
+The 16-byte outer header (common prefix + receiver index + counter) is used as
+AAD for the AEAD, binding the header to the ciphertext without encrypting it.
+
+The plaintext inside the encrypted frame begins with a 5-byte inner header
+(4-byte session-relative timestamp followed by a message type byte), then the
+message-specific payload.
 
 See [fips-wire-formats.md](fips-wire-formats.md) for the complete wire format
 specification.
@@ -189,13 +195,14 @@ The tuple `(transport_id, receiver_idx)` uniquely identifies a session.
 
 ### Dispatch Flow
 
-1. Read discriminator byte to determine packet type
-2. For encrypted frames (0x00): look up `(transport_id, receiver_idx)` in the
-   session table — O(1) hash lookup. Unknown indices are rejected before any
-   cryptographic operation.
-3. For handshake msg2 (0x02): look up by our sender index to match to a
+1. Read the 4-byte common prefix to determine the phase (established,
+   handshake msg1, msg2)
+2. For established frames (phase 0x0): look up `(transport_id, receiver_idx)`
+   in the session table — O(1) hash lookup. Unknown indices are rejected
+   before any cryptographic operation.
+3. For handshake msg2 (phase 0x2): look up by our sender index to match to a
    pending outbound handshake
-4. For handshake msg1 (0x01): rate-limited processing, creates new state
+4. For handshake msg1 (phase 0x1): rate-limited processing, creates new state
 
 This approach follows WireGuard's design: source address is informational,
 not authoritative. Only successful cryptographic verification establishes
@@ -295,7 +302,7 @@ The two-state liveness model:
 
 ## Link Message Types
 
-FLP defines six message types carried inside encrypted frames:
+FLP defines eight message types carried inside encrypted frames:
 
 | Type | Name | Purpose |
 | ---- | ---- | ------- |
@@ -303,11 +310,13 @@ FLP defines six message types carried inside encrypted frames:
 | 0x20 | FilterAnnounce | Bloom filter reachability updates |
 | 0x30 | LookupRequest | Coordinate discovery — flood toward destination |
 | 0x31 | LookupResponse | Coordinate discovery — response with coordinates |
-| 0x40 | SessionDatagram | Encapsulated session-layer payload for forwarding |
+| 0x00 | SessionDatagram | Encapsulated session-layer payload for forwarding |
+| 0x01 | SenderReport | Link statistics — what this node sent (reserved) |
+| 0x02 | ReceiverReport | Link statistics — what this node observed (reserved) |
 | 0x50 | Disconnect | Orderly link teardown with reason code |
 
-Additionally, handshake messages (0x01 msg1, 0x02 msg2) are sent unencrypted
-before the link session is established.
+Additionally, handshake messages (phase 0x1 msg1, phase 0x2 msg2) are sent
+unencrypted before the link session is established.
 
 TreeAnnounce and FilterAnnounce are exchanged between direct peers only — they
 are not forwarded. LookupRequest and LookupResponse are forwarded through the
@@ -366,6 +375,10 @@ an attacker sends invalid packets to elicit responses.
 | Disconnect with reason codes | **Implemented** |
 | Liveness detection (timeout-based) | **Implemented** |
 | Reconnection handling | **Implemented** |
+| Common prefix framing | **Implemented** |
+| AAD binding on encrypted frames | **Implemented** |
+| Inner header timestamps | **Implemented** |
+| Path MTU tracking (SessionDatagram) | **Implemented** |
 | Rekey with index rotation | Planned |
 | Allowlist/blocklist | Planned |
 

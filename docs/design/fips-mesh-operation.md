@@ -509,12 +509,12 @@ routing decisions but retains its own end-to-end encryption and identity.
 | FilterAnnounce | ~1 KB | Topology changes | No (peer-to-peer) |
 | LookupRequest | ~300 bytes | First contact, recovery | Yes (flood) |
 | LookupResponse | ~400 bytes | Response to discovery | Yes (greedy routed) |
-| SessionDatagram + SessionSetup | ~230–400 bytes | Session establishment | Yes (routed) |
-| SessionDatagram + SessionAck | ~120 bytes | Session confirmation | Yes (routed) |
-| SessionDatagram + DataPacket (minimal) | 38 bytes + payload | Bulk traffic | Yes (routed) |
-| SessionDatagram + DataPacket (with coords) | ~170 bytes + payload | Warmup/recovery | Yes (routed) |
-| SessionDatagram + CoordsRequired | 68 bytes | Cache miss error | Yes (routed) |
-| SessionDatagram + PathBroken | 68+ bytes | Dead-end error | Yes (routed) |
+| SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
+| SessionDatagram + SessionAck | ~122 bytes | Session confirmation | Yes (routed) |
+| SessionDatagram + DataPacket (minimal) | 40 bytes + payload | Bulk traffic | Yes (routed) |
+| SessionDatagram + DataPacket (with coords) | ~172 bytes + payload | Warmup/recovery | Yes (routed) |
+| SessionDatagram + CoordsRequired | 70 bytes | Cache miss error | Yes (routed) |
+| SessionDatagram + PathBroken | 70+ bytes | Dead-end error | Yes (routed) |
 | Disconnect | 2 bytes | Link teardown | No (peer-to-peer) |
 
 See [fips-wire-formats.md](fips-wire-formats.md) for byte-level layouts.

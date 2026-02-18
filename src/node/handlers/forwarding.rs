@@ -1,6 +1,6 @@
 //! SessionDatagram forwarding handler.
 //!
-//! Handles incoming SessionDatagram (0x40) link messages: decodes the
+//! Handles incoming SessionDatagram (0x00) link messages: decodes the
 //! envelope, enforces hop limits, performs coordinate cache warming from
 //! plaintext session-layer headers, routes to the next hop or delivers
 //! locally, and generates error signals on routing failure.
@@ -16,7 +16,7 @@ use tracing::debug;
 impl Node {
     /// Handle an incoming SessionDatagram from a peer.
     ///
-    /// Called by `dispatch_link_message` for msg_type 0x40. The payload
+    /// Called by `dispatch_link_message` for msg_type 0x00. The payload
     /// has already had its msg_type byte stripped by dispatch.
     pub(in crate::node) async fn handle_session_datagram(&mut self, _from: &NodeAddr, payload: &[u8]) {
         let mut datagram = match SessionDatagram::decode(payload) {
@@ -27,12 +27,12 @@ impl Node {
             }
         };
 
-        // Hop limit enforcement: decrement and drop if exhausted
-        if !datagram.decrement_hop_limit() {
+        // TTL enforcement: decrement and drop if exhausted
+        if !datagram.decrement_ttl() {
             debug!(
                 src = %datagram.src_addr,
                 dest = %datagram.dest_addr,
-                "SessionDatagram hop limit exhausted, dropping"
+                "SessionDatagram TTL exhausted, dropping"
             );
             return;
         }
@@ -56,7 +56,15 @@ impl Node {
             }
         };
 
-        // Forward: re-encode (includes 0x40 type byte) and send
+        // Apply path_mtu min() from the outgoing link's transport MTU
+        if let Some(peer) = self.peers.get(&next_hop_addr)
+            && let Some(tid) = peer.transport_id()
+            && let Some(transport) = self.transports.get(&tid)
+        {
+            datagram.path_mtu = datagram.path_mtu.min(transport.mtu());
+        }
+
+        // Forward: re-encode (includes 0x00 type byte) and send
         let encoded = datagram.encode();
         if let Err(e) = self
             .send_encrypted_link_message(&next_hop_addr, &encoded)
@@ -204,7 +212,7 @@ impl Node {
             };
 
         let error_dg = SessionDatagram::new(my_addr, original.src_addr, error_payload)
-            .with_hop_limit(self.config.node.session.default_hop_limit);
+            .with_ttl(self.config.node.session.default_ttl);
 
         let next_hop_addr = match self.find_next_hop(&original.src_addr) {
             Some(peer) => *peer.node_addr(),

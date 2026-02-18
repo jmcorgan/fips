@@ -30,7 +30,7 @@ use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
-use self::wire::build_encrypted;
+use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_SP};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -1026,6 +1026,10 @@ impl Node {
     /// The plaintext should include the message type byte followed by the
     /// message-specific payload (e.g., `[0x50, reason]` for Disconnect).
     ///
+    /// The send path prepends a 4-byte session-relative timestamp (inner
+    /// header) before encryption. The full 16-byte outer header is used
+    /// as AAD for the AEAD construction.
+    ///
     /// This is the standard path for sending any link-layer control message
     /// to a peer over their encrypted Noise session.
     pub(super) async fn send_encrypted_link_message(
@@ -1049,19 +1053,35 @@ impl Node {
             reason: "no current_addr".into(),
         })?;
 
+        // Prepend 4-byte session-relative timestamp (inner header)
+        let timestamp_ms = peer.session_elapsed_ms();
+
+        // MMP: read spin bit value before entering session borrow
+        let sp_flag = peer.mmp()
+            .map(|mmp| mmp.spin_bit.tx_bit())
+            .unwrap_or(false);
+        let flags = if sp_flag { FLAG_SP } else { 0 };
+
         let session = peer.noise_session_mut().ok_or_else(|| NodeError::SendFailed {
             node_addr: *node_addr,
             reason: "no noise session".into(),
         })?;
 
-        // Get counter before encrypt (encrypt increments it)
+        // Inner plaintext: [timestamp:4 LE][msg_type][payload...]
+        let inner_plaintext = prepend_inner_header(timestamp_ms, plaintext);
+
+        // Build 16-byte outer header (used as AAD for AEAD)
         let counter = session.current_send_counter();
-        let ciphertext = session.encrypt(plaintext).map_err(|e| NodeError::SendFailed {
+        let payload_len = inner_plaintext.len() as u16;
+        let header = build_established_header(their_index, counter, flags, payload_len);
+
+        // Encrypt with AAD binding to the outer header
+        let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| NodeError::SendFailed {
             node_addr: *node_addr,
             reason: format!("encryption failed: {}", e),
         })?;
 
-        let wire_packet = build_encrypted(their_index, counter, &ciphertext);
+        let wire_packet = build_encrypted(&header, &ciphertext);
 
         // Re-borrow peer for stats update after sending
         let transport = self.transports.get(&transport_id)
@@ -1076,6 +1096,10 @@ impl Node {
         // Update send statistics
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.link_stats_mut().record_sent(bytes_sent);
+            // MMP: record sent frame for sender report generation
+            if let Some(mmp) = peer.mmp_mut() {
+                mmp.sender.record_sent(counter, timestamp_ms, bytes_sent);
+            }
         }
 
         Ok(())

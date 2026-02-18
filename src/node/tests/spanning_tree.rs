@@ -203,23 +203,28 @@ pub(super) fn print_tree_snapshot(label: &str, nodes: &[TestNode]) {
 ///
 /// Returns the number of packets processed.
 pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
-    use crate::node::wire::{DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2};
+    use crate::node::wire::{CommonPrefix, FLP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, COMMON_PREFIX_SIZE};
 
     let mut count = 0;
     for node in nodes.iter_mut() {
         while let Ok(packet) = node.packet_rx.try_recv() {
-            if packet.data.is_empty() {
+            if packet.data.len() < COMMON_PREFIX_SIZE {
                 continue;
             }
-            match packet.data[0] {
-                DISCRIMINATOR_MSG1 => node.node.handle_msg1(packet).await,
-                DISCRIMINATOR_MSG2 => node.node.handle_msg2(packet).await,
-                DISCRIMINATOR_ENCRYPTED => {
-                    node.node.handle_encrypted_frame(packet).await
+            if let Some(prefix) = CommonPrefix::parse(&packet.data) {
+                if prefix.version != FLP_VERSION {
+                    continue;
                 }
-                _ => {}
+                match prefix.phase {
+                    PHASE_MSG1 => node.node.handle_msg1(packet).await,
+                    PHASE_MSG2 => node.node.handle_msg2(packet).await,
+                    PHASE_ESTABLISHED => {
+                        node.node.handle_encrypted_frame(packet).await
+                    }
+                    _ => {}
+                }
+                count += 1;
             }
-            count += 1;
         }
     }
     count

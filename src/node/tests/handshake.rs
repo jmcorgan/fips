@@ -6,7 +6,7 @@ use super::*;
 async fn test_two_node_handshake_udp() {
     use crate::config::UdpConfig;
     use crate::transport::udp::UdpTransport;
-    use crate::node::wire::{build_encrypted, build_msg1};
+    use crate::node::wire::{build_encrypted, build_established_header, build_msg1, prepend_inner_header};
     use tokio::time::{timeout, Duration};
 
     // === Setup: Two nodes with UDP transports on localhost ===
@@ -156,13 +156,17 @@ async fn test_two_node_handshake_udp() {
     // === Phase 4: Encrypted frame A → B ===
 
     // A encrypts a test message and sends to B
-    let plaintext_a = b"hello from A";
+    // Prepend inner header (timestamp + msg_type) as the real send path does
+    let msg_a = b"\x10test from A"; // msg_type 0x10 (TreeAnnounce) + dummy payload
+    let inner_a = prepend_inner_header(0, msg_a);
     let peer_b = node_a.get_peer_mut(&peer_b_node_addr).unwrap();
     let their_index_b = peer_b.their_index().expect("A should know B's index");
     let session_a = peer_b.noise_session_mut().unwrap();
-    let ciphertext_a = session_a.encrypt(plaintext_a).unwrap();
+    let counter_a = session_a.current_send_counter();
+    let header_a = build_established_header(their_index_b, counter_a, 0, inner_a.len() as u16);
+    let ciphertext_a = session_a.encrypt_with_aad(&inner_a, &header_a).unwrap();
 
-    let wire_encrypted = build_encrypted(their_index_b, 0, &ciphertext_a);
+    let wire_encrypted = build_encrypted(&header_a, &ciphertext_a);
     let transport = node_a.transports.get(&transport_id_a).unwrap();
     transport
         .send(&remote_addr_b, &wire_encrypted)
@@ -186,13 +190,17 @@ async fn test_two_node_handshake_udp() {
 
     // === Phase 5: Encrypted frame B → A ===
 
-    let plaintext_b = b"hello from B";
+    // Prepend inner header (timestamp + msg_type) as the real send path does
+    let msg_b = b"\x10test from B"; // msg_type 0x10 (TreeAnnounce) + dummy payload
+    let inner_b = prepend_inner_header(0, msg_b);
     let peer_a = node_b.get_peer_mut(&peer_a_node_addr).unwrap();
     let their_index_a = peer_a.their_index().expect("B should know A's index");
     let session_b = peer_a.noise_session_mut().unwrap();
-    let ciphertext_b = session_b.encrypt(plaintext_b).unwrap();
+    let counter_b = session_b.current_send_counter();
+    let header_b = build_established_header(their_index_a, counter_b, 0, inner_b.len() as u16);
+    let ciphertext_b = session_b.encrypt_with_aad(&inner_b, &header_b).unwrap();
 
-    let wire_encrypted_b = build_encrypted(their_index_a, 0, &ciphertext_b);
+    let wire_encrypted_b = build_encrypted(&header_b, &ciphertext_b);
     let transport = node_b.transports.get(&transport_id_b).unwrap();
     transport
         .send(&remote_addr_a, &wire_encrypted_b)
@@ -328,7 +336,7 @@ async fn test_run_rx_loop_handshake() {
     //
     // This is the key difference from test_two_node_handshake_udp:
     // instead of calling handle_msg1() directly, we run the full rx loop
-    // which dispatches based on the discriminator byte.
+    // which dispatches based on the common prefix phase field.
 
     tokio::select! {
         result = node_b.run_rx_loop() => {

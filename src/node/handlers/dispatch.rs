@@ -17,6 +17,18 @@ impl Node {
         let payload = &plaintext[1..];
 
         match msg_type {
+            0x00 => {
+                // SessionDatagram
+                self.handle_session_datagram(from, payload).await;
+            }
+            0x01 => {
+                // SenderReport
+                self.handle_sender_report(from, payload);
+            }
+            0x02 => {
+                // ReceiverReport
+                self.handle_receiver_report(from, payload);
+            }
             0x10 => {
                 // TreeAnnounce
                 self.handle_tree_announce(from, payload).await;
@@ -32,10 +44,6 @@ impl Node {
             0x31 => {
                 // LookupResponse
                 self.handle_lookup_response(from, payload).await;
-            }
-            0x40 => {
-                // SessionDatagram
-                self.handle_session_datagram(from, payload).await;
             }
             0x50 => {
                 // Disconnect
@@ -85,6 +93,11 @@ impl Node {
                 return;
             }
         };
+
+        // MMP teardown log (before we drop the peer)
+        if let Some(mmp) = peer.mmp() {
+            Self::log_mmp_teardown(node_addr, mmp);
+        }
 
         let link_id = peer.link_id();
 

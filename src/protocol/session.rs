@@ -12,7 +12,7 @@ use std::fmt;
 /// SessionDatagram payload message type identifiers.
 ///
 /// These messages are carried as payloads inside `SessionDatagram` (link
-/// message type 0x40). Session-layer messages (SessionSetup, SessionAck,
+/// message type 0x00). Session-layer messages (SessionSetup, SessionAck,
 /// DataPacket) are end-to-end encrypted with session keys. Error signals
 /// (CoordsRequired, PathBroken) are plaintext link-layer messages generated
 /// by transit routers that cannot establish e2e sessions with the source.
@@ -483,7 +483,7 @@ impl DataFlags {
 
 /// DataPacket header size in bytes (excluding payload).
 /// msg_type(1) + flags(1) + counter(8) + payload_length(2) = 12
-/// (Addressing and hop_limit are in the SessionDatagram envelope.)
+/// (Addressing and TTL are in the SessionDatagram envelope.)
 pub const DATA_HEADER_SIZE: usize = 12;
 
 /// Encrypted application data carried inside a SessionDatagram.

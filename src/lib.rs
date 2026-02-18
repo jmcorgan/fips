@@ -7,6 +7,7 @@ pub mod bloom;
 pub mod cache;
 pub mod config;
 pub mod identity;
+pub mod mmp;
 pub mod noise;
 pub mod utils;
 pub mod node;

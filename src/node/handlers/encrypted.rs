@@ -1,12 +1,13 @@
 //! Encrypted frame handling (hot path).
 
 use crate::node::Node;
+use crate::node::wire::{EncryptedHeader, strip_inner_header, FLAG_CE, FLAG_SP};
 use crate::transport::ReceivedPacket;
-use crate::node::wire::EncryptedHeader;
+use std::time::Instant;
 use tracing::{debug, warn};
 
 impl Node {
-    /// Handle an encrypted frame (discriminator 0x00).
+    /// Handle an encrypted frame (phase 0x0).
     ///
     /// This is the hot path for established sessions. We use O(1)
     /// index-based lookup to find the session, then decrypt.
@@ -53,9 +54,13 @@ impl Node {
             }
         };
 
-        // Decrypt with replay check (this is the expensive part)
-        let ciphertext = &packet.data[header.ciphertext_offset..];
-        let plaintext = match session.decrypt_with_replay_check(ciphertext, header.counter) {
+        // Decrypt with replay check and AAD (this is the expensive part)
+        let ciphertext = &packet.data[header.ciphertext_offset()..];
+        let plaintext = match session.decrypt_with_replay_check_and_aad(
+            ciphertext,
+            header.counter,
+            &header.header_bytes,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 debug!(
@@ -70,6 +75,37 @@ impl Node {
 
         // === PACKET IS AUTHENTIC ===
 
+        // Strip inner header (4-byte timestamp + msg_type)
+        let (timestamp, link_message) = match strip_inner_header(&plaintext) {
+            Some(parts) => parts,
+            None => {
+                debug!(
+                    node_addr = %node_addr,
+                    len = plaintext.len(),
+                    "Decrypted payload too short for inner header"
+                );
+                return;
+            }
+        };
+
+        // MMP per-frame processing: feed counter, timestamp, flags to receiver state
+        let now = Instant::now();
+        let ce_flag = header.flags & FLAG_CE != 0;
+        let sp_flag = header.flags & FLAG_SP != 0;
+        if let Some(mmp) = peer.mmp_mut() {
+            mmp.receiver.record_recv(
+                header.counter,
+                timestamp,
+                packet.data.len(),
+                ce_flag,
+                now,
+            );
+            // Spin bit: feed to spin state, get optional RTT sample
+            if let Some(rtt) = mmp.spin_bit.rx_observe(sp_flag, header.counter, now) {
+                mmp.metrics.srtt.update(rtt.as_micros() as i64);
+            }
+        }
+
         // Update address for roaming support
         peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
 
@@ -77,7 +113,7 @@ impl Node {
         peer.link_stats_mut().record_recv(packet.data.len(), packet.timestamp_ms);
         peer.touch(packet.timestamp_ms);
 
-        // Dispatch to link message handler
-        self.dispatch_link_message(&node_addr, &plaintext).await;
+        // Dispatch to link message handler (msg_type + payload, inner header stripped)
+        self.dispatch_link_message(&node_addr, link_message).await;
     }
 }

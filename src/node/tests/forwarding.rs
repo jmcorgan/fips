@@ -1,7 +1,7 @@
 //! SessionDatagram forwarding tests.
 //!
 //! Tests for the handle_session_datagram handler including decode errors,
-//! hop limit enforcement, local delivery, coordinate cache warming, and
+//! TTL enforcement, local delivery, coordinate cache warming, and
 //! multi-hop forwarding through live node topologies.
 
 use super::*;
@@ -26,7 +26,7 @@ async fn test_forwarding_decode_error() {
     node.handle_session_datagram(&from, &[0x00; 5]).await;
 }
 
-// --- Hop limit ---
+// --- TTL ---
 
 #[tokio::test]
 async fn test_forwarding_hop_limit_exhausted() {
@@ -35,7 +35,7 @@ async fn test_forwarding_hop_limit_exhausted() {
     let src = make_node_addr(0x01);
     let dest = make_node_addr(0x02);
     let dg = SessionDatagram::new(src, dest, vec![0x10, 0x00, 0x00, 0x00])
-        .with_hop_limit(0);
+        .with_ttl(0);
     let encoded = dg.encode();
     // Dispatch with payload after msg_type byte
     node.handle_session_datagram(&from, &encoded[1..]).await;
@@ -44,17 +44,17 @@ async fn test_forwarding_hop_limit_exhausted() {
 
 #[tokio::test]
 async fn test_forwarding_hop_limit_one_drops_at_transit() {
-    // hop_limit=1 means after decrement it becomes 0 — the datagram can
+    // ttl=1 means after decrement it becomes 0 — the datagram can
     // still be delivered this hop but would be dropped at the next.
-    // decrement_hop_limit returns true (1 > 0), so the handler proceeds.
+    // decrement_ttl returns true (1 > 0), so the handler proceeds.
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     let my_addr = *node.node_addr();
     let src = make_node_addr(0x01);
     let dg = SessionDatagram::new(src, my_addr, vec![0x10, 0x00, 0x00, 0x00])
-        .with_hop_limit(1);
+        .with_ttl(1);
     let encoded = dg.encode();
-    // Should succeed — hop_limit=1 decrements to 0 but packet is still processed
+    // Should succeed — ttl=1 decrements to 0 but packet is still processed
     node.handle_session_datagram(&from, &encoded[1..]).await;
 }
 
@@ -343,7 +343,7 @@ async fn test_forwarding_multi_hop() {
     let node1_addr = *nodes[1].node.node_addr();
     let node4_addr = *nodes[4].node.node_addr();
 
-    // Build a SessionDatagram with enough hop_limit for 4 hops
+    // Build a SessionDatagram with enough TTL for 4 hops
     let dg = SessionDatagram::new(
         node0_addr,
         node4_addr,
@@ -372,9 +372,9 @@ async fn test_forwarding_multi_hop() {
 #[tokio::test]
 async fn test_forwarding_hop_limit_prevents_infinite_loops() {
     // 3-node chain: 0 -- 1 -- 2
-    // Send a datagram with hop_limit=1. It should be forwarded by node 1
+    // Send a datagram with ttl=1. It should be forwarded by node 1
     // (decrement to 0) and delivered at node 2 (local delivery). If node 2
-    // tried to forward further, the 0 hop_limit would prevent it.
+    // tried to forward further, the 0 ttl would prevent it.
     let edges = vec![(0, 1), (1, 2)];
     let mut nodes = run_tree_test(3, &edges, false).await;
     verify_tree_convergence(&nodes);
@@ -389,7 +389,7 @@ async fn test_forwarding_hop_limit_prevents_infinite_loops() {
         node2_addr,
         vec![0x10, 0x00, 0x04, 0x00, 1, 2, 3, 4],
     )
-    .with_hop_limit(2); // Enough for 0→1 (decrement to 1) and 1→2 (decrement to 0, local delivery)
+    .with_ttl(2); // Enough for 0->1 (decrement to 1) and 1->2 (decrement to 0, local delivery)
 
     let encoded = dg.encode();
 

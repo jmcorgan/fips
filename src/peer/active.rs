@@ -4,6 +4,7 @@
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
 use crate::bloom::BloomFilter;
+use crate::mmp::{MmpConfig, MmpPeerState};
 use crate::utils::index::SessionIndex;
 use crate::noise::NoiseSession;
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
@@ -11,6 +12,7 @@ use crate::tree::{ParentDeclaration, TreeCoordinate};
 use crate::{FipsAddress, NodeAddr, PeerIdentity};
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
+use std::time::Instant;
 
 /// Connectivity state for an active peer.
 ///
@@ -112,6 +114,11 @@ pub struct ActivePeer {
     /// Whether we owe them a filter update.
     pending_filter_update: bool,
 
+    // === Timing ===
+    /// Session start time for computing session-relative timestamps.
+    /// Used as the epoch for the 4-byte inner header timestamp field.
+    session_start: Instant,
+
     // === Statistics ===
     /// Link statistics.
     link_stats: LinkStats,
@@ -119,6 +126,10 @@ pub struct ActivePeer {
     authenticated_at: u64,
     /// When this peer was last seen (any activity, Unix milliseconds).
     last_seen: u64,
+
+    // === MMP ===
+    /// Per-peer MMP state (None for legacy peers without Noise sessions).
+    mmp: Option<MmpPeerState>,
 }
 
 impl ActivePeer {
@@ -145,9 +156,11 @@ impl ActivePeer {
             filter_sequence: 0,
             filter_received_at: 0,
             pending_filter_update: true, // Send filter on new connection
+            session_start: Instant::now(),
             link_stats: LinkStats::new(),
             authenticated_at,
             last_seen: authenticated_at,
+            mmp: None,
         }
     }
 
@@ -181,6 +194,8 @@ impl ActivePeer {
         transport_id: TransportId,
         current_addr: TransportAddr,
         link_stats: LinkStats,
+        is_initiator: bool,
+        mmp_config: &MmpConfig,
     ) -> Self {
         Self {
             identity,
@@ -200,9 +215,11 @@ impl ActivePeer {
             filter_sequence: 0,
             filter_received_at: 0,
             pending_filter_update: true,
+            session_start: Instant::now(),
             link_stats,
             authenticated_at,
             last_seen: authenticated_at,
+            mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
         }
     }
 
@@ -395,6 +412,18 @@ impl ActivePeer {
         &mut self.link_stats
     }
 
+    // === MMP Accessors ===
+
+    /// Get MMP state (None for legacy peers without sessions).
+    pub fn mmp(&self) -> Option<&MmpPeerState> {
+        self.mmp.as_ref()
+    }
+
+    /// Get mutable MMP state.
+    pub fn mmp_mut(&mut self) -> Option<&mut MmpPeerState> {
+        self.mmp.as_mut()
+    }
+
     /// Link cost for routing decisions.
     ///
     /// Returns a scalar cost where lower is better. Currently returns a
@@ -422,6 +451,14 @@ impl ActivePeer {
     /// Connection duration since authentication.
     pub fn connection_duration(&self, current_time_ms: u64) -> u64 {
         current_time_ms.saturating_sub(self.authenticated_at)
+    }
+
+    /// Session-relative elapsed time in milliseconds (for inner header timestamp).
+    ///
+    /// Returns milliseconds since session establishment, truncated to u32.
+    /// Wraps at ~49.7 days which is acceptable for session-relative timing.
+    pub fn session_elapsed_ms(&self) -> u32 {
+        self.session_start.elapsed().as_millis() as u32
     }
 
     // === State Updates ===

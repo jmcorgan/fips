@@ -144,7 +144,7 @@ impl Node {
         let ack = SessionAck::new(our_coords).with_handshake(msg2);
         let my_addr = *self.node_addr();
         let datagram = SessionDatagram::new(my_addr, *src_addr, ack.encode())
-            .with_hop_limit(self.config.node.session.default_hop_limit);
+            .with_ttl(self.config.node.session.default_ttl);
 
         // Route the ack back to the initiator
         if let Err(e) = self.send_session_datagram(&datagram).await {
@@ -432,7 +432,7 @@ impl Node {
         // Wrap in SessionDatagram
         let my_addr = *self.node_addr();
         let datagram = SessionDatagram::new(my_addr, dest_addr, setup.encode())
-            .with_hop_limit(self.config.node.session.default_hop_limit);
+            .with_ttl(self.config.node.session.default_ttl);
 
         // Route toward destination
         self.send_session_datagram(&datagram).await?;
@@ -498,7 +498,7 @@ impl Node {
 
         let my_addr = *self.node_addr();
         let datagram = SessionDatagram::new(my_addr, *dest_addr, data_packet.encode())
-            .with_hop_limit(self.config.node.session.default_hop_limit);
+            .with_ttl(self.config.node.session.default_ttl);
 
         self.send_session_datagram(&datagram).await?;
 

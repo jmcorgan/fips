@@ -133,8 +133,10 @@ require connection setup before FLP can begin the Noise IK handshake,
 adding startup latency.
 
 **Stream vs. datagram**: Datagram transports have natural packet boundaries.
-Stream transports (TCP, WebSocket, Tor) require length-prefix framing to
-delineate FIPS packets within the byte stream.
+Stream transports (TCP, WebSocket, Tor) require framing to delineate FIPS
+packets within the byte stream. The FLP common prefix includes a payload
+length field that provides this framing directly, replacing the need for a
+separate length-prefix layer.
 
 **Addressing opacity**: Transport addresses are opaque byte vectors. FLP
 doesn't interpret them — it just passes them back to the transport when
@@ -183,8 +185,8 @@ circuit). Peer timeout configuration must account for transport-specific
 setup times.
 
 **Framing**: Stream transports must delimit FIPS packets within the byte
-stream using length-prefix framing. Datagram transports preserve packet
-boundaries naturally.
+stream. The FLP common prefix includes a payload length field that provides
+integrated framing. Datagram transports preserve packet boundaries naturally.
 
 ## UDP/IP: The Primary Internet Transport
 

@@ -24,79 +24,137 @@ needed — each UDP datagram contains exactly one FIPS link-layer packet.
 
 ### Stream Transports *(future direction)*
 
-TCP, WebSocket, and Tor transports require length-prefix framing because
-they provide a byte stream, not datagrams:
-
-```text
-┌────────────┬───────────────────────────────────┐
-│ Length      │ FIPS Packet                       │
-│ 2 bytes LE │ Variable                          │
-└────────────┴───────────────────────────────────┘
-```
+TCP, WebSocket, and Tor transports provide a byte stream, not datagrams. The
+common prefix `payload_len` field provides integrated stream framing — the
+receiver reads the 4-byte common prefix, then reads exactly the number of
+bytes indicated by `payload_len` (plus any phase-specific header and AEAD
+tag). No separate length prefix is needed.
 
 ## Link-Layer Formats
 
-All link-layer packets begin with a **discriminator byte** that determines
-the payload format.
+All FLP packets begin with a **4-byte common prefix** that identifies the
+protocol version, session lifecycle phase, per-packet flags, and payload
+length.
 
-### Discriminator Table
+### Common Prefix (4 bytes)
 
-| Byte | Type | Description |
-| ---- | ---- | ----------- |
-| 0x00 | Encrypted frame | Post-handshake encrypted traffic |
-| 0x01 | Noise IK msg1 | Handshake initiation |
-| 0x02 | Noise IK msg2 | Handshake response |
+```text
+┌──────────────────────┬───────────┬───────────────┐
+│ ver(4) + phase(4)    │ flags     │ payload_len   │
+│ 1 byte               │ 1 byte    │ 2 bytes LE    │
+└──────────────────────┴───────────┴───────────────┘
+```
 
-### Encrypted Frame (0x00)
+| Field | Size | Description |
+| ----- | ---- | ----------- |
+| version | 4 bits (high) | Protocol version. Currently 0x0 |
+| phase | 4 bits (low) | Session lifecycle phase (see table) |
+| flags | 1 byte | Per-packet signal flags (zero during handshake) |
+| payload_len | 2 bytes LE | Length of payload after phase-specific header, excluding AEAD tag |
+
+### Phase Table
+
+| Phase | Type | Description |
+| ----- | ---- | ----------- |
+| 0x0 | Established frame | Post-handshake encrypted traffic |
+| 0x1 | Noise IK msg1 | Handshake initiation |
+| 0x2 | Noise IK msg2 | Handshake response |
+
+### Flags (Established Phase Only)
+
+| Bit | Name | Description |
+| --- | ---- | ----------- |
+| 0 | K (key epoch) | Selects active key during rekeying |
+| 1 | CE | Congestion Experienced echo |
+| 2 | SP (spin bit) | RTT measurement |
+| 3-7 | — | Reserved (must be zero) |
+
+Flags must be zero in handshake packets (phase 0x1 and 0x2).
+
+### Established Frame (phase 0x0)
 
 All post-handshake traffic between authenticated peers. Contains one
 encrypted link-layer message.
 
-```text
-┌────────┬──────────────┬──────────┬───────────────────────────┐
-│ 0x00   │ receiver_idx │ counter  │ ciphertext + AEAD tag     │
-│ 1 byte │ 4 bytes LE   │ 8 bytes LE│ N + 16 bytes             │
-└────────┴──────────────┴──────────┴───────────────────────────┘
+**Outer header** (16 bytes, used as AEAD AAD):
 
-Total overhead: 29 bytes (1 + 4 + 8 + 16)
-Minimum frame: 30 bytes (1-byte plaintext)
+```text
+┌──────────────────────┬───────────┬───────────────┬──────────────┬──────────┐
+│ ver(4) + phase(4)    │ flags     │ payload_len   │ receiver_idx │ counter  │
+│ 1 byte               │ 1 byte    │ 2 bytes LE    │ 4 bytes LE   │ 8 bytes LE│
+└──────────────────────┴───────────┴───────────────┴──────────────┴──────────┘
 ```
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
-| discriminator | 1 byte | 0x00 |
+| common prefix | 4 bytes | ver=0, phase=0, flags, payload_len |
 | receiver_idx | 4 bytes LE | Session index for O(1) lookup |
 | counter | 8 bytes LE | Monotonic nonce, used as AEAD nonce and for replay detection |
-| ciphertext | N bytes | ChaCha20 encrypted payload |
-| tag | 16 bytes | Poly1305 authentication tag |
 
-The **plaintext** inside the encrypted frame begins with a message type byte:
+The entire 16-byte header is authenticated as Associated Data (AAD) in the
+ChaCha20-Poly1305 AEAD construction.
 
-| Type | Message |
-| ---- | ------- |
-| 0x10 | TreeAnnounce |
-| 0x20 | FilterAnnounce |
-| 0x30 | LookupRequest |
-| 0x31 | LookupResponse |
-| 0x40 | SessionDatagram |
-| 0x50 | Disconnect |
+**Encrypted inner header** (5 bytes, first bytes of plaintext):
 
-### Noise IK Message 1 (0x01)
+```text
+┌───────────────┬──────────┐
+│ timestamp     │ msg_type │
+│ 4 bytes LE    │ 1 byte   │
+└───────────────┴──────────┘
+```
+
+| Field | Size | Description |
+| ----- | ---- | ----------- |
+| timestamp | 4 bytes LE | Session-relative milliseconds (u32) |
+| msg_type | 1 byte | Link-layer message type |
+
+After decryption, the plaintext begins with the 4-byte timestamp followed by
+the 1-byte message type and message-specific fields.
+
+**Complete encrypted frame**:
+
+```text
+┌──────────────────────────────────────┬───────────────────────────┐
+│ outer header (16 bytes, used as AAD) │ ciphertext + AEAD tag     │
+│                                      │ (inner_hdr + body) + 16   │
+└──────────────────────────────────────┴───────────────────────────┘
+
+Total overhead: 37 bytes (16 outer + 5 inner + 16 AEAD tag)
+Minimum frame: 37 bytes (empty body)
+```
+
+### Message Type Table
+
+| Type | Message | Description |
+| ---- | ------- | ----------- |
+| 0x00 | SessionDatagram | Encapsulated session-layer payload for forwarding |
+| 0x01 | SenderReport | MMP sender-side report (reserved) |
+| 0x02 | ReceiverReport | MMP receiver-side report (reserved) |
+| 0x10 | TreeAnnounce | Spanning tree state announcement |
+| 0x20 | FilterAnnounce | Bloom filter reachability update |
+| 0x30 | LookupRequest | Coordinate discovery request |
+| 0x31 | LookupResponse | Coordinate discovery response |
+| 0x50 | Disconnect | Orderly link teardown |
+| 0x51 | Keepalive | Keepalive probe (reserved) |
+
+### Noise IK Message 1 (phase 0x1)
 
 Handshake initiation from connecting party.
 
 ```text
-┌────────┬─────────────┬─────────────────────────────────────────┐
-│ 0x01   │ sender_idx  │ Noise IK message 1                      │
-│ 1 byte │ 4 bytes LE  │ 82 bytes                                │
-└────────┴─────────────┴─────────────────────────────────────────┘
+┌──────────────────────┬─────────────┬─────────────────────────────────────────┐
+│ common prefix        │ sender_idx  │ Noise IK message 1                      │
+│ 4 bytes              │ 4 bytes LE  │ 82 bytes                                │
+└──────────────────────┴─────────────┴─────────────────────────────────────────┘
 
-Total: 87 bytes
+Total: 90 bytes
 ```
+
+Common prefix: ver=0, phase=0x1, flags=0, payload_len=86 (4 + 82).
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
-| discriminator | 1 byte | 0x01 |
+| common prefix | 4 bytes | ver=0, phase=1, flags=0, payload_len |
 | sender_idx | 4 bytes LE | Initiator's session index (becomes receiver's `receiver_idx`) |
 | noise_msg1 | 82 bytes | Noise IK first message |
 
@@ -108,24 +166,26 @@ Total: 87 bytes
 | 33 | encrypted_static | 33 bytes | Initiator's static key (encrypted with es key) |
 | 66 | tag | 16 bytes | AEAD tag for encrypted_static |
 
-Noise pattern: `→ e, es, s, ss`
+Noise pattern: `-> e, es, s, ss`
 
-### Noise IK Message 2 (0x02)
+### Noise IK Message 2 (phase 0x2)
 
 Handshake response from responder.
 
 ```text
-┌────────┬─────────────┬──────────────┬──────────────────────────┐
-│ 0x02   │ sender_idx  │ receiver_idx │ Noise IK message 2       │
-│ 1 byte │ 4 bytes LE  │ 4 bytes LE   │ 33 bytes                 │
-└────────┴─────────────┴──────────────┴──────────────────────────┘
+┌──────────────────────┬─────────────┬──────────────┬──────────────────────────┐
+│ common prefix        │ sender_idx  │ receiver_idx │ Noise IK message 2       │
+│ 4 bytes              │ 4 bytes LE  │ 4 bytes LE   │ 33 bytes                 │
+└──────────────────────┴─────────────┴──────────────┴──────────────────────────┘
 
-Total: 42 bytes
+Total: 45 bytes
 ```
+
+Common prefix: ver=0, phase=0x2, flags=0, payload_len=41 (4 + 4 + 33).
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
-| discriminator | 1 byte | 0x02 |
+| common prefix | 4 bytes | ver=0, phase=2, flags=0, payload_len |
 | sender_idx | 4 bytes LE | Responder's session index |
 | receiver_idx | 4 bytes LE | Echo of initiator's sender_idx from msg1 |
 | noise_msg2 | 33 bytes | Noise IK second message |
@@ -136,7 +196,7 @@ Total: 42 bytes
 | ------ | ----- | ---- | ----------- |
 | 0 | ephemeral_pubkey | 33 bytes | Responder's ephemeral key (compressed secp256k1) |
 
-Noise pattern: `← e, ee, se`
+Noise pattern: `<- e, ee, se`
 
 After msg2, both parties derive identical symmetric session keys.
 
@@ -153,34 +213,37 @@ Each party in a link session maintains two indices:
 
 ```text
 Initiator                                    Responder
-─────────                                    ─────────
+---------                                    ---------
 generates sender_idx
 generates ephemeral keypair
 
-         0x01 | sender_idx | noise_msg1
-         ────────────────────────────────►
+         [0x01|flags=0|len] | sender_idx | noise_msg1
+         ------------------------------------------------>
 
                                               validates msg1
                                               learns initiator's static key
                                               generates sender_idx
                                               generates ephemeral keypair
 
-         0x02 | sender_idx | receiver_idx | noise_msg2
-         ◄────────────────────────────────
+         [0x02|flags=0|len] | sender_idx | receiver_idx | noise_msg2
+         <------------------------------------------------
 
 validates msg2
 derives session keys
 
-═══════════════ HANDSHAKE COMPLETE ═══════════════
+=============== HANDSHAKE COMPLETE ===============
 
 First encrypted frame:
-         0x00 | receiver_idx | counter=0 | ciphertext+tag
-         ────────────────────────────────►
+         [0x00|flags|len] | receiver_idx | counter=0 | ciphertext+tag
+         ------------------------------------------------>
 ```
 
 ## Link-Layer Message Types
 
-These messages are carried as plaintext inside encrypted frames (0x00).
+These messages are carried as plaintext inside encrypted frames (phase 0x0).
+After decryption of the AEAD ciphertext, the plaintext begins with a 4-byte
+session-relative timestamp followed by the 1-byte message type and
+message-specific fields.
 
 ### TreeAnnounce (0x10)
 
@@ -194,7 +257,7 @@ Spanning tree state announcement, exchanged between direct peers only.
 | 10 | timestamp | 8 bytes LE | Unix seconds |
 | 18 | parent | 16 bytes | NodeAddr of selected parent (self = root) |
 | 34 | ancestry_count | 2 bytes LE | Number of AncestryEntry records |
-| 36 | ancestry | 32 × n bytes | AncestryEntry array (self → root) |
+| 36 | ancestry | 32 x n bytes | AncestryEntry array (self -> root) |
 | 36 + 32n | signature | 64 bytes | Schnorr signature over entire message |
 
 **AncestryEntry** (32 bytes):
@@ -205,15 +268,15 @@ Spanning tree state announcement, exchanged between direct peers only.
 | 16 | sequence | 8 bytes LE | Node's sequence number |
 | 24 | timestamp | 8 bytes LE | Node's Unix timestamp |
 
-**Size**: `100 + (n × 32)` bytes, where n = `ancestry_count` (depth + 1,
+**Size**: `100 + (n x 32)` bytes, where n = `ancestry_count` (depth + 1,
 includes self)
 
 | Tree Depth | Payload | With Link Overhead |
 | ---------- | ------- | ------------------ |
-| 0 (root) | 132 bytes | 161 bytes |
-| 3 | 228 bytes | 257 bytes |
-| 5 | 292 bytes | 321 bytes |
-| 10 | 452 bytes | 481 bytes |
+| 0 (root) | 132 bytes | 169 bytes |
+| 3 | 228 bytes | 265 bytes |
+| 5 | 292 bytes | 329 bytes |
+| 10 | 452 bytes | 489 bytes |
 
 ### FilterAnnounce (0x20)
 
@@ -237,7 +300,7 @@ Bloom filter reachability update, exchanged between direct peers only.
 | 3 | 4,096 | 32,768 | Reserved |
 
 **v1 payload**: 1,035 bytes (11 header + 1,024 filter).
-With link overhead: 1,064 bytes.
+With link overhead: 1,072 bytes.
 
 ### LookupRequest (0x30)
 
@@ -251,11 +314,11 @@ Coordinate discovery request, flooded through the mesh.
 | 25 | origin | 16 bytes | Requester's NodeAddr |
 | 41 | ttl | 1 byte | Remaining hops (default 64) |
 | 42 | origin_coords_cnt | 2 bytes LE | Number of coordinate entries |
-| 44 | origin_coords | 16 × n bytes | Requester's ancestry (NodeAddr only) |
+| 44 | origin_coords | 16 x n bytes | Requester's ancestry (NodeAddr only) |
 | 44 + 16n | visited_hash_cnt | 1 byte | Hash count for visited filter |
 | 45 + 16n | visited_bits | 256 bytes | Compact bloom of visited nodes |
 
-**Size**: `301 + (n × 16)` bytes, where n = origin depth + 1
+**Size**: `301 + (n x 16)` bytes, where n = origin depth + 1
 
 | Origin Depth | Payload |
 | ------------ | ------- |
@@ -273,10 +336,10 @@ Coordinate discovery response, greedy-routed back to requester.
 | 1 | request_id | 8 bytes LE | Echoes the request's ID |
 | 9 | target | 16 bytes | NodeAddr that was found |
 | 25 | target_coords_cnt | 2 bytes LE | Number of coordinate entries |
-| 27 | target_coords | 16 × n bytes | Target's ancestry (NodeAddr only) |
+| 27 | target_coords | 16 x n bytes | Target's ancestry (NodeAddr only) |
 | 27 + 16n | proof | 64 bytes | Schnorr signature over `(request_id \|\| target)` |
 
-**Size**: `91 + (n × 16)` bytes
+**Size**: `91 + (n x 16)` bytes
 
 | Target Depth | Payload |
 | ------------ | ------- |
@@ -288,19 +351,24 @@ Coordinate discovery response, greedy-routed back to requester.
 excluded so the proof survives tree reconvergence during the lookup
 round-trip.
 
-### SessionDatagram (0x40)
+### SessionDatagram (0x00)
 
 Encapsulated session-layer payload for multi-hop forwarding.
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x40 |
-| 1 | src_addr | 16 bytes | Source NodeAddr |
-| 17 | dest_addr | 16 bytes | Destination NodeAddr |
-| 33 | hop_limit | 1 byte | Decremented each hop |
-| 34 | payload | variable | Session-layer message |
+| 0 | msg_type | 1 byte | 0x00 |
+| 1 | ttl | 1 byte | Remaining hops, decremented each hop |
+| 2 | path_mtu | 2 bytes LE | Path MTU, min'd at each forwarding hop |
+| 4 | src_addr | 16 bytes | Source NodeAddr |
+| 20 | dest_addr | 16 bytes | Destination NodeAddr |
+| 36 | payload | variable | Session-layer message |
 
-**Fixed header**: 34 bytes (`SESSION_DATAGRAM_HEADER_SIZE`)
+**Fixed header**: 36 bytes (`SESSION_DATAGRAM_HEADER_SIZE`)
+
+The `path_mtu` field is initialized to `u16::MAX` by the sender and each
+forwarding hop applies `min(path_mtu, outgoing_link_mtu)`, giving the
+receiver an estimate of the minimum MTU along the path.
 
 The payload is opaque to transit nodes — session-layer encrypted
 independently of link encryption.
@@ -330,7 +398,7 @@ Orderly link teardown with reason code.
 
 ## Session-Layer Message Types
 
-These messages are carried as the payload of a SessionDatagram (0x40).
+These messages are carried as the payload of a SessionDatagram (0x00).
 
 ### SessionSetup (0x00)
 
@@ -341,18 +409,18 @@ Establishes a session and warms transit coordinate caches.
 | 0 | msg_type | 1 byte | 0x00 |
 | 1 | flags | 1 byte | Bit 0: REQUEST_ACK, Bit 1: BIDIRECTIONAL |
 | 2 | src_coords_count | 2 bytes LE | Number of source coordinate entries |
-| 4 | src_coords | 16 × n bytes | Source's ancestry (NodeAddr, self → root) |
+| 4 | src_coords | 16 x n bytes | Source's ancestry (NodeAddr, self -> root) |
 | ... | dest_coords_count | 2 bytes LE | Number of dest coordinate entries |
-| ... | dest_coords | 16 × m bytes | Destination's ancestry |
+| ... | dest_coords | 16 x m bytes | Destination's ancestry |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
 | ... | handshake_payload | variable | Noise IK msg1 (82 bytes typical) |
 
 **Example** (depth-3 source, depth-4 destination):
 
 ```text
-SessionDatagram header: 34 bytes
+SessionDatagram header: 36 bytes
 SessionSetup payload: 1 + 1 + 2 + 48 + 2 + 64 + 2 + 82 = 202 bytes
-Total: 236 bytes
+Total: 238 bytes
 ```
 
 ### SessionAck (0x01)
@@ -364,7 +432,7 @@ Confirms session establishment, completes the Noise handshake.
 | 0 | msg_type | 1 byte | 0x01 |
 | 1 | flags | 1 byte | Reserved |
 | 2 | src_coords_count | 2 bytes LE | Number of coordinate entries |
-| 4 | src_coords | 16 × n bytes | Acknowledger's ancestry (for cache warming) |
+| 4 | src_coords | 16 x n bytes | Acknowledger's ancestry (for cache warming) |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
 | ... | handshake_payload | variable | Noise IK msg2 (33 bytes typical) |
 
@@ -393,9 +461,9 @@ Encrypted application data with explicit replay protection counter.
 | 2 | counter | 8 bytes LE | Session encryption counter |
 | 10 | payload_length | 2 bytes LE | Length of encrypted payload |
 | 12 | src_coords_count | 2 bytes LE | Source coordinate entries |
-| 14 | src_coords | 16 × n bytes | Source's ancestry |
+| 14 | src_coords | 16 x n bytes | Source's ancestry |
 | ... | dest_coords_count | 2 bytes LE | Dest coordinate entries |
-| ... | dest_coords | 16 × m bytes | Destination's ancestry |
+| ... | dest_coords | 16 x m bytes | Destination's ancestry |
 | ... | payload | variable | Encrypted application data |
 
 ### CoordsRequired (0x20)
@@ -410,7 +478,7 @@ Plaintext (not end-to-end encrypted), generated by transit nodes.
 | 2 | dest_addr | 16 bytes | NodeAddr we couldn't route to |
 | 18 | reporter | 16 bytes | NodeAddr of reporting router |
 
-**Payload**: 34 bytes. Wrapped in SessionDatagram: 68 bytes total.
+**Payload**: 34 bytes. Wrapped in SessionDatagram: 70 bytes total.
 
 ### PathBroken (0x21)
 
@@ -424,13 +492,13 @@ generated by transit nodes.
 | 2 | dest_addr | 16 bytes | Unreachable NodeAddr |
 | 18 | reporter | 16 bytes | NodeAddr of reporting router |
 | 34 | last_coords_count | 2 bytes LE | Number of stale coordinate entries |
-| 36 | last_known_coords | 16 × n bytes | Stale coordinates that failed |
+| 36 | last_known_coords | 16 x n bytes | Stale coordinates that failed |
 
 ## Encapsulation Walkthrough
 
 A complete picture of how application data is wrapped through each layer.
 
-### Application Data → Wire
+### Application Data -> Wire
 
 Starting with an application sending a 1024-byte payload to a destination:
 
@@ -443,46 +511,48 @@ Layer 3: Session encryption (FSP)
     = 1052 bytes
 
 Layer 2: SessionDatagram envelope (FLP routing)
-    msg_type (1) + src_addr (16) + dest_addr (16) + hop_limit (1) + payload (1052)
-    = 1086 bytes
+    msg_type (1) + ttl (1) + path_mtu (2) + src_addr (16) + dest_addr (16) + payload (1052)
+    = 1088 bytes
 
 Layer 1: Link encryption (FLP per-hop)
-    discriminator (1) + receiver_idx (4) + counter (8) + ciphertext (1086) + tag (16)
-    = 1115 bytes
+    outer header (16) + encrypted(inner_hdr (5) + datagram (1088)) + AEAD tag (16)
+    = 1125 bytes
 
 Layer 0: Transport
-    UDP datagram containing 1115 bytes
+    UDP datagram containing 1125 bytes
 ```
 
 ### Overhead Budget
 
 | Layer | Overhead | Component |
 | ----- | -------- | --------- |
-| Link encryption | 29 bytes | 1 discriminator + 4 index + 8 counter + 16 AEAD tag |
-| SessionDatagram | 34 bytes | 1 type + 16 src + 16 dest + 1 hop_limit |
+| Link encryption | 37 bytes | 16 outer header (AAD) + 5 inner header + 16 AEAD tag |
+| SessionDatagram | 36 bytes | 1 type + 1 ttl + 2 path_mtu + 16 src + 16 dest |
 | DataPacket header | 12 bytes | 1 type + 1 flags + 8 counter + 2 length |
 | Session AEAD tag | 16 bytes | Poly1305 tag on session-encrypted payload |
-| **Minimal total** | **91 bytes** | |
-| Coordinates (if present) | ~44 bytes | Varies with tree depth |
-| **Worst case** | **135 bytes** | `FIPS_OVERHEAD` constant |
+| **Minimal total** | **101 bytes** | |
+| Coordinates (if present) | ~43 bytes | Varies with tree depth |
+| **Worst case** | **144 bytes** | `FIPS_OVERHEAD` constant |
 
 ### At Each Transit Node
 
 ```text
 1. Receive UDP datagram
-2. Read discriminator (0x00) → encrypted frame
-3. Look up (transport_id, receiver_idx) → session
-4. Check replay window (counter)
-5. Decrypt with link keys → plaintext link message
-6. Read msg_type (0x40) → SessionDatagram
-7. Read dest_addr → routing decision
-8. Decrement hop_limit
-9. Re-encrypt with next-hop link keys
-10. Send via next-hop transport
+2. Parse common prefix -> version, phase, flags, payload_len
+3. Phase 0x0 -> established frame
+4. Look up (transport_id, receiver_idx) -> session
+5. Check replay window (counter)
+6. Decrypt with link keys (16-byte header as AAD) -> plaintext
+7. Strip inner header -> timestamp, msg_type
+8. msg_type 0x00 -> SessionDatagram
+9. Read dest_addr -> routing decision
+10. Decrement ttl, min path_mtu
+11. Re-encrypt with next-hop link keys
+12. Send via next-hop transport
 ```
 
 Transit nodes see the SessionDatagram envelope (src_addr, dest_addr,
-hop_limit) but cannot read the session-layer payload (encrypted with
+ttl, path_mtu) but cannot read the session-layer payload (encrypted with
 endpoint session keys).
 
 ## Size Summary
@@ -491,8 +561,8 @@ endpoint session keys).
 
 | Message | Size |
 | ------- | ---- |
-| Noise IK msg1 | 87 bytes |
-| Noise IK msg2 | 42 bytes |
+| Noise IK msg1 | 90 bytes |
+| Noise IK msg2 | 45 bytes |
 
 ### Link-Layer Messages (inside encrypted frame)
 
@@ -502,6 +572,7 @@ endpoint session keys).
 | FilterAnnounce | 1,035 bytes | v1 (1KB filter) |
 | LookupRequest | 301 + 16n bytes | n = origin depth + 1 |
 | LookupResponse | 91 + 16n bytes | n = target depth + 1 |
+| SessionDatagram | 36 + payload bytes | Fixed 36-byte header |
 | Disconnect | 2 bytes | |
 
 ### Session-Layer Messages (inside SessionDatagram)
@@ -519,11 +590,11 @@ endpoint session keys).
 
 | Scenario | Wire Size | Notes |
 | -------- | --------- | ----- |
-| Encrypted frame minimum | 30 bytes | 1-byte plaintext |
-| SessionDatagram + DataPacket (minimal) | 29 + 34 + 12 + payload + 16 | 91 + payload |
-| SessionDatagram + DataPacket (with coords) | ~135 + payload | Worst case |
-| SessionDatagram + SessionSetup | ~265 bytes | Depth-3, both dirs |
-| SessionDatagram + CoordsRequired | 29 + 34 + 34 = 97 bytes | Including link overhead |
+| Encrypted frame minimum | 37 bytes | Empty body |
+| SessionDatagram + DataPacket (minimal) | 37 + 36 + 12 + payload + 16 | 101 + payload |
+| SessionDatagram + DataPacket (with coords) | ~144 + payload | Worst case |
+| SessionDatagram + SessionSetup | ~275 bytes | Depth-3, both dirs |
+| SessionDatagram + CoordsRequired | 37 + 36 + 34 = 107 bytes | Including link overhead |
 
 ## References
 

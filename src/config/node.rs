@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::IdentityConfig;
+use crate::mmp::MmpConfig;
 
 // ============================================================================
 // Node Configuration Subsections
@@ -213,9 +214,9 @@ impl BloomConfig {
 /// Session/data plane (`node.session.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
-    /// Default SessionDatagram hop limit (`node.session.default_hop_limit`).
-    #[serde(default = "SessionConfig::default_hop_limit")]
-    pub default_hop_limit: u8,
+    /// Default SessionDatagram TTL (`node.session.default_ttl`).
+    #[serde(default = "SessionConfig::default_ttl")]
+    pub default_ttl: u8,
     /// Queue depth per dest during session establishment (`node.session.pending_packets_per_dest`).
     #[serde(default = "SessionConfig::default_pending_packets_per_dest")]
     pub pending_packets_per_dest: usize,
@@ -236,7 +237,7 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            default_hop_limit: 64,
+            default_ttl: 64,
             pending_packets_per_dest: 16,
             pending_max_destinations: 256,
             idle_timeout_secs: 90,
@@ -246,7 +247,7 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
-    fn default_hop_limit() -> u8 { 64 }
+    fn default_ttl() -> u8 { 64 }
     fn default_pending_packets_per_dest() -> usize { 16 }
     fn default_pending_max_destinations() -> usize { 256 }
     fn default_idle_timeout_secs() -> u64 { 90 }
@@ -341,6 +342,10 @@ pub struct NodeConfig {
     /// Internal buffers (`node.buffers.*`).
     #[serde(default)]
     pub buffers: BuffersConfig,
+
+    /// Metrics Measurement Protocol (`node.mmp.*`).
+    #[serde(default)]
+    pub mmp: MmpConfig,
 }
 
 impl Default for NodeConfig {
@@ -359,6 +364,7 @@ impl Default for NodeConfig {
             bloom: BloomConfig::default(),
             session: SessionConfig::default(),
             buffers: BuffersConfig::default(),
+            mmp: MmpConfig::default(),
         }
     }
 }

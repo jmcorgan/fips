@@ -119,15 +119,15 @@ after all layers of wrapping.
 
 | Layer | Overhead | Purpose |
 | ----- | -------- | ------- |
-| Link encryption | 29 bytes | discriminator + receiver_idx + counter + AEAD tag |
-| SessionDatagram envelope | 34 bytes | type + src_addr + dest_addr + hop_limit |
+| Link encryption | 37 bytes | 16-byte outer header + 5-byte inner header + 16-byte AEAD tag |
+| SessionDatagram envelope | 36 bytes | type + ttl + path_mtu + src_addr + dest_addr |
 | DataPacket header | 12 bytes | type + flags + counter + payload_len |
 | Session encryption | 16 bytes | ChaCha20-Poly1305 AEAD tag |
-| **Minimal total** | **91 bytes** | |
-| Coordinates (if present) | ~44 bytes | Depth-dependent, first few packets only |
-| **Worst case total** | **135 bytes** | With COORDS_PRESENT for depth-3 paths |
+| **Minimal total** | **101 bytes** | |
+| Coordinates (if present) | ~43 bytes | Depth-dependent, first few packets only |
+| **Worst case total** | **144 bytes** | With COORDS_PRESENT for depth-3 paths |
 
-The `FIPS_OVERHEAD` constant (135 bytes) is used for conservative MTU
+The `FIPS_OVERHEAD` constant (144 bytes) is used for conservative MTU
 calculations.
 
 ### Effective IPv6 MTU
@@ -142,14 +142,14 @@ For typical deployments:
 
 | Transport MTU | Effective IPv6 MTU | Notes |
 | ------------- | ------------------ | ----- |
-| 1472 (UDP/Ethernet) | 1337 | Standard deployment |
-| 1280 (UDP minimum) | 1145 | Below IPv6 minimum |
+| 1472 (UDP/Ethernet) | 1328 | Standard deployment |
+| 1280 (UDP minimum) | 1136 | Below IPv6 minimum |
 
 IPv6 mandates that every link support at least 1280 bytes. The minimum
 transport path MTU for the IPv6 adapter is therefore:
 
 ```text
-1280 + 135 = 1415 bytes
+1280 + 144 = 1424 bytes
 ```
 
 Transports with smaller MTUs (LoRa at ~250 bytes, serial at 256 bytes) cannot
@@ -278,23 +278,25 @@ TUN device creation requires `CAP_NET_ADMIN`. Options:
 | ICMPv6 Packet Too Big | **Implemented** |
 | ICMP rate limiting (per-source) | **Implemented** |
 | TCP MSS clamping (SYN + SYN-ACK) | **Implemented** |
-| DNS service (.fips domain) | Planned |
+| DNS service (.fips domain) | **Implemented** |
 | Per-destination route MTU (netlink) | Planned |
 | Transit MTU error signal | Planned |
-| Path MTU discovery (envelope field) | Future direction |
+| Path MTU tracking (SessionDatagram field) | **Implemented** |
+| Path MTU notification (end-to-end echo) | Future direction |
 | Endpoint fragmentation/reassembly | Future direction |
 
 ## Design Considerations
 
-### Path MTU Discovery (Planned)
+### Path MTU Discovery
 
-Two complementary mechanisms are planned for full PMTUD:
+Two complementary mechanisms support full PMTUD:
 
-1. **Proactive**: A `path_mtu` field (2 bytes) in the SessionDatagram envelope.
-   The source sets it to its outbound link MTU minus overhead; each transit
-   node applies `min(current, own_outbound_mtu - overhead)`. The destination
-   receives the forward-path minimum. A session-layer echo (2 bytes inside
-   encryption) returns the value to the source.
+1. **Proactive**: The `path_mtu` field (2 bytes) in the SessionDatagram envelope
+   is implemented at the FLP level. The source sets it to its outbound link MTU
+   minus overhead; each transit node applies
+   `min(current, own_outbound_mtu - overhead)`. The destination receives the
+   forward-path minimum. A session-layer echo (PathMtuNotification, 2 bytes
+   inside encryption) to return the value to the source is a future direction.
 
 2. **Reactive**: When a transit node cannot forward a packet (MTU exceeded), it
    sends an error signal back to the source. This handles the in-flight gap

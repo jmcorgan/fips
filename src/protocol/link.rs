@@ -68,6 +68,17 @@ impl fmt::Display for HandshakeMessageType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LinkMessageType {
+    // Forwarding (0x00-0x0F)
+    /// Encapsulated session-layer datagram for forwarding.
+    /// Payload is opaque to intermediate nodes (end-to-end encrypted).
+    SessionDatagram = 0x00,
+
+    // MMP reports (0x01-0x02) — content defined in TASK-2026-0006
+    /// Sender-side MMP report (stub).
+    SenderReport = 0x01,
+    /// Receiver-side MMP report (stub).
+    ReceiverReport = 0x02,
+
     // Tree protocol (0x10-0x1F)
     /// Spanning tree state announcement.
     TreeAnnounce = 0x10,
@@ -82,11 +93,6 @@ pub enum LinkMessageType {
     /// Response with target's coordinates.
     LookupResponse = 0x31,
 
-    // Forwarding (0x40-0x4F)
-    /// Encapsulated session-layer datagram for forwarding.
-    /// Payload is opaque to intermediate nodes (end-to-end encrypted).
-    SessionDatagram = 0x40,
-
     // Link Control (0x50-0x5F)
     /// Orderly disconnect notification before link closure.
     Disconnect = 0x50,
@@ -96,11 +102,13 @@ impl LinkMessageType {
     /// Try to convert from a byte.
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
+            0x00 => Some(LinkMessageType::SessionDatagram),
+            0x01 => Some(LinkMessageType::SenderReport),
+            0x02 => Some(LinkMessageType::ReceiverReport),
             0x10 => Some(LinkMessageType::TreeAnnounce),
             0x20 => Some(LinkMessageType::FilterAnnounce),
             0x30 => Some(LinkMessageType::LookupRequest),
             0x31 => Some(LinkMessageType::LookupResponse),
-            0x40 => Some(LinkMessageType::SessionDatagram),
             0x50 => Some(LinkMessageType::Disconnect),
             _ => None,
         }
@@ -115,11 +123,13 @@ impl LinkMessageType {
 impl fmt::Display for LinkMessageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            LinkMessageType::SessionDatagram => "SessionDatagram",
+            LinkMessageType::SenderReport => "SenderReport",
+            LinkMessageType::ReceiverReport => "ReceiverReport",
             LinkMessageType::TreeAnnounce => "TreeAnnounce",
             LinkMessageType::FilterAnnounce => "FilterAnnounce",
             LinkMessageType::LookupRequest => "LookupRequest",
             LinkMessageType::LookupResponse => "LookupResponse",
-            LinkMessageType::SessionDatagram => "SessionDatagram",
             LinkMessageType::Disconnect => "Disconnect",
         };
         write!(f, "{}", name)
@@ -246,20 +256,21 @@ impl Disconnect {
 
 /// Encapsulated session-layer datagram for multi-hop forwarding.
 ///
-/// This is a link-layer message (type 0x40) that carries session-layer
+/// This is a link-layer message (type 0x00) that carries session-layer
 /// payloads through the mesh. The envelope provides source and destination
 /// addressing that transit routers use for forwarding decisions and error
 /// routing.
 ///
-/// ## Wire Format (34-byte fixed header)
+/// ## Wire Format (36-byte fixed header)
 ///
-/// | Offset | Field     | Size     | Description                    |
-/// |--------|-----------|----------|--------------------------------|
-/// | 0      | msg_type  | 1 byte   | 0x40                           |
-/// | 1      | src_addr  | 16 bytes | Source node_addr               |
-/// | 17     | dest_addr | 16 bytes | Destination node_addr          |
-/// | 33     | hop_limit | 1 byte   | Decremented each hop           |
-/// | 34     | payload   | variable | Session-layer message          |
+/// | Offset | Field     | Size     | Description                         |
+/// |--------|-----------|----------|-------------------------------------|
+/// | 0      | msg_type  | 1 byte   | 0x00                                |
+/// | 1      | ttl       | 1 byte   | Decremented each hop                |
+/// | 2      | path_mtu  | 2 bytes  | Path MTU (LE), min'd at each hop    |
+/// | 4      | src_addr  | 16 bytes | Source node_addr                    |
+/// | 20     | dest_addr | 16 bytes | Destination node_addr               |
+/// | 36     | payload   | variable | Session-layer message               |
 ///
 /// The payload is either end-to-end encrypted (SessionSetup, SessionAck,
 /// DataPacket) or plaintext link-layer error signals (CoordsRequired,
@@ -272,14 +283,17 @@ pub struct SessionDatagram {
     pub src_addr: NodeAddr,
     /// Destination node address (for routing decisions).
     pub dest_addr: NodeAddr,
-    /// Hop limit (decremented at each hop, dropped at zero).
-    pub hop_limit: u8,
+    /// Time-to-live (decremented at each hop, dropped at zero).
+    pub ttl: u8,
+    /// Path MTU: minimum link MTU along the path so far.
+    /// Each forwarding hop applies min(path_mtu, outgoing_link_mtu).
+    pub path_mtu: u16,
     /// Session-layer payload (e2e encrypted or plaintext error signal).
     pub payload: Vec<u8>,
 }
 
-/// SessionDatagram fixed header size: msg_type(1) + src_addr(16) + dest_addr(16) + hop_limit(1).
-pub const SESSION_DATAGRAM_HEADER_SIZE: usize = 34;
+/// SessionDatagram fixed header size: msg_type(1) + ttl(1) + path_mtu(2) + src_addr(16) + dest_addr(16).
+pub const SESSION_DATAGRAM_HEADER_SIZE: usize = 36;
 
 impl SessionDatagram {
     /// Create a new session datagram.
@@ -287,21 +301,28 @@ impl SessionDatagram {
         Self {
             src_addr,
             dest_addr,
-            hop_limit: 64,
+            ttl: 64,
+            path_mtu: u16::MAX,
             payload,
         }
     }
 
-    /// Set the hop limit.
-    pub fn with_hop_limit(mut self, hop_limit: u8) -> Self {
-        self.hop_limit = hop_limit;
+    /// Set the TTL.
+    pub fn with_ttl(mut self, ttl: u8) -> Self {
+        self.ttl = ttl;
         self
     }
 
-    /// Decrement hop limit, returning false if exhausted.
-    pub fn decrement_hop_limit(&mut self) -> bool {
-        if self.hop_limit > 0 {
-            self.hop_limit -= 1;
+    /// Set the path MTU.
+    pub fn with_path_mtu(mut self, path_mtu: u16) -> Self {
+        self.path_mtu = path_mtu;
+        self
+    }
+
+    /// Decrement TTL, returning false if exhausted.
+    pub fn decrement_ttl(&mut self) -> bool {
+        if self.ttl > 0 {
+            self.ttl -= 1;
             true
         } else {
             false
@@ -310,40 +331,43 @@ impl SessionDatagram {
 
     /// Check if the datagram can be forwarded.
     pub fn can_forward(&self) -> bool {
-        self.hop_limit > 0
+        self.ttl > 0
     }
 
-    /// Encode as link-layer message (msg_type + src_addr + dest_addr + hop_limit + payload).
+    /// Encode as link-layer message (msg_type + ttl + path_mtu + src_addr + dest_addr + payload).
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(SESSION_DATAGRAM_HEADER_SIZE + self.payload.len());
         buf.push(LinkMessageType::SessionDatagram.to_byte());
+        buf.push(self.ttl);
+        buf.extend_from_slice(&self.path_mtu.to_le_bytes());
         buf.extend_from_slice(self.src_addr.as_bytes());
         buf.extend_from_slice(self.dest_addr.as_bytes());
-        buf.push(self.hop_limit);
         buf.extend_from_slice(&self.payload);
         buf
     }
 
     /// Decode from link-layer payload (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        // src_addr(16) + dest_addr(16) + hop_limit(1) = 33
-        if payload.len() < 33 {
+        // ttl(1) + path_mtu(2) + src_addr(16) + dest_addr(16) = 35
+        if payload.len() < 35 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 33,
+                expected: 35,
                 got: payload.len(),
             });
         }
+        let ttl = payload[0];
+        let path_mtu = u16::from_le_bytes([payload[1], payload[2]]);
         let mut src_bytes = [0u8; 16];
-        src_bytes.copy_from_slice(&payload[0..16]);
+        src_bytes.copy_from_slice(&payload[3..19]);
         let mut dest_bytes = [0u8; 16];
-        dest_bytes.copy_from_slice(&payload[16..32]);
-        let hop_limit = payload[32];
-        let inner_payload = payload[33..].to_vec();
+        dest_bytes.copy_from_slice(&payload[19..35]);
+        let inner_payload = payload[35..].to_vec();
 
         Ok(Self {
             src_addr: NodeAddr::from_bytes(src_bytes),
             dest_addr: NodeAddr::from_bytes(dest_bytes),
-            hop_limit,
+            ttl,
+            path_mtu,
             payload: inner_payload,
         })
     }
@@ -411,7 +435,8 @@ mod tests {
     #[test]
     fn test_link_message_type_invalid() {
         assert!(LinkMessageType::from_byte(0xFF).is_none());
-        assert!(LinkMessageType::from_byte(0x00).is_none());
+        assert!(LinkMessageType::from_byte(0x03).is_none());
+        assert!(LinkMessageType::from_byte(0x40).is_none());
     }
 
     // ===== DisconnectReason Tests =====
@@ -503,17 +528,17 @@ mod tests {
         let dest = make_node_addr(0xBB);
         let payload = vec![0x10, 0x00, 0x05, 0x00, 1, 2, 3, 4, 5]; // DataPacket payload
         let dg = SessionDatagram::new(src, dest, payload.clone())
-            .with_hop_limit(32);
+            .with_ttl(32);
 
         let encoded = dg.encode();
-        assert_eq!(encoded[0], 0x40); // msg_type
+        assert_eq!(encoded[0], 0x00); // msg_type (SessionDatagram)
         assert_eq!(encoded.len(), SESSION_DATAGRAM_HEADER_SIZE + payload.len());
 
         // Decode (after msg_type)
         let decoded = SessionDatagram::decode(&encoded[1..]).unwrap();
         assert_eq!(decoded.src_addr, src);
         assert_eq!(decoded.dest_addr, dest);
-        assert_eq!(decoded.hop_limit, 32);
+        assert_eq!(decoded.ttl, 32);
         assert_eq!(decoded.payload, payload);
     }
 
@@ -535,14 +560,14 @@ mod tests {
     }
 
     #[test]
-    fn test_session_datagram_hop_limit_roundtrip() {
+    fn test_session_datagram_ttl_roundtrip() {
         for hop in [0u8, 1, 64, 128, 255] {
             let dg = SessionDatagram::new(make_node_addr(1), make_node_addr(2), vec![0x42])
-                .with_hop_limit(hop);
+                .with_ttl(hop);
 
             let encoded = dg.encode();
             let decoded = SessionDatagram::decode(&encoded[1..]).unwrap();
-            assert_eq!(decoded.hop_limit, hop);
+            assert_eq!(decoded.ttl, hop);
         }
     }
 }

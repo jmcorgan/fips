@@ -74,8 +74,8 @@ bloom filters, hop counts, or network topology.
 
 ### SessionDatagram Forwarding
 
-FLP accepts a SessionDatagram (source node_addr, destination node_addr, hop
-limit, payload) and delivers it best-effort toward the destination. Delivery
+FLP accepts a SessionDatagram (source node_addr, destination node_addr, TTL,
+path MTU, payload) and delivers it best-effort toward the destination. Delivery
 may traverse multiple hops, each with independent link encryption.
 
 ### Error Signaling
@@ -389,7 +389,8 @@ node caches (still within their 300s TTL) are re-warmed.
 | Simultaneous initiation tie-breaker | **Implemented** |
 | Flush coord cache on parent change | **Implemented** |
 | Rekey | Planned |
-| Path MTU discovery | Planned |
+| Path MTU tracking (FLP SessionDatagram field) | **Implemented** |
+| Path MTU notification (end-to-end echo) | Planned |
 
 ## References
 

@@ -11,7 +11,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl Node {
-    /// Handle handshake message 1 (discriminator 0x01).
+    /// Handle handshake message 1 (phase 0x1).
     ///
     /// This creates a new inbound connection. Rate limiting is applied
     /// before any expensive crypto operations.
@@ -222,7 +222,7 @@ impl Node {
         self.msg1_rate_limiter.complete_handshake();
     }
 
-    /// Handle handshake message 2 (discriminator 0x02).
+    /// Handle handshake message 2 (phase 0x2).
     ///
     /// This completes an outbound handshake we initiated.
     pub(in crate::node) async fn handle_msg2(&mut self, packet: ReceivedPacket) {
@@ -549,6 +549,8 @@ impl Node {
                     transport_id,
                     current_addr,
                     link_stats,
+                    is_outbound,
+                    &self.config.node.mmp,
                 );
                 new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 
@@ -629,6 +631,8 @@ impl Node {
                 transport_id,
                 current_addr,
                 link_stats,
+                is_outbound,
+                &self.config.node.mmp,
             );
             new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 

@@ -36,7 +36,7 @@ mod replay;
 mod session;
 
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
 };
 use std::fmt;
@@ -261,6 +261,71 @@ impl CipherState {
         let nonce = Self::counter_to_nonce(counter);
         let plaintext = cipher
             .decrypt(&nonce, ciphertext)
+            .map_err(|_| NoiseError::DecryptionFailed)?;
+
+        Ok(plaintext)
+    }
+
+    /// Encrypt plaintext with Additional Authenticated Data (AAD).
+    ///
+    /// The AAD is authenticated but not encrypted. Used for the FLP
+    /// established frame format where the 16-byte outer header is
+    /// bound to the AEAD tag.
+    pub fn encrypt_with_aad(
+        &mut self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
+        if !self.has_key {
+            return Ok(plaintext.to_vec());
+        }
+
+        if plaintext.len() > MAX_MESSAGE_SIZE - TAG_SIZE {
+            return Err(NoiseError::MessageTooLarge {
+                size: plaintext.len(),
+                max: MAX_MESSAGE_SIZE - TAG_SIZE,
+            });
+        }
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| NoiseError::EncryptionFailed)?;
+
+        let nonce = self.next_nonce()?;
+        let ciphertext = cipher
+            .encrypt(&nonce, Payload { msg: plaintext, aad })
+            .map_err(|_| NoiseError::EncryptionFailed)?;
+
+        Ok(ciphertext)
+    }
+
+    /// Decrypt with an explicit counter and AAD (for transport phase).
+    ///
+    /// Combines explicit counter (from wire format) with AAD verification.
+    /// The AAD must match exactly what was used during encryption or the
+    /// AEAD tag verification will fail.
+    pub fn decrypt_with_counter_and_aad(
+        &self,
+        ciphertext: &[u8],
+        counter: u64,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
+        if !self.has_key {
+            return Ok(ciphertext.to_vec());
+        }
+
+        if ciphertext.len() < TAG_SIZE {
+            return Err(NoiseError::MessageTooShort {
+                expected: TAG_SIZE,
+                got: ciphertext.len(),
+            });
+        }
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| NoiseError::DecryptionFailed)?;
+
+        let nonce = Self::counter_to_nonce(counter);
+        let plaintext = cipher
+            .decrypt(&nonce, Payload { msg: ciphertext, aad })
             .map_err(|_| NoiseError::DecryptionFailed)?;
 
         Ok(plaintext)

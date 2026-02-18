@@ -2,7 +2,7 @@
 
 use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
-use crate::node::wire::{DISCRIMINATOR_ENCRYPTED, DISCRIMINATOR_MSG1, DISCRIMINATOR_MSG2};
+use crate::node::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, FLP_VERSION, COMMON_PREFIX_SIZE};
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -10,10 +10,10 @@ impl Node {
     /// Run the receive event loop.
     ///
     /// Processes packets from all transports, dispatching based on
-    /// the discriminator byte in the wire protocol:
-    /// - 0x00: Encrypted frame (session data)
-    /// - 0x01: Handshake message 1 (initiator -> responder)
-    /// - 0x02: Handshake message 2 (responder -> initiator)
+    /// the phase field in the 4-byte common prefix:
+    /// - Phase 0x0: Encrypted frame (session data)
+    /// - Phase 0x1: Handshake message 1 (initiator -> responder)
+    /// - Phase 0x2: Handshake message 2 (responder -> initiator)
     ///
     /// Also processes outbound IPv6 packets from the TUN reader for session
     /// encapsulation and routing through the mesh.
@@ -83,6 +83,7 @@ impl Node {
                     self.process_pending_retries(now_ms).await;
                     self.check_tree_state().await;
                     self.check_bloom_state().await;
+                    self.check_mmp_reports().await;
                     self.purge_stale_lookups(now_ms);
                 }
             }
@@ -94,29 +95,41 @@ impl Node {
 
     /// Process a single received packet.
     ///
-    /// Dispatches based on the discriminator byte.
+    /// Dispatches based on the phase field in the 4-byte common prefix.
     async fn process_packet(&mut self, packet: ReceivedPacket) {
-        if packet.data.is_empty() {
-            return; // Drop empty packets
+        if packet.data.len() < COMMON_PREFIX_SIZE {
+            return; // Drop packets too short for common prefix
         }
 
-        let discriminator = packet.data[0];
-        match discriminator {
-            DISCRIMINATOR_ENCRYPTED => {
+        let prefix = match CommonPrefix::parse(&packet.data) {
+            Some(p) => p,
+            None => return, // Malformed prefix
+        };
+
+        if prefix.version != FLP_VERSION {
+            debug!(
+                version = prefix.version,
+                transport_id = %packet.transport_id,
+                "Unknown FLP version, dropping"
+            );
+            return;
+        }
+
+        match prefix.phase {
+            PHASE_ESTABLISHED => {
                 self.handle_encrypted_frame(packet).await;
             }
-            DISCRIMINATOR_MSG1 => {
+            PHASE_MSG1 => {
                 self.handle_msg1(packet).await;
             }
-            DISCRIMINATOR_MSG2 => {
+            PHASE_MSG2 => {
                 self.handle_msg2(packet).await;
             }
             _ => {
-                // Unknown discriminator, drop silently
                 debug!(
-                    discriminator = discriminator,
+                    phase = prefix.phase,
                     transport_id = %packet.transport_id,
-                    "Unknown packet discriminator, dropping"
+                    "Unknown FLP phase, dropping"
                 );
             }
         }
