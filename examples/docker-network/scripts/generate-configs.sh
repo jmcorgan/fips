@@ -81,7 +81,7 @@ generate_peer_block() {
     local topology_file="$1"
     local peer_id="$2"
 
-    local peer_npub="${RESOLVED_NPUB[$peer_id]}"
+    local peer_npub="$(get_key RESOLVED_NPUB "$peer_id")"
     local peer_ip=$(get_node_attr "$topology_file" "$peer_id" "address")
 
     cat <<EOF
@@ -99,8 +99,10 @@ generate_config() {
     local topology_file="$2"
     local output_file="$3"
 
-    local node_npub="${RESOLVED_NPUB[$node_id]}"
-    local node_nsec="${RESOLVED_NSEC[$node_id]}"
+    local node_npub
+    node_npub="$(get_key RESOLVED_NPUB "$node_id")"
+    local node_nsec
+    node_nsec="$(get_key RESOLVED_NSEC "$node_id")"
     local peers=$(get_peers "$topology_file" "$node_id")
 
     # Generate peers section
@@ -164,8 +166,8 @@ generate_topology() {
     for node_id in $(get_node_ids "$topology_file"); do
         local keys=""
         keys=$(resolve_keys "$topology_file" "$node_id")
-        RESOLVED_NSEC[$node_id]=$(echo "$keys" | grep "^nsec=" | cut -d= -f2)
-        RESOLVED_NPUB[$node_id]=$(echo "$keys" | grep "^npub=" | cut -d= -f2)
+        set_key RESOLVED_NSEC "$node_id" "$(echo "$keys" | grep "^nsec=" | cut -d= -f2)"
+        set_key RESOLVED_NPUB "$node_id" "$(echo "$keys" | grep "^npub=" | cut -d= -f2)"
     done
 
     # Phase 2: generate config files for docker nodes
@@ -189,7 +191,7 @@ generate_topology() {
     fi
     for node_id in $(get_node_ids "$topology_file"); do
         local var_name="NPUB_$(echo "$node_id" | tr '[:lower:]' '[:upper:]')"
-        echo "${var_name}=${RESOLVED_NPUB[$node_id]}" >> "$env_file"
+        echo "${var_name}=$(get_key RESOLVED_NPUB "$node_id")" >> "$env_file"
     done
     echo "  ✓ Generated $env_file"
 }
