@@ -161,6 +161,7 @@ impl Node {
             entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
             entry.mark_established(Self::now_ms());
             entry.init_mmp(&self.config.node.session_mmp);
+            entry.clear_handshake_payload();
             info!(src = %self.peer_display_name(src_addr), "Session established (responder, on first encrypted message)");
         }
 
@@ -316,8 +317,18 @@ impl Node {
                     );
                 }
                 EndToEndState::Responding(_) => {
-                    // Duplicate setup while we already responded — drop
-                    debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, already responding");
+                    // Duplicate setup while we already responded — resend stored ack
+                    if let Some(payload) = existing.handshake_payload() {
+                        debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, resending SessionAck");
+                        let my_addr = *self.node_addr();
+                        let mut datagram = SessionDatagram::new(my_addr, *src_addr, payload.to_vec())
+                            .with_ttl(self.config.node.session.default_ttl);
+                        if let Err(e) = self.send_session_datagram(&mut datagram).await {
+                            debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to resend SessionAck");
+                        }
+                    } else {
+                        debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, no stored ack to resend");
+                    }
                     return;
                 }
                 EndToEndState::Established(_) => {
@@ -360,8 +371,9 @@ impl Node {
         // Build and send SessionAck
         let our_coords = self.tree_state.my_coords().clone();
         let ack = SessionAck::new(our_coords).with_handshake(msg2);
+        let ack_payload = ack.encode();
         let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack.encode())
+        let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack_payload.clone())
             .with_ttl(self.config.node.session.default_ttl);
 
         // Route the ack back to the initiator
@@ -370,9 +382,11 @@ impl Node {
             return;
         }
 
-        // Store session entry in Responding state
+        // Store session entry in Responding state with ack payload for potential resend
         let now_ms = Self::now_ms();
-        let entry = SessionEntry::new(*src_addr, remote_pubkey, EndToEndState::Responding(handshake), now_ms, false);
+        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let mut entry = SessionEntry::new(*src_addr, remote_pubkey, EndToEndState::Responding(handshake), now_ms, false);
+        entry.set_handshake_payload(ack_payload, now_ms + resend_interval);
         self.sessions.insert(*src_addr, entry);
 
         debug!(src = %self.peer_display_name(src_addr), "SessionSetup processed, SessionAck sent");
@@ -433,6 +447,7 @@ impl Node {
         entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
         entry.mark_established(now_ms);
         entry.init_mmp(&self.config.node.session_mmp);
+        entry.clear_handshake_payload();
         entry.touch(now_ms);
         self.sessions.insert(*src_addr, entry);
         self.coord_cache.insert(*src_addr, ack.src_coords, now_ms);
@@ -723,10 +738,11 @@ impl Node {
         let dest_coords = self.get_dest_coords(&dest_addr);
         let setup = SessionSetup::new(our_coords, dest_coords)
             .with_handshake(msg1);
+        let setup_payload = setup.encode();
 
         // Wrap in SessionDatagram
         let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, dest_addr, setup.encode())
+        let mut datagram = SessionDatagram::new(my_addr, dest_addr, setup_payload.clone())
             .with_ttl(self.config.node.session.default_ttl);
 
         // Route toward destination
@@ -735,9 +751,11 @@ impl Node {
         // Register destination identity for TUN → session routing
         self.register_identity(dest_addr, dest_pubkey);
 
-        // Store session entry
+        // Store session entry with handshake payload for potential resend
         let now_ms = Self::now_ms();
-        let entry = SessionEntry::new(dest_addr, dest_pubkey, EndToEndState::Initiating(handshake), now_ms, true);
+        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let mut entry = SessionEntry::new(dest_addr, dest_pubkey, EndToEndState::Initiating(handshake), now_ms, true);
+        entry.set_handshake_payload(setup_payload, now_ms + resend_interval);
         self.sessions.insert(dest_addr, entry);
 
         info!(dest = %self.peer_display_name(&dest_addr), "Session initiation started");
@@ -1027,7 +1045,7 @@ impl Node {
     ///
     /// Finds the next hop for the destination, seeds path_mtu from the
     /// first-hop transport MTU, and sends as an encrypted link message.
-    async fn send_session_datagram(
+    pub(in crate::node) async fn send_session_datagram(
         &mut self,
         datagram: &mut SessionDatagram,
     ) -> Result<(), NodeError> {

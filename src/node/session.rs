@@ -70,6 +70,15 @@ pub(crate) struct SessionEntry {
     is_initiator: bool,
     /// Session-layer MMP state. Initialized on Established transition.
     mmp: Option<MmpSessionState>,
+
+    // === Handshake Resend ===
+    /// Encoded session-layer payload for resend (SessionSetup or SessionAck).
+    /// Cleared on Established transition.
+    handshake_payload: Option<Vec<u8>>,
+    /// Number of resends performed.
+    resend_count: u32,
+    /// When the next resend should fire (Unix ms). 0 = no resend scheduled.
+    next_resend_at_ms: u64,
 }
 
 impl SessionEntry {
@@ -91,6 +100,9 @@ impl SessionEntry {
             coords_warmup_remaining: 0,
             is_initiator,
             mmp: None,
+            handshake_payload: None,
+            resend_count: 0,
+            next_resend_at_ms: 0,
         }
     }
 
@@ -192,5 +204,46 @@ impl SessionEntry {
     /// Initialize session-layer MMP state (called on Established transition).
     pub(crate) fn init_mmp(&mut self, config: &SessionMmpConfig) {
         self.mmp = Some(MmpSessionState::new(config, self.is_initiator));
+    }
+
+    // === Handshake Resend ===
+
+    /// Store the encoded session-layer payload for potential resend.
+    ///
+    /// For initiators, this is the SessionSetup payload bytes.
+    /// For responders, this is the SessionAck payload bytes.
+    /// The payload is re-wrapped in a fresh SessionDatagram on each resend
+    /// so routing can adapt to topology changes.
+    pub(crate) fn set_handshake_payload(&mut self, payload: Vec<u8>, next_resend_at_ms: u64) {
+        self.handshake_payload = Some(payload);
+        self.resend_count = 0;
+        self.next_resend_at_ms = next_resend_at_ms;
+    }
+
+    /// Get the stored handshake payload for resend.
+    pub(crate) fn handshake_payload(&self) -> Option<&[u8]> {
+        self.handshake_payload.as_deref()
+    }
+
+    /// Clear the stored handshake payload (called on Established transition).
+    pub(crate) fn clear_handshake_payload(&mut self) {
+        self.handshake_payload = None;
+        self.next_resend_at_ms = 0;
+    }
+
+    /// Number of resends performed so far.
+    pub(crate) fn resend_count(&self) -> u32 {
+        self.resend_count
+    }
+
+    /// When the next resend should fire (Unix ms). 0 = no resend scheduled.
+    pub(crate) fn next_resend_at_ms(&self) -> u64 {
+        self.next_resend_at_ms
+    }
+
+    /// Record a resend and schedule the next one.
+    pub(crate) fn record_resend(&mut self, next_resend_at_ms: u64) {
+        self.resend_count += 1;
+        self.next_resend_at_ms = next_resend_at_ms;
     }
 }

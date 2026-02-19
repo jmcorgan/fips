@@ -1480,3 +1480,184 @@ fn test_identity_cache_lookup() {
     assert_eq!(addr, remote_addr);
     assert_eq!(pk, remote.pubkey_full());
 }
+
+// ============================================================================
+// Session-layer handshake resend tests
+// ============================================================================
+
+/// Test that SessionEntry handshake payload storage works correctly.
+#[test]
+fn test_session_entry_handshake_payload_storage() {
+    use crate::noise::HandshakeState;
+
+    let identity_a = Identity::generate();
+    let identity_b = Identity::generate();
+
+    let handshake = HandshakeState::new_initiator(
+        identity_a.keypair(),
+        identity_b.pubkey_full(),
+    );
+
+    let mut entry = crate::node::session::SessionEntry::new(
+        *identity_b.node_addr(),
+        identity_b.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+        true,
+    );
+
+    // Initially no handshake payload
+    assert!(entry.handshake_payload().is_none());
+    assert_eq!(entry.resend_count(), 0);
+    assert_eq!(entry.next_resend_at_ms(), 0);
+
+    // Store a handshake payload
+    let payload = vec![0x01, 0x02, 0x03, 0x04];
+    entry.set_handshake_payload(payload.clone(), 2000);
+
+    assert_eq!(entry.handshake_payload().unwrap(), &payload);
+    assert_eq!(entry.resend_count(), 0);
+    assert_eq!(entry.next_resend_at_ms(), 2000);
+}
+
+/// Test that resend_count and next_resend_at_ms track correctly on SessionEntry.
+#[test]
+fn test_session_entry_resend_tracking() {
+    use crate::noise::HandshakeState;
+
+    let identity_a = Identity::generate();
+    let identity_b = Identity::generate();
+
+    let handshake = HandshakeState::new_initiator(
+        identity_a.keypair(),
+        identity_b.pubkey_full(),
+    );
+
+    let mut entry = crate::node::session::SessionEntry::new(
+        *identity_b.node_addr(),
+        identity_b.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+        true,
+    );
+
+    entry.set_handshake_payload(vec![0x01], 2000);
+
+    // Record first resend
+    entry.record_resend(4000);
+    assert_eq!(entry.resend_count(), 1);
+    assert_eq!(entry.next_resend_at_ms(), 4000);
+
+    // Record second resend
+    entry.record_resend(8000);
+    assert_eq!(entry.resend_count(), 2);
+    assert_eq!(entry.next_resend_at_ms(), 8000);
+}
+
+/// Test that clear_handshake_payload clears payload and resets timer.
+#[test]
+fn test_session_entry_clear_handshake_payload() {
+    use crate::noise::HandshakeState;
+
+    let identity_a = Identity::generate();
+    let identity_b = Identity::generate();
+
+    let handshake = HandshakeState::new_initiator(
+        identity_a.keypair(),
+        identity_b.pubkey_full(),
+    );
+
+    let mut entry = crate::node::session::SessionEntry::new(
+        *identity_b.node_addr(),
+        identity_b.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+        true,
+    );
+
+    entry.set_handshake_payload(vec![0x01, 0x02], 2000);
+    entry.record_resend(4000);
+    assert!(entry.handshake_payload().is_some());
+    assert_eq!(entry.resend_count(), 1);
+
+    // Clear on Established transition
+    entry.clear_handshake_payload();
+    assert!(entry.handshake_payload().is_none());
+    assert_eq!(entry.next_resend_at_ms(), 0);
+    // resend_count is NOT reset — it's a historical record
+    assert_eq!(entry.resend_count(), 1);
+}
+
+/// Test that session handshake timeout removes stale Initiating sessions.
+#[tokio::test]
+async fn test_session_handshake_timeout() {
+    use crate::noise::HandshakeState;
+
+    let mut node = make_node();
+
+    let identity_b = Identity::generate();
+    let handshake = HandshakeState::new_initiator(
+        node.identity.keypair(),
+        identity_b.pubkey_full(),
+    );
+
+    let dest_addr = *identity_b.node_addr();
+
+    // Create a session at time 1000
+    let entry = crate::node::session::SessionEntry::new(
+        dest_addr,
+        identity_b.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+        true,
+    );
+    node.sessions.insert(dest_addr, entry);
+
+    assert!(node.sessions.contains_key(&dest_addr));
+
+    // Before timeout: session should remain
+    let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
+    let before_timeout = 1000 + timeout_secs * 1000 - 1;
+    node.resend_pending_session_handshakes(before_timeout).await;
+    assert!(node.sessions.contains_key(&dest_addr), "Session should survive before timeout");
+
+    // After timeout: session should be removed
+    let after_timeout = 1000 + timeout_secs * 1000 + 1;
+    node.resend_pending_session_handshakes(after_timeout).await;
+    assert!(!node.sessions.contains_key(&dest_addr), "Timed-out session should be removed");
+}
+
+/// Test that session handshake timeout removes stale Responding sessions.
+#[tokio::test]
+async fn test_session_responding_timeout() {
+    use crate::noise::HandshakeState;
+
+    let mut node = make_node();
+
+    let identity_a = Identity::generate();
+    let identity_b = Identity::generate();
+
+    let handshake = HandshakeState::new_responder(
+        identity_b.keypair(),
+    );
+
+    let src_addr = *identity_a.node_addr();
+
+    // Create a Responding session at time 1000
+    let entry = crate::node::session::SessionEntry::new(
+        src_addr,
+        identity_a.pubkey_full(),
+        EndToEndState::Responding(handshake),
+        1000,
+        false,
+    );
+    node.sessions.insert(src_addr, entry);
+
+    assert!(node.sessions.contains_key(&src_addr));
+
+    // After timeout: session should be removed
+    let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
+    let after_timeout = 1000 + timeout_secs * 1000 + 1;
+    node.resend_pending_session_handshakes(after_timeout).await;
+    assert!(!node.sessions.contains_key(&src_addr), "Timed-out Responding session should be removed");
+}

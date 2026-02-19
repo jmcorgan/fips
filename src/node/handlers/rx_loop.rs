@@ -80,6 +80,7 @@ impl Node {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     self.resend_pending_handshakes(now_ms).await;
+                    self.resend_pending_session_handshakes(now_ms).await;
                     self.purge_idle_sessions(now_ms);
                     self.process_pending_retries(now_ms).await;
                     self.check_tree_state().await;

@@ -151,6 +151,84 @@ impl Node {
         }
     }
 
+    /// Resend session-layer handshake messages and timeout stale handshakes.
+    ///
+    /// For sessions in Initiating or Responding state:
+    /// - If the handshake has exceeded the timeout window, remove the session.
+    /// - If a resend is due and under max resends, resend the stored payload
+    ///   wrapped in a fresh SessionDatagram (so routing can adapt).
+    pub(in crate::node) async fn resend_pending_session_handshakes(&mut self, now_ms: u64) {
+        if self.sessions.is_empty() {
+            return;
+        }
+
+        let timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
+        let max_resends = self.config.node.rate_limit.handshake_max_resends;
+        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config.node.rate_limit.handshake_resend_backoff;
+        let ttl = self.config.node.session.default_ttl;
+
+        // First pass: find timed-out sessions to remove
+        let timed_out: Vec<crate::NodeAddr> = self.sessions.iter()
+            .filter(|(_, entry)| {
+                !entry.is_established()
+                    && now_ms.saturating_sub(entry.last_activity()) > timeout_ms
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        for addr in &timed_out {
+            let name = self.peer_display_name(addr);
+            info!(dest = %name, "Session handshake timed out, removing");
+            self.sessions.remove(addr);
+            self.pending_tun_packets.remove(addr);
+        }
+
+        // Second pass: collect resend candidates
+        let my_addr = *self.node_addr();
+        let candidates: Vec<(crate::NodeAddr, Vec<u8>)> = self.sessions.iter()
+            .filter(|(_, entry)| {
+                !entry.is_established()
+                    && entry.handshake_payload().is_some()
+                    && entry.resend_count() < max_resends
+                    && entry.next_resend_at_ms() > 0
+                    && now_ms >= entry.next_resend_at_ms()
+            })
+            .map(|(addr, entry)| (*addr, entry.handshake_payload().unwrap().to_vec()))
+            .collect();
+
+        for (dest_addr, payload) in candidates {
+            use crate::protocol::SessionDatagram;
+
+            let mut datagram = SessionDatagram::new(my_addr, dest_addr, payload)
+                .with_ttl(ttl);
+            let sent = match self.send_session_datagram(&mut datagram).await {
+                Ok(_) => true,
+                Err(e) => {
+                    debug!(
+                        dest = %self.peer_display_name(&dest_addr),
+                        error = %e,
+                        "Session handshake resend failed"
+                    );
+                    false
+                }
+            };
+
+            if sent
+                && let Some(entry) = self.sessions.get_mut(&dest_addr)
+            {
+                let count = entry.resend_count() + 1;
+                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                entry.record_resend(next);
+                debug!(
+                    dest = %self.peer_display_name(&dest_addr),
+                    resend = count,
+                    "Resent session handshake"
+                );
+            }
+        }
+    }
+
     /// Remove established sessions that have been idle too long.
     ///
     /// Only targets sessions in the Established state. Initiating/Responding
