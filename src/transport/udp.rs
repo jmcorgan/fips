@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// UDP transport for FIPS.
 ///
@@ -149,7 +149,7 @@ impl UdpTransport {
 
         self.state = TransportState::Down;
 
-        debug!(
+        info!(
             transport_id = %self.transport_id,
             "UDP transport stopped"
         );
@@ -182,7 +182,7 @@ impl UdpTransport {
             .await
             .map_err(|e| TransportError::SendFailed(format!("{}", e)))?;
 
-        debug!(
+        trace!(
             transport_id = %self.transport_id,
             remote_addr = %socket_addr,
             bytes = bytes_sent,
@@ -265,7 +265,7 @@ async fn udp_receive_loop(
                 let addr = TransportAddr::from_string(&remote_addr.to_string());
                 let packet = ReceivedPacket::new(transport_id, addr, data);
 
-                debug!(
+                trace!(
                     transport_id = %transport_id,
                     remote_addr = %remote_addr,
                     bytes = len,

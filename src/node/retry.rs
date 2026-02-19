@@ -79,7 +79,7 @@ impl Node {
             }
             let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
             state.retry_after_ms = now_ms + delay;
-            info!(
+            debug!(
                 node_addr = %node_addr,
                 retry = state.retry_count,
                 delay_secs = delay / 1000,
@@ -102,7 +102,7 @@ impl Node {
                 state.retry_count = 1;
                 let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
                 state.retry_after_ms = now_ms + delay;
-                info!(
+                debug!(
                     node_addr = %node_addr,
                     delay_secs = delay / 1000,
                     "First connection attempt failed, scheduling retry"
@@ -144,7 +144,7 @@ impl Node {
                 None => continue,
             };
 
-            info!(
+            debug!(
                 node_addr = %node_addr,
                 retry = state.retry_count,
                 "Attempting connection retry"

@@ -7,7 +7,7 @@ use crate::protocol::TreeAnnounce;
 use crate::NodeAddr;
 
 use super::{Node, NodeError};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 impl Node {
     /// Build a TreeAnnounce from our current tree state.
@@ -68,7 +68,7 @@ impl Node {
             peer.record_tree_announce_sent(now_ms);
         }
 
-        debug!(peer = %peer_addr, "Sent TreeAnnounce");
+        trace!(peer = %peer_addr, "Sent TreeAnnounce");
         Ok(())
     }
 

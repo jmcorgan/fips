@@ -22,7 +22,7 @@ use crate::protocol::{
 };
 use crate::NodeAddr;
 use secp256k1::PublicKey;
-use tracing::debug;
+use tracing::{debug, info, trace};
 
 impl Node {
     /// Handle a locally-delivered session datagram payload.
@@ -160,7 +160,7 @@ impl Node {
             entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
             entry.mark_established(Self::now_ms());
             entry.init_mmp(&self.config.node.session_mmp);
-            debug!(src = %src_addr, "Session established (responder, on first encrypted message)");
+            info!(src = %src_addr, "Session established (responder, on first encrypted message)");
         }
 
         // Decrypt with AAD = the 12-byte header
@@ -235,7 +235,7 @@ impl Node {
                         debug!(error = %e, "Failed to deliver decrypted packet to TUN");
                     }
                 } else {
-                    debug!(
+                    trace!(
                         src = %src_addr,
                         "DataPacket decrypted (no TUN interface, plaintext dropped)"
                     );
@@ -434,7 +434,7 @@ impl Node {
         // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;
 
-        debug!(src = %src_addr, "Session established (initiator)");
+        info!(src = %src_addr, "Session established (initiator)");
     }
 
     // === Session-layer MMP report handlers ===
@@ -452,7 +452,7 @@ impl Node {
             }
         };
 
-        debug!(
+        trace!(
             src = %src_addr,
             cum_pkts = sr.cumulative_packets_sent,
             interval_bytes = sr.interval_bytes_sent,
@@ -519,7 +519,7 @@ impl Node {
             mmp.metrics.set_delivery_ratio_reverse(reverse_ratio);
         }
 
-        debug!(
+        trace!(
             src = %src_addr,
             rtt_ms = ?mmp.metrics.srtt_ms(),
             loss = format_args!("{:.1}%", mmp.metrics.loss_rate() * 100.0),
@@ -703,7 +703,7 @@ impl Node {
         let entry = SessionEntry::new(dest_addr, dest_pubkey, EndToEndState::Initiating(handshake), now_ms, true);
         self.sessions.insert(dest_addr, entry);
 
-        debug!(dest = %dest_addr, "Session initiation started");
+        info!(dest = %dest_addr, "Session initiation started");
         Ok(())
     }
 

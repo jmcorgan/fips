@@ -8,7 +8,7 @@
 use crate::mmp::algorithms::{DualEwma, SrttEstimator, compute_etx};
 use crate::mmp::report::ReceiverReport;
 use std::time::Instant;
-use tracing::debug;
+use tracing::trace;
 
 /// Derived MMP metrics, updated from incoming ReceiverReports.
 ///
@@ -81,7 +81,7 @@ impl MmpMetrics {
             if our_timestamp_ms > echo_ms + dwell_ms {
                 let rtt_ms = our_timestamp_ms - echo_ms - dwell_ms;
                 let rtt_us = (rtt_ms as i64) * 1000;
-                debug!(
+                trace!(
                     our_ts = our_timestamp_ms,
                     echo = echo_ms,
                     dwell = dwell_ms,

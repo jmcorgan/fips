@@ -13,7 +13,7 @@ use std::net::Ipv6Addr;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::mpsc;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 use tun::Layer;
 
 /// Channel sender for packets to be written to TUN.
@@ -222,7 +222,7 @@ impl TunWriter {
         for mut packet in self.rx {
             // Clamp TCP MSS on inbound SYN-ACK packets
             if clamp_tcp_mss(&mut packet, self.max_mss) {
-                debug!(
+                trace!(
                     name = %self.name,
                     max_mss = self.max_mss,
                     "Clamped TCP MSS in inbound SYN-ACK packet"
@@ -237,7 +237,7 @@ impl TunWriter {
                 }
                 error!(name = %self.name, error = %e, "TUN write error");
             } else {
-                debug!(name = %self.name, len = packet.len(), "TUN packet written");
+                trace!(name = %self.name, len = packet.len(), "TUN packet written");
             }
         }
     }
@@ -301,7 +301,7 @@ pub fn run_tun_reader(
                 if packet[24] == crate::identity::FIPS_ADDRESS_PREFIX {
                     // Clamp TCP MSS if this is a SYN packet
                     if clamp_tcp_mss(packet, max_mss) {
-                        debug!(
+                        trace!(
                             name = %name,
                             max_mss = max_mss,
                             "Clamped TCP MSS in SYN packet"
@@ -321,7 +321,7 @@ pub fn run_tun_reader(
                             our_addr.to_ipv6(),
                         )
                     {
-                        debug!(
+                        trace!(
                             name = %name,
                             len = response.len(),
                             "Sending ICMPv6 Destination Unreachable (non-FIPS destination)"
@@ -347,7 +347,7 @@ pub fn run_tun_reader(
     }
 }
 
-/// Log basic information about an IPv6 packet at DEBUG level.
+/// Log basic information about an IPv6 packet at TRACE level.
 pub fn log_ipv6_packet(packet: &[u8]) {
     if packet.len() < 40 {
         debug!(len = packet.len(), "Received undersized packet");
@@ -374,11 +374,11 @@ pub fn log_ipv6_packet(packet: &[u8]) {
         _ => "other",
     };
 
-    debug!("TUN packet received:");
-    debug!("      src: {}", src);
-    debug!("      dst: {}", dst);
-    debug!(" protocol: {} ({})", protocol, next_header);
-    debug!("  payload: {} bytes, hop_limit: {}", payload_len, hop_limit);
+    trace!("TUN packet received:");
+    trace!("      src: {}", src);
+    trace!("      dst: {}", dst);
+    trace!(" protocol: {} ({})", protocol, next_header);
+    trace!("  payload: {} bytes, hop_limit: {}", payload_len, hop_limit);
 }
 
 /// Shutdown and delete a TUN interface by name.

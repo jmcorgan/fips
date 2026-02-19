@@ -13,7 +13,7 @@ use crate::protocol::{
 };
 use crate::NodeAddr;
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace};
 
 /// Format bytes/sec as human-readable throughput.
 fn format_throughput(bps: f64) -> String {
@@ -55,7 +55,7 @@ impl Node {
             return;
         }
 
-        debug!(
+        trace!(
             from = %from,
             cum_pkts = sr.cumulative_packets_sent,
             interval_bytes = sr.interval_bytes_sent,
@@ -116,7 +116,7 @@ impl Node {
             mmp.metrics.set_delivery_ratio_reverse(reverse_ratio);
         }
 
-        debug!(
+        trace!(
             from = %from,
             rtt_ms = ?mmp.metrics.srtt_ms(),
             loss = format_args!("{:.1}%", mmp.metrics.loss_rate() * 100.0),
@@ -168,13 +168,13 @@ impl Node {
         // Send collected reports
         for (node_addr, encoded) in sender_reports {
             if let Err(e) = self.send_encrypted_link_message(&node_addr, &encoded).await {
-                warn!(peer = %node_addr, error = %e, "Failed to send SenderReport");
+                debug!(peer = %node_addr, error = %e, "Failed to send SenderReport");
             }
         }
 
         for (node_addr, encoded) in receiver_reports {
             if let Err(e) = self.send_encrypted_link_message(&node_addr, &encoded).await {
-                warn!(peer = %node_addr, error = %e, "Failed to send ReceiverReport");
+                debug!(peer = %node_addr, error = %e, "Failed to send ReceiverReport");
             }
         }
     }

@@ -9,7 +9,7 @@ use crate::NodeAddr;
 
 use super::{Node, NodeError};
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::{debug, trace};
 
 impl Node {
     /// Collect inbound filters from all peers for outgoing filter computation.
@@ -77,7 +77,7 @@ impl Node {
             peer.clear_filter_update_needed();
         }
 
-        debug!(peer = %peer_addr, seq = announce.sequence, "Sent FilterAnnounce");
+        trace!(peer = %peer_addr, seq = announce.sequence, "Sent FilterAnnounce");
         Ok(())
     }
 
@@ -161,7 +161,7 @@ impl Node {
             peer.update_filter(announce.filter, announce.sequence, now_ms);
         }
 
-        info!(
+        debug!(
             from = %from,
             seq = announce.sequence,
             "Received FilterAnnounce"

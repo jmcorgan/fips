@@ -166,13 +166,13 @@ impl Node {
                 .map(|a| format!(" ({})", a))
                 .unwrap_or_default();
 
-            info!("Peer connection initiated{}", alias_display);
-            info!("  npub: {}", peer_config.npub);
-            info!("  node_addr: {}", peer_node_addr);
-            info!("  transport: {}", addr.transport);
-            info!("  addr: {}", addr.addr);
-            info!("  link_id: {}", link_id);
-            info!("  our_index: {}", our_index);
+            debug!("Peer connection initiated{}", alias_display);
+            debug!("  npub: {}", peer_config.npub);
+            debug!("  node_addr: {}", peer_node_addr);
+            debug!("  transport: {}", addr.transport);
+            debug!("  addr: {}", addr.addr);
+            debug!("  link_id: {}", link_id);
+            debug!("  our_index: {}", our_index);
 
             // Track in pending_outbound for msg2 dispatch
             self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
