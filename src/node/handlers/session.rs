@@ -141,7 +141,7 @@ impl Node {
             }
         };
 
-        if entry.state().is_responding() {
+        if entry.is_responding() {
             let old_state = entry.take_state();
             let handshake = match old_state {
                 Some(EndToEndState::Responding(hs)) => hs,
@@ -299,42 +299,38 @@ impl Node {
 
         // Check for existing session with this remote
         if let Some(existing) = self.sessions.get(src_addr) {
-            match existing.state() {
-                EndToEndState::Initiating(_) => {
-                    // Simultaneous initiation: smaller NodeAddr wins as initiator
-                    if self.identity.node_addr() < src_addr {
-                        // We win — drop their setup, they'll process ours
-                        debug!(
-                            src = %self.peer_display_name(src_addr),
-                            "Simultaneous session initiation: we win (smaller addr), dropping their setup"
-                        );
-                        return;
-                    }
-                    // We lose — discard our pending handshake, become responder below
+            if existing.is_initiating() {
+                // Simultaneous initiation: smaller NodeAddr wins as initiator
+                if self.identity.node_addr() < src_addr {
+                    // We win — drop their setup, they'll process ours
                     debug!(
                         src = %self.peer_display_name(src_addr),
-                        "Simultaneous session initiation: we lose, becoming responder"
+                        "Simultaneous session initiation: we win (smaller addr), dropping their setup"
                     );
-                }
-                EndToEndState::Responding(_) => {
-                    // Duplicate setup while we already responded — resend stored ack
-                    if let Some(payload) = existing.handshake_payload() {
-                        debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, resending SessionAck");
-                        let my_addr = *self.node_addr();
-                        let mut datagram = SessionDatagram::new(my_addr, *src_addr, payload.to_vec())
-                            .with_ttl(self.config.node.session.default_ttl);
-                        if let Err(e) = self.send_session_datagram(&mut datagram).await {
-                            debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to resend SessionAck");
-                        }
-                    } else {
-                        debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, no stored ack to resend");
-                    }
                     return;
                 }
-                EndToEndState::Established(_) => {
-                    // Re-establishment: replace existing session below
-                    debug!(src = %self.peer_display_name(src_addr), "Session re-establishment from peer");
+                // We lose — discard our pending handshake, become responder below
+                debug!(
+                    src = %self.peer_display_name(src_addr),
+                    "Simultaneous session initiation: we lose, becoming responder"
+                );
+            } else if existing.is_responding() {
+                // Duplicate setup while we already responded — resend stored ack
+                if let Some(payload) = existing.handshake_payload() {
+                    debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, resending SessionAck");
+                    let my_addr = *self.node_addr();
+                    let mut datagram = SessionDatagram::new(my_addr, *src_addr, payload.to_vec())
+                        .with_ttl(self.config.node.session.default_ttl);
+                    if let Err(e) = self.send_session_datagram(&mut datagram).await {
+                        debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to resend SessionAck");
+                    }
+                } else {
+                    debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, no stored ack to resend");
                 }
+                return;
+            } else if existing.is_established() {
+                // Re-establishment: replace existing session below
+                debug!(src = %self.peer_display_name(src_addr), "Session re-establishment from peer");
             }
         }
 
@@ -422,15 +418,15 @@ impl Node {
             }
         };
 
-        // Must be in Initiating state
+        // Must be in Initiating state — check before take to avoid poisoning
+        if !entry.is_initiating() {
+            debug!(src = %self.peer_display_name(src_addr), "SessionAck but session not in Initiating state");
+            self.sessions.insert(*src_addr, entry);
+            return;
+        }
         let handshake = match entry.take_state() {
             Some(EndToEndState::Initiating(hs)) => hs,
-            _ => {
-                debug!(src = %self.peer_display_name(src_addr), "SessionAck but session not in Initiating state");
-                // Put it back
-                self.sessions.insert(*src_addr, entry);
-                return;
-            }
+            _ => unreachable!("checked is_initiating above"),
         };
 
         // Complete the handshake
@@ -720,7 +716,7 @@ impl Node {
     ) -> Result<(), NodeError> {
         // Check for existing session
         if let Some(existing) = self.sessions.get(&dest_addr)
-            && (existing.state().is_established() || existing.state().is_initiating())
+            && (existing.is_established() || existing.is_initiating())
         {
             return Ok(());
         }
@@ -1281,7 +1277,7 @@ impl Node {
 
         // Skip if a session already exists
         if let Some(existing) = self.sessions.get(&dest_addr)
-            && (existing.state().is_established() || existing.state().is_initiating())
+            && (existing.is_established() || existing.is_initiating())
         {
             return;
         }
