@@ -63,13 +63,13 @@ impl Node {
         let disconnect = match crate::protocol::Disconnect::decode(payload) {
             Ok(msg) => msg,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed disconnect message");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed disconnect message");
                 return;
             }
         };
 
         info!(
-            node_addr = %from,
+            peer = %self.peer_display_name(from),
             reason = %disconnect.reason,
             "Peer sent disconnect notification"
         );
@@ -89,14 +89,17 @@ impl Node {
         let peer = match self.peers.remove(node_addr) {
             Some(p) => p,
             None => {
-                debug!(node_addr = %node_addr, "Peer already removed");
+                debug!(peer = %self.peer_display_name(node_addr), "Peer already removed");
                 return;
             }
         };
 
         // MMP teardown log (before we drop the peer)
         if let Some(mmp) = peer.mmp() {
-            Self::log_mmp_teardown(node_addr, mmp);
+            let name = self.peer_aliases.get(node_addr)
+                .cloned()
+                .unwrap_or_else(|| peer.identity().short_npub());
+            Self::log_mmp_teardown(&name, mmp);
         }
 
         let link_id = peer.link_id();
@@ -126,7 +129,7 @@ impl Node {
         self.bloom_state.mark_all_updates_needed(remaining_peers);
 
         info!(
-            node_addr = %node_addr,
+            peer = %self.peer_display_name(node_addr),
             link_id = %link_id,
             tree_changed = tree_changed,
             "Peer removed and state cleaned up"

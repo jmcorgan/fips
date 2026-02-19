@@ -17,6 +17,17 @@ impl Node {
     /// For each peer configured with AutoConnect policy, creates a link and
     /// peer entry, then starts the Noise handshake by sending the first message.
     pub(super) async fn initiate_peer_connections(&mut self) {
+        // Build display name map from all configured peers (alias or short npub)
+        for peer_config in self.config.peers() {
+            if let Ok(identity) = PeerIdentity::from_npub(&peer_config.npub) {
+                let name = peer_config
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| identity.short_npub());
+                self.peer_aliases.insert(*identity.node_addr(), name);
+            }
+        }
+
         // Collect peer configs to avoid borrow conflicts
         let peer_configs: Vec<_> = self.config.auto_connect_peers().cloned().collect();
 
@@ -160,19 +171,14 @@ impl Node {
             // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
             let wire_msg1 = build_msg1(our_index, &noise_msg1);
 
-            let alias_display = peer_config
-                .alias
-                .as_deref()
-                .map(|a| format!(" ({})", a))
-                .unwrap_or_default();
-
-            debug!("Peer connection initiated{}", alias_display);
-            debug!("  npub: {}", peer_config.npub);
-            debug!("  node_addr: {}", peer_node_addr);
-            debug!("  transport: {}", addr.transport);
-            debug!("  addr: {}", addr.addr);
-            debug!("  link_id: {}", link_id);
-            debug!("  our_index: {}", our_index);
+            debug!(
+                peer = %self.peer_display_name(&peer_node_addr),
+                transport = %addr.transport,
+                addr = %addr.addr,
+                link_id = %link_id,
+                our_index = %our_index,
+                "Peer connection initiated"
+            );
 
             // Track in pending_outbound for msg2 dispatch
             self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
@@ -447,7 +453,7 @@ impl Node {
                 Ok(()) => sent += 1,
                 Err(e) => {
                     debug!(
-                        node_addr = %node_addr,
+                        peer = %self.peer_display_name(node_addr),
                         error = %e,
                         "Failed to send disconnect (transport may be down)"
                     );

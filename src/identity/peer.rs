@@ -78,6 +78,13 @@ impl PeerIdentity {
         encode_npub(&self.pubkey)
     }
 
+    /// Return a shortened npub for log display (e.g., `npub1abcd...wxyz`).
+    pub fn short_npub(&self) -> String {
+        let full = self.npub();
+        let data = &full[5..]; // strip "npub1"
+        format!("npub1{}...{}", &data[..4], &data[data.len() - 4..])
+    }
+
     /// Return the node ID.
     pub fn node_addr(&self) -> &NodeAddr {
         &self.node_addr

@@ -64,13 +64,14 @@ impl Node {
 
         let base_interval_ms = retry_cfg.base_interval_secs * 1000;
         let max_backoff_ms = retry_cfg.max_backoff_secs * 1000;
+        let peer_name = self.peer_display_name(&node_addr);
 
         if let Some(state) = self.retry_pending.get_mut(&node_addr) {
             // Already tracking — increment
             state.retry_count += 1;
             if state.retry_count > max_retries {
                 info!(
-                    node_addr = %node_addr,
+                    peer = %peer_name,
                     attempts = state.retry_count,
                     "Max retries exhausted, giving up on peer"
                 );
@@ -80,7 +81,7 @@ impl Node {
             let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
             state.retry_after_ms = now_ms + delay;
             debug!(
-                node_addr = %node_addr,
+                peer = %peer_name,
                 retry = state.retry_count,
                 delay_secs = delay / 1000,
                 "Scheduling connection retry"
@@ -103,7 +104,7 @@ impl Node {
                 let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
                 state.retry_after_ms = now_ms + delay;
                 debug!(
-                    node_addr = %node_addr,
+                    peer = %self.peer_display_name(&node_addr),
                     delay_secs = delay / 1000,
                     "First connection attempt failed, scheduling retry"
                 );
@@ -145,7 +146,7 @@ impl Node {
             };
 
             debug!(
-                node_addr = %node_addr,
+                peer = %self.peer_display_name(&node_addr),
                 retry = state.retry_count,
                 "Attempting connection retry"
             );
@@ -155,7 +156,7 @@ impl Node {
             match self.initiate_peer_connection(&peer_config).await {
                 Ok(()) => {
                     debug!(
-                        node_addr = %node_addr,
+                        peer = %self.peer_display_name(&node_addr),
                         "Retry connection initiated"
                     );
                     // Don't remove from retry_pending — wait for promotion
@@ -163,7 +164,7 @@ impl Node {
                 }
                 Err(e) => {
                     warn!(
-                        node_addr = %node_addr,
+                        peer = %self.peer_display_name(&node_addr),
                         error = %e,
                         "Retry connection initiation failed"
                     );

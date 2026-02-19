@@ -47,7 +47,7 @@ impl Node {
         if !peer.can_send_tree_announce(now_ms) {
             peer.mark_tree_announce_pending();
             debug!(
-                peer = %peer_addr,
+                peer = %self.peer_display_name(peer_addr),
                 "TreeAnnounce rate-limited, marking pending"
             );
             return Ok(());
@@ -68,7 +68,7 @@ impl Node {
             peer.record_tree_announce_sent(now_ms);
         }
 
-        trace!(peer = %peer_addr, "Sent TreeAnnounce");
+        trace!(peer = %self.peer_display_name(peer_addr), "Sent TreeAnnounce");
         Ok(())
     }
 
@@ -79,7 +79,7 @@ impl Node {
         for peer_addr in peer_addrs {
             if let Err(e) = self.send_tree_announce_to_peer(&peer_addr).await {
                 debug!(
-                    peer = %peer_addr,
+                    peer = %self.peer_display_name(&peer_addr),
                     error = %e,
                     "Failed to send TreeAnnounce"
                 );
@@ -104,7 +104,7 @@ impl Node {
         for peer_addr in ready {
             if let Err(e) = self.send_tree_announce_to_peer(&peer_addr).await {
                 debug!(
-                    peer = %peer_addr,
+                    peer = %self.peer_display_name(&peer_addr),
                     error = %e,
                     "Failed to send pending TreeAnnounce"
                 );
@@ -123,7 +123,7 @@ impl Node {
         let announce = match TreeAnnounce::decode(payload) {
             Ok(a) => a,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed TreeAnnounce");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed TreeAnnounce");
                 return;
             }
         };
@@ -132,7 +132,7 @@ impl Node {
         let pubkey = match self.peers.get(from) {
             Some(peer) => peer.pubkey(),
             None => {
-                debug!(from = %from, "TreeAnnounce from unknown peer");
+                debug!(from = %self.peer_display_name(from), "TreeAnnounce from unknown peer");
                 return;
             }
         };
@@ -140,7 +140,7 @@ impl Node {
         // The declaring node_addr in the announce should match the sender
         if announce.declaration.node_addr() != from {
             debug!(
-                from = %from,
+                from = %self.peer_display_name(from),
                 declared = %announce.declaration.node_addr(),
                 "TreeAnnounce node_addr mismatch"
             );
@@ -149,7 +149,7 @@ impl Node {
 
         if let Err(e) = announce.declaration.verify(&pubkey) {
             warn!(
-                from = %from,
+                from = %self.peer_display_name(from),
                 error = %e,
                 "TreeAnnounce signature verification failed"
             );
@@ -177,12 +177,12 @@ impl Node {
         );
 
         if !updated {
-            debug!(from = %from, "TreeAnnounce not fresher than existing, ignored");
+            debug!(from = %self.peer_display_name(from), "TreeAnnounce not fresher than existing, ignored");
             return;
         }
 
         info!(
-            from = %from,
+            from = %self.peer_display_name(from),
             seq = announce.declaration.sequence(),
             depth = announce.ancestry.depth(),
             root = %announce.ancestry.root_id(),
@@ -206,7 +206,7 @@ impl Node {
             self.coord_cache.clear();
 
             info!(
-                new_parent = %new_parent,
+                new_parent = %self.peer_display_name(&new_parent),
                 new_seq = new_seq,
                 new_root = %self.tree_state.root(),
                 depth = self.tree_state.my_coords().depth(),
@@ -242,7 +242,7 @@ impl Node {
 
             if new_root != old_root || new_depth != old_depth {
                 info!(
-                    parent = %from,
+                    parent = %self.peer_display_name(from),
                     old_root = %old_root,
                     new_root = %new_root,
                     new_depth = new_depth,

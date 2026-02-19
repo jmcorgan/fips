@@ -28,7 +28,7 @@ impl Node {
         let request = match LookupRequest::decode(payload) {
             Ok(req) => req,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed LookupRequest");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupRequest");
                 return;
             }
         };
@@ -39,7 +39,7 @@ impl Node {
         if self.recent_requests.contains_key(&request.request_id) {
             trace!(
                 request_id = request.request_id,
-                from = %from,
+                from = %self.peer_display_name(from),
                 "Duplicate LookupRequest, dropping"
             );
             return;
@@ -58,7 +58,7 @@ impl Node {
         if request.was_visited(self.node_addr()) {
             trace!(
                 request_id = request.request_id,
-                target = %request.target,
+                target = %self.peer_display_name(&request.target),
                 "Already visited, dropping LookupRequest"
             );
             return;
@@ -68,7 +68,7 @@ impl Node {
         if request.target == *self.node_addr() {
             debug!(
                 request_id = request.request_id,
-                origin = %request.origin,
+                origin = %self.peer_display_name(&request.origin),
                 "We are the lookup target, generating response"
             );
             self.send_lookup_response(&request).await;
@@ -81,7 +81,7 @@ impl Node {
         } else {
             trace!(
                 request_id = request.request_id,
-                target = %request.target,
+                target = %self.peer_display_name(&request.target),
                 "LookupRequest TTL exhausted, not forwarding"
             );
         }
@@ -102,7 +102,7 @@ impl Node {
         let response = match LookupResponse::decode(payload) {
             Ok(resp) => resp,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed LookupResponse");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupResponse");
                 return;
             }
         };
@@ -116,15 +116,15 @@ impl Node {
 
             debug!(
                 request_id = response.request_id,
-                target = %response.target,
-                next_hop = %from_peer,
+                target = %self.peer_display_name(&response.target),
+                next_hop = %self.peer_display_name(&from_peer),
                 "Reverse-path forwarding LookupResponse"
             );
 
             let encoded = response.encode();
             if let Err(e) = self.send_encrypted_link_message(&from_peer, &encoded).await {
                 debug!(
-                    next_hop = %from_peer,
+                    next_hop = %self.peer_display_name(&from_peer),
                     error = %e,
                     "Failed to forward LookupResponse"
                 );
@@ -133,7 +133,7 @@ impl Node {
             // We originated this request — cache the discovered coordinates
             debug!(
                 request_id = response.request_id,
-                target = %response.target,
+                target = %self.peer_display_name(&response.target),
                 depth = response.target_coords.depth(),
                 "Received LookupResponse, caching route"
             );
@@ -158,7 +158,7 @@ impl Node {
                 let n = self.config.node.session.coords_warmup_packets;
                 entry.set_coords_warmup_remaining(n);
                 debug!(
-                    dest = %target,
+                    dest = %self.peer_display_name(&target),
                     warmup_packets = n,
                     "Reset coords warmup after discovery for existing session"
                 );
@@ -202,7 +202,7 @@ impl Node {
                     recent.from_peer
                 } else {
                     debug!(
-                        origin = %request.origin,
+                        origin = %self.peer_display_name(&request.origin),
                         "Cannot route LookupResponse: no path to origin"
                     );
                     return;
@@ -212,15 +212,15 @@ impl Node {
 
         debug!(
             request_id = request.request_id,
-            origin = %request.origin,
-            next_hop = %next_hop_addr,
+            origin = %self.peer_display_name(&request.origin),
+            next_hop = %self.peer_display_name(&next_hop_addr),
             "Sending LookupResponse"
         );
 
         let encoded = response.encode();
         if let Err(e) = self.send_encrypted_link_message(&next_hop_addr, &encoded).await {
             debug!(
-                next_hop = %next_hop_addr,
+                next_hop = %self.peer_display_name(&next_hop_addr),
                 error = %e,
                 "Failed to send LookupResponse"
             );
@@ -253,7 +253,7 @@ impl Node {
 
         debug!(
             request_id = request.request_id,
-            target = %request.target,
+            target = %self.peer_display_name(&request.target),
             ttl = request.ttl,
             peer_count = forward_to.len(),
             "Forwarding LookupRequest"
@@ -264,7 +264,7 @@ impl Node {
         for peer_addr in forward_to {
             if let Err(e) = self.send_encrypted_link_message(&peer_addr, &encoded).await {
                 debug!(
-                    peer = %peer_addr,
+                    peer = %self.peer_display_name(&peer_addr),
                     error = %e,
                     "Failed to forward LookupRequest to peer"
                 );
@@ -289,7 +289,7 @@ impl Node {
 
         debug!(
             request_id = request.request_id,
-            target = %target,
+            target = %self.peer_display_name(target),
             ttl = ttl,
             "Initiating LookupRequest"
         );
@@ -301,7 +301,7 @@ impl Node {
         for peer_addr in peer_addrs {
             if let Err(e) = self.send_encrypted_link_message(&peer_addr, &encoded).await {
                 debug!(
-                    peer = %peer_addr,
+                    peer = %self.peer_display_name(&peer_addr),
                     error = %e,
                     "Failed to send LookupRequest to peer"
                 );

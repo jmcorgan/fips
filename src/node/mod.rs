@@ -32,7 +32,7 @@ use crate::tree::TreeState;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_SP};
-use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr};
+use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::thread::JoinHandle;
@@ -326,6 +326,11 @@ pub struct Node {
     /// or fails, and removed on successful promotion or when max retries
     /// are exhausted.
     retry_pending: HashMap<NodeAddr, retry::RetryState>,
+
+    // === Display Names ===
+    /// Human-readable names for configured peers (alias or short npub).
+    /// Populated at startup from peer config.
+    peer_aliases: HashMap<NodeAddr, String>,
 }
 
 impl Node {
@@ -409,6 +414,7 @@ impl Node {
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
             retry_pending: HashMap::new(),
+            peer_aliases: HashMap::new(),
         })
     }
 
@@ -485,6 +491,7 @@ impl Node {
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
             retry_pending: HashMap::new(),
+            peer_aliases: HashMap::new(),
         }
     }
 
@@ -549,6 +556,27 @@ impl Node {
     /// Get this node's npub.
     pub fn npub(&self) -> String {
         self.identity.npub()
+    }
+
+    /// Return a human-readable display name for a NodeAddr.
+    ///
+    /// Lookup order:
+    /// 1. Configured peer alias or short npub (from startup map)
+    /// 2. Active peer's short npub (e.g., inbound peer not in config)
+    /// 3. Session endpoint's short npub (end-to-end, may not be direct peer)
+    /// 4. Truncated NodeAddr hex (unknown address)
+    pub(crate) fn peer_display_name(&self, addr: &NodeAddr) -> String {
+        if let Some(name) = self.peer_aliases.get(addr) {
+            return name.clone();
+        }
+        if let Some(peer) = self.peers.get(addr) {
+            return peer.identity().short_npub();
+        }
+        if let Some(entry) = self.sessions.get(addr) {
+            let (xonly, _) = entry.remote_pubkey().x_only_public_key();
+            return PeerIdentity::from_pubkey(xonly).short_npub();
+        }
+        addr.short_hex()
     }
 
     // === Configuration ===

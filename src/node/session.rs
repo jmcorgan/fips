@@ -47,7 +47,6 @@ pub(crate) struct SessionEntry {
     #[allow(dead_code)]
     remote_addr: NodeAddr,
     /// Remote node's static public key (for Noise IK).
-    #[allow(dead_code)]
     remote_pubkey: PublicKey,
     /// Current session state. `None` only during state transitions.
     state: Option<EndToEndState>,
@@ -93,6 +92,11 @@ impl SessionEntry {
             is_initiator,
             mmp: None,
         }
+    }
+
+    /// Get the remote node's public key.
+    pub(crate) fn remote_pubkey(&self) -> &PublicKey {
+        &self.remote_pubkey
     }
 
     /// Get the current session state.

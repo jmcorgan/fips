@@ -47,7 +47,7 @@ impl Node {
             Some(s) => s,
             None => {
                 warn!(
-                    node_addr = %node_addr,
+                    peer = %self.peer_display_name(&node_addr),
                     "Peer in index map has no session"
                 );
                 return;
@@ -64,7 +64,7 @@ impl Node {
             Ok(p) => p,
             Err(e) => {
                 debug!(
-                    node_addr = %node_addr,
+                    peer = %self.peer_display_name(&node_addr),
                     counter = header.counter,
                     error = %e,
                     "Decryption failed"
@@ -80,7 +80,7 @@ impl Node {
             Some(parts) => parts,
             None => {
                 debug!(
-                    node_addr = %node_addr,
+                    peer = %self.peer_display_name(&node_addr),
                     len = plaintext.len(),
                     "Decrypted payload too short for inner header"
                 );

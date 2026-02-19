@@ -98,16 +98,19 @@ impl Node {
             .collect();
 
         for addr in idle {
+            // Compute display name before removing the session
+            let name = self.peer_display_name(&addr);
+
             // Log MMP teardown metrics before removing the session
             if let Some(entry) = self.sessions.get(&addr)
                 && let Some(mmp) = entry.mmp()
             {
-                Self::log_session_mmp_teardown(&addr, mmp);
+                Self::log_session_mmp_teardown(&name, mmp);
             }
             self.sessions.remove(&addr);
             self.pending_tun_packets.remove(&addr);
             debug!(
-                dest = %addr,
+                dest = %name,
                 idle_secs = timeout_ms / 1000,
                 "Idle session removed (no application data)"
             );

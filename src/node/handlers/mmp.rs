@@ -38,7 +38,7 @@ impl Node {
         let sr = match SenderReport::decode(payload) {
             Ok(sr) => sr,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed SenderReport");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed SenderReport");
                 return;
             }
         };
@@ -46,7 +46,7 @@ impl Node {
         let peer = match self.peers.get_mut(from) {
             Some(p) => p,
             None => {
-                debug!(from = %from, "SenderReport from unknown peer");
+                debug!(from = %self.peer_display_name(from), "SenderReport from unknown peer");
                 return;
             }
         };
@@ -56,7 +56,7 @@ impl Node {
         }
 
         trace!(
-            from = %from,
+            from = %self.peer_display_name(from),
             cum_pkts = sr.cumulative_packets_sent,
             interval_bytes = sr.interval_bytes_sent,
             "Received SenderReport"
@@ -75,15 +75,17 @@ impl Node {
         let rr = match ReceiverReport::decode(payload) {
             Ok(rr) => rr,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed ReceiverReport");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed ReceiverReport");
                 return;
             }
         };
 
+        let peer_name = self.peer_display_name(from);
+
         let peer = match self.peers.get_mut(from) {
             Some(p) => p,
             None => {
-                debug!(from = %from, "ReceiverReport from unknown peer");
+                debug!(from = %peer_name, "ReceiverReport from unknown peer");
                 return;
             }
         };
@@ -117,7 +119,7 @@ impl Node {
         }
 
         trace!(
-            from = %from,
+            from = %peer_name,
             rtt_ms = ?mmp.metrics.srtt_ms(),
             loss = format_args!("{:.1}%", mmp.metrics.loss_rate() * 100.0),
             etx = format_args!("{:.2}", mmp.metrics.etx),
@@ -136,6 +138,11 @@ impl Node {
         let mut receiver_reports: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
 
         for (node_addr, peer) in self.peers.iter_mut() {
+            // Compute display name before taking mutable MMP borrow
+            let peer_name = self.peer_aliases.get(node_addr)
+                .cloned()
+                .unwrap_or_else(|| peer.identity().short_npub());
+
             let Some(mmp) = peer.mmp_mut() else {
                 continue;
             };
@@ -160,7 +167,7 @@ impl Node {
 
             // Periodic operator logging
             if mmp.should_log(now) {
-                Self::log_mmp_metrics(node_addr, mmp);
+                Self::log_mmp_metrics(&peer_name, mmp);
                 mmp.mark_logged(now);
             }
         }
@@ -168,19 +175,19 @@ impl Node {
         // Send collected reports
         for (node_addr, encoded) in sender_reports {
             if let Err(e) = self.send_encrypted_link_message(&node_addr, &encoded).await {
-                debug!(peer = %node_addr, error = %e, "Failed to send SenderReport");
+                debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send SenderReport");
             }
         }
 
         for (node_addr, encoded) in receiver_reports {
             if let Err(e) = self.send_encrypted_link_message(&node_addr, &encoded).await {
-                debug!(peer = %node_addr, error = %e, "Failed to send ReceiverReport");
+                debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send ReceiverReport");
             }
         }
     }
 
     /// Emit periodic MMP metrics for a peer at info and debug levels.
-    fn log_mmp_metrics(node_addr: &NodeAddr, mmp: &crate::mmp::MmpPeerState) {
+    fn log_mmp_metrics(peer_name: &str, mmp: &crate::mmp::MmpPeerState) {
         let m = &mmp.metrics;
 
         let rtt_str = match m.srtt_ms() {
@@ -196,7 +203,7 @@ impl Node {
 
         // Info-level: concise summary
         info!(
-            peer = %node_addr,
+            peer = %peer_name,
             rtt = %rtt_str,
             loss = format_args!("{:.1}%", loss_pct),
             goodput = %goodput_str,
@@ -207,7 +214,7 @@ impl Node {
 
         // Debug-level: extended details
         debug!(
-            peer = %node_addr,
+            peer = %peer_name,
             jitter_us = mmp.receiver.jitter_us(),
             reorder = mmp.receiver.cumulative_packets_recv(),
             rtt_trend = format_args!("{}", if m.rtt_trend.initialized() {
@@ -228,7 +235,7 @@ impl Node {
     }
 
     /// Emit a teardown log summarizing lifetime MMP metrics for a removed peer.
-    pub(in crate::node) fn log_mmp_teardown(node_addr: &NodeAddr, mmp: &crate::mmp::MmpPeerState) {
+    pub(in crate::node) fn log_mmp_teardown(peer_name: &str, mmp: &crate::mmp::MmpPeerState) {
         let m = &mmp.metrics;
 
         let rtt_str = match m.srtt_ms() {
@@ -237,7 +244,7 @@ impl Node {
         };
 
         info!(
-            peer = %node_addr,
+            peer = %peer_name,
             rtt = %rtt_str,
             loss = format_args!("{:.1}%", m.loss_rate() * 100.0),
             etx = format_args!("{:.2}", m.etx),
@@ -263,6 +270,14 @@ impl Node {
         let mut reports: Vec<(NodeAddr, u8, Vec<u8>)> = Vec::new();
 
         for (dest_addr, entry) in self.sessions.iter_mut() {
+            // Compute display name before taking mutable MMP borrow
+            let session_name = self.peer_aliases.get(dest_addr)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let (xonly, _) = entry.remote_pubkey().x_only_public_key();
+                    crate::PeerIdentity::from_pubkey(xonly).short_npub()
+                });
+
             let Some(mmp) = entry.mmp_mut() else {
                 continue;
             };
@@ -309,7 +324,7 @@ impl Node {
 
             // Periodic operator logging
             if mmp.should_log(now) {
-                Self::log_session_mmp_metrics(dest_addr, mmp);
+                Self::log_session_mmp_metrics(&session_name, mmp);
                 mmp.mark_logged(now);
             }
         }
@@ -318,7 +333,7 @@ impl Node {
         for (dest_addr, msg_type, body) in reports {
             if let Err(e) = self.send_session_msg(&dest_addr, msg_type, &body).await {
                 debug!(
-                    dest = %dest_addr,
+                    dest = %self.peer_display_name(&dest_addr),
                     msg_type,
                     error = %e,
                     "Failed to send session MMP report"
@@ -328,7 +343,7 @@ impl Node {
     }
 
     /// Emit periodic session MMP metrics at info and debug levels.
-    fn log_session_mmp_metrics(dest_addr: &NodeAddr, mmp: &MmpSessionState) {
+    fn log_session_mmp_metrics(session_name: &str, mmp: &MmpSessionState) {
         let m = &mmp.metrics;
 
         let rtt_str = match m.srtt_ms() {
@@ -343,7 +358,7 @@ impl Node {
         let observed_mtu = mmp.path_mtu.last_observed_mtu();
 
         info!(
-            session = %dest_addr,
+            session = %session_name,
             rtt = %rtt_str,
             loss = format_args!("{:.1}%", loss_pct),
             goodput = %goodput_str,
@@ -355,7 +370,7 @@ impl Node {
         );
 
         debug!(
-            session = %dest_addr,
+            session = %session_name,
             jitter_us = mmp.receiver.jitter_us(),
             rtt_trend = format_args!("{}", if m.rtt_trend.initialized() {
                 format!("short={:.1} long={:.1}", m.rtt_trend.short(), m.rtt_trend.long())
@@ -375,7 +390,7 @@ impl Node {
     }
 
     /// Emit a teardown log summarizing lifetime session MMP metrics.
-    pub(in crate::node) fn log_session_mmp_teardown(dest_addr: &NodeAddr, mmp: &MmpSessionState) {
+    pub(in crate::node) fn log_session_mmp_teardown(session_name: &str, mmp: &MmpSessionState) {
         let m = &mmp.metrics;
 
         let rtt_str = match m.srtt_ms() {
@@ -384,7 +399,7 @@ impl Node {
         };
 
         info!(
-            session = %dest_addr,
+            session = %session_name,
             rtt = %rtt_str,
             loss = format_args!("{:.1}%", m.loss_rate() * 100.0),
             etx = format_args!("{:.2}", m.etx),

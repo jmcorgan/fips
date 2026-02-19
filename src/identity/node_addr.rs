@@ -51,6 +51,11 @@ impl NodeAddr {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
+
+    /// Return a short hex representation: first 4 bytes + "...".
+    pub fn short_hex(&self) -> String {
+        format!("{}...", hex_encode(&self.0[..4]))
+    }
 }
 
 impl fmt::Debug for NodeAddr {

@@ -135,7 +135,7 @@ impl Node {
         let mut entry = match self.sessions.remove(src_addr) {
             Some(e) => e,
             None => {
-                debug!(src = %src_addr, "Encrypted session message for unknown session");
+                debug!(src = %self.peer_display_name(src_addr), "Encrypted session message for unknown session");
                 return;
             }
         };
@@ -145,7 +145,7 @@ impl Node {
             let handshake = match old_state {
                 Some(EndToEndState::Responding(hs)) => hs,
                 _ => {
-                    debug!(src = %src_addr, "Unexpected state during Responding transition");
+                    debug!(src = %self.peer_display_name(src_addr), "Unexpected state during Responding transition");
                     return;
                 }
             };
@@ -160,14 +160,14 @@ impl Node {
             entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
             entry.mark_established(Self::now_ms());
             entry.init_mmp(&self.config.node.session_mmp);
-            info!(src = %src_addr, "Session established (responder, on first encrypted message)");
+            info!(src = %self.peer_display_name(src_addr), "Session established (responder, on first encrypted message)");
         }
 
         // Decrypt with AAD = the 12-byte header
         let session = match entry.state_mut() {
             EndToEndState::Established(s) => s,
             _ => {
-                debug!(src = %src_addr, "Encrypted message but session not established");
+                debug!(src = %self.peer_display_name(src_addr), "Encrypted message but session not established");
                 self.sessions.insert(*src_addr, entry);
                 return;
             }
@@ -181,7 +181,7 @@ impl Node {
             Ok(pt) => pt,
             Err(e) => {
                 debug!(
-                    error = %e, src = %src_addr, counter = header.counter,
+                    error = %e, src = %self.peer_display_name(src_addr), counter = header.counter,
                     "Session AEAD decryption failed"
                 );
                 self.sessions.insert(*src_addr, entry);
@@ -195,7 +195,7 @@ impl Node {
         let (timestamp, msg_type, inner_flags_byte, rest) = match fsp_strip_inner_header(&plaintext) {
             Some(parts) => parts,
             None => {
-                debug!(src = %src_addr, "Decrypted payload too short for FSP inner header");
+                debug!(src = %self.peer_display_name(src_addr), "Decrypted payload too short for FSP inner header");
                 return;
             }
         };
@@ -236,7 +236,7 @@ impl Node {
                     }
                 } else {
                     trace!(
-                        src = %src_addr,
+                        src = %self.peer_display_name(src_addr),
                         "DataPacket decrypted (no TUN interface, plaintext dropped)"
                     );
                 }
@@ -251,7 +251,7 @@ impl Node {
                 self.handle_session_path_mtu_notification(src_addr, rest);
             }
             _ => {
-                debug!(src = %src_addr, msg_type, "Unknown session message type, dropping");
+                debug!(src = %self.peer_display_name(src_addr), msg_type, "Unknown session message type, dropping");
             }
         }
 
@@ -298,25 +298,25 @@ impl Node {
                     if self.identity.node_addr() < src_addr {
                         // We win — drop their setup, they'll process ours
                         debug!(
-                            src = %src_addr,
+                            src = %self.peer_display_name(src_addr),
                             "Simultaneous session initiation: we win (smaller addr), dropping their setup"
                         );
                         return;
                     }
                     // We lose — discard our pending handshake, become responder below
                     debug!(
-                        src = %src_addr,
+                        src = %self.peer_display_name(src_addr),
                         "Simultaneous session initiation: we lose, becoming responder"
                     );
                 }
                 EndToEndState::Responding(_) => {
                     // Duplicate setup while we already responded — drop
-                    debug!(src = %src_addr, "Duplicate SessionSetup, already responding");
+                    debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, already responding");
                     return;
                 }
                 EndToEndState::Established(_) => {
                     // Re-establishment: replace existing session below
-                    debug!(src = %src_addr, "Session re-establishment from peer");
+                    debug!(src = %self.peer_display_name(src_addr), "Session re-establishment from peer");
                 }
             }
         }
@@ -360,7 +360,7 @@ impl Node {
 
         // Route the ack back to the initiator
         if let Err(e) = self.send_session_datagram(&mut datagram).await {
-            debug!(error = %e, dest = %src_addr, "Failed to send SessionAck");
+            debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send SessionAck");
             return;
         }
 
@@ -369,7 +369,7 @@ impl Node {
         let entry = SessionEntry::new(*src_addr, remote_pubkey, EndToEndState::Responding(handshake), now_ms, false);
         self.sessions.insert(*src_addr, entry);
 
-        debug!(src = %src_addr, "SessionSetup processed, SessionAck sent");
+        debug!(src = %self.peer_display_name(src_addr), "SessionSetup processed, SessionAck sent");
     }
 
     /// Handle an incoming SessionAck (Noise IK msg2).
@@ -397,7 +397,7 @@ impl Node {
         let mut entry = match self.sessions.remove(src_addr) {
             Some(e) => e,
             None => {
-                debug!(src = %src_addr, "SessionAck for unknown session");
+                debug!(src = %self.peer_display_name(src_addr), "SessionAck for unknown session");
                 return;
             }
         };
@@ -406,7 +406,7 @@ impl Node {
         let handshake = match entry.take_state() {
             Some(EndToEndState::Initiating(hs)) => hs,
             _ => {
-                debug!(src = %src_addr, "SessionAck but session not in Initiating state");
+                debug!(src = %self.peer_display_name(src_addr), "SessionAck but session not in Initiating state");
                 // Put it back
                 self.sessions.insert(*src_addr, entry);
                 return;
@@ -434,7 +434,7 @@ impl Node {
         // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;
 
-        info!(src = %src_addr, "Session established (initiator)");
+        info!(src = %self.peer_display_name(src_addr), "Session established (initiator)");
     }
 
     // === Session-layer MMP report handlers ===
@@ -447,13 +447,13 @@ impl Node {
         let sr = match SessionSenderReport::decode(body) {
             Ok(sr) => sr,
             Err(e) => {
-                debug!(src = %src_addr, error = %e, "Malformed SessionSenderReport");
+                debug!(src = %self.peer_display_name(src_addr), error = %e, "Malformed SessionSenderReport");
                 return;
             }
         };
 
         trace!(
-            src = %src_addr,
+            src = %self.peer_display_name(src_addr),
             cum_pkts = sr.cumulative_packets_sent,
             interval_bytes = sr.interval_bytes_sent,
             "Received SessionSenderReport"
@@ -468,7 +468,7 @@ impl Node {
         let session_rr = match SessionReceiverReport::decode(body) {
             Ok(rr) => rr,
             Err(e) => {
-                debug!(src = %src_addr, error = %e, "Malformed SessionReceiverReport");
+                debug!(src = %self.peer_display_name(src_addr), error = %e, "Malformed SessionReceiverReport");
                 return;
             }
         };
@@ -477,10 +477,11 @@ impl Node {
         let rr: ReceiverReport = ReceiverReport::from(&session_rr);
 
         let now_ms = Self::now_ms();
+        let peer_name = self.peer_display_name(src_addr);
         let entry = match self.sessions.get_mut(src_addr) {
             Some(e) => e,
             None => {
-                debug!(src = %src_addr, "SessionReceiverReport for unknown session");
+                debug!(src = %peer_name, "SessionReceiverReport for unknown session");
                 return;
             }
         };
@@ -520,7 +521,7 @@ impl Node {
         }
 
         trace!(
-            src = %src_addr,
+            src = %peer_name,
             rtt_ms = ?mmp.metrics.srtt_ms(),
             loss = format_args!("{:.1}%", mmp.metrics.loss_rate() * 100.0),
             "Processed SessionReceiverReport"
@@ -535,15 +536,16 @@ impl Node {
         let notif = match PathMtuNotification::decode(body) {
             Ok(n) => n,
             Err(e) => {
-                debug!(src = %src_addr, error = %e, "Malformed PathMtuNotification");
+                debug!(src = %self.peer_display_name(src_addr), error = %e, "Malformed PathMtuNotification");
                 return;
             }
         };
 
+        let peer_name = self.peer_display_name(src_addr);
         let entry = match self.sessions.get_mut(src_addr) {
             Some(e) => e,
             None => {
-                debug!(src = %src_addr, "PathMtuNotification for unknown session");
+                debug!(src = %peer_name, "PathMtuNotification for unknown session");
                 return;
             }
         };
@@ -559,7 +561,7 @@ impl Node {
 
         if new_mtu != old_mtu {
             debug!(
-                src = %src_addr,
+                src = %peer_name,
                 old_mtu,
                 new_mtu,
                 "Path MTU changed via notification"
@@ -703,7 +705,7 @@ impl Node {
         let entry = SessionEntry::new(dest_addr, dest_pubkey, EndToEndState::Initiating(handshake), now_ms, true);
         self.sessions.insert(dest_addr, entry);
 
-        info!(dest = %dest_addr, "Session initiation started");
+        info!(dest = %self.peer_display_name(&dest_addr), "Session initiation started");
         Ok(())
     }
 
@@ -977,7 +979,7 @@ impl Node {
         if let Some(entry) = self.sessions.get(&dest_addr) {
             if entry.is_established() {
                 if let Err(e) = self.send_session_data(&dest_addr, &ipv6_packet).await {
-                    debug!(dest = %dest_addr, error = %e, "Failed to send TUN packet via session");
+                    debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
                 }
                 return;
             }
@@ -990,7 +992,7 @@ impl Node {
         // If session initiation fails (no route), trigger discovery and
         // queue the packet for retry when discovery completes.
         if let Err(e) = self.initiate_session(dest_addr, dest_pubkey).await {
-            debug!(dest = %dest_addr, error = %e, "Failed to initiate session, trying discovery");
+            debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to initiate session, trying discovery");
             self.maybe_initiate_lookup(&dest_addr).await;
             self.queue_pending_packet(dest_addr, ipv6_packet);
             return;
@@ -1086,7 +1088,7 @@ impl Node {
         };
         for packet in packets {
             if let Err(e) = self.send_session_data(dest_addr, &packet).await {
-                debug!(dest = %dest_addr, error = %e, "Failed to send queued TUN packet");
+                debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
                 break;
             }
         }
@@ -1104,7 +1106,7 @@ impl Node {
         let dest_pubkey = match self.lookup_by_fips_prefix(&prefix) {
             Some((_, pk)) => pk,
             None => {
-                debug!(dest = %dest_addr, "Discovery complete but no identity for session retry");
+                debug!(dest = %self.peer_display_name(&dest_addr), "Discovery complete but no identity for session retry");
                 return;
             }
         };
@@ -1118,10 +1120,10 @@ impl Node {
 
         match self.initiate_session(dest_addr, dest_pubkey).await {
             Ok(()) => {
-                debug!(dest = %dest_addr, "Session initiated after discovery");
+                debug!(dest = %self.peer_display_name(&dest_addr), "Session initiated after discovery");
             }
             Err(e) => {
-                debug!(dest = %dest_addr, error = %e, "Session retry after discovery failed");
+                debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Session retry after discovery failed");
             }
         }
     }

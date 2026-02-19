@@ -77,7 +77,7 @@ impl Node {
             peer.clear_filter_update_needed();
         }
 
-        trace!(peer = %peer_addr, seq = announce.sequence, "Sent FilterAnnounce");
+        trace!(peer = %self.peer_display_name(peer_addr), seq = announce.sequence, "Sent FilterAnnounce");
         Ok(())
     }
 
@@ -98,7 +98,7 @@ impl Node {
         for peer_addr in ready {
             if let Err(e) = self.send_filter_announce_to_peer(&peer_addr).await {
                 debug!(
-                    peer = %peer_addr,
+                    peer = %self.peer_display_name(&peer_addr),
                     error = %e,
                     "Failed to send pending FilterAnnounce"
                 );
@@ -116,18 +116,18 @@ impl Node {
         let announce = match FilterAnnounce::decode(payload) {
             Ok(a) => a,
             Err(e) => {
-                debug!(from = %from, error = %e, "Malformed FilterAnnounce");
+                debug!(from = %self.peer_display_name(from), error = %e, "Malformed FilterAnnounce");
                 return;
             }
         };
 
         // Validate
         if !announce.is_valid() {
-            debug!(from = %from, "FilterAnnounce filter/size_class mismatch");
+            debug!(from = %self.peer_display_name(from), "FilterAnnounce filter/size_class mismatch");
             return;
         }
         if !announce.is_v1_compliant() {
-            debug!(from = %from, size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
+            debug!(from = %self.peer_display_name(from), size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
             return;
         }
 
@@ -135,7 +135,7 @@ impl Node {
         let current_seq = match self.peers.get(from) {
             Some(peer) => peer.filter_sequence(),
             None => {
-                debug!(from = %from, "FilterAnnounce from unknown peer");
+                debug!(from = %self.peer_display_name(from), "FilterAnnounce from unknown peer");
                 return;
             }
         };
@@ -143,7 +143,7 @@ impl Node {
         // Reject stale/replay
         if announce.sequence <= current_seq {
             debug!(
-                from = %from,
+                from = %self.peer_display_name(from),
                 received_seq = announce.sequence,
                 current_seq = current_seq,
                 "Stale FilterAnnounce rejected"
@@ -162,7 +162,7 @@ impl Node {
         }
 
         debug!(
-            from = %from,
+            from = %self.peer_display_name(from),
             seq = announce.sequence,
             "Received FilterAnnounce"
         );

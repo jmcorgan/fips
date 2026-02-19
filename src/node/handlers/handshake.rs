@@ -165,14 +165,14 @@ impl Node {
                 match result {
                     PromotionResult::Promoted(node_addr) => {
                         info!(
-                            node_addr = %node_addr,
+                            peer = %self.peer_display_name(&node_addr),
                             link_id = %link_id,
                             our_index = %our_index,
                             "Inbound peer promoted to active"
                         );
                         // Send initial tree announce to new peer
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
@@ -181,13 +181,13 @@ impl Node {
                         // Clean up the losing connection's link
                         self.remove_link(&loser_link_id);
                         info!(
-                            node_addr = %node_addr,
+                            peer = %self.peer_display_name(&node_addr),
                             loser_link_id = %loser_link_id,
                             "Inbound cross-connection won, loser link cleaned up"
                         );
                         // Send initial tree announce to peer (new or reconnected)
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
@@ -285,7 +285,7 @@ impl Node {
         let peer_node_addr = *peer_identity.node_addr();
 
         info!(
-            node_addr = %peer_node_addr,
+            peer = %self.peer_display_name(&peer_node_addr),
             link_id = %link_id,
             their_index = %header.sender_idx,
             "Outbound handshake completed"
@@ -327,7 +327,7 @@ impl Node {
                     match (outbound_session, outbound_our_index) {
                         (Some(s), Some(idx)) => (s, idx),
                         _ => {
-                            warn!(node_addr = %peer_node_addr, "Incomplete outbound connection");
+                            warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
                             self.pending_outbound.remove(&key);
                             return;
                         }
@@ -352,7 +352,7 @@ impl Node {
                     );
 
                     info!(
-                        node_addr = %peer_node_addr,
+                        peer = %self.peer_display_name(&peer_node_addr),
                         new_our_index = %outbound_our_index,
                         new_their_index = %header.sender_idx,
                         "Cross-connection: swapped to outbound session (our outbound wins)"
@@ -372,7 +372,7 @@ impl Node {
 
                 if let Some(peer) = self.peers.get(&peer_node_addr) {
                     info!(
-                        node_addr = %peer_node_addr,
+                        peer = %self.peer_display_name(&peer_node_addr),
                         kept_their_index = ?peer.their_index(),
                         "Cross-connection: keeping inbound session and original their_index (peer outbound wins)"
                     );
@@ -390,7 +390,7 @@ impl Node {
 
             // Send TreeAnnounce now that sessions are aligned
             if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
-                debug!(peer = %peer_node_addr, error = %e, "Failed to send TreeAnnounce after cross-connection resolution");
+                debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send TreeAnnounce after cross-connection resolution");
             }
             // Schedule filter announce (sent on next tick via debounce)
             self.bloom_state.mark_update_needed(peer_node_addr);
@@ -406,12 +406,12 @@ impl Node {
                 match result {
                     PromotionResult::Promoted(node_addr) => {
                         info!(
-                            node_addr = %node_addr,
+                            peer = %self.peer_display_name(&node_addr),
                             "Peer promoted to active"
                         );
                         // Send initial tree announce to new peer
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
@@ -425,13 +425,13 @@ impl Node {
                             link_id,
                         );
                         info!(
-                            node_addr = %node_addr,
+                            peer = %self.peer_display_name(&node_addr),
                             loser_link_id = %loser_link_id,
                             "Outbound cross-connection won, loser link cleaned up"
                         );
                         // Send initial tree announce to peer (new or reconnected)
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %node_addr, error = %e, "Failed to send initial TreeAnnounce");
+                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
@@ -561,7 +561,7 @@ impl Node {
                 self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
                 info!(
-                    node_addr = %peer_node_addr,
+                    peer = %self.peer_display_name(&peer_node_addr),
                     winner_link = %link_id,
                     loser_link = %loser_link_id,
                     "Cross-connection resolved: this connection won"
@@ -577,7 +577,7 @@ impl Node {
                 let _ = self.index_allocator.free(our_index);
 
                 info!(
-                    node_addr = %peer_node_addr,
+                    peer = %self.peer_display_name(&peer_node_addr),
                     winner_link = %existing_link_id,
                     loser_link = %link_id,
                     "Cross-connection resolved: this connection lost"
@@ -608,7 +608,7 @@ impl Node {
 
             for pending_link_id in &pending_to_same_peer {
                 debug!(
-                    node_addr = %peer_node_addr,
+                    peer = %self.peer_display_name(&peer_node_addr),
                     pending_link_id = %pending_link_id,
                     promoted_link_id = %link_id,
                     "Deferring cleanup of pending outbound (awaiting msg2 for index update)"
@@ -643,7 +643,7 @@ impl Node {
             self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
             info!(
-                node_addr = %peer_node_addr,
+                peer = %self.peer_display_name(&peer_node_addr),
                 link_id = %link_id,
                 our_index = %our_index,
                 their_index = %their_index,
