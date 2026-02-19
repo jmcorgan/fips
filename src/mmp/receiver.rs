@@ -356,6 +356,10 @@ impl ReceiverState {
     pub fn report_interval(&self) -> Duration {
         self.report_interval
     }
+
+    pub fn last_recv_time(&self) -> Option<Instant> {
+        self.last_recv_time
+    }
 }
 
 impl Default for ReceiverState {

@@ -9,11 +9,12 @@ use crate::mmp::MmpSessionState;
 use crate::mmp::report::{ReceiverReport, SenderReport};
 use crate::node::Node;
 use crate::protocol::{
-    PathMtuNotification, SessionMessageType, SessionReceiverReport, SessionSenderReport,
+    LinkMessageType, PathMtuNotification, SessionMessageType, SessionReceiverReport,
+    SessionSenderReport,
 };
 use crate::NodeAddr;
-use std::time::Instant;
-use tracing::{debug, info, trace};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, trace, warn};
 
 /// Format bytes/sec as human-readable throughput.
 fn format_throughput(bps: f64) -> String {
@@ -380,5 +381,64 @@ impl Node {
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
             "MMP session teardown"
         );
+    }
+
+    /// Send heartbeats and remove dead peers.
+    ///
+    /// Called from the tick handler. Sends a 1-byte heartbeat to each peer
+    /// whose heartbeat interval has elapsed, and removes any peer that
+    /// hasn't sent us a frame within the link dead timeout.
+    pub(in crate::node) async fn check_link_heartbeats(&mut self) {
+        let now = Instant::now();
+        let heartbeat_interval = Duration::from_secs(self.config.node.heartbeat_interval_secs);
+        let dead_timeout = Duration::from_secs(self.config.node.link_dead_timeout_secs);
+        let heartbeat_msg = [LinkMessageType::Heartbeat.to_byte()];
+
+        // Collect heartbeats to send and dead peers to remove
+        let mut heartbeats: Vec<NodeAddr> = Vec::new();
+        let mut dead_peers: Vec<NodeAddr> = Vec::new();
+
+        for (node_addr, peer) in self.peers.iter() {
+            // Check liveness via MMP receiver last_recv_time
+            if let Some(mmp) = peer.mmp()
+                && let Some(last_recv) = mmp.receiver.last_recv_time()
+                && now.duration_since(last_recv) >= dead_timeout
+            {
+                dead_peers.push(*node_addr);
+                continue;
+            }
+
+            // Check if heartbeat is due
+            let needs_heartbeat = match peer.last_heartbeat_sent() {
+                None => true,
+                Some(last) => now.duration_since(last) >= heartbeat_interval,
+            };
+            if needs_heartbeat {
+                heartbeats.push(*node_addr);
+            }
+        }
+
+        // Remove dead peers
+        for addr in &dead_peers {
+            warn!(
+                peer = %self.peer_display_name(addr),
+                timeout_secs = self.config.node.link_dead_timeout_secs,
+                "Removing peer: link dead timeout"
+            );
+            self.remove_active_peer(addr);
+        }
+
+        // Send heartbeats (skip peers we just removed)
+        for addr in heartbeats {
+            if dead_peers.contains(&addr) {
+                continue;
+            }
+            if let Some(peer) = self.peers.get_mut(&addr) {
+                peer.mark_heartbeat_sent(now);
+            }
+            if let Err(e) = self.send_encrypted_link_message(&addr, &heartbeat_msg).await {
+                trace!(peer = %self.peer_display_name(&addr), error = %e, "Failed to send heartbeat");
+            }
+        }
     }
 }

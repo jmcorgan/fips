@@ -131,6 +131,10 @@ pub struct ActivePeer {
     /// Per-peer MMP state (None for legacy peers without Noise sessions).
     mmp: Option<MmpPeerState>,
 
+    // === Heartbeat ===
+    /// When we last sent a heartbeat to this peer.
+    last_heartbeat_sent: Option<Instant>,
+
     // === Handshake Resend ===
     /// Wire-format msg2 for resend on duplicate msg1 (responder only).
     /// Cleared after the handshake timeout window.
@@ -166,6 +170,7 @@ impl ActivePeer {
             authenticated_at,
             last_seen: authenticated_at,
             mmp: None,
+            last_heartbeat_sent: None,
             handshake_msg2: None,
         }
     }
@@ -226,6 +231,7 @@ impl ActivePeer {
             authenticated_at,
             last_seen: authenticated_at,
             mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
+            last_heartbeat_sent: None,
             handshake_msg2: None,
         }
     }
@@ -483,6 +489,18 @@ impl ActivePeer {
     /// Wraps at ~49.7 days which is acceptable for session-relative timing.
     pub fn session_elapsed_ms(&self) -> u32 {
         self.session_start.elapsed().as_millis() as u32
+    }
+
+    // === Heartbeat ===
+
+    /// When we last sent a heartbeat to this peer.
+    pub fn last_heartbeat_sent(&self) -> Option<Instant> {
+        self.last_heartbeat_sent
+    }
+
+    /// Record that we sent a heartbeat.
+    pub fn mark_heartbeat_sent(&mut self, now: Instant) {
+        self.last_heartbeat_sent = Some(now);
     }
 
     // === State Updates ===

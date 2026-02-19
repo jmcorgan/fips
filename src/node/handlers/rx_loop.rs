@@ -87,6 +87,7 @@ impl Node {
                     self.check_bloom_state().await;
                     self.check_mmp_reports().await;
                     self.check_session_mmp_reports().await;
+                    self.check_link_heartbeats().await;
                     self.purge_stale_lookups(now_ms);
                 }
             }

@@ -367,6 +367,15 @@ pub struct NodeConfig {
     #[serde(default = "NodeConfig::default_base_rtt_ms")]
     pub base_rtt_ms: u64,
 
+    /// Link heartbeat send interval in seconds (`node.heartbeat_interval_secs`).
+    #[serde(default = "NodeConfig::default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+
+    /// Link dead timeout in seconds (`node.link_dead_timeout_secs`).
+    /// Peers silent for this duration are removed.
+    #[serde(default = "NodeConfig::default_link_dead_timeout_secs")]
+    pub link_dead_timeout_secs: u64,
+
     /// Resource limits (`node.limits.*`).
     #[serde(default)]
     pub limits: LimitsConfig,
@@ -419,6 +428,8 @@ impl Default for NodeConfig {
             leaf_only: false,
             tick_interval_secs: 1,
             base_rtt_ms: 100,
+            heartbeat_interval_secs: 10,
+            link_dead_timeout_secs: 30,
             limits: LimitsConfig::default(),
             rate_limit: RateLimitConfig::default(),
             retry: RetryConfig::default(),
@@ -437,4 +448,6 @@ impl Default for NodeConfig {
 impl NodeConfig {
     fn default_tick_interval_secs() -> u64 { 1 }
     fn default_base_rtt_ms() -> u64 { 100 }
+    fn default_heartbeat_interval_secs() -> u64 { 10 }
+    fn default_link_dead_timeout_secs() -> u64 { 30 }
 }

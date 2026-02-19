@@ -2,7 +2,7 @@
 
 use crate::node::Node;
 use crate::NodeAddr;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 impl Node {
     /// Dispatch a decrypted link message to the appropriate handler.
@@ -48,6 +48,10 @@ impl Node {
             0x50 => {
                 // Disconnect
                 self.handle_disconnect(from, payload);
+            }
+            0x51 => {
+                // Heartbeat — no-op, last_recv_time already updated by record_recv()
+                trace!(peer = %self.peer_display_name(from), "Received heartbeat");
             }
             _ => {
                 debug!(msg_type = msg_type, "Unknown link message type");

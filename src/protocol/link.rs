@@ -96,6 +96,9 @@ pub enum LinkMessageType {
     // Link Control (0x50-0x5F)
     /// Orderly disconnect notification before link closure.
     Disconnect = 0x50,
+    /// Periodic heartbeat for link liveness detection.
+    /// No payload — the msg_type byte alone is sufficient.
+    Heartbeat = 0x51,
 }
 
 impl LinkMessageType {
@@ -110,6 +113,7 @@ impl LinkMessageType {
             0x30 => Some(LinkMessageType::LookupRequest),
             0x31 => Some(LinkMessageType::LookupResponse),
             0x50 => Some(LinkMessageType::Disconnect),
+            0x51 => Some(LinkMessageType::Heartbeat),
             _ => None,
         }
     }
@@ -131,6 +135,7 @@ impl fmt::Display for LinkMessageType {
             LinkMessageType::LookupRequest => "LookupRequest",
             LinkMessageType::LookupResponse => "LookupResponse",
             LinkMessageType::Disconnect => "Disconnect",
+            LinkMessageType::Heartbeat => "Heartbeat",
         };
         write!(f, "{}", name)
     }
@@ -423,6 +428,7 @@ mod tests {
             LinkMessageType::LookupResponse,
             LinkMessageType::SessionDatagram,
             LinkMessageType::Disconnect,
+            LinkMessageType::Heartbeat,
         ];
 
         for ty in types {
