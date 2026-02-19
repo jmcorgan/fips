@@ -112,6 +112,21 @@ impl UdpTransport {
         let actual_send = sock2.send_buffer_size()
             .map_err(|e| TransportError::StartFailed(format!("get send buffer: {}", e)))?;
 
+        if actual_recv < recv_buf {
+            warn!(
+                requested = recv_buf,
+                actual = actual_recv,
+                "UDP recv buffer clamped by kernel (increase net.core.rmem_max)"
+            );
+        }
+        if actual_send < send_buf {
+            warn!(
+                requested = send_buf,
+                actual = actual_send,
+                "UDP send buffer clamped by kernel (increase net.core.wmem_max)"
+            );
+        }
+
         // Convert to tokio UdpSocket
         let std_socket: std::net::UdpSocket = sock2.into();
         let socket = UdpSocket::from_std(std_socket)
