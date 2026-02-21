@@ -1,49 +1,49 @@
-# FIPS Link Protocol (FLP)
+# FIPS Mesh Protocol (FMP)
 
-The FIPS Link Protocol is the middle layer of the FIPS protocol stack. It sits
+The FIPS Mesh Protocol is the middle layer of the FIPS protocol stack. It sits
 between the transport layer below and the FIPS Session Protocol (FSP) above.
-FLP is where anonymous transport addresses become authenticated peers, where
+FMP is where anonymous transport addresses become authenticated peers, where
 the mesh self-organizes, and where forwarding decisions are made.
 
 ## Role
 
-FLP manages direct peer connections over transports. When a transport delivers
-a datagram from an unknown address, FLP authenticates the sender through a
+FMP manages direct peer connections over transports. When a transport delivers
+a datagram from an unknown address, FMP authenticates the sender through a
 Noise IK handshake, establishing a cryptographic link. Once authenticated, the
 link carries all inter-peer communication: spanning tree gossip, bloom filter
 updates, coordinate discovery, and forwarded session datagrams — all encrypted
 per-hop.
 
-FLP is the boundary between opaque transport addresses and identified peers.
-Below FLP, everything is transport-specific addresses (IP:port, MAC, .onion).
-Above FLP, everything is peers identified by public keys and routable by
+FMP is the boundary between opaque transport addresses and identified peers.
+Below FMP, everything is transport-specific addresses (IP:port, MAC, .onion).
+Above FMP, everything is peers identified by public keys and routable by
 node_addr. The transport layer never sees FIPS-level structure; FSP never sees
 transport addresses or routing details.
 
 ## Services Provided to FSP
 
-From the session layer's perspective, FLP is a black box providing three
+From the session layer's perspective, FMP is a black box providing three
 services. FSP knows nothing about transports, links, peers, spanning trees,
 coordinates, bloom filters, hop counts, or network topology.
 
 ### Datagram Forwarding
 
-FLP accepts a datagram addressed by source and destination node_addr and
+FMP accepts a datagram addressed by source and destination node_addr and
 delivers it best-effort toward the destination. The datagram travels hop by
-hop — at each node, FLP decrypts the link layer, reads the destination
+hop — at each node, FMP decrypts the link layer, reads the destination
 node_addr, makes a local forwarding decision, and re-encrypts onto the
 next-hop link.
 
 FSP provides: source node_addr, destination node_addr, hop limit, and an
 opaque payload (the session-layer encrypted message).
 
-FLP provides: best-effort delivery. No acknowledgment, no retransmission, no
+FMP provides: best-effort delivery. No acknowledgment, no retransmission, no
 ordering guarantee. Datagrams may be dropped, duplicated, or delivered out of
 order.
 
 ### Error Signaling
 
-When forwarding fails, FLP signals the source endpoint asynchronously:
+When forwarding fails, FMP signals the source endpoint asynchronously:
 
 - **CoordsRequired**: A transit node lacks the destination's tree coordinates
   and cannot make a forwarding decision. The source should re-initiate
@@ -60,21 +60,21 @@ storms during topology changes.
 ### Local Delivery
 
 When a datagram arrives with a destination node_addr matching the local node,
-FLP delivers it up to FSP for session-layer processing.
+FMP delivers it up to FSP for session-layer processing.
 
 ## Services Required from Transport Layer
 
-FLP requires the following from each transport:
+FMP requires the following from each transport:
 
 ### Datagram Delivery
 
 Send and receive raw datagrams to/from transport addresses. The transport
-handles all medium-specific details. FLP sees only "send bytes to address" and
+handles all medium-specific details. FMP sees only "send bytes to address" and
 "bytes arrived from address."
 
 ### MTU Reporting
 
-The maximum datagram size for a given link. FLP needs this to determine how
+The maximum datagram size for a given link. FMP needs this to determine how
 much payload fits in a single packet after link encryption overhead (37 bytes
 for the encrypted frame wrapper: 16-byte outer header + 5-byte inner header +
 16-byte AEAD tag).
@@ -82,13 +82,13 @@ for the encrypted frame wrapper: 16-byte outer header + 5-byte inner header +
 ### Connection Lifecycle
 
 For connection-oriented transports, the transport must establish the underlying
-connection before FLP can begin the Noise IK handshake. For connectionless
+connection before FMP can begin the Noise IK handshake. For connectionless
 transports, datagrams can flow immediately.
 
 ### Endpoint Discovery (Optional)
 
 When a transport discovers a FIPS-capable endpoint (via beacon, query, or
-other transport-specific mechanism), it notifies FLP so that link setup can
+other transport-specific mechanism), it notifies FMP so that link setup can
 be initiated. Transports without discovery support provide peer addresses
 through configuration.
 
@@ -124,14 +124,14 @@ handshake completion:
 ### Reconnection
 
 When a Noise IK msg1 arrives from a peer that already has an authenticated
-link, FLP accepts the new handshake alongside the existing session. If the new
+link, FMP accepts the new handshake alongside the existing session. If the new
 handshake completes successfully, it replaces the old session. This handles
 legitimate reconnection (network change, process restart, NAT rebinding)
 without disrupting ongoing traffic until the new session is confirmed.
 
 ### Auto-Reconnect
 
-When MMP's liveness detection removes a peer (dead timeout exceeded), FLP
+When MMP's liveness detection removes a peer (dead timeout exceeded), FMP
 automatically re-initiates the connection if the peer is configured for it.
 The auto-reconnect path:
 
@@ -256,7 +256,7 @@ authenticity.
 
 When an encrypted packet successfully decrypts, the sender is the
 authenticated peer regardless of what transport address the packet arrived
-from. FLP updates the peer's current address to the packet's source address,
+from. FMP updates the peer's current address to the packet's source address,
 and subsequent outbound packets use the updated address.
 
 This allows peers to change transport addresses (IP:port for UDP, connection
@@ -294,7 +294,7 @@ Handshake initiation (msg1) is the primary attack surface for unauthenticated
 traffic. Each msg1 requires Noise DH operations (~200µs on modern CPUs),
 state allocation, and response generation.
 
-FLP uses a global token bucket rate limiter:
+FMP uses a global token bucket rate limiter:
 - **Burst capacity**: Handles legitimate connection storms (e.g., node restart
   with many configured peers)
 - **Sustained rate**: Limits steady-state new connections per second
@@ -310,13 +310,13 @@ Additional protections:
 
 ## Disconnect
 
-FLP supports orderly link teardown via a Disconnect message carrying a reason
+FMP supports orderly link teardown via a Disconnect message carrying a reason
 code (shutdown, restart, protocol error, transport failure, resource
 exhaustion, security violation, configuration change, timeout).
 
-On receiving Disconnect, FLP immediately cleans up state: removes the peer
+On receiving Disconnect, FMP immediately cleans up state: removes the peer
 from the peer table, frees the session index, removes the link, and cleans up
-address mappings. If the departed peer was the tree parent, FLP triggers parent
+address mappings. If the departed peer was the tree parent, FMP triggers parent
 reselection.
 
 Disconnect is best-effort — if the transport is broken, the message won't
@@ -328,7 +328,7 @@ stopped.
 
 ## Liveness Detection
 
-FLP detects link liveness through a combination of explicit heartbeats and
+FMP detects link liveness through a combination of explicit heartbeats and
 traffic observation.
 
 ### Heartbeat
@@ -357,7 +357,7 @@ event-driven, and MMP reports require at least one side running Full mode).
 
 ## Link Message Types
 
-FLP defines eight message types carried inside encrypted frames:
+FMP defines eight message types carried inside encrypted frames:
 
 | Type | Name | Purpose |
 | ---- | ---- | ------- |
@@ -392,7 +392,7 @@ routing layer for link-cost decisions.
 ### Metrics Tracked
 
 MMP computes the following metrics from the per-frame counter and timestamp
-fields in the FLP wire format:
+fields in the FMP wire format:
 
 - **SRTT** — Smoothed round-trip time (Jacobson/RFC 6298, α=1/8). Derived
   from timestamp-echo in ReceiverReports with dwell-time compensation.
@@ -426,7 +426,7 @@ formula is `clamp(2 × SRTT, 100ms, 2000ms)`.
 
 ### Spin Bit and RTT
 
-The SP (spin bit) flag in the FLP inner header follows the QUIC spin bit
+The SP (spin bit) flag in the FMP inner header follows the QUIC spin bit
 pattern: reflected on receive, toggled on send when the reflected value
 matches the last sent value. The spin bit state machine runs for TX
 reflection, but **RTT samples from the spin bit are discarded**. In a mesh
@@ -437,7 +437,7 @@ bit RTT measurements unpredictably. Timestamp-echo from ReceiverReports
 
 ### CE Echo
 
-The CE (Congestion Experienced) echo flag (bit 1 in the FLP flags byte) is
+The CE (Congestion Experienced) echo flag (bit 1 in the FMP flags byte) is
 reserved for ECN signaling. The transport trait does not currently expose
 ECN marking, so the CE echo flag is never set. One-way delay trend serves
 as the sole pre-loss congestion indicator.
@@ -515,8 +515,8 @@ an attacker sends invalid packets to elicit responses.
 ## References
 
 - [fips-intro.md](fips-intro.md) — Protocol overview and architecture
-- [fips-transport-layer.md](fips-transport-layer.md) — Transport layer (below FLP)
-- [fips-session-layer.md](fips-session-layer.md) — FSP (above FLP)
-- [fips-mesh-operation.md](fips-mesh-operation.md) — How FLP's routing and
+- [fips-transport-layer.md](fips-transport-layer.md) — Transport layer (below FMP)
+- [fips-session-layer.md](fips-session-layer.md) — FSP (above FMP)
+- [fips-mesh-operation.md](fips-mesh-operation.md) — How FMP's routing and
   self-organization work in practice
 - [fips-wire-formats.md](fips-wire-formats.md) — Byte-level wire format reference

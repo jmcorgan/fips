@@ -118,7 +118,7 @@ impl NoiseSession {
 
     /// Decrypt with explicit counter, replay protection, and AAD.
     ///
-    /// This is the primary decryption method for the FLP transport phase
+    /// This is the primary decryption method for the FMP transport phase
     /// with AAD binding. The AAD (typically the 16-byte outer header) must
     /// match what was used during encryption.
     pub fn decrypt_with_replay_check_and_aad(

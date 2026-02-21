@@ -2,7 +2,7 @@
 //!
 //! Measures link quality between adjacent peers: RTT, loss, jitter,
 //! throughput, one-way delay trend, and ETX. Operates on the per-frame
-//! hooks (counter, timestamp, flags) introduced by the FLP wire format
+//! hooks (counter, timestamp, flags) introduced by the FMP wire format
 //! revision.
 //!
 //! Three operating modes trade measurement fidelity for overhead:

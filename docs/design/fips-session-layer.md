@@ -1,7 +1,7 @@
 # FIPS Session Protocol (FSP)
 
 The FIPS Session Protocol is the top protocol layer in the FIPS stack. It sits
-above the FIPS Link Protocol (FLP) and below applications (native FIPS API or
+above the FIPS Mesh Protocol (FMP) and below applications (native FIPS API or
 IPv6 adapter). FSP provides end-to-end authenticated, encrypted datagram
 delivery between any two FIPS nodes, regardless of how many intermediate hops
 separate them.
@@ -34,7 +34,7 @@ Applications access the FIPS mesh through two interfaces, both served by FSP:
 
 Applications address destinations directly by npub or public key. The FIPS
 stack resolves the destination's node_addr, establishes or reuses a session,
-encrypts the payload, and routes through FLP. No DNS involvement.
+encrypts the payload, and routes through FMP. No DNS involvement.
 
 ### IPv6 Adapter
 
@@ -66,21 +66,21 @@ layer.
   TCP over IPv6 get TCP's congestion control; native API applications must
   manage their own sending rate.
 
-## Services Required from FLP
+## Services Required from FMP
 
-FSP treats FLP as a black box providing three services. FSP knows nothing about
+FSP treats FMP as a black box providing three services. FSP knows nothing about
 transports, transport addresses, links, peers, spanning trees, coordinates,
 bloom filters, hop counts, or network topology.
 
 ### SessionDatagram Forwarding
 
-FLP accepts a SessionDatagram (source node_addr, destination node_addr, TTL,
+FMP accepts a SessionDatagram (source node_addr, destination node_addr, TTL,
 path MTU, payload) and delivers it best-effort toward the destination. Delivery
 may traverse multiple hops, each with independent link encryption.
 
 ### Error Signaling
 
-FLP signals routing failures asynchronously:
+FMP signals routing failures asynchronously:
 
 - **CoordsRequired**: A transit node lacks the destination's tree coordinates.
   FSP responds by sending a standalone CoordsWarmup (0x14) message
@@ -97,7 +97,7 @@ end-to-end encrypted) because transit nodes have no session with the source.
 ### Local Delivery
 
 When a SessionDatagram arrives with a destination node_addr matching the local
-node, FLP delivers it to FSP for session-layer processing.
+node, FMP delivers it to FSP for session-layer processing.
 
 ## Session Lifecycle
 
@@ -189,7 +189,7 @@ transport addresses or routing paths. A session survives:
 
 ### Noise IK Pattern
 
-FSP uses the same Noise IK pattern as FLP link encryption, but with
+FSP uses the same Noise IK pattern as FMP link encryption, but with
 independent keys and sessions. The full Noise descriptor is
 `Noise_IK_secp256k1_ChaChaPoly_SHA256`.
 
@@ -386,7 +386,7 @@ Cache population mechanisms:
 
 The coordinate cache maps `NodeAddr → TreeCoordinate` and is the critical
 data structure that enables efficient multi-hop routing. Without cached
-coordinates for a destination, FLP cannot make forwarding decisions and must
+coordinates for a destination, FMP cannot make forwarding decisions and must
 either fall back to bloom-filter-only routing or signal CoordsRequired.
 
 ### Unified Cache
@@ -506,13 +506,13 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
 | Simultaneous initiation tie-breaker | **Implemented** |
 | Flush coord cache on parent change | **Implemented** |
 | Rekey | Planned |
-| Path MTU tracking (FLP SessionDatagram field) | **Implemented** |
+| Path MTU tracking (FMP SessionDatagram field) | **Implemented** |
 | Path MTU notification (end-to-end echo) | **Implemented** |
 
 ## References
 
 - [fips-intro.md](fips-intro.md) — Protocol overview and architecture
-- [fips-link-layer.md](fips-link-layer.md) — FLP specification (below FSP)
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification (below FSP)
 - [fips-ipv6-adapter.md](fips-ipv6-adapter.md) — IPv6 adaptation layer (above FSP)
 - [fips-mesh-operation.md](fips-mesh-operation.md) — Routing, discovery, and
   error recovery

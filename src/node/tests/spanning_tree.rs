@@ -204,7 +204,7 @@ pub(super) fn print_tree_snapshot(label: &str, nodes: &[TestNode]) {
 ///
 /// Returns the number of packets processed.
 pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
-    use crate::node::wire::{CommonPrefix, FLP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, COMMON_PREFIX_SIZE};
+    use crate::node::wire::{CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, COMMON_PREFIX_SIZE};
 
     let mut count = 0;
     for node in nodes.iter_mut() {
@@ -213,7 +213,7 @@ pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
                 continue;
             }
             if let Some(prefix) = CommonPrefix::parse(&packet.data) {
-                if prefix.version != FLP_VERSION {
+                if prefix.version != FMP_VERSION {
                     continue;
                 }
                 match prefix.phase {

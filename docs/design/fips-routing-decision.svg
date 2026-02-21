@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 920" font-family="monospace" font-size="12">
+  <style>
+    text           { fill: #e0e0e0; }
+    text.title     { font-size: 16px; font-weight: bold; }
+    text.subtitle  { font-size: 12px; fill: #909090; }
+    text.step      { font-size: 11px; fill: #5080c0; font-weight: bold; }
+    text.decision  { font-size: 12px; }
+    text.action    { font-size: 12px; }
+    text.branch    { font-size: 11px; fill: #a0a0b0; }
+    text.caption   { font-size: 13px; fill: #808090; font-style: italic; }
+    polygon.diamond { fill: #1a1a2e; stroke: #5080c0; stroke-width: 1.5; }
+    rect.start     { fill: #2e3a5e; stroke: #5080c0; stroke-width: 1.5; }
+    rect.outcome   { fill: #1a3a2a; stroke: #40a060; stroke-width: 1.5; rx: 4; }
+    rect.error     { fill: #2a1a1a; stroke: #c06040; stroke-width: 1.5; rx: 4; }
+    rect.interim   { fill: #1a2a3a; stroke: #4080c0; stroke-width: 1.5; rx: 4; }
+    line.arrow     { stroke: #606080; stroke-width: 1.5; }
+    marker         { fill: #606080; }
+  </style>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#606080"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="920" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="360" y="30" text-anchor="middle" class="title">Routing Decision Chain</text>
+  <text x="360" y="48" text-anchor="middle" class="subtitle">Per-hop forwarding priority at each FMP router</text>
+
+  <!-- ============================================================ -->
+  <!-- START: Packet arrives                                        -->
+  <!-- ============================================================ -->
+  <rect x="260" y="74" width="200" height="36" rx="18" class="start"/>
+  <text x="360" y="97" text-anchor="middle" class="action">Packet arrives</text>
+
+  <!-- Arrow: start → decision 1 -->
+  <line x1="360" y1="110" x2="360" y2="140" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 1: Local delivery?                                      -->
+  <!-- ============================================================ -->
+  <text x="240" y="155" text-anchor="end" class="step">1</text>
+  <polygon points="360,140 440,180 360,220 280,180" class="diamond"/>
+  <text x="360" y="176" text-anchor="middle" class="decision">Local</text>
+  <text x="360" y="190" text-anchor="middle" class="decision">delivery?</text>
+
+  <!-- Yes → right to outcome -->
+  <line x1="440" y1="180" x2="520" y2="180" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="475" y="172" text-anchor="middle" class="branch">Yes</text>
+  <rect x="528" y="162" width="160" height="36" class="outcome"/>
+  <text x="608" y="185" text-anchor="middle" class="action">Deliver to application</text>
+
+  <!-- No → down -->
+  <line x1="360" y1="220" x2="360" y2="260" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="372" y="244" class="branch">No</text>
+
+  <!-- ============================================================ -->
+  <!-- STEP 2: Direct peer?                                         -->
+  <!-- ============================================================ -->
+  <text x="240" y="275" text-anchor="end" class="step">2</text>
+  <polygon points="360,260 440,300 360,340 280,300" class="diamond"/>
+  <text x="360" y="296" text-anchor="middle" class="decision">Direct</text>
+  <text x="360" y="310" text-anchor="middle" class="decision">peer?</text>
+
+  <!-- Yes → right to outcome -->
+  <line x1="440" y1="300" x2="520" y2="300" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="475" y="292" text-anchor="middle" class="branch">Yes</text>
+  <rect x="528" y="282" width="160" height="36" class="outcome"/>
+  <text x="608" y="305" text-anchor="middle" class="action">Forward to peer</text>
+
+  <!-- No → down -->
+  <line x1="360" y1="340" x2="360" y2="380" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="372" y="364" class="branch">No</text>
+
+  <!-- ============================================================ -->
+  <!-- STEP 3: Bloom filter hit?                                    -->
+  <!-- ============================================================ -->
+  <text x="240" y="395" text-anchor="end" class="step">3</text>
+  <polygon points="360,380 440,420 360,460 280,420" class="diamond"/>
+  <text x="360" y="416" text-anchor="middle" class="decision">Bloom filter</text>
+  <text x="360" y="430" text-anchor="middle" class="decision">hit?</text>
+
+  <!-- Yes → right to interim step -->
+  <line x1="440" y1="420" x2="520" y2="420" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="475" y="412" text-anchor="middle" class="branch">Yes</text>
+  <rect x="520" y="396" width="176" height="48" class="interim"/>
+  <text x="608" y="412" text-anchor="middle" class="action">Rank candidates by</text>
+  <text x="608" y="426" text-anchor="middle" class="action">tree distance and</text>
+  <text x="608" y="440" text-anchor="middle" class="action">link performance</text>
+
+  <!-- Arrow from interim → final outcome -->
+  <line x1="608" y1="444" x2="608" y2="470" class="arrow" marker-end="url(#arrowhead)"/>
+  <rect x="528" y="478" width="160" height="36" class="outcome"/>
+  <text x="608" y="501" text-anchor="middle" class="action">Forward to 'best'</text>
+
+  <!-- No → down -->
+  <line x1="360" y1="460" x2="360" y2="530" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="372" y="500" class="branch">No</text>
+
+  <!-- ============================================================ -->
+  <!-- STEP 4: Coords known?                                        -->
+  <!-- ============================================================ -->
+  <text x="240" y="545" text-anchor="end" class="step">4</text>
+  <polygon points="360,530 440,570 360,610 280,570" class="diamond"/>
+  <text x="360" y="566" text-anchor="middle" class="decision">Coords</text>
+  <text x="360" y="580" text-anchor="middle" class="decision">known?</text>
+
+  <!-- Yes → right to outcome -->
+  <line x1="440" y1="570" x2="520" y2="570" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="475" y="562" text-anchor="middle" class="branch">Yes</text>
+  <rect x="528" y="552" width="160" height="36" class="outcome"/>
+  <text x="608" y="575" text-anchor="middle" class="action">Greedy tree forward</text>
+
+  <!-- No → down -->
+  <line x1="360" y1="610" x2="360" y2="660" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="372" y="640" class="branch">No</text>
+
+  <!-- ============================================================ -->
+  <!-- STEP 5: No route → error signal                              -->
+  <!-- ============================================================ -->
+  <text x="240" y="683" text-anchor="end" class="step">5</text>
+  <rect x="260" y="668" width="200" height="36" class="error"/>
+  <text x="360" y="691" text-anchor="middle" class="action">No route → error signal</text>
+
+  <!-- ============================================================ -->
+  <!-- Legend                                                        -->
+  <!-- ============================================================ -->
+  <rect x="40" y="740" width="640" height="120" fill="#151520" stroke="#404060" stroke-width="1" rx="4"/>
+
+  <rect x="60" y="762" width="24" height="14" rx="7" fill="#2e3a5e" stroke="#5080c0" stroke-width="1"/>
+  <text x="92" y="774" font-size="11" fill="#a0a0b0">Start / entry point</text>
+
+  <polygon points="64,800 72,793 80,800 72,807" fill="#1a1a2e" stroke="#5080c0" stroke-width="1"/>
+  <text x="88" y="804" font-size="11" fill="#a0a0b0">Routing decision (checked in priority order)</text>
+
+  <rect x="60" y="822" width="24" height="14" rx="4" fill="#1a3a2a" stroke="#40a060" stroke-width="1"/>
+  <text x="92" y="834" font-size="11" fill="#a0a0b0">Forwarding action (packet delivered or sent)</text>
+
+  <rect x="410" y="762" width="24" height="14" rx="4" fill="#1a2a3a" stroke="#4080c0" stroke-width="1"/>
+  <text x="442" y="774" font-size="11" fill="#a0a0b0">Intermediate processing step</text>
+
+  <rect x="410" y="793" width="24" height="14" rx="4" fill="#2a1a1a" stroke="#c06040" stroke-width="1"/>
+  <text x="442" y="805" font-size="11" fill="#a0a0b0">Terminal error (no route available)</text>
+
+  <line x1="410" y1="831" x2="434" y2="831" stroke="#606080" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="442" y="835" font-size="11" fill="#a0a0b0">Control flow direction</text>
+
+  <!-- Caption -->
+  <text x="360" y="896" text-anchor="middle" class="caption">Each hop evaluates destinations in priority order 1–4, falling through on miss</text>
+</svg>

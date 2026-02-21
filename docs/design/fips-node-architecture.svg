@@ -1,10 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 520" font-family="monospace" font-size="12">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 560" font-family="monospace" font-size="12">
   <style>
     rect.outer   { fill: #151525; stroke: #505070; stroke-width: 2; rx: 6; }
     rect.layer   { rx: 4; }
     rect.api     { fill: #1a3a2a; stroke: #40a060; stroke-width: 1.5; }
     rect.tun     { fill: #1a2a3a; stroke: #4080c0; stroke-width: 1.5; }
-    rect.router  { fill: #2a2040; stroke: #8060c0; stroke-width: 1.5; }
+    rect.fsp     { fill: #2a2040; stroke: #8060c0; stroke-width: 1.5; }
+    rect.fmp     { fill: #2e3a5e; stroke: #5080c0; stroke-width: 1.5; }
     rect.xport   { fill: #2a1a1a; stroke: #c06040; stroke-width: 1.5; }
     rect.cat     { fill: none; stroke: #404060; stroke-width: 1; stroke-dasharray: 4,3; rx: 3; }
     text         { fill: #e0e0e0; }
@@ -18,21 +19,17 @@
   </style>
 
   <!-- Background -->
-  <rect width="800" height="520" fill="#0d1117" rx="8"/>
+  <rect width="800" height="560" fill="#0d1117" rx="8"/>
 
   <!-- Title -->
   <text x="400" y="28" text-anchor="middle" class="title">FIPS Node Architecture</text>
-  <text x="400" y="46" text-anchor="middle" class="subtitle">Application interfaces, router core, and transport abstraction layer</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">Application interfaces, protocol layers, and transport abstraction</text>
 
   <!-- Outer node box -->
-  <rect x="40" y="60" width="720" height="310" class="outer"/>
+  <rect x="40" y="60" width="720" height="350" class="outer"/>
   <text x="56" y="80" class="sub">FIPS Node</text>
 
-  <!-- === Application layer (centered) === -->
-  <!-- Router core center = 390, gap = 20, each box = 200 wide -->
-  <!-- Left box: 390 - 10 - 200 = 180..380, center = 280 -->
-  <!-- Right box: 390 + 10 = 400..600, center = 500 -->
-
+  <!-- === Application layer === -->
   <!-- FIPS-native API (left) -->
   <rect x="180" y="90" width="200" height="50" class="layer api"/>
   <text x="280" y="108" text-anchor="middle" class="label">FIPS-Native API</text>
@@ -53,122 +50,111 @@
   <line x1="280" y1="78" x2="280" y2="90" class="conn"/>
   <line x1="500" y1="78" x2="500" y2="90" class="conn"/>
 
-  <!-- === Router Core === -->
-  <rect x="80" y="170" width="620" height="60" class="layer router"/>
-  <text x="390" y="196" text-anchor="middle" class="label">Router Core</text>
-  <text x="390" y="212" text-anchor="middle" class="sub">Spanning tree · Bloom filters · Greedy routing · Session management · Noise IK</text>
+  <!-- === FSP Layer === -->
+  <rect x="80" y="170" width="620" height="50" class="layer fsp"/>
+  <text x="390" y="191" text-anchor="middle" class="label">FIPS Session Protocol (FSP)</text>
+  <text x="390" y="205" text-anchor="middle" class="sub">End-to-end encryption · Session lifecycle · Path discovery · In-band metrics</text>
 
-  <!-- Connections: API/TUN → Router -->
+  <!-- Connections: API/TUN → FSP -->
   <line x1="280" y1="140" x2="280" y2="170" class="conn"/>
   <line x1="500" y1="140" x2="500" y2="170" class="conn"/>
 
-  <!-- === Router → Transport connections (single trunk, branching to groups) === -->
+  <!-- === FMP Layer === -->
+  <rect x="80" y="240" width="620" height="50" class="layer fmp"/>
+  <text x="390" y="261" text-anchor="middle" class="label">FIPS Mesh Protocol (FMP)</text>
+  <text x="390" y="275" text-anchor="middle" class="sub">Link encryption · Spanning tree · Bloom filters · Routing · Peer management</text>
 
-  <!-- Single vertical trunk from router bottom center -->
-  <line x1="390" y1="230" x2="390" y2="252" class="conn"/>
+  <!-- Connection: FSP → FMP -->
+  <line x1="390" y1="220" x2="390" y2="240" class="conn"/>
+
+  <!-- === FMP → Transport connections === -->
+  <!-- Single vertical trunk from FMP bottom center -->
+  <line x1="390" y1="290" x2="390" y2="312" class="conn"/>
 
   <!-- Horizontal bar at branch point -->
-  <line x1="160" y1="252" x2="690" y2="252" class="conn"/>
+  <line x1="155" y1="312" x2="625" y2="312" class="conn"/>
 
   <!-- Vertical drops to each category group outline -->
-  <line x1="160" y1="252" x2="160" y2="276" class="conn"/>
-  <line x1="400" y1="252" x2="400" y2="276" class="conn"/>
-  <line x1="580" y1="252" x2="580" y2="276" class="conn"/>
-  <line x1="690" y1="252" x2="690" y2="276" class="conn"/>
+  <line x1="155" y1="312" x2="155" y2="336" class="conn"/>
+  <line x1="390" y1="312" x2="390" y2="336" class="conn"/>
+  <line x1="625" y1="312" x2="625" y2="336" class="conn"/>
 
   <!-- === Transport layer === -->
 
   <!-- Overlay transports -->
-  <rect x="60" y="276" width="200" height="80" class="cat"/>
-  <text x="160" y="289" text-anchor="middle" class="cat">Overlay</text>
+  <rect x="80" y="336" width="150" height="60" class="cat"/>
+  <text x="155" y="349" text-anchor="middle" class="cat">Overlay</text>
 
-  <rect x="72" y="296" width="56" height="36" class="layer xport"/>
-  <text x="100" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">UDP</text>
-  <text x="100" y="324" text-anchor="middle" class="sub">IP</text>
+  <rect x="92" y="356" width="60" height="30" class="layer xport"/>
+  <text x="122" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">UDP</text>
+  <text x="122" y="381" text-anchor="middle" class="sub">IP</text>
 
-  <rect x="134" y="296" width="56" height="36" class="layer xport"/>
-  <text x="162" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">QUIC</text>
-  <text x="162" y="324" text-anchor="middle" class="sub">IP</text>
-
-  <rect x="196" y="296" width="56" height="36" class="layer xport"/>
-  <text x="224" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">WS</text>
-  <text x="224" y="324" text-anchor="middle" class="sub">TCP</text>
+  <rect x="158" y="356" width="60" height="30" class="layer xport"/>
+  <text x="188" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Tor</text>
+  <text x="188" y="381" text-anchor="middle" class="sub">.onion</text>
 
   <!-- Shared medium transports -->
-  <rect x="270" y="276" width="260" height="80" class="cat"/>
-  <text x="400" y="289" text-anchor="middle" class="cat">Shared Medium</text>
+  <rect x="240" y="336" width="300" height="60" class="cat"/>
+  <text x="390" y="349" text-anchor="middle" class="cat">Shared Medium</text>
 
-  <rect x="282" y="296" width="56" height="36" class="layer xport"/>
-  <text x="310" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Ether</text>
-  <text x="310" y="324" text-anchor="middle" class="sub">802.3</text>
+  <rect x="254" y="356" width="60" height="30" class="layer xport"/>
+  <text x="284" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Ether</text>
+  <text x="284" y="381" text-anchor="middle" class="sub">802.3</text>
 
-  <rect x="344" y="296" width="56" height="36" class="layer xport"/>
-  <text x="372" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">WiFi</text>
-  <text x="372" y="324" text-anchor="middle" class="sub">802.11</text>
+  <rect x="320" y="356" width="60" height="30" class="layer xport"/>
+  <text x="350" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">WiFi</text>
+  <text x="350" y="381" text-anchor="middle" class="sub">802.11</text>
 
-  <rect x="406" y="296" width="56" height="36" class="layer xport"/>
-  <text x="434" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">BT</text>
-  <text x="434" y="324" text-anchor="middle" class="sub">RFCOMM</text>
+  <rect x="386" y="356" width="60" height="30" class="layer xport"/>
+  <text x="416" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">BT</text>
+  <text x="416" y="381" text-anchor="middle" class="sub">RFCOMM</text>
 
-  <rect x="468" y="296" width="56" height="36" class="layer xport"/>
-  <text x="496" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">LoRa</text>
-  <text x="496" y="324" text-anchor="middle" class="sub">radio</text>
+  <rect x="452" y="356" width="60" height="30" class="layer xport"/>
+  <text x="482" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Radio</text>
+  <text x="482" y="381" text-anchor="middle" class="sub">Sat, ...</text>
 
   <!-- Point-to-point transports -->
-  <rect x="540" y="276" width="80" height="80" class="cat"/>
-  <text x="580" y="289" text-anchor="middle" class="cat">P-to-P</text>
+  <rect x="550" y="336" width="150" height="60" class="cat"/>
+  <text x="625" y="349" text-anchor="middle" class="cat">Point-to-Point</text>
 
-  <rect x="552" y="296" width="56" height="36" class="layer xport"/>
-  <text x="580" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Serial</text>
-  <text x="580" y="324" text-anchor="middle" class="sub">UART</text>
+  <rect x="562" y="356" width="60" height="30" class="layer xport"/>
+  <text x="592" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Serial</text>
+  <text x="592" y="381" text-anchor="middle" class="sub">UART</text>
 
-  <!-- Anonymity transports -->
-  <rect x="630" y="276" width="120" height="80" class="cat"/>
-  <text x="690" y="289" text-anchor="middle" class="cat">Anonymity</text>
-
-  <rect x="642" y="296" width="46" height="36" class="layer xport"/>
-  <text x="665" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">Tor</text>
-  <text x="665" y="324" text-anchor="middle" class="sub">.onion</text>
-
-  <rect x="694" y="296" width="46" height="36" class="layer xport"/>
-  <text x="717" y="312" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">I2P</text>
-  <text x="717" y="324" text-anchor="middle" class="sub">tunnel</text>
+  <rect x="628" y="356" width="60" height="30" class="layer xport"/>
+  <text x="658" y="371" text-anchor="middle" font-size="10" font-weight="bold" fill="#e0e0e0">...</text>
+  <text x="658" y="381" text-anchor="middle" class="sub"></text>
 
   <!-- === Peer networks below node box === -->
+  <text x="155" y="436" text-anchor="middle" class="sub">Internet / Overlay Peers</text>
+  <line x1="155" y1="410" x2="155" y2="426" class="peer"/>
 
-  <!-- Overlay peers -->
-  <text x="160" y="396" text-anchor="middle" class="sub">Internet Peers</text>
-  <line x1="160" y1="370" x2="160" y2="386" class="peer"/>
+  <text x="390" y="436" text-anchor="middle" class="sub">Local / Radio Peers</text>
+  <line x1="390" y1="410" x2="390" y2="426" class="peer"/>
 
-  <!-- Shared medium peers -->
-  <text x="400" y="396" text-anchor="middle" class="sub">Local / Radio Peers</text>
-  <line x1="400" y1="370" x2="400" y2="386" class="peer"/>
-
-  <!-- Point-to-point peers -->
-  <text x="580" y="396" text-anchor="middle" class="sub">Wired Peer</text>
-  <line x1="580" y1="370" x2="580" y2="386" class="peer"/>
-
-  <!-- Anonymity peers -->
-  <text x="690" y="396" text-anchor="middle" class="sub">Anonymous Peers</text>
-  <line x1="690" y1="370" x2="690" y2="386" class="peer"/>
+  <text x="625" y="436" text-anchor="middle" class="sub">Wired Peers</text>
+  <line x1="625" y1="410" x2="625" y2="426" class="peer"/>
 
   <!-- === Legend === -->
-  <rect x="40" y="420" width="720" height="85" fill="#151520" stroke="#404060" stroke-width="1" rx="4"/>
+  <rect x="40" y="458" width="720" height="88" fill="#151520" stroke="#404060" stroke-width="1" rx="4"/>
 
-  <rect x="60" y="438" width="24" height="14" class="layer api"/>
-  <text x="92" y="450" class="sub">Application interface</text>
+  <rect x="60" y="476" width="24" height="14" class="layer api"/>
+  <text x="92" y="488" class="sub">Application interface</text>
 
-  <rect x="60" y="460" width="24" height="14" class="layer tun"/>
-  <text x="92" y="472" class="sub">IPv6 compatibility layer</text>
+  <rect x="60" y="496" width="24" height="14" class="layer tun"/>
+  <text x="92" y="508" class="sub">IPv6 compatibility layer</text>
 
-  <rect x="60" y="482" width="24" height="14" class="layer router"/>
-  <text x="92" y="494" class="sub">Router core (protocol engine)</text>
+  <rect x="300" y="476" width="24" height="14" class="layer fsp"/>
+  <text x="332" y="488" class="sub">FSP — end-to-end session encryption</text>
 
-  <rect x="300" y="438" width="24" height="14" class="layer xport"/>
-  <text x="332" y="450" class="sub">Transport plugin</text>
+  <rect x="300" y="496" width="24" height="14" class="layer fmp"/>
+  <text x="332" y="508" class="sub">FMP — mesh routing and link encryption</text>
 
-  <rect x="300" y="460" width="24" height="14" fill="none" stroke="#404060" stroke-width="1" stroke-dasharray="4,3" rx="2"/>
-  <text x="332" y="472" class="sub">Transport category grouping</text>
+  <rect x="590" y="476" width="24" height="14" class="layer xport"/>
+  <text x="622" y="488" class="sub">Transport plugin</text>
 
-  <text x="300" y="494" class="sub">All transports use the same Router Core interface</text>
+  <rect x="590" y="496" width="24" height="14" fill="none" stroke="#404060" stroke-width="1" stroke-dasharray="4,3" rx="2"/>
+  <text x="622" y="508" class="sub">Transport category</text>
+
+  <text x="300" y="536" class="sub">All transports use the same FMP protocol</text>
 </svg>

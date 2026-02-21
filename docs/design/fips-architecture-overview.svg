@@ -1,122 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="monospace" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 455" font-family="monospace" font-size="13">
   <style>
-    rect.node { fill: #1a1a2e; stroke: #e0e0e0; stroke-width: 1.5; rx: 4; }
-    rect.app  { fill: #2a2a4e; stroke: #e0e0e0; stroke-width: 1; rx: 2; }
-    rect.fips { fill: #2e3a5e; stroke: #e0e0e0; stroke-width: 1; rx: 2; }
-    rect.xport { fill: #3a2e2e; stroke: #e0e0e0; stroke-width: 1; rx: 2; }
-    text { fill: #e0e0e0; }
-    text.label { font-size: 14px; font-weight: bold; }
-    text.npub { font-size: 11px; fill: #90a0b0; }
-    text.role { font-size: 11px; fill: #90a0b0; }
-    text.layer { font-size: 12px; }
-    text.transport-label { font-size: 11px; fill: #c0c0c0; }
-    line.link { stroke: #70a0d0; stroke-width: 2; }
-    line.session { stroke: #d0a040; stroke-width: 2; stroke-dasharray: 6,3; }
-    text.link-label { font-size: 11px; fill: #70a0d0; }
-    text.session-label { font-size: 12px; fill: #d0a040; }
+    rect.node   { fill: #1a1a2e; stroke: #e0e0e0; stroke-width: 1.5; rx: 4; }
+    rect.app    { fill: #1a3a2a; stroke: #40a060; stroke-width: 1; rx: 2; }
+    rect.fips   { fill: #2e3a5e; stroke: #5080c0; stroke-width: 1; rx: 2; }
+    rect.xport  { fill: #2a1a1a; stroke: #c06040; stroke-width: 1; rx: 2; }
+    text         { fill: #e0e0e0; }
+    text.label   { font-size: 15px; font-weight: bold; }
+    text.role    { font-size: 11px; fill: #90a0b0; }
+    text.layer   { font-size: 12px; }
+    text.caption { font-size: 13px; fill: #808090; font-style: italic; }
+    path.link    { fill: none; stroke: #5080c0; stroke-width: 2; }
+    text.link-label { font-size: 12px; fill: #5080c0; font-weight: bold; }
+    text.link-enc   { font-size: 10px; fill: #5080c0; }
+    line.session { stroke: #d0a040; stroke-width: 2; stroke-dasharray: 8,4; }
+    text.session-label { font-size: 13px; fill: #d0a040; }
+    text.legend  { font-size: 12px; }
   </style>
 
   <!-- Background -->
-  <rect width="900" height="420" fill="#0d1117" rx="8"/>
+  <rect width="880" height="420" fill="#0d1117" rx="8"/>
 
-  <!-- Node positions: x = 60, 230, 400, 570, 740  width=100 -->
+  <!-- ============ NODES ============ -->
+  <!-- Node A (source) -->
+  <text x="100" y="30" text-anchor="middle" class="label">Node A</text>
+  <text x="100" y="46" text-anchor="middle" class="role">(source)</text>
+  <rect x="50" y="56" width="100" height="130" class="node"/>
+  <rect x="60" y="66" width="80" height="28" class="app"/>
+  <text x="100" y="85" text-anchor="middle" class="layer">App</text>
+  <rect x="60" y="102" width="80" height="28" class="fips"/>
+  <text x="100" y="121" text-anchor="middle" class="layer">FIPS</text>
+  <rect x="60" y="138" width="80" height="28" class="xport"/>
+  <text x="100" y="157" text-anchor="middle" class="layer">WiFi</text>
 
-  <!-- Node A -->
-  <text x="110" y="30" text-anchor="middle" class="label">Node A</text>
-  <text x="110" y="46" text-anchor="middle" class="npub">npub1aaa...</text>
-  <text x="110" y="60" text-anchor="middle" class="role">(source)</text>
-  <rect x="60" y="70" width="100" height="130" class="node"/>
-  <rect x="70" y="80" width="80" height="30" class="app"/>
-  <text x="110" y="100" text-anchor="middle" class="layer">App</text>
-  <rect x="70" y="118" width="80" height="30" class="fips"/>
-  <text x="110" y="138" text-anchor="middle" class="layer">FIPS</text>
-  <rect x="70" y="156" width="80" height="30" class="xport"/>
-  <text x="110" y="176" text-anchor="middle" class="layer">WiFi</text>
-
-  <!-- Node B -->
+  <!-- Node B (transit) -->
   <text x="280" y="30" text-anchor="middle" class="label">Node B</text>
-  <text x="280" y="46" text-anchor="middle" class="npub">npub1bbb...</text>
-  <text x="280" y="60" text-anchor="middle" class="role">(relay)</text>
-  <rect x="230" y="70" width="100" height="130" class="node"/>
-  <rect x="240" y="118" width="80" height="30" class="fips"/>
-  <text x="280" y="138" text-anchor="middle" class="layer">FIPS</text>
-  <rect x="240" y="156" width="37" height="30" class="xport"/>
-  <text x="258" y="176" text-anchor="middle" class="layer">WiFi</text>
-  <rect x="283" y="156" width="37" height="30" class="xport"/>
-  <text x="302" y="176" text-anchor="middle" class="layer">Eth</text>
+  <text x="280" y="46" text-anchor="middle" class="role">(transit)</text>
+  <rect x="230" y="56" width="100" height="130" class="node"/>
+  <rect x="240" y="102" width="80" height="28" class="fips"/>
+  <text x="280" y="121" text-anchor="middle" class="layer">FIPS</text>
+  <rect x="240" y="138" width="36" height="28" class="xport"/>
+  <text x="258" y="157" text-anchor="middle" class="layer">WiFi</text>
+  <rect x="284" y="138" width="36" height="28" class="xport"/>
+  <text x="302" y="157" text-anchor="middle" class="layer">Eth</text>
 
-  <!-- Node C -->
-  <text x="450" y="30" text-anchor="middle" class="label">Node C</text>
-  <text x="450" y="46" text-anchor="middle" class="npub">npub1ccc...</text>
-  <text x="450" y="60" text-anchor="middle" class="role">(relay)</text>
-  <rect x="400" y="70" width="100" height="130" class="node"/>
-  <rect x="410" y="118" width="80" height="30" class="fips"/>
-  <text x="450" y="138" text-anchor="middle" class="layer">FIPS</text>
-  <rect x="410" y="156" width="37" height="30" class="xport"/>
-  <text x="428" y="176" text-anchor="middle" class="layer">Eth</text>
-  <rect x="453" y="156" width="37" height="30" class="xport"/>
-  <text x="472" y="176" text-anchor="middle" class="layer">UDP</text>
+  <!-- Node C (transit) -->
+  <text x="460" y="30" text-anchor="middle" class="label">Node C</text>
+  <text x="460" y="46" text-anchor="middle" class="role">(transit)</text>
+  <rect x="410" y="56" width="100" height="130" class="node"/>
+  <rect x="420" y="102" width="80" height="28" class="fips"/>
+  <text x="460" y="121" text-anchor="middle" class="layer">FIPS</text>
+  <rect x="420" y="138" width="36" height="28" class="xport"/>
+  <text x="438" y="157" text-anchor="middle" class="layer">Eth</text>
+  <rect x="464" y="138" width="36" height="28" class="xport"/>
+  <text x="482" y="157" text-anchor="middle" class="layer">UDP</text>
 
-  <!-- Node D -->
-  <text x="620" y="30" text-anchor="middle" class="label">Node D</text>
-  <text x="620" y="46" text-anchor="middle" class="npub">npub1ddd...</text>
-  <text x="620" y="60" text-anchor="middle" class="role">(relay)</text>
-  <rect x="570" y="70" width="100" height="130" class="node"/>
-  <rect x="580" y="118" width="80" height="30" class="fips"/>
-  <text x="620" y="138" text-anchor="middle" class="layer">FIPS</text>
-  <rect x="580" y="156" width="37" height="30" class="xport"/>
-  <text x="598" y="176" text-anchor="middle" class="layer">UDP</text>
-  <rect x="623" y="156" width="37" height="30" class="xport"/>
-  <text x="642" y="176" text-anchor="middle" class="layer">Tor</text>
+  <!-- Node D (transit) -->
+  <text x="640" y="30" text-anchor="middle" class="label">Node D</text>
+  <text x="640" y="46" text-anchor="middle" class="role">(transit)</text>
+  <rect x="590" y="56" width="100" height="130" class="node"/>
+  <rect x="600" y="102" width="80" height="28" class="fips"/>
+  <text x="640" y="121" text-anchor="middle" class="layer">FIPS</text>
+  <rect x="600" y="138" width="36" height="28" class="xport"/>
+  <text x="618" y="157" text-anchor="middle" class="layer">UDP</text>
+  <rect x="644" y="138" width="36" height="28" class="xport"/>
+  <text x="662" y="157" text-anchor="middle" class="layer">Tor</text>
 
-  <!-- Node E -->
-  <text x="790" y="30" text-anchor="middle" class="label">Node E</text>
-  <text x="790" y="46" text-anchor="middle" class="npub">npub1eee...</text>
-  <text x="790" y="60" text-anchor="middle" class="role">(dest)</text>
-  <rect x="740" y="70" width="100" height="130" class="node"/>
-  <rect x="750" y="80" width="80" height="30" class="app"/>
-  <text x="790" y="100" text-anchor="middle" class="layer">App</text>
-  <rect x="750" y="118" width="80" height="30" class="fips"/>
-  <text x="790" y="138" text-anchor="middle" class="layer">FIPS</text>
-  <rect x="750" y="156" width="80" height="30" class="xport"/>
-  <text x="790" y="176" text-anchor="middle" class="layer">Tor</text>
+  <!-- Node E (destination) -->
+  <text x="800" y="30" text-anchor="middle" class="label">Node E</text>
+  <text x="800" y="46" text-anchor="middle" class="role">(destination)</text>
+  <rect x="750" y="56" width="100" height="130" class="node"/>
+  <rect x="760" y="66" width="80" height="28" class="app"/>
+  <text x="800" y="85" text-anchor="middle" class="layer">App</text>
+  <rect x="760" y="102" width="80" height="28" class="fips"/>
+  <text x="800" y="121" text-anchor="middle" class="layer">FIPS</text>
+  <rect x="760" y="138" width="80" height="28" class="xport"/>
+  <text x="800" y="157" text-anchor="middle" class="layer">Tor</text>
 
-  <!-- Link lines (from bottom of transport boxes) -->
-  <!-- WiFi: A(110) -> B-WiFi(258) -->
-  <line x1="110" y1="200" x2="110" y2="240" class="link"/>
-  <line x1="110" y1="240" x2="258" y2="240" class="link"/>
-  <line x1="258" y1="240" x2="258" y2="200" class="link"/>
-  <text x="184" y="256" text-anchor="middle" class="link-label">WiFi</text>
+  <!-- ============ LINK CONNECTIONS (U-shaped, all same depth) ============ -->
+  <!-- WiFi: A ↔ B -->
+  <path d="M 100 186 L 100 240 L 258 240 L 258 186" class="link"/>
+  <text x="179" y="256" text-anchor="middle" class="link-label">WiFi</text>
+  <text x="179" y="268" text-anchor="middle" class="link-enc">encrypted FMP link</text>
 
-  <!-- Ethernet: B-Eth(302) -> C-Eth(428) -->
-  <line x1="302" y1="200" x2="302" y2="270" class="link"/>
-  <line x1="302" y1="270" x2="428" y2="270" class="link"/>
-  <line x1="428" y1="270" x2="428" y2="200" class="link"/>
-  <text x="365" y="286" text-anchor="middle" class="link-label">Ethernet</text>
+  <!-- Ethernet: B ↔ C -->
+  <path d="M 302 186 L 302 240 L 438 240 L 438 186" class="link"/>
+  <text x="370" y="256" text-anchor="middle" class="link-label">Ethernet</text>
+  <text x="370" y="268" text-anchor="middle" class="link-enc">encrypted FMP link</text>
 
-  <!-- UDP/IP: C-UDP(472) -> D-UDP(598) -->
-  <line x1="472" y1="200" x2="472" y2="300" class="link"/>
-  <line x1="472" y1="300" x2="598" y2="300" class="link"/>
-  <line x1="598" y1="300" x2="598" y2="200" class="link"/>
-  <text x="535" y="316" text-anchor="middle" class="link-label">UDP/IP</text>
+  <!-- UDP/IP: C ↔ D -->
+  <path d="M 482 186 L 482 240 L 618 240 L 618 186" class="link"/>
+  <text x="550" y="256" text-anchor="middle" class="link-label">UDP/IP</text>
+  <text x="550" y="268" text-anchor="middle" class="link-enc">encrypted FMP link</text>
 
-  <!-- Tor: D-Tor(642) -> E(790) -->
-  <line x1="642" y1="200" x2="642" y2="330" class="link"/>
-  <line x1="642" y1="330" x2="790" y2="330" class="link"/>
-  <line x1="790" y1="330" x2="790" y2="200" class="link"/>
-  <text x="716" y="346" text-anchor="middle" class="link-label">Tor</text>
+  <!-- Tor: D ↔ E -->
+  <path d="M 662 186 L 662 240 L 800 240 L 800 186" class="link"/>
+  <text x="731" y="256" text-anchor="middle" class="link-label">Tor</text>
+  <text x="731" y="268" text-anchor="middle" class="link-enc">encrypted FMP link</text>
 
-  <!-- End-to-end session (dashed) -->
-  <line x1="110" y1="380" x2="790" y2="380" class="session"/>
-  <text x="450" y="375" text-anchor="middle" class="session-label">End-to-end encrypted session (A ↔ E)</text>
+  <!-- ============ END-TO-END SESSION (below links, no intersection) ============ -->
+  <line x1="100" y1="305" x2="800" y2="305" class="session"/>
+  <text x="450" y="298" text-anchor="middle" class="session-label">End-to-end FSP session encryption (A ↔ E)</text>
 
-  <!-- Link labels -->
-  <text x="184" y="405" text-anchor="middle" class="link-label">Link</text>
-  <line x1="110" y1="395" x2="258" y2="395" class="link" stroke-dasharray="3,2"/>
-  <text x="365" y="405" text-anchor="middle" class="link-label">Link</text>
-  <line x1="302" y1="395" x2="428" y2="395" class="link" stroke-dasharray="3,2"/>
-  <text x="535" y="405" text-anchor="middle" class="link-label">Link</text>
-  <line x1="472" y1="395" x2="598" y2="395" class="link" stroke-dasharray="3,2"/>
-  <text x="716" y="405" text-anchor="middle" class="link-label">Link</text>
-  <line x1="642" y1="395" x2="790" y2="395" class="link" stroke-dasharray="3,2"/>
+  <!-- ============ LEGEND ============ -->
+  <line x1="60" y1="345" x2="120" y2="345" class="session"/>
+  <text x="132" y="349" class="legend" fill="#d0a040">FSP session encryption (end-to-end)</text>
+
+  <path d="M 60 370 L 60 380 L 120 380 L 120 370" class="link"/>
+  <text x="132" y="381" class="legend" fill="#5080c0">FMP link encryption (hop-by-hop)</text>
+
+  <!-- Caption -->
+  <text x="440" y="443" text-anchor="middle" class="caption">Multi-transport architecture — each link encrypted independently, session spans the full path</text>
 </svg>

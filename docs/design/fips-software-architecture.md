@@ -93,7 +93,7 @@ FIPS uses independent Noise IK encryption at two layers:
 
 | Layer | Scope | What It Protects |
 | ----- | ----- | ---------------- |
-| FLP (link) | Hop-by-hop | All traffic on each peer link |
+| FMP (mesh) | Hop-by-hop | All traffic on each peer link |
 | FSP (session) | End-to-end | Application payload between endpoints |
 
 **Why two layers instead of one**:
@@ -163,7 +163,7 @@ MMP is instantiated at two independent layers, each with its own
 configuration and state:
 
 - **Link layer**: One `MmpPeerState` per `ActivePeer`. Measures per-hop
-  quality using the FLP counter and timestamp fields that already exist on
+  quality using the FMP counter and timestamp fields that already exist on
   every encrypted frame. No additional message overhead beyond periodic
   SenderReport/ReceiverReport exchanges.
 
@@ -224,13 +224,13 @@ increase in bloom filter occupancy).
 
 ## Transport Opacity
 
-Transport addresses are opaque byte vectors above FLP. The transport layer
+Transport addresses are opaque byte vectors above FMP. The transport layer
 interprets them (e.g., UDP parses "ip:port" strings); all layers above treat
 them as handles passed back to the transport for sending.
 
 **Architectural boundary**: Adding a new transport type (e.g., BLE) requires
 implementing the transport trait and potentially a new `TransportHandle`
-variant. No changes to FLP, FSP, or any routing logic. The transport trait
+variant. No changes to FMP, FSP, or any routing logic. The transport trait
 defines the interface:
 
 - `send(addr, data)` — send a datagram
@@ -300,7 +300,7 @@ The `TransportHandle` enum provides async dispatch for methods that need it
 ## References
 
 - [fips-intro.md](fips-intro.md) — Protocol overview
-- [fips-link-layer.md](fips-link-layer.md) — FLP specification
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification
 - [fips-session-layer.md](fips-session-layer.md) — FSP specification
 - [fips-state-machines.md](fips-state-machines.md) — Phase-based state
   machine pattern

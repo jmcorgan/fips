@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 895 620" font-family="monospace" font-size="15">
+  <style>
+    rect.layer   { rx: 5; }
+    rect.app     { fill: #1a3a2a; stroke: #40a060; stroke-width: 2; }
+    rect.fsp     { fill: #2a2040; stroke: #8060c0; stroke-width: 2; }
+    rect.fmp     { fill: #2e3a5e; stroke: #5080c0; stroke-width: 2; }
+    rect.xport   { fill: #2a1a1a; stroke: #c06040; stroke-width: 2; }
+    text         { fill: #e0e0e0; }
+    text.name    { font-size: 23px; font-weight: bold; }
+    text.desc    { font-size: 18px; fill: #a0a0b0; }
+    text.scope   { font-size: 17px; fill: #707080; font-style: italic; }
+    text.caption { font-size: 18px; fill: #808090; font-style: italic; }
+  </style>
+
+  <!-- Background -->
+  <rect width="875" height="560" fill="#0d1117" rx="10"/>
+
+  <!-- Applications layer -->
+  <rect x="50" y="25" width="775" height="100" class="layer app"/>
+  <text x="75" y="58" class="name">Application Layer Interface</text>
+  <text x="75" y="78" class="desc">Native FIPS API — for FIPS-aware applications</text>
+  <text x="75" y="98" class="desc">IPv6 Shim — for traditional IP application backward compatibility</text>
+
+  <!-- FSP layer -->
+  <rect x="50" y="150" width="775" height="120" class="layer fsp"/>
+  <text x="75" y="183" class="name">FIPS Session Protocol (FSP)</text>
+  <text x="75" y="205" class="desc">End-to-end authenticated encryption between endpoints</text>
+  <text x="75" y="225" class="desc">Session lifecycle, path discovery, in-band metrics</text>
+  <text x="75" y="245" class="desc">Replay protection, forward secrecy, identity privacy</text>
+  <text x="800" y="183" class="scope" text-anchor="end">end-to-end</text>
+
+  <!-- FMP layer -->
+  <rect x="50" y="295" width="775" height="120" class="layer fmp"/>
+  <text x="75" y="328" class="name">FIPS Mesh Protocol (FMP)</text>
+  <text x="75" y="350" class="desc">Hop-by-hop peer authentication, link encryption, liveness detection</text>
+  <text x="75" y="370" class="desc">Spanning tree, bloom filters, routing, forwarding, repair</text>
+  <text x="75" y="390" class="desc">Link quality monitoring, maintenance, optional discovery</text>
+  <text x="800" y="328" class="scope" text-anchor="end">hop-by-hop</text>
+
+  <!-- Transport layer -->
+  <rect x="50" y="440" width="775" height="95" class="layer xport"/>
+  <text x="75" y="473" class="name">Transport Layer</text>
+  <text x="800" y="473" class="scope" text-anchor="end">(overlay, shared medium, point-to-point)</text>
+  <text x="75" y="495" class="desc">Datagram delivery over arbitrary media</text>
+  <text x="75" y="515" class="desc">UDP, Ethernet, WiFi, Bluetooth, Tor, serial, ...</text>
+
+  <!-- Caption -->
+  <text x="438" y="585" text-anchor="middle" class="caption">FIPS protocol layer stack — three layers with clean service boundaries</text>
+</svg>

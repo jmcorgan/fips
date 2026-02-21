@@ -166,7 +166,7 @@ configurable.
 ### Link-Layer MMP (`node.mmp.*`)
 
 Metrics Measurement Protocol for per-peer link measurement. See
-[fips-link-layer.md](fips-link-layer.md) for behavioral details.
+[fips-mesh-layer.md](fips-mesh-layer.md) for behavioral details.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

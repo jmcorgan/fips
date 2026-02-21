@@ -16,7 +16,7 @@ specific topics.
 | -------- | ----------- |
 | [fips-intro.md](fips-intro.md) | Protocol introduction: goals, architecture, layer model |
 | [fips-transport-layer.md](fips-transport-layer.md) | Transport layer: datagram delivery over arbitrary media |
-| [fips-link-layer.md](fips-link-layer.md) | FIPS Link Protocol (FLP): peer authentication, link encryption, forwarding |
+| [fips-mesh-layer.md](fips-mesh-layer.md) | FIPS Mesh Protocol (FMP): peer authentication, link encryption, forwarding |
 | [fips-session-layer.md](fips-session-layer.md) | FIPS Session Protocol (FSP): end-to-end encryption, sessions |
 | [fips-ipv6-adapter.md](fips-ipv6-adapter.md) | IPv6 adaptation: TUN interface, DNS, MTU enforcement |
 
@@ -58,7 +58,7 @@ specific topics.
    fips-transport-layer  fips-mesh-     fips-software-
               │          operation       architecture
               ▼              │              │
-   fips-link-layer ◄────────┤              ▼
+   fips-mesh-layer ◄────────┤              ▼
               │              │       fips-state-machines
               ▼              │
    fips-session-layer        ├──► fips-spanning-tree

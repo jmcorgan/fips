@@ -8,14 +8,14 @@ session management — is built on the services the transport layer provides.
 ## Role
 
 A **transport** is a driver for a particular communication medium: a UDP
-socket, an Ethernet interface, a LoRa radio, a serial line, a Tor circuit.
+socket, an Ethernet interface, a serial line, a Tor circuit, a radio modem.
 The transport layer's job is simple: accept a datagram and a transport
 address, deliver the datagram to that address, and push inbound datagrams up
-to the FIPS Link Protocol (FLP) above.
+to the FIPS Mesh Protocol (FMP) above.
 
 The transport layer deals exclusively in **transport addresses** — IP:port
-tuples, MAC addresses, LoRa device addresses, .onion identifiers. These are
-opaque to every layer above FLP. The mapping from transport address to FIPS
+tuples, MAC addresses, .onion identifiers, radio device addresses. These are
+opaque to every layer above FMP. The mapping from transport address to FIPS
 identity happens at the link layer after the Noise IK handshake completes.
 The word "peer" belongs to the link layer and above; the transport layer
 knows only about remote endpoints identified by transport addresses.
@@ -23,29 +23,29 @@ knows only about remote endpoints identified by transport addresses.
 A single transport instance can serve multiple remote endpoints
 simultaneously — a UDP socket exchanges datagrams with many remote
 addresses, an Ethernet interface communicates with many MAC addresses on the
-same segment. Each endpoint may become a separate FLP link, but the
+same segment. Each endpoint may become a separate FMP link, but the
 transport layer itself maintains no per-endpoint state.
 
-## Services Provided to FLP
+## Services Provided to FMP
 
-The transport layer provides four services to the FIPS Link Protocol above:
+The transport layer provides four services to the FIPS Mesh Protocol above:
 
 ### Datagram Delivery
 
 Send and receive datagrams to/from transport addresses. The transport
 handles all medium-specific details: socket management, framing for stream
-transports, radio configuration. FLP sees only "send bytes to address" and
+transports, radio configuration. FMP sees only "send bytes to address" and
 "bytes arrived from address."
 
-Inbound datagrams are pushed to FLP through a channel. The transport spawns
+Inbound datagrams are pushed to FMP through a channel. The transport spawns
 a receive task that pushes arriving datagrams (along with the source
-transport address and transport identifier) onto a bounded channel. FLP
+transport address and transport identifier) onto a bounded channel. FMP
 reads from this channel and dispatches based on the source address and
 packet content.
 
 ### MTU Reporting
 
-Report the maximum datagram size for a given link. FLP needs this to
+Report the maximum datagram size for a given link. FMP needs this to
 determine how much payload can fit in a single packet after link-layer
 encryption overhead.
 
@@ -63,7 +63,7 @@ link individually.
 ### Connection Lifecycle
 
 For connection-oriented transports, manage the underlying connection: TCP
-handshake, Tor circuit establishment, Bluetooth pairing. FLP cannot begin
+handshake, Tor circuit establishment, Bluetooth pairing. FMP cannot begin
 the Noise IK handshake until the transport-layer connection is established.
 
 Connectionless transports (UDP, raw Ethernet) skip this — datagrams can flow
@@ -71,7 +71,7 @@ immediately to any reachable address.
 
 ### Discovery (Optional)
 
-Notify FLP when FIPS-capable endpoints are discovered on the local medium.
+Notify FMP when FIPS-capable endpoints are discovered on the local medium.
 This is an optional capability — transports that don't support it simply
 don't provide discovery events.
 
@@ -94,7 +94,6 @@ for internet connectivity:
 | TCP/IP | IP:port | Stream | Reliable | Requires length-prefix framing |
 | WebSocket | URL | Stream | Reliable | Browser-compatible |
 | Tor | .onion | Stream | Reliable | High latency, strong anonymity |
-| I2P | Destination | ~32K | Unreliable | Datagram mode |
 
 **Shared medium transports** operate over broadcast- or multicast-capable
 media:
@@ -105,7 +104,7 @@ media:
 | WiFi | MAC | 1500 | Unreliable | Infrastructure mode = Ethernet |
 | Bluetooth | BD_ADDR | 672–64K | Reliable | L2CAP |
 | BLE | BD_ADDR | 23–517 | Reliable | Negotiated ATT_MTU |
-| LoRa | Device addr | 51–222 | Unreliable | Low bandwidth, long range |
+| Radio | Device addr | 51–222 | Unreliable | Low bandwidth, long range |
 
 **Point-to-point transports** connect exactly two endpoints:
 
@@ -114,9 +113,9 @@ media:
 | Serial | None (P2P) | 256–1500 | Reliable | SLIP/COBS framing |
 | Dialup | None (P2P) | 1500 | Reliable | PPP framing |
 
-### Properties That Matter to FLP
+### Properties That Matter to FMP
 
-**MTU**: Determines how much data FLP can pack into a single datagram after
+**MTU**: Determines how much data FMP can pack into a single datagram after
 accounting for link encryption overhead. Heterogeneous MTUs across the mesh
 are normal — the IPv6 minimum (1280 bytes) is the safe baseline for FIPS
 packet sizing.
@@ -129,19 +128,19 @@ and duplication at the routing layer.
 
 **Connection model**: Connectionless transports (UDP, raw Ethernet) allow
 immediate datagram exchange. Connection-oriented transports (TCP, Tor, BLE)
-require connection setup before FLP can begin the Noise IK handshake,
+require connection setup before FMP can begin the Noise IK handshake,
 adding startup latency.
 
 **Stream vs. datagram**: Datagram transports have natural packet boundaries.
 Stream transports (TCP, WebSocket, Tor) require framing to delineate FIPS
-packets within the byte stream. The FLP common prefix includes a payload
+packets within the byte stream. The FMP common prefix includes a payload
 length field that provides this framing directly, replacing the need for a
 separate length-prefix layer.
 
-**Addressing opacity**: Transport addresses are opaque byte vectors. FLP
+**Addressing opacity**: Transport addresses are opaque byte vectors. FMP
 doesn't interpret them — it just passes them back to the transport when
 sending. This means adding a new transport type with a novel address format
-requires no changes to FLP or FSP.
+requires no changes to FMP or FSP.
 
 ## Connection Model
 
@@ -154,13 +153,12 @@ are lightweight — a transport address is sufficient to begin communication.
 | --------- | ----- |
 | UDP/IP | Stateless datagrams; NAT state is implicit |
 | Ethernet | Send to MAC address directly |
-| LoRa | Raw packets to device address |
-| I2P | Datagram mode |
+| Radio | Raw packets to device address |
 
 ### Connection-Oriented Transports
 
 Explicit connection setup is required before FIPS traffic can flow. The link
-must complete transport-layer connection before FLP authentication can
+must complete transport-layer connection before FMP authentication can
 proceed.
 
 | Transport | Connection Setup |
@@ -185,7 +183,7 @@ circuit). Peer timeout configuration must account for transport-specific
 setup times.
 
 **Framing**: Stream transports must delimit FIPS packets within the byte
-stream. The FLP common prefix includes a payload length field that provides
+stream. The FMP common prefix includes a payload length field that provides
 integrated framing. Datagram transports preserve packet boundaries naturally.
 
 ## UDP/IP: The Primary Internet Transport
@@ -248,14 +246,14 @@ discovery; a FIPS-specific announcement or response is.
 
 Discovery is an optional transport capability. Transports that don't support
 it (configured UDP endpoints, TCP) simply don't provide discovery events.
-FLP handles both cases uniformly: with discovery, it waits for events then
+FMP handles both cases uniformly: with discovery, it waits for events then
 initiates link setup; without discovery, it initiates link setup directly to
 configured addresses.
 
 ### Local/Medium Discovery *(future direction)*
 
 For transports where endpoints share a physical or link-layer medium — LAN
-broadcast, LoRa, BLE — discovery uses beacon and query mechanisms:
+broadcast, radio, BLE — discovery uses beacon and query mechanisms:
 
 - **Beacon**: A node periodically broadcasts its FIPS presence on the shared
   medium. Content is a FIPS-defined discovery frame carrying enough
@@ -264,13 +262,13 @@ broadcast, LoRa, BLE — discovery uses beacon and query mechanisms:
   respond. Responses arrive on the same channel as beacon events.
 
 Both produce the same result: "FIPS endpoint available at transport address
-X." FLP does not need to distinguish beacons from query responses.
+X." FMP does not need to distinguish beacons from query responses.
 
 | Transport | Discovery | Notes |
 | --------- | --------- | ----- |
 | UDP (LAN) | Broadcast/multicast | On local network segment |
 | Ethernet | Broadcast | Custom EtherType, ff:ff:ff:ff:ff:ff |
-| LoRa | Beacon | Shared RF channel, natural fit |
+| Radio | Beacon | Shared RF channel, natural fit |
 | BLE | Advertising | GATT service UUID |
 
 ### Nostr Relay Discovery *(future direction)*
@@ -290,7 +288,7 @@ Key properties:
   is authenticated
 - Relay selection acts as scoping — which relays a node publishes to and
   subscribes on determines its discovery neighborhood
-- Can only advertise IP-reachable endpoints (not LoRa, BLE, serial)
+- Can only advertise IP-reachable endpoints (not radio, BLE, serial)
 - Higher latency than local discovery (relay propagation delays)
 
 ### Current State
@@ -333,7 +331,7 @@ Each inbound datagram carries:
 
 ### Transport Metadata
 
-Transport types carry static metadata that FLP can query:
+Transport types carry static metadata that FMP can query:
 
 ```text
 TransportType {
@@ -373,7 +371,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | WiFi | Future direction | Infrastructure mode = Ethernet driver |
 | Tor | Future direction | High latency, .onion addressing |
 | BLE | Future direction | ATT_MTU negotiation, per-link MTU |
-| LoRa | Future direction | Constrained MTU (51–222 bytes) |
+| Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |
 
 ## Design Considerations
@@ -399,7 +397,7 @@ traffic automatically routes through alternatives. A node with both UDP and
 Ethernet transports bridges between internet-connected and local-only
 networks transparently.
 
-Multiple links to the same peer over different transports are possible. FLP
+Multiple links to the same peer over different transports are possible. FMP
 manages these independently — each link has its own Noise session, its own
 MTU, and its own liveness tracking.
 
@@ -413,7 +411,7 @@ consider transport quality. This is a potential area for future optimization.
 ## References
 
 - [fips-intro.md](fips-intro.md) — Protocol overview and layer architecture
-- [fips-link-layer.md](fips-link-layer.md) — FLP specification (the layer above)
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification (the layer above)
 - [fips-wire-formats.md](fips-wire-formats.md) — Transport framing details
 - [fips-software-architecture.md](fips-software-architecture.md) — Transport
   trait implementation details

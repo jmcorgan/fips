@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 400" font-family="monospace" font-size="15">
+  <style>
+    text        { fill: #e0e0e0; }
+    text.header { font-size: 16px; font-weight: bold; fill: #e0e0e0; }
+    text.layer  { font-size: 15px; fill: #e0e0e0; }
+    text.fips   { font-size: 15px; fill: #80b0e0; }
+    text.diff   { font-size: 14px; fill: #a0a0b0; }
+    line.rule   { stroke: #404050; stroke-width: 1; }
+    line.top    { stroke: #606070; stroke-width: 1.5; }
+  </style>
+
+  <!-- Background -->
+  <rect width="800" height="360" fill="#0d1117" rx="8"/>
+
+  <!-- Column headers -->
+  <text x="40"  y="35" class="header">Traditional</text>
+  <text x="280" y="35" class="header">FIPS</text>
+  <text x="560" y="35" class="header">Key Difference</text>
+  <line x1="20" y1="48" x2="780" y2="48" class="top"/>
+
+  <!-- Application -->
+  <text x="40"  y="75" class="layer">Application</text>
+  <text x="280" y="75" class="fips">Application</text>
+  <text x="560" y="75" class="diff">Same role</text>
+  <line x1="20" y1="90" x2="780" y2="90" class="rule"/>
+
+  <!-- Transport -->
+  <text x="40"  y="117" class="layer">Transport</text>
+  <text x="280" y="117" class="fips">(not present)</text>
+  <text x="560" y="117" class="diff">Datagrams, not streams</text>
+  <line x1="20" y1="132" x2="780" y2="132" class="rule"/>
+
+  <!-- Session -->
+  <text x="40"  y="159" class="layer">Session</text>
+  <text x="280" y="159" class="fips">FIPS Session Protocol</text>
+  <text x="560" y="159" class="diff">End-to-end encryption</text>
+  <text x="280" y="177" class="fips">(FSP)</text>
+  <text x="560" y="177" class="diff">and session management</text>
+  <line x1="20" y1="192" x2="780" y2="192" class="rule"/>
+
+  <!-- Network -->
+  <text x="40"  y="219" class="layer">Network (IP)</text>
+  <text x="280" y="219" class="fips">FIPS Mesh Protocol</text>
+  <text x="560" y="219" class="diff">Self-organizing routing</text>
+  <text x="280" y="237" class="fips">(FMP)</text>
+  <text x="560" y="237" class="diff">and forwarding</text>
+  <line x1="20" y1="252" x2="780" y2="252" class="rule"/>
+
+  <!-- Link -->
+  <text x="40"  y="279" class="layer">Link</text>
+  <text x="280" y="279" class="fips">FMP (link encryption)</text>
+  <text x="560" y="279" class="diff">Hop-by-hop crypto</text>
+  <line x1="20" y1="294" x2="780" y2="294" class="rule"/>
+
+  <!-- Physical -->
+  <text x="40"  y="321" class="layer">Physical</text>
+  <text x="280" y="321" class="fips">Transport layer</text>
+  <text x="560" y="321" class="diff">Abstracted — all media</text>
+  <text x="280" y="339" class="fips">(UDP, radio, serial)</text>
+  <text x="560" y="339" class="diff">treated the same</text>
+
+  <!-- Caption -->
+  <text x="400" y="393" text-anchor="middle" font-size="14" fill="#808090" font-style="italic">Mapping FIPS protocol layers to the traditional networking model</text>
+</svg>

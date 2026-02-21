@@ -32,7 +32,7 @@ tag). No separate length prefix is needed.
 
 ## Link-Layer Formats
 
-All FLP packets begin with a **4-byte common prefix** that identifies the
+All FMP packets begin with a **4-byte common prefix** that identifies the
 protocol version, session lifecycle phase, per-packet flags, and payload
 length.
 
@@ -663,11 +663,11 @@ Layer 3: Session encryption (FSP)
     FSP header (12 bytes) + AEAD(inner_hdr (6) + payload (1024)) + AEAD tag (16)
     = 1058 bytes
 
-Layer 2: SessionDatagram envelope (FLP routing)
+Layer 2: SessionDatagram envelope (FMP routing)
     msg_type (1) + ttl (1) + path_mtu (2) + src_addr (16) + dest_addr (16) + payload (1058)
     = 1094 bytes
 
-Layer 1: Link encryption (FLP per-hop)
+Layer 1: Link encryption (FMP per-hop)
     outer header (16) + encrypted(inner_hdr (5) + datagram (1094)) + AEAD tag (16)
     = 1131 bytes
 
@@ -754,7 +754,7 @@ endpoint session keys).
 
 ## References
 
-- [fips-link-layer.md](fips-link-layer.md) — FLP behavioral specification
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP behavioral specification
 - [fips-session-layer.md](fips-session-layer.md) — FSP behavioral specification
 - [fips-transport-layer.md](fips-transport-layer.md) — Transport framing
 - [fips-mesh-operation.md](fips-mesh-operation.md) — How messages work together

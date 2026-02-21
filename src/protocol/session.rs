@@ -565,7 +565,7 @@ impl SessionAck {
 
 /// Session-layer sender report (msg_type 0x11).
 ///
-/// Mirrors the FLP `SenderReport` fields but carried as an FSP session
+/// Mirrors the FMP `SenderReport` fields but carried as an FSP session
 /// message inside the AEAD envelope. The msg_type is in the FSP inner
 /// header, so the body starts with reserved bytes.
 ///
@@ -634,7 +634,7 @@ impl SessionSenderReport {
 
 /// Session-layer receiver report (msg_type 0x12).
 ///
-/// Mirrors the FLP `ReceiverReport` fields but carried as an FSP session
+/// Mirrors the FMP `ReceiverReport` fields but carried as an FSP session
 /// message inside the AEAD envelope.
 ///
 /// ## Wire Format (66 bytes body, after inner header stripped)

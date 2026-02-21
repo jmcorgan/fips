@@ -2,7 +2,7 @@
 
 use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
-use crate::node::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, FLP_VERSION, COMMON_PREFIX_SIZE};
+use crate::node::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, FMP_VERSION, COMMON_PREFIX_SIZE};
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -110,11 +110,11 @@ impl Node {
             None => return, // Malformed prefix
         };
 
-        if prefix.version != FLP_VERSION {
+        if prefix.version != FMP_VERSION {
             debug!(
                 version = prefix.version,
                 transport_id = %packet.transport_id,
-                "Unknown FLP version, dropping"
+                "Unknown FMP version, dropping"
             );
             return;
         }
@@ -133,7 +133,7 @@ impl Node {
                 debug!(
                     phase = prefix.phase,
                     transport_id = %packet.transport_id,
-                    "Unknown FLP phase, dropping"
+                    "Unknown FMP phase, dropping"
                 );
             }
         }

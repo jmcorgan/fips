@@ -69,22 +69,22 @@ const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADE
 /// Breakdown (traced through the actual send path):
 ///
 /// ```text
-/// FLP outer header (cleartext AAD)              16
+/// FMP outer header (cleartext AAD)              16
 ///   common prefix (4) + receiver_idx (4) + counter (8)
-/// FLP AEAD ciphertext:
-///   timestamp (4) + msg_type (1)                 5   [FLP inner header]
+/// FMP AEAD ciphertext:
+///   timestamp (4) + msg_type (1)                 5   [FMP inner header]
 ///   ttl (1) + path_mtu (2) + src (16) + dst (16) 35  [SessionDatagram body]
 ///   FSP header (4 prefix + 8 counter)            12   [cleartext AAD]
 ///   FSP AEAD ciphertext:
 ///     timestamp (4) + msg_type (1) + flags (1)    6   [FSP inner header]
 ///     <application data>
 ///     Poly1305 tag                               16   [FSP AEAD]
-/// FLP Poly1305 tag                              16   [FLP AEAD]
+/// FMP Poly1305 tag                              16   [FMP AEAD]
 ///                                              ────
 ///                                               106
 /// ```
 ///
-/// Note: the FLP inner header msg_type byte IS the SessionDatagram msg_type
+/// Note: the FMP inner header msg_type byte IS the SessionDatagram msg_type
 /// byte (shared, not double-counted). The "35 bytes" is the SessionDatagram
 /// body after msg_type is consumed by the dispatch layer.
 pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 6 + 16; // 106 bytes

@@ -136,7 +136,7 @@ FPR calculations, and size class folding.
 
 ## Routing Decision Process
 
-At each hop, FLP makes a local forwarding decision using the `find_next_hop()`
+At each hop, FMP makes a local forwarding decision using the `find_next_hop()`
 priority chain. This is the core routing algorithm.
 
 ### Priority Chain
@@ -585,7 +585,7 @@ recovery).
 ## References
 
 - [fips-intro.md](fips-intro.md) — Protocol overview
-- [fips-link-layer.md](fips-link-layer.md) — FLP specification
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification
 - [fips-spanning-tree.md](fips-spanning-tree.md) — Tree algorithms and data
   structures
 - [fips-bloom-filters.md](fips-bloom-filters.md) — Filter parameters and math

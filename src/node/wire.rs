@@ -1,6 +1,6 @@
 //! Wire Format Parsing and Serialization
 //!
-//! Defines the FIPS link-layer wire format (FLP) for packet dispatch.
+//! Defines the FIPS mesh-layer wire format (FMP) for packet dispatch.
 //! All packets begin with a 4-byte common prefix followed by phase-specific fields.
 //!
 //! ## Common Prefix (4 bytes)
@@ -24,8 +24,8 @@ use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, TAG_SIZE};
 // Constants
 // ============================================================================
 
-/// FLP protocol version (4 high bits of byte 0).
-pub const FLP_VERSION: u8 = 0;
+/// FMP protocol version (4 high bits of byte 0).
+pub const FMP_VERSION: u8 = 0;
 
 /// Phase value for established (encrypted) frames.
 pub const PHASE_ESTABLISHED: u8 = 0x0;
@@ -70,7 +70,7 @@ pub const FLAG_SP: u8 = 0x04;
 // Common Prefix
 // ============================================================================
 
-/// Parsed common packet prefix (first 4 bytes of every FLP packet).
+/// Parsed common packet prefix (first 4 bytes of every FMP packet).
 ///
 /// Wire format:
 /// ```text
@@ -156,7 +156,7 @@ impl EncryptedHeader {
         let version = data[0] >> 4;
         let phase = data[0] & 0x0F;
 
-        if version != FLP_VERSION || phase != PHASE_ESTABLISHED {
+        if version != FMP_VERSION || phase != PHASE_ESTABLISHED {
             return None;
         }
 
@@ -222,7 +222,7 @@ impl Msg1Header {
         let version = data[0] >> 4;
         let phase = data[0] & 0x0F;
 
-        if version != FLP_VERSION || phase != PHASE_MSG1 {
+        if version != FMP_VERSION || phase != PHASE_MSG1 {
             return None;
         }
 
@@ -278,7 +278,7 @@ impl Msg2Header {
         let version = data[0] >> 4;
         let phase = data[0] & 0x0F;
 
-        if version != FLP_VERSION || phase != PHASE_MSG2 {
+        if version != FMP_VERSION || phase != PHASE_MSG2 {
             return None;
         }
 
@@ -317,7 +317,7 @@ pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
     let payload_len = (4 + noise_msg1.len()) as u16; // sender_idx + noise_msg1
 
     let mut packet = Vec::with_capacity(MSG1_WIRE_SIZE);
-    packet.push(CommonPrefix::ver_phase_byte(FLP_VERSION, PHASE_MSG1));
+    packet.push(CommonPrefix::ver_phase_byte(FMP_VERSION, PHASE_MSG1));
     packet.push(0x00); // flags must be zero
     packet.extend_from_slice(&payload_len.to_le_bytes());
     packet.extend_from_slice(&sender_idx.to_le_bytes());
@@ -334,7 +334,7 @@ pub fn build_msg2(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_ms
     let payload_len = (4 + 4 + noise_msg2.len()) as u16; // sender + receiver + noise
 
     let mut packet = Vec::with_capacity(MSG2_WIRE_SIZE);
-    packet.push(CommonPrefix::ver_phase_byte(FLP_VERSION, PHASE_MSG2));
+    packet.push(CommonPrefix::ver_phase_byte(FMP_VERSION, PHASE_MSG2));
     packet.push(0x00); // flags must be zero
     packet.extend_from_slice(&payload_len.to_le_bytes());
     packet.extend_from_slice(&sender_idx.to_le_bytes());
@@ -353,7 +353,7 @@ pub fn build_established_header(
     payload_len: u16,
 ) -> [u8; ESTABLISHED_HEADER_SIZE] {
     let mut header = [0u8; ESTABLISHED_HEADER_SIZE];
-    header[0] = CommonPrefix::ver_phase_byte(FLP_VERSION, PHASE_ESTABLISHED);
+    header[0] = CommonPrefix::ver_phase_byte(FMP_VERSION, PHASE_ESTABLISHED);
     header[1] = flags;
     header[2..4].copy_from_slice(&payload_len.to_le_bytes());
     header[4..8].copy_from_slice(&receiver_idx.to_le_bytes());

@@ -155,7 +155,7 @@ transport path MTU for the IPv6 adapter is therefore:
 1280 + 106 = 1386 bytes
 ```
 
-Transports with smaller MTUs (LoRa at ~250 bytes, serial at 256 bytes) cannot
+Transports with smaller MTUs (radio at ~250 bytes, serial at 256 bytes) cannot
 support the IPv6 adapter — applications on those transports must use the
 native FIPS datagram API.
 
@@ -227,7 +227,7 @@ The TUN reader receives raw IPv6 packets from applications and processes them:
 4. Retrieve NodeAddr and PublicKey from cache
 5. Look up or establish FSP session
 6. Encrypt payload with session keys
-7. Route through FLP toward destination
+7. Route through FMP toward destination
 
 ### Writer Thread
 
@@ -295,7 +295,7 @@ TUN device creation requires `CAP_NET_ADMIN`. Options:
 Two complementary mechanisms support full PMTUD:
 
 1. **Proactive**: The `path_mtu` field (2 bytes) in the SessionDatagram envelope
-   is implemented at the FLP level. The source sets it to its outbound link MTU
+   is implemented at the FMP level. The source sets it to its outbound link MTU
    minus overhead; each transit node applies
    `min(current, own_outbound_mtu - overhead)`. The destination receives the
    forward-path minimum. PathMtuNotification is handled at the session layer;

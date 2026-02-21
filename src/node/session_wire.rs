@@ -144,7 +144,7 @@ impl FspCommonPrefix {
 /// ```
 ///
 /// The full 12-byte header is used as AAD for the AEAD construction.
-/// No receiver_idx — unlike FLP, FSP is end-to-end (dispatched by src_addr
+/// No receiver_idx — unlike FMP, FSP is end-to-end (dispatched by src_addr
 /// from the SessionDatagram envelope, not by index).
 #[derive(Clone, Debug)]
 pub struct FspEncryptedHeader {

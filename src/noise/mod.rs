@@ -268,7 +268,7 @@ impl CipherState {
 
     /// Encrypt plaintext with Additional Authenticated Data (AAD).
     ///
-    /// The AAD is authenticated but not encrypted. Used for the FLP
+    /// The AAD is authenticated but not encrypted. Used for the FMP
     /// established frame format where the 16-byte outer header is
     /// bound to the AEAD tag.
     pub fn encrypt_with_aad(

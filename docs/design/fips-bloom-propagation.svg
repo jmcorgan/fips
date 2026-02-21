@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 620" font-family="monospace" font-size="12">
+  <style>
+    rect.callout  { fill: #151520; stroke: #505040; stroke-width: 1; rx: 3; }
+    rect.bloom    { fill: #1a1a2e; stroke-width: 1; rx: 3; }
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 14px; font-weight: bold; }
+    text.bloom-t  { font-size: 11px; fill: #b0b0c0; }
+    text.sender   { font-size: 12px; font-weight: bold; }
+    text.op       { font-size: 10px; fill: #b0b0b0; font-style: italic; }
+    text.caption  { font-size: 13px; fill: #808090; font-style: italic; }
+    line.link     { stroke: #404860; stroke-width: 2; }
+  </style>
+
+  <!-- Background -->
+  <rect width="840" height="620" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="420" y="28" text-anchor="middle" class="title">Bloom Filter Propagation</text>
+  <text x="420" y="46" text-anchor="middle" class="subtitle">Each link carries two filters — one in each direction (split-horizon)</text>
+
+  <!--
+    Node colors (sender-coded):
+      R: #d0a040 (amber)     B: #40a0a0 (teal)
+      C: #a060c0 (purple)    D: #c07050 (coral)
+      E: #50a060 (green)     F: #5090d0 (sky)
+
+    Filter contents (tree-only, no mesh links):
+      D to B = {D}           B to D = {B C E F R}
+      E to B = {E}           B to E = {B C D F R}
+      F to C = {F}           C to F = {B C D E R}
+      B to R = {B D E}       R to B = {C F R}
+      C to R = {C F}         R to C = {B D E R}
+  -->
+
+  <!-- ═══ Edges (drawn first so nodes/boxes overlay) ═══ -->
+  <line x1="400" y1="120" x2="232" y2="252" class="link"/>
+  <line x1="440" y1="120" x2="610" y2="252" class="link"/>
+  <line x1="192" y1="272" x2="130" y2="412" class="link"/>
+  <line x1="228" y1="272" x2="290" y2="412" class="link"/>
+  <line x1="630" y1="272" x2="630" y2="412" class="link"/>
+
+  <!-- ═══ Nodes (colored per-node) ═══ -->
+
+  <rect x="388" y="92" width="64" height="36" fill="#2e3020" stroke="#d0a040" stroke-width="2" rx="6"/>
+  <text x="420" y="115" text-anchor="middle" class="nlabel" fill="#d0a040">R</text>
+
+  <rect x="178" y="248" width="64" height="36" fill="#1e3030" stroke="#40a0a0" stroke-width="2" rx="6"/>
+  <text x="210" y="271" text-anchor="middle" class="nlabel" fill="#40a0a0">B</text>
+
+  <rect x="598" y="248" width="64" height="36" fill="#2a1e30" stroke="#a060c0" stroke-width="2" rx="6"/>
+  <text x="630" y="271" text-anchor="middle" class="nlabel" fill="#a060c0">C</text>
+
+  <rect x="78" y="408" width="64" height="36" fill="#2e2018" stroke="#c07050" stroke-width="2" rx="6"/>
+  <text x="110" y="431" text-anchor="middle" class="nlabel" fill="#c07050">D</text>
+
+  <rect x="278" y="408" width="64" height="36" fill="#1a2e1a" stroke="#50a060" stroke-width="2" rx="6"/>
+  <text x="310" y="431" text-anchor="middle" class="nlabel" fill="#50a060">E</text>
+
+  <rect x="598" y="408" width="64" height="36" fill="#1a2030" stroke="#5090d0" stroke-width="2" rx="6"/>
+  <text x="630" y="431" text-anchor="middle" class="nlabel" fill="#5090d0">F</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- Filter boxes colored by sender node.                   -->
+  <!-- Every filter: self + merge(all inbound except recipient's) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- ─── R—B link ─── -->
+
+  <!-- B to R -->
+  <text x="210" y="120" class="sender" fill="#40a0a0">B to R</text>
+  <rect x="210" y="124" width="80" height="26" class="bloom" stroke="#40a0a0"/>
+  <text x="218" y="142" class="bloom-t">B D E</text>
+
+  <!-- R to B -->
+  <text x="210" y="166" class="sender" fill="#d0a040">R to B</text>
+  <rect x="210" y="170" width="80" height="26" class="bloom" stroke="#d0a040"/>
+  <text x="218" y="188" class="bloom-t">C F R</text>
+
+  <!-- ─── R—C link ─── -->
+
+  <!-- C to R -->
+  <text x="560" y="120" class="sender" fill="#a060c0">C to R</text>
+  <rect x="560" y="124" width="80" height="26" class="bloom" stroke="#a060c0"/>
+  <text x="568" y="142" class="bloom-t">C F</text>
+
+  <!-- R to C -->
+  <text x="560" y="166" class="sender" fill="#d0a040">R to C</text>
+  <rect x="560" y="170" width="80" height="26" class="bloom" stroke="#d0a040"/>
+  <text x="568" y="188" class="bloom-t">B D E R</text>
+
+  <!-- ─── B—D link ─── -->
+
+  <!-- D to B -->
+  <text x="52" y="320" class="sender" fill="#c07050">D to B</text>
+  <rect x="52" y="324" width="80" height="26" class="bloom" stroke="#c07050"/>
+  <text x="60" y="342" class="bloom-t">D</text>
+
+  <!-- B to D -->
+  <text x="52" y="366" class="sender" fill="#40a0a0">B to D</text>
+  <rect x="52" y="370" width="80" height="26" class="bloom" stroke="#40a0a0"/>
+  <text x="60" y="388" class="bloom-t">B C E F R</text>
+
+  <!-- ─── B—E link ─── -->
+
+  <!-- E to B -->
+  <text x="298" y="320" class="sender" fill="#50a060">E to B</text>
+  <rect x="298" y="324" width="80" height="26" class="bloom" stroke="#50a060"/>
+  <text x="306" y="342" class="bloom-t">E</text>
+
+  <!-- B to E -->
+  <text x="298" y="366" class="sender" fill="#40a0a0">B to E</text>
+  <rect x="298" y="370" width="80" height="26" class="bloom" stroke="#40a0a0"/>
+  <text x="306" y="388" class="bloom-t">B C D F R</text>
+
+  <!-- ─── C—F link ─── -->
+
+  <!-- F to C -->
+  <text x="668" y="320" class="sender" fill="#5090d0">F to C</text>
+  <rect x="668" y="324" width="80" height="26" class="bloom" stroke="#5090d0"/>
+  <text x="676" y="342" class="bloom-t">F</text>
+
+  <!-- C to F -->
+  <text x="668" y="366" class="sender" fill="#a060c0">C to F</text>
+  <rect x="668" y="370" width="80" height="26" class="bloom" stroke="#a060c0"/>
+  <text x="676" y="388" class="bloom-t">B C D E R</text>
+
+  <!-- ═══ Merge annotations ═══ -->
+  <text x="248" y="271" class="op">merges D + E + self, sends to R</text>
+  <text x="592" y="271" text-anchor="end" class="op">merges F + self, sends to R</text>
+
+  <!-- ═══ Legend ═══ -->
+  <rect x="40" y="462" width="760" height="36" class="callout"/>
+  <text x="60" y="486" font-size="12" font-weight="bold" fill="#e0e0e0">X to Y</text>
+  <rect x="116" y="474" width="54" height="20" class="bloom" stroke="#e0e0e0"/>
+  <text x="180" y="488" class="bloom-t">filter X sends to Y — box color matches sender node</text>
+
+  <!-- ═══ Callout: candidate selection ═══ -->
+  <rect x="40" y="512" width="760" height="62" class="callout"/>
+  <text x="56" y="532" font-size="11" font-weight="bold" fill="#d0a040">Candidate selection</text>
+  <text x="56" y="548" font-size="10" fill="#c0c0c0">At any node, each peer's filter answers: "can you maybe reach destination X?"</text>
+  <text x="56" y="564" font-size="10" fill="#c0c0c0">Example: D wants to reach F. D checks the filter from B: B C E F R — F present, so B is a candidate.</text>
+
+  <!-- Caption -->
+  <text x="420" y="604" text-anchor="middle" class="caption">At steady state, every node knows full network reachability through each of its peers</text>
+</svg>
