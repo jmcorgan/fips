@@ -424,8 +424,9 @@ async fn test_session_ack_for_unknown_session() {
     let node1_addr = *nodes[1].node.node_addr();
 
     // Fabricate a SessionAck and deliver directly
-    let coords = nodes[1].node.tree_state().my_coords().clone();
-    let ack = SessionAck::new(coords).with_handshake(vec![0u8; 33]);
+    let src_coords = nodes[1].node.tree_state().my_coords().clone();
+    let dest_coords = nodes[0].node.tree_state().my_coords().clone();
+    let ack = SessionAck::new(src_coords, dest_coords).with_handshake(vec![0u8; 33]);
     let datagram = SessionDatagram::new(node1_addr, node0_addr, ack.encode());
 
     // Send through link layer

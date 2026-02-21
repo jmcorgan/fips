@@ -138,8 +138,14 @@ impl Node {
                             ack.src_coords,
                             now_ms,
                         );
+                        self.coord_cache_mut().insert(
+                            datagram.dest_addr,
+                            ack.dest_coords,
+                            now_ms,
+                        );
                         debug!(
                             src = %datagram.src_addr,
+                            dest = %datagram.dest_addr,
                             "Cached coords from SessionAck"
                         );
                     }

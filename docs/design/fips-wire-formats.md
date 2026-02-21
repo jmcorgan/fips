@@ -566,8 +566,10 @@ Encoded with FSP prefix: ver=0, phase=0x2, flags=0, payload_len.
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
 | 0 | flags | 1 byte | Reserved |
-| 1 | src_coords_count | 2 bytes LE | Number of coordinate entries |
+| 1 | src_coords_count | 2 bytes LE | Number of acknowledger coordinate entries |
 | 3 | src_coords | 16 x n bytes | Acknowledger's ancestry (for cache warming) |
+| ... | dest_coords_count | 2 bytes LE | Number of initiator coordinate entries |
+| ... | dest_coords | 16 x m bytes | Initiator's ancestry (for return-path cache warming) |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
 | ... | handshake_payload | variable | Noise IK msg2 (33 bytes typical) |
 
@@ -730,7 +732,7 @@ endpoint session keys).
 | Message | Typical Size | Notes |
 | ------- | ------------ | ----- |
 | SessionSetup | ~200 bytes | Depth-dependent |
-| SessionAck | ~80 bytes | Depth-dependent |
+| SessionAck | ~130 bytes | Depth-dependent (carries both endpoints' coords) |
 | Data (minimal) | 12 + 6 + payload + 16 bytes | Steady state |
 | Data (with coords) | 12 + ~130 + 6 + payload + 16 bytes | Warmup/recovery |
 | SenderReport | 12 + 6 + 46 + 16 bytes | MMP metrics |

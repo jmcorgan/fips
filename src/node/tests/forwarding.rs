@@ -159,8 +159,9 @@ async fn test_coord_cache_warming_session_ack() {
     let root_addr = make_node_addr(0xF0);
 
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
 
-    let ack = SessionAck::new(src_coords.clone());
+    let ack = SessionAck::new(src_coords.clone(), dest_coords.clone());
     let ack_payload = ack.encode();
 
     let dg = SessionDatagram::new(src_addr, dest_addr, ack_payload);
@@ -172,16 +173,18 @@ async fn test_coord_cache_warming_session_ack() {
         .as_millis() as u64;
 
     assert!(node.coord_cache().get(&src_addr, now_ms).is_none());
+    assert!(node.coord_cache().get(&dest_addr, now_ms).is_none());
 
     node.handle_session_datagram(&from, &encoded[1..]).await;
 
-    // SessionAck only caches src_coords (the acknowledger's coords)
+    // SessionAck caches both src_coords and dest_coords
     let cached_src = node.coord_cache().get(&src_addr, now_ms);
     assert!(cached_src.is_some(), "src_addr coords not cached from SessionAck");
     assert_eq!(cached_src.unwrap().root_id(), &root_addr);
 
-    // dest_addr should NOT be cached (SessionAck doesn't carry dest coords)
-    assert!(node.coord_cache().get(&dest_addr, now_ms).is_none());
+    let cached_dest = node.coord_cache().get(&dest_addr, now_ms);
+    assert!(cached_dest.is_some(), "dest_addr coords not cached from SessionAck");
+    assert_eq!(cached_dest.unwrap().root_id(), &root_addr);
 }
 
 #[tokio::test]

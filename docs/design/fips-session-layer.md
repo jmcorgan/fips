@@ -116,7 +116,7 @@ The handshake is carried in SessionSetup and SessionAck messages:
 1. **Initiator** sends SessionSetup containing Noise IK msg1 and both
    parties' tree coordinates
 2. **Responder** processes msg1, learns initiator identity, sends SessionAck
-   containing Noise IK msg2 and its own coordinates
+   containing Noise IK msg2 and both parties' tree coordinates
 3. Both parties derive identical symmetric session keys
 
 Packets that trigger session establishment are queued (with bounded buffer)
@@ -130,8 +130,10 @@ As the message transits intermediate nodes, each node caches these coordinates,
 warming the path for subsequent data packets that carry only addresses (no
 coordinates).
 
-SessionAck carries the responder's coordinates back along the reverse path,
-warming caches in the other direction.
+SessionAck carries both the responder's and initiator's coordinates back
+along the reverse path, warming caches in the other direction. This ensures
+return-path transit nodes can route even when the reverse path diverges from
+the forward path (e.g., after tree reconvergence).
 
 ### Simultaneous Initiation
 

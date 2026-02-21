@@ -446,8 +446,10 @@ impl SessionSetup {
 /// Session acknowledgement.
 ///
 /// Carried inside a SessionDatagram envelope which provides src_addr and
-/// dest_addr. The SessionAck payload contains the acknowledger's coordinates
-/// for route cache warming and the Noise IK handshake response.
+/// dest_addr. The SessionAck payload contains both the acknowledger's and
+/// initiator's coordinates for route cache warming (ensuring return-path
+/// transit nodes can route independently of the forward path) and the Noise
+/// IK handshake response.
 ///
 /// ## Wire Format
 ///
@@ -457,12 +459,16 @@ impl SessionSetup {
 /// | 1      | flags            | 1 byte  | Reserved                            |
 /// | 2      | src_coords_count | 2 bytes | u16 LE                              |
 /// | 4      | src_coords       | 16 × n  | Acknowledger's coords (for caching) |
+/// | ...    | dest_coords_count| 2 bytes | u16 LE                              |
+/// | ...    | dest_coords      | 16 × m  | Initiator's coords (for return path)|
 /// | ...    | handshake_len    | 2 bytes  | u16 LE, Noise payload length        |
 /// | ...    | handshake_payload| variable| Noise IK msg2 (33 bytes typical)    |
 #[derive(Clone, Debug)]
 pub struct SessionAck {
     /// Acknowledger's coordinates.
     pub src_coords: TreeCoordinate,
+    /// Initiator's coordinates (for return-path cache warming).
+    pub dest_coords: TreeCoordinate,
     /// Reserved flags byte (for forward compatibility).
     pub flags: u8,
     /// Noise IK handshake message 2.
@@ -471,9 +477,10 @@ pub struct SessionAck {
 
 impl SessionAck {
     /// Create a new session acknowledgement.
-    pub fn new(src_coords: TreeCoordinate) -> Self {
+    pub fn new(src_coords: TreeCoordinate, dest_coords: TreeCoordinate) -> Self {
         Self {
             src_coords,
+            dest_coords,
             flags: 0,
             handshake_payload: Vec::new(),
         }
@@ -494,6 +501,7 @@ impl SessionAck {
         let mut body = Vec::new();
         body.push(self.flags);
         encode_coords(&self.src_coords, &mut body);
+        encode_coords(&self.dest_coords, &mut body);
         let hs_len = self.handshake_payload.len() as u16;
         body.extend_from_slice(&hs_len.to_le_bytes());
         body.extend_from_slice(&self.handshake_payload);
@@ -522,6 +530,9 @@ impl SessionAck {
         let (src_coords, consumed) = decode_coords(&payload[offset..])?;
         offset += consumed;
 
+        let (dest_coords, consumed) = decode_coords(&payload[offset..])?;
+        offset += consumed;
+
         if payload.len() < offset + 2 {
             return Err(ProtocolError::MessageTooShort {
                 expected: offset + 2,
@@ -541,6 +552,7 @@ impl SessionAck {
 
         Ok(Self {
             src_coords,
+            dest_coords,
             flags,
             handshake_payload,
         })
@@ -1079,7 +1091,7 @@ mod tests {
     #[test]
     fn test_session_ack_encode_decode() {
         let handshake = vec![0xBB; 33]; // typical Noise IK msg2
-        let ack = SessionAck::new(make_coords(&[7, 8, 0]))
+        let ack = SessionAck::new(make_coords(&[7, 8, 0]), make_coords(&[3, 4, 0]))
             .with_handshake(handshake.clone());
 
         let encoded = ack.encode();
@@ -1089,6 +1101,7 @@ mod tests {
 
         let decoded = SessionAck::decode(&encoded[4..]).unwrap();
         assert_eq!(decoded.src_coords, ack.src_coords);
+        assert_eq!(decoded.dest_coords, ack.dest_coords);
         assert_eq!(decoded.handshake_payload, handshake);
     }
 

@@ -220,7 +220,7 @@ transit, CP-flagged data packets, LookupResponse — write to the same cache.
 | Source | When | What |
 | ------ | ---- | ---- |
 | SessionSetup transit | Session establishment | Both src and dest coordinates |
-| SessionAck transit | Session establishment | Responder's coordinates |
+| SessionAck transit | Session establishment | Both src and dest coordinates |
 | CP-flagged data packet | Warmup or recovery | Both src and dest coordinates (cleartext) |
 | LookupResponse | Discovery | Target's coordinates |
 
@@ -329,8 +329,10 @@ As the SessionSetup transits each intermediate node:
    coordinate cache
 3. Forwards the message using the cached destination coordinates
 
-SessionAck returns along the reverse path, carrying the responder's
-coordinates and warming caches in the other direction.
+SessionAck returns along the reverse path, carrying both the responder's
+and initiator's coordinates and warming caches in the other direction. This
+ensures return-path transit nodes can route even when the reverse path
+diverges from the forward path (e.g., after tree reconvergence).
 
 ### Result
 
@@ -532,7 +534,7 @@ routing decisions but retains its own end-to-end encryption and identity.
 | LookupRequest | ~300 bytes | First contact, recovery | Yes (flood) |
 | LookupResponse | ~400 bytes | Response to discovery | Yes (greedy routed) |
 | SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
-| SessionDatagram + SessionAck | ~122 bytes | Session confirmation | Yes (routed) |
+| SessionDatagram + SessionAck | ~170 bytes | Session confirmation | Yes (routed) |
 | SessionDatagram + Data (minimal) | 106 bytes + payload | Bulk traffic | Yes (routed) |
 | SessionDatagram + Data (with CP) | 106 + coords + payload | Warmup/recovery | Yes (routed) |
 | SessionDatagram + CoordsRequired | 70 bytes | Cache miss error | Yes (routed) |

@@ -364,9 +364,9 @@ impl Node {
             }
         };
 
-        // Build and send SessionAck
+        // Build and send SessionAck (include initiator's coords for return-path warming)
         let our_coords = self.tree_state.my_coords().clone();
-        let ack = SessionAck::new(our_coords).with_handshake(msg2);
+        let ack = SessionAck::new(our_coords, setup.src_coords).with_handshake(msg2);
         let ack_payload = ack.encode();
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack_payload.clone())
