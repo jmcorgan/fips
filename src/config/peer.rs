@@ -51,6 +51,10 @@ fn default_priority() -> u8 {
     100
 }
 
+fn default_auto_reconnect() -> bool {
+    true
+}
+
 impl PeerAddress {
     /// Create a new peer address.
     pub fn new(transport: impl Into<String>, addr: impl Into<String>) -> Self {
@@ -75,7 +79,7 @@ impl PeerAddress {
 ///
 /// Peers are identified by their Nostr public key (npub) and can have
 /// multiple transport addresses for reaching them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerConfig {
     /// The peer's Nostr public key in npub (bech32) or hex format.
@@ -92,6 +96,24 @@ pub struct PeerConfig {
     /// Connection policy for this peer.
     #[serde(default)]
     pub connect_policy: ConnectPolicy,
+
+    /// Whether to automatically reconnect after link-dead removal.
+    /// When true (default), the node will retry connecting with exponential
+    /// backoff after MMP removes this peer due to liveness timeout.
+    #[serde(default = "default_auto_reconnect")]
+    pub auto_reconnect: bool,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            npub: String::new(),
+            alias: None,
+            addresses: Vec::new(),
+            connect_policy: ConnectPolicy::default(),
+            auto_reconnect: default_auto_reconnect(),
+        }
+    }
 }
 
 impl PeerConfig {
@@ -102,6 +124,7 @@ impl PeerConfig {
             alias: None,
             addresses: vec![PeerAddress::new(transport, addr)],
             connect_policy: ConnectPolicy::default(),
+            auto_reconnect: default_auto_reconnect(),
         }
     }
 

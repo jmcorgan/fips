@@ -60,6 +60,42 @@ class SimTopology:
     def container_name(self, node_id: str) -> str:
         return f"fips-node-{node_id}"
 
+    def directed_outbound(self) -> dict[str, list[str]]:
+        """Assign each edge to exactly one node for outbound connection.
+
+        Returns a mapping from node_id to the list of peers that node
+        should connect to (outbound only). Every edge appears in exactly
+        one direction, ensuring auto-reconnect is testable — if B goes
+        down, only A (the outbound owner) will attempt to reconnect.
+
+        Strategy: BFS spanning tree edges go parent→child. Non-tree
+        edges go from the lower node ID to the higher. This guarantees
+        every node is reachable via at least one inbound connection.
+        """
+        outbound: dict[str, list[str]] = {nid: [] for nid in self.nodes}
+
+        # BFS spanning tree from first node
+        root = min(self.nodes)
+        visited: set[str] = set()
+        tree_edges: set[tuple[str, str]] = set()
+        queue = deque([root])
+        visited.add(root)
+        while queue:
+            node = queue.popleft()
+            for peer in self.nodes[node].peers:
+                if peer not in visited:
+                    visited.add(peer)
+                    queue.append(peer)
+                    tree_edges.add((node, peer))  # parent → child
+                    outbound[node].append(peer)
+
+        # Non-tree edges: lower ID → higher ID
+        for a, b in self.edges:
+            if (a, b) not in tree_edges and (b, a) not in tree_edges:
+                outbound[a].append(b)  # a < b by _make_edge convention
+
+        return outbound
+
 
 def generate_topology(
     config: TopologyConfig,

@@ -71,6 +71,19 @@ class SimRunner:
         s = self.scenario
         mesh_name = f"sim-{s.name}-{s.seed}"
 
+        # Set up runner log file so all sim orchestration output is captured
+        # alongside the per-node FIPS logs for post-run analysis.
+        os.makedirs(self.output_dir, exist_ok=True)
+        runner_log_path = os.path.join(self.output_dir, "runner.log")
+        fh = logging.FileHandler(runner_log_path, mode="w")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        logging.getLogger().addHandler(fh)
+        log.info("Runner log: %s", runner_log_path)
+
         # 1. Generate topology
         log.info(
             "Generating %d-node %s topology (seed=%d)...",
@@ -226,7 +239,6 @@ class SimRunner:
                 self.node_mgr.restore_all()
 
             # Collect logs before stopping containers
-            os.makedirs(self.output_dir, exist_ok=True)
             container_names = [
                 self.topology.container_name(nid) for nid in sorted(self.topology.nodes)
             ]

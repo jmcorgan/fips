@@ -566,7 +566,7 @@ fn test_schedule_retry_creates_entry() {
 
     assert!(node.retry_pending.is_empty());
 
-    node.schedule_retry(peer_node_addr, 1000);
+    node.schedule_retry(peer_node_addr, 1000, false);
 
     assert_eq!(node.retry_pending.len(), 1);
     let state = node.retry_pending.get(&peer_node_addr).unwrap();
@@ -593,11 +593,11 @@ fn test_schedule_retry_increments() {
     let mut node = Node::new(config).unwrap();
 
     // First failure
-    node.schedule_retry(peer_node_addr, 1000);
+    node.schedule_retry(peer_node_addr, 1000, false);
     assert_eq!(node.retry_pending.get(&peer_node_addr).unwrap().retry_count, 1);
 
     // Second failure
-    node.schedule_retry(peer_node_addr, 11_000);
+    node.schedule_retry(peer_node_addr, 11_000, false);
     let state = node.retry_pending.get(&peer_node_addr).unwrap();
     assert_eq!(state.retry_count, 2);
     // backoff_ms(5000) with retry_count=2 = 5000 * 4 = 20000
@@ -622,14 +622,14 @@ fn test_schedule_retry_max_retries_exhausted() {
     let mut node = Node::new(config).unwrap();
 
     // Attempts 1 and 2 should schedule retries
-    node.schedule_retry(peer_node_addr, 1000);
+    node.schedule_retry(peer_node_addr, 1000, false);
     assert!(node.retry_pending.contains_key(&peer_node_addr));
 
-    node.schedule_retry(peer_node_addr, 2000);
+    node.schedule_retry(peer_node_addr, 2000, false);
     assert!(node.retry_pending.contains_key(&peer_node_addr));
 
     // Attempt 3 exceeds max_retries=2, should remove entry
-    node.schedule_retry(peer_node_addr, 3000);
+    node.schedule_retry(peer_node_addr, 3000, false);
     assert!(
         !node.retry_pending.contains_key(&peer_node_addr),
         "Should be removed after max retries exhausted"
@@ -653,7 +653,7 @@ fn test_schedule_retry_disabled() {
 
     let mut node = Node::new(config).unwrap();
 
-    node.schedule_retry(peer_node_addr, 1000);
+    node.schedule_retry(peer_node_addr, 1000, false);
     assert!(
         node.retry_pending.is_empty(),
         "No retry should be scheduled when max_retries=0"
@@ -669,7 +669,7 @@ fn test_schedule_retry_ignores_non_autoconnect() {
     // No peers configured at all
     let mut node = make_node();
 
-    node.schedule_retry(peer_node_addr, 1000);
+    node.schedule_retry(peer_node_addr, 1000, false);
     assert!(
         node.retry_pending.is_empty(),
         "No retry for unconfigured peer"
@@ -691,7 +691,7 @@ fn test_schedule_retry_skips_connected_peer() {
     assert_eq!(node.peer_count(), 1);
 
     // Scheduling a retry for an already-connected peer should be a no-op
-    node.schedule_retry(node_addr, 3000);
+    node.schedule_retry(node_addr, 3000, false);
     assert!(
         node.retry_pending.is_empty(),
         "No retry for already-connected peer"

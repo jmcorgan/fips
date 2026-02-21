@@ -51,7 +51,7 @@ impl Node {
                 if conn.is_outbound()
                     && let Some(identity) = conn.expected_identity()
                 {
-                    self.schedule_retry(*identity.node_addr(), now_ms);
+                    self.schedule_retry(*identity.node_addr(), now_ms, false);
                 }
             }
             self.cleanup_stale_connection(link_id, now_ms);

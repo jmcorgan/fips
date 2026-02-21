@@ -39,15 +39,15 @@ link_flaps:
 
 traffic:
   enabled: true
-  max_concurrent: 5
-  interval_secs: { min: 10, max: 30 }
-  duration_secs: { min: 5, max: 15 }
+  max_concurrent: 10
+  interval_secs: { min: 0, max: 30 }
+  duration_secs: { min: 5, max: 90 }
   parallel_streams: 4
 
 node_churn:
   enabled: true
   interval_secs: { min: 60, max: 90 }
-  max_down_nodes: 3
+  max_down_nodes: 5
   down_duration_secs: { min: 30, max: 90 }
   protect_connectivity: false
 

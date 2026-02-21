@@ -418,7 +418,12 @@ impl Node {
             }
         }
 
-        // Remove dead peers
+        // Remove dead peers and schedule auto-reconnect
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
         for addr in &dead_peers {
             warn!(
                 peer = %self.peer_display_name(addr),
@@ -426,6 +431,7 @@ impl Node {
                 "Removing peer: link dead timeout"
             );
             self.remove_active_peer(addr);
+            self.schedule_reconnect(*addr, now_ms);
         }
 
         // Send heartbeats (skip peers we just removed)

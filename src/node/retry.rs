@@ -22,6 +22,9 @@ pub struct RetryState {
 
     /// Timestamp (Unix ms) when the next retry should be attempted.
     pub retry_after_ms: u64,
+
+    /// Whether this is an auto-reconnect (unlimited retries, ignores max_retries).
+    pub reconnect: bool,
 }
 
 impl RetryState {
@@ -31,6 +34,7 @@ impl RetryState {
             peer_config,
             retry_count: 0,
             retry_after_ms: 0,
+            reconnect: false,
         }
     }
 
@@ -48,12 +52,18 @@ impl Node {
     /// Schedule a retry for a failed outbound connection, if applicable.
     ///
     /// Only schedules if the peer is an auto-connect peer and max retries
-    /// have not been exhausted. Does nothing if the peer is already connected
-    /// or has a connection in progress.
-    pub(super) fn schedule_retry(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    /// have not been exhausted (unless `reconnect` is true, which retries
+    /// indefinitely). Does nothing if the peer is already connected or has
+    /// a connection in progress.
+    pub(super) fn schedule_retry(
+        &mut self,
+        node_addr: NodeAddr,
+        now_ms: u64,
+        reconnect: bool,
+    ) {
         let retry_cfg = &self.config.node.retry;
         let max_retries = retry_cfg.max_retries;
-        if max_retries == 0 {
+        if max_retries == 0 && !reconnect {
             return;
         }
 
@@ -69,7 +79,7 @@ impl Node {
         if let Some(state) = self.retry_pending.get_mut(&node_addr) {
             // Already tracking — increment
             state.retry_count += 1;
-            if state.retry_count > max_retries {
+            if !state.reconnect && state.retry_count > max_retries {
                 info!(
                     peer = %peer_name,
                     attempts = state.retry_count,
@@ -83,6 +93,7 @@ impl Node {
             debug!(
                 peer = %peer_name,
                 retry = state.retry_count,
+                reconnect = state.reconnect,
                 delay_secs = delay / 1000,
                 "Scheduling connection retry"
             );
@@ -101,10 +112,12 @@ impl Node {
             if let Some(pc) = peer_config {
                 let mut state = RetryState::new(pc);
                 state.retry_count = 1;
+                state.reconnect = reconnect;
                 let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
                 state.retry_after_ms = now_ms + delay;
                 debug!(
                     peer = %self.peer_display_name(&node_addr),
+                    reconnect = reconnect,
                     delay_secs = delay / 1000,
                     "First connection attempt failed, scheduling retry"
                 );
@@ -112,6 +125,51 @@ impl Node {
             }
             // If not found in auto_connect_peers, no retry (one-shot connection)
         }
+    }
+
+    /// Schedule auto-reconnect for a peer removed by MMP dead timeout.
+    ///
+    /// Looks up the peer in auto-connect config and checks `auto_reconnect`.
+    /// If enabled, feeds the peer into the retry system with unlimited retries.
+    pub(super) fn schedule_reconnect(&mut self, node_addr: NodeAddr, now_ms: u64) {
+        // Find peer in auto-connect config
+        let peer_config = self
+            .config
+            .auto_connect_peers()
+            .find(|pc| {
+                PeerIdentity::from_npub(&pc.npub)
+                    .map(|id| *id.node_addr() == node_addr)
+                    .unwrap_or(false)
+            })
+            .cloned();
+
+        let Some(pc) = peer_config else {
+            return; // Not an auto-connect peer, no reconnect
+        };
+
+        if !pc.auto_reconnect {
+            debug!(
+                peer = %self.peer_display_name(&node_addr),
+                "Auto-reconnect disabled for peer, skipping"
+            );
+            return;
+        }
+
+        let base_interval_ms = self.config.node.retry.base_interval_secs * 1000;
+        let max_backoff_ms = self.config.node.retry.max_backoff_secs * 1000;
+
+        let mut state = RetryState::new(pc);
+        state.reconnect = true;
+        let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
+        state.retry_after_ms = now_ms + delay;
+
+        info!(
+            peer = %self.peer_display_name(&node_addr),
+            delay_secs = delay / 1000,
+            "Scheduling auto-reconnect after link-dead removal"
+        );
+
+        self.retry_pending.insert(node_addr, state);
     }
 
     /// Process pending retries whose time has arrived.
@@ -155,12 +213,21 @@ impl Node {
 
             match self.initiate_peer_connection(&peer_config).await {
                 Ok(()) => {
+                    // Push retry_after_ms past the handshake timeout window so
+                    // we don't re-fire on the next tick. If the handshake
+                    // succeeds, promote_connection() clears retry_pending. If
+                    // it times out, check_timeouts() calls schedule_retry()
+                    // which bumps the counter and applies proper backoff.
+                    let hs_timeout_ms =
+                        self.config.node.rate_limit.handshake_timeout_secs * 1000;
+                    if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+                        state.retry_after_ms = now_ms + hs_timeout_ms;
+                    }
                     debug!(
                         peer = %self.peer_display_name(&node_addr),
-                        "Retry connection initiated"
+                        "Retry connection initiated, suppressing re-fire for {}s",
+                        self.config.node.rate_limit.handshake_timeout_secs,
                     );
-                    // Don't remove from retry_pending — wait for promotion
-                    // (success) or next timeout (failure triggers schedule_retry again)
                 }
                 Err(e) => {
                     warn!(
@@ -169,7 +236,8 @@ impl Node {
                         "Retry connection initiation failed"
                     );
                     // Immediate failure counts as an attempt — schedule next retry
-                    self.schedule_retry(node_addr, now_ms);
+                    // (reconnect flag is preserved on existing retry_pending entry)
+                    self.schedule_retry(node_addr, now_ms, false);
                 }
             }
         }
@@ -189,6 +257,7 @@ mod tests {
             peer_config: PeerConfig::default(),
             retry_count: 0,
             retry_after_ms: 0,
+            reconnect: false,
         };
         // base = 5000ms
         assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 5000); // 5s * 2^0
@@ -224,6 +293,7 @@ mod tests {
             peer_config: PeerConfig::default(),
             retry_count: 20, // 2^20 * 5000 would be huge
             retry_after_ms: 0,
+            reconnect: false,
         };
         assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), TEST_MAX_BACKOFF_MS);
     }
@@ -234,6 +304,7 @@ mod tests {
             peer_config: PeerConfig::default(),
             retry_count: 3,
             retry_after_ms: 0,
+            reconnect: false,
         };
         assert_eq!(state.backoff_ms(0, TEST_MAX_BACKOFF_MS), 0);
     }

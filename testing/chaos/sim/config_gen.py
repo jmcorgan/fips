@@ -17,14 +17,19 @@ def _load_template() -> str:
         return f.read()
 
 
-def generate_peers_block(topology: SimTopology, node_id: str) -> str:
-    """Generate the YAML peers block for a node."""
-    peers = topology.nodes[node_id].peers
-    if not peers:
+def generate_peers_block(
+    topology: SimTopology, node_id: str, outbound_peers: list[str]
+) -> str:
+    """Generate the YAML peers block for a node.
+
+    Only includes peers that this node is responsible for connecting to
+    (outbound direction). The link is still bidirectional once established.
+    """
+    if not outbound_peers:
         return "  []"
 
     lines = []
-    for peer_id in sorted(peers):
+    for peer_id in sorted(outbound_peers):
         peer = topology.nodes[peer_id]
         lines.append(f'  - npub: "{peer.npub}"')
         lines.append(f'    alias: "{peer_id}"')
@@ -35,11 +40,13 @@ def generate_peers_block(topology: SimTopology, node_id: str) -> str:
     return "\n".join(lines)
 
 
-def generate_node_config(topology: SimTopology, node_id: str) -> str:
+def generate_node_config(
+    topology: SimTopology, node_id: str, outbound_peers: list[str]
+) -> str:
     """Generate a complete FIPS config YAML for one node."""
     template = _load_template()
     node = topology.nodes[node_id]
-    peers_yaml = generate_peers_block(topology, node_id)
+    peers_yaml = generate_peers_block(topology, node_id, outbound_peers)
 
     config = template
     config = config.replace("{{NODE_NAME}}", node_id.upper())
@@ -64,8 +71,9 @@ def write_configs(topology: SimTopology, output_dir: str):
     """Write all node configs and npubs.env to the output directory."""
     os.makedirs(output_dir, exist_ok=True)
 
+    outbound = topology.directed_outbound()
     for node_id in topology.nodes:
-        config = generate_node_config(topology, node_id)
+        config = generate_node_config(topology, node_id, outbound[node_id])
         path = os.path.join(output_dir, f"{node_id}.yaml")
         with open(path, "w") as f:
             f.write(config)
