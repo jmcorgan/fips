@@ -2,6 +2,11 @@
 name = "fips"
 version = "0.1.0"
 edition = "2024"
+description = "A distributed, decentralized network routing protocol for mesh nodes connecting over arbitrary transports"
+license = "MIT"
+authors = ["Johnathan Corgan <jcorgan@corganlabs.com>"]
+repository = "https://github.com/jmcorgan/fips"
+readme = "README.md"
 
 [dependencies]
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }

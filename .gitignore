@@ -1,3 +1,15 @@
+# macOS
 .DS_Store
 
+# Build
 /target
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
