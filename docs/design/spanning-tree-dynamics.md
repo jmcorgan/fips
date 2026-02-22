@@ -1025,22 +1025,25 @@ The following limitations exist in the current implementation relative to the
 design described in this document. They are documented here to guide future
 work.
 
-### Known Limitation: Root Timeout Not Enforced
+### Root Timeout Not Enforced
 
 The design specifies a 60-minute root timeout (§6 partition detection) after
-which nodes should treat the root as departed and re-elect. The current implementation does not track root entry timestamps or
-perform staleness checks.
+which nodes should treat the root as departed and re-elect. The current
+implementation does not track root entry timestamps or perform staleness
+checks.
 
-**Impact**: If the root node disappears permanently without a graceful
-disconnect, remaining nodes retain stale root state indefinitely. Nodes that
-lose their direct parent will re-elect locally (via `handle_parent_lost()`),
-but nodes with an intact path to a now-departed root will not detect the
-failure.
+**Mitigation**: Heartbeat cascading significantly reduces the practical
+impact. When the root disappears, its direct children detect the parent loss
+(keepalive timeout), re-elect, and announce new coordinates. This cascades
+down the tree — each level's children detect their parent's changed state and
+re-evaluate. For the common case of root departure, the tree reconverges
+without an explicit root timeout.
 
-**Required fix**: Track the timestamp of the most recent root declaration in
-`TreeState`. In `check_tree_state()` (called every 1s from the RX loop),
-compare against `root_timeout` (default 60 min). On expiration, treat it as
-root loss — increment sequence number, become own root, and re-announce.
+**Remaining gap**: If an intermediate node maintains a link to the root but
+that link silently stops forwarding (no keepalive failure), nodes below it
+would retain stale root state. This is an unusual failure mode — most link
+failures are detected by keepalive timeouts. An explicit root timeout would
+provide defense-in-depth for this edge case.
 
 ### Known Limitation: No TTL on Tree Entries
 

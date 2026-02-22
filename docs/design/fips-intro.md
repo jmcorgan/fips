@@ -241,7 +241,7 @@ FIPS uses independent encryption at two protocol layers:
 | Layer | Scope | Pattern | Purpose |
 | ----- | ----- | ------- | ------- |
 | **FMP (Mesh)** | Hop-by-hop | Noise IK | Encrypt all traffic on each peer link |
-| **FSP (Session)** | End-to-end | Noise IK | Encrypt application payload between endpoints |
+| **FSP (Session)** | End-to-end | Noise XK | Encrypt application payload between endpoints |
 
 ### Link Layer (Hop-by-Hop)
 
@@ -258,9 +258,13 @@ from the first handshake message.
 ### Session Layer (End-to-End)
 
 FIPS establishes end-to-end encrypted sessions between any two communicating
-nodes using Noise IK, regardless of how many hops separate them. The
-initiator knows the destination's npub; the responder learns the initiator's
-identity from the handshake — the same asymmetry as link-layer connections.
+nodes using Noise XK, regardless of how many hops separate them. The
+initiator knows the destination's npub (required for XK's pre-message);
+the responder learns the initiator's identity from the third handshake
+message. Unlike the link-layer IK pattern where the initiator's identity
+is revealed in msg1, XK delays identity disclosure until msg3, providing
+stronger initiator identity protection for traffic traversing untrusted
+intermediate nodes.
 
 A packet from A to D through intermediate nodes B and C:
 
@@ -414,17 +418,19 @@ without individual discovery at each hop.
 
 ### Error Recovery
 
-When routing fails — because cached coordinates are stale or a path has
-broken — transit nodes signal the source:
+When routing fails — because cached coordinates are stale, a path has
+broken, or a packet exceeds a link's MTU — transit nodes signal the source:
 
 - **CoordsRequired**: A transit node lacks the destination's coordinates.
   The source re-initiates discovery and resets its coordinate warmup
   strategy.
 - **PathBroken**: Greedy routing reached a dead end. The source re-discovers
   the destination's current coordinates.
+- **MtuExceeded**: A transit node cannot forward a packet because it exceeds
+  the next-hop link MTU. The source adjusts its path MTU estimate.
 
-Both signals trigger active recovery, and are rate-limited to prevent storms
-during topology changes.
+All three signals trigger active recovery, and are rate-limited to prevent
+storms during topology changes.
 
 See [fips-mesh-operation.md](fips-mesh-operation.md) for the complete
 routing and mesh behavior description.
@@ -548,7 +554,7 @@ packets.
 The most important adversary class is the operators of other nodes in the
 mesh — the peers that forward your traffic. FIPS treats every intermediate
 router as potentially adversarial. The FSP session layer establishes a
-completely independent Noise IK session between the communicating endpoints,
+completely independent Noise XK session between the communicating endpoints,
 so intermediate nodes cannot read application payloads even though they
 decrypt and re-encrypt the link-layer envelope at each hop.
 
@@ -660,19 +666,21 @@ confidentiality and integrity rather than hiding traffic patterns.
 
 ### Noise Protocol Framework
 
-Both FMP link encryption and FSP session encryption use the
-[Noise Protocol Framework](https://noiseprotocol.org/) IK handshake pattern.
-Noise IK provides mutual authentication with a single round trip, where the
-initiator knows the responder's static key in advance.
+FIPS uses the [Noise Protocol Framework](https://noiseprotocol.org/) at both
+protocol layers, with different handshake patterns chosen for each layer's
+threat model. FMP link encryption uses **Noise IK**, providing mutual
+authentication with a single round trip where the initiator knows the
+responder's static key in advance.
 [WireGuard](https://www.wireguard.com/) uses the same IK base pattern
-(extended with a pre-shared key as IKpsk2) for VPN tunnels. The
-[Lightning Network](https://github.com/lightning/bolts/blob/master/08-transport.md)
-uses Noise XK, a related pattern where the initiator's static key is
-transmitted in a third message rather than the first, providing stronger
-initiator identity hiding. FIPS uses pure Noise IK at two independent layers,
-sharing the same framework and cryptographic foundation as these deployed
-systems while choosing the pattern that best fits its mutual-authentication
-requirement.
+(extended with a pre-shared key as IKpsk2) for VPN tunnels. FSP session
+encryption uses **Noise XK**, the same pattern used by the
+[Lightning Network](https://github.com/lightning/bolts/blob/master/08-transport.md),
+where the initiator's static key is transmitted in a third message rather
+than the first. XK provides stronger initiator identity hiding at the cost
+of an additional round trip — a worthwhile tradeoff for session-layer traffic
+that traverses untrusted intermediate nodes. At the link layer, where both
+peers are configured and directly connected, IK's single round trip is
+preferred.
 
 ### Index-Based Session Dispatch
 

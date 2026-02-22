@@ -36,6 +36,8 @@ sessions across the mesh.
   unmodified IP applications
 - **Metrics Measurement Protocol** — per-link RTT, loss, jitter, and goodput
   measurement
+- **Operator visibility** — `fipsctl` control socket interface for runtime
+  inspection of peers, links, sessions, tree state, and metrics
 - **Zero configuration** — sensible defaults; a node can run with no config
   file
 
@@ -81,7 +83,7 @@ a layered protocol specification. Start with
 ## Project Structure
 
 ```
-src/          Rust source (library + daemon binary)
+src/          Rust source (library + fips/fipsctl binaries)
 docs/design/  Protocol design specifications
 testing/      Docker-based integration test harnesses
 benches/      Criterion benchmarks

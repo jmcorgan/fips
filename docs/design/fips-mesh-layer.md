@@ -110,6 +110,25 @@ session keys derived from four DH operations (es, ss, ee, se). The handshake
 provides mutual authentication, forward secrecy, and identity hiding for the
 initiator.
 
+### Epoch Exchange and Peer Restart Detection
+
+Both IK handshake messages carry an encrypted epoch payload — an 8-byte
+random value generated once at node startup:
+
+- **msg1**: Ephemeral key (33 bytes) + encrypted static key (49 bytes) +
+  encrypted epoch (24 bytes) = 106 bytes total
+- **msg2**: Ephemeral key (33 bytes) + encrypted epoch (24 bytes) = 57 bytes
+  total
+
+The encrypted epoch (EPOCH_ENCRYPTED_SIZE = 24 bytes) consists of the
+8-byte epoch value plus a 16-byte AEAD tag.
+
+On reconnection, each peer compares the received epoch with the previously
+stored epoch for that peer. An epoch mismatch indicates the peer has
+restarted (generated a new epoch), triggering full link re-establishment
+rather than treating the handshake as a simple reconnection. This prevents
+stale session state from persisting across restarts.
+
 ### Identity Binding
 
 The Noise handshake binds the link to the peer's cryptographic identity. After
@@ -493,7 +512,8 @@ an attacker sends invalid packets to elicit responses.
 
 | Feature | Status |
 | ------- | ------ |
-| Noise IK handshake | **Implemented** |
+| Noise IK handshake (with epoch) | **Implemented** |
+| Peer restart detection (epoch mismatch) | **Implemented** |
 | Link encryption (ChaCha20-Poly1305) | **Implemented** |
 | Index-based session dispatch | **Implemented** |
 | Replay protection (sliding window) | **Implemented** |

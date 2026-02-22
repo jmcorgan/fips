@@ -89,7 +89,7 @@ treatment of this pattern.
 
 ## Two-Layer Encryption Rationale
 
-FIPS uses independent Noise IK encryption at two layers:
+FIPS uses independent Noise encryption at two layers (IK at FMP, XK at FSP):
 
 | Layer | Scope | What It Protects |
 | ----- | ----- | ---------------- |
@@ -108,10 +108,12 @@ FIPS uses independent Noise IK encryption at two layers:
   means topology changes (a direct peer becomes multi-hop) don't affect
   sessions.
 
-**Why the same pattern (Noise IK) at both layers**: Both layers need mutual
-authentication with identity hiding for the initiator. Reusing the same
-cryptographic stack (secp256k1, ChaCha20-Poly1305, SHA-256) simplifies the
-implementation and reduces the number of cryptographic dependencies.
+**Why different patterns**: FMP uses Noise IK (2-message) because link peers
+are configured and directly connected — the single round trip is preferred.
+FSP uses Noise XK (3-message) because session traffic traverses untrusted
+intermediate nodes — the extra round trip buys stronger initiator identity
+hiding. Both layers reuse the same cryptographic stack (secp256k1,
+ChaCha20-Poly1305, SHA-256), minimizing cryptographic dependencies.
 
 ## Identity Model
 
@@ -296,6 +298,61 @@ while the trait surface remains synchronous for `send()`, `mtu()`, etc.
 
 The `TransportHandle` enum provides async dispatch for methods that need it
 (like `send_async()`) without requiring dyn dispatch.
+
+## Control Socket
+
+FIPS exposes a read-only observability interface through a Unix domain
+socket. The control socket provides runtime visibility into node state
+without affecting protocol operation.
+
+### Architecture
+
+The control socket is a `UnixListener` integrated into the node's async
+runtime. It accepts connections, reads a single JSON request per
+connection, dispatches to query handlers that read (but never modify)
+node state, and returns a JSON response.
+
+- **Max request size**: 4,096 bytes
+- **I/O timeout**: 5 seconds per connection
+- **Socket cleanup**: Automatically removes stale sockets on startup
+
+### fipsctl Binary
+
+The `fipsctl` command-line tool communicates with the control socket:
+
+```text
+fipsctl [OPTIONS] <COMMAND>
+
+OPTIONS:
+  -s, --socket <SOCKET>    Control socket path override
+
+COMMANDS:
+  show status       Node status overview
+  show peers        Authenticated peers
+  show links        Active links
+  show tree         Spanning tree state
+  show sessions     End-to-end sessions
+  show bloom        Bloom filter state
+  show mmp          MMP metrics summary
+  show cache        Coordinate cache stats
+  show connections  Pending handshake connections
+  show transports   Transport instances
+  show routing      Routing table summary
+```
+
+### Protocol
+
+Request and response are line-delimited JSON:
+
+```json
+{"command":"show_status"}
+{"status":"ok","data":{...}}
+```
+
+Error responses use `{"status":"error","message":"..."}`.
+
+All queries are read-only — the control socket cannot modify node state,
+trigger actions, or shut down the node.
 
 ## References
 

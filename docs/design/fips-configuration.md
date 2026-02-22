@@ -49,6 +49,18 @@ transports:  # Network transports (UDP, future: TCP, Tor)
 peers:       # Static peer list
 ```
 
+### Control Socket (`node.control.*`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.control.enabled` | bool | `true` | Enable the Unix domain control socket |
+| `node.control.socket_path` | string | *(auto)* | Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock` if `XDG_RUNTIME_DIR` is set, otherwise `/tmp/fips-control.sock` |
+
+The control socket provides read-only access to node state via the
+`fipsctl` command-line tool. See
+[fips-software-architecture.md](fips-software-architecture.md) for the
+protocol and command list.
+
 All tunable protocol parameters live under `node.*`, organized as sysctl-style
 dotted paths. The top-level sections (`tun`, `dns`, `transports`, `peers`)
 handle infrastructure concerns only.
@@ -352,6 +364,9 @@ node:
     mode: full                       # full | lightweight | minimal
     log_interval_secs: 30
     owd_window_size: 32
+  control:
+    enabled: true
+    socket_path: null                # null = auto ($XDG_RUNTIME_DIR/fips/control.sock or /tmp/fips-control.sock)
   buffers:
     packet_channel: 1024
     tun_channel: 1024

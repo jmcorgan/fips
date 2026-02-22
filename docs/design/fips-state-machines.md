@@ -217,6 +217,50 @@ PeerSlot::Active(ActivePeer)
 - Session indices and transport address (for wire protocol dispatch)
 - Statistics (`last_seen`, `link_stats`, `authenticated_at`)
 
+### End-to-End Session Lifecycle (FSP)
+
+```text
+EndToEndState::Initiating(HandshakeState)
+    │
+    │ Noise XK msg1 sent (SessionSetup)
+    │ Awaiting msg2 (SessionAck)
+    │
+    │ msg2 received, processed
+    │ msg3 sent (SessionMsg3)
+    ▼
+EndToEndState::Established(NoiseSession)
+```
+
+```text
+[msg1 received from remote initiator]
+    │
+    │ Noise XK msg1 processed, msg2 sent (SessionAck)
+    ▼
+EndToEndState::AwaitingMsg3(HandshakeState)
+    │
+    │ msg3 received, processed
+    ▼
+EndToEndState::Established(NoiseSession)
+```
+
+**EndToEndState** is an enum with three variants:
+
+- **Initiating(HandshakeState)** — We initiated the session, sent
+  SessionSetup with XK msg1, awaiting SessionAck (msg2)
+- **AwaitingMsg3(HandshakeState)** — We are the XK responder, processed
+  msg1, sent msg2, awaiting msg3 from initiator
+- **Established(NoiseSession)** — Handshake complete, symmetric session
+  keys derived, ready for application data
+
+The three-message flow (XK pattern) means the responder has an intermediate
+`AwaitingMsg3` state that does not exist in the link-layer IK handshake
+(which completes in two messages). The initiator transitions directly from
+Initiating to Established upon processing msg2 and sending msg3.
+
+Each side's epoch (8-byte random startup value) is exchanged encrypted in
+msg2 and msg3. Epoch mismatch on subsequent handshakes indicates peer
+restart.
+
 ### Link Lifecycle (Connection-Oriented Transports)
 
 Links use a simple state enum rather than phase-based structs, since link

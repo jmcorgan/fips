@@ -288,17 +288,26 @@ direct peer), a LookupResponse is created containing:
 - **request_id**: Echoed from the request
 - **target**: The target's node_addr
 - **target_coords**: The target's current tree coordinates
-- **proof**: Signature covering `(request_id || target)` — authenticates
-  that the response is genuine
+- **path_mtu**: Minimum MTU along the response path (transit-annotated,
+  initialized to `u16::MAX` by the target)
+- **proof**: Signature covering `(request_id || target || target_coords)` —
+  authenticates that the response is genuine and the target holds the
+  claimed tree position
 
-The response routes back to the requester using greedy tree routing toward
-the origin_coords from the request.
+The response routes back to the requester using reverse-path routing as the
+primary mechanism: each transit node looks up the request_id in its
+`recent_requests` table to find the peer that forwarded the original request,
+and sends the response back through that peer. This ensures the response
+follows the same path as the request. Greedy tree routing toward the
+origin_coords is used only as a fallback if the reverse-path entry has
+expired.
 
-**Security**: Coordinates are intentionally excluded from the signed proof.
-Binding coordinates would invalidate signatures whenever the spanning tree
-reconverges. Coordinate tampering by transit nodes causes only routing
-inefficiency, not a security breach (data integrity is protected by
-session-layer encryption).
+**Proof verification**: The source verifies the Schnorr proof upon receipt,
+confirming that the target actually signed the response. The proof covers
+`(request_id || target || target_coords)` — coordinates are included because
+verification at the source confirms the target holds the claimed position.
+The `path_mtu` field is excluded from the proof because it is a transit
+annotation modified at each hop.
 
 ### Discovery Outcome
 
@@ -402,9 +411,31 @@ source.
 3. Initiate discovery for the destination
 4. Reset CP warmup counter
 
+### MtuExceeded
+
+**Trigger**: A transit node receives a SessionDatagram but the total
+packet size exceeds the next-hop link MTU. The packet cannot be forwarded
+without fragmentation, which FIPS does not perform at the mesh layer.
+
+**Transit node action**:
+
+1. Create a new SessionDatagram addressed back to the original source,
+   carrying an MtuExceeded payload identifying the destination, the
+   reporting router, and the bottleneck MTU
+2. Route the error via `find_next_hop(src_addr)`
+3. Drop the original oversized packet
+
+**Source recovery**: FSP uses the reported bottleneck MTU to adjust its
+session-layer path MTU estimate (immediate decrease). The source can then
+reduce payload sizes to fit within the discovered path MTU. MtuExceeded is
+the reactive complement to the proactive `path_mtu` field in
+SessionDatagram and LookupResponse — the proactive field tracks the
+minimum MTU along the forward path, while MtuExceeded signals when an
+actual packet exceeds the limit.
+
 ### Error Signal Rate Limiting
 
-Both error types are rate-limited at transit nodes: maximum one error per
+All three error types are rate-limited at transit nodes: maximum one error per
 destination per 100ms. This prevents storms during topology changes when many
 packets to the same destination hit the same routing failure simultaneously.
 
@@ -414,9 +445,9 @@ per `coords_response_interval_ms` (default 2000ms, configurable). This
 prevents amplification where a burst of error signals would generate a
 corresponding burst of warmup messages.
 
-Error signals (CoordsRequired, PathBroken) are handled asynchronously outside
-the packet receive path, allowing the RX loop to continue processing without
-blocking on discovery or session repair.
+Error signals (CoordsRequired, PathBroken, MtuExceeded) are handled
+asynchronously outside the packet receive path, allowing the RX loop to
+continue processing without blocking on discovery or session repair.
 
 ### Error Routing Limitation
 
@@ -577,6 +608,9 @@ recovery).
 | Hybrid coordinate warmup (CP + CoordsWarmup) | **Implemented** |
 | CoordsRequired recovery | **Implemented** |
 | PathBroken recovery | **Implemented** |
+| MtuExceeded recovery | **Implemented** |
+| LookupResponse proof verification | **Implemented** |
+| Discovery reverse-path routing | **Implemented** |
 | Error signal rate limiting | **Implemented** |
 | Leaf-only operation | Future direction |
 | Link cost metrics (ETX) | Future direction |

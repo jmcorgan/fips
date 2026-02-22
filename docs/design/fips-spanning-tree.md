@@ -170,7 +170,8 @@ for stronger verification.
 - Type: u64, Unix seconds
 - Used for stale detection, not versioning
 - A root declaration is considered stale after `ROOT_TIMEOUT` (60 minutes)
-  without refresh
+  without refresh. In practice, heartbeat cascading handles root departure
+  for the common case (see spanning-tree-dynamics.md §11)
 
 ## Reconvergence
 
@@ -229,7 +230,7 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | --------- | ------- | ----------- |
 | PARENT_SWITCH_THRESHOLD | 1 hop | Minimum depth improvement for same-root switch |
 | ANNOUNCE_MIN_INTERVAL | 500ms | Minimum between announcements to same peer |
-| ROOT_TIMEOUT | 60 min | Root declaration considered stale |
+| ROOT_TIMEOUT | 60 min | Root declaration considered stale (not yet enforced; heartbeat cascading covers common case) |
 | TREE_ENTRY_TTL | 5–10 min | Individual entry expiration |
 
 ## Implementation Status

@@ -55,10 +55,15 @@ link — this is the degenerate case. Transports that negotiate MTU
 per-connection (e.g., BLE ATT_MTU) report the negotiated value for each
 link individually.
 
-> **Implementation note**: The current transport trait exposes MTU as a
-> transport-wide method (`fn mtu(&self) -> u16`). This works for UDP, where
-> MTU is a static configuration value. Supporting per-link MTU for future
-> transports will require extending this interface.
+The transport trait exposes two MTU methods:
+
+- `fn mtu(&self) -> u16` — Transport-wide default MTU
+- `fn link_mtu(&self, addr: &TransportAddr) -> u16` — Per-link MTU for a
+  specific remote address. The default implementation falls back to
+  `mtu()`, so transports with uniform MTU (like UDP) need not override it.
+
+FMP uses `link_mtu()` when computing path MTU for SessionDatagram
+forwarding and LookupResponse transit annotation.
 
 ### Connection Lifecycle
 
@@ -305,14 +310,15 @@ The transport interface defines what every transport driver must provide.
 ### Trait Surface
 
 ```text
-transport_id()    → TransportId       Unique identifier for this transport instance
-transport_type()  → &TransportType    Static metadata (name, connection-oriented, reliable)
-state()           → TransportState    Current lifecycle state
-mtu()             → u16              Maximum datagram size
-start()           → lifecycle         Bring transport up (bind socket, open device)
-stop()            → lifecycle         Bring transport down
-send(addr, data)  → delivery          Send datagram to transport address
-discover()        → Vec<DiscoveredPeer>  Report discovered FIPS endpoints (optional)
+transport_id()        → TransportId         Unique identifier for this transport instance
+transport_type()      → &TransportType      Static metadata (name, connection-oriented, reliable)
+state()               → TransportState      Current lifecycle state
+mtu()                 → u16                 Transport-wide default MTU
+link_mtu(addr)        → u16                 Per-link MTU (defaults to mtu())
+start()               → lifecycle           Bring transport up (bind socket, open device)
+stop()                → lifecycle           Bring transport down
+send(addr, data)      → delivery            Send datagram to transport address
+discover()            → Vec<DiscoveredPeer> Report discovered FIPS endpoints (optional)
 ```
 
 ### Receive Path

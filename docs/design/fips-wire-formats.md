@@ -144,29 +144,29 @@ Handshake initiation from connecting party.
 ```text
 ┌──────────────────────┬─────────────┬─────────────────────────────────────────┐
 │ common prefix        │ sender_idx  │ Noise IK message 1                      │
-│ 4 bytes              │ 4 bytes LE  │ 82 bytes                                │
+│ 4 bytes              │ 4 bytes LE  │ 106 bytes                               │
 └──────────────────────┴─────────────┴─────────────────────────────────────────┘
 
-Total: 90 bytes
+Total: 114 bytes
 ```
 
-Common prefix: ver=0, phase=0x1, flags=0, payload_len=86 (4 + 82).
+Common prefix: ver=0, phase=0x1, flags=0, payload_len=110 (4 + 106).
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
 | common prefix | 4 bytes | ver=0, phase=1, flags=0, payload_len |
 | sender_idx | 4 bytes LE | Initiator's session index (becomes receiver's `receiver_idx`) |
-| noise_msg1 | 82 bytes | Noise IK first message |
+| noise_msg1 | 106 bytes | Noise IK first message |
 
-**Noise msg1 breakdown** (82 bytes):
+**Noise msg1 breakdown** (106 bytes):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
 | 0 | ephemeral_pubkey | 33 bytes | Initiator's ephemeral key (compressed secp256k1) |
-| 33 | encrypted_static | 33 bytes | Initiator's static key (encrypted with es key) |
-| 66 | tag | 16 bytes | AEAD tag for encrypted_static |
+| 33 | encrypted_static | 49 bytes | Initiator's static key (33) + AEAD tag (16) |
+| 82 | encrypted_epoch | 24 bytes | Startup epoch (8) + AEAD tag (16) |
 
-Noise pattern: `-> e, es, s, ss`
+Noise pattern: `-> e, es, s, ss` with epoch payload
 
 ### Noise IK Message 2 (phase 0x2)
 
@@ -175,30 +175,34 @@ Handshake response from responder.
 ```text
 ┌──────────────────────┬─────────────┬──────────────┬──────────────────────────┐
 │ common prefix        │ sender_idx  │ receiver_idx │ Noise IK message 2       │
-│ 4 bytes              │ 4 bytes LE  │ 4 bytes LE   │ 33 bytes                 │
+│ 4 bytes              │ 4 bytes LE  │ 4 bytes LE   │ 57 bytes                 │
 └──────────────────────┴─────────────┴──────────────┴──────────────────────────┘
 
-Total: 45 bytes
+Total: 69 bytes
 ```
 
-Common prefix: ver=0, phase=0x2, flags=0, payload_len=41 (4 + 4 + 33).
+Common prefix: ver=0, phase=0x2, flags=0, payload_len=65 (4 + 4 + 57).
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
 | common prefix | 4 bytes | ver=0, phase=2, flags=0, payload_len |
 | sender_idx | 4 bytes LE | Responder's session index |
 | receiver_idx | 4 bytes LE | Echo of initiator's sender_idx from msg1 |
-| noise_msg2 | 33 bytes | Noise IK second message |
+| noise_msg2 | 57 bytes | Noise IK second message |
 
-**Noise msg2 breakdown** (33 bytes):
+**Noise msg2 breakdown** (57 bytes):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
 | 0 | ephemeral_pubkey | 33 bytes | Responder's ephemeral key (compressed secp256k1) |
+| 33 | encrypted_epoch | 24 bytes | Startup epoch (8) + AEAD tag (16) |
 
-Noise pattern: `<- e, ee, se`
+Noise pattern: `<- e, ee, se` with epoch payload
 
-After msg2, both parties derive identical symmetric session keys.
+After msg2, both parties derive identical symmetric session keys. The
+encrypted epoch in msg1 and msg2 enables peer restart detection — if a
+peer's epoch changes, the other side knows it restarted and must
+re-establish the link.
 
 ### Index Semantics
 
@@ -313,18 +317,19 @@ Coordinate discovery request, flooded through the mesh.
 | 9 | target | 16 bytes | NodeAddr being sought |
 | 25 | origin | 16 bytes | Requester's NodeAddr |
 | 41 | ttl | 1 byte | Remaining hops (default 64) |
-| 42 | origin_coords_cnt | 2 bytes LE | Number of coordinate entries |
-| 44 | origin_coords | 16 x n bytes | Requester's ancestry (NodeAddr only) |
-| 44 + 16n | visited_hash_cnt | 1 byte | Hash count for visited filter |
-| 45 + 16n | visited_bits | 256 bytes | Compact bloom of visited nodes |
+| 42 | min_mtu | 2 bytes LE | Minimum transport MTU the origin requires (0 = no requirement) |
+| 44 | origin_coords_cnt | 2 bytes LE | Number of coordinate entries |
+| 46 | origin_coords | 16 x n bytes | Requester's ancestry (NodeAddr only) |
+| 46 + 16n | visited_hash_cnt | 1 byte | Hash count for visited filter |
+| 47 + 16n | visited_bits | 256 bytes | Compact bloom of visited nodes |
 
-**Size**: `301 + (n x 16)` bytes, where n = origin depth + 1
+**Size**: `303 + (n x 16)` bytes, where n = origin depth + 1
 
 | Origin Depth | Payload |
 | ------------ | ------- |
-| 3 | 349 bytes |
-| 5 | 381 bytes |
-| 10 | 461 bytes |
+| 3 | 351 bytes |
+| 5 | 383 bytes |
+| 10 | 463 bytes |
 
 ### LookupResponse (0x31)
 
@@ -335,21 +340,28 @@ Coordinate discovery response, greedy-routed back to requester.
 | 0 | msg_type | 1 byte | 0x31 |
 | 1 | request_id | 8 bytes LE | Echoes the request's ID |
 | 9 | target | 16 bytes | NodeAddr that was found |
-| 25 | target_coords_cnt | 2 bytes LE | Number of coordinate entries |
-| 27 | target_coords | 16 x n bytes | Target's ancestry (NodeAddr only) |
-| 27 + 16n | proof | 64 bytes | Schnorr signature over `(request_id \|\| target)` |
+| 25 | path_mtu | 2 bytes LE | Minimum MTU along response path (transit-annotated) |
+| 27 | target_coords_cnt | 2 bytes LE | Number of coordinate entries |
+| 29 | target_coords | 16 x n bytes | Target's ancestry (NodeAddr only) |
+| 29 + 16n | proof | 64 bytes | Schnorr signature over `(request_id \|\| target \|\| target_coords)` |
 
-**Size**: `91 + (n x 16)` bytes
+**Size**: `93 + (n x 16)` bytes
 
 | Target Depth | Payload |
 | ------------ | ------- |
-| 3 | 139 bytes |
-| 5 | 171 bytes |
-| 10 | 251 bytes |
+| 3 | 141 bytes |
+| 5 | 173 bytes |
+| 10 | 253 bytes |
 
-**Proof coverage**: Signs `(request_id || target)` only — coordinates are
-excluded so the proof survives tree reconvergence during the lookup
-round-trip.
+The `path_mtu` field is initialized to `u16::MAX` by the target and each
+transit hop applies `min(path_mtu, outgoing_link_mtu)`, giving the
+originator an MTU estimate for the discovered path.
+
+**Proof coverage**: Signs `(request_id || target || target_coords)` —
+`path_mtu` is excluded from the proof because it is a transit annotation
+modified at each hop. Coordinates are included because proof verification
+at the source confirms the target actually holds the claimed tree position.
+The source verifies the proof upon receipt.
 
 ### SessionDatagram (0x00)
 
@@ -460,8 +472,9 @@ protocol version, session lifecycle phase, per-packet flags, and payload length.
 | Phase | Type | Description |
 | ----- | ---- | ----------- |
 | 0x0 | Established | Post-handshake encrypted traffic or plaintext error signals |
-| 0x1 | Handshake msg1 | SessionSetup (Noise IK msg1) |
-| 0x2 | Handshake msg2 | SessionAck (Noise IK msg2) |
+| 0x1 | Handshake msg1 | SessionSetup (Noise XK msg1) |
+| 0x2 | Handshake msg2 | SessionAck (Noise XK msg2) |
+| 0x3 | Handshake msg3 | SessionMsg3 (Noise XK msg3) |
 
 ### FSP Flags (Established Phase Only)
 
@@ -472,7 +485,7 @@ protocol version, session lifecycle phase, per-packet flags, and payload length.
 | 2 | U (unencrypted) | Payload is plaintext (error signals) |
 | 3-7 | — | Reserved (must be zero) |
 
-Flags must be zero in handshake packets (phase 0x1 and 0x2).
+Flags must be zero in handshake packets (phase 0x1, 0x2, and 0x3).
 
 ### FSP Encrypted Message (phase 0x0, U flag clear)
 
@@ -529,9 +542,10 @@ body.
 | 0x14 | CoordsWarmup | Standalone coordinate cache warming |
 | 0x20 | CoordsRequired | Error: transit node lacks destination coordinates |
 | 0x21 | PathBroken | Error: greedy routing reached dead end |
+| 0x22 | MtuExceeded | Error: forwarded packet exceeds next-hop MTU |
 
 Message types 0x10-0x14 are carried inside the AEAD ciphertext (dispatched
-by the `msg_type` field in the encrypted inner header). Types 0x20-0x21 are
+by the `msg_type` field in the encrypted inner header). Types 0x20-0x22 are
 plaintext error signals (U flag set, no encryption).
 
 Session-layer SenderReport (0x11) and ReceiverReport (0x12) use the same
@@ -541,7 +555,9 @@ happens at the session level based on the FSP message type.
 
 ### SessionSetup (phase 0x1)
 
-Establishes a session and warms transit coordinate caches.
+Establishes a session and warms transit coordinate caches. Contains the
+first message of the Noise XK handshake (ephemeral key only — the
+initiator's static identity is not revealed until msg3).
 Encoded with FSP prefix: ver=0, phase=0x1, flags=0, payload_len.
 
 **Body** (after 4-byte FSP prefix):
@@ -554,11 +570,12 @@ Encoded with FSP prefix: ver=0, phase=0x1, flags=0, payload_len.
 | ... | dest_coords_count | 2 bytes LE | Number of dest coordinate entries |
 | ... | dest_coords | 16 x m bytes | Destination's ancestry |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
-| ... | handshake_payload | variable | Noise IK msg1 (82 bytes typical) |
+| ... | handshake_payload | variable | Noise XK msg1 (33 bytes — ephemeral key only) |
 
 ### SessionAck (phase 0x2)
 
-Confirms session establishment, completes the Noise handshake.
+Second message of the Noise XK handshake. The responder sends its
+ephemeral key and encrypted epoch.
 Encoded with FSP prefix: ver=0, phase=0x2, flags=0, payload_len.
 
 **Body** (after 4-byte FSP prefix):
@@ -571,7 +588,32 @@ Encoded with FSP prefix: ver=0, phase=0x2, flags=0, payload_len.
 | ... | dest_coords_count | 2 bytes LE | Number of initiator coordinate entries |
 | ... | dest_coords | 16 x m bytes | Initiator's ancestry (for return-path cache warming) |
 | ... | handshake_len | 2 bytes LE | Noise payload length |
-| ... | handshake_payload | variable | Noise IK msg2 (33 bytes typical) |
+| ... | handshake_payload | variable | Noise XK msg2 (57 bytes — ephemeral key + encrypted epoch) |
+
+### SessionMsg3 (phase 0x3)
+
+Third and final message of the Noise XK handshake. The initiator reveals
+its encrypted static identity and epoch. After msg3, both parties derive
+identical symmetric session keys and the session is established.
+Encoded with FSP prefix: ver=0, phase=0x3, flags=0, payload_len.
+
+**Body** (after 4-byte FSP prefix):
+
+| Offset | Field | Size | Description |
+| ------ | ----- | ---- | ----------- |
+| 0 | flags | 1 byte | Reserved |
+| 1 | handshake_len | 2 bytes LE | Noise payload length |
+| 3 | handshake_payload | variable | Noise XK msg3 (73 bytes — encrypted static + encrypted epoch) |
+
+**Noise XK msg3 breakdown** (73 bytes):
+
+| Offset | Field | Size | Description |
+| ------ | ----- | ---- | ----------- |
+| 0 | encrypted_static | 49 bytes | Initiator's static key (33) + AEAD tag (16) |
+| 49 | encrypted_epoch | 24 bytes | Startup epoch (8) + AEAD tag (16) |
+
+SessionMsg3 does not carry coordinates — both endpoints already have each
+other's coordinates from SessionSetup (msg1) and SessionAck (msg2).
 
 ### Data (0x10)
 
@@ -647,6 +689,28 @@ Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
 | 33 | last_coords_count | 2 bytes LE | Number of stale coordinate entries |
 | 35 | last_known_coords | 16 x n bytes | Stale coordinates that failed |
 
+### MtuExceeded (0x22)
+
+Plaintext error signal — forwarded packet exceeds the next-hop link MTU.
+Sent by a transit router back to the source when a SessionDatagram cannot
+be forwarded because its size exceeds the outgoing link's MTU.
+Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
+
+**Body** (after 4-byte FSP prefix + 1-byte msg_type):
+
+| Offset | Field | Size | Description |
+| ------ | ----- | ---- | ----------- |
+| 0 | flags | 1 byte | Reserved |
+| 1 | dest_addr | 16 bytes | NodeAddr of the destination being forwarded to |
+| 17 | reporter | 16 bytes | NodeAddr of the router that detected the MTU violation |
+| 33 | mtu | 2 bytes LE | Bottleneck MTU at the reporting router |
+
+**Body size**: 35 bytes. Total with prefix + msg_type: 40 bytes.
+
+The source uses the reported MTU to adjust its session-layer path MTU
+estimate. MtuExceeded is the reactive complement to the proactive
+`path_mtu` field in SessionDatagram and LookupResponse.
+
 ## Encapsulation Walkthrough
 
 A complete picture of how application data is wrapped through each layer.
@@ -709,12 +773,20 @@ endpoint session keys).
 
 ## Size Summary
 
-### Handshake Messages
+### FMP Handshake Messages (Noise IK)
 
-| Message | Size |
-| ------- | ---- |
-| Noise IK msg1 | 90 bytes |
-| Noise IK msg2 | 45 bytes |
+| Message | Raw Noise | Wire Frame |
+| ------- | --------- | ---------- |
+| IK msg1 (ephemeral + encrypted static + encrypted epoch) | 106 bytes | 114 bytes |
+| IK msg2 (ephemeral + encrypted epoch) | 57 bytes | 69 bytes |
+
+### FSP Handshake Messages (Noise XK)
+
+| Message | Raw Noise | Notes |
+| ------- | --------- | ----- |
+| XK msg1 (ephemeral only) | 33 bytes | Carried in SessionSetup |
+| XK msg2 (ephemeral + encrypted epoch) | 57 bytes | Carried in SessionAck |
+| XK msg3 (encrypted static + encrypted epoch) | 73 bytes | Carried in SessionMsg3 |
 
 ### Link-Layer Messages (inside encrypted frame)
 
@@ -722,8 +794,8 @@ endpoint session keys).
 | ------- | ---- | ----- |
 | TreeAnnounce | 100 + 32n bytes | n = depth + 1 |
 | FilterAnnounce | 1,035 bytes | v1 (1KB filter) |
-| LookupRequest | 301 + 16n bytes | n = origin depth + 1 |
-| LookupResponse | 91 + 16n bytes | n = target depth + 1 |
+| LookupRequest | 303 + 16n bytes | n = origin depth + 1 |
+| LookupResponse | 93 + 16n bytes | n = target depth + 1 |
 | SessionDatagram | 36 + payload bytes | Fixed 36-byte header |
 | Disconnect | 2 bytes | |
 
@@ -731,8 +803,9 @@ endpoint session keys).
 
 | Message | Typical Size | Notes |
 | ------- | ------------ | ----- |
-| SessionSetup | ~200 bytes | Depth-dependent |
-| SessionAck | ~130 bytes | Depth-dependent (carries both endpoints' coords) |
+| SessionSetup | ~170 bytes | Depth-dependent (XK msg1 = 33 bytes) |
+| SessionAck | ~190 bytes | Depth-dependent, carries both endpoints' coords (XK msg2 = 57 bytes) |
+| SessionMsg3 | ~80 bytes | Fixed (XK msg3 = 73 bytes, no coords) |
 | Data (minimal) | 12 + 6 + payload + 16 bytes | Steady state |
 | Data (with coords) | 12 + ~130 + 6 + payload + 16 bytes | Warmup/recovery |
 | SenderReport | 12 + 6 + 46 + 16 bytes | MMP metrics |
@@ -741,6 +814,7 @@ endpoint session keys).
 | CoordsWarmup | 12 + coords + 6 + 16 bytes | Standalone warmup (empty body) |
 | CoordsRequired | 38 bytes | Fixed (prefix + msg_type + body) |
 | PathBroken | 35 + 16n bytes | Includes stale coords |
+| MtuExceeded | 40 bytes | Fixed (prefix + msg_type + body) |
 
 ### Complete Packet Sizes (link + session)
 
