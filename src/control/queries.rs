@@ -185,8 +185,8 @@ pub fn show_sessions(node: &Node) -> Value {
             "established"
         } else if entry.is_initiating() {
             "initiating"
-        } else if entry.is_responding() {
-            "responding"
+        } else if entry.is_awaiting_msg3() {
+            "awaiting_msg3"
         } else {
             "unknown"
         };

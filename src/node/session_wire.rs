@@ -17,8 +17,9 @@
 //! |-------|--------|------------------|-----------------------------------|
 //! | 0x0   | 0      | Encrypted        | Post-handshake encrypted data     |
 //! | 0x0   | 1      | Plaintext error  | CoordsRequired, PathBroken        |
-//! | 0x1   | -      | Handshake msg1   | SessionSetup (Noise IK msg1)      |
-//! | 0x2   | -      | Handshake msg2   | SessionAck (Noise IK msg2)        |
+//! | 0x1   | -      | Handshake msg1   | SessionSetup (Noise XK msg1)      |
+//! | 0x2   | -      | Handshake msg2   | SessionAck (Noise XK msg2)        |
+//! | 0x3   | -      | Handshake msg3   | SessionMsg3 (Noise XK msg3)       |
 
 use crate::protocol::{ProtocolError, decode_optional_coords};
 use crate::tree::TreeCoordinate;
@@ -36,8 +37,11 @@ pub const FSP_PHASE_ESTABLISHED: u8 = 0x0;
 /// Phase value for SessionSetup (Noise IK message 1).
 pub const FSP_PHASE_MSG1: u8 = 0x1;
 
-/// Phase value for SessionAck (Noise IK message 2).
+/// Phase value for SessionAck (Noise handshake message 2).
 pub const FSP_PHASE_MSG2: u8 = 0x2;
+
+/// Phase value for XK message 3 (initiator's encrypted static).
+pub const FSP_PHASE_MSG3: u8 = 0x3;
 
 /// Size of the common packet prefix (all FSP message types).
 pub const FSP_COMMON_PREFIX_SIZE: usize = 4;
@@ -245,7 +249,7 @@ pub fn build_fsp_encrypted(header: &[u8; FSP_HEADER_SIZE], ciphertext: &[u8]) ->
 
 /// Build a 4-byte common prefix for a handshake message.
 ///
-/// `phase` should be `FSP_PHASE_MSG1` or `FSP_PHASE_MSG2`.
+/// `phase` should be `FSP_PHASE_MSG1`, `FSP_PHASE_MSG2`, or `FSP_PHASE_MSG3`.
 /// Flags are zero during handshake.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn build_fsp_handshake_prefix(phase: u8, payload_len: u16) -> [u8; FSP_COMMON_PREFIX_SIZE] {
@@ -480,6 +484,17 @@ mod tests {
         assert_eq!(u16::from_le_bytes([prefix[2], prefix[3]]), 50);
     }
 
+    #[test]
+    fn test_build_fsp_handshake_prefix_msg3() {
+        let prefix = build_fsp_handshake_prefix(FSP_PHASE_MSG3, 73);
+        assert_eq!(prefix[0], 0x03); // ver=0, phase=3
+        assert_eq!(prefix[1], 0x00); // flags zero
+        assert_eq!(u16::from_le_bytes([prefix[2], prefix[3]]), 73);
+
+        let parsed = FspCommonPrefix::parse(&prefix).unwrap();
+        assert_eq!(parsed.phase, FSP_PHASE_MSG3);
+    }
+
     // ===== Error Prefix Tests =====
 
     #[test]
@@ -578,5 +593,9 @@ mod tests {
         // SessionAck (phase 2)
         let prefix = FspCommonPrefix::parse(&[0x02, 0x00, 0x21, 0x00]).unwrap();
         assert_eq!(prefix.phase, 2);
+
+        // SessionMsg3 (phase 3)
+        let prefix = FspCommonPrefix::parse(&[0x03, 0x00, 0x49, 0x00]).unwrap();
+        assert_eq!(prefix.phase, 3);
     }
 }

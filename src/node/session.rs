@@ -1,8 +1,9 @@
 //! End-to-end session state.
 //!
-//! Tracks Noise IK sessions between this node and remote endpoints.
-//! Sessions are established via SessionSetup/SessionAck handshake
-//! messages carried inside SessionDatagram envelopes through the mesh.
+//! Tracks Noise XK sessions between this node and remote endpoints.
+//! Sessions are established via a three-message XK handshake
+//! (SessionSetup/SessionAck/SessionMsg3) carried inside SessionDatagram
+//! envelopes through the mesh.
 
 use crate::config::SessionMmpConfig;
 use crate::mmp::MmpSessionState;
@@ -12,10 +13,11 @@ use secp256k1::PublicKey;
 
 /// State machine for an end-to-end session.
 pub(crate) enum EndToEndState {
-    /// We initiated: sent SessionSetup with Noise IK msg1, awaiting SessionAck.
+    /// We initiated: sent SessionSetup with Noise XK msg1, awaiting SessionAck.
     Initiating(HandshakeState),
-    /// We are responding: received msg1, sent SessionAck with msg2.
-    Responding(HandshakeState),
+    /// XK responder: processed msg1, sent msg2, awaiting msg3.
+    /// Transitions to Established when msg3 arrives.
+    AwaitingMsg3(HandshakeState),
     /// Handshake complete, NoiseSession available for encrypt/decrypt.
     Established(NoiseSession),
 }
@@ -31,9 +33,9 @@ impl EndToEndState {
         matches!(self, EndToEndState::Initiating(_))
     }
 
-    /// Check if we are the responder (sent ack, waiting for data).
-    pub(crate) fn is_responding(&self) -> bool {
-        matches!(self, EndToEndState::Responding(_))
+    /// Check if we are an XK responder awaiting msg3.
+    pub(crate) fn is_awaiting_msg3(&self) -> bool {
+        matches!(self, EndToEndState::AwaitingMsg3(_))
     }
 }
 
@@ -46,7 +48,7 @@ pub(crate) struct SessionEntry {
     /// Remote node's address (session table key).
     #[allow(dead_code)]
     remote_addr: NodeAddr,
-    /// Remote node's static public key (for Noise IK).
+    /// Remote node's static public key.
     remote_pubkey: PublicKey,
     /// Current session state. `None` only during state transitions.
     state: Option<EndToEndState>,
@@ -65,7 +67,7 @@ pub(crate) struct SessionEntry {
     /// Initialized from config when session becomes Established;
     /// reset on CoordsRequired receipt.
     coords_warmup_remaining: u8,
-    /// Whether this node initiated the Noise IK handshake.
+    /// Whether this node initiated the Noise handshake.
     /// Used for spin bit role assignment in session-layer MMP.
     is_initiator: bool,
     /// Session-layer MMP state. Initialized on Established transition.
@@ -153,9 +155,9 @@ impl SessionEntry {
         self.state.as_ref().is_some_and(|s| s.is_initiating())
     }
 
-    /// Check if we are the responder (sent ack, waiting for data).
-    pub(crate) fn is_responding(&self) -> bool {
-        self.state.as_ref().is_some_and(|s| s.is_responding())
+    /// Check if we are an XK responder awaiting msg3.
+    pub(crate) fn is_awaiting_msg3(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.is_awaiting_msg3())
     }
 
     /// Get creation time.
@@ -196,7 +198,7 @@ impl SessionEntry {
         now_ms.wrapping_sub(self.session_start_ms) as u32
     }
 
-    /// Whether this node initiated the Noise IK handshake.
+    /// Whether this node initiated the Noise handshake.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_initiator(&self) -> bool {
         self.is_initiator

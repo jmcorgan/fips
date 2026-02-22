@@ -153,7 +153,7 @@ impl Node {
 
     /// Resend session-layer handshake messages and timeout stale handshakes.
     ///
-    /// For sessions in Initiating or Responding state:
+    /// For sessions in Initiating or AwaitingMsg3 state:
     /// - If the handshake has exceeded the timeout window, remove the session.
     /// - If a resend is due and under max resends, resend the stored payload
     ///   wrapped in a fresh SessionDatagram (so routing can adapt).
@@ -231,7 +231,7 @@ impl Node {
 
     /// Remove established sessions that have been idle too long.
     ///
-    /// Only targets sessions in the Established state. Initiating/Responding
+    /// Only targets sessions in the Established state. Initiating/AwaitingMsg3
     /// sessions are handled by the handshake timeout.
     pub(in crate::node) fn purge_idle_sessions(&mut self, now_ms: u64) {
         let timeout_ms = self.config.node.session.idle_timeout_secs * 1000;

@@ -65,7 +65,7 @@ fn test_session_entry_new_initiating() {
 
     assert!(entry.state().is_initiating());
     assert!(!entry.state().is_established());
-    assert!(!entry.state().is_responding());
+    assert!(!entry.state().is_awaiting_msg3());
     assert_eq!(entry.created_at(), 1000);
     assert_eq!(entry.last_activity(), 1000);
 }
@@ -163,24 +163,37 @@ async fn test_session_direct_peer_handshake() {
     let count = process_available_packets(&mut nodes).await;
     assert!(count > 0, "Expected SessionSetup packet to arrive");
 
-    // Node 1 should now have a session in Responding state
+    // Node 1 should now have a session in AwaitingMsg3 state (XK: identity not yet known)
     assert_eq!(nodes[1].node.session_count(), 1);
     assert!(nodes[1]
         .node
         .get_session(&node0_addr)
         .unwrap()
         .state()
-        .is_responding());
+        .is_awaiting_msg3());
 
-    // Process packets: SessionAck arrives at Node 0
+    // Process packets: SessionAck arrives at Node 0, Node 0 sends SessionMsg3
     tokio::time::sleep(Duration::from_millis(20)).await;
     let count = process_available_packets(&mut nodes).await;
     assert!(count > 0, "Expected SessionAck packet to arrive");
 
-    // Node 0 should now be Established
+    // Node 0 should now be Established (transitions after sending msg3)
     assert!(nodes[0]
         .node
         .get_session(&node1_addr)
+        .unwrap()
+        .state()
+        .is_established());
+
+    // Process packets: SessionMsg3 arrives at Node 1
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let count = process_available_packets(&mut nodes).await;
+    assert!(count > 0, "Expected SessionMsg3 packet to arrive");
+
+    // Node 1 should now be Established (transitions after processing msg3)
+    assert!(nodes[1]
+        .node
+        .get_session(&node0_addr)
         .unwrap()
         .state()
         .is_established());
@@ -200,7 +213,7 @@ async fn test_session_direct_peer_data_transfer() {
     let node1_addr = *nodes[1].node.node_addr();
     let node1_pubkey = nodes[1].node.identity().pubkey_full();
 
-    // Establish session
+    // Establish session (XK: 3 messages — Setup, Ack, Msg3)
     nodes[0]
         .node
         .initiate_session(node1_addr, node1_pubkey)
@@ -209,11 +222,19 @@ async fn test_session_direct_peer_data_transfer() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await; // Setup → Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
-    process_available_packets(&mut nodes).await; // Ack → Node 0
+    process_available_packets(&mut nodes).await; // Ack → Node 0, Node 0 sends Msg3
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await; // Msg3 → Node 1
 
     assert!(nodes[0]
         .node
         .get_session(&node1_addr)
+        .unwrap()
+        .state()
+        .is_established());
+    assert!(nodes[1]
+        .node
+        .get_session(&node0_addr)
         .unwrap()
         .state()
         .is_established());
@@ -230,14 +251,6 @@ async fn test_session_direct_peer_data_transfer() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let count = process_available_packets(&mut nodes).await;
     assert!(count > 0, "Expected encrypted data to arrive");
-
-    // Node 1's session should now be Established (was Responding, transitions on first data)
-    assert!(nodes[1]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_established());
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -273,7 +286,7 @@ async fn test_session_3node_forwarded_handshake() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await;
 
-    // Node 2 should have a Responding session
+    // Node 2 should have an AwaitingMsg3 session (XK: identity not yet known)
     assert!(
         nodes[2].node.get_session(&node0_addr).is_some(),
         "Node 2 should have a session entry for Node 0"
@@ -283,20 +296,36 @@ async fn test_session_3node_forwarded_handshake() {
         .get_session(&node0_addr)
         .unwrap()
         .state()
-        .is_responding());
+        .is_awaiting_msg3());
 
     // Process: SessionAck: 2→1 (forwarded by transit B)
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await;
 
-    // Process: SessionAck: 1→0 (arrives at initiator A)
+    // Process: SessionAck: 1→0 (arrives at initiator A, sends SessionMsg3)
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await;
 
-    // Node 0 should now be Established
+    // Node 0 should now be Established (transitions after sending msg3)
     assert!(nodes[0]
         .node
         .get_session(&node2_addr)
+        .unwrap()
+        .state()
+        .is_established());
+
+    // Process: SessionMsg3: 0→1 (forwarded by transit B)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await;
+
+    // Process: SessionMsg3: 1→2 (arrives at responder C)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await;
+
+    // Node 2 should now be Established (transitions after processing msg3)
+    assert!(nodes[2]
+        .node
+        .get_session(&node0_addr)
         .unwrap()
         .state()
         .is_established());
@@ -359,7 +388,7 @@ async fn test_session_3node_forwarded_data() {
         process_available_packets(&mut nodes).await;
     }
 
-    // Node 2 should have transitioned to Established on first data
+    // Node 2 should be Established (transitioned during XK handshake msg3)
     assert!(nodes[2]
         .node
         .get_session(&node0_addr)
@@ -426,7 +455,7 @@ async fn test_session_ack_for_unknown_session() {
     // Fabricate a SessionAck and deliver directly
     let src_coords = nodes[1].node.tree_state().my_coords().clone();
     let dest_coords = nodes[0].node.tree_state().my_coords().clone();
-    let ack = SessionAck::new(src_coords, dest_coords).with_handshake(vec![0u8; 33]);
+    let ack = SessionAck::new(src_coords, dest_coords).with_handshake(vec![0u8; 57]);
     let datagram = SessionDatagram::new(node1_addr, node0_addr, ack.encode());
 
     // Send through link layer
@@ -575,7 +604,6 @@ async fn test_session_100_nodes() {
     //
     // For each session pair:
     //   1. Initiator sends one datagram to responder
-    //      (this also transitions responder from Responding → Established)
     //   2. Responder sends one datagram back to initiator
     //
     // Batched per pair with draining between each.
@@ -604,7 +632,7 @@ async fn test_session_100_nodes() {
         drain_to_quiescence(&mut nodes).await;
 
         // Reverse: responder → initiator
-        // (Responder should now be Established after receiving the forward datagram)
+        // (Responder should already be Established after XK msg3)
         let rev_payload = format!("rev-{}", pair_idx).into_bytes();
         match nodes[dst]
             .node
@@ -668,7 +696,7 @@ async fn test_session_100_nodes() {
         for (_, entry) in tn.node.sessions.iter() {
             if entry.state().is_established() {
                 total_established += 1;
-            } else if entry.state().is_responding() {
+            } else if entry.state().is_awaiting_msg3() {
                 total_responding += 1;
                 all_est = false;
             } else {
@@ -848,7 +876,7 @@ async fn test_session_100_nodes() {
     );
     assert_eq!(
         send_reverse_err, 0,
-        "All reverse sends should succeed (responder Established after forward data)"
+        "All reverse sends should succeed (responder Established after XK msg3)"
     );
     assert_eq!(
         fwd_delivered, send_forward_ok,
@@ -943,12 +971,14 @@ async fn test_tun_outbound_established_session() {
     let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
     let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
 
-    // Establish session
+    // Establish session (XK: 3 messages — Setup, Ack, Msg3)
     nodes[0].node.initiate_session(node1_addr, node1_pubkey).await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await; // Setup → Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
-    process_available_packets(&mut nodes).await; // Ack → Node 0
+    process_available_packets(&mut nodes).await; // Ack → Node 0, Node 0 sends Msg3
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await; // Msg3 → Node 1
 
     assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
 
@@ -1636,9 +1666,9 @@ async fn test_session_handshake_timeout() {
     assert!(!node.sessions.contains_key(&dest_addr), "Timed-out session should be removed");
 }
 
-/// Test that session handshake timeout removes stale Responding sessions.
+/// Test that session handshake timeout removes stale AwaitingMsg3 sessions.
 #[tokio::test]
-async fn test_session_responding_timeout() {
+async fn test_session_awaiting_msg3_timeout() {
     use crate::noise::HandshakeState;
 
     let mut node = make_node();
@@ -1646,17 +1676,17 @@ async fn test_session_responding_timeout() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_responder(
+    let handshake = HandshakeState::new_xk_responder(
         identity_b.keypair(),
     );
 
     let src_addr = *identity_a.node_addr();
 
-    // Create a Responding session at time 1000
+    // Create an AwaitingMsg3 session at time 1000
     let entry = crate::node::session::SessionEntry::new(
         src_addr,
         identity_a.pubkey_full(),
-        EndToEndState::Responding(handshake),
+        EndToEndState::AwaitingMsg3(handshake),
         1000,
         false,
     );
@@ -1668,5 +1698,5 @@ async fn test_session_responding_timeout() {
     let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
     let after_timeout = 1000 + timeout_secs * 1000 + 1;
     node.resend_pending_session_handshakes(after_timeout).await;
-    assert!(!node.sessions.contains_key(&src_addr), "Timed-out Responding session should be removed");
+    assert!(!node.sessions.contains_key(&src_addr), "Timed-out AwaitingMsg3 session should be removed");
 }

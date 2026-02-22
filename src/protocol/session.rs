@@ -564,6 +564,97 @@ impl SessionAck {
 }
 
 // ============================================================================
+// Session Msg3 (XK Handshake Message 3)
+// ============================================================================
+
+/// XK handshake message 3 (initiator -> responder).
+///
+/// Carries the initiator's encrypted static key and epoch. Sent by the
+/// initiator after receiving msg2. The responder learns the initiator's
+/// identity from this message.
+///
+/// ## Wire Format
+///
+/// | Offset | Field            | Size    | Description                         |
+/// |--------|------------------|---------|-------------------------------------|
+/// | 0      | flags            | 1 byte  | Reserved                            |
+/// | 1      | handshake_len    | 2 bytes | u16 LE, Noise payload length        |
+/// | 3      | handshake_payload| variable| Noise XK msg3 (73 bytes typical)    |
+#[derive(Clone, Debug)]
+pub struct SessionMsg3 {
+    /// Reserved flags byte.
+    pub flags: u8,
+    /// Noise XK handshake message 3.
+    pub handshake_payload: Vec<u8>,
+}
+
+impl SessionMsg3 {
+    /// Create a new SessionMsg3 with the given handshake payload.
+    pub fn new(handshake_payload: Vec<u8>) -> Self {
+        Self {
+            flags: 0,
+            handshake_payload,
+        }
+    }
+
+    /// Encode as wire format (4-byte FSP prefix + flags + handshake).
+    ///
+    /// The 4-byte prefix: `[ver_phase:1][flags:1][payload_len:2 LE]`
+    /// where ver_phase = 0x03 (version 0, phase MSG3).
+    pub fn encode(&self) -> Vec<u8> {
+        // Build body first to compute payload_len
+        let mut body = Vec::new();
+        body.push(self.flags);
+        let hs_len = self.handshake_payload.len() as u16;
+        body.extend_from_slice(&hs_len.to_le_bytes());
+        body.extend_from_slice(&self.handshake_payload);
+
+        // Prepend 4-byte FSP common prefix
+        let payload_len = body.len() as u16;
+        let mut buf = Vec::with_capacity(4 + body.len());
+        buf.push(0x03); // version 0, phase 0x3 (MSG3)
+        buf.push(0x00); // flags (must be zero for handshake)
+        buf.extend_from_slice(&payload_len.to_le_bytes());
+        buf.extend_from_slice(&body);
+        buf
+    }
+
+    /// Decode from wire format (after 4-byte FSP prefix has been consumed).
+    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+        if payload.is_empty() {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 1,
+                got: 0,
+            });
+        }
+        let flags = payload[0];
+        let mut offset = 1;
+
+        if payload.len() < offset + 2 {
+            return Err(ProtocolError::MessageTooShort {
+                expected: offset + 2,
+                got: payload.len(),
+            });
+        }
+        let hs_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
+        offset += 2;
+
+        if payload.len() < offset + hs_len {
+            return Err(ProtocolError::MessageTooShort {
+                expected: offset + hs_len,
+                got: payload.len(),
+            });
+        }
+        let handshake_payload = payload[offset..offset + hs_len].to_vec();
+
+        Ok(Self {
+            flags,
+            handshake_payload,
+        })
+    }
+}
+
+// ============================================================================
 // Session-Layer MMP Reports
 // ============================================================================
 
@@ -1548,5 +1639,39 @@ mod tests {
     #[test]
     fn test_mtu_exceeded_display() {
         assert_eq!(format!("{}", SessionMessageType::MtuExceeded), "MtuExceeded");
+    }
+
+    // ===== SessionMsg3 Tests =====
+
+    #[test]
+    fn test_session_msg3_encode_decode() {
+        let handshake = vec![0xCC; 73]; // typical XK msg3
+        let msg3 = SessionMsg3::new(handshake.clone());
+
+        let encoded = msg3.encode();
+        // Verify FSP prefix: ver_phase=0x03 (version 0, phase MSG3)
+        assert_eq!(encoded[0], 0x03);
+        assert_eq!(encoded[1], 0x00); // flags = 0 for handshake
+        let payload_len = u16::from_le_bytes([encoded[2], encoded[3]]);
+        assert_eq!(payload_len as usize, encoded.len() - 4);
+
+        // Decode (skip 4-byte FSP prefix)
+        let decoded = SessionMsg3::decode(&encoded[4..]).unwrap();
+        assert_eq!(decoded.flags, 0);
+        assert_eq!(decoded.handshake_payload, handshake);
+    }
+
+    #[test]
+    fn test_session_msg3_decode_too_short() {
+        assert!(SessionMsg3::decode(&[]).is_err());
+        assert!(SessionMsg3::decode(&[0x00]).is_err()); // flags only, no hs_len
+    }
+
+    #[test]
+    fn test_session_msg3_empty_handshake() {
+        let msg3 = SessionMsg3::new(vec![]);
+        let encoded = msg3.encode();
+        let decoded = SessionMsg3::decode(&encoded[4..]).unwrap();
+        assert!(decoded.handshake_payload.is_empty());
     }
 }
