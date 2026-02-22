@@ -299,6 +299,11 @@ impl SpinBitState {
         }
     }
 
+    /// Check if this is the spin bit initiator.
+    pub fn is_initiator(&self) -> bool {
+        self.is_initiator
+    }
+
     /// Get the spin bit value to set on an outgoing frame.
     pub fn tx_bit(&self) -> bool {
         self.current_value

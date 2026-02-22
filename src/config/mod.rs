@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use node::{
-    BloomConfig, BuffersConfig, CacheConfig, DiscoveryConfig, LimitsConfig, NodeConfig,
-    RateLimitConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
+    BloomConfig, BuffersConfig, CacheConfig, ControlConfig, DiscoveryConfig, LimitsConfig,
+    NodeConfig, RateLimitConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
 pub use transport::{TransportInstances, TransportsConfig, UdpConfig};

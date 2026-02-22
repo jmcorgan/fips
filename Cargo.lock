@@ -543,6 +543,7 @@ dependencies = [
  "rtnetlink",
  "secp256k1",
  "serde",
+ "serde_json",
  "serde_yaml",
  "sha2",
  "simple-dns",

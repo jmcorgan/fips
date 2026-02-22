@@ -314,6 +314,38 @@ impl SessionMmpConfig {
     fn default_owd_window_size() -> usize { DEFAULT_OWD_WINDOW_SIZE }
 }
 
+/// Control socket configuration (`node.control.*`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlConfig {
+    /// Enable the control socket (`node.control.enabled`).
+    #[serde(default = "ControlConfig::default_enabled")]
+    pub enabled: bool,
+    /// Unix socket path (`node.control.socket_path`).
+    #[serde(default = "ControlConfig::default_socket_path")]
+    pub socket_path: String,
+}
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            socket_path: Self::default_socket_path(),
+        }
+    }
+}
+
+impl ControlConfig {
+    fn default_enabled() -> bool { true }
+
+    fn default_socket_path() -> String {
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            format!("{}/fips/control.sock", runtime_dir)
+        } else {
+            "/tmp/fips-control.sock".to_string()
+        }
+    }
+}
+
 /// Internal buffers (`node.buffers.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuffersConfig {
@@ -412,6 +444,10 @@ pub struct NodeConfig {
     #[serde(default)]
     pub buffers: BuffersConfig,
 
+    /// Control socket (`node.control.*`).
+    #[serde(default)]
+    pub control: ControlConfig,
+
     /// Metrics Measurement Protocol — link layer (`node.mmp.*`).
     #[serde(default)]
     pub mmp: MmpConfig,
@@ -439,6 +475,7 @@ impl Default for NodeConfig {
             bloom: BloomConfig::default(),
             session: SessionConfig::default(),
             buffers: BuffersConfig::default(),
+            control: ControlConfig::default(),
             mmp: MmpConfig::default(),
             session_mmp: SessionMmpConfig::default(),
         }

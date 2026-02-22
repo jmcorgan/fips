@@ -17,6 +17,7 @@ rand = "0.8"
 thiserror = "2.0"
 bech32 = "0.11"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = "0.9"
 dirs = "6.0"
 hex = "0.4"
@@ -34,6 +35,10 @@ socket2 = { version = "0.5", features = ["all"] }
 [dev-dependencies]
 tempfile = "3.15"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bin]]
+name = "fipsctl"
+path = "src/bin/fipsctl.rs"
 
 [[bench]]
 name = "bloom"

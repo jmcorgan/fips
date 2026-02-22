@@ -1,10 +1,12 @@
 //! RX event loop and packet dispatch.
 
+use crate::control::ControlSocket;
+use crate::control::queries;
 use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
 use crate::node::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, FMP_VERSION, COMMON_PREFIX_SIZE};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 impl Node {
     /// Run the receive event loop.
@@ -53,6 +55,28 @@ impl Node {
 
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.node.tick_interval_secs));
 
+        // Set up control socket channel
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<
+            crate::control::ControlMessage,
+        >(32);
+
+        if self.config.node.control.enabled {
+            let config = self.config.node.control.clone();
+            let tx = control_tx.clone();
+            tokio::spawn(async move {
+                match ControlSocket::bind(&config) {
+                    Ok(socket) => {
+                        socket.accept_loop(tx).await;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to bind control socket");
+                    }
+                }
+            });
+        }
+        // Drop unused sender to avoid keeping channel open if control is disabled
+        drop(control_tx);
+
         info!("RX event loop started");
 
         loop {
@@ -72,6 +96,10 @@ impl Node {
                         "Registering identity from DNS resolution"
                     );
                     self.register_identity(identity.node_addr, identity.pubkey);
+                }
+                Some((request, response_tx)) = control_rx.recv() => {
+                    let response = queries::dispatch(self, &request.command);
+                    let _ = response_tx.send(response);
                 }
                 _ = tick.tick() => {
                     self.check_timeouts();

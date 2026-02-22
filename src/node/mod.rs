@@ -919,6 +919,11 @@ impl Node {
         self.sessions.len()
     }
 
+    /// Iterate over all session entries (for control queries).
+    pub(crate) fn session_entries(&self) -> impl Iterator<Item = (&NodeAddr, &SessionEntry)> {
+        self.sessions.iter()
+    }
+
     // === Identity Cache ===
 
     /// Register a node in the identity cache for FipsAddress → NodeAddr lookup.
@@ -950,6 +955,16 @@ impl Node {
     /// Number of identity cache entries.
     pub fn identity_cache_len(&self) -> usize {
         self.identity_cache.len()
+    }
+
+    /// Number of pending discovery lookups.
+    pub fn pending_lookup_count(&self) -> usize {
+        self.pending_lookups.len()
+    }
+
+    /// Number of recent discovery requests tracked.
+    pub fn recent_request_count(&self) -> usize {
+        self.recent_requests.len()
     }
 
     // === Routing ===
