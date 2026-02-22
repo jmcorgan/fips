@@ -37,10 +37,10 @@ pub use tree::TreeAnnounce;
 pub use filter::FilterAnnounce;
 pub use discovery::{LookupRequest, LookupResponse};
 pub use session::{
-    CoordsRequired, FspFlags, FspInnerFlags, PathBroken, PathMtuNotification, SessionAck,
-    SessionFlags, SessionMessageType, SessionReceiverReport, SessionSenderReport, SessionSetup,
-    COORDS_REQUIRED_SIZE, PATH_MTU_NOTIFICATION_SIZE, SESSION_RECEIVER_REPORT_SIZE,
-    SESSION_SENDER_REPORT_SIZE,
+    CoordsRequired, FspFlags, FspInnerFlags, MtuExceeded, PathBroken, PathMtuNotification,
+    SessionAck, SessionFlags, SessionMessageType, SessionReceiverReport, SessionSenderReport,
+    SessionSetup, COORDS_REQUIRED_SIZE, MTU_EXCEEDED_SIZE, PATH_MTU_NOTIFICATION_SIZE,
+    SESSION_RECEIVER_REPORT_SIZE, SESSION_SENDER_REPORT_SIZE,
 };
 pub(crate) use session::{coords_wire_size, decode_optional_coords, encode_coords};
 

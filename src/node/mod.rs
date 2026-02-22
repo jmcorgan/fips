@@ -25,7 +25,7 @@ use crate::peer::{ActivePeer, PeerConnection};
 use self::rate_limit::HandshakeRateLimiter;
 use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 use crate::transport::{
-    Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportHandle, TransportId,
+    Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
 use crate::tree::TreeState;
@@ -95,6 +95,9 @@ pub enum NodeError {
 
     #[error("send failed to {node_addr}: {reason}")]
     SendFailed { node_addr: NodeAddr, reason: String },
+
+    #[error("mtu exceeded forwarding to {node_addr}: packet {packet_size} > mtu {mtu}")]
+    MtuExceeded { node_addr: NodeAddr, packet_size: usize, mtu: u16 },
 
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
@@ -1156,9 +1159,16 @@ impl Node {
             .ok_or(NodeError::TransportNotFound(transport_id))?;
 
         let bytes_sent = transport.send(&remote_addr, &wire_packet).await
-            .map_err(|e| NodeError::SendFailed {
-                node_addr: *node_addr,
-                reason: format!("transport send: {}", e),
+            .map_err(|e| match e {
+                TransportError::MtuExceeded { packet_size, mtu } => NodeError::MtuExceeded {
+                    node_addr: *node_addr,
+                    packet_size,
+                    mtu,
+                },
+                other => NodeError::SendFailed {
+                    node_addr: *node_addr,
+                    reason: format!("transport send: {}", other),
+                },
             })?;
 
         // Update send statistics

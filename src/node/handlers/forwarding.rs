@@ -5,13 +5,13 @@
 //! plaintext session-layer headers, routes to the next hop or delivers
 //! locally, and generates error signals on routing failure.
 
-use crate::node::Node;
+use crate::node::{Node, NodeError};
 use crate::node::session_wire::{
     parse_encrypted_coords, FspCommonPrefix, FSP_COMMON_PREFIX_SIZE, FSP_HEADER_SIZE,
     FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
 };
 use crate::protocol::{
-    CoordsRequired, PathBroken, SessionAck, SessionDatagram, SessionSetup,
+    CoordsRequired, MtuExceeded, PathBroken, SessionAck, SessionDatagram, SessionSetup,
 };
 use crate::NodeAddr;
 use tracing::debug;
@@ -77,12 +77,19 @@ impl Node {
             .send_encrypted_link_message(&next_hop_addr, &encoded)
             .await
         {
-            debug!(
-                next_hop = %next_hop_addr,
-                dest = %datagram.dest_addr,
-                error = %e,
-                "Failed to forward SessionDatagram"
-            );
+            match e {
+                NodeError::MtuExceeded { mtu, .. } => {
+                    self.send_mtu_exceeded_error(&datagram, mtu).await;
+                }
+                _ => {
+                    debug!(
+                        next_hop = %next_hop_addr,
+                        dest = %datagram.dest_addr,
+                        error = %e,
+                        "Failed to forward SessionDatagram"
+                    );
+                }
+            }
         }
     }
 
@@ -258,6 +265,64 @@ impl Node {
                 original_dest = %original.dest_addr,
                 error_dest = %original.src_addr,
                 "Sent routing error signal"
+            );
+        }
+    }
+
+    /// Generate and send an MtuExceeded error signal back to the datagram's source.
+    ///
+    /// Called when `send_encrypted_link_message()` fails with
+    /// `NodeError::MtuExceeded` during forwarding. The signal tells the
+    /// source the bottleneck MTU so it can immediately reduce its path MTU.
+    async fn send_mtu_exceeded_error(
+        &mut self,
+        original: &SessionDatagram,
+        bottleneck_mtu: u16,
+    ) {
+        // Rate limit: reuse routing_error_rate_limiter keyed on dest_addr
+        if !self.routing_error_rate_limiter.should_send(&original.dest_addr) {
+            return;
+        }
+
+        let my_addr = *self.node_addr();
+
+        let error_payload = MtuExceeded::new(
+            original.dest_addr,
+            my_addr,
+            bottleneck_mtu,
+        ).encode();
+
+        let error_dg = SessionDatagram::new(my_addr, original.src_addr, error_payload)
+            .with_ttl(self.config.node.session.default_ttl);
+
+        let next_hop_addr = match self.find_next_hop(&original.src_addr) {
+            Some(peer) => *peer.node_addr(),
+            None => {
+                debug!(
+                    src = %original.src_addr,
+                    dest = %original.dest_addr,
+                    "Cannot route MtuExceeded signal back to source, dropping"
+                );
+                return;
+            }
+        };
+
+        let encoded = error_dg.encode();
+        if let Err(e) = self
+            .send_encrypted_link_message(&next_hop_addr, &encoded)
+            .await
+        {
+            debug!(
+                next_hop = %next_hop_addr,
+                error = %e,
+                "Failed to send MtuExceeded error signal"
+            );
+        } else {
+            debug!(
+                original_dest = %original.dest_addr,
+                error_dest = %original.src_addr,
+                bottleneck_mtu,
+                "Sent MtuExceeded error signal"
             );
         }
     }

@@ -18,8 +18,8 @@ use crate::noise::{HandshakeState, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE};
 use crate::mmp::report::ReceiverReport;
 use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
 use crate::protocol::{
-    CoordsRequired, FspInnerFlags, PathBroken, PathMtuNotification, SessionAck, SessionDatagram,
-    SessionMessageType, SessionReceiverReport, SessionSenderReport, SessionSetup,
+    CoordsRequired, FspInnerFlags, MtuExceeded, PathBroken, PathMtuNotification, SessionAck,
+    SessionDatagram, SessionMessageType, SessionReceiverReport, SessionSenderReport, SessionSetup,
 };
 use crate::NodeAddr;
 use secp256k1::PublicKey;
@@ -72,6 +72,9 @@ impl Node {
                     }
                     Some(SessionMessageType::PathBroken) => {
                         self.handle_path_broken(error_body).await;
+                    }
+                    Some(SessionMessageType::MtuExceeded) => {
+                        self.handle_mtu_exceeded(error_body).await;
                     }
                     _ => {
                         debug!(error_type, "Unknown plaintext error signal type");
@@ -700,6 +703,47 @@ impl Node {
                 warmup_packets = n,
                 "Reset coords warmup counter after PathBroken"
             );
+        }
+    }
+
+    /// Handle an MtuExceeded error signal from a transit router.
+    ///
+    /// A transit router couldn't forward our packet because it exceeded the
+    /// next-hop transport MTU. Apply the reported bottleneck MTU to our
+    /// PathMtuState for the affected session, causing an immediate decrease.
+    async fn handle_mtu_exceeded(&mut self, inner: &[u8]) {
+        let msg = match MtuExceeded::decode(inner) {
+            Ok(m) => m,
+            Err(e) => {
+                debug!(error = %e, "Malformed MtuExceeded");
+                return;
+            }
+        };
+
+        let peer_name = self.peer_display_name(&msg.dest_addr);
+        debug!(
+            dest = %peer_name,
+            reporter = %msg.reporter,
+            bottleneck_mtu = msg.mtu,
+            "MtuExceeded: transit router reports oversized packet"
+        );
+
+        // Apply to PathMtuState: immediate decrease via apply_notification()
+        if let Some(entry) = self.sessions.get_mut(&msg.dest_addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            let old_mtu = mmp.path_mtu.current_mtu();
+            let now = std::time::Instant::now();
+            if mmp.path_mtu.apply_notification(msg.mtu, now) {
+                let new_mtu = mmp.path_mtu.current_mtu();
+                info!(
+                    dest = %peer_name,
+                    old_mtu,
+                    new_mtu,
+                    reporter = %msg.reporter,
+                    "Path MTU decreased via reactive MtuExceeded signal"
+                );
+            }
         }
     }
 
