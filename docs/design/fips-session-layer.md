@@ -497,6 +497,20 @@ feedback:
 5. Notifications are sent on first measurement, on any decrease, and
    periodically at `max(10s, 5 × SRTT)`.
 
+### Send Failure Backoff
+
+When a session MMP report cannot be delivered (destination unreachable, no
+route), the sender applies exponential backoff to the probe interval:
+
+- Each consecutive failure doubles the interval: 2x, 4x, 8x, 16x, 32x
+- Backoff caps at 32x the base interval (5 consecutive failures)
+- A successful send resets to the normal SRTT-based interval
+- Debug logging is suppressed after 3 consecutive failures; a summary is
+  logged when the destination becomes reachable again
+
+This prevents wasted CPU and log noise when a session's remote endpoint has
+departed the network but the local session has not yet timed out.
+
 ### Idle Timeout Interaction
 
 MMP reports (SenderReport, ReceiverReport) and PathMtuNotification do **not**
@@ -525,7 +539,7 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
 | Explicit counter replay protection | **Implemented** |
 | Hybrid coordinate warmup (CP + CoordsWarmup) | **Implemented** |
 | FSP wire format (prefix, AAD, inner header) | **Implemented** |
-| Session-layer MMP | **Implemented** |
+| Session-layer MMP (with send-failure backoff) | **Implemented** |
 | Identity cache (LRU-only) | **Implemented** |
 | Coordinate cache (unified, TTL + refresh) | **Implemented** |
 | Session idle timeout | **Implemented** |

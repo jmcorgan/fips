@@ -1104,17 +1104,22 @@ The primary stability mechanisms are implemented:
   re-evaluation after a parent switch, allowing MMP metrics to stabilize
 - **Periodic re-evaluation** (`reeval_interval_secs = 60`): catches link
   degradation after tree stabilization independent of TreeAnnounce traffic
+- **Flap dampening** (`flap_threshold = 4`, `flap_window_secs = 60`,
+  `flap_dampening_secs = 120`): if a node switches parents more than 4
+  times within 60s, an extended 120s hold-down is imposed. Mandatory
+  switches (parent loss, root change) bypass dampening. The flap counter
+  resets when the window expires naturally.
 
 Remaining gaps:
 
 - No sequence number advancement rate limiting
 - No minimum stable state duration before re-announcing
 
-**Impact**: A rapidly flapping link could still cause moderate announcement
-traffic. The hold-down timer limits the rate of parent switches (at most
-one non-mandatory switch per 30s), and per-peer rate limiting (500ms)
-bounds announcement frequency, but the source node's announcement rate is
-not independently throttled.
+**Impact**: These mechanisms compose to bound announcement traffic even
+under rapid link flapping. The hold-down timer limits the rate of parent
+switches (at most one non-mandatory switch per 30s), flap dampening
+catches pathological patterns that persist beyond the hold-down window,
+and per-peer rate limiting (500ms) bounds announcement frequency.
 
 ### Known Limitation: Integration Test Gaps
 
@@ -1126,7 +1131,8 @@ propagation. However, the following failure scenarios lack test coverage:
 - Network partition formation and independent operation
 - Partition healing and root convergence
 - Stale entry cleanup (depends on TTL implementation)
-- Parent flapping under rapid topology changes
+- Parent flapping under rapid topology changes (flap dampening is
+  implemented; integration test coverage is the remaining gap)
 
 These tests are blocked on or related to the limitations above and should be
 added as each limitation is resolved.
@@ -1144,7 +1150,7 @@ through:
 4. **Bounded state** - O(peers × depth) entries per node, not O(network size)
 5. **Depth-proportional convergence** - Scales with tree height, not node count
 6. **Traffic-based failure detection** - No dedicated keepalive overhead
-7. **Stability thresholds** - Hysteresis prevents flapping on similar-cost paths
+7. **Stability thresholds** - Hysteresis, hold-down, and flap dampening prevent flapping on similar-cost paths
 
 Each node maintains only its own ancestry and direct peer information—not global
 topology. Reachability to arbitrary destinations is provided by Bloom-guided

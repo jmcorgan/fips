@@ -151,6 +151,9 @@ Controls tree construction and parent selection.
 | `node.tree.parent_hysteresis`          | f64   | `0.2`   | Cost improvement fraction required for same-root parent switch (0.0–1.0) |
 | `node.tree.hold_down_secs`             | u64   | `30`    | Suppress non-mandatory re-evaluation after parent switch |
 | `node.tree.reeval_interval_secs`       | u64   | `60`    | Periodic cost-based parent re-evaluation interval (0 = disabled) |
+| `node.tree.flap_threshold`             | u32   | `4`     | Parent switches in window before dampening engages  |
+| `node.tree.flap_window_secs`           | u64   | `60`    | Sliding window for counting parent switches          |
+| `node.tree.flap_dampening_secs`        | u64   | `120`   | Extended hold-down duration when flap threshold exceeded |
 
 ### Bloom Filter (`node.bloom.*`)
 
@@ -351,6 +354,9 @@ node:
     parent_hysteresis: 0.2              # cost improvement fraction for parent switch
     hold_down_secs: 30                  # suppress re-evaluation after switch
     reeval_interval_secs: 60            # periodic cost-based re-evaluation (0 = disabled)
+    flap_threshold: 4                    # parent switches before dampening
+    flap_window_secs: 60                 # sliding window for flap detection
+    flap_dampening_secs: 120             # extended hold-down on flap
   bloom:
     update_debounce_ms: 500
   session:

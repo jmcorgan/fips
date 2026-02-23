@@ -71,6 +71,13 @@ immediate parent reselection:
   Re-evaluates parent selection using current MMP link costs, independent
   of TreeAnnounce traffic. This catches link degradation after the tree
   has stabilized and TreeAnnounce gossip has stopped.
+- **Flap dampening** (`flap_threshold` / `flap_window_secs` /
+  `flap_dampening_secs`): If a node switches parents more than
+  `flap_threshold` times (default 4) within `flap_window_secs` (default
+  60s), an extended hold-down of `flap_dampening_secs` (default 120s) is
+  imposed. This reduces TreeAnnounce storms from link flapping without
+  delaying legitimate reconvergence. Mandatory switches (parent loss,
+  root change) bypass dampening.
 - **Local-only metrics**: Link costs use only locally measured MMP data
   (ETX and SRTT). No cumulative path costs are propagated and no wire
   format changes are required. This avoids the trust problems inherent
@@ -230,11 +237,13 @@ direct peers and D is the tree depth. This is NOT O(N) where N is the
 network size.
 
 What a node stores:
+
 - Its own declaration (coordinates, sequence, timestamp, signature)
 - Each peer's declaration and ancestry chain (P entries, each with D
   ancestry entries)
 
 What a node does NOT know:
+
 - Other subtrees branching off its ancestors
 - Siblings of ancestors
 - Nodes in distant parts of the network
@@ -249,6 +258,9 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | PARENT_HYSTERESIS | 0.2 (20%) | Fractional improvement in effective depth required for same-root switch |
 | HOLD_DOWN_SECS | 30s | Suppress non-mandatory re-evaluation after parent switch |
 | REEVAL_INTERVAL_SECS | 60s | Periodic cost-based parent re-evaluation interval |
+| FLAP_THRESHOLD | 4 | Parent switches in window before dampening engages |
+| FLAP_WINDOW_SECS | 60s | Sliding window for counting parent switches |
+| FLAP_DAMPENING_SECS | 120s | Extended hold-down duration when flap threshold exceeded |
 | ANNOUNCE_MIN_INTERVAL | 500ms | Minimum between announcements to same peer |
 | ROOT_TIMEOUT | 60 min | Root declaration considered stale (not yet enforced; heartbeat cascading covers common case) |
 | TREE_ENTRY_TTL | 5–10 min | Individual entry expiration |
@@ -267,6 +279,7 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | Sequence-based freshness | **Implemented** |
 | Rate limiting (500ms per peer) | **Implemented** |
 | Coord cache flush on parent change | **Implemented** |
+| Flap dampening (extended hold-down on rapid switches) | **Implemented** |
 | Root timeout enforcement | Planned |
 | Tree entry TTL enforcement | Planned |
 | Per-ancestry-entry signatures | Future direction |

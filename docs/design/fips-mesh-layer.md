@@ -100,6 +100,7 @@ Every peer connection begins with a Noise IK handshake that mutually
 authenticates both parties and establishes symmetric keys for link encryption.
 
 The IK pattern is chosen because:
+
 - The **initiator** knows the responder's static public key from configuration
   or discovery, and sends their own static key encrypted in the first message
 - The **responder** learns the initiator's identity from the first message,
@@ -241,6 +242,7 @@ receiver index — a random 32-bit value chosen by the receiver during the
 handshake. This enables O(1) lookup without relying on source addresses.
 
 Each party in a link has two indices:
+
 - **our_index**: Chosen by us, included by the peer in packets sent to us
 - **their_index**: Chosen by them, included by us in packets sent to them
 
@@ -307,6 +309,12 @@ than the window are rejected.
 The replay check is performed before decryption to prevent CPU exhaustion from
 replayed packets that would pass the index lookup but fail decryption.
 
+During link transitions, stale packets from a previous Noise session arrive
+encrypted with old counters and are correctly rejected. To avoid excessive log
+volume from these benign bursts, replay detection logging is suppressed after
+the first 3 occurrences per peer. A summary is emitted when the peer's session
+is re-established or the peer is removed.
+
 ## Rate Limiting
 
 Handshake initiation (msg1) is the primary attack surface for unauthenticated
@@ -314,6 +322,7 @@ traffic. Each msg1 requires Noise DH operations (~200µs on modern CPUs),
 state allocation, and response generation.
 
 FMP uses a global token bucket rate limiter:
+
 - **Burst capacity**: Handles legitimate connection storms (e.g., node restart
   with many configured peers)
 - **Sustained rate**: Limits steady-state new connections per second
@@ -321,6 +330,7 @@ FMP uses a global token bucket rate limiter:
   source addresses are trivially spoofable
 
 Additional protections:
+
 - **Connection limit**: Maximum number of pending inbound handshakes, capping
   memory usage
 - **Handshake timeout**: Stale pending handshakes are cleaned up after a
