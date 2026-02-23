@@ -31,6 +31,10 @@ pub struct SenderState {
     // --- Report timing ---
     last_report_time: Option<Instant>,
     report_interval: Duration,
+
+    // --- Send failure backoff ---
+    /// Consecutive send failure count for backoff calculation.
+    consecutive_send_failures: u32,
 }
 
 impl SenderState {
@@ -54,6 +58,7 @@ impl SenderState {
             interval_has_data: false,
             last_report_time: None,
             report_interval: Duration::from_millis(cold_start_ms),
+            consecutive_send_failures: 0,
         }
     }
 
@@ -102,13 +107,44 @@ impl SenderState {
     }
 
     /// Check if it's time to send a report.
+    ///
+    /// When consecutive send failures have occurred, the effective interval
+    /// is multiplied by an exponential backoff factor (2^failures, capped at 32×).
     pub fn should_send_report(&self, now: Instant) -> bool {
         if !self.interval_has_data {
             return false;
         }
         match self.last_report_time {
             None => true, // Never sent a report — send immediately
-            Some(last) => now.duration_since(last) >= self.report_interval,
+            Some(last) => {
+                let effective = self.report_interval.mul_f64(self.send_failure_backoff_multiplier());
+                now.duration_since(last) >= effective
+            }
+        }
+    }
+
+    /// Record a send failure. Returns the new consecutive failure count.
+    pub fn record_send_failure(&mut self) -> u32 {
+        self.consecutive_send_failures += 1;
+        self.consecutive_send_failures
+    }
+
+    /// Record a successful send. Returns the previous failure count (for summary logging).
+    pub fn record_send_success(&mut self) -> u32 {
+        let prev = self.consecutive_send_failures;
+        self.consecutive_send_failures = 0;
+        prev
+    }
+
+    /// Get the backoff multiplier based on consecutive failures.
+    ///
+    /// Returns 1.0 for no failures, 2.0 for 1 failure, 4.0 for 2, ...
+    /// capped at 32.0 (5 failures).
+    pub fn send_failure_backoff_multiplier(&self) -> f64 {
+        if self.consecutive_send_failures == 0 {
+            1.0
+        } else {
+            2.0_f64.powi(self.consecutive_send_failures.min(5) as i32)
         }
     }
 
@@ -144,6 +180,10 @@ impl SenderState {
 
     pub fn report_interval(&self) -> Duration {
         self.report_interval
+    }
+
+    pub fn consecutive_send_failures(&self) -> u32 {
+        self.consecutive_send_failures
     }
 }
 
@@ -262,5 +302,77 @@ mod tests {
         // 2s RTT → 4s, clamped to max 2s
         s.update_report_interval_from_srtt(2_000_000);
         assert_eq!(s.report_interval(), Duration::from_millis(MAX_REPORT_INTERVAL_MS));
+    }
+
+    #[test]
+    fn test_backoff_multiplier_progression() {
+        let mut s = SenderState::new();
+
+        // No failures → multiplier 1.0
+        assert_eq!(s.send_failure_backoff_multiplier(), 1.0);
+        assert_eq!(s.consecutive_send_failures(), 0);
+
+        // Progressive failures: 2^1, 2^2, 2^3, 2^4, 2^5
+        let expected = [2.0, 4.0, 8.0, 16.0, 32.0];
+        for (i, &exp) in expected.iter().enumerate() {
+            let count = s.record_send_failure();
+            assert_eq!(count, (i + 1) as u32);
+            assert_eq!(s.send_failure_backoff_multiplier(), exp);
+        }
+
+        // Beyond 5 failures: stays capped at 32.0
+        s.record_send_failure(); // 6th
+        assert_eq!(s.send_failure_backoff_multiplier(), 32.0);
+        s.record_send_failure(); // 7th
+        assert_eq!(s.send_failure_backoff_multiplier(), 32.0);
+    }
+
+    #[test]
+    fn test_backoff_reset_on_success() {
+        let mut s = SenderState::new();
+
+        // Accumulate failures
+        s.record_send_failure();
+        s.record_send_failure();
+        s.record_send_failure();
+        assert_eq!(s.consecutive_send_failures(), 3);
+        assert_eq!(s.send_failure_backoff_multiplier(), 8.0);
+
+        // Success resets and returns previous count
+        let prev = s.record_send_success();
+        assert_eq!(prev, 3);
+        assert_eq!(s.consecutive_send_failures(), 0);
+        assert_eq!(s.send_failure_backoff_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn test_backoff_success_with_no_prior_failures() {
+        let mut s = SenderState::new();
+
+        // Success with no failures returns 0
+        let prev = s.record_send_success();
+        assert_eq!(prev, 0);
+        assert_eq!(s.consecutive_send_failures(), 0);
+    }
+
+    #[test]
+    fn test_should_send_report_respects_backoff() {
+        let mut s = SenderState::new();
+        let t0 = Instant::now();
+        s.record_sent(1, 100, 500);
+        let _ = s.build_report(t0);
+
+        // Record a failure: multiplier becomes 2.0
+        s.record_send_failure();
+
+        s.record_sent(2, 200, 500);
+
+        // At 1× interval: should NOT send (backoff requires 2×)
+        let t1 = t0 + s.report_interval() + Duration::from_millis(1);
+        assert!(!s.should_send_report(t1));
+
+        // At 2× interval: should send
+        let t2 = t0 + s.report_interval() * 2 + Duration::from_millis(1);
+        assert!(s.should_send_report(t2));
     }
 }

@@ -313,15 +313,68 @@ impl Node {
             }
         }
 
-        // Send collected reports via session-layer encryption
+        // Send collected reports via session-layer encryption.
+        // Track per-destination success/failure for backoff and log suppression.
+        let mut send_results: Vec<(NodeAddr, bool)> = Vec::new();
         for (dest_addr, msg_type, body) in reports {
-            if let Err(e) = self.send_session_msg(&dest_addr, msg_type, &body).await {
-                debug!(
-                    dest = %self.peer_display_name(&dest_addr),
-                    msg_type,
-                    error = %e,
-                    "Failed to send session MMP report"
-                );
+            match self.send_session_msg(&dest_addr, msg_type, &body).await {
+                Ok(()) => {
+                    send_results.push((dest_addr, true));
+                }
+                Err(e) => {
+                    // Peek at current failure count for log suppression
+                    let failures = self.sessions.get(&dest_addr)
+                        .and_then(|entry| entry.mmp())
+                        .map(|mmp| mmp.sender.consecutive_send_failures())
+                        .unwrap_or(0);
+
+                    if failures < 3 {
+                        debug!(
+                            dest = %self.peer_display_name(&dest_addr),
+                            msg_type,
+                            error = %e,
+                            "Failed to send session MMP report"
+                        );
+                    } else if failures == 3 {
+                        debug!(
+                            dest = %self.peer_display_name(&dest_addr),
+                            "Suppressing further session MMP send failure logs"
+                        );
+                    }
+                    // failures > 3: silently suppressed
+
+                    send_results.push((dest_addr, false));
+                }
+            }
+        }
+
+        // Update backoff state from send results.
+        // Deduplicate: a destination counts as success if ANY report succeeded,
+        // failure only if ALL reports for that destination failed.
+        let mut dest_success: std::collections::HashMap<NodeAddr, bool> =
+            std::collections::HashMap::new();
+        for (dest, ok) in &send_results {
+            let entry = dest_success.entry(*dest).or_insert(false);
+            if *ok {
+                *entry = true;
+            }
+        }
+        for (dest_addr, success) in dest_success {
+            if let Some(entry) = self.sessions.get_mut(&dest_addr)
+                && let Some(mmp) = entry.mmp_mut()
+            {
+                if success {
+                    let prev = mmp.sender.record_send_success();
+                    if prev > 3 {
+                        debug!(
+                            dest = %self.peer_display_name(&dest_addr),
+                            consecutive_failures = prev,
+                            "Resumed session MMP reporting"
+                        );
+                    }
+                } else {
+                    mmp.sender.record_send_failure();
+                }
             }
         }
     }
