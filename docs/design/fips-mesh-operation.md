@@ -100,25 +100,33 @@ decision uses tree coordinate distance to rank those candidates.
 
 ### How Filters Propagate
 
-Nodes exchange **FilterAnnounce** messages with direct peers. Each
+Nodes exchange **FilterAnnounce** messages with all direct peers. Each
 FilterAnnounce replaces the previous filter for that peer — there is no
 incremental update.
 
-Filter computation uses **split-horizon exclusion**: the outbound filter
-for peer Q is computed by merging the local node's own identity, its
-leaf-only dependents (if any), and the filters received from all other
-peers *except* Q. This prevents echo loops where a node advertises back
-to Q the destinations it learned from Q.
+Filter computation uses **tree-only merge with split-horizon exclusion**:
+the outbound filter for peer Q is computed by merging the local node's own
+identity, its leaf-only dependents (if any), and the inbound filters from
+tree peers (parent and children) *except* Q. Filters from non-tree mesh
+peers are stored locally for routing queries but are not merged into
+outgoing filters. This prevents saturation where mesh shortcuts cause
+filters to converge toward the full network.
 
-Filters propagate unboundedly (no TTL). At steady state, every reachable
-destination appears in at least one peer's filter.
+The restriction creates **directional asymmetry**: upward filters
+(child → parent) contain the child's subtree, while downward filters
+(parent → child) contain the complement. Together they cover the entire
+network.
+
+Filters propagate transitively through tree edges. At steady state, every
+reachable destination appears in at least one tree peer's filter.
 
 ### Update Triggers
 
 Filter updates are event-driven, not periodic:
 
 - Peer connects or disconnects
-- A peer's incoming filter changes
+- A peer's incoming filter changes (triggers recomputation for other peers)
+- Tree relationship changes (new parent, new child, parent switch)
 - Local state changes (new identity, leaf-only dependent changes)
 
 Updates are rate-limited at 500ms to prevent storms during topology changes.
@@ -509,8 +517,8 @@ When traffic to a destination stops:
 
 1. **Session idles out** (90s) — session torn down
 2. **Coordinate caches expire** (300s) — transit nodes forget coordinates
-3. **Bloom filters remain** — they have no TTL, so reachability information
-   persists
+3. **Bloom filters remain** — they have no TTL, so tree-propagated
+   reachability information persists
 
 When traffic resumes:
 

@@ -972,6 +972,26 @@ impl Node {
 
     // === Routing ===
 
+    /// Check if a peer is a tree neighbor (parent or child in the spanning tree).
+    ///
+    /// Returns true if the peer is our current tree parent, or if the peer
+    /// has declared us as their parent (making them our child).
+    pub(crate) fn is_tree_peer(&self, peer_addr: &NodeAddr) -> bool {
+        // Peer is our parent
+        if !self.tree_state.is_root()
+            && self.tree_state.my_declaration().parent_id() == peer_addr
+        {
+            return true;
+        }
+        // Peer is our child (their declaration names us as parent)
+        if let Some(decl) = self.tree_state.peer_declaration(peer_addr)
+            && decl.parent_id() == self.node_addr()
+        {
+            return true;
+        }
+        false
+    }
+
     /// Find next hop for a destination node address.
     ///
     /// Routing priority:

@@ -127,7 +127,7 @@ impl Node {
             }
         }
 
-        // Bloom filter cleanup: clear state for removed peer, mark remaining
+        // Bloom filter cleanup: clear state for removed peer, mark all remaining peers
         self.bloom_state.remove_peer_state(node_addr);
         let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
         self.bloom_state.mark_all_updates_needed(remaining_peers);

@@ -9,7 +9,7 @@ use crate::NodeAddr;
 
 use super::{Node, NodeError};
 use std::collections::HashMap;
-use tracing::{debug, trace};
+use tracing::debug;
 
 impl Node {
     /// Collect inbound filters from all peers for outgoing filter computation.
@@ -19,7 +19,9 @@ impl Node {
     fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
         let mut filters = HashMap::new();
         for (addr, peer) in &self.peers {
-            if let Some(filter) = peer.inbound_filter() {
+            if self.is_tree_peer(addr)
+                && let Some(filter) = peer.inbound_filter()
+            {
                 filters.insert(*addr, filter.clone());
             }
         }
@@ -71,13 +73,21 @@ impl Node {
         self.send_encrypted_link_message(peer_addr, &encoded).await?;
 
         // Record send and store the filter for change detection
+        debug!(
+            peer = %self.peer_display_name(peer_addr),
+            seq = announce.sequence,
+            est_entries = format_args!("{:.0}", sent_filter.estimated_count()),
+            set_bits = sent_filter.count_ones(),
+            fill = format_args!("{:.1}%", sent_filter.fill_ratio() * 100.0),
+            tree_peer = self.is_tree_peer(peer_addr),
+            "Sent FilterAnnounce"
+        );
         self.bloom_state.record_update_sent(*peer_addr, now_ms);
         self.bloom_state.record_sent_filter(*peer_addr, sent_filter);
         if let Some(peer) = self.peers.get_mut(peer_addr) {
             peer.clear_filter_update_needed();
         }
 
-        trace!(peer = %self.peer_display_name(peer_addr), seq = announce.sequence, "Sent FilterAnnounce");
         Ok(())
     }
 
@@ -156,18 +166,24 @@ impl Node {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
+        debug!(
+            from = %self.peer_display_name(from),
+            seq = announce.sequence,
+            est_entries = format_args!("{:.0}", announce.filter.estimated_count()),
+            set_bits = announce.filter.count_ones(),
+            fill = format_args!("{:.1}%", announce.filter.fill_ratio() * 100.0),
+            tree_peer = self.is_tree_peer(from),
+            "Received FilterAnnounce"
+        );
+
         // Store on peer
         if let Some(peer) = self.peers.get_mut(from) {
             peer.update_filter(announce.filter, announce.sequence, now_ms);
         }
 
-        debug!(
-            from = %self.peer_display_name(from),
-            seq = announce.sequence,
-            "Received FilterAnnounce"
-        );
-
-        // Check which peers' outgoing filters actually changed
+        // Check which peers' outgoing filters actually changed.
+        // All peers receive filters, but only tree peers' inbound filters
+        // are merged into outgoing computation (tree-only propagation).
         let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
         let peer_filters = self.peer_inbound_filters();
         self.bloom_state

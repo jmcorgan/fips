@@ -350,22 +350,27 @@ routing — bloom filters narrow the set of peers worth considering, and the
 actual forwarding decision ranks those candidates by tree distance and link
 quality.
 
-Filters propagate via gossip, with each node computing outbound filters by
-merging the filters received from its other peers (a
+Filters propagate transitively through tree edges, with each node computing
+outbound filters by merging the filters received from its tree peers (parent
+and children) using a
 [split-horizon](https://en.wikipedia.org/wiki/Split_horizon_route_advertisement)
-technique borrowed from distance-vector routing). At steady state, filters
-represent the entire reachable network.
+technique borrowed from distance-vector routing. All peers — including
+non-tree mesh shortcuts — receive FilterAnnounce messages, but only tree
+peers' filters are merged into outgoing computation. This prevents filter
+saturation where mesh shortcuts would cause every filter to converge toward
+the full network.
 
 See [fips-bloom-filters.md](fips-bloom-filters.md) for filter parameters and
 mathematical properties.
 
 ![Bloom filter propagation on a spanning tree](fips-bloom-propagation.svg)
 
-Every filter is computed identically regardless of link type: the outbound
-filter for peer Q merges this node's identity with all inbound filters
-except Q's (split-horizon exclusion). The protocol makes no distinction
-between tree parents, tree children, or mesh peers — the asymmetry visible
-in the diagram is a consequence of tree topology, not a different operation.
+The outbound filter for peer Q merges this node's identity with tree peer
+inbound filters except Q's (split-horizon exclusion). This creates
+directional asymmetry: upward filters (child → parent) contain the child's
+subtree, while downward filters (parent → child) contain the complement.
+Mesh peers receive filters but their inbound filters are not merged
+transitively — they provide single-hop shortcut visibility only.
 
 A node with multiple peers receives genuinely different filters from each.
 In the diagram, R receives {B, D, E} from B and {C, F} from C — two disjoint

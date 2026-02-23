@@ -64,8 +64,14 @@ distance calculation makes the actual forwarding decision.
 
 A bloom filter with 8,192 bits and k = 5 saturates (FPR approaches 100%)
 around 3,000–4,000 entries. Beyond this, every query returns "maybe" and the
-filter provides no candidate selection value. Hub nodes approaching this
-threshold effectively fall back to tree-distance-only routing.
+filter provides no candidate selection value.
+
+Tree-only merge propagation mitigates saturation by limiting each filter's
+content to tree-relevant entries. A node's outgoing filter to its parent
+contains only its subtree; its outgoing filter to a child contains the
+complement. Neither filter contains entries from mesh shortcuts' transitive
+information, keeping filter occupancy proportional to the node's position
+in the tree rather than the total mesh connectivity.
 
 ## Per-Peer Filter Model
 
@@ -79,7 +85,14 @@ The outbound filter for peer Q is computed by merging:
 
 1. **This node's own identity** (node_addr)
 2. **Leaf-only dependents** (if any — future direction)
-3. **All other peers' inbound filters except Q's** (split-horizon exclusion)
+3. **Tree peers' inbound filters except Q's** (tree-only merge with
+   split-horizon exclusion)
+
+Only filters from **tree peers** (parent and children in the spanning tree)
+are merged into outgoing filter computation. Filters from non-tree mesh
+peers are stored locally for routing queries but are not propagated
+transitively. This prevents bloom filter saturation where mesh shortcuts
+cause every node's filter to converge toward the full network.
 
 ### Split-Horizon Exclusion
 
@@ -89,13 +102,38 @@ creating a routing loop where Q thinks it can reach a destination through
 this node, and this node thinks it can reach the same destination through Q.
 
 Split-horizon is computed per-peer: the outbound filter for peer Q merges
-all inbound filters except Q's. For a node with peers A, B, C:
+all tree peer inbound filters except Q's.
+
+### Directional Asymmetry
+
+Because merge is restricted to tree peers, outgoing filters exhibit
+directional asymmetry along tree edges:
+
+- **Upward (child → parent)**: Contains the child's subtree — the child's
+  own identity plus all entries merged from its children's filters
+- **Downward (parent → child)**: Contains the complement — the parent's
+  own identity plus entries from all other tree peers (siblings' subtrees
+  and the parent's own parent direction)
+
+Together, the upward and downward filters for a tree edge cover the entire
+network with no overlap (excluding the node itself at the split point).
+
+### Mesh Peer Filters
+
+All peers — including non-tree mesh shortcuts — still **receive**
+FilterAnnounce messages and **store** received filters locally. These
+stored filters are consulted during routing (step 3 of `find_next_hop()`)
+for single-hop shortcut discovery. However, mesh peer filters contain
+only the mesh peer's own tree-propagated information, not transitive
+entries from the broader network.
+
+For a node with tree peers A, B and mesh peer C:
 
 | Outbound to | Includes entries from |
 | ----------- | -------------------- |
-| A | Self + B's filter + C's filter |
-| B | Self + A's filter + C's filter |
-| C | Self + A's filter + B's filter |
+| A | Self + B's filter (tree-only merge, excluding A) |
+| B | Self + A's filter (tree-only merge, excluding B) |
+| C | Self + A's filter + B's filter (tree-only merge, C excluded as non-tree) |
 
 ## Filter Propagation
 
@@ -121,10 +159,16 @@ cooldown period are coalesced into a single announcement.
 
 ### Propagation Scope
 
-Filters propagate unboundedly — there is no TTL on filter propagation. At
-steady state, every reachable destination appears in at least one peer's
-filter. New nodes added to the network propagate through the entire mesh
-within O(D × 500ms) where D is the network diameter.
+Filters propagate transitively through tree edges only. Since the spanning
+tree is a connected subgraph covering all nodes, every reachable
+destination still appears in at least one tree peer's filter at steady
+state. New nodes propagate through the tree within O(depth × 500ms) where
+depth is the tree depth.
+
+Mesh shortcuts provide single-hop filter visibility (the mesh peer's own
+filter) but do not contribute to transitive propagation. This bounds the
+information in each filter to tree-relevant entries rather than the full
+network.
 
 ## Filter Expiration
 
@@ -232,10 +276,13 @@ negotiation not present in v1.
 | 1 KB bloom filter (size_class 1) | **Implemented** |
 | 5 hash functions | **Implemented** |
 | Split-horizon filter computation | **Implemented** |
+| Tree-only merge propagation | **Implemented** |
+| Directional asymmetry (subtree/complement) | **Implemented** |
 | Per-peer filter maintenance | **Implemented** |
 | Event-driven updates | **Implemented** |
 | 500ms rate limiting | **Implemented** |
-| FilterAnnounce gossip | **Implemented** |
+| FilterAnnounce gossip (all peers) | **Implemented** |
+| Filter cardinality logging | **Implemented** |
 | Size class negotiation | Future direction |
 | Folding support | Future direction |
 | Adaptive filter sizing | Future direction |

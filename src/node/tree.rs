@@ -189,6 +189,11 @@ impl Node {
             "Processed TreeAnnounce"
         );
 
+        // If this peer is (now) a tree peer, ensure bloom filter exchange
+        if self.is_tree_peer(from) {
+            self.bloom_state.mark_update_needed(*from);
+        }
+
         // Re-evaluate parent selection
         if let Some(new_parent) = self.tree_state.evaluate_parent() {
             let new_seq = self.tree_state.my_declaration().sequence() + 1;
@@ -214,6 +219,10 @@ impl Node {
             );
 
             self.send_tree_announce_to_all().await;
+
+            // Tree structure changed — trigger bloom filter exchange with all peers
+            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+            self.bloom_state.mark_all_updates_needed(all_peers);
         } else if !self.tree_state.is_root()
             && *self.tree_state.my_declaration().parent_id() == *from
         {
@@ -249,6 +258,10 @@ impl Node {
                     "Parent ancestry changed, re-announcing"
                 );
                 self.send_tree_announce_to_all().await;
+
+                // Coords changed — trigger bloom filter exchange with all peers
+                let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
             }
         }
     }
