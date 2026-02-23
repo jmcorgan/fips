@@ -374,6 +374,11 @@ impl Node {
         let mut tree_state = TreeState::new(node_addr);
         tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
         tree_state.set_hold_down(config.node.tree.hold_down_secs);
+        tree_state.set_flap_dampening(
+            config.node.tree.flap_threshold,
+            config.node.tree.flap_window_secs,
+            config.node.tree.flap_dampening_secs,
+        );
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");
@@ -459,6 +464,11 @@ impl Node {
         let mut tree_state = TreeState::new(node_addr);
         tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
         tree_state.set_hold_down(config.node.tree.hold_down_secs);
+        tree_state.set_flap_dampening(
+            config.node.tree.flap_threshold,
+            config.node.tree.flap_window_secs,
+            config.node.tree.flap_dampening_secs,
+        );
         tree_state
             .sign_declaration(&identity)
             .expect("signing own declaration should never fail");

@@ -31,6 +31,18 @@ pub struct TreeState {
     hold_down: Duration,
     /// Timestamp of last parent switch (for hold-down enforcement).
     last_parent_switch: Option<Instant>,
+    /// Number of parent switches in current flap window.
+    flap_count: u32,
+    /// Start of the current flap counting window.
+    flap_window_start: Option<Instant>,
+    /// If dampened, suppressed until this instant.
+    flap_dampening_until: Option<Instant>,
+    /// Flap threshold: max switches before dampening engages.
+    flap_threshold: u32,
+    /// Flap window duration.
+    flap_window: Duration,
+    /// Dampening duration when threshold exceeded.
+    flap_dampening_duration: Duration,
 }
 
 impl TreeState {
@@ -56,6 +68,12 @@ impl TreeState {
             parent_hysteresis: 0.0,
             hold_down: Duration::ZERO,
             last_parent_switch: None,
+            flap_count: 0,
+            flap_window_start: None,
+            flap_dampening_until: None,
+            flap_threshold: 4,
+            flap_window: Duration::from_secs(60),
+            flap_dampening_duration: Duration::from_secs(120),
         }
     }
 
@@ -135,10 +153,19 @@ impl TreeState {
     /// Update this node's parent selection.
     ///
     /// Call this when switching parents. Updates the declaration and coordinates.
-    pub fn set_parent(&mut self, parent_id: NodeAddr, sequence: u64, timestamp: u64) {
+    /// Returns true if flap dampening was just engaged due to this switch.
+    /// Only records a flap when the parent actually changes.
+    pub fn set_parent(&mut self, parent_id: NodeAddr, sequence: u64, timestamp: u64) -> bool {
+        let parent_changed = self.is_root() || *self.my_declaration.parent_id() != parent_id;
         self.my_declaration = ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
         self.last_parent_switch = Some(Instant::now());
-        // Coordinates will be recomputed when ancestry is available
+        // Record switch for flap detection only when parent actually changes;
+        // coordinates will be recomputed when ancestry is available
+        if parent_changed {
+            self.record_parent_switch()
+        } else {
+            false
+        }
     }
 
     /// Update this node's coordinates based on current parent's ancestry.
@@ -225,6 +252,45 @@ impl TreeState {
     /// Set the hold-down duration after parent switches.
     pub fn set_hold_down(&mut self, secs: u64) {
         self.hold_down = Duration::from_secs(secs);
+    }
+
+    /// Configure flap dampening parameters.
+    pub fn set_flap_dampening(&mut self, threshold: u32, window_secs: u64, dampening_secs: u64) {
+        self.flap_threshold = threshold;
+        self.flap_window = Duration::from_secs(window_secs);
+        self.flap_dampening_duration = Duration::from_secs(dampening_secs);
+    }
+
+    /// Record a parent switch for flap detection.
+    /// Returns true if dampening was just engaged.
+    pub fn record_parent_switch(&mut self) -> bool {
+        let now = Instant::now();
+
+        // Reset window if expired or not started
+        match self.flap_window_start {
+            Some(start) if now.duration_since(start) < self.flap_window => {
+                self.flap_count += 1;
+            }
+            _ => {
+                self.flap_window_start = Some(now);
+                self.flap_count = 1;
+            }
+        }
+
+        // Check threshold
+        if self.flap_count >= self.flap_threshold && self.flap_dampening_until.is_none() {
+            self.flap_dampening_until = Some(now + self.flap_dampening_duration);
+            return true;
+        }
+        false
+    }
+
+    /// Check if flap dampening is currently active.
+    pub fn is_flap_dampened(&self) -> bool {
+        match self.flap_dampening_until {
+            Some(until) => Instant::now() < until,
+            None => false,
+        }
     }
 
     /// Evaluate whether to switch parents based on current peer tree state.
@@ -315,6 +381,12 @@ impl TreeState {
                 .last_parent_switch
                 .is_some_and(|last| last.elapsed() < self.hold_down)
         {
+            return None;
+        }
+
+        // --- Flap dampening: suppress after excessive parent switches ---
+
+        if self.is_flap_dampened() {
             return None;
         }
 

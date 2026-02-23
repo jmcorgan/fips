@@ -210,6 +210,15 @@ pub struct TreeConfig {
     /// tree has stabilized. Set to 0 to disable.
     #[serde(default = "TreeConfig::default_reeval_interval_secs")]
     pub reeval_interval_secs: u64,
+    /// Flap dampening: max parent switches before extended hold-down (`node.tree.flap_threshold`).
+    #[serde(default = "TreeConfig::default_flap_threshold")]
+    pub flap_threshold: u32,
+    /// Flap dampening: window in seconds for counting switches (`node.tree.flap_window_secs`).
+    #[serde(default = "TreeConfig::default_flap_window_secs")]
+    pub flap_window_secs: u64,
+    /// Flap dampening: extended hold-down duration in seconds (`node.tree.flap_dampening_secs`).
+    #[serde(default = "TreeConfig::default_flap_dampening_secs")]
+    pub flap_dampening_secs: u64,
 }
 
 impl Default for TreeConfig {
@@ -219,6 +228,9 @@ impl Default for TreeConfig {
             parent_hysteresis: 0.2,
             hold_down_secs: 30,
             reeval_interval_secs: 60,
+            flap_threshold: 4,
+            flap_window_secs: 60,
+            flap_dampening_secs: 120,
         }
     }
 }
@@ -228,6 +240,9 @@ impl TreeConfig {
     fn default_parent_hysteresis() -> f64 { 0.2 }
     fn default_hold_down_secs() -> u64 { 30 }
     fn default_reeval_interval_secs() -> u64 { 60 }
+    fn default_flap_threshold() -> u32 { 4 }
+    fn default_flap_window_secs() -> u64 { 60 }
+    fn default_flap_dampening_secs() -> u64 { 120 }
 }
 
 /// Bloom filter (`node.bloom.*`).

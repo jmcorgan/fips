@@ -207,7 +207,7 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            self.tree_state.set_parent(new_parent, new_seq, timestamp);
+            let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after parent switch");
                 return;
@@ -222,6 +222,9 @@ impl Node {
                 depth = self.tree_state.my_coords().depth(),
                 "Parent switched, flushed coord cache, announcing to all peers"
             );
+            if flap_dampened {
+                warn!("Flap dampening engaged: excessive parent switches detected");
+            }
 
             self.send_tree_announce_to_all().await;
 
@@ -318,7 +321,7 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            self.tree_state.set_parent(new_parent, new_seq, timestamp);
+            let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
                 return;
@@ -334,6 +337,9 @@ impl Node {
                 trigger = "periodic",
                 "Parent switched via periodic cost re-evaluation"
             );
+            if flap_dampened {
+                warn!("Flap dampening engaged: excessive parent switches detected");
+            }
 
             self.send_tree_announce_to_all().await;
 
