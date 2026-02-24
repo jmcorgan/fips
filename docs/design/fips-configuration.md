@@ -229,7 +229,7 @@ with the node for routing.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `dns.enabled` | bool | `false` | Enable DNS responder |
+| `dns.enabled` | bool | `true` | Enable DNS responder |
 | `dns.bind_addr` | string | `"127.0.0.1"` | Bind address |
 | `dns.port` | u16 | `5354` | Listen port |
 | `dns.ttl` | u32 | `300` | AAAA record TTL in seconds |
@@ -387,7 +387,7 @@ tun:
   mtu: 1280
 
 dns:
-  enabled: false
+  enabled: true
   bind_addr: "127.0.0.1"
   port: 5354
   ttl: 300

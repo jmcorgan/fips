@@ -20,11 +20,15 @@ const DEFAULT_DNS_PORT: u16 = 5354;
 /// Default DNS record TTL in seconds (5 minutes).
 const DEFAULT_DNS_TTL: u32 = 300;
 
+fn default_true() -> bool {
+    true
+}
+
 /// DNS responder configuration (`dns.*`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsConfig {
-    /// Enable DNS responder (`dns.enabled`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Enable DNS responder (`dns.enabled`, default: true).
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Bind address (`dns.bind_addr`).
@@ -38,6 +42,17 @@ pub struct DnsConfig {
     /// Record TTL in seconds (`dns.ttl`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u32>,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind_addr: None,
+            port: None,
+            ttl: None,
+        }
+    }
 }
 
 impl DnsConfig {

@@ -186,10 +186,8 @@ impl Config {
         if other.tun.mtu.is_some() {
             self.tun.mtu = other.tun.mtu;
         }
-        // Merge dns section
-        if other.dns.enabled {
-            self.dns.enabled = true;
-        }
+        // Merge dns section — higher-priority config always wins for enabled
+        self.dns.enabled = other.dns.enabled;
         if other.dns.bind_addr.is_some() {
             self.dns.bind_addr = other.dns.bind_addr;
         }

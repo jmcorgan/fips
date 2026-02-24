@@ -48,27 +48,4 @@ specific topics.
 
 ## Document Relationships
 
-```text
-                        fips-intro.md
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              │
-   fips-transport-layer  fips-mesh-        │
-              │          operation          │
-              ▼              │              │
-   fips-mesh-layer ◄────────┤              │
-              │              │              │
-              ▼              ├──► fips-spanning-tree
-   fips-session-layer        │         │
-              │              └──► fips-bloom-filters
-              ▼
-   fips-ipv6-adapter
-                        fips-wire-formats
-                        (referenced by all layer docs)
-
-              fips-configuration
-              (standalone reference)
-
-              spanning-tree-dynamics
-              (pedagogical companion to fips-spanning-tree)
-```
+![Document relationships](document-relationships.svg)

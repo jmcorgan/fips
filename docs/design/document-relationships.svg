@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 520" font-family="system-ui, -apple-system, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="520" rx="8" fill="#fafafa" stroke="#ddd" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="360" y="32" text-anchor="middle" font-size="16" font-weight="600" fill="#333">Document Relationships</text>
+
+  <!-- fips-intro -->
+  <rect x="260" y="50" width="200" height="32" rx="6" fill="#e3f2fd" stroke="#90caf9"/>
+  <text x="360" y="71" text-anchor="middle" font-weight="500" fill="#1565c0">fips-intro.md</text>
+
+  <!-- Arrows from intro -->
+  <line x1="310" y1="82" x2="130" y2="120" stroke="#555" marker-end="url(#arrow)"/>
+  <line x1="360" y1="82" x2="360" y2="120" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- fips-transport-layer -->
+  <rect x="30" y="120" width="200" height="32" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="130" y="141" text-anchor="middle" font-weight="500" fill="#2e7d32">fips-transport-layer.md</text>
+
+  <!-- fips-mesh-operation -->
+  <rect x="270" y="120" width="200" height="32" rx="6" fill="#fff3e0" stroke="#ffcc80"/>
+  <text x="370" y="141" text-anchor="middle" font-weight="500" fill="#e65100">fips-mesh-operation.md</text>
+
+  <!-- Arrow: transport -> mesh-layer -->
+  <line x1="130" y1="152" x2="130" y2="190" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- fips-mesh-layer -->
+  <rect x="30" y="190" width="200" height="32" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="130" y="211" text-anchor="middle" font-weight="500" fill="#2e7d32">fips-mesh-layer.md</text>
+
+  <!-- Arrow: mesh-operation -> mesh-layer -->
+  <line x1="270" y1="145" x2="230" y2="200" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- Arrow: mesh-layer -> session-layer -->
+  <line x1="130" y1="222" x2="130" y2="260" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- fips-session-layer -->
+  <rect x="30" y="260" width="200" height="32" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="130" y="281" text-anchor="middle" font-weight="500" fill="#2e7d32">fips-session-layer.md</text>
+
+  <!-- Arrow: session-layer -> ipv6-adapter -->
+  <line x1="130" y1="292" x2="130" y2="330" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- fips-ipv6-adapter -->
+  <rect x="30" y="330" width="200" height="32" rx="6" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="130" y="351" text-anchor="middle" font-weight="500" fill="#2e7d32">fips-ipv6-adapter.md</text>
+
+  <!-- Arrow: mesh-operation -> spanning-tree -->
+  <line x1="470" y1="145" x2="550" y2="190" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- Arrow: mesh-operation -> bloom-filters -->
+  <line x1="470" y1="148" x2="550" y2="260" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- fips-spanning-tree -->
+  <rect x="500" y="190" width="200" height="32" rx="6" fill="#f3e5f5" stroke="#ce93d8"/>
+  <text x="600" y="211" text-anchor="middle" font-weight="500" fill="#7b1fa2">fips-spanning-tree.md</text>
+
+  <!-- Arrow: intro -> spanning-tree -->
+  <line x1="460" y1="72" x2="560" y2="190" stroke="#555" marker-end="url(#arrow)"/>
+
+  <!-- fips-bloom-filters -->
+  <rect x="500" y="260" width="200" height="32" rx="6" fill="#f3e5f5" stroke="#ce93d8"/>
+  <text x="600" y="281" text-anchor="middle" font-weight="500" fill="#7b1fa2">fips-bloom-filters.md</text>
+
+  <!-- Arrow: spanning-tree -> bloom (dependency) -->
+  <line x1="600" y1="222" x2="600" y2="260" stroke="#999" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- fips-wire-formats -->
+  <rect x="260" y="400" width="200" height="32" rx="6" fill="#fce4ec" stroke="#ef9a9a"/>
+  <text x="360" y="421" text-anchor="middle" font-weight="500" fill="#c62828">fips-wire-formats.md</text>
+  <text x="360" y="448" text-anchor="middle" font-size="11" fill="#888">(referenced by all layer docs)</text>
+
+  <!-- fips-configuration -->
+  <rect x="30" y="400" width="200" height="32" rx="6" fill="#f5f5f5" stroke="#bdbdbd"/>
+  <text x="130" y="421" text-anchor="middle" font-weight="500" fill="#424242">fips-configuration.md</text>
+  <text x="130" y="448" text-anchor="middle" font-size="11" fill="#888">(standalone reference)</text>
+
+  <!-- spanning-tree-dynamics -->
+  <rect x="500" y="330" width="200" height="32" rx="6" fill="#f3e5f5" stroke="#ce93d8"/>
+  <text x="600" y="351" text-anchor="middle" font-weight="500" fill="#7b1fa2">spanning-tree-dynamics.md</text>
+  <text x="600" y="378" text-anchor="middle" font-size="11" fill="#888">(companion to fips-spanning-tree)</text>
+
+  <!-- Legend -->
+  <rect x="30" y="472" width="14" height="14" rx="3" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="50" y="484" font-size="11" fill="#666">Protocol stack</text>
+  <rect x="155" y="472" width="14" height="14" rx="3" fill="#fff3e0" stroke="#ffcc80"/>
+  <text x="175" y="484" font-size="11" fill="#666">Mesh behavior</text>
+  <rect x="295" y="472" width="14" height="14" rx="3" fill="#f3e5f5" stroke="#ce93d8"/>
+  <text x="315" y="484" font-size="11" fill="#666">Supporting references</text>
+  <rect x="460" y="472" width="14" height="14" rx="3" fill="#fce4ec" stroke="#ef9a9a"/>
+  <text x="480" y="484" font-size="11" fill="#666">Wire formats</text>
+  <rect x="580" y="472" width="14" height="14" rx="3" fill="#f5f5f5" stroke="#bdbdbd"/>
+  <text x="600" y="484" font-size="11" fill="#666">Implementation</text>
+</svg>

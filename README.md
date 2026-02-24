@@ -1,12 +1,16 @@
 # FIPS: Free Internetworking Peering System
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Status](https://img.shields.io/badge/status-alpha%20(0.1.0)-yellow.svg)](#status--roadmap)
+
 A distributed, decentralized network routing protocol for mesh nodes
 connecting over arbitrary transports.
 
-> **Status: Experimental / Pre-release**
+> **Status: Alpha (0.1.0)**
 >
 > FIPS is under active development. The protocol and APIs are not stable.
-> Expect breaking changes.
+> Expect breaking changes. See [Status & Roadmap](#status--roadmap) below.
 
 ## Overview
 
@@ -38,8 +42,8 @@ sessions across the mesh.
   measurement
 - **Operator visibility** — `fipsctl` control socket interface for runtime
   inspection of peers, links, sessions, tree state, and metrics
-- **Zero configuration** — sensible defaults; a node can run with no config
-  file
+- **Zero configuration** — sensible defaults; a node can start with no config
+  file, though peer addresses are needed to join a network
 
 ## Quick Start
 
@@ -59,15 +63,76 @@ cargo build --release
 ### Run
 
 ```
-# With default configuration (ephemeral identity, default ports):
+# Start with default search paths (see below):
 sudo ./target/release/fips
 
-# With a configuration file:
+# With an explicit configuration file:
 sudo ./target/release/fips -c fips.yaml
 ```
 
+Without `-c`, the node searches for `fips.yaml` in these locations
+(highest priority first, values from later files override earlier ones):
+
+1. `./fips.yaml` (current directory)
+2. `~/.config/fips/fips.yaml` (user config)
+3. `/etc/fips/fips.yaml` (system)
+
+If no config file is found, the node starts with defaults (ephemeral
+identity, default ports, no peers).
+
+A minimal two-node setup (each node points at the other):
+
+```yaml
+# node-a.yaml                          # node-b.yaml
+node:                                  # node:
+  identity:                            #   identity:
+    nsec: "nsec1aaa..."                #     nsec: "nsec1bbb..."
+transports:                            # transports:
+  udp:                                 #   udp:
+    bind_addr: "0.0.0.0:4000"          #     bind_addr: "0.0.0.0:4000"
+peers:                                 # peers:
+  - npub: "npub1bbb..."                #   - npub: "npub1aaa..."
+    addresses:                         #     addresses:
+      - transport: udp                 #       - transport: udp
+        addr: "10.0.0.2:4000"          #         addr: "10.0.0.1:4000"
+```
+
+The `nsec` field accepts bech32 (`nsec1...`) or hex-encoded secret keys.
+Omit it entirely for an ephemeral identity that changes each restart.
+
 See [docs/design/fips-configuration.md](docs/design/fips-configuration.md) for
 the full configuration reference.
+
+### Test Connectivity
+
+FIPS includes a built-in DNS resolver (enabled by default, port 5354)
+that maps `.fips` names to fd00::/8 IPv6 addresses derived from each
+node's public key. Configure your system to send `.fips` queries to it.
+
+With systemd-resolved:
+
+```
+sudo resolvectl dns fips0 127.0.0.1:5354
+sudo resolvectl domain fips0 ~fips
+```
+
+Or manually in `/etc/resolv.conf` (routes all DNS through FIPS for
+`.fips` names only if your resolver supports conditional forwarding;
+otherwise this sets it as a general nameserver):
+
+```
+nameserver 127.0.0.1
+options port:5354
+```
+
+Once DNS is configured, ping a peer by npub:
+
+```
+ping6 npub1bbb....fips
+```
+
+Any IPv6-capable application can reach FIPS nodes this way — `ping6`,
+`ssh`, `curl`, etc.
 
 ### Inspect
 
@@ -108,8 +173,36 @@ a layered protocol specification. Start with
 src/          Rust source (library + fips/fipsctl binaries)
 docs/design/  Protocol design specifications
 testing/      Docker-based integration test harnesses
-benches/      Criterion benchmarks
 ```
+
+## Status & Roadmap
+
+FIPS is at **v0.1.0 (alpha)**. The core protocol works end-to-end over
+UDP/IP overlays but has not been tested beyond small meshes.
+
+### What works today
+
+- Spanning tree construction with greedy coordinate routing
+- Bloom filter discovery for finding nodes without global state
+- Noise IK (link layer) and Noise XK (session layer) encryption
+- IPv6 TUN adapter with DNS resolution of `.fips` names
+- Per-link metrics (RTT, loss, jitter, goodput)
+- Runtime inspection via `fipsctl`
+- Docker-based integration and chaos testing
+
+### Near-term priorities
+
+- Peer discovery via Nostr relays (bootstrap without static peer lists)
+- Additional transports (Ethernet, Tor)
+- Improved routing resilience under churn
+- Security audit of cryptographic protocols
+- CI pipeline and published crate
+
+### Longer-term
+
+- Mobile platform support
+- Bandwidth-aware routing and QoS
+- Protocol stability and versioned wire format
 
 ## License
 
