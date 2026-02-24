@@ -24,8 +24,8 @@ RUN printf '%s\n' \
     'no-resolv' \
     >> /etc/dnsmasq.conf
 
-COPY fips /usr/local/bin/
-RUN chmod +x /usr/local/bin/fips
+COPY fips fipsctl /usr/local/bin/
+RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl
 
 # Static web page served via Python HTTP server
 RUN printf 'Fuck IPs!\n' > /root/index.html

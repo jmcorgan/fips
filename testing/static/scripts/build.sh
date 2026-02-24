@@ -49,18 +49,20 @@ if [ "$UNAME_S" = "Darwin" ]; then
     echo "Building FIPS for Linux (release) using cargo-zigbuild..."
     cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml"
     
-    echo "Copying binary to docker context..."
+    echo "Copying binaries to docker context..."
     cp "$PROJECT_ROOT/target/$CARGO_TARGET/release/fips" "$DOCKER_DIR/fips"
+    cp "$PROJECT_ROOT/target/$CARGO_TARGET/release/fipsctl" "$DOCKER_DIR/fipsctl"
 else
     # Native Linux build
     echo "Building FIPS (release)..."
     cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml"
-    
-    echo "Copying binary to docker context..."
+
+    echo "Copying binaries to docker context..."
     cp "$PROJECT_ROOT/target/release/fips" "$DOCKER_DIR/fips"
+    cp "$PROJECT_ROOT/target/release/fipsctl" "$DOCKER_DIR/fipsctl"
 fi
 
-echo "Done. Binary at $DOCKER_DIR/fips"
+echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl}"
 echo ""
 echo "Generating node configurations from templates..."
 "$SCRIPT_DIR/generate-configs.sh" "$TOPOLOGY" $MESH_NAME
