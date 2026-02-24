@@ -69,6 +69,28 @@ sudo ./target/release/fips -c fips.yaml
 See [docs/design/fips-configuration.md](docs/design/fips-configuration.md) for
 the full configuration reference.
 
+### Inspect
+
+While a node is running, use `fipsctl` to inspect its state:
+
+```
+fipsctl show status       # Node status overview
+fipsctl show peers        # Authenticated peers
+fipsctl show links        # Active links
+fipsctl show tree         # Spanning tree state
+fipsctl show sessions     # End-to-end sessions
+fipsctl show bloom        # Bloom filter state
+fipsctl show mmp          # MMP metrics summary
+fipsctl show cache        # Coordinate cache stats
+fipsctl show connections  # Pending handshake connections
+fipsctl show transports   # Transport instances
+fipsctl show routing      # Routing table summary
+```
+
+`fipsctl` communicates with the node via a Unix domain control socket
+(enabled by default). All queries are read-only. Use `-s <path>` to
+override the socket path.
+
 ### Multi-node Testing
 
 See [testing/](testing/) for Docker-based integration test harnesses including

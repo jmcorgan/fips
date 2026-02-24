@@ -280,8 +280,8 @@ authenticated peer regardless of what transport address the packet arrived
 from. FMP updates the peer's current address to the packet's source address,
 and subsequent outbound packets use the updated address.
 
-This allows peers to change transport addresses (IP:port for UDP, connection
-handle for TCP) without session interruption. The mechanism is:
+This allows peers to change transport addresses (e.g., IP:port for UDP)
+without session interruption. The mechanism is:
 
 1. Packet arrives from a different address than expected
 2. Receiver index lookup finds the session

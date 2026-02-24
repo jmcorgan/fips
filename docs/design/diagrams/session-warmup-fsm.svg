@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 340" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="520" height="340" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="260" y="28" fill="#e0e0e0" text-anchor="middle" font-size="15" font-weight="bold">Coordinate Warmup State Machine</text>
+
+  <!-- ======================== -->
+  <!-- WARMUP state (top)       -->
+  <!-- ======================== -->
+  <rect x="160" y="50" width="200" height="40" rx="6" fill="#1a1a2e" stroke="#d0a040" stroke-width="2"/>
+  <text x="260" y="75" fill="#d0a040" text-anchor="middle" font-weight="bold">WARMUP</text>
+
+  <!-- Annotation right of WARMUP -->
+  <text x="375" y="75" fill="#909090" text-anchor="start" font-size="10">send coords via CP</text>
+  <text x="375" y="87" fill="#909090" text-anchor="start" font-size="10">or CoordsWarmup</text>
+
+  <!-- Arrow: WARMUP &#8594; MINIMAL -->
+  <line x1="260" y1="90" x2="260" y2="140" stroke="#e0e0e0" stroke-width="1.5"/>
+  <polygon points="260,148 254,138 266,138" fill="#e0e0e0"/>
+
+  <!-- Transition label -->
+  <text x="268" y="120" fill="#909090" text-anchor="start" font-size="10">N packets sent</text>
+
+  <!-- ======================== -->
+  <!-- MINIMAL state (middle)   -->
+  <!-- ======================== -->
+  <rect x="160" y="148" width="200" height="40" rx="6" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="260" y="173" fill="#e0e0e0" text-anchor="middle" font-weight="bold">MINIMAL</text>
+
+  <!-- Annotation right of MINIMAL -->
+  <text x="375" y="173" fill="#909090" text-anchor="start" font-size="10">no coords attached</text>
+
+  <!-- Arrow: MINIMAL &#8594; RE-WARM -->
+  <line x1="260" y1="188" x2="260" y2="238" stroke="#e0e0e0" stroke-width="1.5"/>
+  <polygon points="260,246 254,236 266,236" fill="#e0e0e0"/>
+
+  <!-- Transition label -->
+  <text x="268" y="218" fill="#c04040" text-anchor="start" font-size="10">CoordsRequired</text>
+  <text x="268" y="230" fill="#c04040" text-anchor="start" font-size="10">or PathBroken</text>
+
+  <!-- ======================== -->
+  <!-- RE-WARM state (bottom)   -->
+  <!-- ======================== -->
+  <rect x="110" y="246" width="300" height="40" rx="6" fill="#1a1a2e" stroke="#c04040" stroke-width="2"/>
+  <text x="260" y="271" fill="#e0e0e0" text-anchor="middle" font-weight="bold">SEND CoordsWarmup (0x14)</text>
+
+  <!-- Annotation right of RE-WARM -->
+  <text x="425" y="271" fill="#909090" text-anchor="start" font-size="10">rate-limited</text>
+
+  <!-- Arrow: RE-WARM &#8594; back to WARMUP (curved left side) -->
+  <path d="M 110,266 L 60,266 L 60,70 L 160,70" fill="none" stroke="#d0a040" stroke-width="1.5"/>
+  <polygon points="160,70 150,64 150,76" fill="#d0a040"/>
+
+  <!-- Transition label on return arrow -->
+  <text x="48" y="170" fill="#d0a040" text-anchor="end" font-size="10" transform="rotate(-90, 48, 170)">counter reset</text>
+
+  <!-- Entry arrow into WARMUP (from above) -->
+  <line x1="260" y1="38" x2="260" y2="50" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="268" y="46" fill="#909090" text-anchor="start" font-size="10">session established</text>
+
+  <!-- LookupResponse annotation on return path -->
+  <text x="68" y="310" fill="#909090" text-anchor="start" font-size="10">also on LookupResponse</text>
+</svg>

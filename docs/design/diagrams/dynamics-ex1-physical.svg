@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 320">
+  <rect width="500" height="320" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="250" y="30" text-anchor="middle" font-family="monospace" font-size="15" font-weight="bold" fill="#e0e0e0">Office Network — Physical Topology</text>
+  <text x="250" y="48" text-anchor="middle" font-family="monospace" font-size="11" fill="#909090">node_addr: A &lt; C &lt; B &lt; E &lt; D</text>
+
+  <!-- Node positions: A(100,110) B(340,110) D(100,250) C(340,250) E(460,250) -->
+
+  <!-- Mesh links (gray) -->
+  <line x1="100" y1="110" x2="340" y2="110" stroke="#404860" stroke-width="1.5"/><!-- A—B -->
+  <line x1="100" y1="110" x2="100" y2="250" stroke="#404860" stroke-width="1.5"/><!-- A—D -->
+  <line x1="100" y1="110" x2="340" y2="250" stroke="#404860" stroke-width="1.5"/><!-- A—C -->
+  <line x1="340" y1="110" x2="340" y2="250" stroke="#404860" stroke-width="1.5"/><!-- B—C -->
+  <line x1="340" y1="110" x2="100" y2="250" stroke="#404860" stroke-width="1.5"/><!-- B—D -->
+  <line x1="100" y1="250" x2="340" y2="250" stroke="#404860" stroke-width="1.5"/><!-- D—C -->
+  <line x1="340" y1="250" x2="460" y2="250" stroke="#404860" stroke-width="1.5"/><!-- C—E -->
+
+  <!-- Node A -->
+  <circle cx="100" cy="110" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="100" y="115" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <!-- Node B -->
+  <circle cx="340" cy="110" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="340" y="115" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <!-- Node D -->
+  <circle cx="100" cy="250" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="100" y="255" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">D</text>
+
+  <!-- Node C -->
+  <circle cx="340" cy="250" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="340" y="255" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <!-- Node E -->
+  <circle cx="460" cy="250" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="460" y="255" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">E</text>
+</svg>

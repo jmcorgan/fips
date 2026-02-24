@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 650 280">
+  <rect width="650" height="280" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="325" y="30" text-anchor="middle" font-family="monospace" font-size="15" font-weight="bold" fill="#e0e0e0">Two-Site Network — Physical Topology</text>
+  <text x="325" y="48" text-anchor="middle" font-family="monospace" font-size="11" fill="#909090">node_addr: A &lt; E &lt; B &lt; F &lt; C &lt; G</text>
+
+  <!-- Site 1 grouping -->
+  <rect x="42" y="68" width="200" height="185" rx="8" fill="none" stroke="#303050" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="142" y="86" text-anchor="middle" font-family="monospace" font-size="11" fill="#606880">Site 1</text>
+
+  <!-- Site 2 grouping -->
+  <rect x="408" y="68" width="200" height="185" rx="8" fill="none" stroke="#303050" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="508" y="86" text-anchor="middle" font-family="monospace" font-size="11" fill="#606880">Site 2</text>
+
+  <!-- Node positions:
+       Site 1: A(100,140) B(200,140) C(200,220)
+       Site 2: E(450,140) F(550,140) G(550,220)
+  -->
+
+  <!-- Local links — Site 1 -->
+  <line x1="100" y1="140" x2="200" y2="140" stroke="#404860" stroke-width="1.5"/><!-- A—B -->
+  <line x1="200" y1="140" x2="200" y2="220" stroke="#404860" stroke-width="1.5"/><!-- B—C -->
+
+  <!-- Local links — Site 2 -->
+  <line x1="450" y1="140" x2="550" y2="140" stroke="#404860" stroke-width="1.5"/><!-- E—F -->
+  <line x1="550" y1="140" x2="550" y2="220" stroke="#404860" stroke-width="1.5"/><!-- F—G -->
+
+  <!-- WAN link B—E (dashed) -->
+  <line x1="200" y1="140" x2="450" y2="140" stroke="#404860" stroke-width="1.5" stroke-dasharray="8,4"/>
+  <text x="325" y="132" text-anchor="middle" font-family="monospace" font-size="10" fill="#909090">WAN</text>
+
+  <!-- Node A -->
+  <circle cx="100" cy="140" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="100" y="145" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <!-- Node B -->
+  <circle cx="200" cy="140" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="200" y="145" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <!-- Node C -->
+  <circle cx="200" cy="220" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="200" y="225" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <!-- Node E -->
+  <circle cx="450" cy="140" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="450" y="145" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">E</text>
+
+  <!-- Node F -->
+  <circle cx="550" cy="140" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="550" y="145" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">F</text>
+
+  <!-- Node G -->
+  <circle cx="550" cy="220" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="550" y="225" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">G</text>
+</svg>

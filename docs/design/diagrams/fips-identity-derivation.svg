@@ -95,7 +95,7 @@
   <!-- Arrow down from node_addr -->
   <line x1="400" y1="226" x2="400" y2="276" class="derive"/>
   <polygon points="396,274 400,282 404,274" class="dhead"/>
-  <text x="416" y="254" class="op">add fd::/8 prefix</text>
+  <text x="416" y="254" class="op">add fd00::/8 prefix</text>
 
   <!-- IPv6 address box -->
   <rect x="280" y="282" width="240" height="50" class="box compat"/>

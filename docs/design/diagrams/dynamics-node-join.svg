@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 320" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="700" height="320" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="28" fill="#e0e0e0" text-anchor="middle" font-size="15" font-weight="bold">Node Joining — B Connects to D</text>
+
+  <!-- Section titles -->
+  <text x="175" y="56" fill="#909090" text-anchor="middle" font-size="14">Before</text>
+  <text x="525" y="56" fill="#909090" text-anchor="middle" font-size="14">After</text>
+
+  <!-- Arrow between halves -->
+  <text x="350" y="180" fill="#909090" text-anchor="middle" font-size="22">→</text>
+
+  <!-- ======================== -->
+  <!-- BEFORE (left half)       -->
+  <!-- ======================== -->
+
+  <!-- Root A at top center of left half -->
+  <!-- A: (175, 110) -->
+  <text x="175" y="78" fill="#d0a040" text-anchor="middle" font-size="10">&#9733; root</text>
+  <circle cx="175" cy="110" r="22" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="175" y="115" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">A</text>
+
+  <!-- Children: C (105, 200), D (175, 200), E (245, 200) -->
+  <!-- Links from A to children -->
+  <line x1="175" y1="132" x2="105" y2="178" stroke="#d0a040" stroke-width="2.5"/>
+  <line x1="175" y1="132" x2="175" y2="178" stroke="#d0a040" stroke-width="2.5"/>
+  <line x1="175" y1="132" x2="245" y2="178" stroke="#d0a040" stroke-width="2.5"/>
+
+  <!-- C -->
+  <circle cx="105" cy="200" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="105" y="205" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">C</text>
+
+  <!-- D -->
+  <circle cx="175" cy="200" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="175" y="205" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">D</text>
+
+  <!-- E -->
+  <circle cx="245" cy="200" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="245" y="205" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">E</text>
+
+  <!-- B isolated (dashed, off to the side) -->
+  <circle cx="60" cy="280" r="22" fill="#1a1a2e" stroke="#808890" stroke-width="2" stroke-dasharray="4,3"/>
+  <text x="60" y="285" fill="#808890" text-anchor="middle" font-weight="bold" font-size="14">B</text>
+
+  <!-- ======================== -->
+  <!-- AFTER (right half)       -->
+  <!-- ======================== -->
+
+  <!-- Root A at top center of right half -->
+  <!-- A: (525, 110) -->
+  <text x="525" y="78" fill="#d0a040" text-anchor="middle" font-size="10">&#9733; root</text>
+  <circle cx="525" cy="110" r="22" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="525" y="115" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">A</text>
+
+  <!-- Children: C (455, 200), D (525, 200), E (595, 200) -->
+  <!-- Links from A to children -->
+  <line x1="525" y1="132" x2="455" y2="178" stroke="#d0a040" stroke-width="2.5"/>
+  <line x1="525" y1="132" x2="525" y2="178" stroke="#d0a040" stroke-width="2.5"/>
+  <line x1="525" y1="132" x2="595" y2="178" stroke="#d0a040" stroke-width="2.5"/>
+
+  <!-- C -->
+  <circle cx="455" cy="200" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="455" y="205" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">C</text>
+
+  <!-- D -->
+  <circle cx="525" cy="200" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="525" y="205" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">D</text>
+
+  <!-- E -->
+  <circle cx="595" cy="200" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="595" y="205" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">E</text>
+
+  <!-- B as child of D -->
+  <!-- Link from D to B -->
+  <line x1="525" y1="222" x2="525" y2="268" stroke="#d0a040" stroke-width="2.5"/>
+
+  <!-- B -->
+  <circle cx="525" cy="290" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="525" y="295" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="14">B</text>
+</svg>

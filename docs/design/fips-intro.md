@@ -108,14 +108,14 @@ and applications know nothing about which physical media carry their traffic.
 This separation means new transports, protocol features, and application
 interfaces can be added independently.
 
-![Protocol Stack](fips-protocol-stack.svg)
+![Protocol Stack](diagrams/fips-protocol-stack.svg)
 
 ### Mapping to Traditional Networking
 
 Readers familiar with the OSI model or TCP/IP networking may find it helpful
 to see how FIPS concepts relate to traditional layers:
 
-![OSI Mapping](fips-osi-mapping.svg)
+![OSI Mapping](diagrams/fips-osi-mapping.svg)
 
 Note that FMP spans what would traditionally be separate link and network
 layers. This is intentional — in a self-organizing mesh, the same layer that
@@ -168,7 +168,7 @@ Two application interfaces sit at the top of the stack: a native datagram
 API addressed by npub, and an IPv6 TUN adapter that maps npubs to `fd00::/8`
 addresses so unmodified IP applications can use the network transparently.
 
-![Node Architecture](fips-node-architecture.svg)
+![Node Architecture](diagrams/fips-node-architecture.svg)
 
 The mesh routes application traffic across heterogeneous transports
 transparently. A packet may traverse WiFi, Ethernet, UDP/IP, and Tor links
@@ -177,7 +177,7 @@ which transports are involved. Each hop is independently encrypted at the
 link layer, while a single end-to-end session protects the payload across
 the entire path.
 
-![Architecture Overview](fips-architecture-overview.svg)
+![Architecture Overview](diagrams/fips-architecture-overview.svg)
 
 ---
 
@@ -198,7 +198,7 @@ same keypair.
 
 ### FIPS Identity Handling
 
-![Identity Derivation](fips-identity-derivation.svg)
+![Identity Derivation](diagrams/fips-identity-derivation.svg)
 
 The pubkey is the node's cryptographic identity, used in Noise IK handshakes
 for both link and session encryption. It is never exposed beyond the
@@ -299,7 +299,7 @@ complementary mechanisms provide the information each node needs.
 
 ### Spanning Tree: The Coordinate System
 
-![Mesh Topology](fips-mesh-topology.svg)
+![Mesh Topology](diagrams/fips-mesh-topology.svg)
 
 Nodes self-organize into a spanning tree through gossip — each node
 exchanges announcements with its direct peers and independently selects a
@@ -363,7 +363,7 @@ the full network.
 See [fips-bloom-filters.md](fips-bloom-filters.md) for filter parameters and
 mathematical properties.
 
-![Bloom filter propagation on a spanning tree](fips-bloom-propagation.svg)
+![Bloom filter propagation on a spanning tree](diagrams/fips-bloom-propagation.svg)
 
 The outbound filter for peer Q merges this node's identity with tree peer
 inbound filters except Q's (split-horizon exclusion). This creates
@@ -405,7 +405,7 @@ These are cached at each node after being learned through discovery
 (LookupRequest/LookupResponse) or session establishment (SessionSetup). The
 coordinate cache is the critical piece that enables efficient forwarding.
 
-![Per-hop routing decision flowchart](fips-routing-decision.svg)
+![Per-hop routing decision flowchart](diagrams/fips-routing-decision.svg)
 
 ### Coordinate Caching and Discovery
 
@@ -419,7 +419,7 @@ Session establishment (SessionSetup) also carries coordinates, warming
 transit node caches along the path so that data packets can be forwarded
 without individual discovery at each hop.
 
-![Coordinate discovery and cache warming sequence](fips-coordinate-discovery.svg)
+![Coordinate discovery and cache warming sequence](diagrams/fips-coordinate-discovery.svg)
 
 ### Error Recovery
 
@@ -783,8 +783,6 @@ of self-sovereign identity systems. No novel cryptography is introduced.
 
 | Document | Description |
 | -------- | ----------- |
-| [fips-software-architecture.md](fips-software-architecture.md) | Stable architectural decisions guiding the codebase |
-| [fips-state-machines.md](fips-state-machines.md) | Phase-based state machine pattern (Rust) |
 | [fips-configuration.md](fips-configuration.md) | YAML configuration reference |
 
 ### External References

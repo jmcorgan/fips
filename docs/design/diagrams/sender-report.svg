@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 478" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="580" height="478" fill="#1a1a2e" rx="4"/>
+
+  <!-- Title -->
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">SenderReport (0x01) — 48 bytes</text>
+
+  <!-- Row 0 (0–3): msg_type + reserved -->
+  <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0–3</text>
+
+  <rect x="55" y="36" width="130" height="52" fill="#2d4a7a" stroke="#4a90d9" stroke-width="1.5" rx="3"/>
+  <text x="120" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">msg_type</text>
+  <text x="120" y="78" fill="#8ab4f8" text-anchor="middle" font-size="10">0x01</text>
+
+  <rect x="185" y="36" width="390" height="52" fill="#1f1f3a" stroke="#444" stroke-width="1" rx="3"/>
+  <text x="380" y="66" fill="#666" text-anchor="middle" font-size="12">reserved (3 bytes zero)</text>
+
+  <!-- Row 1 (4–11): interval_start_counter -->
+  <text x="50" y="114" fill="#666" font-size="10" text-anchor="end">4–11</text>
+
+  <rect x="55" y="88" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="110" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">interval_start_counter</text>
+  <text x="315" y="128" fill="#f8c88a" text-anchor="middle" font-size="10">8 bytes LE</text>
+
+  <!-- Row 2 (12–19): interval_end_counter -->
+  <text x="50" y="166" fill="#666" font-size="10" text-anchor="end">12–19</text>
+
+  <rect x="55" y="140" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="162" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">interval_end_counter</text>
+  <text x="315" y="180" fill="#f8c88a" text-anchor="middle" font-size="10">8 bytes LE</text>
+
+  <!-- Row 3 (20–27): interval_start_timestamp + interval_end_timestamp -->
+  <text x="50" y="218" fill="#666" font-size="10" text-anchor="end">20–27</text>
+
+  <rect x="55" y="192" width="260" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="185" y="214" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">interval_start_ts</text>
+  <text x="185" y="232" fill="#d8a0f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+
+  <rect x="315" y="192" width="260" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="445" y="214" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">interval_end_ts</text>
+  <text x="445" y="232" fill="#d8a0f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+
+  <!-- Row 4 (28–31): interval_bytes_sent -->
+  <text x="50" y="270" fill="#666" font-size="10" text-anchor="end">28–31</text>
+
+  <rect x="55" y="244" width="520" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="266" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">interval_bytes_sent</text>
+  <text x="315" y="284" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+
+  <!-- Row 5 (32–39): cumulative_packets_sent -->
+  <text x="50" y="322" fill="#666" font-size="10" text-anchor="end">32–39</text>
+
+  <rect x="55" y="296" width="520" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="318" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_packets_sent</text>
+  <text x="315" y="336" fill="#8af8c8" text-anchor="middle" font-size="10">8 bytes LE</text>
+
+  <!-- Row 6 (40–47): cumulative_bytes_sent -->
+  <text x="50" y="374" fill="#666" font-size="10" text-anchor="end">40–47</text>
+
+  <rect x="55" y="348" width="520" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="370" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_bytes_sent</text>
+  <text x="315" y="388" fill="#8af8c8" text-anchor="middle" font-size="10">8 bytes LE</text>
+
+  <!-- Total -->
+  <text x="310" y="422" fill="#777" font-size="10" text-anchor="middle">total: 48 bytes</text>
+</svg>

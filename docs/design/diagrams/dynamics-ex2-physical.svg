@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 550 320">
+  <rect width="550" height="320" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="275" y="30" text-anchor="middle" font-family="monospace" font-size="15" font-weight="bold" fill="#e0e0e0">Mixed Network — Physical Topology</text>
+  <text x="275" y="48" text-anchor="middle" font-family="monospace" font-size="11" fill="#909090">node_addr: B &lt; A &lt; D &lt; E &lt; C</text>
+
+  <!-- Node positions: A(100,110) B(420,110) C(100,250) D(275,250) E(450,250) -->
+
+  <!-- Fiber links (thick solid green) -->
+  <line x1="100" y1="110" x2="420" y2="110" stroke="#60a060" stroke-width="3"/><!-- A═B fiber -->
+  <line x1="420" y1="110" x2="275" y2="250" stroke="#60a060" stroke-width="3"/><!-- B═D fiber -->
+  <line x1="275" y1="250" x2="450" y2="250" stroke="#60a060" stroke-width="3"/><!-- D═E fiber -->
+
+  <!-- DSL link (medium dashed yellow) -->
+  <line x1="100" y1="250" x2="275" y2="250" stroke="#a0a060" stroke-width="2" stroke-dasharray="8,3"/><!-- C—D DSL -->
+
+  <!-- Radio link (thin dotted red) -->
+  <line x1="100" y1="110" x2="100" y2="250" stroke="#a06060" stroke-width="1.5" stroke-dasharray="3,3"/><!-- A~C radio -->
+
+  <!-- Link labels -->
+  <text x="260" y="100" text-anchor="middle" font-family="monospace" font-size="10" fill="#60a060">fiber</text>
+  <text x="365" y="178" text-anchor="start" font-family="monospace" font-size="10" fill="#60a060">fiber</text>
+  <text x="362" y="240" text-anchor="middle" font-family="monospace" font-size="10" fill="#60a060">fiber</text>
+  <text x="187" y="268" text-anchor="middle" font-family="monospace" font-size="10" fill="#a0a060">DSL 1Mbps</text>
+  <text x="78" y="183" text-anchor="end" font-family="monospace" font-size="10" fill="#a06060">radio</text>
+  <text x="78" y="195" text-anchor="end" font-family="monospace" font-size="10" fill="#a06060">9600bps</text>
+
+  <!-- Node A -->
+  <circle cx="100" cy="110" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="100" y="115" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <!-- Node B -->
+  <circle cx="420" cy="110" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="420" y="115" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <!-- Node C -->
+  <circle cx="100" cy="250" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="100" y="255" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <!-- Node D -->
+  <circle cx="275" cy="250" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="275" y="255" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">D</text>
+
+  <!-- Node E -->
+  <circle cx="450" cy="250" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="450" y="255" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">E</text>
+</svg>

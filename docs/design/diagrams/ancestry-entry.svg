@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 192" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="580" height="192" fill="#1a1a2e" rx="4"/>
+
+  <!-- Title -->
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">AncestryEntry (32 bytes)</text>
+
+  <!-- Row 0 (0–15): node_addr -->
+  <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0–15</text>
+
+  <rect x="55" y="36" width="520" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="58" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">node_addr</text>
+  <text x="315" y="76" fill="#8af8f8" text-anchor="middle" font-size="10">16 bytes — routing identifier</text>
+
+  <!-- Row 1 (16–23): sequence -->
+  <text x="50" y="114" fill="#666" font-size="10" text-anchor="end">16–23</text>
+
+  <rect x="55" y="88" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="110" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">sequence</text>
+  <text x="315" y="128" fill="#f8c88a" text-anchor="middle" font-size="10">8 bytes LE</text>
+
+  <!-- Row 2 (24–31): timestamp -->
+  <text x="50" y="166" fill="#666" font-size="10" text-anchor="end">24–31</text>
+
+  <rect x="55" y="140" width="520" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="162" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">timestamp</text>
+  <text x="315" y="180" fill="#d8a0f8" text-anchor="middle" font-size="10">8 bytes LE — Unix seconds</text>
+</svg>

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 450 320">
+  <rect width="450" height="320" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="225" y="30" text-anchor="middle" font-family="monospace" font-size="15" font-weight="bold" fill="#e0e0e0">Mixed Network — Cost-Weighted Tree</text>
+
+  <!--
+    Tree layout:
+         B (225,90)  root
+        / \
+       A   D
+    (120,180) (330,180)
+            |\
+            E  C
+        (380,270) (270,270)
+  -->
+
+  <!-- Non-tree physical links (faint background) -->
+  <!-- A~C radio (non-tree) -->
+  <line x1="120" y1="180" x2="270" y2="270" stroke="#404860" stroke-width="1" opacity="0.3" stroke-dasharray="3,3"/>
+  <!-- C—D DSL (non-tree, now C is child of D so this is tree; but the physical DSL link exists) -->
+  <!-- Actually C→D is tree, so only A~C is non-tree -->
+
+  <!-- Tree links (gold) -->
+  <!-- B→A -->
+  <line x1="225" y1="90" x2="120" y2="180" stroke="#d0a040" stroke-width="2.5"/>
+  <!-- B→D -->
+  <line x1="225" y1="90" x2="330" y2="180" stroke="#d0a040" stroke-width="2.5"/>
+  <!-- D→E -->
+  <line x1="330" y1="180" x2="380" y2="270" stroke="#d0a040" stroke-width="2.5"/>
+  <!-- D→C -->
+  <line x1="330" y1="180" x2="270" y2="270" stroke="#d0a040" stroke-width="2.5"/>
+
+  <!-- Cost labels on tree links -->
+  <text x="155" y="128" text-anchor="middle" font-family="monospace" font-size="10" fill="#d0a040">eff 1.01</text>
+  <text x="295" y="128" text-anchor="middle" font-family="monospace" font-size="10" fill="#d0a040">eff 1.01</text>
+  <text x="375" y="228" text-anchor="start" font-family="monospace" font-size="10" fill="#d0a040">eff 2.01</text>
+  <text x="278" y="228" text-anchor="end" font-family="monospace" font-size="10" fill="#d0a040">eff 2.25</text>
+
+  <!-- Node B (root) -->
+  <circle cx="225" cy="90" r="22" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="225" y="95" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">B</text>
+  <text x="225" y="56" text-anchor="middle" font-family="monospace" font-size="10" fill="#d0a040">★ root</text>
+
+  <!-- Node A -->
+  <circle cx="120" cy="180" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="120" y="185" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <!-- Node D -->
+  <circle cx="330" cy="180" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="330" y="185" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">D</text>
+
+  <!-- Node E -->
+  <circle cx="380" cy="270" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="380" y="275" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">E</text>
+
+  <!-- Node C -->
+  <circle cx="270" cy="270" r="22" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="270" y="275" text-anchor="middle" font-family="monospace" font-size="14" font-weight="bold" fill="#e0e0e0">C</text>
+</svg>

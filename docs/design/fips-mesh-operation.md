@@ -23,8 +23,8 @@ Two complementary mechanisms provide the information each node needs:
   ancestry path from itself to the root. These coordinates enable distance
   calculations between any two nodes without global topology knowledge.
 - **Bloom filters** summarize which destinations are reachable through each
-  peer. They provide candidate selection — narrowing which peers are worth
-  considering for forwarding a given destination.
+  peer. Because they propagate along tree edges, they encode directional
+  reachability — which subtree contains a given destination.
 
 Together, they enable a routing decision process that is local, efficient,
 and self-healing.
@@ -48,7 +48,7 @@ enable:
 
 Nodes self-organize into a spanning tree through distributed parent selection:
 
-1. **Root election**: The node with the smallest node_addr becomes the root.
+1. **Root discovery**: The node with the smallest node_addr becomes the root.
    No election protocol — this is a consequence of each node independently
    preferring lower-addressed roots.
 2. **Parent selection**: Each node selects a single parent from among its
@@ -75,10 +75,76 @@ Changes cascade through the tree:
 TreeAnnounce propagation is rate-limited at 500ms minimum interval per peer.
 A tree of depth D reconverges in roughly D×0.5s to D×1.0s.
 
+### How the Tree Adapts to Link Quality
+
+The initial tree forms based on hop count alone — all links default to a
+cost of 1.0 before measurements are available. As the Metrics Measurement
+Protocol (MMP) accumulates bidirectional delivery ratios and round-trip
+time estimates, each node computes a per-link cost:
+
+```text
+link_cost = ETX × (1.0 + SRTT_ms / 100.0)
+```
+
+ETX (Expected Transmission Count) captures loss — a perfect link has
+ETX = 1.0, while 10% loss in each direction yields ETX ≈ 1.23. The SRTT
+term weights latency so that a low-loss but high-latency link (e.g., a
+satellite hop) costs more than a low-loss, low-latency link.
+
+Parent selection uses **effective depth** rather than raw hop count:
+
+```text
+effective_depth = peer.depth + link_cost_to_peer
+```
+
+This allows a node to trade a shorter but lossy path for a longer but
+higher-quality one. A node two hops from the root over clean links
+(effective depth ≈ 3.0) is preferred over a node one hop away over a
+degraded link (effective depth ≈ 4.5).
+
+Parent reselection is triggered by three paths:
+
+1. **TreeAnnounce**: When a peer announces a new tree position, the node
+   re-evaluates using current link costs
+2. **Periodic re-evaluation**: Every 60s (configurable), the node
+   re-evaluates its parent choice using the latest MMP metrics, catching
+   gradual link degradation that doesn't trigger TreeAnnounce
+3. **Parent loss**: When the current parent is removed, the node
+   immediately selects the best alternative
+
+To prevent oscillation from metric noise, parent switches are subject to
+**hysteresis**: a candidate must offer an effective depth at least 20%
+better than the current parent to trigger a switch. A **hold-down period**
+(default 30s) suppresses non-mandatory re-evaluation after a switch,
+allowing MMP metrics to stabilize on the new link before reconsidering.
+
+### Flap Dampening
+
+Unstable links that repeatedly connect and disconnect can cause cascading
+tree reconvergence. The spanning tree uses flap dampening with hysteresis
+and hold-down periods to suppress rapid parent oscillation. Links that flap
+above a configurable threshold are temporarily penalized, preventing them
+from being selected as parent until the link stabilizes.
+
+### Link Liveness
+
+Each node sends a dedicated **Heartbeat** message (0x51, 1 byte, no
+payload) to every peer at a fixed interval (default 10s). Any
+authenticated encrypted frame — heartbeat, MMP report, TreeAnnounce,
+data packet — resets the peer's liveness timer. On an idle link with no
+application data or topology changes, the heartbeat is the only traffic
+that keeps the link alive.
+
+Peers that are silent for a configurable dead timeout (default 30s) are
+considered dead and removed from the peer table. With the default 10s
+heartbeat interval, a peer must miss three consecutive heartbeats before
+removal. This triggers tree reconvergence and bloom filter recomputation
+for the affected subtree.
+
 ### Partition Handling
 
-If the network partitions, each segment independently elects its own root
-(the smallest node_addr in the segment) and reconverges. When segments
+If the network partitions, each segment independently rediscovers its own
+root (the smallest node_addr in the segment) and reconverges. When segments
 rejoin, nodes discover the globally-smallest root through TreeAnnounce
 exchange and reconverge to a single tree.
 
@@ -94,9 +160,10 @@ Each node maintains a bloom filter per peer, answering: "can peer P possibly
 reach destination D?" The answer is either "no" (definitive) or "maybe"
 (probabilistic — false positives are possible).
 
-This is **candidate selection**, not routing. Bloom filters identify which
-peers are worth considering for a destination, but the actual forwarding
-decision uses tree coordinate distance to rank those candidates.
+Because filters propagate along tree edges with split-horizon exclusion,
+they encode directional reachability: a bloom hit on a tree peer reliably
+indicates which subtree contains the destination. When multiple peers match,
+tree coordinate distance ranks them.
 
 ### How Filters Propagate
 
@@ -135,9 +202,9 @@ Updates are rate-limited at 500ms to prevent storms during topology changes.
 
 At moderate network sizes, bloom filters are highly accurate. At larger
 scales (~1M nodes), hub nodes with many peers may see elevated false positive
-rates (7–15% for nodes with 20+ peers). False positives cause unnecessary
-discovery attempts but do not affect routing correctness — the tree distance
-calculation makes the actual forwarding decision.
+rates (7–15% for nodes with 20+ peers). False positives may cause a packet
+to be forwarded toward the wrong subtree, but the self-distance check at
+each hop prevents loops and the packet falls through to greedy tree routing.
 
 See [fips-bloom-filters.md](fips-bloom-filters.md) for filter parameters,
 FPR calculations, and size class folding.
@@ -155,8 +222,8 @@ priority chain. This is the core routing algorithm.
 2. **Direct peer** — The destination is an authenticated neighbor. Forward
    directly. No coordinates or bloom filters needed.
 
-3. **Bloom-guided candidate selection** — One or more peers' bloom filters
-   contain the destination. Select the best candidate by composite key:
+3. **Bloom-guided routing** — One or more peers' bloom filters contain the
+   destination. Select the best peer by composite key:
    `(link_cost, tree_distance, node_addr)`. This requires the destination's
    tree coordinates to be in the local coordinate cache.
 
@@ -189,10 +256,12 @@ through to greedy tree routing (functional but suboptimal).
 When bloom filters identify multiple candidate peers, they are ranked by a
 composite key:
 
-1. **link_cost** — Per-link quality metric. ETX is computed from bidirectional
-   delivery ratios in MMP metrics and is used in cost-based parent selection
-   via `effective_depth = depth + link_cost`, but is not yet wired into
-   `find_next_hop()` candidate ranking.
+1. **link_cost** — Per-link quality metric derived from ETX (Expected
+   Transmission Count), computed from bidirectional delivery ratios in MMP
+   metrics. In practice this is an uncommon tie-breaker: most forwarding
+   decisions are resolved by tree distance alone, and link_cost only
+   differentiates candidates when multiple peers offer the same tree distance
+   to the destination.
 2. **tree_distance** — Coordinate-based distance to destination through this
    peer
 3. **node_addr** — Deterministic tie-breaker
@@ -285,9 +354,10 @@ to a visited filter (preventing loops on a single path), and forwards to all
 peers not in the visited filter. Bloom filters may help direct the flood
 toward likely candidates.
 
-**Deduplication**: Nodes maintain a short-lived request_id dedup cache to
-drop convergent duplicates (the same request arriving via different paths).
-This is a protocol requirement, not an optimization.
+**Deduplication**: Nodes maintain a short-lived request_id dedup cache
+(default 10s window) to drop convergent duplicates (the same request
+arriving via different paths). This is a protocol requirement, not an
+optimization.
 
 ### LookupResponse
 
@@ -528,10 +598,12 @@ When traffic resumes:
 3. Coordinates: discovery may be needed if cache has expired
 4. SessionSetup re-warms transit caches on the new path
 
-## Leaf-Only Operation *(future direction)*
+## Leaf-Only Operation *(under development)*
 
-Leaf-only operation is a planned optimization for resource-constrained nodes
-(sensors, battery-powered devices). Not currently implemented.
+Leaf-only operation is an optimization for resource-constrained nodes
+(sensors, battery-powered devices). The core infrastructure exists (config
+flag, node constructor, bloom filter support) but is not yet enabled in
+normal operation.
 
 ### Concept
 
@@ -558,7 +630,7 @@ The upstream peer:
 
 Even as a leaf-only node, it still:
 
-- Maintains its own Noise IK link session with the upstream peer
+- Maintains its own Noise IK link session with the upstream peer (FMP layer)
 - Can establish end-to-end FSP sessions with arbitrary destinations
 - Has its own identity (npub, node_addr)
 
@@ -621,9 +693,12 @@ recovery).
 | LookupResponse proof verification | **Implemented** |
 | Discovery reverse-path routing | **Implemented** |
 | Error signal rate limiting | **Implemented** |
-| Leaf-only operation | Future direction |
+| Flap dampening (hysteresis + hold-down) | **Implemented** |
+| Link liveness (dead timeout) | **Implemented** |
+| Discovery request deduplication | **Implemented** |
+| Leaf-only operation | Under development |
 | Link cost in parent selection (ETX) | **Implemented** |
-| Link cost in candidate ranking | Future direction |
+| Link cost in candidate ranking | **Implemented** |
 | Discovery path accumulation | Future direction |
 
 ## References

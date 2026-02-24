@@ -17,18 +17,11 @@ how application data is wrapped through each layer.
 
 ## Transport Framing
 
-### UDP
-
-FIPS packets are carried directly in UDP datagrams. No additional framing is
-needed — each UDP datagram contains exactly one FIPS link-layer packet.
-
-### Stream Transports *(future direction)*
-
-TCP, WebSocket, and Tor transports provide a byte stream, not datagrams. The
-common prefix `payload_len` field provides integrated stream framing — the
-receiver reads the 4-byte common prefix, then reads exactly the number of
-bytes indicated by `payload_len` (plus any phase-specific header and AEAD
-tag). No separate length prefix is needed.
+Datagram-oriented transports (UDP, raw Ethernet, radio) preserve natural
+packet boundaries and require no additional framing. Stream-oriented
+transports (TCP, WebSocket, Tor) must delineate FIPS packets within the
+byte stream; the common prefix `payload_len` field provides this
+framing directly.
 
 ## Link-Layer Formats
 
@@ -38,12 +31,7 @@ length.
 
 ### Common Prefix (4 bytes)
 
-```text
-┌──────────────────────┬───────────┬───────────────┐
-│ ver(4) + phase(4)    │ flags     │ payload_len   │
-│ 1 byte               │ 1 byte    │ 2 bytes LE    │
-└──────────────────────┴───────────┴───────────────┘
-```
+![Common Prefix](diagrams/common-prefix.svg)
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
@@ -78,12 +66,7 @@ encrypted link-layer message.
 
 **Outer header** (16 bytes, used as AEAD AAD):
 
-```text
-┌──────────────────────┬───────────┬───────────────┬──────────────┬──────────┐
-│ ver(4) + phase(4)    │ flags     │ payload_len   │ receiver_idx │ counter  │
-│ 1 byte               │ 1 byte    │ 2 bytes LE    │ 4 bytes LE   │ 8 bytes LE│
-└──────────────────────┴───────────┴───────────────┴──────────────┴──────────┘
-```
+![Established frame outer header](diagrams/established-outer-header.svg)
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
@@ -96,12 +79,7 @@ ChaCha20-Poly1305 AEAD construction.
 
 **Encrypted inner header** (5 bytes, first bytes of plaintext):
 
-```text
-┌───────────────┬──────────┐
-│ timestamp     │ msg_type │
-│ 4 bytes LE    │ 1 byte   │
-└───────────────┴──────────┘
-```
+![Established frame inner header](diagrams/established-inner-header.svg)
 
 | Field | Size | Description |
 | ----- | ---- | ----------- |
@@ -113,15 +91,7 @@ the 1-byte message type and message-specific fields.
 
 **Complete encrypted frame**:
 
-```text
-┌──────────────────────────────────────┬───────────────────────────┐
-│ outer header (16 bytes, used as AAD) │ ciphertext + AEAD tag     │
-│                                      │ (inner_hdr + body) + 16   │
-└──────────────────────────────────────┴───────────────────────────┘
-
-Total overhead: 37 bytes (16 outer + 5 inner + 16 AEAD tag)
-Minimum frame: 37 bytes (empty body)
-```
+![Complete encrypted frame](diagrams/established-complete-frame.svg)
 
 ### Message Type Table
 
@@ -141,14 +111,7 @@ Minimum frame: 37 bytes (empty body)
 
 Handshake initiation from connecting party.
 
-```text
-┌──────────────────────┬─────────────┬─────────────────────────────────────────┐
-│ common prefix        │ sender_idx  │ Noise IK message 1                      │
-│ 4 bytes              │ 4 bytes LE  │ 106 bytes                               │
-└──────────────────────┴─────────────┴─────────────────────────────────────────┘
-
-Total: 114 bytes
-```
+![Noise IK message 1](diagrams/noise-ik-msg1.svg)
 
 Common prefix: ver=0, phase=0x1, flags=0, payload_len=110 (4 + 106).
 
@@ -172,14 +135,7 @@ Noise pattern: `-> e, es, s, ss` with epoch payload
 
 Handshake response from responder.
 
-```text
-┌──────────────────────┬─────────────┬──────────────┬──────────────────────────┐
-│ common prefix        │ sender_idx  │ receiver_idx │ Noise IK message 2       │
-│ 4 bytes              │ 4 bytes LE  │ 4 bytes LE   │ 57 bytes                 │
-└──────────────────────┴─────────────┴──────────────┴──────────────────────────┘
-
-Total: 69 bytes
-```
+![Noise IK message 2](diagrams/noise-ik-msg2.svg)
 
 Common prefix: ver=0, phase=0x2, flags=0, payload_len=65 (4 + 4 + 57).
 
@@ -215,32 +171,7 @@ Each party in a link session maintains two indices:
 
 ### Handshake Flow
 
-```text
-Initiator                                    Responder
----------                                    ---------
-generates sender_idx
-generates ephemeral keypair
-
-         [0x01|flags=0|len] | sender_idx | noise_msg1
-         ------------------------------------------------>
-
-                                              validates msg1
-                                              learns initiator's static key
-                                              generates sender_idx
-                                              generates ephemeral keypair
-
-         [0x02|flags=0|len] | sender_idx | receiver_idx | noise_msg2
-         <------------------------------------------------
-
-validates msg2
-derives session keys
-
-=============== HANDSHAKE COMPLETE ===============
-
-First encrypted frame:
-         [0x00|flags|len] | receiver_idx | counter=0 | ciphertext+tag
-         ------------------------------------------------>
-```
+![Handshake flow](diagrams/handshake-flow.svg)
 
 ## Link-Layer Message Types
 
@@ -252,6 +183,8 @@ message-specific fields.
 ### TreeAnnounce (0x10)
 
 Spanning tree state announcement, exchanged between direct peers only.
+
+![TreeAnnounce](diagrams/tree-announce.svg)
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
@@ -265,6 +198,8 @@ Spanning tree state announcement, exchanged between direct peers only.
 | 36 + 32n | signature | 64 bytes | Schnorr signature over entire message |
 
 **AncestryEntry** (32 bytes):
+
+![AncestryEntry](diagrams/ancestry-entry.svg)
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
@@ -285,6 +220,8 @@ includes self)
 ### FilterAnnounce (0x20)
 
 Bloom filter reachability update, exchanged between direct peers only.
+
+![FilterAnnounce](diagrams/filter-announce.svg)
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
@@ -310,6 +247,8 @@ With link overhead: 1,072 bytes.
 
 Coordinate discovery request, flooded through the mesh.
 
+![LookupRequest](diagrams/lookup-request.svg)
+
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
 | 0 | msg_type | 1 byte | 0x30 |
@@ -334,6 +273,8 @@ Coordinate discovery request, flooded through the mesh.
 ### LookupResponse (0x31)
 
 Coordinate discovery response, greedy-routed back to requester.
+
+![LookupResponse](diagrams/lookup-response.svg)
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
@@ -367,6 +308,8 @@ The source verifies the proof upon receipt.
 
 Encapsulated session-layer payload for multi-hop forwarding.
 
+![SessionDatagram](diagrams/session-datagram.svg)
+
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
 | 0 | msg_type | 1 byte | 0x00 |
@@ -388,6 +331,8 @@ independently of link encryption.
 ### Disconnect (0x50)
 
 Orderly link teardown with reason code.
+
+![Disconnect](diagrams/disconnect.svg)
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
@@ -412,6 +357,8 @@ Orderly link teardown with reason code.
 
 Sent by the frame sender to provide interval-based transmission statistics.
 
+![SenderReport](diagrams/sender-report.svg)
+
 | Offset | Field | Size | Encoding |
 | ------ | ----- | ---- | -------- |
 | 0 | msg_type | 1 | `0x01` |
@@ -429,6 +376,8 @@ Sent by the frame sender to provide interval-based transmission statistics.
 ### ReceiverReport (0x02)
 
 Sent by the frame receiver to provide loss, jitter, and timing feedback.
+
+![ReceiverReport](diagrams/receiver-report.svg)
 
 | Offset | Field | Size | Encoding |
 | ------ | ----- | ---- | -------- |
@@ -524,12 +473,7 @@ body.
 
 **Complete encrypted message**:
 
-```text
-┌─────────────────────────────────┬─────────────────┬───────────────────────────┐
-│ header (12 bytes, used as AAD)  │ [coords if CP]  │ ciphertext + AEAD tag     │
-│                                 │                 │ (inner_hdr + body) + 16   │
-└─────────────────────────────────┴─────────────────┴───────────────────────────┘
-```
+![FSP complete encrypted message](diagrams/fsp-complete-message.svg)
 
 ### FSP Session Message Types
 
@@ -558,7 +502,15 @@ happens at the session level based on the FSP message type.
 Establishes a session and warms transit coordinate caches. Contains the
 first message of the Noise XK handshake (ephemeral key only — the
 initiator's static identity is not revealed until msg3).
+
+SessionSetup, SessionAck, and SessionMsg3 are identified by the **phase**
+field in the FSP common prefix (0x1, 0x2, 0x3), not by a message type
+byte. The `msg_type` field in the encrypted inner header applies only to
+established-phase (0x0) messages.
+
 Encoded with FSP prefix: ver=0, phase=0x1, flags=0, payload_len.
+
+![SessionSetup](diagrams/session-setup.svg)
 
 **Body** (after 4-byte FSP prefix):
 
@@ -578,6 +530,8 @@ Second message of the Noise XK handshake. The responder sends its
 ephemeral key and encrypted epoch.
 Encoded with FSP prefix: ver=0, phase=0x2, flags=0, payload_len.
 
+![SessionAck](diagrams/session-ack.svg)
+
 **Body** (after 4-byte FSP prefix):
 
 | Offset | Field | Size | Description |
@@ -596,6 +550,8 @@ Third and final message of the Noise XK handshake. The initiator reveals
 its encrypted static identity and epoch. After msg3, both parties derive
 identical symmetric session keys and the session is established.
 Encoded with FSP prefix: ver=0, phase=0x3, flags=0, payload_len.
+
+![SessionMsg3](diagrams/session-msg3.svg)
 
 **Body** (after 4-byte FSP prefix):
 
@@ -624,6 +580,8 @@ The body after the inner header is delivered directly to the TUN interface.
 ### PathMtuNotification (0x13)
 
 Sent by the destination to report the observed forward-path MTU.
+
+![PathMtuNotification](diagrams/path-mtu-notification.svg)
 
 | Offset | Field | Size | Encoding |
 | ------ | ----- | ---- | -------- |
@@ -662,50 +620,61 @@ on the wire.
 ### CoordsRequired (0x20)
 
 Plaintext error signal — transit node lacks coordinates for destination.
-Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
+Identified by the FSP phase field, not a separate message type byte
+(same as SessionSetup/SessionAck/SessionMsg3).
+Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len=34.
 
-**Body** (after 4-byte FSP prefix + 1-byte msg_type):
+![CoordsRequired](diagrams/coords-required.svg)
+
+**Payload** (after 4-byte FSP prefix):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | flags | 1 byte | Reserved |
-| 1 | dest_addr | 16 bytes | NodeAddr we couldn't route to |
-| 17 | reporter | 16 bytes | NodeAddr of reporting router |
+| 0 | msg_type | 1 byte | 0x20 |
+| 1 | flags | 1 byte | Reserved |
+| 2 | dest_addr | 16 bytes | NodeAddr we couldn't route to |
+| 18 | reporter | 16 bytes | NodeAddr of reporting router |
 
-**Body size**: 33 bytes. Total with prefix + msg_type: 38 bytes.
+**Payload size**: 34 bytes. **Total on wire**: 38 bytes (4 prefix + 34 payload).
 
 ### PathBroken (0x21)
 
 Plaintext error signal — greedy routing reached a dead end.
 Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
 
-**Body** (after 4-byte FSP prefix + 1-byte msg_type):
+![PathBroken](diagrams/path-broken.svg)
+
+**Payload** (after 4-byte FSP prefix):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | flags | 1 byte | Reserved |
-| 1 | dest_addr | 16 bytes | Unreachable NodeAddr |
-| 17 | reporter | 16 bytes | NodeAddr of reporting router |
-| 33 | last_coords_count | 2 bytes LE | Number of stale coordinate entries |
-| 35 | last_known_coords | 16 x n bytes | Stale coordinates that failed |
+| 0 | msg_type | 1 byte | 0x21 |
+| 1 | flags | 1 byte | Reserved |
+| 2 | dest_addr | 16 bytes | Unreachable NodeAddr |
+| 18 | reporter | 16 bytes | NodeAddr of reporting router |
+| 34 | last_coords_count | 2 bytes LE | Number of stale coordinate entries |
+| 36 | last_known_coords | 16 x n bytes | Stale coordinates that failed |
 
 ### MtuExceeded (0x22)
 
 Plaintext error signal — forwarded packet exceeds the next-hop link MTU.
 Sent by a transit router back to the source when a SessionDatagram cannot
 be forwarded because its size exceeds the outgoing link's MTU.
-Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len.
+Encoded with FSP prefix: ver=0, phase=0x0, U flag set, payload_len=36.
 
-**Body** (after 4-byte FSP prefix + 1-byte msg_type):
+![MtuExceeded](diagrams/mtu-exceeded.svg)
+
+**Payload** (after 4-byte FSP prefix):
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | flags | 1 byte | Reserved |
-| 1 | dest_addr | 16 bytes | NodeAddr of the destination being forwarded to |
-| 17 | reporter | 16 bytes | NodeAddr of the router that detected the MTU violation |
-| 33 | mtu | 2 bytes LE | Bottleneck MTU at the reporting router |
+| 0 | msg_type | 1 byte | 0x22 |
+| 1 | flags | 1 byte | Reserved |
+| 2 | dest_addr | 16 bytes | NodeAddr of the destination being forwarded to |
+| 18 | reporter | 16 bytes | NodeAddr of the router that detected the MTU violation |
+| 34 | mtu | 2 bytes LE | Bottleneck MTU at the reporting router |
 
-**Body size**: 35 bytes. Total with prefix + msg_type: 40 bytes.
+**Payload size**: 36 bytes. **Total on wire**: 40 bytes (4 prefix + 36 payload).
 
 The source uses the reported MTU to adjust its session-layer path MTU
 estimate. MtuExceeded is the reactive complement to the proactive

@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 168" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="780" height="168" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="390" y="22" text-anchor="middle" font-size="14" font-weight="bold" fill="#e0e0e0">Three-Node Convergence</text>
+
+  <!-- Panel separators -->
+  <line x1="193" y1="32" x2="193" y2="160" stroke="#303050" stroke-width="1"/>
+  <line x1="390" y1="32" x2="390" y2="160" stroke="#303050" stroke-width="1"/>
+  <line x1="587" y1="32" x2="587" y2="160" stroke="#303050" stroke-width="1"/>
+
+  <!-- ======================== -->
+  <!-- Panel 1: T0 — Isolated  -->
+  <!-- ======================== -->
+  <text x="95" y="44" text-anchor="middle" font-size="10" fill="#909090">T0 &#x2014; Isolated</text>
+
+  <text x="45" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+  <text x="95" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+  <text x="145" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+
+  <circle cx="45" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="45" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <circle cx="95" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="95" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <circle cx="145" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="145" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <text x="95" y="150" text-anchor="middle" font-size="9" fill="#606060">node_addr: A &lt; B &lt; C</text>
+
+  <!-- ======================== -->
+  <!-- Panel 2: T1 — Links form -->
+  <!-- ======================== -->
+  <text x="292" y="44" text-anchor="middle" font-size="10" fill="#909090">T1 &#x2014; Links form</text>
+
+  <text x="242" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+  <text x="292" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+  <text x="342" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+
+  <!-- Peer link A—B (dashed gray) -->
+  <line x1="260" y1="105" x2="274" y2="105" stroke="#404860" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <!-- Peer link B—C (dashed gray) -->
+  <line x1="310" y1="105" x2="324" y2="105" stroke="#404860" stroke-width="1.5" stroke-dasharray="6,3"/>
+
+  <circle cx="242" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="242" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <circle cx="292" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="292" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <circle cx="342" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="342" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <!-- ======================== -->
+  <!-- Panel 3: T2 — B re-parents -->
+  <!-- ======================== -->
+  <text x="490" y="44" text-anchor="middle" font-size="10" fill="#909090">T2 &#x2014; B re-parents</text>
+
+  <text x="440" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+  <text x="540" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+
+  <!-- Tree link A—B (gold solid) -->
+  <line x1="458" y1="105" x2="472" y2="105" stroke="#d0a040" stroke-width="2"/>
+  <!-- Peer link B—C (dashed gray) -->
+  <line x1="508" y1="105" x2="522" y2="105" stroke="#404860" stroke-width="1.5" stroke-dasharray="6,3"/>
+
+  <circle cx="440" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="440" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <circle cx="490" cy="105" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="490" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <circle cx="540" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="540" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <!-- ======================== -->
+  <!-- Panel 4: T3 — Converged -->
+  <!-- ======================== -->
+  <text x="685" y="44" text-anchor="middle" font-size="10" fill="#909090">T3 &#x2014; Converged</text>
+
+  <text x="635" y="72" text-anchor="middle" font-size="8" fill="#d0a040">&#x2605; root</text>
+
+  <!-- Tree link A—B (gold solid) -->
+  <line x1="653" y1="105" x2="667" y2="105" stroke="#d0a040" stroke-width="2"/>
+  <!-- Tree link B—C (gold solid) -->
+  <line x1="703" y1="105" x2="717" y2="105" stroke="#d0a040" stroke-width="2"/>
+
+  <circle cx="635" cy="105" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="635" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">A</text>
+
+  <circle cx="685" cy="105" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="685" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">B</text>
+
+  <circle cx="735" cy="105" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="735" y="109" text-anchor="middle" font-weight="bold" fill="#e0e0e0">C</text>
+
+  <text x="685" y="150" text-anchor="middle" font-size="9" fill="#909090">A &#x2190; B &#x2190; C</text>
+</svg>

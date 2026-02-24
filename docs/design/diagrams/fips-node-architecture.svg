@@ -40,7 +40,7 @@
   <rect x="400" y="90" width="200" height="50" class="layer tun"/>
   <text x="500" y="108" text-anchor="middle" class="label">IPv6 TUN Adapter</text>
   <text x="500" y="121" text-anchor="middle" class="sub">fips0 + DNS (.fips)</text>
-  <text x="500" y="133" text-anchor="middle" class="sub">npub → fd::/8 IPv6</text>
+  <text x="500" y="133" text-anchor="middle" class="sub">npub → fd00::/8 IPv6</text>
 
   <!-- External app labels -->
   <text x="280" y="74" text-anchor="middle" class="sub">FIPS-aware apps</text>

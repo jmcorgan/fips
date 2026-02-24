@@ -8,7 +8,7 @@
 //! ## v1 Parameters
 //!
 //! - Size: 1 KB (8,192 bits) - sized for actual ~400-800 entry occupancy
-//! - Hash functions: k=5 - optimal for 800-1,600 entries at 1KB
+//! - Hash functions: k=5 - optimal at ~1,200 entries, good for 800-1,600
 //! - Bandwidth: 1 KB/announce (75% reduction from original 4KB design)
 //!
 //! These parameters are right-sized for typical network occupancy of
@@ -24,7 +24,7 @@ pub use state::BloomState;
 
 /// Default filter size in bits (1KB = 8,192 bits).
 ///
-/// Sized for ~800-1,600 entries with <5% FPR at typical occupancy (~400 entries).
+/// Sized for ~800-1,600 entries. FPR ~0.05% at 400 entries, ~0.9% at 800.
 /// This is v1 protocol default (size_class=1).
 pub const DEFAULT_FILTER_SIZE_BITS: usize = 8192;
 
@@ -33,8 +33,8 @@ pub const DEFAULT_FILTER_SIZE_BYTES: usize = DEFAULT_FILTER_SIZE_BITS / 8;
 
 /// Default number of hash functions.
 ///
-/// k=5 is optimal for 800-1,600 entries at 1KB filter size.
-/// At 400 entries: FPR ~0.3%. At 800 entries: FPR ~2.4%.
+/// k=5 is optimal at ~1,200 entries and a good compromise for 800-1,600.
+/// At 400 entries: FPR ~0.05%. At 800 entries: FPR ~0.9%.
 pub const DEFAULT_HASH_COUNT: u8 = 5;
 
 /// Size class for v1 protocol (1 KB filters).

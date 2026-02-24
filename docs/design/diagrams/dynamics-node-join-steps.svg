@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 310" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="780" height="310" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="390" y="24" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">Node B Joins via D &#x2014; State Progression</text>
+
+  <!-- Panel subtitles -->
+  <text x="130" y="46" fill="#909090" text-anchor="middle" font-size="11">T1 &#x2014; Link established</text>
+  <text x="390" y="46" fill="#909090" text-anchor="middle" font-size="11">T2&#x2013;T3 &#x2014; B re-parents to D</text>
+  <text x="650" y="46" fill="#909090" text-anchor="middle" font-size="11">T4&#x2013;T5 &#x2014; Filter propagation</text>
+
+  <!-- Vertical separators -->
+  <line x1="260" y1="36" x2="260" y2="300" stroke="#303050" stroke-width="1"/>
+  <line x1="520" y1="36" x2="520" y2="300" stroke="#303050" stroke-width="1"/>
+
+  <!-- ======================== -->
+  <!-- PANEL 1: Link established -->
+  <!-- ======================== -->
+  <!-- A at (130, 110), children C(65,190) D(130,190) E(195,190), B below D at (130,265) -->
+
+  <!-- Root label -->
+  <text x="130" y="82" fill="#d0a040" text-anchor="middle" font-size="9">&#x2605; root</text>
+
+  <!-- Tree links A to children -->
+  <line x1="130" y1="128" x2="65" y2="172" stroke="#d0a040" stroke-width="2"/>
+  <line x1="130" y1="128" x2="130" y2="172" stroke="#d0a040" stroke-width="2"/>
+  <line x1="130" y1="128" x2="195" y2="172" stroke="#d0a040" stroke-width="2"/>
+
+  <!-- New peer link D to B (dashed green, vertical) -->
+  <line x1="130" y1="208" x2="130" y2="247" stroke="#60a060" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="152" y="233" fill="#60a060" font-size="9">new link</text>
+
+  <!-- Node A (root) -->
+  <circle cx="130" cy="110" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="130" y="114" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">A</text>
+
+  <!-- Node C -->
+  <circle cx="65" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="65" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">C</text>
+
+  <!-- Node D -->
+  <circle cx="130" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="130" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">D</text>
+
+  <!-- Node E -->
+  <circle cx="195" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="195" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">E</text>
+
+  <!-- Node B (not yet in tree, dashed border) -->
+  <circle cx="130" cy="265" r="18" fill="#1a1a2e" stroke="#808890" stroke-width="2" stroke-dasharray="4,3"/>
+  <text x="130" y="269" fill="#808890" text-anchor="middle" font-weight="bold" font-size="13">B</text>
+
+  <!-- ======================== -->
+  <!-- PANEL 2: B re-parents to D -->
+  <!-- ======================== -->
+  <!-- A at (390, 110), children C(325,190) D(390,190) E(455,190), B at (390,265) -->
+
+  <!-- Root label -->
+  <text x="390" y="82" fill="#d0a040" text-anchor="middle" font-size="9">&#x2605; root</text>
+
+  <!-- Tree links A to children -->
+  <line x1="390" y1="128" x2="325" y2="172" stroke="#d0a040" stroke-width="2"/>
+  <line x1="390" y1="128" x2="390" y2="172" stroke="#d0a040" stroke-width="2"/>
+  <line x1="390" y1="128" x2="455" y2="172" stroke="#d0a040" stroke-width="2"/>
+
+  <!-- Tree link D to B (gold) -->
+  <line x1="390" y1="208" x2="390" y2="247" stroke="#d0a040" stroke-width="2"/>
+
+  <!-- Node A (root) -->
+  <circle cx="390" cy="110" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="390" y="114" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">A</text>
+
+  <!-- Node C -->
+  <circle cx="325" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="325" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">C</text>
+
+  <!-- Node D -->
+  <circle cx="390" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="390" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">D</text>
+
+  <!-- Node E -->
+  <circle cx="455" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="455" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">E</text>
+
+  <!-- Node B (child of D) -->
+  <circle cx="390" cy="265" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="390" y="269" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">B</text>
+
+  <!-- Annotation near B -->
+  <text x="416" y="278" fill="#909090" font-size="9">parent=D, seq=2</text>
+
+  <!-- ======================== -->
+  <!-- PANEL 3: Filter propagation -->
+  <!-- ======================== -->
+  <!-- A at (650, 110), children C(585,190) D(650,190) E(715,190), B at (650,265) -->
+
+  <!-- Root label -->
+  <text x="650" y="82" fill="#d0a040" text-anchor="middle" font-size="9">&#x2605; root</text>
+
+  <!-- Tree links A to children -->
+  <line x1="650" y1="128" x2="585" y2="172" stroke="#d0a040" stroke-width="2"/>
+  <line x1="650" y1="128" x2="650" y2="172" stroke="#d0a040" stroke-width="2"/>
+  <line x1="650" y1="128" x2="715" y2="172" stroke="#d0a040" stroke-width="2"/>
+
+  <!-- Tree link D to B (gold) -->
+  <line x1="650" y1="208" x2="650" y2="247" stroke="#d0a040" stroke-width="2"/>
+
+  <!-- Node A (root) -->
+  <circle cx="650" cy="110" r="18" fill="#1a1a2e" stroke="#d0a040" stroke-width="2.5"/>
+  <text x="650" y="114" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">A</text>
+
+  <!-- Node C -->
+  <circle cx="585" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="585" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">C</text>
+
+  <!-- Node D -->
+  <circle cx="650" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="650" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">D</text>
+
+  <!-- Node E -->
+  <circle cx="715" cy="190" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="715" y="194" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">E</text>
+
+  <!-- Node B (child of D) -->
+  <circle cx="650" cy="265" r="18" fill="#1a1a2e" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="650" y="269" fill="#e0e0e0" text-anchor="middle" font-weight="bold" font-size="13">B</text>
+
+  <!-- FilterAnnounce arrow and label (drawn last so they render on top) -->
+  <defs>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#6090c0"/>
+    </marker>
+  </defs>
+  <line x1="640" y1="177" x2="640" y2="132" stroke="#6090c0" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowBlue)"/>
+  <text x="622" y="158" fill="#6090c0" font-size="9" text-anchor="end">FilterAnnounce</text>
+
+  <!-- Annotation near A -->
+  <text x="688" y="102" fill="#909090" font-size="9">B reachable via D</text>
+</svg>

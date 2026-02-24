@@ -6,12 +6,31 @@ selection. It is a supporting reference — for how bloom filters fit into
 the overall routing system, see
 [fips-mesh-operation.md](fips-mesh-operation.md).
 
+## What Is a Bloom Filter?
+
+A bloom filter is a space-efficient probabilistic data structure that
+tests whether an element is a member of a set. It uses a bit array and
+multiple hash functions to represent a set compactly, with one key
+tradeoff:
+
+- **No false negatives** — if the filter says "not present," the
+  element is definitely not in the set
+- **Possible false positives** — if the filter says "present," the
+  element is *probably* in the set, but might not be
+
+This makes bloom filters well-suited for routing: a definitive "no"
+eliminates a peer from consideration, while a "maybe" simply means the
+peer is worth checking. The false positive rate is controlled by the
+filter size and number of hash functions relative to the number of
+entries.
+
 ## Purpose
 
 Each node maintains bloom filters summarizing which destinations are
-reachable through each of its peers. Bloom filters provide **candidate
-selection**: they narrow which peers are worth considering when forwarding
-a packet to a given destination. The actual forwarding decision is made by
+reachable through each of its peers. When forwarding a packet, a node
+checks its peers' filters to identify potential routing paths — typically
+up or down the spanning tree, unless a mesh peer provides a shortcut
+directly to the destination. The actual forwarding decision is made by
 tree coordinate distance ranking.
 
 Bloom filters answer a single question: "can peer P possibly reach
@@ -23,55 +42,85 @@ destination D?" The answer is either "no" (definitive) or "maybe"
 | Parameter | Value | Rationale |
 | --------- | ----- | --------- |
 | Size | 1 KB (8,192 bits) | Balance between accuracy and bandwidth |
-| Hash functions (k) | 5 | Compromise between optimal k=7 for 800 entries and accommodating up to ~1,600 entries |
+| Hash functions (k) | 5 | Optimal at ~1,200 entries; good compromise for 800–1,600 range |
 | Size class | 1 (v1 mandated) | `512 << 1 = 1024` bytes |
 
 ### Why k = 5
 
-The optimal number of hash functions depends on the expected occupancy:
+The optimal number of hash functions is k_opt = (m/n) × ln(2). For
+m = 8,192 bits:
 
-- At 800 entries (typical for moderate-degree nodes), optimal k ≈ 7
-- At 1,600 entries (hub nodes), optimal k ≈ 4
+| n (entries) | k_opt | Rounded |
+| ----------- | ----- | ------- |
+| 800 | 7.1 | 7 |
+| 1,200 | 4.7 | **5** |
+| 1,600 | 3.5 | 4 |
 
-k = 5 is a practical compromise that provides reasonable false positive
-rates across the expected range of occupancy.
+k = 5 is optimal at n ≈ 1,200 and a practical compromise across the
+800–1,600 range. The FPR penalty versus the per-n optimal k is under
+1 percentage point throughout this range.
 
 ## False Positive Rate (FPR) Analysis
 
 The false positive rate for a bloom filter with m bits, k hash functions,
-and n entries is approximately:
+and n entries is:
 
 ```text
-FPR ≈ (1 - e^(-kn/m))^k
+FPR = (1 - e^(-kn/m))^k
 ```
 
 With m = 8,192 bits and k = 5:
 
-| Node Degree | Expected Entries | FPR | Impact |
-| ----------- | ---------------- | --- | ------ |
-| 5 (IoT) | 100–200 | ~0.02% | Negligible |
-| 8 (typical) | 250–400 | ~0.3% | Negligible |
-| 12 (well-connected) | 500–800 | ~2.4% | Minor — occasional unnecessary discovery |
-| 20+ (hub) | 1,200–1,800 | 7.5–15% | Elevated — more false positive candidates |
+| n (entries) | Fill % | FPR | Impact |
+| ----------- | ------ | --- | ------ |
+| 200 | 11.5% | 0.002% | Negligible |
+| 400 | 21.7% | 0.048% | Negligible |
+| 800 | 38.6% | 0.86% | Negligible |
+| 1,200 | 51.9% | 3.8% | Minor — occasional unnecessary candidate |
+| 1,600 | 62.3% | 9.4% | Elevated |
+| 2,400 | 78.3% | 27% | Poor — filter losing discrimination |
+| 3,350 | 87% | 50% | Useless for candidate selection |
 
-At moderate network sizes, filters are highly accurate. At larger scales
-(~1M nodes), hub nodes with many peers see elevated FPR. False positives
-cause unnecessary candidate evaluation (and potentially unnecessary
-discovery attempts) but do not affect routing correctness — the tree
-distance calculation makes the actual forwarding decision.
+### Filter Occupancy Model
+
+Filter entries are determined by **network size and tree position**, not
+node degree. Under tree-only merge with split-horizon:
+
+- **Upward filter** (to parent): contains the node's subtree — small
+  for deep nodes, at most N for the root
+- **Downward filter** (to a child): contains the complement of the
+  child's subtree — approximately N × (b-1)/b entries for branching
+  factor b
+
+The worst-case filter is the downward direction from the root's child,
+containing roughly N × (b-1)/b entries. Upward filters remain compact
+even in large networks.
+
+For a tree with branching factor b ≈ 5:
+
+| Network size (N) | Worst-case n | FPR | Assessment |
+| ----------------- | ------------ | --- | ---------- |
+| 500 | 400 | 0.048% | Negligible |
+| 1,000 | 800 | 0.86% | Good |
+| 2,000 | 1,600 | 9.4% | Acceptable |
+| 3,000 | 2,400 | 27% | Poor |
+| 5,000 | 4,000 | 63% | Filter nearly useless |
+
+Upward filters remain excellent: a depth-2 node in a 10,000-node tree
+has a subtree of ~400 entries (FPR 0.048%).
 
 ### Saturation Behavior
 
-A bloom filter with 8,192 bits and k = 5 saturates (FPR approaches 100%)
-around 3,000–4,000 entries. Beyond this, every query returns "maybe" and the
-filter provides no candidate selection value.
+At 50% FPR (n ≈ 3,350), the filter provides no better than coin-flip
+discrimination and is effectively useless for candidate selection.
+Full saturation (FPR > 99%) occurs around n ≈ 10,000.
 
 Tree-only merge propagation mitigates saturation by limiting each filter's
 content to tree-relevant entries. A node's outgoing filter to its parent
 contains only its subtree; its outgoing filter to a child contains the
 complement. Neither filter contains entries from mesh shortcuts' transitive
-information, keeping filter occupancy proportional to the node's position
-in the tree rather than the total mesh connectivity.
+information. This keeps upward filters compact regardless of network size,
+but downward filters grow proportionally with N.
 
 ## Per-Peer Filter Model
 
@@ -179,38 +228,10 @@ property of the data structure). Entries are expired through:
   removed, and outbound filters are recomputed
 - **Filter replacement**: Each FilterAnnounce completely replaces the
   previous filter for that peer
-- **Implicit timeout**: If no FilterAnnounce is received from a peer within
-  a threshold period, the peer's filter may be considered stale (tied to
-  link liveness detection)
-
-## Size Classes and Folding
-
-### Size Class Table
-
-| size_class | Bytes | Bits | Status |
-| ---------- | ----- | ---- | ------ |
-| 0 | 512 | 4,096 | Reserved |
-| 1 | 1,024 | 8,192 | **v1 (MUST use)** |
-| 2 | 2,048 | 16,384 | Reserved |
-| 3 | 4,096 | 32,768 | Reserved |
-
-v1 nodes MUST use size_class = 1 and MUST reject FilterAnnounce messages
-with any other size_class.
-
-### Folding (Forward Compatibility)
-
-Larger filters can be **folded** to smaller sizes by OR-ing the two halves
-together. A 2 KB filter folds to 1 KB by OR-ing the upper and lower
-halves. This preserves the "maybe present" property (no false negatives
-introduced) but increases the false positive rate.
-
-Folding enables future protocol versions where hub nodes maintain larger
-filters (lower FPR) while constrained nodes fold down to the mandated size.
-A node receiving a larger filter folds it locally before use if needed.
-
-The hash function design supports folding: membership tests at a smaller
-size use `hash(item, i) % smaller_bit_count`, which maps to the same bit
-positions that folding produces.
+- **Implicit timeout**: If a peer becomes unresponsive, the MMP link
+  liveness detector eventually declares the link dead and removes the
+  peer, which triggers filter cleanup as a side effect of peer removal.
+  There is no independent filter staleness timer.
 
 ## Membership Test
 
@@ -244,30 +265,75 @@ overhead.
 See [fips-wire-formats.md](fips-wire-formats.md) for the complete wire
 format reference.
 
-## Scale Considerations
+## Scale and Size Classes
 
-### Small Networks (< 1,000 nodes)
+### v1 Scale Limits
 
-Filters are very accurate (FPR < 1% for typical node degrees). Candidate
-selection effectively identifies the correct forwarding peer on the first
-try for most destinations.
+Coordinate-based tree distance checking ensures correct routing decisions
+at all network sizes — bloom filters are an optimization that narrows the
+set of peers considered, not a correctness requirement. As filters
+saturate, routing still works; it just evaluates more candidates per hop.
 
-### Medium Networks (1,000–100,000 nodes)
+With the v1 mandatory 1 KB filter (size_class 1):
 
-Filters remain accurate for typical nodes. Hub nodes (20+ peers) may see
-elevated FPR but the tree distance ranking correctly selects the best
-candidate regardless.
+- **Small networks (< 1,000 nodes)**: Both upward and downward filters
+  are highly accurate (worst-case FPR < 1%). Filters effectively narrow
+  candidates to the correct forwarding peer on the first try.
 
-### Large Networks (> 100,000 nodes)
+- **Medium networks (1,000–2,000 nodes)**: Upward filters remain
+  excellent. Downward filters approach 10% FPR at the worst case
+  (near-root nodes). The additional false positives add minor overhead
+  to candidate evaluation but do not affect routing correctness.
 
-Hub nodes approach filter saturation. The filter still provides value
-(some peers can be definitively excluded) but the candidate set grows
-larger. The tree distance calculation becomes the primary routing
-discriminator.
+- **Large networks (> 2,000 nodes)**: Downward filters lose most of
+  their discrimination value. At N ≈ 5,000, downward filters for
+  near-root nodes have ~63% FPR, providing little benefit over evaluating
+  all peers. Upward filters remain compact and accurate at any scale.
+  Routing correctness is unaffected — greedy tree distance still selects
+  the right next hop — but the efficiency gain from bloom filter
+  pre-selection diminishes.
 
-Future mitigation: hub nodes could use larger filters (size_class 2 or 3)
-while constrained nodes fold to size_class 1. This requires protocol
-negotiation not present in v1.
+### Size Class Table
+
+| size_class | Bytes | Bits | Status |
+| ---------- | ----- | ---- | ------ |
+| 0 | 512 | 4,096 | Reserved |
+| 1 | 1,024 | 8,192 | **v1 (MUST use)** |
+| 2 | 2,048 | 16,384 | Reserved |
+| 3 | 4,096 | 32,768 | Reserved |
+
+FMP v1 mandates size_class = 1. Nodes MUST use size_class = 1 and MUST
+reject FilterAnnounce messages with any other size_class. The size_class
+field is reserved in the wire format to support future protocol versions
+with larger default filter sizes.
+
+### Scaling Strategy
+
+The 1 KB filter becomes a practical limitation beyond ~2,000 nodes. The
+size class mechanism provides the path forward: future FMP versions may
+use larger default filters (size_class 2 or 3) to support larger networks
+while remaining compatible with constrained nodes through folding.
+Size_class 2 (2 KB, 16,384 bits) would roughly double the practical
+network size limit.
+
+The envisioned approach is that hub nodes near the root — which carry the
+largest downward filters — would use larger size classes, while leaf nodes
+and resource-constrained nodes continue with smaller filters. A node
+receiving a filter larger than its own size class folds it down locally.
+The mechanism by which heterogeneous filter sizes propagate through the
+tree is a future design direction not specified in v1. See
+[IDEA-0043](../../ideas/IDEA-0043-heterogeneous-filter-propagation.md).
+
+### Folding
+
+Larger filters can be **folded** to smaller sizes by OR-ing the two halves
+together. A 2 KB filter folds to 1 KB by OR-ing the upper and lower
+halves. This preserves the "maybe present" property (no false negatives
+introduced) but increases the false positive rate.
+
+The hash function design supports folding: membership tests at a smaller
+size use `hash(item, i) % smaller_bit_count`, which maps to the same bit
+positions that folding produces.
 
 ## Implementation Status
 

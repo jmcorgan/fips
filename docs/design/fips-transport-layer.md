@@ -16,7 +16,7 @@ to the FIPS Mesh Protocol (FMP) above.
 The transport layer deals exclusively in **transport addresses** — IP:port
 tuples, MAC addresses, .onion identifiers, radio device addresses. These are
 opaque to every layer above FMP. The mapping from transport address to FIPS
-identity happens at the link layer after the Noise IK handshake completes.
+identity happens at the link layer after the Noise IK link handshake completes.
 The word "peer" belongs to the link layer and above; the transport layer
 knows only about remote endpoints identified by transport addresses.
 
@@ -69,7 +69,7 @@ forwarding and LookupResponse transit annotation.
 
 For connection-oriented transports, manage the underlying connection: TCP
 handshake, Tor circuit establishment, Bluetooth pairing. FMP cannot begin
-the Noise IK handshake until the transport-layer connection is established.
+the Noise IK link handshake until the transport-layer connection is established.
 
 Connectionless transports (UDP, raw Ethernet) skip this — datagrams can flow
 immediately to any reachable address.
@@ -133,7 +133,7 @@ and duplication at the routing layer.
 
 **Connection model**: Connectionless transports (UDP, raw Ethernet) allow
 immediate datagram exchange. Connection-oriented transports (TCP, Tor, BLE)
-require connection setup before FMP can begin the Noise IK handshake,
+require connection setup before FMP can begin the Noise IK link handshake,
 adding startup latency.
 
 **Stream vs. datagram**: Datagram transports have natural packet boundaries.
@@ -422,5 +422,3 @@ quality difference is significant. Link cost is not yet used in
 - [fips-intro.md](fips-intro.md) — Protocol overview and layer architecture
 - [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification (the layer above)
 - [fips-wire-formats.md](fips-wire-formats.md) — Transport framing details
-- [fips-software-architecture.md](fips-software-architecture.md) — Transport
-  trait implementation details

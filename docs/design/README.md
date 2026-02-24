@@ -31,15 +31,13 @@ specific topics.
 
 | Document | Description |
 | -------- | ----------- |
-| [fips-spanning-tree.md](fips-spanning-tree.md) | Spanning tree algorithms: root election, parent selection, coordinates |
+| [fips-spanning-tree.md](fips-spanning-tree.md) | Spanning tree algorithms: root discovery, parent selection, coordinates |
 | [fips-bloom-filters.md](fips-bloom-filters.md) | Bloom filter math: FPR analysis, size classes, split-horizon |
 
 ### Implementation
 
 | Document | Description |
 | -------- | ----------- |
-| [fips-software-architecture.md](fips-software-architecture.md) | Stable architectural decisions guiding the codebase |
-| [fips-state-machines.md](fips-state-machines.md) | Phase-based state machine pattern (Rust enum-of-structs) |
 | [fips-configuration.md](fips-configuration.md) | YAML configuration reference |
 
 ### Supplemental
@@ -54,16 +52,16 @@ specific topics.
                         fips-intro.md
                              │
               ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-   fips-transport-layer  fips-mesh-     fips-software-
-              │          operation       architecture
+              ▼              ▼              │
+   fips-transport-layer  fips-mesh-        │
+              │          operation          │
               ▼              │              │
-   fips-mesh-layer ◄────────┤              ▼
-              │              │       fips-state-machines
-              ▼              │
-   fips-session-layer        ├──► fips-spanning-tree
-              │              │         │
-              ▼              └──► fips-bloom-filters
+   fips-mesh-layer ◄────────┤              │
+              │              │              │
+              ▼              ├──► fips-spanning-tree
+   fips-session-layer        │         │
+              │              └──► fips-bloom-filters
+              ▼
    fips-ipv6-adapter
                         fips-wire-formats
                         (referenced by all layer docs)

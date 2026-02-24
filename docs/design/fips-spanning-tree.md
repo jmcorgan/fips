@@ -6,9 +6,29 @@ for readers who want to understand the tree internals — for how the
 spanning tree fits into the overall mesh operation, see
 [fips-mesh-operation.md](fips-mesh-operation.md).
 
+## What Is a Spanning Tree?
+
+A spanning tree is a subset of the links in a mesh network that:
+
+- **Reaches every node** — no node is disconnected
+- **Contains no cycles** — there is exactly one path between any two nodes
+- **Has a single root** — one distinguished node from which all paths descend
+- **Assigns every non-root node exactly one parent** — creating a
+  hierarchy from leaves to root
+
+Because a tree has no cycles, any node's position can be described by
+its path to the root. This path serves as a coordinate in a virtual
+address space, enabling distance calculations and routing decisions
+without global topology knowledge.
+
+There is nothing special about the root node other than providing the
+center of the coordinate system. Being root implies no additional
+processing, routing, or operational burden — the root runs the same
+protocol as every other node.
+
 ## Purpose
 
-The spanning tree gives every node in the mesh a **coordinate** — its
+The FIPS spanning tree gives every node in the mesh a **coordinate** — its
 ancestry path from itself to the root. These coordinates enable:
 
 - Distance calculation between any two nodes without global topology
@@ -16,23 +36,30 @@ ancestry path from itself to the root. These coordinates enable:
 - Greedy routing where each hop reduces distance to the destination
 - Loop-free forwarding guaranteed by strictly-decreasing distance
 
-## Root Election
+## Root Discovery
 
 The root is the node with the **lexicographically smallest node_addr** among
 all reachable nodes. There is no election protocol, no voting, no
-negotiation. Each node independently evaluates the TreeAnnounce messages
-from its peers and selects the minimum root.
+negotiation — each node independently discovers the same root by
+evaluating the TreeAnnounce messages from its peers and selecting the
+minimum root.
 
 When a node first joins the network with no peers, it is its own root. As
 it connects to peers and receives their TreeAnnounce messages, it discovers
 smaller node_addrs and converges to the global root.
 
-If the network partitions, each segment independently elects its own root
+If the network partitions, each segment independently discovers its own root
 (the smallest node_addr in that segment). When segments rejoin, all nodes
 discover the globally-smallest root through TreeAnnounce exchange and
 reconverge to a single tree.
 
 ## Parent Selection
+
+Parent selection and reselection is the primary means by which the mesh
+self-organizes into an efficient routing structure. By having each node
+choose the parent with the best measured link performance, packet
+routing up and down the tree follows the best available path that
+reduces distance to the destination.
 
 Each node selects a single parent from among its direct peers. Parent
 selection uses cost-weighted depth to balance tree depth against link
@@ -79,9 +106,9 @@ immediate parent reselection:
   delaying legitimate reconvergence. Mandatory switches (parent loss,
   root change) bypass dampening.
 - **Local-only metrics**: Link costs use only locally measured MMP data
-  (ETX and SRTT). No cumulative path costs are propagated and no wire
-  format changes are required. This avoids the trust problems inherent
-  in self-reported cost metrics in a permissionless network.
+  (ETX and SRTT). No cumulative path costs are propagated, avoiding
+  the trust problems inherent in self-reported cost metrics in a
+  permissionless network.
 
 ### After Parent Change
 
@@ -126,7 +153,7 @@ tree_distance(a, b):
 
 Example: If A has coordinates `[A, X, Y, Root]` and B has coordinates
 `[B, Z, Y, Root]`, the common suffix is `[Y, Root]` (length 2). Distance =
-(3 - 2) + (3 - 2) = 2 hops.
+(4 - 2) + (4 - 2) = 4 hops.
 
 The self-distance check in greedy routing uses this calculation: a packet is
 forwarded to a peer only if the peer is strictly closer to the destination
@@ -193,10 +220,8 @@ for stronger verification.
 ### Timestamp
 
 - Type: u64, Unix seconds
-- Used for stale detection, not versioning
-- A root declaration is considered stale after `ROOT_TIMEOUT` (60 minutes)
-  without refresh. In practice, heartbeat cascading handles root departure
-  for the common case (see spanning-tree-dynamics.md §11)
+- Advisory only — not used in any decision logic, as there is no way to
+  verify its accuracy from peers
 
 ## Reconvergence
 
@@ -214,7 +239,7 @@ When a node fails (link timeout or disconnect):
 When the network partitions:
 
 1. Nodes in each segment lose peers across the partition boundary
-2. If the root was in the other segment, affected nodes elect a new segment
+2. If the root was in the other segment, affected nodes discover a new segment
    root (smallest node_addr in their segment)
 3. Each segment reconverges independently
 
@@ -262,14 +287,12 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | FLAP_WINDOW_SECS | 60s | Sliding window for counting parent switches |
 | FLAP_DAMPENING_SECS | 120s | Extended hold-down duration when flap threshold exceeded |
 | ANNOUNCE_MIN_INTERVAL | 500ms | Minimum between announcements to same peer |
-| ROOT_TIMEOUT | 60 min | Root declaration considered stale (not yet enforced; heartbeat cascading covers common case) |
-| TREE_ENTRY_TTL | 5–10 min | Individual entry expiration |
 
 ## Implementation Status
 
 | Feature | Status |
 | ------- | ------ |
-| Root election (smallest node_addr) | **Implemented** |
+| Root discovery (smallest node_addr) | **Implemented** |
 | Cost-based parent selection with hysteresis | **Implemented** |
 | Hold-down timer after parent change | **Implemented** |
 | Periodic cost-based parent re-evaluation | **Implemented** |
@@ -280,8 +303,6 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | Rate limiting (500ms per peer) | **Implemented** |
 | Coord cache flush on parent change | **Implemented** |
 | Flap dampening (extended hold-down on rapid switches) | **Implemented** |
-| Root timeout enforcement | Planned |
-| Tree entry TTL enforcement | Planned |
 | Per-ancestry-entry signatures | Future direction |
 
 ## References

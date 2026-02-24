@@ -57,9 +57,8 @@ peers:       # Static peer list
 | `node.control.socket_path` | string | *(auto)* | Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock` if `XDG_RUNTIME_DIR` is set, otherwise `/tmp/fips-control.sock` |
 
 The control socket provides read-only access to node state via the
-`fipsctl` command-line tool. See
-[fips-software-architecture.md](fips-software-architecture.md) for the
-protocol and command list.
+`fipsctl` command-line tool. See the project
+[README](../../README.md#inspect) for the command list.
 
 All tunable protocol parameters live under `node.*`, organized as sysctl-style
 dotted paths. The top-level sections (`tun`, `dns`, `transports`, `peers`)
@@ -285,7 +284,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:4000"
-    mtu: 1197
+    mtu: 1472
 
 peers:
   - npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"

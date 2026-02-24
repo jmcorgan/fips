@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 426" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="580" height="426" fill="#1a1a2e" rx="4"/>
+
+  <!-- Title -->
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">Noise IK Message 1 — phase 0x1 (114 bytes)</text>
+
+  <!-- Row 0: Common prefix (bytes 0-3) -->
+  <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0–3</text>
+
+  <rect x="55" y="36" width="95" height="52" fill="#2d4a7a" stroke="#4a90d9" stroke-width="1.5" rx="3"/>
+  <text x="102" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">ver</text>
+  <text x="102" y="78" fill="#8ab4f8" text-anchor="middle" font-size="10">4 bits</text>
+
+  <rect x="150" y="36" width="95" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
+  <text x="197" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">phase</text>
+  <text x="197" y="78" fill="#8af8c8" text-anchor="middle" font-size="10">4 bits</text>
+
+  <rect x="245" y="36" width="130" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="310" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">flags</text>
+  <text x="310" y="78" fill="#f8c88a" text-anchor="middle" font-size="10">1 byte</text>
+
+  <rect x="375" y="36" width="200" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="475" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">payload_len</text>
+  <text x="475" y="78" fill="#d8a0f8" text-anchor="middle" font-size="10">2 bytes LE</text>
+
+  <!-- Row 1: sender_idx (bytes 4-7) -->
+  <text x="50" y="114" fill="#666" font-size="10" text-anchor="end">4–7</text>
+
+  <rect x="55" y="88" width="520" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="112" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">sender_idx</text>
+  <text x="315" y="130" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+
+  <!-- Noise IK msg1 label -->
+  <text x="10" y="250" fill="#777" font-size="10" text-anchor="middle" transform="rotate(-90, 10, 250)">Noise IK msg1 (106 bytes)</text>
+  <line x1="18" y1="140" x2="18" y2="348" stroke="#555" stroke-width="1"/>
+  <line x1="18" y1="140" x2="23" y2="140" stroke="#555" stroke-width="1"/>
+  <line x1="18" y1="348" x2="23" y2="348" stroke="#555" stroke-width="1"/>
+
+  <!-- Rows 2-3: ephemeral_pubkey (bytes 8-40, 33 bytes) -->
+  <text x="50" y="166" fill="#666" font-size="10" text-anchor="end">8–40</text>
+
+  <rect x="55" y="140" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="170" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">ephemeral_pubkey</text>
+
+  <rect x="55" y="192" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="222" fill="#f8c88a" text-anchor="middle" font-size="10">33 bytes (compressed secp256k1)</text>
+
+  <!-- Rows 4-5: encrypted_static (bytes 41-89, 49 bytes) -->
+  <text x="50" y="270" fill="#666" font-size="10" text-anchor="end">41–89</text>
+
+  <rect x="55" y="244" width="520" height="52" fill="#5a2d3d" stroke="#d94a6a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="274" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">encrypted_static</text>
+
+  <rect x="55" y="296" width="520" height="52" fill="#5a2d3d" stroke="#d94a6a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="326" fill="#f88aaa" text-anchor="middle" font-size="10">49 bytes (static key 33 + AEAD tag 16)</text>
+
+  <!-- Row 6: encrypted_epoch (bytes 90-113, 24 bytes) -->
+  <text x="50" y="374" fill="#666" font-size="10" text-anchor="end">90–113</text>
+
+  <rect x="55" y="348" width="520" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="372" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">encrypted_epoch</text>
+  <text x="315" y="390" fill="#d8a0f8" text-anchor="middle" font-size="10">24 bytes (epoch 8 + AEAD tag 16)</text>
+
+  <!-- Total -->
+  <text x="310" y="418" fill="#777" font-size="10" text-anchor="middle">total: 114 bytes · payload_len = 110 · pattern: e, es, s, ss</text>
+</svg>

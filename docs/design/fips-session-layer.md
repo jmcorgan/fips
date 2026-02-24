@@ -38,7 +38,7 @@ encrypts the payload, and routes through FMP. No DNS involvement.
 
 ### IPv6 Adapter
 
-Unmodified IPv6 applications use a TUN device with `fd::/8` routing. A local
+Unmodified IPv6 applications use a TUN device with `fd00::/8` routing. A local
 DNS service maps npub → IPv6 address and primes the identity cache. Packets
 arriving at the TUN are translated to FIPS datagrams and routed through FSP.
 
@@ -111,10 +111,10 @@ node, FMP delivers it to FSP for session-layer processing.
 Sessions are established on demand when the first datagram needs to be sent to
 a destination with no existing session.
 
-FSP uses Noise XK for session key agreement. The initiator knows the
-destination's npub (required for XK's pre-message `s` token); the
-responder learns the initiator's identity from msg3 (not msg1, unlike
-IK at the link layer). This provides stronger initiator identity hiding
+FSP uses Noise XK for session key agreement (Noise Protocol Framework;
+Perrin 2018). The initiator knows the destination's npub (required for
+XK's pre-message `s` token); the responder learns the initiator's
+identity from msg3 (not msg1, unlike IK at the link layer). This provides stronger initiator identity hiding
 — the initiator's static key is encrypted under the established shared
 secret rather than under only the responder's static key.
 
@@ -133,7 +133,8 @@ and SessionMsg3:
 Each side's epoch (an 8-byte random value generated at startup) is
 exchanged encrypted in msg2 and msg3. On subsequent handshakes, an epoch
 mismatch indicates the peer has restarted, triggering session
-re-establishment.
+re-establishment — similar to IKEv2's INITIAL_CONTACT notification for
+peer restart detection (RFC 7296 §2.4).
 
 Packets that trigger session establishment are queued (with bounded buffer)
 and transmitted after the session is established.
@@ -154,14 +155,15 @@ the forward path (e.g., after tree reconvergence).
 ### Simultaneous Initiation
 
 When both nodes attempt to establish a session simultaneously ("crossing
-hellos"), a deterministic tie-breaker resolves the conflict:
+hellos"), a deterministic tie-breaker resolves the conflict, mirroring
+IKEv2's simultaneous initiation resolution (RFC 7296 §2.8):
 
 - If `local_node_addr < remote_node_addr`: Continue as initiator, ignore
   incoming setup
 - If `local_node_addr > remote_node_addr`: Abort own initiation, switch to
   responder role
 
-This ensures exactly one handshake completes.
+This lowest-address-wins approach ensures exactly one handshake completes.
 
 ### Data Transfer
 
@@ -194,7 +196,9 @@ The fresh SessionSetup re-warms the caches, maintaining routing continuity.
 ### Session Independence from Transport
 
 Sessions exist above the routing layer and are bound to npub identities, not
-transport addresses or routing paths. A session survives:
+transport addresses or routing paths — following WireGuard's approach
+(Donenfeld 2017) of binding cryptographic sessions to identity keys rather
+than network addresses. A session survives:
 
 - Transport failover (UDP → Ethernet → back to UDP)
 - Route changes (different intermediate hops)
@@ -237,7 +241,9 @@ operations) rather than under only the responder's static key.
 | Hash | SHA-256 | Nostr-native |
 | Key derivation | HKDF-SHA256 | Standard Noise KDF |
 
-These choices prioritize compatibility with the Nostr cryptographic stack.
+These choices prioritize compatibility with the Nostr cryptographic stack —
+secp256k1 + ChaCha20-Poly1305 + SHA-256 aligns with the NIP-44 encrypted
+messaging standard.
 
 ### secp256k1 Parity Normalization
 
@@ -271,14 +277,16 @@ authentication for every packet, matching WireGuard and Lightning's approach.
 
 ### Forward Secrecy
 
-Ephemeral keys in the Noise handshake provide forward secrecy. Compromise of
-static keys (nsec) does not reveal past session keys, because session keys are
-derived in part from ephemeral-ephemeral DH (`ee`), and ephemeral keys are
-discarded after the handshake.
+Ephemeral keys in the Noise handshake provide forward secrecy — a standard
+property of Noise handshake patterns that include ephemeral key exchange.
+Compromise of static keys (nsec) does not reveal past session keys, because
+session keys are derived in part from ephemeral-ephemeral DH (`ee`), and
+ephemeral keys are discarded after the handshake.
 
 ## Replay Protection
 
-FSP uses explicit 8-byte counters on the wire for replay protection. Each side
+FSP uses explicit 8-byte counters on the wire for replay protection, adapted
+from the DTLS anti-replay mechanism (Rescorla & Modadugu, RFC 6347). Each side
 maintains a monotonically increasing send counter, included in the 12-byte
 cleartext header of every encrypted message. The receiver maintains a sliding
 window (2048-entry bitmap) tracking which counters have been seen.
@@ -287,8 +295,9 @@ This design is critical for operation over unreliable transports. Under UDP
 packet loss or reordering, implicit nonce counters (where the receiver
 increments on each decrypt attempt) would desynchronize permanently — a failed
 `decrypt()` increments the nonce, and the desync grows with each lost packet.
-Explicit counters allow the receiver to decrypt any packet independently,
-regardless of what packets were lost or reordered.
+Explicit counters with a sliding bitmap window — the standard DTLS approach —
+allow the receiver to decrypt any packet independently, regardless of what
+packets were lost or reordered.
 
 The same `ReplayWindow` and `decrypt_with_replay_check()` implementation is
 used at both the link and session layers.
@@ -302,7 +311,9 @@ entry expires, it cannot forward data packets (which carry only addresses, not
 coordinates) and sends a CoordsRequired error.
 
 FSP uses a hybrid warmup strategy combining proactive piggybacking with
-reactive standalone messages to keep transit caches populated:
+reactive standalone messages to keep transit caches populated (Yggdrasil
+uses a similar approach of embedding coordinates in session traffic to
+warm transit node caches):
 
 ### Proactive Warmup Phase
 
@@ -329,15 +340,12 @@ Transit nodes extract coordinates via the existing `try_warm_coord_cache()`
 code path with zero changes to the transit forwarding logic. CoordsWarmup is
 indistinguishable from any other CP-flagged message at the transit layer.
 
-Wire format:
-
-```text
-FSP header (12 bytes, AAD): ver=0, phase=0, flags=CP, counter, payload_len
-Cleartext coords: src_coords + dst_coords (same encoding as CP flag)
-AEAD ciphertext: inner_header(6) + Poly1305 tag(16) = 22 bytes
-
-Total FSP payload: 12 + coords + 22
-```
+On the wire, a CoordsWarmup message consists of the standard 12-byte FSP
+header (used as AEAD AAD) with ver=0, phase=0, flags=CP, followed by
+cleartext source and destination coordinates (same encoding as any
+CP-flagged packet), followed by 22 bytes of AEAD ciphertext (6-byte inner
+header and 16-byte Poly1305 tag). The total FSP payload is 12 bytes of
+header, the coordinate data, and 22 bytes of ciphertext.
 
 ### Steady State
 
@@ -368,30 +376,11 @@ signal generation (100ms per destination).
 
 ### Warmup State Machine
 
-```text
-        ┌──────────────┐
-        │    WARMUP    │ ◄── Send first N packets with coords (CP or CoordsWarmup)
-        └──────┬───────┘
-               │ N packets sent without CoordsRequired
-               ▼
-        ┌──────────────┐
-        │   MINIMAL    │ ◄── Send packets without coords
-        └──────┬───────┘
-               │ CoordsRequired or PathBroken received
-               ▼
-        ┌──────────────────────────┐
-        │ SEND CoordsWarmup (0x14) │ ◄── Immediate standalone warmup (rate-limited)
-        └──────────┬───────────────┘
-                   │
-                   ▼
-        ┌──────────────┐
-        │    WARMUP    │ ◄── Counter reset, piggyback coords again
-        └──────────────┘
-```
+![Coordinate warmup state machine](diagrams/session-warmup-fsm.svg)
 
 ## Identity Cache
 
-The identity cache maps FIPS address prefix (15 bytes, the `fd::/8` IPv6
+The identity cache maps FIPS address prefix (15 bytes, the `fd00::/8` IPv6
 address minus the `fd` prefix) to `(NodeAddr, PublicKey)`. This cache is
 needed only when using the IPv6 adapter — the native FIPS API provides the
 public key directly.
@@ -482,7 +471,8 @@ bandwidth cost: clamped to [500ms, 10s] with a cold-start interval of 1s
 ### Path MTU Tracking
 
 PathMtuNotification (message type 0x13) provides end-to-end path MTU
-feedback:
+feedback, adapting RFC 1191 Path MTU Discovery for overlay networks — the
+transit-node `min()` propagation replaces ICMP Packet Too Big:
 
 1. The source sets `path_mtu` in each SessionDatagram envelope to its
    outbound link MTU.
@@ -500,7 +490,8 @@ feedback:
 ### Send Failure Backoff
 
 When a session MMP report cannot be delivered (destination unreachable, no
-route), the sender applies exponential backoff to the probe interval:
+route), the sender applies exponential backoff to the probe interval (a
+standard distributed systems pattern for transient failure handling):
 
 - Each consecutive failure doubles the interval: 2x, 4x, 8x, 16x, 32x
 - Backoff caps at 32x the base interval (5 consecutive failures)
@@ -553,6 +544,8 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
 
 ## References
 
+### FIPS Internal Documentation
+
 - [fips-intro.md](fips-intro.md) — Protocol overview and architecture
 - [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification (below FSP)
 - [fips-ipv6-adapter.md](fips-ipv6-adapter.md) — IPv6 adaptation layer (above FSP)
@@ -560,3 +553,29 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
   error recovery
 - [fips-wire-formats.md](fips-wire-formats.md) — Wire format reference for all
   session message types
+
+### External References
+
+- Perrin, T. ["The Noise Protocol Framework"](https://noiseprotocol.org/noise.html).
+  Revision 34, 2018. *Framework for building crypto protocols using Diffie-Hellman
+  key agreement and AEAD ciphers. FSP uses the XK handshake pattern.*
+
+- Donenfeld, J.A. ["WireGuard: Next Generation Kernel Network Tunnel"](https://www.wireguard.com/papers/wireguard.pdf).
+  NDSS 2017. *Transport-independent cryptographic sessions bound to identity keys
+  rather than network addresses; AEAD-only authentication model.*
+
+- Rescorla, E., Modadugu, N. [RFC 6347](https://datatracker.ietf.org/doc/html/rfc6347):
+  "Datagram Transport Layer Security Version 1.2". 2012. *Explicit sequence numbers
+  with sliding bitmap window for replay protection over unreliable transports.*
+
+- Kaufman, C., Hoffman, P., Nir, Y., Eronen, P., Kivinen, T.
+  [RFC 7296](https://datatracker.ietf.org/doc/html/rfc7296):
+  "Internet Key Exchange Protocol Version 2 (IKEv2)". 2014. *Simultaneous
+  initiation resolution (§2.8) and INITIAL_CONTACT peer restart detection (§2.4).*
+
+- Mogul, J., Deering, S. [RFC 1191](https://datatracker.ietf.org/doc/html/rfc1191):
+  "Path MTU Discovery". 1990. *End-to-end path MTU discovery; FSP adapts this for
+  overlay networks using transit-node min() propagation.*
+
+- [Yggdrasil Network](https://yggdrasil-network.github.io/). *Coordinate-based
+  overlay routing with session traffic used to warm transit node coordinate caches.*

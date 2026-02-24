@@ -10,7 +10,8 @@ can communicate over the mesh without modification.
 The adapter bridges two worlds: IPv6 applications that address destinations by
 IP address, and the FIPS mesh that addresses destinations by public key
 (npub). The adapter handles the translation: DNS resolution from npub to
-`fd::/8` address, identity cache management so FIPS can route IPv6 packets,
+`fd00::/8` ULA (Unique Local Address) address, identity cache management so
+FIPS can route IPv6 packets,
 MTU enforcement so packets fit through the mesh, and the TUN interface that
 connects to the kernel's IPv6 stack.
 
@@ -21,7 +22,7 @@ native FIPS datagram API, addressing destinations directly by npub.
 
 ### The Problem
 
-IPv6 addresses in the `fd::/8` range are derived from public keys via a
+IPv6 addresses in the `fd00::/8` range are derived from public keys via a
 one-way hash (SHA-256). Given only an IPv6 address, the public key cannot be
 recovered — and without the public key, FIPS cannot compute the node_addr
 needed for routing.
@@ -35,7 +36,7 @@ DNS resolution serves as the "routing intent" signal. When an application
 resolves `npub1xxx...xxx.fips`, the FIPS DNS service:
 
 1. Extracts the npub from the `.fips` domain name
-2. Derives the `fd::/8` IPv6 address from the public key
+2. Derives the `fd00::/8` IPv6 address from the public key
 3. Primes the identity cache with the mapping
    (IPv6 address prefix ↔ NodeAddr ↔ PublicKey)
 4. Returns the IPv6 address to the application
@@ -54,7 +55,7 @@ for address derivation.
 
 ### Traffic Without Prior DNS Lookup
 
-A packet may arrive at the TUN for an `fd::/8` destination without a prior DNS
+A packet may arrive at the TUN for an `fd00::/8` destination without a prior DNS
 lookup — cached address, manual configuration, etc. Since the address derivation
 is one-way, the npub cannot be recovered from the address alone.
 
@@ -82,24 +83,37 @@ SHA-256 → node_addr (16 bytes, truncated)
 fd + node_addr[0..15] → IPv6 address (16 bytes)
 ```
 
-The `fd` prefix ensures no collision with addresses in use on the underlying
-transport network. These are overlay identifiers — they appear in the TUN
-interface for application compatibility but are not routable on the underlying
-transport.
+The `fd` prefix places FIPS addresses in the IPv6 Unique Local Address (ULA)
+space defined by RFC 4193. ULAs are the IPv6 equivalent of RFC 1918 private
+addresses (10.x, 172.16.x, 192.168.x) — they are reserved for local use and
+are not routable over the public Internet. This means FIPS overlay addresses
+cannot conflict with native IPv6 traffic that may be present on the same host
+or network, and they will not leak beyond the local system even if routing is
+misconfigured. These are overlay identifiers — they appear in the TUN
+interface for application compatibility but have no meaning outside the FIPS
+mesh.
 
 ## Identity Cache
 
-The identity cache maps the FIPS address prefix (15 bytes — the IPv6 address
-minus the `fd` prefix) to `(NodeAddr, PublicKey)`. This cache is needed only
-when using the IPv6 adapter; the native FIPS API provides the public key
-directly.
+The derivation from public key to NodeAddr and IPv6 address is one-way
+(SHA-256 truncation). Given a destination IPv6 address from an outbound packet
+on the TUN interface, the adapter cannot recover the public key or NodeAddr
+needed for FIPS routing. The identity cache provides the reverse lookup:
+it maps the FIPS address prefix (15 bytes — the IPv6 address minus the `fd`
+prefix) back to `(NodeAddr, PublicKey)`, allowing the adapter to route
+IPv6 traffic into the mesh. This cache is needed only when using the IPv6
+adapter; the native FIPS API provides the public key directly.
 
 ### Eviction Policy
 
 The mapping is deterministic (derived from the public key) and never becomes
 stale. The cache uses **LRU-only eviction** bounded by a configurable size
 (default 10K entries). There is no TTL — entries are evicted only when the
-cache is full and space is needed for a new entry.
+cache is full and space is needed for a new entry. LRU-only eviction is
+necessary because there is no other way for the FIPS router to recover the
+routing identity from an IPv6 address, and IPv6 traffic for a destination may
+arrive an arbitrarily long time after the DNS resolution that populated the
+cache entry.
 
 ### Relationship to DNS TTL
 
@@ -111,9 +125,17 @@ entry hasn't been evicted by memory pressure.
 
 ## MTU Enforcement
 
-FIPS encapsulation adds overhead to every packet. The adapter must ensure
-that IPv6 packets from applications fit within the FIPS encapsulation budget
-after all layers of wrapping.
+FIPS does not provide fragmentation or reassembly at the session or mesh
+protocol layers — every datagram must fit in a single transport-layer packet.
+Some transports may perform fragmentation and reassembly internally (e.g., BLE
+L2CAP) and can advertise a larger virtual MTU than the physical medium
+supports, but this is transparent to FIPS. The mesh layer provides two
+facilities to manage MTU across heterogeneous paths: route discovery can
+constrain results to paths that support a required minimum MTU, and transit
+nodes that cannot forward an oversized datagram send an MtuExceeded error
+signal back to the source. The adapter must ensure that IPv6 packets from
+applications fit within the FIPS encapsulation budget after all layers of
+wrapping.
 
 ### Encapsulation Overhead
 
@@ -156,8 +178,9 @@ transport path MTU for the IPv6 adapter is therefore:
 ```
 
 Transports with smaller MTUs (radio at ~250 bytes, serial at 256 bytes) cannot
-support the IPv6 adapter — applications on those transports must use the
-native FIPS datagram API.
+support the IPv6 adapter without some form of internal fragmentation and
+reassembly. Otherwise, applications on those transports must use the native
+FIPS datagram API.
 
 ### ICMP Packet Too Big
 
@@ -206,10 +229,10 @@ defining feature.
 ### Architecture
 
 ```text
-Applications (sockets using fd::/8 addresses)
+Applications (sockets using fd00::/8 addresses)
        │
        ▼
-Kernel IPv6 Stack (routing: fd::/8 → fips0)
+Kernel IPv6 Stack (routing: fd00::/8 → fips0)
        │
        ▼
 TUN Device (fips0)
@@ -222,7 +245,7 @@ TUN Device (fips0)
 The TUN reader receives raw IPv6 packets from applications and processes them:
 
 1. Validate IPv6 header
-2. Extract destination `fd::/8` address
+2. Extract destination `fd00::/8` address
 3. Look up identity cache — miss returns ICMPv6 Destination Unreachable
 4. Retrieve NodeAddr and PublicKey from cache
 5. Look up or establish FSP session
@@ -247,7 +270,7 @@ handle.
 The Linux kernel routing table processes rules in priority order:
 
 1. **Local table**: Intercepts traffic to addresses assigned to this machine
-2. **Main table**: Routes `fd::/8` to the TUN device
+2. **Main table**: Routes `fd00::/8` to the TUN device
 
 This means every packet arriving at the TUN reader is guaranteed to be for a
 *remote* FIPS destination. No "is this for me?" check is needed on the read
@@ -283,10 +306,10 @@ TUN device creation requires `CAP_NET_ADMIN`. Options:
 | TCP MSS clamping (SYN + SYN-ACK) | **Implemented** |
 | DNS service (.fips domain) | **Implemented** |
 | Per-destination route MTU (netlink) | Planned |
-| Transit MTU error signal | Planned |
+| Transit MTU error signal | **Implemented** |
 | Path MTU tracking (SessionDatagram field) | **Implemented** |
 | Path MTU notification (end-to-end echo) | **Implemented** |
-| Endpoint fragmentation/reassembly | Future direction |
+| Endpoint fragmentation/reassembly | Transport drivers |
 
 ## Design Considerations
 
@@ -317,11 +340,6 @@ Session-layer encryption is end-to-end — the AEAD tag authenticates the entire
 plaintext. Fragmenting encrypted datagrams would require either exposing
 plaintext structure to transit nodes (unacceptable) or reassembly before
 decryption (opens attack surface).
-
-Endpoint-only fragmentation (fragment before session encryption, reassemble
-after decryption) is a future direction that avoids these objections. Each
-fragment would be independently encrypted and look like a normal data packet
-to transit nodes.
 
 ## References
 
