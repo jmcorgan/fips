@@ -26,6 +26,25 @@ other by npub, and the same cryptographic identity used in the Nostr ecosystem
 serves as both the routing address and the basis for end-to-end encrypted
 sessions across the mesh.
 
+## Why
+
+DNS is a single point of control. 
+
+Domain seizures, DNS poisoning, and registrar suspensions are routinely used to take services offline, often without due process.
+
+| Project | Approach | Limitation |                                                                                                                                  
+  |---------|----------|------------|                                                                                                                                
+  | Tor .onion | Key hash → address | Internet-only overlay |                                                                                                          
+  | CJDNS | Key → `fc00::/8` IPv6 | Internet-only overlay |                                                                                                          
+  | Yggdrasil | Key → `200::/7` IPv6 | Internet-only overlay |                                                                                                         
+                                                                  
+All three eliminate DNS. But all three require the internet underneath. If the infrastructure goes down, they go down with it.
+
+FIPS eliminates DNS the same way — public key is your address — but doesn't depend on the internet to function. The [FIPS transport layer](https://github.com/jmcorgan/fips/blob/master/docs/design/fips-transport-layer.md) is pluggable: UDP today, and also designed for radio/Bluetooth/serial. The mesh routes traffic without any central infrastructure.
+
+FIPS uses [nostr](https://fiatjaf.com/nostr.html) keypairs as node identity, making it a potential physical transport layer for the Nostr ecosystem — carrying relay traffic over mesh links when the internet is unavailable.
+
+
 ## Features
 
 - **Self-organizing mesh routing** — spanning tree coordinates and bloom
