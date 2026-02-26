@@ -45,7 +45,7 @@ The configuration is organized into five top-level sections:
 node:        # Node behavior, protocol parameters, and tuning
 tun:         # TUN virtual interface
 dns:         # DNS responder for .fips domain
-transports:  # Network transports (UDP, future: TCP, Tor)
+transports:  # Network transports (UDP, Ethernet, Bluetooth, Tor, ...)
 peers:       # Static peer list
 ```
 
@@ -248,6 +248,43 @@ stale address mappings.
 | `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
 | `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
 
+### Ethernet (`transports.ethernet.*`)
+
+Ethernet transport sends raw frames via AF_PACKET SOCK_DGRAM sockets.
+Requires `CAP_NET_RAW` or running as root. Linux only.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `interface` | string | *(required)* | Network interface name (e.g., `"eth0"`, `"enp3s0"`) |
+| `ethertype` | u16 | `0x88B5` | IEEE EtherType (802 experimental range) |
+| `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 1 (for frame type prefix) |
+| `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
+| `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
+| `discovery` | bool | `true` | Listen for discovery beacons from other nodes |
+| `announce` | bool | `false` | Broadcast announcement beacons on the LAN |
+| `auto_connect` | bool | `false` | Auto-connect to discovered peers |
+| `accept_connections` | bool | `false` | Accept incoming connection attempts from discovered peers |
+| `beacon_interval_secs` | u64 | `30` | Announcement beacon interval in seconds (minimum 10) |
+
+**Named instances.** Multiple Ethernet interfaces can be configured by
+using named sub-keys instead of flat parameters:
+
+```yaml
+transports:
+  ethernet:
+    lan:
+      interface: "eth0"
+      discovery: true
+      announce: true
+    backbone:
+      interface: "eth1"
+      announce: false
+```
+
+Each named instance operates independently with its own socket and
+discovery state. The instance name is used in log messages and the
+`name()` method on the Transport trait.
+
 ## Peers (`peers[]`)
 
 Static peer list. Each entry defines a peer to connect to.
@@ -256,8 +293,8 @@ Static peer list. Each entry defines a peer to connect to.
 |-----------|------|---------|-------------|
 | `peers[].npub` | string | *(required)* | Peer's Nostr public key (npub-encoded) |
 | `peers[].alias` | string | *(none)* | Human-readable name for logging |
-| `peers[].addresses[].transport` | string | *(required)* | Transport type (`udp`) |
-| `peers[].addresses[].addr` | string | *(required)* | Transport address (e.g., `"10.0.0.2:4000"`) |
+| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp` or `ethernet` |
+| `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP: `"ip:port"`. Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`) |
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
@@ -294,6 +331,43 @@ peers:
         addr: "172.20.0.11:4000"
     connect_policy: auto_connect
 ```
+
+### Mixed UDP + Ethernet Example
+
+A node bridging internet peers (UDP) and a local Ethernet segment with
+beacon discovery:
+
+```yaml
+node:
+  identity:
+    nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+tun:
+  enabled: true
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:4000"
+    mtu: 1472
+  ethernet:
+    interface: "eth0"
+    discovery: true
+    announce: true
+    auto_connect: true
+    accept_connections: true
+
+peers:
+  - npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
+    alias: "internet-peer"
+    addresses:
+      - transport: udp
+        addr: "203.0.113.5:4000"
+    connect_policy: auto_connect
+```
+
+Ethernet peers on the local segment are discovered automatically via
+beacons — no static peer entries needed. Internet peers still require
+explicit configuration.
 
 All `node.*` parameters use their defaults. To override specific values, add
 only the relevant sections:
@@ -398,6 +472,17 @@ transports:
     mtu: 1280
     recv_buf_size: 2097152           # 2 MB (kernel doubles to 4 MB actual)
     send_buf_size: 2097152           # 2 MB
+  # ethernet:                        # uncomment to enable (requires CAP_NET_RAW)
+  #   interface: "eth0"              # required: network interface name
+  #   ethertype: 0x88B5              # IEEE 802 experimental EtherType
+  #   mtu: null                      # null = interface MTU - 1 (typically 1499)
+  #   recv_buf_size: 2097152         # 2 MB
+  #   send_buf_size: 2097152         # 2 MB
+  #   discovery: true                # listen for beacons
+  #   announce: false                # broadcast beacons
+  #   auto_connect: false            # connect to discovered peers
+  #   accept_connections: false      # accept inbound handshakes
+  #   beacon_interval_secs: 30       # beacon interval (min 10)
 
 peers:                               # static peer list
   # - npub: "npub1..."

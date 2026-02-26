@@ -54,6 +54,37 @@ def generate_peers_block(
     return "\n".join(lines)
 
 
+def _build_ethernet_config(iface: str) -> dict:
+    """Build an Ethernet transport config dict for a single interface."""
+    return {
+        "interface": iface,
+        "discovery": True,
+        "announce": True,
+        "auto_connect": True,
+        "accept_connections": True,
+        "beacon_interval_secs": 10,
+    }
+
+
+def _inject_ethernet_transports(parsed: dict, eth_ifaces: list[str]):
+    """Inject Ethernet transport config into a parsed FIPS config.
+
+    For a single interface, uses the single-instance format.
+    For multiple interfaces, uses the named-instances format.
+    Pure-Ethernet nodes (no UDP peers) have their UDP transport removed.
+    """
+    if not eth_ifaces:
+        return
+
+    transports = parsed.setdefault("transports", {})
+    if len(eth_ifaces) == 1:
+        transports["ethernet"] = _build_ethernet_config(eth_ifaces[0])
+    else:
+        transports["ethernet"] = {
+            iface: _build_ethernet_config(iface) for iface in eth_ifaces
+        }
+
+
 def generate_node_config(
     topology: SimTopology,
     node_id: str,
@@ -72,12 +103,36 @@ def generate_node_config(
     config = config.replace("{{NSEC}}", node.nsec)
     config = config.replace("{{PEERS}}", peers_yaml)
 
-    if fips_overrides:
+    # Inject Ethernet transport config if this node has Ethernet edges
+    eth_ifaces = topology.ethernet_interfaces(node_id)
+    has_udp_peers = bool(outbound_peers) or _has_inbound_udp_peers(topology, node_id)
+
+    if eth_ifaces or not has_udp_peers:
+        parsed = yaml.safe_load(config)
+        if fips_overrides:
+            parsed = _deep_merge(parsed, fips_overrides)
+        if eth_ifaces:
+            _inject_ethernet_transports(parsed, eth_ifaces)
+        if not has_udp_peers and eth_ifaces:
+            # Pure-Ethernet node: remove UDP transport
+            transports = parsed.get("transports", {})
+            transports.pop("udp", None)
+        config = yaml.dump(parsed, default_flow_style=False, sort_keys=False)
+    elif fips_overrides:
         parsed = yaml.safe_load(config)
         merged = _deep_merge(parsed, fips_overrides)
         config = yaml.dump(merged, default_flow_style=False, sort_keys=False)
 
     return config
+
+
+def _has_inbound_udp_peers(topology: SimTopology, node_id: str) -> bool:
+    """Check if any other node has a UDP outbound edge to this node."""
+    for peer_id in topology.nodes[node_id].peers:
+        edge = (min(node_id, peer_id), max(node_id, peer_id))
+        if topology.edge_transport.get(edge, "udp") == "udp":
+            return True
+    return False
 
 
 def generate_npubs_env(topology: SimTopology) -> str:

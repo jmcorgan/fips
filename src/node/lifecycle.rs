@@ -3,7 +3,7 @@
 use super::{Node, NodeError, NodeState};
 use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
-use crate::transport::{packet_channel, Link, LinkDirection, TransportAddr};
+use crate::transport::{packet_channel, Link, LinkDirection, TransportAddr, TransportId};
 use crate::upper::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
 use crate::node::wire::build_msg1;
 use crate::{NodeAddr, PeerIdentity};
@@ -89,133 +89,49 @@ impl Node {
 
         // Try addresses in priority order until one works
         for addr in peer_config.addresses_by_priority() {
-            // Find a transport matching this address type
-            let transport_id = match self.find_transport_for_type(&addr.transport) {
-                Some(id) => id,
-                None => {
-                    debug!(
-                        transport = %addr.transport,
-                        addr = %addr.addr,
-                        "No operational transport for address type"
-                    );
-                    continue;
-                }
-            };
-
-            // Allocate link ID and create link
-            let link_id = self.allocate_link_id();
-            let remote_addr = TransportAddr::from_string(&addr.addr);
-
-            // For UDP, links are immediately "connected" (connectionless)
-            // TODO: For connection-oriented transports, state would be Connecting
-            let link = Link::connectionless(
-                link_id,
-                transport_id,
-                remote_addr.clone(),
-                LinkDirection::Outbound,
-                Duration::from_millis(self.config.node.base_rtt_ms),
-            );
-
-            self.links.insert(link_id, link);
-
-            // Add reverse lookup for packet dispatch
-            self.addr_to_link
-                .insert((transport_id, remote_addr.clone()), link_id);
-
-            // Create connection in handshake phase (outbound knows expected identity)
-            let current_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let mut connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
-
-            // Allocate a session index for this handshake
-            let our_index = match self.index_allocator.allocate() {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(
-                        npub = %peer_config.npub,
-                        error = %e,
-                        "Failed to allocate session index"
-                    );
-                    // Clean up the link we just created
-                    self.links.remove(&link_id);
-                    self.addr_to_link.remove(&(transport_id, remote_addr));
-                    continue;
-                }
-            };
-
-            // Start the Noise handshake and get message 1
-            let our_keypair = self.identity.keypair();
-            let noise_msg1 = match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    warn!(
-                        npub = %peer_config.npub,
-                        error = %e,
-                        "Failed to start handshake"
-                    );
-                    // Clean up the index and link
-                    let _ = self.index_allocator.free(our_index);
-                    self.links.remove(&link_id);
-                    self.addr_to_link.remove(&(transport_id, remote_addr));
-                    continue;
-                }
-            };
-
-            // Set index and transport info on the connection
-            connection.set_our_index(our_index);
-            connection.set_transport_id(transport_id);
-            connection.set_source_addr(remote_addr.clone());
-
-            // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
-            let wire_msg1 = build_msg1(our_index, &noise_msg1);
-
-            debug!(
-                peer = %self.peer_display_name(&peer_node_addr),
-                transport = %addr.transport,
-                addr = %addr.addr,
-                link_id = %link_id,
-                our_index = %our_index,
-                "Peer connection initiated"
-            );
-
-            // Store msg1 for resend and schedule first resend
-            let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
-            connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
-
-            // Track in pending_outbound for msg2 dispatch
-            self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
-            self.connections.insert(link_id, connection);
-
-            // Send the wire format handshake message
-            if let Some(transport) = self.transports.get(&transport_id) {
-                match transport.send(&remote_addr, &wire_msg1).await {
-                    Ok(bytes) => {
-                        debug!(
-                            link_id = %link_id,
-                            our_index = %our_index,
-                            bytes,
-                            "Sent Noise handshake message 1 (wire format)"
-                        );
-                    }
+            // For Ethernet addresses ("interface/mac"), find the transport
+            // instance matching the interface name and parse the MAC.
+            let (transport_id, remote_addr) = if addr.transport == "ethernet" {
+                match self.resolve_ethernet_addr(&addr.addr) {
+                    Ok(result) => result,
                     Err(e) => {
-                        warn!(
-                            link_id = %link_id,
+                        debug!(
+                            transport = %addr.transport,
+                            addr = %addr.addr,
                             error = %e,
-                            "Failed to send handshake message"
+                            "Failed to resolve Ethernet address"
                         );
-                        // Mark connection as failed but don't remove it yet
-                        // The event loop can handle retry logic
-                        if let Some(conn) = self.connections.get_mut(&link_id) {
-                            conn.mark_failed();
-                        }
+                        continue;
                     }
+                }
+            } else {
+                // Find a transport matching this address type
+                let tid = match self.find_transport_for_type(&addr.transport) {
+                    Some(id) => id,
+                    None => {
+                        debug!(
+                            transport = %addr.transport,
+                            addr = %addr.addr,
+                            "No operational transport for address type"
+                        );
+                        continue;
+                    }
+                };
+                (tid, TransportAddr::from_string(&addr.addr))
+            };
+
+            match self.initiate_connection(transport_id, remote_addr, peer_identity).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    debug!(
+                        npub = %peer_config.npub,
+                        transport_id = %transport_id,
+                        error = %e,
+                        "Connection attempt failed, trying next address"
+                    );
+                    continue;
                 }
             }
-
-            // Successfully initiated connection via this address
-            return Ok(());
         }
 
         // No address worked
@@ -223,6 +139,186 @@ impl Node {
             "no operational transport for any of {}'s addresses",
             peer_config.npub
         )))
+    }
+
+    /// Initiate a connection to a peer on a specific transport and address.
+    ///
+    /// Allocates a link, starts the Noise IK handshake, sends msg1, and
+    /// registers the connection for msg2 dispatch. Used by both static peer
+    /// config and transport discovery auto-connect paths.
+    pub(super) async fn initiate_connection(
+        &mut self,
+        transport_id: TransportId,
+        remote_addr: TransportAddr,
+        peer_identity: PeerIdentity,
+    ) -> Result<(), NodeError> {
+        let peer_node_addr = *peer_identity.node_addr();
+
+        // Allocate link ID and create link
+        let link_id = self.allocate_link_id();
+
+        let link = Link::connectionless(
+            link_id,
+            transport_id,
+            remote_addr.clone(),
+            LinkDirection::Outbound,
+            Duration::from_millis(self.config.node.base_rtt_ms),
+        );
+
+        self.links.insert(link_id, link);
+
+        // Add reverse lookup for packet dispatch
+        self.addr_to_link
+            .insert((transport_id, remote_addr.clone()), link_id);
+
+        // Create connection in handshake phase (outbound knows expected identity)
+        let current_time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
+
+        // Allocate a session index for this handshake
+        let our_index = match self.index_allocator.allocate() {
+            Ok(idx) => idx,
+            Err(e) => {
+                // Clean up the link we just created
+                self.links.remove(&link_id);
+                self.addr_to_link.remove(&(transport_id, remote_addr));
+                return Err(NodeError::IndexAllocationFailed(e.to_string()));
+            }
+        };
+
+        // Start the Noise handshake and get message 1
+        let our_keypair = self.identity.keypair();
+        let noise_msg1 = match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
+            Ok(msg) => msg,
+            Err(e) => {
+                // Clean up the index and link
+                let _ = self.index_allocator.free(our_index);
+                self.links.remove(&link_id);
+                self.addr_to_link.remove(&(transport_id, remote_addr));
+                return Err(NodeError::HandshakeFailed(e.to_string()));
+            }
+        };
+
+        // Set index and transport info on the connection
+        connection.set_our_index(our_index);
+        connection.set_transport_id(transport_id);
+        connection.set_source_addr(remote_addr.clone());
+
+        // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
+        let wire_msg1 = build_msg1(our_index, &noise_msg1);
+
+        debug!(
+            peer = %self.peer_display_name(&peer_node_addr),
+            transport_id = %transport_id,
+            remote_addr = %remote_addr,
+            link_id = %link_id,
+            our_index = %our_index,
+            "Connection initiated"
+        );
+
+        // Store msg1 for resend and schedule first resend
+        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
+
+        // Track in pending_outbound for msg2 dispatch
+        self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
+        self.connections.insert(link_id, connection);
+
+        // Send the wire format handshake message
+        if let Some(transport) = self.transports.get(&transport_id) {
+            match transport.send(&remote_addr, &wire_msg1).await {
+                Ok(bytes) => {
+                    debug!(
+                        link_id = %link_id,
+                        our_index = %our_index,
+                        bytes,
+                        "Sent Noise handshake message 1 (wire format)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        link_id = %link_id,
+                        error = %e,
+                        "Failed to send handshake message"
+                    );
+                    // Mark connection as failed but don't remove it yet
+                    // The event loop can handle retry logic
+                    if let Some(conn) = self.connections.get_mut(&link_id) {
+                        conn.mark_failed();
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Poll all transports for discovered peers and auto-connect.
+    ///
+    /// Called from the tick handler. Iterates operational transports,
+    /// drains their discovery buffers, and initiates connections to
+    /// newly discovered peers (if auto_connect is enabled).
+    pub(super) async fn poll_transport_discovery(&mut self) {
+        // Collect discoveries first to avoid borrow conflict with self
+        let mut to_connect = Vec::new();
+
+        for (transport_id, transport) in &self.transports {
+            if !transport.is_operational() {
+                continue;
+            }
+            if !transport.auto_connect() {
+                // Still drain the buffer so it doesn't grow unbounded
+                let _ = transport.discover();
+                continue;
+            }
+            let discovered = match transport.discover() {
+                Ok(peers) => peers,
+                Err(_) => continue,
+            };
+            for peer in discovered {
+                let pubkey = match peer.pubkey_hint {
+                    Some(pk) => pk,
+                    None => continue,
+                };
+                let identity = PeerIdentity::from_pubkey(pubkey);
+                let node_addr = *identity.node_addr();
+
+                // Skip self
+                if node_addr == *self.identity.node_addr() {
+                    continue;
+                }
+                // Skip if already connected
+                if self.peers.contains_key(&node_addr) {
+                    continue;
+                }
+                // Skip if connection already in progress
+                let connecting = self.connections.values().any(|c| {
+                    c.expected_identity()
+                        .map(|id| id.node_addr() == &node_addr)
+                        .unwrap_or(false)
+                });
+                if connecting {
+                    continue;
+                }
+
+                to_connect.push((*transport_id, peer.addr, identity));
+            }
+        }
+
+        for (transport_id, remote_addr, identity) in to_connect {
+            info!(
+                peer = %self.peer_display_name(identity.node_addr()),
+                transport_id = %transport_id,
+                remote_addr = %remote_addr,
+                "Auto-connecting to discovered peer"
+            );
+            if let Err(e) = self.initiate_connection(transport_id, remote_addr, identity).await {
+                warn!(error = %e, "Failed to auto-connect to discovered peer");
+            }
+        }
     }
 
     // === State Transitions ===

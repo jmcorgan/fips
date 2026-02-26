@@ -1,0 +1,46 @@
+# Ethernet-only: 4-node ring, all Ethernet transport
+#
+# All links use raw Ethernet (AF_PACKET) over veth pairs. Nodes
+# discover each other via beacons (no static peer config). Tests
+# that Ethernet transport and beacon discovery work end-to-end.
+#
+# Topology:
+#
+#   n01 ---eth--- n02
+#    |             |
+#   eth           eth
+#    |             |
+#   n04 ---eth--- n03
+
+scenario:
+  name: "ethernet-only"
+  seed: 42
+  duration_secs: 90
+
+topology:
+  algorithm: explicit
+  num_nodes: 4
+  default_transport: ethernet
+  params:
+    adjacency:
+      - [n01, n02]
+      - [n02, n03]
+      - [n03, n04]
+      - [n04, n01]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 5]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.5]
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: false
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"

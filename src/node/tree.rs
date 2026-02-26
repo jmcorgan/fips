@@ -302,10 +302,10 @@ impl Node {
         let now = std::time::Instant::now();
         let interval = std::time::Duration::from_secs(interval_secs);
 
-        if let Some(last) = self.last_parent_reeval {
-            if now.duration_since(last) < interval {
-                return;
-            }
+        if let Some(last) = self.last_parent_reeval
+            && now.duration_since(last) < interval
+        {
+            return;
         }
 
         self.last_parent_reeval = Some(now);

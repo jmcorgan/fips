@@ -18,12 +18,41 @@ class SimNode:
     nsec: str  # 64-char hex
     npub: str  # bech32 npub1...
     peers: list[str] = field(default_factory=list)
+    # MAC addresses for Ethernet veth interfaces, keyed by peer_id
+    ethernet_macs: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class SimTopology:
     nodes: dict[str, SimNode] = field(default_factory=dict)
     edges: set[tuple[str, str]] = field(default_factory=set)
+    # Per-edge transport type; edges not in this dict default to "udp"
+    edge_transport: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def transport_for_edge(self, a: str, b: str) -> str:
+        """Get the transport type for an edge (defaults to 'udp')."""
+        edge = _make_edge(a, b)
+        return self.edge_transport.get(edge, "udp")
+
+    def ethernet_edges(self) -> list[tuple[str, str]]:
+        """Return all edges using Ethernet transport."""
+        return [e for e, t in self.edge_transport.items() if t == "ethernet"]
+
+    def has_ethernet(self) -> bool:
+        """Check if any edges use Ethernet transport."""
+        return any(t == "ethernet" for t in self.edge_transport.values())
+
+    def ethernet_interfaces(self, node_id: str) -> list[str]:
+        """Return the veth interface names for a node's Ethernet edges."""
+        ifaces = []
+        for (a, b), transport in self.edge_transport.items():
+            if transport != "ethernet":
+                continue
+            if a == node_id:
+                ifaces.append(veth_interface_name(a, b))
+            elif b == node_id:
+                ifaces.append(veth_interface_name(b, a))
+        return sorted(ifaces)
 
     def is_connected(self) -> bool:
         """BFS connectivity check."""
@@ -61,20 +90,35 @@ class SimTopology:
         return f"fips-node-{node_id}"
 
     def directed_outbound(self) -> dict[str, list[str]]:
-        """Assign each edge to exactly one node for outbound connection.
+        """Assign each UDP edge to exactly one node for outbound connection.
 
         Returns a mapping from node_id to the list of peers that node
         should connect to (outbound only). Every edge appears in exactly
         one direction, ensuring auto-reconnect is testable — if B goes
         down, only A (the outbound owner) will attempt to reconnect.
 
+        Ethernet edges are excluded — they use beacon discovery instead
+        of static peer configuration.
+
         Strategy: BFS spanning tree edges go parent→child. Non-tree
         edges go from the lower node ID to the higher. This guarantees
         every node is reachable via at least one inbound connection.
         """
+        # Only consider UDP edges for static peer config
+        udp_edges = {
+            e for e in self.edges
+            if self.edge_transport.get(e, "udp") == "udp"
+        }
+
         outbound: dict[str, list[str]] = {nid: [] for nid in self.nodes}
 
-        # BFS spanning tree from first node
+        # Build UDP-only adjacency for BFS
+        udp_adj: dict[str, list[str]] = {nid: [] for nid in self.nodes}
+        for a, b in udp_edges:
+            udp_adj[a].append(b)
+            udp_adj[b].append(a)
+
+        # BFS spanning tree from first node (over UDP edges only)
         root = min(self.nodes)
         visited: set[str] = set()
         tree_edges: set[tuple[str, str]] = set()
@@ -82,15 +126,15 @@ class SimTopology:
         visited.add(root)
         while queue:
             node = queue.popleft()
-            for peer in self.nodes[node].peers:
+            for peer in udp_adj[node]:
                 if peer not in visited:
                     visited.add(peer)
                     queue.append(peer)
                     tree_edges.add((node, peer))  # parent → child
                     outbound[node].append(peer)
 
-        # Non-tree edges: lower ID → higher ID
-        for a, b in self.edges:
+        # Non-tree UDP edges: lower ID → higher ID
+        for a, b in udp_edges:
             if (a, b) not in tree_edges and (b, a) not in tree_edges:
                 outbound[a].append(b)  # a < b by _make_edge convention
 
@@ -134,7 +178,9 @@ def generate_topology(
         adjacency = config.params.get("adjacency")
         if not adjacency:
             raise ValueError("explicit topology requires params.adjacency")
-        edges = _generate_explicit(adjacency)
+        edges, edge_transport = _generate_explicit(
+            adjacency, config.default_transport
+        )
         # Validate all referenced nodes exist
         for a, b in edges:
             if a not in nodes:
@@ -144,12 +190,16 @@ def generate_topology(
     else:
         raise ValueError(f"Unknown algorithm: {config.algorithm}")
 
+    # For non-explicit topologies, all edges use the default transport
+    if config.algorithm != "explicit":
+        edge_transport = {e: config.default_transport for e in edges}
+
     # Build peer lists from edges
     for a, b in edges:
         nodes[a].peers.append(b)
         nodes[b].peers.append(a)
 
-    topo = SimTopology(nodes=nodes, edges=edges)
+    topo = SimTopology(nodes=nodes, edges=edges, edge_transport=edge_transport)
 
     # Connectivity check with retry
     if config.ensure_connected:
@@ -223,19 +273,42 @@ def _generate_erdos_renyi(
     return edges
 
 
-def _generate_explicit(adjacency: list) -> set[tuple[str, str]]:
+def _generate_explicit(
+    adjacency: list, default_transport: str = "udp"
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
     """Build edges from an explicit adjacency list.
 
-    Each entry should be a 2-element list like ["n01", "n02"].
+    Each entry is a 2-element list ``[nodeA, nodeB]`` (uses default
+    transport) or a 3-element list ``[nodeA, nodeB, transport]``.
+
+    Returns ``(edges, edge_transport)`` where ``edge_transport`` maps
+    each edge to its transport type.
     """
     edges = set()
-    for i, pair in enumerate(adjacency):
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+    edge_transport: dict[tuple[str, str], str] = {}
+    for i, entry in enumerate(adjacency):
+        if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
             raise ValueError(
-                f"explicit adjacency[{i}]: expected [nodeA, nodeB], got {pair}"
+                f"explicit adjacency[{i}]: expected [nodeA, nodeB] or "
+                f"[nodeA, nodeB, transport], got {entry}"
             )
-        edges.add(_make_edge(str(pair[0]), str(pair[1])))
-    return edges
+        edge = _make_edge(str(entry[0]), str(entry[1]))
+        edges.add(edge)
+        transport = str(entry[2]) if len(entry) == 3 else default_transport
+        edge_transport[edge] = transport
+    return edges, edge_transport
+
+
+def veth_interface_name(local: str, peer: str) -> str:
+    """Generate the veth interface name inside a container.
+
+    Format: ``ve-{local}-{peer}`` (max 15 chars for IFNAMSIZ).
+    For typical node IDs like "n01", this yields "ve-n01-n02" (10 chars).
+    """
+    name = f"ve-{local}-{peer}"
+    if len(name) > 15:
+        raise ValueError(f"veth interface name too long: {name!r} ({len(name)} > 15)")
+    return name
 
 
 def _make_edge(a: str, b: str) -> tuple[str, str]:

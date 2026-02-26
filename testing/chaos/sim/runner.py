@@ -21,6 +21,7 @@ from .nodes import NodeManager
 from .scenario import Scenario
 from .topology import SimTopology, generate_topology
 from .traffic import TrafficManager
+from .veth import VethManager
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class SimRunner:
         self._down_nodes: set[str] = set()
 
         # Managers (initialized during setup)
+        self.veth_mgr: VethManager | None = None
         self.netem_mgr: NetemManager | None = None
         self.link_mgr: LinkManager | None = None
         self.traffic_mgr: TrafficManager | None = None
@@ -125,7 +127,17 @@ class SimRunner:
         log.info("Starting %d containers...", len(self.topology.nodes))
         docker_compose(self.compose_file, ["up", "-d"])
 
-        # 6. Initialize managers
+        # 6. Set up veth pairs for Ethernet edges (before netem)
+        #
+        # The entrypoint script waits for configured Ethernet interfaces
+        # to appear before starting FIPS, so we just need to create the
+        # veth pairs promptly after containers are running.
+        if self.topology.has_ethernet():
+            self.veth_mgr = VethManager(self.topology)
+            log.info("Setting up Ethernet veth pairs...")
+            self.veth_mgr.setup_all()
+
+        # 7. Initialize managers
         if s.netem.enabled:
             bw = s.bandwidth if s.bandwidth.enabled else None
             self.netem_mgr = NetemManager(self.topology, s.netem, self.rng, bandwidth=bw)
@@ -147,6 +159,7 @@ class SimRunner:
             self.node_mgr = NodeManager(
                 self.topology, s.node_churn, self.rng,
                 netem_mgr=self.netem_mgr, down_nodes=self._down_nodes,
+                veth_mgr=self.veth_mgr,
             )
 
     def _warmup(self):
@@ -268,6 +281,11 @@ class SimRunner:
                 duration_secs=self.scenario.duration_secs,
                 topology=self.topology,
             )
+
+            # Clean up veth pairs
+            if self.veth_mgr:
+                log.info("Cleaning up veth pairs...")
+                self.veth_mgr.teardown_all()
 
             # Stop containers
             log.info("Stopping containers...")

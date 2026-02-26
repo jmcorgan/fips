@@ -28,6 +28,8 @@ use crate::transport::{
     Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
+#[cfg(target_os = "linux")]
+use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
@@ -107,6 +109,12 @@ pub enum NodeError {
 
     #[error("TUN error: {0}")]
     Tun(#[from] TunError),
+
+    #[error("index allocation failed: {0}")]
+    IndexAllocationFailed(String),
+
+    #[error("handshake failed: {0}")]
+    HandshakeFailed(String),
 }
 
 /// Node operational state.
@@ -570,8 +578,25 @@ impl Node {
             transports.push(TransportHandle::Udp(udp));
         }
 
-        // Future transports follow same pattern:
-        // for (name, tcp_config) in self.config.transports.tcp.iter() { ... }
+        // Create Ethernet transport instances
+        #[cfg(target_os = "linux")]
+        {
+            let eth_instances: Vec<_> = self
+                .config
+                .transports
+                .ethernet
+                .iter()
+                .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+                .collect();
+
+            let xonly = self.identity.pubkey();
+            for (name, eth_config) in eth_instances {
+                let transport_id = self.allocate_transport_id();
+                let mut eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
+                eth.set_local_pubkey(xonly);
+                transports.push(TransportHandle::Ethernet(eth));
+            }
+        }
 
         transports
     }
@@ -584,6 +609,55 @@ impl Node {
                 handle.transport_type().name == transport_type && handle.is_operational()
             })
             .map(|(id, _)| *id)
+    }
+
+    /// Resolve an Ethernet peer address ("interface/mac") to a transport ID
+    /// and binary TransportAddr.
+    ///
+    /// Finds the Ethernet transport instance bound to the named interface
+    /// and parses the MAC portion into a 6-byte TransportAddr.
+    fn resolve_ethernet_addr(
+        &self,
+        addr_str: &str,
+    ) -> Result<(TransportId, TransportAddr), NodeError> {
+        let (iface, mac_str) = addr_str.split_once('/').ok_or_else(|| {
+            NodeError::NoTransportForType(format!(
+                "invalid Ethernet address format '{}': expected 'interface/mac'",
+                addr_str
+            ))
+        })?;
+
+        // Find the Ethernet transport bound to this interface
+        let transport_id = self
+            .transports
+            .iter()
+            .find(|(_, handle)| {
+                handle.transport_type().name == "ethernet"
+                    && handle.is_operational()
+                    && handle.interface_name() == Some(iface)
+            })
+            .map(|(id, _)| *id)
+            .ok_or_else(|| {
+                NodeError::NoTransportForType(format!(
+                    "no operational Ethernet transport for interface '{}'",
+                    iface
+                ))
+            })?;
+
+        // Parse the MAC address
+        #[cfg(target_os = "linux")]
+        let mac = crate::transport::ethernet::parse_mac_string(mac_str).map_err(|e| {
+            NodeError::NoTransportForType(format!("invalid MAC in '{}': {}", addr_str, e))
+        })?;
+        #[cfg(not(target_os = "linux"))]
+        let mac: [u8; 6] = {
+            let _ = mac_str;
+            return Err(NodeError::NoTransportForType(
+                "Ethernet transport not available on this platform".into(),
+            ));
+        };
+
+        Ok((transport_id, TransportAddr::from_bytes(&mac)))
     }
 
     // === Identity Accessors ===
@@ -640,18 +714,24 @@ impl Node {
         crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
     }
 
-    /// Get the transport MTU from configuration.
+    /// Get the transport MTU for a specific transport.
     ///
-    /// Returns the MTU of the first configured UDP transport, or 1280
-    /// (IPv6 minimum) as fallback.
+    /// When called without a specific transport context, returns the MTU
+    /// of the first operational transport, or 1280 (IPv6 minimum) as
+    /// fallback. This is used for initial TUN configuration where a
+    /// specific transport isn't yet known.
     pub fn transport_mtu(&self) -> u16 {
-        self.config
-            .transports
-            .udp
-            .iter()
-            .next()
-            .map(|(_, cfg)| cfg.mtu())
-            .unwrap_or(1280)
+        // Prefer the MTU from the first operational transport
+        for handle in self.transports.values() {
+            if handle.is_operational() {
+                return handle.mtu();
+            }
+        }
+        // Fallback to config: try UDP first, then Ethernet
+        if let Some((_, cfg)) = self.config.transports.udp.iter().next() {
+            return cfg.mtu();
+        }
+        1280
     }
 
     // === State ===

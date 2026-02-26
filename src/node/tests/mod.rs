@@ -7,6 +7,8 @@ use std::time::Duration;
 mod bloom;
 mod disconnect;
 mod discovery;
+#[cfg(target_os = "linux")]
+mod ethernet;
 mod forwarding;
 mod handshake;
 mod routing;

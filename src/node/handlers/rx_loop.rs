@@ -117,6 +117,7 @@ impl Node {
                     self.check_session_mmp_reports().await;
                     self.check_link_heartbeats().await;
                     self.purge_stale_lookups(now_ms);
+                    self.poll_transport_discovery().await;
                 }
             }
         }

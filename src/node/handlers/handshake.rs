@@ -26,6 +26,14 @@ impl Node {
             return;
         }
 
+        // Check if this transport accepts inbound connections
+        if let Some(transport) = self.transports.get(&packet.transport_id)
+            && !transport.accept_connections()
+        {
+            self.msg1_rate_limiter.complete_handshake();
+            return;
+        }
+
         // Parse header
         let header = match Msg1Header::parse(&packet.data) {
             Some(h) => h,

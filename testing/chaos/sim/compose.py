@@ -25,6 +25,7 @@ x-fips-common: &fips-common
     context: ../..
   cap_add:
     - NET_ADMIN
+    - NET_RAW
   devices:
     - /dev/net/tun:/dev/net/tun
   sysctls:

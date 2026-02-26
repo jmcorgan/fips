@@ -42,11 +42,13 @@ class NodeManager:
         rng: random.Random,
         netem_mgr=None,
         down_nodes: set[str] | None = None,
+        veth_mgr=None,
     ):
         self.topology = topology
         self.config = config
         self.rng = rng
         self.netem_mgr = netem_mgr
+        self.veth_mgr = veth_mgr
         self.down_nodes = down_nodes or set()
         self.node_states: dict[str, NodeState] = {
             nid: NodeState(node_id=nid) for nid in topology.nodes
@@ -149,10 +151,15 @@ class NodeManager:
 
         log.info("Node STARTED: %s (was down %.0fs)", node_id, down_for)
 
+        # Re-create veth pairs (container restart destroys netns)
+        if self.veth_mgr:
+            time.sleep(1)
+            self.veth_mgr.setup_node(node_id)
+
         # Re-apply netem after a brief delay for the container to initialize
         if self.netem_mgr:
-            # Small delay for container networking to be ready
-            time.sleep(1)
+            if not self.veth_mgr:
+                time.sleep(1)
             self.netem_mgr.setup_node(node_id)
 
     def _would_disconnect(self, node_id: str) -> bool:

@@ -242,6 +242,76 @@ Actual buffer sizes are logged at startup:
 UDP transport started local_addr=0.0.0.0:4000 recv_buf=4194304 send_buf=4194304
 ```
 
+## Ethernet: The Local Network Transport
+
+For nodes on the same LAN segment, raw Ethernet provides a direct transport
+without IP/UDP overhead — 28 bytes more FIPS payload per frame compared to
+UDP (1500 vs 1472 MTU).
+
+- **No IP dependency**: Operates below the IP layer. Nodes on the same
+  Ethernet segment can communicate without IP addresses or routing
+  infrastructure
+- **Broadcast discovery**: Nodes discover each other via periodic beacon
+  broadcasts on the shared medium, with no static peer configuration required
+- **Higher MTU**: Standard Ethernet frames carry 1500 bytes of payload,
+  yielding an effective FIPS MTU of 1499 after the frame type prefix
+- **Matches FIPS model**: Like UDP, Ethernet is connectionless and
+  unreliable — datagrams flow immediately to any MAC address on the segment
+
+### Implementation
+
+The Ethernet transport uses Linux AF_PACKET sockets in SOCK_DGRAM mode with
+EtherType 0x88B5 (IEEE 802 experimental/local use range). SOCK_DGRAM mode
+lets the kernel handle Ethernet header construction and parsing — the
+transport deals only with payloads and MAC addresses.
+
+A 1-byte frame type prefix disambiguates data frames (0x00) from discovery
+beacons (0x01) on the receive path. This costs one byte of MTU but allows
+beacons and data to share the same EtherType and socket.
+
+| Property | Value |
+| -------- | ----- |
+| EtherType | 0x88B5 (IEEE 802 experimental) |
+| Socket type | AF_PACKET SOCK_DGRAM |
+| Frame type prefix | 0x00 = data, 0x01 = beacon |
+| Effective MTU | Interface MTU - 1 (typically 1499) |
+| Addressing | 6-byte MAC address |
+| Platform | Linux only (`CAP_NET_RAW` required) |
+
+### Beacon Discovery
+
+Ethernet nodes discover peers via broadcast beacons sent to
+ff:ff:ff:ff:ff:ff. Each beacon is a 34-byte frame containing the sender's
+x-only public key. Receiving nodes extract the MAC source address from the
+frame and the public key from the payload, then report the discovered peer
+to FMP.
+
+Four configuration flags control discovery behavior:
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `discovery` | true | Listen for beacons from other nodes |
+| `announce` | false | Broadcast beacons periodically |
+| `auto_connect` | false | Initiate handshakes to discovered peers |
+| `accept_connections` | false | Accept inbound handshake attempts |
+
+A typical discoverable node sets `announce: true`, `auto_connect: true`, and
+`accept_connections: true`. A passive listener uses just `discovery: true` to
+observe the network without announcing itself.
+
+### WiFi Compatibility
+
+WiFi interfaces in infrastructure (managed) mode work transparently for
+unicast — the mac80211 subsystem handles frame translation between 802.11
+and 802.3. Broadcast beacon discovery is unreliable in managed mode because
+access points commonly isolate clients from each other's broadcast traffic.
+
+Startup logging:
+
+```text
+Ethernet transport started name=eth0 interface=eth0 mac=aa:bb:cc:dd:ee:ff mtu=1499 if_mtu=1500
+```
+
 ## Discovery
 
 Discovery determines that a FIPS-capable endpoint is reachable at a given
@@ -255,7 +325,7 @@ FMP handles both cases uniformly: with discovery, it waits for events then
 initiates link setup; without discovery, it initiates link setup directly to
 configured addresses.
 
-### Local/Medium Discovery *(future direction)*
+### Local/Medium Discovery
 
 For transports where endpoints share a physical or link-layer medium — LAN
 broadcast, radio, BLE — discovery uses beacon and query mechanisms:
@@ -289,6 +359,7 @@ is reachable at UDP 1.2.3.4:9735, then establishes the link over the UDP
 transport.
 
 Key properties:
+
 - Identity is built in — Nostr events are signed, so discovery information
   is authenticated
 - Relay selection acts as scoping — which relays a node publishes to and
@@ -298,10 +369,12 @@ Key properties:
 
 ### Current State
 
-> **Implemented**: Peer addresses come from YAML configuration. The
-> transport trait's `discover()` method exists but returns an empty list for
-> UDP. Transport-level discovery (beacon/query, Nostr relay) is not yet
-> implemented.
+> **Implemented**: UDP peers are configured via YAML. Ethernet peers are
+> discovered via beacon broadcast — the `discover()` trait method returns
+> newly seen endpoints, and per-transport `auto_connect()` /
+> `accept_connections()` policies control whether discovered peers are
+> connected automatically or require explicit configuration. Nostr relay
+> discovery is not yet implemented.
 
 ## Transport Interface
 
@@ -312,6 +385,7 @@ The transport interface defines what every transport driver must provide.
 ```text
 transport_id()        → TransportId         Unique identifier for this transport instance
 transport_type()      → &TransportType      Static metadata (name, connection-oriented, reliable)
+name()                → Option<&str>        Instance name (for multi-instance transports)
 state()               → TransportState      Current lifecycle state
 mtu()                 → u16                 Transport-wide default MTU
 link_mtu(addr)        → u16                 Per-link MTU (defaults to mtu())
@@ -319,6 +393,8 @@ start()               → lifecycle           Bring transport up (bind socket, o
 stop()                → lifecycle           Bring transport down
 send(addr, data)      → delivery            Send datagram to transport address
 discover()            → Vec<DiscoveredPeer> Report discovered FIPS endpoints (optional)
+auto_connect()        → bool                Auto-connect discovered peers (default: false)
+accept_connections()  → bool                Accept inbound handshakes (default: true)
 ```
 
 ### Receive Path
@@ -330,6 +406,7 @@ node's main event loop reads from the corresponding receiver, which
 aggregates datagrams from all active transports into a single stream.
 
 Each inbound datagram carries:
+
 - **transport_id** — which transport it arrived on
 - **remote_addr** — the transport address of the sender
 - **data** — the raw datagram bytes
@@ -373,7 +450,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, async send/receive, configurable MTU |
 | TCP/IP | Future direction | Requires stream framing, TCP-over-TCP concern |
-| Ethernet | Future direction | AF_PACKET raw frames, EtherType TBD |
+| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x88B5, beacon discovery, Linux only |
 | WiFi | Future direction | Infrastructure mode = Ethernet driver |
 | Tor | Future direction | High latency, .onion addressing |
 | BLE | Future direction | ATT_MTU negotiation, per-link MTU |

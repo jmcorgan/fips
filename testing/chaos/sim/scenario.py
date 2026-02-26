@@ -22,6 +22,9 @@ class Range:
             raise ValueError(f"{name}: min ({self.min}) must be >= 0")
 
 
+VALID_TRANSPORTS = ("udp", "ethernet")
+
+
 @dataclass
 class TopologyConfig:
     num_nodes: int = 10
@@ -30,6 +33,7 @@ class TopologyConfig:
     ensure_connected: bool = True
     subnet: str = "172.20.0.0/24"
     ip_start: int = 10
+    default_transport: str = "udp"
 
 
 @dataclass
@@ -186,6 +190,7 @@ def load_scenario(path: str) -> Scenario:
     s.topology.ensure_connected = tc.get("ensure_connected", True)
     s.topology.subnet = tc.get("subnet", "172.20.0.0/24")
     s.topology.ip_start = int(tc.get("ip_start", 10))
+    s.topology.default_transport = tc.get("default_transport", "udp")
 
     # Netem section
     nc = raw.get("netem", {})
@@ -279,17 +284,30 @@ def _validate(s: Scenario):
         raise ValueError("topology.num_nodes must be <= 250 (subnet limit)")
     if s.topology.algorithm not in ("random_geometric", "erdos_renyi", "chain", "explicit"):
         raise ValueError(f"Unknown topology algorithm: {s.topology.algorithm}")
+    if s.topology.default_transport not in VALID_TRANSPORTS:
+        raise ValueError(
+            f"topology.default_transport: '{s.topology.default_transport}' "
+            f"not in {VALID_TRANSPORTS}"
+        )
     if s.topology.algorithm == "explicit":
         adj = s.topology.params.get("adjacency")
         if not adj or not isinstance(adj, list):
             raise ValueError("explicit topology requires params.adjacency list")
         node_ids = set()
-        for i, pair in enumerate(adj):
-            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+        for i, entry in enumerate(adj):
+            if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
                 raise ValueError(
-                    f"explicit adjacency[{i}]: expected [nodeA, nodeB], got {pair}"
+                    f"explicit adjacency[{i}]: expected [nodeA, nodeB] or "
+                    f"[nodeA, nodeB, transport], got {entry}"
                 )
-            node_ids.update(str(p) for p in pair)
+            node_ids.update(str(p) for p in entry[:2])
+            if len(entry) == 3:
+                transport = str(entry[2])
+                if transport not in VALID_TRANSPORTS:
+                    raise ValueError(
+                        f"explicit adjacency[{i}]: transport '{transport}' "
+                        f"not in {VALID_TRANSPORTS}"
+                    )
         if len(node_ids) != s.topology.num_nodes:
             raise ValueError(
                 f"explicit adjacency references {len(node_ids)} nodes "

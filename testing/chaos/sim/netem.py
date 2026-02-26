@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from .docker_exec import docker_exec_quiet, is_container_running
 from .scenario import BandwidthConfig, LinkPolicyOverride, NetemConfig, NetemPolicy
-from .topology import SimTopology
+from .topology import SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,15 @@ class LinkNetemState:
     rate_mbit: int = 0  # 0 = unlimited (1gbit default)
 
 
+@dataclass
+class VethNetemState:
+    """Tracks the netem state for a veth interface (Ethernet link direction)."""
+
+    container: str
+    iface: str  # e.g., "ve-n01-n02"
+    params: NetemParams = field(default_factory=NetemParams)
+
+
 class NetemManager:
     """Manages per-link netem impairment across all containers."""
 
@@ -80,8 +89,10 @@ class NetemManager:
         self.topology = topology
         self.config = config
         self.rng = rng
-        # Per-container, per-dest-ip netem state
+        # Per-container, per-dest-ip netem state (UDP links on eth0)
         self.states: dict[str, dict[str, LinkNetemState]] = {}
+        # Per-container, per-veth netem state (Ethernet links)
+        self.veth_states: dict[str, dict[str, VethNetemState]] = {}
         # Nodes currently down (updated by NodeManager) — skip tc ops on these
         self.down_nodes: set[str] = set()
         # Per-edge bandwidth: (node_a, node_b) -> rate in mbit
@@ -127,7 +138,11 @@ class NetemManager:
         return self.config.default_policy
 
     def setup_initial(self):
-        """Set up HTB qdiscs and initial netem on all containers."""
+        """Set up HTB qdiscs and initial netem on all containers.
+
+        UDP peers use HTB + u32 filters on eth0. Ethernet peers use a
+        simple root netem qdisc on their dedicated veth interface.
+        """
         if self._edge_rates:
             log.info("Bandwidth pacing enabled (%d edges with rate limits)",
                      len(self._edge_rates) // 2)
@@ -135,69 +150,103 @@ class NetemManager:
         for node_id in sorted(self.topology.nodes):
             node = self.topology.nodes[node_id]
             container = self.topology.container_name(node_id)
-            peer_ips = {}
+
+            # Split peers by transport type
+            udp_peers = {}
+            eth_peers = []
             for peer_id in sorted(node.peers):
-                peer_ips[peer_id] = self.topology.nodes[peer_id].docker_ip
+                transport = self.topology.transport_for_edge(node_id, peer_id)
+                if transport == "ethernet":
+                    eth_peers.append(peer_id)
+                else:
+                    udp_peers[peer_id] = self.topology.nodes[peer_id].docker_ip
 
-            if not peer_ips:
-                continue
-
-            # Build all tc commands for this container
-            cmds = [f"tc qdisc del dev {IFACE} root 2>/dev/null || true"]
-            cmds.append(
-                f"tc qdisc add dev {IFACE} root handle 1: htb default 99"
-            )
-            cmds.append(
-                f"tc class add dev {IFACE} parent 1: classid 1:99 htb rate 1gbit"
-            )
-
-            container_states = {}
-
-            for idx, (peer_id, dest_ip) in enumerate(peer_ips.items(), start=1):
-                class_id = f"1:{idx}"
-                netem_handle = f"{idx + 10}:"
-
-                # Sample initial params (per-edge override or default policy)
-                policy = self._policy_for_edge(node_id, peer_id)
-                params = self._sample_policy(policy)
-
-                rate = self._htb_rate(node_id, peer_id)
-                rate_mbit = self._edge_rates.get((node_id, peer_id), 0)
+            # --- UDP peers: HTB + u32 on eth0 ---
+            if udp_peers:
+                cmds = [f"tc qdisc del dev {IFACE} root 2>/dev/null || true"]
                 cmds.append(
-                    f"tc class add dev {IFACE} parent 1: classid {class_id} htb rate {rate}"
+                    f"tc qdisc add dev {IFACE} root handle 1: htb default 99"
                 )
                 cmds.append(
-                    f"tc qdisc add dev {IFACE} parent {class_id} "
-                    f"handle {netem_handle} netem {params.to_tc_args()}"
-                )
-                cmds.append(
-                    f"tc filter add dev {IFACE} parent 1: protocol ip "
-                    f"prio {idx} u32 match ip dst {dest_ip}/32 flowid {class_id}"
+                    f"tc class add dev {IFACE} parent 1: classid 1:99 htb rate 1gbit"
                 )
 
-                state = LinkNetemState(
-                    container=container,
-                    dest_ip=dest_ip,
-                    class_id=class_id,
-                    netem_handle=netem_handle,
-                    params=params,
-                    rate_mbit=rate_mbit,
-                )
-                container_states[dest_ip] = state
+                container_states = {}
 
-            # Execute all commands in one docker exec
-            full_cmd = " && ".join(cmds)
-            result = docker_exec_quiet(container, full_cmd, timeout=30)
-            if result is not None:
+                for idx, (peer_id, dest_ip) in enumerate(udp_peers.items(), start=1):
+                    class_id = f"1:{idx}"
+                    netem_handle = f"{idx + 10}:"
+
+                    policy = self._policy_for_edge(node_id, peer_id)
+                    params = self._sample_policy(policy)
+
+                    rate = self._htb_rate(node_id, peer_id)
+                    rate_mbit = self._edge_rates.get((node_id, peer_id), 0)
+                    cmds.append(
+                        f"tc class add dev {IFACE} parent 1: classid {class_id} htb rate {rate}"
+                    )
+                    cmds.append(
+                        f"tc qdisc add dev {IFACE} parent {class_id} "
+                        f"handle {netem_handle} netem {params.to_tc_args()}"
+                    )
+                    cmds.append(
+                        f"tc filter add dev {IFACE} parent 1: protocol ip "
+                        f"prio {idx} u32 match ip dst {dest_ip}/32 flowid {class_id}"
+                    )
+
+                    state = LinkNetemState(
+                        container=container,
+                        dest_ip=dest_ip,
+                        class_id=class_id,
+                        netem_handle=netem_handle,
+                        params=params,
+                        rate_mbit=rate_mbit,
+                    )
+                    container_states[dest_ip] = state
+
+                full_cmd = " && ".join(cmds)
+                result = docker_exec_quiet(container, full_cmd, timeout=30)
+                if result is not None:
+                    log.info(
+                        "Configured per-link netem on %s (%d UDP peers)",
+                        container,
+                        len(udp_peers),
+                    )
+                else:
+                    log.warning("Failed to configure netem on %s", container)
+
+                self.states[container] = container_states
+
+            # --- Ethernet peers: simple netem on veth ---
+            if eth_peers:
+                container_veth_states = {}
+                for peer_id in eth_peers:
+                    iface = veth_interface_name(node_id, peer_id)
+                    policy = self._policy_for_edge(node_id, peer_id)
+                    params = self._sample_policy(policy)
+
+                    cmd = (
+                        f"tc qdisc del dev {iface} root 2>/dev/null || true && "
+                        f"tc qdisc add dev {iface} root netem {params.to_tc_args()}"
+                    )
+                    result = docker_exec_quiet(container, cmd, timeout=10)
+                    if result is not None:
+                        log.debug("Veth netem on %s:%s -> %s", container, iface, params.to_tc_args())
+                    else:
+                        log.warning("Failed to configure veth netem on %s:%s", container, iface)
+
+                    container_veth_states[iface] = VethNetemState(
+                        container=container,
+                        iface=iface,
+                        params=params,
+                    )
+
+                self.veth_states[container] = container_veth_states
                 log.info(
-                    "Configured per-link netem on %s (%d peers)",
+                    "Configured veth netem on %s (%d Ethernet peers)",
                     container,
-                    len(peer_ips),
+                    len(eth_peers),
                 )
-            else:
-                log.warning("Failed to configure netem on %s", container)
-
-            self.states[container] = container_states
 
     def setup_node(self, node_id: str):
         """Re-apply HTB/netem/filters for a single node (after container restart).
@@ -206,45 +255,62 @@ class NetemManager:
         class IDs and current netem params it had before going down.
         """
         container = self.topology.container_name(node_id)
+
+        # Re-apply UDP netem (eth0 HTB + u32)
         container_states = self.states.get(container)
-        if not container_states:
-            log.warning("No netem state for %s, skipping setup", container)
-            return
-
-        cmds = [f"tc qdisc del dev {IFACE} root 2>/dev/null || true"]
-        cmds.append(
-            f"tc qdisc add dev {IFACE} root handle 1: htb default 99"
-        )
-        cmds.append(
-            f"tc class add dev {IFACE} parent 1: classid 1:99 htb rate 1gbit"
-        )
-
-        for dest_ip, state in container_states.items():
-            rate = f"{state.rate_mbit}mbit" if state.rate_mbit > 0 else "1gbit"
+        if container_states:
+            cmds = [f"tc qdisc del dev {IFACE} root 2>/dev/null || true"]
             cmds.append(
-                f"tc class add dev {IFACE} parent 1: classid {state.class_id} htb rate {rate}"
+                f"tc qdisc add dev {IFACE} root handle 1: htb default 99"
             )
             cmds.append(
-                f"tc qdisc add dev {IFACE} parent {state.class_id} "
-                f"handle {state.netem_handle} netem {state.params.to_tc_args()}"
-            )
-            # Extract the priority from class_id (e.g., "1:3" -> 3)
-            prio = state.class_id.split(":")[1]
-            cmds.append(
-                f"tc filter add dev {IFACE} parent 1: protocol ip "
-                f"prio {prio} u32 match ip dst {dest_ip}/32 flowid {state.class_id}"
+                f"tc class add dev {IFACE} parent 1: classid 1:99 htb rate 1gbit"
             )
 
-        full_cmd = " && ".join(cmds)
-        result = docker_exec_quiet(container, full_cmd, timeout=30)
-        if result is not None:
+            for dest_ip, state in container_states.items():
+                rate = f"{state.rate_mbit}mbit" if state.rate_mbit > 0 else "1gbit"
+                cmds.append(
+                    f"tc class add dev {IFACE} parent 1: classid {state.class_id} htb rate {rate}"
+                )
+                cmds.append(
+                    f"tc qdisc add dev {IFACE} parent {state.class_id} "
+                    f"handle {state.netem_handle} netem {state.params.to_tc_args()}"
+                )
+                prio = state.class_id.split(":")[1]
+                cmds.append(
+                    f"tc filter add dev {IFACE} parent 1: protocol ip "
+                    f"prio {prio} u32 match ip dst {dest_ip}/32 flowid {state.class_id}"
+                )
+
+            full_cmd = " && ".join(cmds)
+            result = docker_exec_quiet(container, full_cmd, timeout=30)
+            if result is not None:
+                log.info(
+                    "Re-applied UDP netem on %s (%d peers)",
+                    container,
+                    len(container_states),
+                )
+            else:
+                log.warning("Failed to re-apply UDP netem on %s", container)
+
+        # Re-apply Ethernet veth netem
+        veth_states = self.veth_states.get(container)
+        if veth_states:
+            for iface, state in veth_states.items():
+                cmd = (
+                    f"tc qdisc del dev {iface} root 2>/dev/null || true && "
+                    f"tc qdisc add dev {iface} root netem {state.params.to_tc_args()}"
+                )
+                result = docker_exec_quiet(container, cmd, timeout=10)
+                if result is not None:
+                    log.debug("Re-applied veth netem on %s:%s", container, iface)
+                else:
+                    log.warning("Failed to re-apply veth netem on %s:%s", container, iface)
             log.info(
-                "Re-applied netem on %s (%d peers)",
+                "Re-applied veth netem on %s (%d Ethernet peers)",
                 container,
-                len(container_states),
+                len(veth_states),
             )
-        else:
-            log.warning("Failed to re-apply netem on %s", container)
 
     def mutate(self):
         """Randomly mutate netem params on a fraction of links."""
@@ -280,6 +346,8 @@ class NetemManager:
 
     def _update_link(self, node_a: str, node_b: str, params: NetemParams):
         """Update netem on both directions of a link."""
+        transport = self.topology.transport_for_edge(node_a, node_b)
+
         for src, dst in [(node_a, node_b), (node_b, node_a)]:
             if src in self.down_nodes:
                 continue
@@ -295,26 +363,38 @@ class NetemManager:
                 self.down_nodes.add(src)
                 continue
 
-            dest_ip = self.topology.nodes[dst].docker_ip
-
-            states = self.states.get(container, {})
-            state = states.get(dest_ip)
-            if state is None:
-                continue
-
-            cmd = (
-                f"tc qdisc replace dev {IFACE} parent {state.class_id} "
-                f"handle {state.netem_handle} netem {params.to_tc_args()}"
-            )
-            result = docker_exec_quiet(container, cmd)
-            if result is not None:
-                state.params = params
-                log.debug(
-                    "Updated netem %s -> %s: %s",
-                    src,
-                    dst,
-                    params.to_tc_args(),
+            if transport == "ethernet":
+                # Ethernet: simple netem replace on veth
+                iface = veth_interface_name(src, dst)
+                veth_states = self.veth_states.get(container, {})
+                state = veth_states.get(iface)
+                if state is None:
+                    continue
+                cmd = f"tc qdisc replace dev {iface} root netem {params.to_tc_args()}"
+                result = docker_exec_quiet(container, cmd)
+                if result is not None:
+                    state.params = params
+                    log.debug("Updated veth netem %s:%s -> %s", src, iface, params.to_tc_args())
+            else:
+                # UDP: HTB class-based netem on eth0
+                dest_ip = self.topology.nodes[dst].docker_ip
+                states = self.states.get(container, {})
+                state = states.get(dest_ip)
+                if state is None:
+                    continue
+                cmd = (
+                    f"tc qdisc replace dev {IFACE} parent {state.class_id} "
+                    f"handle {state.netem_handle} netem {params.to_tc_args()}"
                 )
+                result = docker_exec_quiet(container, cmd)
+                if result is not None:
+                    state.params = params
+                    log.debug(
+                        "Updated netem %s -> %s: %s",
+                        src,
+                        dst,
+                        params.to_tc_args(),
+                    )
 
     def _sample_policy(self, policy: NetemPolicy) -> NetemParams:
         """Sample concrete params from a policy's ranges."""

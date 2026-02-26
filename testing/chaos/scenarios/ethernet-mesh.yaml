@@ -1,0 +1,67 @@
+# Mixed transport mesh: 6 nodes, UDP + Ethernet edges
+#
+# Exercises both transports in a single mesh. UDP edges use static
+# peer config; Ethernet edges use beacon discovery. Tests that the
+# spanning tree converges across heterogeneous transports with netem
+# and link flaps active.
+#
+# Topology:
+#
+#   n01 ---udp--- n02 ---udp--- n03
+#    |             |              |
+#   eth           eth            udp
+#    |             |              |
+#   n04 ---eth--- n05 ---udp--- n06
+#
+# UDP edges: n01-n02, n02-n03, n03-n06, n05-n06
+# Ethernet edges: n01-n04, n02-n05, n04-n05
+
+scenario:
+  name: "ethernet-mesh"
+  seed: 42
+  duration_secs: 120
+
+topology:
+  algorithm: explicit
+  num_nodes: 6
+  params:
+    adjacency:
+      - [n01, n02, udp]
+      - [n02, n03, udp]
+      - [n03, n06, udp]
+      - [n05, n06, udp]
+      - [n01, n04, ethernet]
+      - [n02, n05, ethernet]
+      - [n04, n05, ethernet]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 10]
+    jitter_ms: [0, 2]
+    loss_pct: [0, 1]
+  mutation:
+    interval_secs: {min: 20, max: 40}
+    fraction: 0.3
+    policies:
+      normal:
+        delay_ms: [1, 10]
+        loss_pct: [0, 1]
+      degraded:
+        delay_ms: [30, 80]
+        jitter_ms: [5, 20]
+        loss_pct: [3, 8]
+
+link_flaps:
+  enabled: true
+  interval_secs: {min: 20, max: 40}
+  max_down_links: 1
+  down_duration_secs: {min: 10, max: 20}
+  protect_connectivity: true
+
+traffic:
+  enabled: false
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"

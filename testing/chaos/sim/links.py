@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from .docker_exec import docker_exec_quiet, is_container_running
 from .scenario import LinkFlapsConfig
-from .topology import SimTopology
+from .topology import SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +138,11 @@ class LinkManager:
         log.info("Link UP: %s -- %s (was down %.0fs)", a, b, down_for)
 
     def _set_loss(self, src_node: str, dst_node: str, netem_args: str) -> str | None:
-        """Set netem args on the tc class for src->dst. Returns the previous netem args."""
+        """Set netem args on the link for src->dst. Returns the previous netem args.
+
+        Transport-aware: UDP links use tc class on eth0, Ethernet links
+        use tc qdisc replace on the dedicated veth interface.
+        """
         if not self.netem_mgr:
             return None
 
@@ -158,25 +162,38 @@ class LinkManager:
             self.netem_mgr.down_nodes.add(src_node)
             return None
 
-        dest_ip = self.topology.nodes[dst_node].docker_ip
+        transport = self.topology.transport_for_edge(src_node, dst_node)
 
-        states = self.netem_mgr.states.get(container, {})
-        link_state = states.get(dest_ip)
-        if link_state is None:
-            log.warning("No netem state for %s -> %s", src_node, dst_node)
-            return None
+        if transport == "ethernet":
+            # Ethernet: simple netem on veth
+            iface = veth_interface_name(src_node, dst_node)
+            veth_states = self.netem_mgr.veth_states.get(container, {})
+            veth_state = veth_states.get(iface)
+            if veth_state is None:
+                log.warning("No veth netem state for %s -> %s (%s)", src_node, dst_node, iface)
+                return None
 
-        # Save current params
-        prev_args = link_state.params.to_tc_args()
+            prev_args = veth_state.params.to_tc_args()
+            cmd = f"tc qdisc replace dev {iface} root netem {netem_args}"
+            docker_exec_quiet(container, cmd)
+            return prev_args
+        else:
+            # UDP: HTB class on eth0
+            dest_ip = self.topology.nodes[dst_node].docker_ip
 
-        # Apply new netem
-        cmd = (
-            f"tc qdisc replace dev {IFACE} parent {link_state.class_id} "
-            f"handle {link_state.netem_handle} netem {netem_args}"
-        )
-        docker_exec_quiet(container, cmd)
+            states = self.netem_mgr.states.get(container, {})
+            link_state = states.get(dest_ip)
+            if link_state is None:
+                log.warning("No netem state for %s -> %s", src_node, dst_node)
+                return None
 
-        return prev_args
+            prev_args = link_state.params.to_tc_args()
+            cmd = (
+                f"tc qdisc replace dev {IFACE} parent {link_state.class_id} "
+                f"handle {link_state.netem_handle} netem {netem_args}"
+            )
+            docker_exec_quiet(container, cmd)
+            return prev_args
 
     def _would_disconnect(self, edge: tuple[str, str]) -> bool:
         """Check if removing this edge (plus currently-down edges) disconnects the graph."""

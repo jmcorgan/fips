@@ -27,8 +27,10 @@ RUN printf '%s\n' \
 COPY fips fipsctl /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 # Static web page served via Python HTTP server
 RUN printf 'Fuck IPs!\n' > /root/index.html
 
-# Start dnsmasq, SSH server, iperf3, and HTTP server in background, then run FIPS
-ENTRYPOINT ["/bin/bash", "-c", "dnsmasq && /usr/sbin/sshd && iperf3 -s -D && python3 -m http.server 8000 -d /root -b :: &>/dev/null & exec fips --config /etc/fips/fips.yaml"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
