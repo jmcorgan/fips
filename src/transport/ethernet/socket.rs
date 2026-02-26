@@ -329,7 +329,11 @@ fn get_mac_addr(fd: RawFd, if_index: i32) -> Result<[u8; 6], TransportError> {
         );
     }
 
-    let ret = unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR as libc::c_ulong, &ifr) };
+    #[cfg(target_env = "musl")]
+    let ioctl_req = libc::SIOCGIFHWADDR as libc::c_int;
+    #[cfg(not(target_env = "musl"))]
+    let ioctl_req = libc::SIOCGIFHWADDR as libc::c_ulong;
+    let ret = unsafe { libc::ioctl(fd, ioctl_req, &ifr) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
             "ioctl(SIOCGIFHWADDR) failed: {}",
@@ -375,7 +379,11 @@ fn get_if_mtu(fd: RawFd, if_index: i32) -> Result<u16, TransportError> {
         );
     }
 
-    let ret = unsafe { libc::ioctl(fd, libc::SIOCGIFMTU as libc::c_ulong, &ifr) };
+    #[cfg(target_env = "musl")]
+    let ioctl_req = libc::SIOCGIFMTU as libc::c_int;
+    #[cfg(not(target_env = "musl"))]
+    let ioctl_req = libc::SIOCGIFMTU as libc::c_ulong;
+    let ret = unsafe { libc::ioctl(fd, ioctl_req, &ifr) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
             "ioctl(SIOCGIFMTU) failed: {}",

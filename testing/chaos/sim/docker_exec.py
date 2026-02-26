@@ -1,5 +1,7 @@
 """Thin wrapper around subprocess for docker exec calls."""
 
+from __future__ import annotations
+
 import subprocess
 import logging
 
