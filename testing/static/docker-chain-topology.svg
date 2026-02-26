@@ -101,7 +101,7 @@
   <rect x="30" y="260" width="640" height="120" class="legend-box"/>
 
   <line x1="50" y1="282" x2="90" y2="282" stroke="#506090" stroke-width="2"/>
-  <text x="100" y="286" class="legend">Direct UDP peer link (port 4000, auto_connect)</text>
+  <text x="100" y="286" class="legend">Direct UDP peer link (port 2121, auto_connect)</text>
 
   <line x1="50" y1="304" x2="90" y2="304" stroke="#d0a040" stroke-width="1.2"
         stroke-dasharray="5 3" marker-end="url(#arrow)"/>

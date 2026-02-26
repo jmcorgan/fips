@@ -997,9 +997,9 @@ mod tests {
 
     #[test]
     fn test_transport_addr_string() {
-        let addr = TransportAddr::from_string("192.168.1.1:4000");
-        assert_eq!(format!("{}", addr), "192.168.1.1:4000");
-        assert_eq!(addr.as_str(), Some("192.168.1.1:4000"));
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
+        assert_eq!(format!("{}", addr), "192.168.1.1:2121");
+        assert_eq!(addr.as_str(), Some("192.168.1.1:2121"));
     }
 
     #[test]
@@ -1152,7 +1152,7 @@ mod tests {
     fn test_discovered_peer() {
         let peer = DiscoveredPeer::new(
             TransportId::new(1),
-            TransportAddr::from_string("192.168.1.1:4000"),
+            TransportAddr::from_string("192.168.1.1:2121"),
         );
 
         assert_eq!(peer.transport_id, TransportId::new(1));
@@ -1175,7 +1175,7 @@ mod tests {
     fn test_received_packet() {
         let packet = ReceivedPacket::new(
             TransportId::new(1),
-            TransportAddr::from_string("192.168.1.1:4000"),
+            TransportAddr::from_string("192.168.1.1:2121"),
             vec![1, 2, 3, 4],
         );
 
@@ -1314,7 +1314,7 @@ mod tests {
     #[test]
     fn test_link_mtu_default_falls_back_to_mtu() {
         let transport = MockTransport::new(1280);
-        let addr = TransportAddr::from_string("192.168.1.1:4000");
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
 
         // Default link_mtu() should return the transport-wide mtu()
         assert_eq!(transport.link_mtu(&addr), 1280);
@@ -1327,7 +1327,7 @@ mod tests {
 
     #[test]
     fn test_link_mtu_per_link_override() {
-        let addr_a = TransportAddr::from_string("192.168.1.1:4000");
+        let addr_a = TransportAddr::from_string("192.168.1.1:2121");
         let addr_b = TransportAddr::from_string("10.0.0.1:5000");
         let addr_unknown = TransportAddr::from_string("172.16.0.1:6000");
 
@@ -1356,7 +1356,7 @@ mod tests {
         let transport = UdpTransport::new(TransportId::new(1), None, config, tx);
         let handle = TransportHandle::Udp(transport);
 
-        let addr = TransportAddr::from_string("192.168.1.1:4000");
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
 
         // TransportHandle::link_mtu() should delegate and return the same
         // as TransportHandle::mtu() for UDP (no per-link overrides)

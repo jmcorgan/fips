@@ -544,9 +544,9 @@ mod tests {
 
     #[test]
     fn test_parse_socket_addr() {
-        let addr = TransportAddr::from_string("192.168.1.1:4000");
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
         let result = parse_socket_addr(&addr).unwrap();
-        assert_eq!(result.to_string(), "192.168.1.1:4000");
+        assert_eq!(result.to_string(), "192.168.1.1:2121");
 
         let invalid = TransportAddr::from_string("not_an_address");
         assert!(parse_socket_addr(&invalid).is_err());

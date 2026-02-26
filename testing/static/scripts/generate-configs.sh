@@ -89,7 +89,7 @@ generate_peer_block() {
     alias: "node-$peer_id"
     addresses:
       - transport: udp
-        addr: "$peer_ip:4000"
+        addr: "$peer_ip:2121"
     connect_policy: auto_connect
 EOF
 }

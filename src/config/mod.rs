@@ -460,7 +460,7 @@ node:
         let yaml = r#"
 transports:
   udp:
-    bind_addr: "0.0.0.0:4000"
+    bind_addr: "0.0.0.0:2121"
     mtu: 1400
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
@@ -469,7 +469,7 @@ transports:
         let instances: Vec<_> = config.transports.udp.iter().collect();
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].0, None); // Single instance has no name
-        assert_eq!(instances[0].1.bind_addr(), "0.0.0.0:4000");
+        assert_eq!(instances[0].1.bind_addr(), "0.0.0.0:2121");
         assert_eq!(instances[0].1.mtu(), 1400);
     }
 
@@ -479,9 +479,9 @@ transports:
 transports:
   udp:
     main:
-      bind_addr: "0.0.0.0:4000"
+      bind_addr: "0.0.0.0:2121"
     backup:
-      bind_addr: "192.168.1.100:4001"
+      bind_addr: "192.168.1.100:2122"
       mtu: 1280
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
@@ -494,8 +494,8 @@ transports:
         // Named instances have Some(name)
         assert!(instances.contains_key(&Some("main")));
         assert!(instances.contains_key(&Some("backup")));
-        assert_eq!(instances[&Some("main")].bind_addr(), "0.0.0.0:4000");
-        assert_eq!(instances[&Some("backup")].bind_addr(), "192.168.1.100:4001");
+        assert_eq!(instances[&Some("main")].bind_addr(), "0.0.0.0:2121");
+        assert_eq!(instances[&Some("backup")].bind_addr(), "192.168.1.100:2122");
         assert_eq!(instances[&Some("backup")].mtu(), 1280);
     }
 
@@ -513,7 +513,7 @@ transports: {}
     fn test_transport_instances_iter() {
         // Single instance - no name
         let single = TransportInstances::Single(UdpConfig {
-            bind_addr: Some("0.0.0.0:4000".to_string()),
+            bind_addr: Some("0.0.0.0:2121".to_string()),
             mtu: None,
             ..Default::default()
         });
@@ -540,10 +540,10 @@ peers:
     alias: "gateway"
     addresses:
       - transport: udp
-        addr: "192.168.1.1:4000"
+        addr: "192.168.1.1:2121"
         priority: 1
       - transport: tor
-        addr: "xyz.onion:4000"
+        addr: "xyz.onion:2121"
         priority: 2
     connect_policy: auto_connect
 "#;
@@ -571,7 +571,7 @@ peers:
   - npub: "npub1xyz"
     addresses:
       - transport: udp
-        addr: "10.0.0.1:4000"
+        addr: "10.0.0.1:2121"
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
 
@@ -592,11 +592,11 @@ peers:
   - npub: "npub1peer1"
     addresses:
       - transport: udp
-        addr: "10.0.0.1:4000"
+        addr: "10.0.0.1:2121"
   - npub: "npub1peer2"
     addresses:
       - transport: udp
-        addr: "10.0.0.2:4000"
+        addr: "10.0.0.2:2121"
     connect_policy: on_demand
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
@@ -607,9 +607,9 @@ peers:
 
     #[test]
     fn test_peer_config_builder() {
-        let peer = PeerConfig::new("npub1test", "udp", "192.168.1.1:4000")
+        let peer = PeerConfig::new("npub1test", "udp", "192.168.1.1:2121")
             .with_alias("test-peer")
-            .with_address(PeerAddress::with_priority("tor", "xyz.onion:4000", 50));
+            .with_address(PeerAddress::with_priority("tor", "xyz.onion:2121", 50));
 
         assert_eq!(peer.npub, "npub1test");
         assert_eq!(peer.alias, Some("test-peer".to_string()));

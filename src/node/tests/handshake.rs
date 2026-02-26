@@ -601,7 +601,7 @@ async fn test_stale_connection_cleanup() {
     let transport_id = TransportId::new(1);
 
     let peer_identity = make_peer_identity();
-    let remote_addr = TransportAddr::from_string("10.0.0.2:4000");
+    let remote_addr = TransportAddr::from_string("10.0.0.2:2121");
 
     // Create outbound connection with a timestamp far in the past
     let past_time_ms = 1000; // A very early timestamp
@@ -653,7 +653,7 @@ async fn test_failed_connection_cleanup() {
     let transport_id = TransportId::new(1);
 
     let peer_identity = make_peer_identity();
-    let remote_addr = TransportAddr::from_string("10.0.0.2:4000");
+    let remote_addr = TransportAddr::from_string("10.0.0.2:2121");
 
     // Create a connection and mark it failed (simulating a send failure)
     let now_ms = std::time::SystemTime::now()
@@ -699,7 +699,7 @@ async fn test_msg1_stored_for_resend() {
     let transport_id = TransportId::new(1);
 
     let peer_identity = make_peer_identity();
-    let remote_addr = TransportAddr::from_string("10.0.0.2:4000");
+    let remote_addr = TransportAddr::from_string("10.0.0.2:2121");
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -733,7 +733,7 @@ async fn test_resend_scheduling() {
     let transport_id = TransportId::new(1);
 
     let peer_identity = make_peer_identity();
-    let remote_addr = TransportAddr::from_string("10.0.0.2:4000");
+    let remote_addr = TransportAddr::from_string("10.0.0.2:2121");
 
     let now_ms = 100_000u64; // Use a fixed time for predictable testing
     let link_id = node.allocate_link_id();
@@ -832,7 +832,7 @@ async fn test_duplicate_msg2_dropped() {
 
     let packet = ReceivedPacket {
         transport_id,
-        remote_addr: TransportAddr::from_string("10.0.0.2:4000"),
+        remote_addr: TransportAddr::from_string("10.0.0.2:2121"),
         data: wire_msg2,
         timestamp_ms: 1000,
     };

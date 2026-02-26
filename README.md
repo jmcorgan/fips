@@ -89,12 +89,12 @@ node:                                  # node:
     nsec: "nsec1aaa..."                #     nsec: "nsec1bbb..."
 transports:                            # transports:
   udp:                                 #   udp:
-    bind_addr: "0.0.0.0:4000"          #     bind_addr: "0.0.0.0:4000"
+    bind_addr: "0.0.0.0:2121"          #     bind_addr: "0.0.0.0:2121"
 peers:                                 # peers:
   - npub: "npub1bbb..."                #   - npub: "npub1aaa..."
     addresses:                         #     addresses:
       - transport: udp                 #       - transport: udp
-        addr: "10.0.0.2:4000"          #         addr: "10.0.0.1:4000"
+        addr: "10.0.0.2:2121"          #         addr: "10.0.0.1:2121"
 ```
 
 The `nsec` field accepts bech32 (`nsec1...`) or hex-encoded secret keys.

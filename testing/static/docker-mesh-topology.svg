@@ -117,7 +117,7 @@
   <rect x="40" y="410" width="620" height="130" class="legend-box"/>
 
   <line x1="60" y1="435" x2="100" y2="435" stroke="#404860" stroke-width="1.5"/>
-  <text x="110" y="439" class="legend">UDP peer link (port 4000, auto_connect)</text>
+  <text x="110" y="439" class="legend">UDP peer link (port 2121, auto_connect)</text>
 
   <line x1="55" y1="457" x2="100" y2="457" stroke="#60a0e0" stroke-width="2"/>
   <path d="M 90 454 L 100 457 L 90 460 z" fill="#60a0e0"/>

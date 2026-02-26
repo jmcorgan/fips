@@ -239,7 +239,7 @@ sysctl net.core.rmem_max net.core.wmem_max
 Actual buffer sizes are logged at startup:
 
 ```text
-UDP transport started local_addr=0.0.0.0:4000 recv_buf=4194304 send_buf=4194304
+UDP transport started local_addr=0.0.0.0:2121 recv_buf=4194304 send_buf=4194304
 ```
 
 ## Ethernet: The Local Network Transport
@@ -261,7 +261,7 @@ UDP (1500 vs 1472 MTU).
 ### Implementation
 
 The Ethernet transport uses Linux AF_PACKET sockets in SOCK_DGRAM mode with
-EtherType 0x88B5 (IEEE 802 experimental/local use range). SOCK_DGRAM mode
+EtherType 0x2121. SOCK_DGRAM mode
 lets the kernel handle Ethernet header construction and parsing — the
 transport deals only with payloads and MAC addresses.
 
@@ -271,7 +271,7 @@ beacons and data to share the same EtherType and socket.
 
 | Property | Value |
 | -------- | ----- |
-| EtherType | 0x88B5 (IEEE 802 experimental) |
+| EtherType | 0x2121 |
 | Socket type | AF_PACKET SOCK_DGRAM |
 | Frame type prefix | 0x00 = data, 0x01 = beacon |
 | Effective MTU | Interface MTU - 1 (typically 1499) |
@@ -450,7 +450,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, async send/receive, configurable MTU |
 | TCP/IP | Future direction | Requires stream framing, TCP-over-TCP concern |
-| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x88B5, beacon discovery, Linux only |
+| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
 | WiFi | Future direction | Infrastructure mode = Ethernet driver |
 | Tor | Future direction | High latency, .onion addressing |
 | BLE | Future direction | ATT_MTU negotiation, per-link MTU |

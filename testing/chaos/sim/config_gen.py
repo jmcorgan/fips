@@ -49,7 +49,7 @@ def generate_peers_block(
         lines.append(f'    alias: "{peer_id}"')
         lines.append(f"    addresses:")
         lines.append(f"      - transport: udp")
-        lines.append(f'        addr: "{peer.docker_ip}:4000"')
+        lines.append(f'        addr: "{peer.docker_ip}:2121"')
         lines.append(f"    connect_policy: auto_connect")
     return "\n".join(lines)
 

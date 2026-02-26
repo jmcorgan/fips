@@ -455,7 +455,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let pending_index = node.index_allocator.allocate().unwrap();
     pending_conn.set_our_index(pending_index);
     pending_conn.set_transport_id(transport_id);
-    let pending_addr = TransportAddr::from_string("10.0.0.2:4000");
+    let pending_addr = TransportAddr::from_string("10.0.0.2:2121");
     pending_conn.set_source_addr(pending_addr.clone());
 
     let pending_link = Link::connectionless(
@@ -561,7 +561,7 @@ fn test_schedule_retry_creates_entry() {
     config.peers.push(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
-        "10.0.0.2:4000",
+        "10.0.0.2:2121",
     ));
 
     let mut node = Node::new(config).unwrap();
@@ -589,7 +589,7 @@ fn test_schedule_retry_increments() {
     config.peers.push(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
-        "10.0.0.2:4000",
+        "10.0.0.2:2121",
     ));
 
     let mut node = Node::new(config).unwrap();
@@ -618,7 +618,7 @@ fn test_schedule_retry_max_retries_exhausted() {
     config.peers.push(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
-        "10.0.0.2:4000",
+        "10.0.0.2:2121",
     ));
 
     let mut node = Node::new(config).unwrap();
@@ -650,7 +650,7 @@ fn test_schedule_retry_disabled() {
     config.peers.push(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
-        "10.0.0.2:4000",
+        "10.0.0.2:2121",
     ));
 
     let mut node = Node::new(config).unwrap();

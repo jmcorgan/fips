@@ -568,7 +568,7 @@ mod tests {
         let addr = TransportAddr::from_bytes(&[0xaa, 0xbb, 0xcc]);
         assert!(parse_mac_addr(&addr).is_err());
 
-        let addr = TransportAddr::from_string("192.168.1.1:4000");
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
         assert!(parse_mac_addr(&addr).is_err());
     }
 

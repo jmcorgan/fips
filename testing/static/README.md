@@ -306,7 +306,7 @@ removing rules first.
 - **Capabilities**: `CAP_NET_ADMIN` (for TUN device creation)
 - **Devices**: `/dev/net/tun` mapped into each container
 - **DNS**: FIPS built-in resolver on `127.0.0.1:53`
-- **Transport**: UDP on port 4000, MTU 1472
+- **Transport**: UDP on port 2121, MTU 1472
 - **TUN**: `fips0` interface, MTU 1280
 
 Each node resolves `<npub>.fips` DNS names to FIPS IPv6 addresses via its

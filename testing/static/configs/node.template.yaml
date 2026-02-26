@@ -17,7 +17,7 @@ dns:
 
 transports:
   udp:
-    bind_addr: "0.0.0.0:4000"
+    bind_addr: "0.0.0.0:2121"
     mtu: 1472
     # recv_buf_size: 2097152   # 2 MB (default)
     # send_buf_size: 2097152   # 2 MB (default)

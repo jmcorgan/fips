@@ -243,7 +243,7 @@ stale address mappings.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `transports.udp.bind_addr` | string | `"0.0.0.0:4000"` | UDP bind address and port |
+| `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port |
 | `transports.udp.mtu` | u16 | `1280` | Transport MTU |
 | `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
 | `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
@@ -256,7 +256,7 @@ Requires `CAP_NET_RAW` or running as root. Linux only.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `interface` | string | *(required)* | Network interface name (e.g., `"eth0"`, `"enp3s0"`) |
-| `ethertype` | u16 | `0x88B5` | IEEE EtherType (802 experimental range) |
+| `ethertype` | u16 | `0x2121` | EtherType |
 | `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 1 (for frame type prefix) |
 | `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
 | `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
@@ -320,7 +320,7 @@ dns:
 
 transports:
   udp:
-    bind_addr: "0.0.0.0:4000"
+    bind_addr: "0.0.0.0:2121"
     mtu: 1472
 
 peers:
@@ -328,7 +328,7 @@ peers:
     alias: "node-b"
     addresses:
       - transport: udp
-        addr: "172.20.0.11:4000"
+        addr: "172.20.0.11:2121"
     connect_policy: auto_connect
 ```
 
@@ -347,7 +347,7 @@ tun:
 
 transports:
   udp:
-    bind_addr: "0.0.0.0:4000"
+    bind_addr: "0.0.0.0:2121"
     mtu: 1472
   ethernet:
     interface: "eth0"
@@ -361,7 +361,7 @@ peers:
     alias: "internet-peer"
     addresses:
       - transport: udp
-        addr: "203.0.113.5:4000"
+        addr: "203.0.113.5:2121"
     connect_policy: auto_connect
 ```
 
@@ -468,13 +468,13 @@ dns:
 
 transports:
   udp:
-    bind_addr: "0.0.0.0:4000"
+    bind_addr: "0.0.0.0:2121"
     mtu: 1280
     recv_buf_size: 2097152           # 2 MB (kernel doubles to 4 MB actual)
     send_buf_size: 2097152           # 2 MB
   # ethernet:                        # uncomment to enable (requires CAP_NET_RAW)
   #   interface: "eth0"              # required: network interface name
-  #   ethertype: 0x88B5              # IEEE 802 experimental EtherType
+  #   ethertype: 0x2121              # default EtherType
   #   mtu: null                      # null = interface MTU - 1 (typically 1499)
   #   recv_buf_size: 2097152         # 2 MB
   #   send_buf_size: 2097152         # 2 MB
@@ -489,7 +489,7 @@ peers:                               # static peer list
   #   alias: "node-b"
   #   addresses:
   #     - transport: udp
-  #       addr: "10.0.0.2:4000"
+  #       addr: "10.0.0.2:2121"
   #       priority: 100
   #   connect_policy: auto_connect
   #   auto_reconnect: true           # reconnect after link-dead removal

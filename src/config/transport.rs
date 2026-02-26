@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Default UDP bind address.
-const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:4000";
+const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:2121";
 
 /// Default UDP MTU (IPv6 minimum).
 const DEFAULT_UDP_MTU: u16 = 1280;
@@ -23,7 +23,7 @@ const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UdpConfig {
-    /// Bind address (`bind_addr`). Defaults to "0.0.0.0:4000".
+    /// Bind address (`bind_addr`). Defaults to "0.0.0.0:2121".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_addr: Option<String>,
 
@@ -68,7 +68,7 @@ impl UdpConfig {
 /// ```yaml
 /// transports:
 ///   udp:
-///     bind_addr: "0.0.0.0:4000"
+///     bind_addr: "0.0.0.0:2121"
 /// ```
 ///
 /// And multiple named instances:
@@ -76,9 +76,9 @@ impl UdpConfig {
 /// transports:
 ///   udp:
 ///     main:
-///       bind_addr: "0.0.0.0:4000"
+///       bind_addr: "0.0.0.0:2121"
 ///     backup:
-///       bind_addr: "192.168.1.100:4001"
+///       bind_addr: "192.168.1.100:2122"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -131,8 +131,8 @@ impl<T> Default for TransportInstances<T> {
     }
 }
 
-/// Default Ethernet EtherType (IEEE 802 experimental).
-const DEFAULT_ETHERNET_ETHERTYPE: u16 = 0x88B5;
+/// Default Ethernet EtherType (FIPS default).
+const DEFAULT_ETHERNET_ETHERTYPE: u16 = 0x2121;
 
 /// Default Ethernet receive buffer size (2 MB).
 const DEFAULT_ETHERNET_RECV_BUF: usize = 2 * 1024 * 1024;
@@ -156,7 +156,7 @@ pub struct EthernetConfig {
     /// Network interface name (e.g., "eth0", "enp3s0"). Required.
     pub interface: String,
 
-    /// Custom EtherType (default: 0x88B5).
+    /// Custom EtherType (default: 0x2121).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ethertype: Option<u16>,
 
