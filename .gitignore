@@ -13,3 +13,5 @@
 
 # Claude Code
 .claude/
+
+deploy/
