@@ -185,6 +185,9 @@ impl EthernetTransport {
                 let beacon_stats = self.stats.clone();
                 let beacon_transport_id = self.transport_id;
 
+                let beacon_interface = self.config.interface.clone();
+                let beacon_ethertype = self.config.ethertype();
+
                 let beacon_task = tokio::spawn(async move {
                     beacon_sender_loop(
                         beacon_socket,
@@ -192,6 +195,8 @@ impl EthernetTransport {
                         interval_secs,
                         beacon_stats,
                         beacon_transport_id,
+                        beacon_interface,
+                        beacon_ethertype,
                     )
                     .await;
                 });
@@ -446,13 +451,23 @@ async fn ethernet_receive_loop(
 // ============================================================================
 
 /// Periodic beacon sender loop.
+///
+/// Detects stale AF_PACKET sockets (ENXIO / os error 6) that occur when
+/// the underlying veth interface is destroyed and recreated (e.g., during
+/// node churn in chaos tests). After `REOPEN_THRESHOLD` consecutive send
+/// failures, attempts to open a fresh socket on the same interface.
 async fn beacon_sender_loop(
-    socket: Arc<AsyncPacketSocket>,
+    mut socket: Arc<AsyncPacketSocket>,
     pubkey: XOnlyPublicKey,
     interval_secs: u64,
     stats: Arc<EthernetStats>,
     transport_id: TransportId,
+    interface: String,
+    ethertype: u16,
 ) {
+    /// Number of consecutive ENXIO errors before attempting socket reopen.
+    const REOPEN_THRESHOLD: u32 = 3;
+
     let beacon = build_beacon(&pubkey);
     let interval = tokio::time::Duration::from_secs(interval_secs);
 
@@ -475,12 +490,20 @@ async fn beacon_sender_loop(
 
     let mut interval_timer = tokio::time::interval(interval);
     interval_timer.tick().await; // consume the immediate first tick
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         interval_timer.tick().await;
 
         match socket.send_to(&beacon, &ETHERNET_BROADCAST).await {
             Ok(_) => {
+                if consecutive_errors > 0 {
+                    debug!(
+                        transport_id = %transport_id,
+                        "Beacon send recovered after {} errors", consecutive_errors,
+                    );
+                }
+                consecutive_errors = 0;
                 stats.record_beacon_sent();
                 trace!(
                     transport_id = %transport_id,
@@ -488,15 +511,62 @@ async fn beacon_sender_loop(
                 );
             }
             Err(e) => {
+                consecutive_errors += 1;
                 stats.record_send_error();
-                warn!(
-                    transport_id = %transport_id,
-                    error = %e,
-                    "Failed to send beacon"
-                );
+
+                let is_enxio = format!("{e}").contains("os error 6");
+
+                // Log only the first error in a streak to avoid log spam
+                if consecutive_errors == 1 {
+                    warn!(
+                        transport_id = %transport_id,
+                        error = %e,
+                        "Failed to send beacon"
+                    );
+                }
+
+                if is_enxio && consecutive_errors >= REOPEN_THRESHOLD {
+                    info!(
+                        transport_id = %transport_id,
+                        consecutive_errors,
+                        interface = %interface,
+                        "Stale veth detected (ENXIO), attempting socket reopen"
+                    );
+                    match reopen_beacon_socket(&interface, ethertype) {
+                        Ok(new_socket) => {
+                            socket = Arc::new(new_socket);
+                            consecutive_errors = 0;
+                            info!(
+                                transport_id = %transport_id,
+                                interface = %interface,
+                                "Beacon socket reopened successfully"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                transport_id = %transport_id,
+                                error = %e,
+                                interface = %interface,
+                                "Failed to reopen beacon socket, will retry"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+/// Attempt to open a fresh AF_PACKET socket for beacon sending.
+///
+/// This is called when the beacon sender detects that the underlying veth
+/// has been recreated and the old socket FD is stale (ENXIO).
+fn reopen_beacon_socket(
+    interface: &str,
+    ethertype: u16,
+) -> Result<AsyncPacketSocket, TransportError> {
+    let raw_socket = PacketSocket::open(interface, ethertype)?;
+    raw_socket.into_async()
 }
 
 // ============================================================================
