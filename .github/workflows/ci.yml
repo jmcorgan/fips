@@ -178,6 +178,9 @@ jobs:
           - suite: mixed-technology
             type: chaos
             scenario: mixed-technology
+          # ── Sidecar deployment ──────────────────────────────────────────
+          - suite: sidecar
+            type: sidecar
 
     steps:
       - uses: actions/checkout@v4
@@ -256,3 +259,24 @@ jobs:
           name: sim-results-${{ matrix.scenario }}
           path: testing/chaos/sim-results/
           retention-days: 7
+
+      # ── Sidecar deployment ──────────────────────────────────────────────
+      - name: Install binary (sidecar)
+        if: matrix.type == 'sidecar'
+        run: |
+          chmod +x _bin/fips _bin/fipsctl
+          cp _bin/fips    testing/sidecar/fips
+          cp _bin/fipsctl testing/sidecar/fipsctl
+
+      - name: Run sidecar integration test
+        if: matrix.type == 'sidecar'
+        run: bash testing/sidecar/scripts/test-sidecar.sh
+
+      - name: Collect logs on failure (sidecar)
+        if: matrix.type == 'sidecar' && failure()
+        run: |
+          for node in a b c; do
+            echo "--- sidecar-${node} logs ---"
+            docker logs "sidecar-${node}-fips-1" 2>&1 || true
+            echo ""
+          done
