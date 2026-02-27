@@ -840,8 +840,8 @@ mod tests {
         frame[1] = 0x00; // flags
         frame[2..4].copy_from_slice(&payload_len.to_le_bytes());
         // Fill the rest with a recognizable pattern
-        for i in 4..total {
-            frame[i] = (i & 0xFF) as u8;
+        for (i, byte) in frame[4..total].iter_mut().enumerate() {
+            *byte = ((4 + i) & 0xFF) as u8;
         }
 
         let bytes_sent = t1

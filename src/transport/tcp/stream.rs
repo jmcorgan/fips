@@ -168,8 +168,8 @@ mod tests {
         frame[1] = 0x00; // flags
         frame[2..4].copy_from_slice(&payload_len.to_le_bytes());
         // Fill remaining with pattern for verification
-        for i in PREFIX_SIZE..total {
-            frame[i] = (i & 0xFF) as u8;
+        for (i, byte) in frame[PREFIX_SIZE..total].iter_mut().enumerate() {
+            *byte = ((PREFIX_SIZE + i) & 0xFF) as u8;
         }
         frame
     }
@@ -267,7 +267,7 @@ mod tests {
 
         // Provide enough bytes for the reader to read prefix
         let mut data = prefix.to_vec();
-        data.extend_from_slice(&vec![0u8; 200]); // extra bytes
+        data.extend_from_slice(&[0u8; 200]); // extra bytes
 
         let mut cursor = Cursor::new(data);
         let err = read_fmp_packet(&mut cursor, 100).await.unwrap_err();

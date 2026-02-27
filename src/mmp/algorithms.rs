@@ -475,7 +475,7 @@ mod tests {
 
         // Responder receives, copies bit
         responder.rx_observe(bit_to_send, 1, t0);
-        assert_eq!(responder.tx_bit(), false);
+        assert!(!responder.tx_bit());
 
         // Responder sends back, initiator receives
         let resp_bit = responder.tx_bit();
@@ -489,7 +489,7 @@ mod tests {
 
         // Responder receives new bit
         responder.rx_observe(bit2, 3, t1);
-        assert_eq!(responder.tx_bit(), true);
+        assert!(responder.tx_bit());
 
         // Responder sends back, initiator receives
         let resp_bit2 = responder.tx_bit();
@@ -504,10 +504,10 @@ mod tests {
 
         // Receive counter=5 with spin=true
         responder.rx_observe(true, 5, Instant::now());
-        assert_eq!(responder.tx_bit(), true);
+        assert!(responder.tx_bit());
 
         // Reordered packet with counter=3 and spin=false should be ignored
         responder.rx_observe(false, 3, Instant::now());
-        assert_eq!(responder.tx_bit(), true); // unchanged
+        assert!(responder.tx_bit()); // unchanged
     }
 }

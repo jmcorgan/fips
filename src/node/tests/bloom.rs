@@ -269,19 +269,19 @@ fn print_filter_cardinality(nodes: &[TestNode]) {
                 continue;
             }
             let addr = *other.node.node_addr();
-            if let Some(peer) = tn.node.get_peer(&addr) {
-                if let Some(filter) = peer.inbound_filter() {
-                    let is_tree = tn.node.is_tree_peer(&addr);
-                    println!(
-                        "  n{} <- n{}: est={:.1} set_bits={} fill={:.1}% tree={}",
-                        i,
-                        j,
-                        filter.estimated_count(),
-                        filter.count_ones(),
-                        filter.fill_ratio() * 100.0,
-                        is_tree,
-                    );
-                }
+            if let Some(peer) = tn.node.get_peer(&addr)
+                && let Some(filter) = peer.inbound_filter()
+            {
+                let is_tree = tn.node.is_tree_peer(&addr);
+                println!(
+                    "  n{} <- n{}: est={:.1} set_bits={} fill={:.1}% tree={}",
+                    i,
+                    j,
+                    filter.estimated_count(),
+                    filter.count_ones(),
+                    filter.fill_ratio() * 100.0,
+                    is_tree,
+                );
             }
         }
     }
