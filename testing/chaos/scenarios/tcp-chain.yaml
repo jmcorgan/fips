@@ -1,0 +1,40 @@
+# TCP chain: 4-node linear topology, all TCP transport
+#
+# Tests basic TCP transport connectivity, spanning tree convergence,
+# and multi-hop routing over TCP links.
+#
+# Topology:
+#
+#   n01 ---tcp--- n02 ---tcp--- n03 ---tcp--- n04
+
+scenario:
+  name: "tcp-chain"
+  seed: 42
+  duration_secs: 90
+
+topology:
+  algorithm: explicit
+  num_nodes: 4
+  default_transport: tcp
+  params:
+    adjacency:
+      - [n01, n02]
+      - [n02, n03]
+      - [n03, n04]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 5]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.5]
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: false
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"

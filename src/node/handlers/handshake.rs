@@ -280,6 +280,14 @@ impl Node {
                         if let Some(peer) = self.peers.get_mut(&node_addr) {
                             peer.set_handshake_msg2(wire_msg2.clone());
                         }
+                        // Close the losing TCP connection (no-op for connectionless)
+                        if let Some(loser_link) = self.links.get(&loser_link_id) {
+                            let loser_tid = loser_link.transport_id();
+                            let loser_addr = loser_link.remote_addr().clone();
+                            if let Some(transport) = self.transports.get(&loser_tid) {
+                                transport.close_connection(&loser_addr).await;
+                            }
+                        }
                         // Clean up the losing connection's link
                         self.remove_link(&loser_link_id);
                         info!(
@@ -295,6 +303,10 @@ impl Node {
                         self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
+                        // Close the losing TCP connection (no-op for connectionless)
+                        if let Some(transport) = self.transports.get(&packet.transport_id) {
+                            transport.close_connection(&packet.remote_addr).await;
+                        }
                         // This connection lost — clean up its link
                         self.remove_link(&link_id);
                         // Restore addr_to_link for the winner's link
@@ -519,6 +531,14 @@ impl Node {
 
             // Clean up outbound connection state
             self.pending_outbound.remove(&key);
+            // Close the losing TCP connection (no-op for connectionless)
+            if let Some(link) = self.links.get(&link_id) {
+                let tid = link.transport_id();
+                let addr = link.remote_addr().clone();
+                if let Some(transport) = self.transports.get(&tid) {
+                    transport.close_connection(&addr).await;
+                }
+            }
             self.remove_link(&link_id);
 
             // Send TreeAnnounce now that sessions are aligned
@@ -550,6 +570,14 @@ impl Node {
                         self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
+                        // Close the losing TCP connection (no-op for connectionless)
+                        if let Some(loser_link) = self.links.get(&loser_link_id) {
+                            let loser_tid = loser_link.transport_id();
+                            let loser_addr = loser_link.remote_addr().clone();
+                            if let Some(transport) = self.transports.get(&loser_tid) {
+                                transport.close_connection(&loser_addr).await;
+                            }
+                        }
                         // Clean up the losing connection's link
                         self.remove_link(&loser_link_id);
                         // Ensure addr_to_link points to the winning link
@@ -570,6 +598,10 @@ impl Node {
                         self.bloom_state.mark_update_needed(node_addr);
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
+                        // Close the losing TCP connection (no-op for connectionless)
+                        if let Some(transport) = self.transports.get(&packet.transport_id) {
+                            transport.close_connection(&packet.remote_addr).await;
+                        }
                         // This connection lost — clean up its link
                         self.remove_link(&link_id);
                         // Ensure addr_to_link points to the winner's link
@@ -756,6 +788,12 @@ impl Node {
                 return Err(NodeError::MaxPeersExceeded { max: self.max_peers });
             }
 
+            // Preserve tree announce rate-limit state from old peer (if reconnecting).
+            // Without this, reconnection resets the rate limit window to zero,
+            // allowing an immediate announce that can feed an announce loop.
+            let old_announce_ts = self.peers.get(&peer_node_addr)
+                .map(|p| p.last_tree_announce_sent_ms());
+
             let mut new_peer = ActivePeer::with_session(
                 verified_identity,
                 link_id,
@@ -771,6 +809,9 @@ impl Node {
                 remote_epoch,
             );
             new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
+            if let Some(ts) = old_announce_ts {
+                new_peer.set_last_tree_announce_sent_ms(ts);
+            }
 
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index

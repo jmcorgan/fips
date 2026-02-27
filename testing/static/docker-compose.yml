@@ -203,3 +203,40 @@ services:
     networks:
       fips-net:
         ipv4_address: 172.20.0.14
+
+  # ── TCP chain topology (A-B-C) ───────────────────────────────
+  tcp-a:
+    <<: *fips-common
+    profiles: ["tcp-chain"]
+    container_name: fips-node-a
+    hostname: node-a
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/tcp-chain/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.10
+
+  tcp-b:
+    <<: *fips-common
+    profiles: ["tcp-chain"]
+    container_name: fips-node-b
+    hostname: node-b
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/tcp-chain/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.11
+
+  tcp-c:
+    <<: *fips-common
+    profiles: ["tcp-chain"]
+    container_name: fips-node-c
+    hostname: node-c
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/tcp-chain/node-c.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.12

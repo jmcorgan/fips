@@ -622,6 +622,16 @@ impl ActivePeer {
         self.tree_announce_min_interval_ms = ms;
     }
 
+    /// Get the last tree announce send timestamp (for carrying across reconnection).
+    pub fn last_tree_announce_sent_ms(&self) -> u64 {
+        self.last_tree_announce_sent_ms
+    }
+
+    /// Set the last tree announce send timestamp (to preserve rate limit across reconnection).
+    pub fn set_last_tree_announce_sent_ms(&mut self, ms: u64) {
+        self.last_tree_announce_sent_ms = ms;
+    }
+
     /// Check if we can send a TreeAnnounce now (rate limiting).
     pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.last_tree_announce_sent_ms) >= self.tree_announce_min_interval_ms

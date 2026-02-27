@@ -178,7 +178,7 @@ class LinkManager:
             docker_exec_quiet(container, cmd)
             return prev_args
         else:
-            # UDP: HTB class on eth0
+            # IP-based (UDP/TCP): HTB class on eth0
             dest_ip = self.topology.nodes[dst_node].docker_ip
 
             states = self.netem_mgr.states.get(container, {})

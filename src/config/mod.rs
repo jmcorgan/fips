@@ -33,7 +33,7 @@ pub use node::{
     NodeConfig, RateLimitConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
-pub use transport::{EthernetConfig, TransportInstances, TransportsConfig, UdpConfig};
+pub use transport::{EthernetConfig, TcpConfig, TransportInstances, TransportsConfig, UdpConfig};
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";

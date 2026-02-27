@@ -285,6 +285,37 @@ Each named instance operates independently with its own socket and
 discovery state. The instance name is used in log messages and the
 `name()` method on the Transport trait.
 
+### TCP (`transports.tcp.*`)
+
+TCP transport enables firewall traversal on networks that block UDP but
+allow TCP (e.g., port 443). Uses FMP header-based framing with zero
+overhead.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:443"`). If omitted, outbound-only mode. |
+| `transports.tcp.mtu` | u16 | `1400` | Default MTU. Per-connection MTU derived from `TCP_MAXSEG` when available. |
+| `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
+| `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
+| `transports.tcp.keepalive_secs` | u64 | `30` | TCP keepalive interval in seconds (0 = disabled) |
+| `transports.tcp.recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
+| `transports.tcp.send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
+| `transports.tcp.max_inbound_connections` | usize | `256` | Maximum simultaneous inbound connections |
+| `transports.tcp.socks5_proxy` | string | *(none)* | SOCKS5 proxy for outbound connections (implementation deferred) |
+
+**Named instances.** Like other transports, multiple TCP instances can
+be configured with named sub-keys:
+
+```yaml
+transports:
+  tcp:
+    public:
+      bind_addr: "0.0.0.0:443"
+    tor:
+      socks5_proxy: "127.0.0.1:9050"
+      connect_timeout_ms: 30000
+```
+
 ## Peers (`peers[]`)
 
 Static peer list. Each entry defines a peer to connect to.
@@ -293,8 +324,8 @@ Static peer list. Each entry defines a peer to connect to.
 |-----------|------|---------|-------------|
 | `peers[].npub` | string | *(required)* | Peer's Nostr public key (npub-encoded) |
 | `peers[].alias` | string | *(none)* | Human-readable name for logging |
-| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp` or `ethernet` |
-| `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP: `"ip:port"`. Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`) |
+| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp`, `tcp`, or `ethernet` |
+| `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP/TCP: `"ip:port"`. Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`) |
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
@@ -483,6 +514,16 @@ transports:
   #   auto_connect: false            # connect to discovered peers
   #   accept_connections: false      # accept inbound handshakes
   #   beacon_interval_secs: 30       # beacon interval (min 10)
+  # tcp:                             # uncomment to enable TCP transport
+  #   bind_addr: "0.0.0.0:443"      # listen address (omit for outbound-only)
+  #   mtu: 1400                      # default MTU
+  #   connect_timeout_ms: 5000       # outbound connect timeout
+  #   nodelay: true                  # TCP_NODELAY
+  #   keepalive_secs: 30             # keepalive interval (0 = disabled)
+  #   recv_buf_size: 2097152         # 2 MB
+  #   send_buf_size: 2097152         # 2 MB
+  #   max_inbound_connections: 256   # resource protection limit
+  #   socks5_proxy: null             # SOCKS5 for outbound (deferred)
 
 peers:                               # static peer list
   # - npub: "npub1..."

@@ -77,19 +77,37 @@ resolve_keys() {
     fi
 }
 
+# Get the default transport from topology file (defaults to "udp")
+get_default_transport() {
+    local topology_file="$1"
+    local transport=$(grep "^default_transport:" "$topology_file" | head -1 | sed 's/.*: *\([a-z]*\).*/\1/')
+    echo "${transport:-udp}"
+}
+
+# Get the port for a given transport type
+transport_port() {
+    local transport="$1"
+    case "$transport" in
+        tcp) echo "443" ;;
+        *)   echo "2121" ;;
+    esac
+}
+
 generate_peer_block() {
     local topology_file="$1"
     local peer_id="$2"
 
     local peer_npub="$(get_key RESOLVED_NPUB "$peer_id")"
     local peer_ip=$(get_node_attr "$topology_file" "$peer_id" "address")
+    local transport=$(get_default_transport "$topology_file")
+    local port=$(transport_port "$transport")
 
     cat <<EOF
   - npub: "$peer_npub"
     alias: "node-$peer_id"
     addresses:
-      - transport: udp
-        addr: "$peer_ip:2121"
+      - transport: $transport
+        addr: "$peer_ip:$port"
     connect_policy: auto_connect
 EOF
 }
@@ -103,7 +121,8 @@ generate_config() {
     node_npub="$(get_key RESOLVED_NPUB "$node_id")"
     local node_nsec
     node_nsec="$(get_key RESOLVED_NSEC "$node_id")"
-    local peers=$(get_peers "$topology_file" "$node_id")
+    local peers
+    peers=$(get_peers "$topology_file" "$node_id")
 
     # Generate peers section
     local peers_config=""
@@ -129,6 +148,22 @@ generate_config() {
     config="${config//\{\{PEERS\}\}/$peers_config}"
 
     echo "$config" > "$output_file"
+
+    # Post-process: inject TCP transport config for TCP topologies
+    local transport
+    transport=$(get_default_transport "$topology_file")
+    if [ "$transport" = "tcp" ]; then
+        # Add TCP transport section and remove UDP transport
+        python3 -c "
+import yaml, sys
+with open('$output_file') as f:
+    cfg = yaml.safe_load(f)
+cfg.setdefault('transports', {})['tcp'] = {'bind_addr': '0.0.0.0:443'}
+cfg.get('transports', {}).pop('udp', None)
+with open('$output_file', 'w') as f:
+    yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+"
+    fi
 }
 
 # Key storage for bash 3.2 compatibility (using prefixed variables instead of associative arrays)

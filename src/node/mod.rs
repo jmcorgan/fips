@@ -28,6 +28,7 @@ use crate::transport::{
     Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError, TransportHandle, TransportId,
 };
 use crate::transport::udp::UdpTransport;
+use crate::transport::tcp::TcpTransport;
 #[cfg(target_os = "linux")]
 use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
@@ -596,6 +597,21 @@ impl Node {
                 eth.set_local_pubkey(xonly);
                 transports.push(TransportHandle::Ethernet(eth));
             }
+        }
+
+        // Create TCP transport instances
+        let tcp_instances: Vec<_> = self
+            .config
+            .transports
+            .tcp
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+
+        for (name, tcp_config) in tcp_instances {
+            let transport_id = self.allocate_transport_id();
+            let tcp = TcpTransport::new(transport_id, name, tcp_config, packet_tx.clone());
+            transports.push(TransportHandle::Tcp(tcp));
         }
 
         transports

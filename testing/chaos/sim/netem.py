@@ -151,18 +151,18 @@ class NetemManager:
             node = self.topology.nodes[node_id]
             container = self.topology.container_name(node_id)
 
-            # Split peers by transport type
-            udp_peers = {}
+            # Split peers by transport type: IP-based (UDP/TCP) vs Ethernet (veth)
+            ip_peers = {}
             eth_peers = []
             for peer_id in sorted(node.peers):
                 transport = self.topology.transport_for_edge(node_id, peer_id)
                 if transport == "ethernet":
                     eth_peers.append(peer_id)
                 else:
-                    udp_peers[peer_id] = self.topology.nodes[peer_id].docker_ip
+                    ip_peers[peer_id] = self.topology.nodes[peer_id].docker_ip
 
-            # --- UDP peers: HTB + u32 on eth0 ---
-            if udp_peers:
+            # --- IP-based peers (UDP/TCP): HTB + u32 on eth0 ---
+            if ip_peers:
                 cmds = [f"tc qdisc del dev {IFACE} root 2>/dev/null || true"]
                 cmds.append(
                     f"tc qdisc add dev {IFACE} root handle 1: htb default 99"
@@ -173,7 +173,7 @@ class NetemManager:
 
                 container_states = {}
 
-                for idx, (peer_id, dest_ip) in enumerate(udp_peers.items(), start=1):
+                for idx, (peer_id, dest_ip) in enumerate(ip_peers.items(), start=1):
                     class_id = f"1:{idx}"
                     netem_handle = f"{idx + 10}:"
 
@@ -208,9 +208,9 @@ class NetemManager:
                 result = docker_exec_quiet(container, full_cmd, timeout=30)
                 if result is not None:
                     log.info(
-                        "Configured per-link netem on %s (%d UDP peers)",
+                        "Configured per-link netem on %s (%d IP peers)",
                         container,
-                        len(udp_peers),
+                        len(ip_peers),
                     )
                 else:
                     log.warning("Failed to configure netem on %s", container)
@@ -256,7 +256,7 @@ class NetemManager:
         """
         container = self.topology.container_name(node_id)
 
-        # Re-apply UDP netem (eth0 HTB + u32)
+        # Re-apply IP-based netem (eth0 HTB + u32) for UDP/TCP peers
         container_states = self.states.get(container)
         if container_states:
             cmds = [f"tc qdisc del dev {IFACE} root 2>/dev/null || true"]
@@ -286,12 +286,12 @@ class NetemManager:
             result = docker_exec_quiet(container, full_cmd, timeout=30)
             if result is not None:
                 log.info(
-                    "Re-applied UDP netem on %s (%d peers)",
+                    "Re-applied IP netem on %s (%d peers)",
                     container,
                     len(container_states),
                 )
             else:
-                log.warning("Failed to re-apply UDP netem on %s", container)
+                log.warning("Failed to re-apply IP netem on %s", container)
 
         # Re-apply Ethernet veth netem
         veth_states = self.veth_states.get(container)
@@ -376,7 +376,7 @@ class NetemManager:
                     state.params = params
                     log.debug("Updated veth netem %s:%s -> %s", src, iface, params.to_tc_args())
             else:
-                # UDP: HTB class-based netem on eth0
+                # IP-based (UDP/TCP): HTB class-based netem on eth0
                 dest_ip = self.topology.nodes[dst].docker_ip
                 states = self.states.get(container, {})
                 state = states.get(dest_ip)

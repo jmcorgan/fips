@@ -238,6 +238,111 @@ impl EthernetConfig {
     }
 }
 
+// ============================================================================
+// TCP Transport Configuration
+// ============================================================================
+
+/// Default TCP MTU (conservative, matches typical Ethernet MSS minus overhead).
+const DEFAULT_TCP_MTU: u16 = 1400;
+
+/// Default TCP connect timeout in milliseconds.
+const DEFAULT_TCP_CONNECT_TIMEOUT_MS: u64 = 5000;
+
+/// Default TCP keepalive interval in seconds.
+const DEFAULT_TCP_KEEPALIVE_SECS: u64 = 30;
+
+/// Default TCP receive buffer size (2 MB).
+const DEFAULT_TCP_RECV_BUF: usize = 2 * 1024 * 1024;
+
+/// Default TCP send buffer size (2 MB).
+const DEFAULT_TCP_SEND_BUF: usize = 2 * 1024 * 1024;
+
+/// Default maximum inbound TCP connections.
+const DEFAULT_TCP_MAX_INBOUND: usize = 256;
+
+/// TCP transport instance configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpConfig {
+    /// Listen address (e.g., "0.0.0.0:443"). If not set, outbound-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_addr: Option<String>,
+
+    /// Default MTU for TCP connections. Defaults to 1400.
+    /// Per-connection MTU is derived from TCP_MAXSEG when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+
+    /// Outbound connect timeout in milliseconds. Defaults to 5000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+
+    /// Enable TCP_NODELAY (disable Nagle). Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodelay: Option<bool>,
+
+    /// TCP keepalive interval in seconds. 0 = disabled. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u64>,
+
+    /// TCP receive buffer size in bytes. Defaults to 2 MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recv_buf_size: Option<usize>,
+
+    /// TCP send buffer size in bytes. Defaults to 2 MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_buf_size: Option<usize>,
+
+    /// SOCKS5 proxy for outbound connections (placeholder; not yet implemented).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_proxy: Option<String>,
+
+    /// Maximum simultaneous inbound connections. Defaults to 256.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inbound_connections: Option<usize>,
+}
+
+impl TcpConfig {
+    /// Get the default MTU.
+    pub fn mtu(&self) -> u16 {
+        self.mtu.unwrap_or(DEFAULT_TCP_MTU)
+    }
+
+    /// Get the connect timeout in milliseconds.
+    pub fn connect_timeout_ms(&self) -> u64 {
+        self.connect_timeout_ms.unwrap_or(DEFAULT_TCP_CONNECT_TIMEOUT_MS)
+    }
+
+    /// Whether TCP_NODELAY is enabled. Default: true.
+    pub fn nodelay(&self) -> bool {
+        self.nodelay.unwrap_or(true)
+    }
+
+    /// Get the keepalive interval in seconds. 0 = disabled. Default: 30.
+    pub fn keepalive_secs(&self) -> u64 {
+        self.keepalive_secs.unwrap_or(DEFAULT_TCP_KEEPALIVE_SECS)
+    }
+
+    /// Get the receive buffer size. Default: 2 MB.
+    pub fn recv_buf_size(&self) -> usize {
+        self.recv_buf_size.unwrap_or(DEFAULT_TCP_RECV_BUF)
+    }
+
+    /// Get the send buffer size. Default: 2 MB.
+    pub fn send_buf_size(&self) -> usize {
+        self.send_buf_size.unwrap_or(DEFAULT_TCP_SEND_BUF)
+    }
+
+    /// Get the maximum number of inbound connections. Default: 256.
+    pub fn max_inbound_connections(&self) -> usize {
+        self.max_inbound_connections.unwrap_or(DEFAULT_TCP_MAX_INBOUND)
+    }
+}
+
+// ============================================================================
+// TransportsConfig
+// ============================================================================
+
 /// Transports configuration section.
 ///
 /// Each transport type can have either a single instance (config directly
@@ -251,6 +356,10 @@ pub struct TransportsConfig {
     /// Ethernet transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub ethernet: TransportInstances<EthernetConfig>,
+
+    /// TCP transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub tcp: TransportInstances<TcpConfig>,
 }
 
 /// Helper for skip_serializing_if on TransportInstances.
@@ -261,7 +370,7 @@ fn is_transport_empty<T>(instances: &TransportInstances<T>) -> bool {
 impl TransportsConfig {
     /// Check if any transports are configured.
     pub fn is_empty(&self) -> bool {
-        self.udp.is_empty() && self.ethernet.is_empty()
+        self.udp.is_empty() && self.ethernet.is_empty() && self.tcp.is_empty()
     }
 
     /// Merge another TransportsConfig into this one.
@@ -273,6 +382,9 @@ impl TransportsConfig {
         }
         if !other.ethernet.is_empty() {
             self.ethernet = other.ethernet;
+        }
+        if !other.tcp.is_empty() {
+            self.tcp = other.tcp;
         }
     }
 }

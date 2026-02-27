@@ -5,12 +5,14 @@
 //! which FIPS links are established.
 
 pub mod udp;
+pub mod tcp;
 
 #[cfg(target_os = "linux")]
 pub mod ethernet;
 
 use secp256k1::XOnlyPublicKey;
 use udp::UdpTransport;
+use tcp::TcpTransport;
 #[cfg(target_os = "linux")]
 use ethernet::EthernetTransport;
 use std::fmt;
@@ -778,6 +780,15 @@ pub trait Transport {
     fn accept_connections(&self) -> bool {
         true
     }
+
+    /// Close a specific connection (connection-oriented transports only).
+    ///
+    /// For connectionless transports (UDP, Ethernet), this is a no-op.
+    /// Connection-oriented transports (TCP, Tor) remove the connection
+    /// from their pool and drop the underlying stream.
+    fn close_connection(&self, _addr: &TransportAddr) {
+        // Default no-op for connectionless transports
+    }
 }
 
 // ============================================================================
@@ -794,6 +805,8 @@ pub enum TransportHandle {
     /// Raw Ethernet transport.
     #[cfg(target_os = "linux")]
     Ethernet(EthernetTransport),
+    /// TCP/IP transport.
+    Tcp(TcpTransport),
 }
 
 impl TransportHandle {
@@ -803,6 +816,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.start_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.start_async().await,
+            TransportHandle::Tcp(t) => t.start_async().await,
         }
     }
 
@@ -812,6 +826,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.stop_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.stop_async().await,
+            TransportHandle::Tcp(t) => t.stop_async().await,
         }
     }
 
@@ -821,6 +836,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.send_async(addr, data).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.send_async(addr, data).await,
+            TransportHandle::Tcp(t) => t.send_async(addr, data).await,
         }
     }
 
@@ -830,6 +846,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.transport_id(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.transport_id(),
+            TransportHandle::Tcp(t) => t.transport_id(),
         }
     }
 
@@ -839,6 +856,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.name(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.name(),
+            TransportHandle::Tcp(t) => t.name(),
         }
     }
 
@@ -848,6 +866,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.transport_type(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.transport_type(),
+            TransportHandle::Tcp(t) => t.transport_type(),
         }
     }
 
@@ -857,6 +876,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.state(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.state(),
+            TransportHandle::Tcp(t) => t.state(),
         }
     }
 
@@ -866,6 +886,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.mtu(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.mtu(),
+            TransportHandle::Tcp(t) => t.mtu(),
         }
     }
 
@@ -878,6 +899,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.link_mtu(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.link_mtu(addr),
+            TransportHandle::Tcp(t) => t.link_mtu(addr),
         }
     }
 
@@ -887,6 +909,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.local_addr(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(_) => None,
+            TransportHandle::Tcp(t) => t.local_addr(),
         }
     }
 
@@ -896,6 +919,7 @@ impl TransportHandle {
             TransportHandle::Udp(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => Some(t.interface_name()),
+            TransportHandle::Tcp(_) => None,
         }
     }
 
@@ -905,6 +929,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.discover(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.discover(),
+            TransportHandle::Tcp(t) => t.discover(),
         }
     }
 
@@ -914,6 +939,7 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.auto_connect(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.auto_connect(),
+            TransportHandle::Tcp(t) => t.auto_connect(),
         }
     }
 
@@ -923,6 +949,20 @@ impl TransportHandle {
             TransportHandle::Udp(t) => t.accept_connections(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.accept_connections(),
+            TransportHandle::Tcp(t) => t.accept_connections(),
+        }
+    }
+
+    /// Close a specific connection on this transport.
+    ///
+    /// No-op for connectionless transports. For TCP, removes the
+    /// connection from the pool and drops the stream.
+    pub async fn close_connection(&self, addr: &TransportAddr) {
+        match self {
+            TransportHandle::Udp(t) => t.close_connection(addr),
+            #[cfg(target_os = "linux")]
+            TransportHandle::Ethernet(t) => t.close_connection(addr),
+            TransportHandle::Tcp(t) => t.close_connection_async(addr).await,
         }
     }
 

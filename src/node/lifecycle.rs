@@ -157,13 +157,28 @@ impl Node {
         // Allocate link ID and create link
         let link_id = self.allocate_link_id();
 
-        let link = Link::connectionless(
-            link_id,
-            transport_id,
-            remote_addr.clone(),
-            LinkDirection::Outbound,
-            Duration::from_millis(self.config.node.base_rtt_ms),
-        );
+        // Use Link::new() for connection-oriented transports (Connecting state)
+        // and Link::connectionless() for connectionless transports (Connected state)
+        let link = if self.transports.get(&transport_id)
+            .map(|t| t.transport_type().connection_oriented)
+            .unwrap_or(false)
+        {
+            Link::new(
+                link_id,
+                transport_id,
+                remote_addr.clone(),
+                LinkDirection::Outbound,
+                Duration::from_millis(self.config.node.base_rtt_ms),
+            )
+        } else {
+            Link::connectionless(
+                link_id,
+                transport_id,
+                remote_addr.clone(),
+                LinkDirection::Outbound,
+                Duration::from_millis(self.config.node.base_rtt_ms),
+            )
+        };
 
         self.links.insert(link_id, link);
 

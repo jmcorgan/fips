@@ -42,6 +42,26 @@ class SimTopology:
         """Check if any edges use Ethernet transport."""
         return any(t == "ethernet" for t in self.edge_transport.values())
 
+    def tcp_edges(self) -> list[tuple[str, str]]:
+        """Return all edges using TCP transport."""
+        return [e for e, t in self.edge_transport.items() if t == "tcp"]
+
+    def has_tcp(self) -> bool:
+        """Check if any edges use TCP transport."""
+        return any(t == "tcp" for t in self.edge_transport.values())
+
+    def tcp_peers(self, node_id: str) -> list[str]:
+        """Return peer IDs connected to this node via TCP."""
+        peers = []
+        for (a, b), transport in self.edge_transport.items():
+            if transport != "tcp":
+                continue
+            if a == node_id:
+                peers.append(b)
+            elif b == node_id:
+                peers.append(a)
+        return sorted(peers)
+
     def ethernet_interfaces(self, node_id: str) -> list[str]:
         """Return the veth interface names for a node's Ethernet edges."""
         ifaces = []
@@ -90,7 +110,7 @@ class SimTopology:
         return f"fips-node-{node_id}"
 
     def directed_outbound(self) -> dict[str, list[str]]:
-        """Assign each UDP edge to exactly one node for outbound connection.
+        """Assign each static-config edge to exactly one node for outbound connection.
 
         Returns a mapping from node_id to the list of peers that node
         should connect to (outbound only). Every edge appears in exactly
@@ -98,27 +118,27 @@ class SimTopology:
         down, only A (the outbound owner) will attempt to reconnect.
 
         Ethernet edges are excluded — they use beacon discovery instead
-        of static peer configuration.
+        of static peer configuration. UDP and TCP edges use static config.
 
         Strategy: BFS spanning tree edges go parent→child. Non-tree
         edges go from the lower node ID to the higher. This guarantees
         every node is reachable via at least one inbound connection.
         """
-        # Only consider UDP edges for static peer config
-        udp_edges = {
+        # Consider all edges that use static peer config (not Ethernet/discovery)
+        static_edges = {
             e for e in self.edges
-            if self.edge_transport.get(e, "udp") == "udp"
+            if self.edge_transport.get(e, "udp") != "ethernet"
         }
 
         outbound: dict[str, list[str]] = {nid: [] for nid in self.nodes}
 
-        # Build UDP-only adjacency for BFS
-        udp_adj: dict[str, list[str]] = {nid: [] for nid in self.nodes}
-        for a, b in udp_edges:
-            udp_adj[a].append(b)
-            udp_adj[b].append(a)
+        # Build static-config adjacency for BFS
+        static_adj: dict[str, list[str]] = {nid: [] for nid in self.nodes}
+        for a, b in static_edges:
+            static_adj[a].append(b)
+            static_adj[b].append(a)
 
-        # BFS spanning tree from first node (over UDP edges only)
+        # BFS spanning tree from first node (over static-config edges only)
         root = min(self.nodes)
         visited: set[str] = set()
         tree_edges: set[tuple[str, str]] = set()
@@ -126,15 +146,15 @@ class SimTopology:
         visited.add(root)
         while queue:
             node = queue.popleft()
-            for peer in udp_adj[node]:
+            for peer in static_adj[node]:
                 if peer not in visited:
                     visited.add(peer)
                     queue.append(peer)
                     tree_edges.add((node, peer))  # parent → child
                     outbound[node].append(peer)
 
-        # Non-tree UDP edges: lower ID → higher ID
-        for a, b in udp_edges:
+        # Non-tree static-config edges: lower ID → higher ID
+        for a, b in static_edges:
             if (a, b) not in tree_edges and (b, a) not in tree_edges:
                 outbound[a].append(b)  # a < b by _make_edge convention
 

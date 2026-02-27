@@ -312,6 +312,98 @@ Startup logging:
 Ethernet transport started name=eth0 interface=eth0 mac=aa:bb:cc:dd:ee:ff mtu=1499 if_mtu=1500
 ```
 
+## TCP/IP: Firewall Traversal Transport
+
+For networks where UDP is blocked but TCP port 443 is open, the TCP
+transport provides an alternative path. It also serves as the foundation
+for the future Tor transport.
+
+FIPS protocols (FMP, FSP, MMP) are all unreliable datagrams. Running them
+over TCP introduces head-of-line blocking, which adds latency jitter. MMP
+correctly measures this jitter, and cost-based parent selection naturally
+penalizes TCP links (higher SRTT leads to higher link cost). ETX will be
+1.0 over TCP since TCP handles retransmission.
+
+### Architecture
+
+Unlike UDP (one socket serves all peers), TCP requires one `TcpStream` per
+peer. The transport maintains a connection pool (`HashMap<TransportAddr,
+TcpConnection>`) plus an optional `TcpListener` for inbound connections.
+
+| Property | Value |
+| -------- | ----- |
+| Addressing | IP:port (same as UDP) |
+| Default MTU | 1400 bytes |
+| Per-link MTU | Derived from `TCP_MAXSEG` socket option |
+| Framing | FMP header-based (zero overhead) |
+| Connection model | Connect-on-send, optional listener |
+| Platform | Cross-platform (no `#[cfg]` gates) |
+
+### FMP Header-Based Framing
+
+TCP is a byte stream; FIPS packets need delineation. Rather than adding a
+separate length-prefix layer, the TCP transport uses the existing 4-byte
+FMP common prefix `[ver+phase:1][flags:1][payload_len:2 LE]` to determine
+packet boundaries:
+
+- **Phase 0x0 (established)**: remaining = 12 + payload_len + 16 (header + AEAD tag)
+- **Phase 0x1 (msg1)**: remaining = payload_len (fixed at 110, total 114 bytes)
+- **Phase 0x2 (msg2)**: remaining = payload_len (fixed at 65, total 69 bytes)
+- **Unknown phase**: close connection (protocol error)
+
+This provides zero framing overhead and built-in phase validation. The
+stream reader is implemented in a separate module (`stream.rs`) for reuse
+by the future Tor transport.
+
+### Connect-on-Send
+
+When `send(addr, data)` is called with no existing connection:
+
+1. Connect with configurable timeout (default 5s)
+2. Configure socket: `TCP_NODELAY`, keepalive, buffer sizes
+3. Read `TCP_MAXSEG` for per-connection MTU
+4. Split stream into read/write halves
+5. Spawn per-connection receive task
+6. Store connection in pool
+7. Write packet directly to stream
+
+If connect fails, return error. The node's handshake retry mechanism
+handles re-attempts.
+
+### Session Independence
+
+TCP connection loss does **not** tear down the FIPS peer. Noise keys, MMP
+state, and FSP sessions are bound to the peer's npub, not the TCP
+connection. The transport reconnects transparently on the next send via
+connect-on-send. MMP liveness timeout is the sole authority for peer death.
+
+### Connection Deduplication
+
+Simultaneous outbound connections from both sides are resolved by the
+existing cross-connection tie-breaker in `promote_connection`. The losing
+TCP connection is closed via `Transport::close_connection(addr)`, which
+removes it from the pool and aborts its receive task.
+
+### Configuration
+
+```yaml
+transports:
+  tcp:
+    bind_addr: "0.0.0.0:443"       # Listen address (omit for outbound-only)
+    mtu: 1400                       # Default MTU
+    connect_timeout_ms: 5000        # Outbound connect timeout
+    nodelay: true                   # TCP_NODELAY (disable Nagle)
+    keepalive_secs: 30              # TCP keepalive interval (0 = disabled)
+    recv_buf_size: 2097152          # SO_RCVBUF (2 MB)
+    send_buf_size: 2097152          # SO_SNDBUF (2 MB)
+    max_inbound_connections: 256    # Resource protection limit
+    socks5_proxy: "127.0.0.1:9050" # SOCKS5 for outbound (deferred)
+```
+
+If `bind_addr` is configured, the transport accepts inbound connections.
+Without it, the transport operates in outbound-only mode (no listener
+socket is created).
+
 ## Discovery
 
 Discovery determines that a FIPS-capable endpoint is reachable at a given
@@ -369,12 +461,13 @@ Key properties:
 
 ### Current State
 
-> **Implemented**: UDP peers are configured via YAML. Ethernet peers are
-> discovered via beacon broadcast — the `discover()` trait method returns
-> newly seen endpoints, and per-transport `auto_connect()` /
-> `accept_connections()` policies control whether discovered peers are
-> connected automatically or require explicit configuration. Nostr relay
-> discovery is not yet implemented.
+> **Implemented**: UDP and TCP peers are configured via YAML. Ethernet
+> peers are discovered via beacon broadcast — the `discover()` trait
+> method returns newly seen endpoints, and per-transport `auto_connect()`
+> / `accept_connections()` policies control whether discovered peers are
+> connected automatically or require explicit configuration. TCP has no
+> discovery mechanism (peers are configured). Nostr relay discovery is
+> not yet implemented.
 
 ## Transport Interface
 
@@ -392,6 +485,7 @@ link_mtu(addr)        → u16                 Per-link MTU (defaults to mtu())
 start()               → lifecycle           Bring transport up (bind socket, open device)
 stop()                → lifecycle           Bring transport down
 send(addr, data)      → delivery            Send datagram to transport address
+close_connection(addr)→ ()                  Close a specific connection (no-op for connectionless)
 discover()            → Vec<DiscoveredPeer> Report discovered FIPS endpoints (optional)
 auto_connect()        → bool                Auto-connect discovered peers (default: false)
 accept_connections()  → bool                Accept inbound handshakes (default: true)
@@ -449,7 +543,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | Transport | Status | Notes |
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, async send/receive, configurable MTU |
-| TCP/IP | Future direction | Requires stream framing, TCP-over-TCP concern |
+| TCP/IP | **Implemented** | FMP header-based framing, connect-on-send, per-connection MSS MTU |
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
 | WiFi | Future direction | Infrastructure mode = Ethernet driver |
 | Tor | Future direction | High latency, .onion addressing |

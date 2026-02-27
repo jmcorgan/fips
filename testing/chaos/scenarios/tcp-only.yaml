@@ -1,0 +1,45 @@
+# TCP-only: 4-node ring, all TCP transport
+#
+# Tests pure-TCP mesh with netem impairment. Nodes have no UDP
+# transport — only TCP with static peer config.
+#
+# Topology:
+#
+#   n01 ---tcp--- n02
+#    |             |
+#   tcp           tcp
+#    |             |
+#   n04 ---tcp--- n03
+
+scenario:
+  name: "tcp-only"
+  seed: 42
+  duration_secs: 90
+
+topology:
+  algorithm: explicit
+  num_nodes: 4
+  default_transport: tcp
+  params:
+    adjacency:
+      - [n01, n02]
+      - [n02, n03]
+      - [n03, n04]
+      - [n04, n01]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 10]
+    jitter_ms: [0, 2]
+    loss_pct: [0, 1]
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: false
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"

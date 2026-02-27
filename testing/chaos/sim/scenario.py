@@ -22,7 +22,7 @@ class Range:
             raise ValueError(f"{name}: min ({self.min}) must be >= 0")
 
 
-VALID_TRANSPORTS = ("udp", "ethernet")
+VALID_TRANSPORTS = ("udp", "ethernet", "tcp")
 
 
 @dataclass
