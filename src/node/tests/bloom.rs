@@ -333,12 +333,6 @@ async fn test_bloom_filter_split_horizon() {
         tree_adj[parent].push(child);
     }
 
-    // Find the root
-    let root_idx = nodes
-        .iter()
-        .position(|tn| tn.node.tree_state().is_root())
-        .expect("Should have exactly one root");
-
     print_filter_cardinality(&nodes);
 
     // For each tree edge (child, parent), verify split-horizon:
