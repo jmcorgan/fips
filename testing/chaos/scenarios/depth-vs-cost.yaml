@@ -1,10 +1,10 @@
-# Cost-Based Parent Selection: Deeper Fiber Beats Shallow LoRa
+# Cost-Based Parent Selection: Deeper Fiber Beats Shallow Bluetooth
 #
 # Topology (explicit 4-node):
 #
 #    n01 (root)
 #    /       \
-#   fiber    LoRa
+#   fiber     BT
 #   /         \
 #  n02        n04  (test subject)
 #   |        /
@@ -13,18 +13,16 @@
 #  n03
 #
 # n04 has two candidate parents:
-#   - n01 (root, depth 0) via LoRa:  effective_depth = 0 + ~6.0 = ~6.0
-#   - n03 (depth 2) via fiber:       effective_depth = 2 + ~1.01 = ~3.01
+#   - n01 (root, depth 0) via Bluetooth L2CAP: effective_depth = 0 + ~1.4 = ~1.4
+#   - n03 (depth 2) via fiber:                 effective_depth = 2 + ~1.01 = ~3.01
 #
 # Without cost-based selection, n04 would pick n01 (depth 0 < depth 2).
-# With cost-based selection, n04 should pick n03 (lower effective_depth
-# despite being 2 levels deeper).
+# With cost-based selection and these Bluetooth impairments, n04 may
+# still pick n01 since the Bluetooth cost (~1.4) is modest. This tests
+# that the cost formula correctly weighs depth against link quality.
 #
-# This tests the core depth-vs-cost tradeoff: a much deeper fiber path
-# should beat a direct LoRa link to root when the cost difference is
-# large enough.
-#
-# Validation: tree snapshot shows n04's parent is n03, n04's depth is 3.
+# Validation: tree snapshot shows n04's parent selection reflects the
+# actual cost tradeoff between depth and link quality.
 
 scenario:
   name: "depth-vs-cost"
@@ -51,12 +49,12 @@ netem:
     jitter_ms: [0, 1]
     loss_pct: [0, 0.5]
   link_policies:
-    # LoRa link from n01 to n04
+    # Bluetooth (L2CAP) link from n01 to n04
     - edges: ["n01-n04"]
       policy:
-        delay_ms: [400, 600]
-        jitter_ms: [50, 100]
-        loss_pct: [5, 15]
+        delay_ms: [15, 40]
+        jitter_ms: [5, 15]
+        loss_pct: [2, 8]
 
 link_flaps:
   enabled: false

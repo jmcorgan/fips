@@ -2,10 +2,10 @@
 
 Multi-node integration test for FIPS using Docker containers with fixed
 topologies. Multiple topologies are provided: a sparse mesh (5 nodes, 6
-links), a linear chain (5 nodes, 4 links), and a mesh with a public external
-node. All exercise the full FIPS stack including TUN devices, DNS resolution,
-peer link encryption, spanning tree construction, and discovery-driven
-multi-hop routing.
+links), a linear chain (5 nodes, 4 links), a mesh with a public external
+node, and a TCP chain (3 nodes). All exercise the full FIPS stack including
+TUN devices, DNS resolution, peer link encryption, spanning tree
+construction, and discovery-driven multi-hop routing.
 
 ## Prerequisites
 
@@ -56,14 +56,14 @@ are highlighted in blue in the diagram above.
 The ping test exercises all 20 directed pairs (5 nodes x 4 targets each),
 covering both direct-peer and multi-hop paths.
 
-| Link | Type |
-|------|------|
+| Link   | Type                        |
+| ------ | --------------------------- |
 | A -- D | tree edge (D's parent is A) |
 | A -- E | tree edge (E's parent is A) |
 | C -- D | tree edge (C's parent is D) |
 | B -- C | tree edge (B's parent is C) |
-| D -- E | non-tree link |
-| C -- E | non-tree link |
+| D -- E | non-tree link               |
+| C -- E | non-tree link               |
 
 ### Chain
 
@@ -88,6 +88,16 @@ topology is for testing mixed local/remote mesh operation.
 External nodes are not managed by Docker -- only their identity and address
 appear in the topology file so that Docker nodes can peer with them.
 
+### TCP Chain
+
+Three nodes in a linear chain using TCP transport (port 443) instead of
+UDP: A -- B -- C. Each node peers only with its immediate neighbors.
+Tests basic TCP transport connectivity and multi-hop routing over TCP.
+
+The topology file sets `default_transport: tcp`, which causes config
+generation to use TCP peer addresses (port 443), inject the TCP transport
+section, and remove the UDP transport section.
+
 ## Configuration Management
 
 ### File Structure
@@ -103,15 +113,18 @@ testing/static/
 │   └── topologies/
 │       ├── mesh.yaml                   # Mesh topology definition
 │       ├── chain.yaml                  # Chain topology definition
-│       └── mesh-public.yaml            # Mesh + external public node
+│       ├── mesh-public.yaml            # Mesh + external public node
+│       └── tcp-chain.yaml             # TCP chain (3 nodes, port 443)
 ├── generated-configs/                  # Auto-generated (gitignored)
 │   ├── npubs.env                       # NPUB_A=..., NPUB_B=..., etc.
 │   ├── mesh/
 │   │   ├── node-a.yaml ... node-e.yaml
 │   ├── mesh-public/
 │   │   ├── node-a.yaml ... node-e.yaml
-│   └── chain/
-│       ├── node-a.yaml ... node-e.yaml
+│   ├── chain/
+│   │   ├── node-a.yaml ... node-e.yaml
+│   └── tcp-chain/
+│       ├── node-a.yaml ... node-c.yaml
 ├── scripts/
 │   ├── build.sh                        # Build binary + generate configs
 │   ├── generate-configs.sh             # Generate node configs from topology
@@ -306,7 +319,7 @@ removing rules first.
 - **Capabilities**: `CAP_NET_ADMIN` (for TUN device creation)
 - **Devices**: `/dev/net/tun` mapped into each container
 - **DNS**: FIPS built-in resolver on `127.0.0.1:53`
-- **Transport**: UDP on port 2121, MTU 1472
+- **Transport**: UDP on port 2121 (MTU 1472) or TCP on port 443
 - **TUN**: `fips0` interface, MTU 1280
 
 Each node resolves `<npub>.fips` DNS names to FIPS IPv6 addresses via its

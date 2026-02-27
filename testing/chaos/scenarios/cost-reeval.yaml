@@ -17,7 +17,7 @@
 # n02 (smaller NodeAddr, tiebreak rule).
 #
 # Mutation: Stochastic netem mutation with a single "degraded" policy
-# (LoRa-like: 400-600ms delay, 5-15% loss). With fraction=0.5, on
+# (Bluetooth-like: 15-40ms delay, 2-8% loss). With fraction=0.5, on
 # average 2 of 4 edges degrade each round. Over 12 mutation rounds
 # (180s / 15s interval), n02-n04 will be degraded in some rounds.
 #
@@ -62,9 +62,9 @@ netem:
     fraction: 0.5
     policies:
       degraded:
-        delay_ms: [400, 600]
-        jitter_ms: [50, 100]
-        loss_pct: [5, 15]
+        delay_ms: [15, 40]
+        jitter_ms: [5, 15]
+        loss_pct: [2, 8]
 
 link_flaps:
   enabled: false

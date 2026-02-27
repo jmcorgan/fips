@@ -34,6 +34,10 @@ class TopologyConfig:
     subnet: str = "172.20.0.0/24"
     ip_start: int = 10
     default_transport: str = "udp"
+    # Optional transport mix for random topologies: {transport: weight}.
+    # When set, each edge is randomly assigned a transport based on weights.
+    # Only valid for non-explicit algorithms (explicit uses per-edge syntax).
+    transport_mix: dict[str, float] | None = None
 
 
 @dataclass
@@ -191,6 +195,11 @@ def load_scenario(path: str) -> Scenario:
     s.topology.subnet = tc.get("subnet", "172.20.0.0/24")
     s.topology.ip_start = int(tc.get("ip_start", 10))
     s.topology.default_transport = tc.get("default_transport", "udp")
+    if "transport_mix" in tc:
+        mix = tc["transport_mix"]
+        if not isinstance(mix, dict) or not mix:
+            raise ValueError("topology.transport_mix must be a non-empty dict")
+        s.topology.transport_mix = {str(k): float(v) for k, v in mix.items()}
 
     # Netem section
     nc = raw.get("netem", {})
@@ -289,6 +298,21 @@ def _validate(s: Scenario):
             f"topology.default_transport: '{s.topology.default_transport}' "
             f"not in {VALID_TRANSPORTS}"
         )
+    if s.topology.transport_mix is not None:
+        if s.topology.algorithm == "explicit":
+            raise ValueError(
+                "topology.transport_mix cannot be used with explicit algorithm "
+                "(use per-edge transport syntax instead)"
+            )
+        for transport, weight in s.topology.transport_mix.items():
+            if transport not in VALID_TRANSPORTS:
+                raise ValueError(
+                    f"topology.transport_mix: '{transport}' not in {VALID_TRANSPORTS}"
+                )
+            if weight <= 0:
+                raise ValueError(
+                    f"topology.transport_mix: weight for '{transport}' must be > 0"
+                )
     if s.topology.algorithm == "explicit":
         adj = s.topology.params.get("adjacency")
         if not adj or not isinstance(adj, list):

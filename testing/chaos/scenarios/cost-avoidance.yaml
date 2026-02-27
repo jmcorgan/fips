@@ -8,13 +8,13 @@
 #   /         \
 #  n02        n03
 #   \        /
-#   LoRa   fiber
+#    BT    fiber
 #     \   /
 #      n04  (test subject)
 #
-# n04 has two candidate parents at depth 1: n02 (via LoRa) and n03 (via
-# fiber). Cost-based selection should pick n03 because:
-#   effective_depth(n02) = 1 + ~6.0 (LoRa) = ~7.0
+# n04 has two candidate parents at depth 1: n02 (via Bluetooth L2CAP)
+# and n03 (via fiber). Cost-based selection should pick n03 because:
+#   effective_depth(n02) = 1 + ~1.4 (Bluetooth) = ~2.4
 #   effective_depth(n03) = 1 + ~1.01 (fiber) = ~2.01
 #
 # Validation: tree snapshot shows n04's parent is n03.
@@ -44,12 +44,12 @@ netem:
     jitter_ms: [0, 1]
     loss_pct: [0, 0.5]
   link_policies:
-    # LoRa link from n02 to n04
+    # Bluetooth (L2CAP) link from n02 to n04
     - edges: ["n02-n04"]
       policy:
-        delay_ms: [400, 600]
-        jitter_ms: [50, 100]
-        loss_pct: [5, 15]
+        delay_ms: [15, 40]
+        jitter_ms: [5, 15]
+        loss_pct: [2, 8]
 
 link_flaps:
   enabled: false

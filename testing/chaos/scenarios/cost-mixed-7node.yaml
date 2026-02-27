@@ -4,7 +4,7 @@
 #
 #          n01 (root)
 #         / |  \
-#      fiber | fiber  LoRa
+#      fiber | fiber  BT
 #       /    |    \
 #     n02   n03   n04
 #      |     | \    |
@@ -16,8 +16,8 @@
 #
 # Test subjects:
 #   - n06 has edges to n03 (fiber) and n04 (wifi) — should prefer n03
-#   - n04's link to root is LoRa, so n04 has high-cost parent link
-#   - n07 connects only to n04 (no choice, stuck with LoRa upstream)
+#   - n04's link to root is Bluetooth (L2CAP), so n04 has higher-cost parent link
+#   - n07 connects only to n04 (no choice, stuck with Bluetooth upstream)
 #
 # Validation: tree snapshot shows n06's parent is n03 (not n04).
 
@@ -50,12 +50,12 @@ netem:
     jitter_ms: [0, 1]
     loss_pct: [0, 0.5]
   link_policies:
-    # LoRa link from n01 to n04
+    # Bluetooth (L2CAP) link from n01 to n04
     - edges: ["n01-n04"]
       policy:
-        delay_ms: [400, 600]
-        jitter_ms: [50, 100]
-        loss_pct: [5, 15]
+        delay_ms: [15, 40]
+        jitter_ms: [5, 15]
+        loss_pct: [2, 8]
     # WiFi link from n04 to n06
     - edges: ["n04-n06"]
       policy:

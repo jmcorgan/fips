@@ -1,8 +1,8 @@
 # Mixed Technology: 10-node heterogeneous network
 #
-# Explicit topology with LoRa, WiFi, and fiber links. Tests that
-# cost-based parent selection produces a tree favoring low-cost paths
-# when multiple link technologies coexist.
+# Explicit topology with Bluetooth (L2CAP), WiFi, and fiber links.
+# Tests that cost-based parent selection produces a tree favoring
+# low-cost paths when multiple link technologies coexist.
 #
 # Topology:
 #
@@ -12,7 +12,7 @@
 #    /   |    \
 #  n02  n03   n04
 #  |  \  | \   |  \
-#  f  LoRa f  f  LoRa f
+#  f   BT f  f  BT  f
 #  |    \ |  |   \   |
 #  n05  n06 n07  n08 n09
 #         \       /
@@ -20,14 +20,14 @@
 #          n10
 #
 # Edges and link types:
-#   Fiber:  n01-n02, n01-n03, n01-n04, n02-n05, n03-n07, n04-n09
-#   LoRa:   n02-n06, n04-n08
-#   WiFi:   n03-n06, n08-n10
-#   Fiber:  n03-n08, n06-n10
+#   Fiber:     n01-n02, n01-n03, n01-n04, n02-n05, n03-n07, n04-n09
+#   Bluetooth: n02-n06, n04-n08
+#   WiFi:      n03-n06, n08-n10
+#   Fiber:     n03-n08, n06-n10
 #
 # Test subjects:
-#   - n06 has fiber (n03) and LoRa (n02) parents — should pick n03
-#   - n08 has fiber (n03) and LoRa (n04) parents — should pick n03
+#   - n06 has fiber (n03) and Bluetooth (n02) parents — should pick n03
+#   - n08 has fiber (n03) and Bluetooth (n04) parents — should pick n03
 #
 # Netem mutation shifts fiber-only links between normal and degraded.
 
@@ -64,12 +64,12 @@ netem:
     jitter_ms: [0, 1]
     loss_pct: [0, 0.5]
   link_policies:
-    # LoRa links (high latency, moderate loss)
+    # Bluetooth (L2CAP) links
     - edges: ["n02-n06", "n04-n08"]
       policy:
-        delay_ms: [400, 600]
-        jitter_ms: [50, 100]
-        loss_pct: [5, 15]
+        delay_ms: [15, 40]
+        jitter_ms: [5, 15]
+        loss_pct: [2, 8]
     # WiFi links (moderate latency, low loss)
     - edges: ["n03-n06", "n08-n10"]
       policy:

@@ -210,9 +210,9 @@ def generate_topology(
     else:
         raise ValueError(f"Unknown algorithm: {config.algorithm}")
 
-    # For non-explicit topologies, all edges use the default transport
+    # Assign transport types to edges
     if config.algorithm != "explicit":
-        edge_transport = {e: config.default_transport for e in edges}
+        edge_transport = _assign_edge_transports(edges, config, rng)
 
     # Build peer lists from edges
     for a, b in edges:
@@ -243,6 +243,7 @@ def generate_topology(
                 nodes[b].peers.append(a)
 
             topo.edges = edges
+            topo.edge_transport = _assign_edge_transports(edges, config, rng)
 
         if not topo.is_connected():
             raise RuntimeError(
@@ -317,6 +318,26 @@ def _generate_explicit(
         transport = str(entry[2]) if len(entry) == 3 else default_transport
         edge_transport[edge] = transport
     return edges, edge_transport
+
+
+def _assign_edge_transports(
+    edges: set[tuple[str, str]],
+    config: TopologyConfig,
+    rng: random.Random,
+) -> dict[tuple[str, str], str]:
+    """Assign transport types to edges.
+
+    If ``config.transport_mix`` is set, each edge is randomly assigned
+    a transport based on the mix weights. Otherwise all edges use
+    ``config.default_transport``.
+    """
+    if config.transport_mix is None:
+        return {e: config.default_transport for e in edges}
+
+    transports = list(config.transport_mix.keys())
+    weights = [config.transport_mix[t] for t in transports]
+    assignments = rng.choices(transports, weights=weights, k=len(edges))
+    return dict(zip(sorted(edges), assignments))
 
 
 def veth_interface_name(local: str, peer: str) -> str:
