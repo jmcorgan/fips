@@ -48,6 +48,7 @@ impl Node {
 
         if !peer.can_send_tree_announce(now_ms) {
             peer.mark_tree_announce_pending();
+            self.stats_mut().tree.rate_limited += 1;
             debug!(
                 peer = %self.peer_display_name(peer_addr),
                 "TreeAnnounce rate-limited, marking pending"
@@ -63,7 +64,12 @@ impl Node {
         })?;
 
         // Send
-        self.send_encrypted_link_message(peer_addr, &encoded).await?;
+        if let Err(e) = self.send_encrypted_link_message(peer_addr, &encoded).await {
+            self.stats_mut().tree.send_failed += 1;
+            return Err(e);
+        }
+
+        self.stats_mut().tree.sent += 1;
 
         // Record send time
         if let Some(peer) = self.peers.get_mut(peer_addr) {
@@ -122,9 +128,12 @@ impl Node {
     /// 4. Re-evaluate parent selection
     /// 5. If parent changed: increment seq, sign, recompute coords, announce to all
     pub(super) async fn handle_tree_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
+        self.stats_mut().tree.received += 1;
+
         let announce = match TreeAnnounce::decode(payload) {
             Ok(a) => a,
             Err(e) => {
+                self.stats_mut().tree.decode_error += 1;
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed TreeAnnounce");
                 return;
             }
@@ -134,6 +143,7 @@ impl Node {
         let pubkey = match self.peers.get(from) {
             Some(peer) => peer.pubkey(),
             None => {
+                self.stats_mut().tree.unknown_peer += 1;
                 debug!(from = %self.peer_display_name(from), "TreeAnnounce from unknown peer");
                 return;
             }
@@ -141,6 +151,7 @@ impl Node {
 
         // The declaring node_addr in the announce should match the sender
         if announce.declaration.node_addr() != from {
+            self.stats_mut().tree.addr_mismatch += 1;
             debug!(
                 from = %self.peer_display_name(from),
                 declared = %announce.declaration.node_addr(),
@@ -150,6 +161,7 @@ impl Node {
         }
 
         if let Err(e) = announce.declaration.verify(&pubkey) {
+            self.stats_mut().tree.sig_failed += 1;
             warn!(
                 from = %self.peer_display_name(from),
                 error = %e,
@@ -179,9 +191,12 @@ impl Node {
         );
 
         if !updated {
+            self.stats_mut().tree.stale += 1;
             debug!(from = %self.peer_display_name(from), "TreeAnnounce not fresher than existing, ignored");
             return;
         }
+
+        self.stats_mut().tree.accepted += 1;
 
         info!(
             from = %self.peer_display_name(from),
@@ -215,6 +230,9 @@ impl Node {
             self.tree_state.recompute_coords();
             self.coord_cache.clear();
 
+            self.stats_mut().tree.parent_switched += 1;
+            self.stats_mut().tree.parent_switches += 1;
+
             info!(
                 new_parent = %self.peer_display_name(&new_parent),
                 new_seq = new_seq,
@@ -223,6 +241,7 @@ impl Node {
                 "Parent switched, flushed coord cache, announcing to all peers"
             );
             if flap_dampened {
+                self.stats_mut().tree.flap_dampened += 1;
                 warn!("Flap dampening engaged: excessive parent switches detected");
             }
 
@@ -235,25 +254,26 @@ impl Node {
             && *self.tree_state.my_declaration().parent_id() == *from
         {
             // Check for loop: if parent's ancestry now contains us, drop parent
-            if let Some(parent_coords) = self.tree_state.peer_coords(from) {
-                if parent_coords.contains(self.identity.node_addr()) {
-                    warn!(
-                        parent = %self.peer_display_name(from),
-                        "Parent ancestry contains us — loop detected, dropping parent"
-                    );
-                    let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
-                        .map(|(addr, peer)| (*addr, peer.link_cost()))
-                        .collect();
-                    if self.tree_state.handle_parent_lost(&peer_costs) {
-                        if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
-                            warn!(error = %e, "Failed to sign declaration after loop detection");
-                            return;
-                        }
-                        self.coord_cache.clear();
-                        self.send_tree_announce_to_all().await;
+            if let Some(parent_coords) = self.tree_state.peer_coords(from)
+                && parent_coords.contains(self.identity.node_addr())
+            {
+                self.stats_mut().tree.loop_detected += 1;
+                warn!(
+                    parent = %self.peer_display_name(from),
+                    "Parent ancestry contains us — loop detected, dropping parent"
+                );
+                let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+                    .map(|(addr, peer)| (*addr, peer.link_cost()))
+                    .collect();
+                if self.tree_state.handle_parent_lost(&peer_costs) {
+                    if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                        warn!(error = %e, "Failed to sign declaration after loop detection");
+                        return;
                     }
-                    return;
+                    self.coord_cache.clear();
+                    self.send_tree_announce_to_all().await;
                 }
+                return;
             }
 
             // Our parent's ancestry changed but we're keeping the same parent.
@@ -280,6 +300,7 @@ impl Node {
             let new_depth = self.tree_state.my_coords().depth();
 
             if new_root != old_root || new_depth != old_depth {
+                self.stats_mut().tree.ancestry_changed += 1;
                 info!(
                     parent = %self.peer_display_name(from),
                     old_root = %old_root,
@@ -351,6 +372,9 @@ impl Node {
             self.tree_state.recompute_coords();
             self.coord_cache.clear();
 
+            self.stats_mut().tree.parent_switched += 1;
+            self.stats_mut().tree.parent_switches += 1;
+
             info!(
                 new_parent = %self.peer_display_name(&new_parent),
                 new_seq = new_seq,
@@ -360,6 +384,7 @@ impl Node {
                 "Parent switched via periodic cost re-evaluation"
             );
             if flap_dampened {
+                self.stats_mut().tree.flap_dampened += 1;
                 warn!("Flap dampening engaged: excessive parent switches detected");
             }
 
@@ -383,6 +408,7 @@ impl Node {
         self.tree_state.remove_peer(node_addr);
 
         if was_parent {
+            self.stats_mut().tree.parent_losses += 1;
             let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
                 .map(|(addr, peer)| (*addr, peer.link_cost()))
                 .collect();

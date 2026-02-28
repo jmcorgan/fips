@@ -22,6 +22,7 @@
 //! No additional framing overhead — packets are written directly to the
 //! TCP stream and the receiver uses phase-dependent size computation.
 
+pub mod stats;
 pub mod stream;
 
 use super::{
@@ -29,6 +30,7 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 use crate::config::TcpConfig;
+use stats::TcpStats;
 use stream::read_fmp_packet;
 
 use socket2::TcpKeepalive;
@@ -91,6 +93,8 @@ pub struct TcpTransport {
     accept_task: Option<JoinHandle<()>>,
     /// Local listener address (after start, if bind_addr configured).
     local_addr: Option<SocketAddr>,
+    /// Transport statistics.
+    stats: Arc<TcpStats>,
 }
 
 impl TcpTransport {
@@ -110,6 +114,7 @@ impl TcpTransport {
             packet_tx,
             accept_task: None,
             local_addr: None,
+            stats: Arc::new(TcpStats::new()),
         }
     }
 
@@ -121,6 +126,11 @@ impl TcpTransport {
     /// Get the local listener address (only valid after start with bind_addr).
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.local_addr
+    }
+
+    /// Get the transport statistics.
+    pub fn stats(&self) -> &Arc<TcpStats> {
+        &self.stats
     }
 
     /// Start the transport asynchronously.
@@ -154,6 +164,7 @@ impl TcpTransport {
             let transport_id = self.transport_id;
             let packet_tx = self.packet_tx.clone();
             let pool = self.pool.clone();
+            let stats = self.stats.clone();
             let cfg = AcceptConfig {
                 mtu: self.config.mtu(),
                 max_inbound: self.config.max_inbound_connections(),
@@ -164,7 +175,7 @@ impl TcpTransport {
             };
 
             let accept_task = tokio::spawn(async move {
-                accept_loop(listener, transport_id, packet_tx, pool, cfg).await;
+                accept_loop(listener, transport_id, packet_tx, pool, cfg, stats).await;
             });
             self.accept_task = Some(accept_task);
         }
@@ -245,6 +256,7 @@ impl TcpTransport {
         // disruptive reset-reconnect cycle.
         let mtu = self.config.mtu() as usize;
         if data.len() > mtu {
+            self.stats.record_mtu_exceeded();
             return Err(TransportError::MtuExceeded {
                 packet_size: data.len(),
                 mtu: self.config.mtu(),
@@ -269,6 +281,7 @@ impl TcpTransport {
         let mut w = writer.lock().await;
         match w.write_all(data).await {
             Ok(()) => {
+                self.stats.record_send(data.len());
                 trace!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
@@ -278,6 +291,7 @@ impl TcpTransport {
                 Ok(data.len())
             }
             Err(e) => {
+                self.stats.record_send_error();
                 drop(w);
                 // Remove failed connection from pool
                 let mut pool = self.pool.lock().await;
@@ -301,13 +315,22 @@ impl TcpTransport {
         let timeout_ms = self.config.connect_timeout_ms();
 
         // Connect with timeout
-        let stream = tokio::time::timeout(
+        let stream = match tokio::time::timeout(
             Duration::from_millis(timeout_ms),
             TcpStream::connect(socket_addr),
         )
         .await
-        .map_err(|_| TransportError::Timeout)?
-        .map_err(|_| TransportError::ConnectionRefused)?;
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(_)) => {
+                self.stats.record_connect_refused();
+                return Err(TransportError::ConnectionRefused);
+            }
+            Err(_) => {
+                self.stats.record_connect_timeout();
+                return Err(TransportError::Timeout);
+            }
+        };
 
         // Configure socket options via socket2
         let std_stream = stream.into_std()
@@ -328,11 +351,12 @@ impl TcpTransport {
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
         let pool = self.pool.clone();
+        let recv_stats = self.stats.clone();
         let remote_addr = addr.clone();
         let mtu = mss_mtu;
 
         let recv_task = tokio::spawn(async move {
-            tcp_receive_loop(read_half, transport_id, remote_addr.clone(), packet_tx, pool, mtu).await;
+            tcp_receive_loop(read_half, transport_id, remote_addr.clone(), packet_tx, pool, mtu, recv_stats).await;
         });
 
         let conn = TcpConnection {
@@ -344,6 +368,8 @@ impl TcpTransport {
 
         let mut pool = self.pool.lock().await;
         pool.insert(addr.clone(), conn);
+
+        self.stats.record_connection_established();
 
         debug!(
             transport_id = %self.transport_id,
@@ -447,6 +473,7 @@ async fn accept_loop(
     packet_tx: PacketTx,
     pool: ConnectionPool,
     cfg: AcceptConfig,
+    stats: Arc<TcpStats>,
 ) {
     let AcceptConfig { mtu, max_inbound, nodelay, keepalive_secs, recv_buf, send_buf } = cfg;
     debug!(transport_id = %transport_id, "TCP accept loop starting");
@@ -458,6 +485,7 @@ async fn accept_loop(
                 {
                     let pool_guard = pool.lock().await;
                     if pool_guard.len() >= max_inbound {
+                        stats.record_connection_rejected();
                         warn!(
                             transport_id = %transport_id,
                             peer_addr = %peer_addr,
@@ -514,6 +542,7 @@ async fn accept_loop(
 
                 let recv_pool = pool.clone();
                 let recv_packet_tx = packet_tx.clone();
+                let recv_stats = stats.clone();
                 let recv_addr = remote_addr.clone();
 
                 let recv_task = tokio::spawn(async move {
@@ -524,6 +553,7 @@ async fn accept_loop(
                         recv_packet_tx,
                         recv_pool,
                         conn_mtu,
+                        recv_stats,
                     )
                     .await;
                 });
@@ -537,6 +567,8 @@ async fn accept_loop(
 
                 let mut pool_guard = pool.lock().await;
                 pool_guard.insert(remote_addr.clone(), conn);
+
+                stats.record_connection_accepted();
 
                 debug!(
                     transport_id = %transport_id,
@@ -572,6 +604,7 @@ async fn tcp_receive_loop(
     packet_tx: PacketTx,
     pool: ConnectionPool,
     mtu: u16,
+    stats: Arc<TcpStats>,
 ) {
     debug!(
         transport_id = %transport_id,
@@ -582,6 +615,8 @@ async fn tcp_receive_loop(
     loop {
         match read_fmp_packet(&mut reader, mtu).await {
             Ok(data) => {
+                stats.record_recv(data.len());
+
                 trace!(
                     transport_id = %transport_id,
                     remote_addr = %remote_addr,
@@ -604,6 +639,7 @@ async fn tcp_receive_loop(
                 }
             }
             Err(e) => {
+                stats.record_recv_error();
                 // EOF or protocol error — remove connection from pool
                 debug!(
                     transport_id = %transport_id,

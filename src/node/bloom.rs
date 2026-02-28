@@ -57,6 +57,7 @@ impl Node {
 
         // Check debounce
         if !self.bloom_state.should_send_update(peer_addr, now_ms) {
+            self.stats_mut().bloom.debounce_suppressed += 1;
             // Either not pending or rate-limited; will retry on tick
             return Ok(());
         }
@@ -70,7 +71,12 @@ impl Node {
         })?;
 
         // Send
-        self.send_encrypted_link_message(peer_addr, &encoded).await?;
+        if let Err(e) = self.send_encrypted_link_message(peer_addr, &encoded).await {
+            self.stats_mut().bloom.send_failed += 1;
+            return Err(e);
+        }
+
+        self.stats_mut().bloom.sent += 1;
 
         // Record send and store the filter for change detection
         debug!(
@@ -123,9 +129,12 @@ impl Node {
     /// 3. Store the filter on the peer
     /// 4. Mark other peers for outgoing filter update
     pub(super) async fn handle_filter_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
+        self.stats_mut().bloom.received += 1;
+
         let announce = match FilterAnnounce::decode(payload) {
             Ok(a) => a,
             Err(e) => {
+                self.stats_mut().bloom.decode_error += 1;
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed FilterAnnounce");
                 return;
             }
@@ -133,10 +142,12 @@ impl Node {
 
         // Validate
         if !announce.is_valid() {
+            self.stats_mut().bloom.invalid += 1;
             debug!(from = %self.peer_display_name(from), "FilterAnnounce filter/size_class mismatch");
             return;
         }
         if !announce.is_v1_compliant() {
+            self.stats_mut().bloom.non_v1 += 1;
             debug!(from = %self.peer_display_name(from), size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
             return;
         }
@@ -145,6 +156,7 @@ impl Node {
         let current_seq = match self.peers.get(from) {
             Some(peer) => peer.filter_sequence(),
             None => {
+                self.stats_mut().bloom.unknown_peer += 1;
                 debug!(from = %self.peer_display_name(from), "FilterAnnounce from unknown peer");
                 return;
             }
@@ -152,6 +164,7 @@ impl Node {
 
         // Reject stale/replay
         if announce.sequence <= current_seq {
+            self.stats_mut().bloom.stale += 1;
             debug!(
                 from = %self.peer_display_name(from),
                 received_seq = announce.sequence,
@@ -160,6 +173,8 @@ impl Node {
             );
             return;
         }
+
+        self.stats_mut().bloom.accepted += 1;
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -151,8 +151,13 @@ pub fn show_tree(node: &Node) -> Value {
             "display_name": node.peer_display_name(peer_id),
         });
         if let Some(coords) = tree.peer_coords(peer_id) {
+            let coord_path: Vec<String> = coords.entries()
+                .iter()
+                .map(|e| hex::encode(e.node_addr.as_bytes()))
+                .collect();
             peer_json["depth"] = json!(coords.depth());
             peer_json["root"] = json!(hex::encode(coords.root_id().as_bytes()));
+            peer_json["coords"] = json!(coord_path);
             peer_json["distance_to_us"] = json!(my_coords.distance_to(coords));
         }
         peer_json
@@ -162,6 +167,8 @@ pub fn show_tree(node: &Node) -> Value {
     let parent_addr = my_coords.parent_id();
     let parent_hex = hex::encode(parent_addr.as_bytes());
     let parent_display = node.peer_display_name(parent_addr);
+
+    let tree_stats = node.stats().snapshot().tree;
 
     json!({
         "my_node_addr": hex::encode(tree.my_node_addr().as_bytes()),
@@ -175,6 +182,7 @@ pub fn show_tree(node: &Node) -> Value {
         "declaration_signed": decl.is_signed(),
         "peer_tree_count": tree.peer_count(),
         "peers": peers,
+        "stats": serde_json::to_value(&tree_stats).unwrap_or_default(),
     })
 }
 
@@ -229,13 +237,21 @@ pub fn show_bloom(node: &Node) -> Value {
     // Build per-peer filter info
     let peer_filters: Vec<Value> = node.peers().map(|peer| {
         let addr = *peer.node_addr();
-        json!({
+        let mut pf = json!({
             "peer": hex::encode(addr.as_bytes()),
             "display_name": node.peer_display_name(&addr),
             "has_filter": peer.filter_sequence() > 0,
             "filter_sequence": peer.filter_sequence(),
-        })
+        });
+        if let Some(filter) = peer.inbound_filter() {
+            pf["estimated_count"] = json!(filter.estimated_count());
+            pf["set_bits"] = json!(filter.count_ones());
+            pf["fill_ratio"] = json!(filter.fill_ratio());
+        }
+        pf
     }).collect();
+
+    let bloom_stats = node.stats().snapshot().bloom;
 
     json!({
         "own_node_addr": hex::encode(node.node_addr().as_bytes()),
@@ -244,6 +260,7 @@ pub fn show_bloom(node: &Node) -> Value {
         "leaf_dependent_count": bloom.leaf_dependents().len(),
         "leaf_dependents": leaf_deps,
         "peer_filters": peer_filters,
+        "stats": serde_json::to_value(&bloom_stats).unwrap_or_default(),
     })
 }
 
@@ -376,22 +393,28 @@ pub fn show_transports(node: &Node) -> Value {
             t_json["local_addr"] = json!(format!("{}", addr));
         }
 
+        t_json["stats"] = handle.transport_stats();
+
         t_json
     }).collect();
 
     json!({ "transports": transports })
 }
 
-/// `show_routing` — Routing table summary.
+/// `show_routing` — Routing table summary and node statistics.
 pub fn show_routing(node: &Node) -> Value {
     let cache = node.coord_cache();
-    let stats = cache.stats(now_ms());
+    let cache_stats = cache.stats(now_ms());
+    let node_stats = node.stats().snapshot();
 
     json!({
-        "coord_cache_entries": stats.entries,
+        "coord_cache_entries": cache_stats.entries,
         "identity_cache_entries": node.identity_cache_len(),
         "pending_lookups": node.pending_lookup_count(),
         "recent_requests": node.recent_request_count(),
+        "forwarding": serde_json::to_value(&node_stats.forwarding).unwrap_or_default(),
+        "discovery": serde_json::to_value(&node_stats.discovery).unwrap_or_default(),
+        "error_signals": serde_json::to_value(&node_stats.errors).unwrap_or_default(),
     })
 }
 

@@ -13,6 +13,7 @@ mod routing_error_rate_limit;
 pub(crate) mod session;
 pub(crate) mod session_wire;
 pub(crate) mod wire;
+pub(crate) mod stats;
 mod tree;
 #[cfg(test)]
 mod tests;
@@ -299,6 +300,10 @@ pub struct Node {
     /// Next transport ID to allocate.
     next_transport_id: u32,
 
+    // === Node Statistics ===
+    /// Routing, forwarding, discovery, and error signal counters.
+    stats: stats::NodeStats,
+
     // === TUN Interface ===
     /// TUN device state.
     tun_state: TunState,
@@ -433,6 +438,7 @@ impl Node {
             max_links,
             next_link_id: 1,
             next_transport_id: 1,
+            stats: stats::NodeStats::new(),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -526,6 +532,7 @@ impl Node {
             max_links,
             next_link_id: 1,
             next_transport_id: 1,
+            stats: stats::NodeStats::new(),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -801,6 +808,18 @@ impl Node {
     /// Get mutable coordinate cache.
     pub fn coord_cache_mut(&mut self) -> &mut CoordCache {
         &mut self.coord_cache
+    }
+
+    // === Node Statistics ===
+
+    /// Get the node statistics.
+    pub fn stats(&self) -> &stats::NodeStats {
+        &self.stats
+    }
+
+    /// Get mutable node statistics.
+    pub(crate) fn stats_mut(&mut self) -> &mut stats::NodeStats {
+        &mut self.stats
     }
 
     // === TUN Interface ===

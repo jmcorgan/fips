@@ -25,9 +25,12 @@ impl Node {
         from: &NodeAddr,
         payload: &[u8],
     ) {
+        self.stats_mut().discovery.req_received += 1;
+
         let request = match LookupRequest::decode(payload) {
             Ok(req) => req,
             Err(e) => {
+                self.stats_mut().discovery.req_decode_error += 1;
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupRequest");
                 return;
             }
@@ -37,6 +40,7 @@ impl Node {
 
         // Dedup: drop if we've already seen this request_id
         if self.recent_requests.contains_key(&request.request_id) {
+            self.stats_mut().discovery.req_duplicate += 1;
             trace!(
                 request_id = request.request_id,
                 from = %self.peer_display_name(from),
@@ -56,6 +60,7 @@ impl Node {
 
         // Loop prevention: drop if we've already been visited
         if request.was_visited(self.node_addr()) {
+            self.stats_mut().discovery.req_already_visited += 1;
             trace!(
                 request_id = request.request_id,
                 target = %self.peer_display_name(&request.target),
@@ -66,6 +71,7 @@ impl Node {
 
         // Are we the target?
         if request.target == *self.node_addr() {
+            self.stats_mut().discovery.req_target_is_us += 1;
             debug!(
                 request_id = request.request_id,
                 origin = %self.peer_display_name(&request.origin),
@@ -77,8 +83,10 @@ impl Node {
 
         // Forward if TTL permits
         if request.can_forward() {
+            self.stats_mut().discovery.req_forwarded += 1;
             self.forward_lookup_request(request).await;
         } else {
+            self.stats_mut().discovery.req_ttl_exhausted += 1;
             trace!(
                 request_id = request.request_id,
                 target = %self.peer_display_name(&request.target),
@@ -99,9 +107,12 @@ impl Node {
         from: &NodeAddr,
         payload: &[u8],
     ) {
+        self.stats_mut().discovery.resp_received += 1;
+
         let mut response = match LookupResponse::decode(payload) {
             Ok(resp) => resp,
             Err(e) => {
+                self.stats_mut().discovery.resp_decode_error += 1;
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupResponse");
                 return;
             }
@@ -113,6 +124,7 @@ impl Node {
         if let Some(recent) = self.recent_requests.get(&response.request_id) {
             // Transit node: reverse-path forward
             let from_peer = recent.from_peer;
+            self.stats_mut().discovery.resp_forwarded += 1;
 
             // Apply path_mtu min() from the outgoing link's transport MTU
             if let Some(peer) = self.peers.get(&from_peer)
@@ -153,6 +165,7 @@ impl Node {
             let target_pubkey = match self.lookup_by_fips_prefix(&prefix) {
                 Some((_addr, pubkey)) => pubkey,
                 None => {
+                    self.stats_mut().discovery.resp_identity_miss += 1;
                     warn!(
                         request_id = response.request_id,
                         target = %self.peer_display_name(&target),
@@ -171,6 +184,7 @@ impl Node {
                 &response.target_coords,
             );
             if !peer_id.verify(&proof_data, &response.proof) {
+                self.stats_mut().discovery.resp_proof_failed += 1;
                 warn!(
                     request_id = response.request_id,
                     target = %self.peer_display_name(&target),
@@ -178,6 +192,8 @@ impl Node {
                 );
                 return;
             }
+
+            self.stats_mut().discovery.resp_accepted += 1;
 
             debug!(
                 request_id = response.request_id,
@@ -335,6 +351,8 @@ impl Node {
     /// response arrives, it's recognized as "our request" and the
     /// target's coordinates are cached in coord_cache.
     pub(in crate::node) async fn initiate_lookup(&mut self, target: &NodeAddr, ttl: u8) {
+        self.stats_mut().discovery.req_initiated += 1;
+
         let origin = *self.node_addr();
         let origin_coords = self.tree_state().my_coords().clone();
         let mut request = LookupRequest::generate(*target, origin, origin_coords, ttl, 0);
@@ -375,6 +393,7 @@ impl Node {
         if let Some(&initiated_at) = self.pending_lookups.get(dest)
             && now_ms.saturating_sub(initiated_at) < lookup_timeout_ms
         {
+            self.stats_mut().discovery.req_deduplicated += 1;
             return;
         }
         self.pending_lookups.insert(*dest, now_ms);
@@ -396,6 +415,7 @@ impl Node {
             .collect();
 
         for addr in timed_out {
+            self.stats_mut().discovery.resp_timed_out += 1;
             self.pending_lookups.remove(&addr);
             if let Some(packets) = self.pending_tun_packets.remove(&addr) {
                 for pkt in &packets {

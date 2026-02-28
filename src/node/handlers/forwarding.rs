@@ -22,9 +22,12 @@ impl Node {
     /// Called by `dispatch_link_message` for msg_type 0x00. The payload
     /// has already had its msg_type byte stripped by dispatch.
     pub(in crate::node) async fn handle_session_datagram(&mut self, _from: &NodeAddr, payload: &[u8]) {
+        self.stats_mut().forwarding.record_received(payload.len());
+
         let mut datagram = match SessionDatagram::decode(payload) {
             Ok(dg) => dg,
             Err(e) => {
+                self.stats_mut().forwarding.record_decode_error(payload.len());
                 debug!(error = %e, "Malformed SessionDatagram");
                 return;
             }
@@ -32,6 +35,7 @@ impl Node {
 
         // TTL enforcement: decrement and drop if exhausted
         if !datagram.decrement_ttl() {
+            self.stats_mut().forwarding.record_ttl_exhausted(payload.len());
             debug!(
                 src = %datagram.src_addr,
                 dest = %datagram.dest_addr,
@@ -45,6 +49,7 @@ impl Node {
 
         // Local delivery: dispatch to session layer handlers
         if datagram.dest_addr == *self.node_addr() {
+            self.stats_mut().forwarding.record_delivered(payload.len());
             self.handle_session_payload(&datagram.src_addr, &datagram.payload, datagram.path_mtu)
                 .await;
             return;
@@ -54,6 +59,7 @@ impl Node {
         let next_hop_addr = match self.find_next_hop(&datagram.dest_addr) {
             Some(peer) => *peer.node_addr(),
             None => {
+                self.stats_mut().forwarding.record_drop_no_route(payload.len());
                 self.send_routing_error(&datagram).await;
                 return;
             }
@@ -79,9 +85,11 @@ impl Node {
         {
             match e {
                 NodeError::MtuExceeded { mtu, .. } => {
+                    self.stats_mut().forwarding.record_drop_mtu_exceeded(payload.len());
                     self.send_mtu_exceeded_error(&datagram, mtu).await;
                 }
                 _ => {
+                    self.stats_mut().forwarding.record_drop_send_error(payload.len());
                     debug!(
                         next_hop = %next_hop_addr,
                         dest = %datagram.dest_addr,
@@ -90,6 +98,8 @@ impl Node {
                     );
                 }
             }
+        } else {
+            self.stats_mut().forwarding.record_forwarded(encoded.len());
         }
     }
 

@@ -6,6 +6,8 @@ use super::{
     DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
     TransportId, TransportState, TransportType,
 };
+mod stats;
+use stats::UdpStats;
 use crate::config::UdpConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
@@ -36,6 +38,8 @@ pub struct UdpTransport {
     recv_task: Option<JoinHandle<()>>,
     /// Local bound address (after start).
     local_addr: Option<SocketAddr>,
+    /// Transport statistics.
+    stats: Arc<UdpStats>,
 }
 
 impl UdpTransport {
@@ -55,6 +59,7 @@ impl UdpTransport {
             packet_tx,
             recv_task: None,
             local_addr: None,
+            stats: Arc::new(UdpStats::new()),
         }
     }
 
@@ -71,6 +76,11 @@ impl UdpTransport {
     /// Get a reference to the socket (only valid after start).
     pub fn socket(&self) -> Option<&Arc<UdpSocket>> {
         self.socket.as_ref()
+    }
+
+    /// Get the transport statistics.
+    pub fn stats(&self) -> &Arc<UdpStats> {
+        &self.stats
     }
 
     /// Start the transport asynchronously.
@@ -145,9 +155,10 @@ impl UdpTransport {
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
         let mtu = self.config.mtu();
+        let stats = self.stats.clone();
 
         let recv_task = tokio::spawn(async move {
-            udp_receive_loop(socket, transport_id, packet_tx, mtu).await;
+            udp_receive_loop(socket, transport_id, packet_tx, mtu, stats).await;
         });
 
         self.recv_task = Some(recv_task);
@@ -210,6 +221,7 @@ impl UdpTransport {
         }
 
         if data.len() > self.config.mtu() as usize {
+            self.stats.record_mtu_exceeded();
             return Err(TransportError::MtuExceeded {
                 packet_size: data.len(),
                 mtu: self.config.mtu(),
@@ -219,19 +231,22 @@ impl UdpTransport {
         let socket_addr = parse_socket_addr(addr)?;
         let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
 
-        let bytes_sent = socket
-            .send_to(data, socket_addr)
-            .await
-            .map_err(|e| TransportError::SendFailed(format!("{}", e)))?;
-
-        trace!(
-            transport_id = %self.transport_id,
-            remote_addr = %socket_addr,
-            bytes = bytes_sent,
-            "UDP packet sent"
-        );
-
-        Ok(bytes_sent)
+        match socket.send_to(data, socket_addr).await {
+            Ok(bytes_sent) => {
+                self.stats.record_send(bytes_sent);
+                trace!(
+                    transport_id = %self.transport_id,
+                    remote_addr = %socket_addr,
+                    bytes = bytes_sent,
+                    "UDP packet sent"
+                );
+                Ok(bytes_sent)
+            }
+            Err(e) => {
+                self.stats.record_send_error();
+                Err(TransportError::SendFailed(format!("{}", e)))
+            }
+        }
     }
 }
 
@@ -294,6 +309,7 @@ async fn udp_receive_loop(
     transport_id: TransportId,
     packet_tx: PacketTx,
     mtu: u16,
+    stats: Arc<UdpStats>,
 ) {
     // Buffer with headroom for slightly oversized packets
     let mut buf = vec![0u8; mtu as usize + 100];
@@ -303,6 +319,8 @@ async fn udp_receive_loop(
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((len, remote_addr)) => {
+                stats.record_recv(len);
+
                 let data = buf[..len].to_vec();
                 let addr = TransportAddr::from_string(&remote_addr.to_string());
                 let packet = ReceivedPacket::new(transport_id, addr, data);
@@ -324,6 +342,7 @@ async fn udp_receive_loop(
                 }
             }
             Err(e) => {
+                stats.record_recv_error();
                 // Log error but continue - transient errors are expected
                 warn!(
                     transport_id = %transport_id,

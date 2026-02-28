@@ -703,6 +703,8 @@ impl Node {
     /// immediately (rate-limited), trigger discovery, and reset the
     /// warmup counter for subsequent data packets.
     async fn handle_coords_required(&mut self, inner: &[u8]) {
+        self.stats_mut().errors.coords_required += 1;
+
         let msg = match CoordsRequired::decode(inner) {
             Ok(m) => m,
             Err(e) => {
@@ -759,6 +761,8 @@ impl Node {
     /// Send a standalone CoordsWarmup immediately (rate-limited), invalidate
     /// cached coordinates, trigger re-discovery, and reset the warmup counter.
     async fn handle_path_broken(&mut self, inner: &[u8]) {
+        self.stats_mut().errors.path_broken += 1;
+
         let msg = match PathBroken::decode(inner) {
             Ok(m) => m,
             Err(e) => {
@@ -820,6 +824,8 @@ impl Node {
     /// next-hop transport MTU. Apply the reported bottleneck MTU to our
     /// PathMtuState for the affected session, causing an immediate decrease.
     async fn handle_mtu_exceeded(&mut self, inner: &[u8]) {
+        self.stats_mut().errors.mtu_exceeded += 1;
+
         let msg = match MtuExceeded::decode(inner) {
             Ok(m) => m,
             Err(e) => {
@@ -1231,7 +1237,9 @@ impl Node {
         }
 
         let encoded = datagram.encode();
-        self.send_encrypted_link_message(&next_hop_addr, &encoded).await
+        self.send_encrypted_link_message(&next_hop_addr, &encoded).await?;
+        self.stats_mut().forwarding.record_originated(encoded.len());
+        Ok(())
     }
 
     /// Look up destination coordinates from available caches.

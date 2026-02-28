@@ -498,7 +498,7 @@ fn test_evaluate_parent_rejects_loop_candidate() {
     let mut state = TreeState::new(my_node);
 
     let peer1 = make_node_addr(1);
-    let root = make_node_addr(0);
+    let _root = make_node_addr(0);
 
     // Peer 1's ancestry: [1, 5, 0] — contains us (node 5)
     state.update_peer(
@@ -519,7 +519,7 @@ fn test_evaluate_parent_picks_loop_free_over_loopy() {
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
-    let root = make_node_addr(0);
+    let _root = make_node_addr(0);
 
     // Peer 1: depth 2, but ancestry contains us — loop
     state.update_peer(
