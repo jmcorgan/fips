@@ -491,6 +491,52 @@ fn test_evaluate_parent_depth_threshold() {
 }
 
 #[test]
+fn test_evaluate_parent_rejects_loop_candidate() {
+    // Node 5 with peer 1 whose ancestry contains node 5 — selecting
+    // peer 1 would create a coordinate loop. evaluate_parent must skip it.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer1 = make_node_addr(1);
+    let root = make_node_addr(0);
+
+    // Peer 1's ancestry: [1, 5, 0] — contains us (node 5)
+    state.update_peer(
+        ParentDeclaration::new(peer1, my_node, 1, 1000),
+        make_coords(&[1, 5, 0]),
+    );
+
+    // Should return None — the only candidate creates a loop
+    assert_eq!(state.evaluate_parent(&HashMap::new()), None);
+}
+
+#[test]
+fn test_evaluate_parent_picks_loop_free_over_loopy() {
+    // Two peers reach the same root. Peer 1's ancestry contains us (loop),
+    // peer 2's does not. Should pick peer 2 even though peer 1 is shallower.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let peer1 = make_node_addr(1);
+    let peer2 = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    // Peer 1: depth 2, but ancestry contains us — loop
+    state.update_peer(
+        ParentDeclaration::new(peer1, my_node, 1, 1000),
+        make_coords(&[1, 5, 0]),
+    );
+    // Peer 2: depth 3, loop-free
+    state.update_peer(
+        ParentDeclaration::new(peer2, make_node_addr(3), 1, 1000),
+        make_coords(&[2, 3, 4, 0]),
+    );
+
+    let result = state.evaluate_parent(&HashMap::new());
+    assert_eq!(result, Some(peer2));
+}
+
+#[test]
 fn test_handle_parent_lost_finds_alternative() {
     let my_node = make_node_addr(5);
     let mut state = TreeState::new(my_node);

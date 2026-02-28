@@ -336,6 +336,10 @@ impl TreeState {
             if *coords.root_id() != smallest_root {
                 continue;
             }
+            // Reject candidates whose ancestry contains us (would create a loop)
+            if coords.contains(&self.my_node_addr) {
+                continue;
+            }
             let cost = peer_costs.get(peer_id).copied().unwrap_or(1.0);
             let eff_depth = coords.depth() as f64 + cost;
             match &best_peer {

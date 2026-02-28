@@ -234,6 +234,28 @@ impl Node {
         } else if !self.tree_state.is_root()
             && *self.tree_state.my_declaration().parent_id() == *from
         {
+            // Check for loop: if parent's ancestry now contains us, drop parent
+            if let Some(parent_coords) = self.tree_state.peer_coords(from) {
+                if parent_coords.contains(self.identity.node_addr()) {
+                    warn!(
+                        parent = %self.peer_display_name(from),
+                        "Parent ancestry contains us — loop detected, dropping parent"
+                    );
+                    let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+                        .map(|(addr, peer)| (*addr, peer.link_cost()))
+                        .collect();
+                    if self.tree_state.handle_parent_lost(&peer_costs) {
+                        if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                            warn!(error = %e, "Failed to sign declaration after loop detection");
+                            return;
+                        }
+                        self.coord_cache.clear();
+                        self.send_tree_announce_to_all().await;
+                    }
+                    return;
+                }
+            }
+
             // Our parent's ancestry changed but we're keeping the same parent.
             // Recompute our own coordinates (which derive from parent's ancestry)
             // and re-announce so downstream nodes stay current.
