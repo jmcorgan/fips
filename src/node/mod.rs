@@ -216,6 +216,9 @@ pub struct Node {
     /// Exchanged inside Noise handshake messages so peers can detect restarts.
     startup_epoch: [u8; 8],
 
+    /// Instant when the node was created, for uptime reporting.
+    started_at: std::time::Instant,
+
     // === Configuration ===
     /// Loaded configuration.
     config: Config,
@@ -415,6 +418,7 @@ impl Node {
         Ok(Self {
             identity,
             startup_epoch,
+            started_at: std::time::Instant::now(),
             config,
             state: NodeState::Created,
             is_leaf_only,
@@ -509,6 +513,7 @@ impl Node {
         Self {
             identity,
             startup_epoch,
+            started_at: std::time::Instant::now(),
             config,
             state: NodeState::Created,
             is_leaf_only: false,
@@ -764,6 +769,11 @@ impl Node {
         self.state
     }
 
+    /// Get the node uptime.
+    pub fn uptime(&self) -> std::time::Duration {
+        self.started_at.elapsed()
+    }
+
     /// Check if node is operational.
     pub fn is_running(&self) -> bool {
         self.state.is_operational()
@@ -827,6 +837,11 @@ impl Node {
     /// Get the TUN state.
     pub fn tun_state(&self) -> TunState {
         self.tun_state
+    }
+
+    /// Get the TUN interface name, if active.
+    pub fn tun_name(&self) -> Option<&str> {
+        self.tun_name.as_deref()
     }
 
 

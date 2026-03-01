@@ -26,6 +26,7 @@ services:
       - FIPS_PEER_ALIAS=${FIPS_PEER_ALIAS:-peer}
       - FIPS_UDP_BIND=${FIPS_UDP_BIND:-0.0.0.0:2121}
       - FIPS_TUN_MTU=${FIPS_TUN_MTU:-1280}
+      - FIPS_PEER_TRANSPORT=${FIPS_PEER_TRANSPORT:-udp}
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
     networks:

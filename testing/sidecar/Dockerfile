@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -25,8 +25,8 @@ RUN printf '%s\n' \
     'no-resolv' \
     >> /etc/dnsmasq.conf
 
-COPY fips fipsctl /usr/local/bin/
-RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl
+COPY fips fipsctl fipstop /usr/local/bin/
+RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop
 
 COPY entrypoint.sh /entrypoint.sh
 

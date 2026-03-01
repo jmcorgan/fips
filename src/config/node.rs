@@ -375,7 +375,9 @@ impl ControlConfig {
 
     fn default_socket_path() -> String {
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            format!("{}/fips/control.sock", runtime_dir)
+            format!("{runtime_dir}/fips/control.sock")
+        } else if std::fs::create_dir_all("/run/fips").is_ok() {
+            "/run/fips/control.sock".to_string()
         } else {
             "/tmp/fips-control.sock".to_string()
         }

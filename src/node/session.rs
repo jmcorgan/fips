@@ -73,6 +73,16 @@ pub(crate) struct SessionEntry {
     /// Session-layer MMP state. Initialized on Established transition.
     mmp: Option<MmpSessionState>,
 
+    // === Traffic Counters ===
+    /// Total data packets sent on this session.
+    packets_sent: u64,
+    /// Total data packets received on this session.
+    packets_recv: u64,
+    /// Total data bytes sent on this session (FSP payload).
+    bytes_sent: u64,
+    /// Total data bytes received on this session (FSP payload).
+    bytes_recv: u64,
+
     // === Handshake Resend ===
     /// Encoded session-layer payload for resend (SessionSetup or SessionAck).
     /// Cleared on Established transition.
@@ -102,6 +112,10 @@ impl SessionEntry {
             coords_warmup_remaining: 0,
             is_initiator,
             mmp: None,
+            packets_sent: 0,
+            packets_recv: 0,
+            bytes_sent: 0,
+            bytes_recv: 0,
             handshake_payload: None,
             resend_count: 0,
             next_resend_at_ms: 0,
@@ -217,6 +231,25 @@ impl SessionEntry {
     /// Initialize session-layer MMP state (called on Established transition).
     pub(crate) fn init_mmp(&mut self, config: &SessionMmpConfig) {
         self.mmp = Some(MmpSessionState::new(config, self.is_initiator));
+    }
+
+    // === Traffic Counters ===
+
+    /// Record a sent data packet.
+    pub(crate) fn record_sent(&mut self, bytes: usize) {
+        self.packets_sent += 1;
+        self.bytes_sent += bytes as u64;
+    }
+
+    /// Record a received data packet.
+    pub(crate) fn record_recv(&mut self, bytes: usize) {
+        self.packets_recv += 1;
+        self.bytes_recv += bytes as u64;
+    }
+
+    /// Get traffic counters: (packets_sent, packets_recv, bytes_sent, bytes_recv).
+    pub(crate) fn traffic_counters(&self) -> (u64, u64, u64, u64) {
+        (self.packets_sent, self.packets_recv, self.bytes_sent, self.bytes_recv)
     }
 
     // === Handshake Resend ===

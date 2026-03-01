@@ -3,6 +3,7 @@
 //! Each function takes `&Node` and returns a `serde_json::Value`.
 //! Query logic is kept separate from socket handling.
 
+use crate::identity::encode_npub;
 use crate::node::Node;
 use serde_json::{json, Value};
 
@@ -31,10 +32,17 @@ fn trend_label(short: f64, long: f64) -> &'static str {
 
 /// `show_status` — Node overview.
 pub fn show_status(node: &Node) -> Value {
+    let pid = std::process::id();
+    let exe_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "-".into());
+    let uptime_secs = node.uptime().as_secs();
+    let fwd = node.stats().snapshot().forwarding;
+
     json!({
         "npub": node.npub(),
         "node_addr": hex::encode(node.node_addr().as_bytes()),
-        "fips_address": format!("{}", node.identity().address()),
+        "ipv6_addr": format!("{}", node.identity().address()),
         "state": format!("{}", node.state()),
         "is_leaf_only": node.is_leaf_only(),
         "peer_count": node.peer_count(),
@@ -43,7 +51,13 @@ pub fn show_status(node: &Node) -> Value {
         "transport_count": node.transport_count(),
         "connection_count": node.connection_count(),
         "tun_state": format!("{}", node.tun_state()),
+        "tun_name": node.tun_name().unwrap_or("-"),
         "effective_ipv6_mtu": node.effective_ipv6_mtu(),
+        "control_socket": &node.config().node.control.socket_path,
+        "pid": pid,
+        "exe_path": exe_path,
+        "uptime_secs": uptime_secs,
+        "forwarding": serde_json::to_value(&fwd).unwrap_or_default(),
     })
 }
 
@@ -57,7 +71,7 @@ pub fn show_peers(node: &Node) -> Value {
             "node_addr": addr_hex,
             "npub": peer.npub(),
             "display_name": node.peer_display_name(&node_addr),
-            "fips_address": format!("{}", peer.address()),
+            "ipv6_addr": format!("{}", peer.address()),
             "connectivity": format!("{}", peer.connectivity()),
             "link_id": peer.link_id().as_u64(),
             "authenticated_at_ms": peer.authenticated_at(),
@@ -99,6 +113,17 @@ pub fn show_peers(node: &Node) -> Value {
             mmp_json["goodput_bps"] = json!(mmp.metrics.goodput_bps);
             mmp_json["delivery_ratio_forward"] = json!(mmp.metrics.delivery_ratio_forward);
             mmp_json["delivery_ratio_reverse"] = json!(mmp.metrics.delivery_ratio_reverse);
+            if let Some(smoothed_loss) = mmp.metrics.smoothed_loss() {
+                mmp_json["smoothed_loss"] = json!(smoothed_loss);
+            }
+            if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
+                mmp_json["smoothed_etx"] = json!(smoothed_etx);
+            }
+            if let Some(srtt) = mmp.metrics.srtt_ms() {
+                if let Some(setx) = mmp.metrics.smoothed_etx() {
+                    mmp_json["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+                }
+            }
             peer_json["mmp"] = mmp_json;
         }
 
@@ -207,15 +232,44 @@ pub fn show_sessions(node: &Node) -> Value {
             "last_activity_ms": entry.last_activity(),
         });
 
+        // Derive npub from session's remote public key
+        let (xonly, _parity) = entry.remote_pubkey().x_only_public_key();
+        session_json["npub"] = json!(encode_npub(&xonly));
+
+        // Traffic counters
+        let (pkts_tx, pkts_rx, bytes_tx, bytes_rx) = entry.traffic_counters();
+        session_json["stats"] = json!({
+            "packets_sent": pkts_tx,
+            "packets_recv": pkts_rx,
+            "bytes_sent": bytes_tx,
+            "bytes_recv": bytes_rx,
+        });
+
         // Add session MMP if available
         if let Some(mmp) = entry.mmp() {
             let mut mmp_json = json!({
                 "mode": format!("{}", mmp.mode()),
+                "loss_rate": mmp.metrics.loss_rate(),
+                "etx": mmp.metrics.etx,
+                "goodput_bps": mmp.metrics.goodput_bps,
+                "delivery_ratio_forward": mmp.metrics.delivery_ratio_forward,
+                "delivery_ratio_reverse": mmp.metrics.delivery_ratio_reverse,
+                "path_mtu": mmp.path_mtu.current_mtu(),
             });
             if let Some(srtt) = mmp.metrics.srtt_ms() {
                 mmp_json["srtt_ms"] = json!(srtt);
             }
-            mmp_json["path_mtu"] = json!(mmp.path_mtu.current_mtu());
+            if let Some(smoothed_loss) = mmp.metrics.smoothed_loss() {
+                mmp_json["smoothed_loss"] = json!(smoothed_loss);
+            }
+            if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
+                mmp_json["smoothed_etx"] = json!(smoothed_etx);
+            }
+            if let Some(srtt) = mmp.metrics.srtt_ms() {
+                if let Some(setx) = mmp.metrics.smoothed_etx() {
+                    mmp_json["sqi"] = json!(setx * (1.0 + srtt / 100.0));
+                }
+            }
             session_json["mmp"] = mmp_json;
         }
 
@@ -279,8 +333,17 @@ pub fn show_mmp(node: &Node) -> Value {
             "spin_bit_role": if mmp.spin_bit.is_initiator() { "initiator" } else { "responder" },
         });
 
+        if let Some(smoothed_loss) = metrics.smoothed_loss() {
+            link_layer["smoothed_loss"] = json!(smoothed_loss);
+        }
+        if let Some(smoothed_etx) = metrics.smoothed_etx() {
+            link_layer["smoothed_etx"] = json!(smoothed_etx);
+        }
         if let Some(srtt) = metrics.srtt_ms() {
             link_layer["srtt_ms"] = json!(srtt);
+            if let Some(setx) = metrics.smoothed_etx() {
+                link_layer["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+            }
         }
 
         // Trend indicators
@@ -319,8 +382,17 @@ pub fn show_mmp(node: &Node) -> Value {
             "path_mtu": mmp.path_mtu.current_mtu(),
         });
 
+        if let Some(smoothed_loss) = metrics.smoothed_loss() {
+            session_layer["smoothed_loss"] = json!(smoothed_loss);
+        }
+        if let Some(smoothed_etx) = metrics.smoothed_etx() {
+            session_layer["smoothed_etx"] = json!(smoothed_etx);
+        }
         if let Some(srtt) = metrics.srtt_ms() {
             session_layer["srtt_ms"] = json!(srtt);
+            if let Some(setx) = metrics.smoothed_etx() {
+                session_layer["sqi"] = json!(setx * (1.0 + srtt / 100.0));
+            }
         }
 
         Some(json!({

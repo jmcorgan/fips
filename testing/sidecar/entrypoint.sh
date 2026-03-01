@@ -7,6 +7,7 @@ set -e
 FIPS_NSEC="${FIPS_NSEC:?FIPS_NSEC is required}"
 FIPS_UDP_BIND="${FIPS_UDP_BIND:-0.0.0.0:2121}"
 FIPS_TUN_MTU="${FIPS_TUN_MTU:-1280}"
+FIPS_PEER_TRANSPORT="${FIPS_PEER_TRANSPORT:-udp}"
 
 mkdir -p /etc/fips
 
@@ -17,7 +18,7 @@ if [ -n "$FIPS_PEER_NPUB" ] && [ -n "$FIPS_PEER_ADDR" ]; then
     PEERS_SECTION="  - npub: \"${FIPS_PEER_NPUB}\"
     alias: \"${FIPS_PEER_ALIAS}\"
     addresses:
-      - transport: udp
+      - transport: ${FIPS_PEER_TRANSPORT}
         addr: \"${FIPS_PEER_ADDR}\"
     connect_policy: auto_connect"
 fi
@@ -40,6 +41,7 @@ transports:
   udp:
     bind_addr: "${FIPS_UDP_BIND}"
     mtu: 1472
+  tcp: {}
 
 peers:
 ${PEERS_SECTION:-  []}
@@ -61,6 +63,8 @@ iptables -A OUTPUT -o eth0 -p udp --dport 2121 -j ACCEPT
 iptables -A OUTPUT -o eth0 -p udp --sport 2121 -j ACCEPT
 iptables -A INPUT  -i eth0 -p udp --dport 2121 -j ACCEPT
 iptables -A INPUT  -i eth0 -p udp --sport 2121 -j ACCEPT
+iptables -A OUTPUT -o eth0 -p tcp --dport 443 -j ACCEPT
+iptables -A INPUT  -i eth0 -p tcp --sport 443 -j ACCEPT
 iptables -A OUTPUT -o eth0 -j DROP
 iptables -A INPUT  -i eth0 -j DROP
 

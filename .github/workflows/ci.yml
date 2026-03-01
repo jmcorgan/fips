@@ -66,6 +66,7 @@ jobs:
           path: |
             target/release/fips
             target/release/fipsctl
+            target/release/fipstop
           retention-days: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,9 +265,10 @@ jobs:
       - name: Install binary (sidecar)
         if: matrix.type == 'sidecar'
         run: |
-          chmod +x _bin/fips _bin/fipsctl
+          chmod +x _bin/fips _bin/fipsctl _bin/fipstop
           cp _bin/fips    testing/sidecar/fips
           cp _bin/fipsctl testing/sidecar/fipsctl
+          cp _bin/fipstop testing/sidecar/fipstop
 
       - name: Run sidecar integration test
         if: matrix.type == 'sidecar'

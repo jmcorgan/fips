@@ -24,6 +24,7 @@ pub struct MmpMetrics {
     pub loss_trend: DualEwma,
     pub goodput_trend: DualEwma,
     pub jitter_trend: DualEwma,
+    pub etx_trend: DualEwma,
 
     /// Forward delivery ratio (what fraction of our frames the peer received).
     pub delivery_ratio_forward: f64,
@@ -54,6 +55,7 @@ impl MmpMetrics {
             loss_trend: DualEwma::new(),
             goodput_trend: DualEwma::new(),
             jitter_trend: DualEwma::new(),
+            etx_trend: DualEwma::new(),
             delivery_ratio_forward: 1.0,
             delivery_ratio_reverse: 1.0,
             etx: 1.0,
@@ -106,6 +108,7 @@ impl MmpMetrics {
                 let loss_rate = 1.0 - self.delivery_ratio_forward;
                 self.loss_trend.update(loss_rate);
                 self.etx = compute_etx(self.delivery_ratio_forward, self.delivery_ratio_reverse);
+                self.etx_trend.update(self.etx);
             }
         }
 
@@ -146,6 +149,7 @@ impl MmpMetrics {
     pub fn set_delivery_ratio_reverse(&mut self, ratio: f64) {
         self.delivery_ratio_reverse = ratio.clamp(0.0, 1.0);
         self.etx = compute_etx(self.delivery_ratio_forward, self.delivery_ratio_reverse);
+        self.etx_trend.update(self.etx);
     }
 
     /// Current smoothed RTT in milliseconds, or `None` if not yet measured.
@@ -160,6 +164,24 @@ impl MmpMetrics {
     /// Current loss rate (0.0 = no loss, 1.0 = total loss).
     pub fn loss_rate(&self) -> f64 {
         1.0 - self.delivery_ratio_forward
+    }
+
+    /// Smoothed loss rate (long-term EWMA), or `None` if not yet initialized.
+    pub fn smoothed_loss(&self) -> Option<f64> {
+        if self.loss_trend.initialized() {
+            Some(self.loss_trend.long())
+        } else {
+            None
+        }
+    }
+
+    /// Smoothed ETX (long-term EWMA), or `None` if not yet initialized.
+    pub fn smoothed_etx(&self) -> Option<f64> {
+        if self.etx_trend.initialized() {
+            Some(self.etx_trend.long())
+        } else {
+            None
+        }
     }
 
     /// Current smoothed goodput in bytes/sec, or 0 if not yet measured.

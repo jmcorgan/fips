@@ -54,7 +54,7 @@ peers:       # Static peer list
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.control.enabled` | bool | `true` | Enable the Unix domain control socket |
-| `node.control.socket_path` | string | *(auto)* | Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock` if `XDG_RUNTIME_DIR` is set, otherwise `/tmp/fips-control.sock` |
+| `node.control.socket_path` | string | *(auto)* | Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock`, then `/run/fips/control.sock` (if root), then `/tmp/fips-control.sock` |
 
 The control socket provides read-only access to node state via the
 `fipsctl` command-line tool. See the project
@@ -480,7 +480,7 @@ node:
     owd_window_size: 32
   control:
     enabled: true
-    socket_path: null                # null = auto ($XDG_RUNTIME_DIR/fips/control.sock or /tmp/fips-control.sock)
+    socket_path: null                # null = auto ($XDG_RUNTIME_DIR → /run/fips → /tmp fallback)
   buffers:
     packet_channel: 1024
     tun_channel: 1024

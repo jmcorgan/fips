@@ -16,9 +16,9 @@ from .topology import SimTopology
 
 log = logging.getLogger(__name__)
 
-# Default control socket path inside containers (XDG_RUNTIME_DIR is
-# typically unset in Docker, so fips falls back to /tmp).
-CONTROL_SOCKET = "/tmp/fips-control.sock"
+# Default control socket path inside containers (running as root,
+# so /run/fips/ is created by the daemon).
+CONTROL_SOCKET = "/run/fips/control.sock"
 
 
 def query_node(container: str, command: str, timeout: int = 10) -> dict | None:

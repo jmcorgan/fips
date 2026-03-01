@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// FIPS control client
@@ -77,7 +77,9 @@ impl ShowCommands {
 /// Determine the default socket path.
 fn default_socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(format!("{}/fips/control.sock", runtime_dir))
+        PathBuf::from(format!("{runtime_dir}/fips/control.sock"))
+    } else if Path::new("/run/fips/control.sock").exists() {
+        PathBuf::from("/run/fips/control.sock")
     } else {
         PathBuf::from("/tmp/fips-control.sock")
     }

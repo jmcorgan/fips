@@ -38,6 +38,7 @@ if [ "$UNAME_S" = "Darwin" ]; then
     echo "Copying binaries to docker context..."
     cp "$PROJECT_ROOT/target/$CARGO_TARGET/release/fips" "$DOCKER_DIR/fips"
     cp "$PROJECT_ROOT/target/$CARGO_TARGET/release/fipsctl" "$DOCKER_DIR/fipsctl"
+    cp "$PROJECT_ROOT/target/$CARGO_TARGET/release/fipstop" "$DOCKER_DIR/fipstop"
 else
     echo "Building FIPS (release)..."
     cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml"
@@ -45,9 +46,10 @@ else
     echo "Copying binaries to docker context..."
     cp "$PROJECT_ROOT/target/release/fips" "$DOCKER_DIR/fips"
     cp "$PROJECT_ROOT/target/release/fipsctl" "$DOCKER_DIR/fipsctl"
+    cp "$PROJECT_ROOT/target/release/fipstop" "$DOCKER_DIR/fipstop"
 fi
 
-echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl}"
+echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl,fipstop}"
 echo ""
 echo "Building Docker image..."
 docker compose -f "$DOCKER_DIR/docker-compose.yml" build

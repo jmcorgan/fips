@@ -263,11 +263,12 @@ impl Node {
             }
         }
 
-        // Only application data resets the idle timer — MMP reports
-        // (SenderReport, ReceiverReport, PathMtuNotification) do not.
+        // Only application data resets the idle timer and traffic counters —
+        // MMP reports (SenderReport, ReceiverReport, PathMtuNotification) do not.
         if msg_type == SessionMessageType::DataPacket.to_byte()
             && let Some(entry) = self.sessions.get_mut(src_addr)
         {
+            entry.record_recv(rest.len());
             entry.touch(Self::now_ms());
         }
 
@@ -1026,6 +1027,7 @@ impl Node {
 
         // Re-borrow after send (which borrowed &mut self)
         if let Some(entry) = self.sessions.get_mut(dest_addr) {
+            entry.record_sent(plaintext.len());
             if let Some(mmp) = entry.mmp_mut() {
                 mmp.sender.record_sent(counter, timestamp, ciphertext.len());
             }
