@@ -135,12 +135,13 @@ impl EthernetTransport {
         let local_mac = raw_socket.local_mac()?;
         let if_mtu = raw_socket.interface_mtu()?;
 
-        // Effective MTU: interface MTU minus 1 byte for frame type prefix
+        // Effective MTU: interface MTU minus 3 bytes for frame header
+        // (1 byte frame type + 2 bytes LE payload length)
         let effective_mtu = if let Some(configured_mtu) = self.config.mtu {
-            // Config MTU cannot exceed interface MTU - 1
-            configured_mtu.min(if_mtu.saturating_sub(1))
+            // Config MTU cannot exceed interface MTU - 3
+            configured_mtu.min(if_mtu.saturating_sub(3))
         } else {
-            if_mtu.saturating_sub(1)
+            if_mtu.saturating_sub(3)
         };
         self.effective_mtu = effective_mtu;
         self.local_mac = Some(local_mac);
@@ -289,9 +290,13 @@ impl EthernetTransport {
         let dest_mac = parse_mac_addr(addr)?;
         let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
 
-        // Prepend frame type prefix
-        let mut frame = Vec::with_capacity(1 + data.len());
+        // Prepend frame type prefix and 2-byte LE payload length.
+        // The length field lets the receiver trim Ethernet minimum-frame padding
+        // (NICs pad frames shorter than 46 bytes payload to 46 bytes with zeros,
+        // which would otherwise corrupt AEAD ciphertext verification).
+        let mut frame = Vec::with_capacity(3 + data.len());
         frame.push(FRAME_TYPE_DATA);
+        frame.extend_from_slice(&(data.len() as u16).to_le_bytes());
         frame.extend_from_slice(data);
 
         let bytes_sent = socket.send_to(&frame, &dest_mac).await?;
@@ -304,8 +309,8 @@ impl EthernetTransport {
             "Ethernet frame sent"
         );
 
-        // Return the data bytes sent (excluding frame type prefix)
-        Ok(bytes_sent.saturating_sub(1))
+        // Return the data bytes sent (excluding frame type prefix and length field)
+        Ok(bytes_sent.saturating_sub(3))
     }
 }
 
@@ -388,15 +393,30 @@ async fn ethernet_receive_loop(
                 let frame_type = buf[0];
                 match frame_type {
                     FRAME_TYPE_DATA => {
-                        // Strip the frame type prefix, deliver payload
-                        let data = buf[1..len].to_vec();
+                        // Data frame: [type:1][length:2 LE][payload:N]
+                        // Use the length field to trim Ethernet minimum-frame padding.
+                        if len < 3 {
+                            trace!("Data frame too short ({len} bytes), ignoring");
+                            continue;
+                        }
+                        let payload_len =
+                            u16::from_le_bytes([buf[1], buf[2]]) as usize;
+                        if payload_len > len - 3 {
+                            trace!(
+                                "Data frame length field ({payload_len}) exceeds \
+                                 available bytes ({}), ignoring",
+                                len - 3
+                            );
+                            continue;
+                        }
+                        let data = buf[3..3 + payload_len].to_vec();
                         let addr = TransportAddr::from_bytes(&src_mac);
                         let packet = ReceivedPacket::new(transport_id, addr, data);
 
                         trace!(
                             transport_id = %transport_id,
                             remote_mac = %format_mac(&src_mac),
-                            bytes = len - 1,
+                            bytes = payload_len,
                             "Ethernet data frame received"
                         );
 
@@ -682,14 +702,38 @@ mod tests {
 
     #[test]
     fn test_frame_type_data_prefix() {
-        // Verify data frames are prefixed with 0x00
+        // Verify data frames have type prefix + 2-byte LE length + payload
         let data = vec![1, 2, 3, 4];
-        let mut frame = Vec::with_capacity(1 + data.len());
+        let mut frame = Vec::with_capacity(3 + data.len());
         frame.push(FRAME_TYPE_DATA);
+        frame.extend_from_slice(&(data.len() as u16).to_le_bytes());
         frame.extend_from_slice(&data);
 
-        assert_eq!(frame[0], 0x00);
-        assert_eq!(&frame[1..], &[1, 2, 3, 4]);
+        assert_eq!(frame[0], 0x00); // frame type
+        assert_eq!(u16::from_le_bytes([frame[1], frame[2]]), 4); // length
+        assert_eq!(&frame[3..], &[1, 2, 3, 4]); // payload
+    }
+
+    #[test]
+    fn test_data_frame_padding_trimmed() {
+        // Simulate Ethernet minimum-frame padding: a 4-byte payload produces
+        // a 7-byte frame (type + len + payload), padded to 46 bytes by NIC.
+        let payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let payload_len = payload.len() as u16;
+
+        // Build frame as sender would
+        let mut frame = Vec::with_capacity(3 + payload.len());
+        frame.push(FRAME_TYPE_DATA);
+        frame.extend_from_slice(&payload_len.to_le_bytes());
+        frame.extend_from_slice(&payload);
+
+        // Simulate NIC padding to 46 bytes
+        frame.resize(46, 0x00);
+
+        // Receiver extracts using length field
+        let recv_len = u16::from_le_bytes([frame[1], frame[2]]) as usize;
+        let extracted = &frame[3..3 + recv_len];
+        assert_eq!(extracted, &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
     #[test]
