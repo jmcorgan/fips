@@ -1,0 +1,28 @@
+[Unit]
+Description=FIPS Mesh Network Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fips --config /etc/fips/fips.yaml
+Restart=on-failure
+RestartSec=5
+
+# Logging: RUST_LOG controls verbosity.
+# Use "info" for production, "debug" for troubleshooting.
+Environment=RUST_LOG=info
+
+# Control socket directory (/run/fips/).
+# Group-readable so 'fips' group members can use fipsctl/fipstop.
+RuntimeDirectory=fips
+RuntimeDirectoryMode=0750
+
+# Security hardening (daemon runs as root for TUN and raw sockets)
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=no
+
+[Install]
+WantedBy=multi-user.target

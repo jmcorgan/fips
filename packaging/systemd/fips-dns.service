@@ -1,0 +1,12 @@
+[Unit]
+Description=Configure DNS routing for .fips domain
+After=systemd-resolved.service
+Wants=systemd-resolved.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'while ! ip link show fips0 >/dev/null 2>&1; do sleep 1; done; /usr/bin/resolvectl dns fips0 127.0.0.1:5354; /usr/bin/resolvectl domain fips0 ~fips'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

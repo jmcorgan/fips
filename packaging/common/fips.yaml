@@ -1,0 +1,47 @@
+# FIPS Node Configuration
+
+node:
+  identity:
+    # By default, a new ephemeral keypair is generated on each start.
+    # Uncomment persistent to keep the same identity across restarts;
+    # on first start a keypair is saved to fips.key/fips.pub next to
+    # this config file (mode 0600/0644).
+    # persistent: true
+    #
+    # Or set an explicit key (overrides persistent):
+    # nsec: "nsec1..."
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+  port: 5354
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+
+  tcp:
+    # Accepts inbound connections. No static outbound peers.
+    bind_addr: "0.0.0.0:8443"
+
+  # Ethernet transport — uncomment and set your interface name.
+  # ethernet:
+  #   interface: "eth0"
+  #   discovery: true
+  #   announce: true
+  #   auto_connect: true
+  #   accept_connections: true
+
+peers: []
+  # Static peers for bootstrapping (UDP or TCP):
+  # - npub: "npub1..."
+  #   alias: "gateway"
+  #   addresses:
+  #     - transport: udp
+  #       addr: "217.77.8.91:2121"  # public FIPS testing node
+  #   connect_policy: auto_connect
