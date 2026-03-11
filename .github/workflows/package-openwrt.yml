@@ -1,0 +1,203 @@
+name: OpenWrt Package
+
+on:
+  push:
+    tags:
+      - "openwrt-packaging"
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target architecture (leave empty to build all)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build .ipk (${{ matrix.openwrt_arch }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust_target: aarch64-unknown-linux-musl
+            openwrt_arch: aarch64_cortex-a53
+            # MT3000, MT6000, Flint 2, RPi 3/4/5
+          - rust_target: mipsel-unknown-linux-musl
+            openwrt_arch: mipsel_24kc
+            # Older GL.iNet, TP-Link, Netgear
+          - rust_target: mips-unknown-linux-musl
+            openwrt_arch: mips_24kc
+            # ath79 (Archer C7, etc.)
+          - rust_target: x86_64-unknown-linux-musl
+            openwrt_arch: x86_64
+            # x86 routers / VMs
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive package version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g')
+            HEIGHT=$(git rev-list --count HEAD)
+            HASH=$(git rev-parse --short HEAD)
+            VERSION="${BRANCH}.${HEIGHT}.${HASH}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "filename=fips_${VERSION}_${{ matrix.openwrt_arch }}.ipk" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/${{ matrix.rust_target }}
+          key: openwrt-${{ matrix.rust_target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            openwrt-${{ matrix.rust_target }}-
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Install zig (required by cargo-zigbuild)
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Build binaries
+        run: |
+          cargo zigbuild \
+            --release \
+            --target ${{ matrix.rust_target }} \
+            --bin fips \
+            --bin fipsctl \
+            --bin fipstop
+
+      - name: Strip binaries
+        run: |
+          for bin in fips fipsctl fipstop; do
+            strip target/${{ matrix.rust_target }}/release/$bin
+          done
+
+      - name: Assemble .ipk
+        env:
+          PKG_VERSION: ${{ steps.version.outputs.version }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          OPENWRT_ARCH: ${{ matrix.openwrt_arch }}
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="target/${RUST_TARGET}/release"
+          FILES_DIR="packaging/openwrt/files"
+          WORK="$(mktemp -d)"
+          CTRL="$WORK/control"
+          DATA="$WORK/data"
+          mkdir -p "$CTRL" "$DATA"
+
+          # --- data ---
+          install -Dm755 "$RELEASE_DIR/fips"    "$DATA/usr/bin/fips"
+          install -Dm755 "$RELEASE_DIR/fipsctl" "$DATA/usr/bin/fipsctl"
+          install -Dm755 "$RELEASE_DIR/fipstop" "$DATA/usr/bin/fipstop"
+          install -Dm755 "$FILES_DIR/etc/init.d/fips"                  "$DATA/etc/init.d/fips"
+          install -Dm600 "$FILES_DIR/etc/fips/fips.yaml"               "$DATA/etc/fips/fips.yaml"
+          install -Dm755 "$FILES_DIR/etc/fips/firewall.sh"             "$DATA/etc/fips/firewall.sh"
+          install -Dm644 "$FILES_DIR/etc/dnsmasq.d/fips.conf"          "$DATA/etc/dnsmasq.d/fips.conf"
+          install -Dm644 "$FILES_DIR/etc/sysctl.d/fips-bridge.conf"    "$DATA/etc/sysctl.d/fips-bridge.conf"
+          install -Dm755 "$FILES_DIR/etc/hotplug.d/net/99-fips"        "$DATA/etc/hotplug.d/net/99-fips"
+          install -Dm755 "$FILES_DIR/etc/uci-defaults/90-fips-setup"   "$DATA/etc/uci-defaults/90-fips-setup"
+          install -Dm644 "$FILES_DIR/lib/upgrade/keep.d/fips"          "$DATA/lib/upgrade/keep.d/fips"
+
+          # --- control ---
+          PKG_SIZE=$(du -sk "$DATA" | cut -f1)
+          cat > "$CTRL/control" <<EOF
+          Package: fips
+          Version: ${PKG_VERSION}
+          Architecture: ${OPENWRT_ARCH}
+          Maintainer: FIPS Network
+          Section: net
+          Priority: optional
+          Depends: kmod-tun, kmod-br-netfilter
+          Description: FIPS Mesh Network Daemon
+           Distributed, decentralized mesh networking over UDP, TCP, and raw Ethernet.
+           Provides a TUN interface (fips0) with ULA IPv6 addressing and a DNS
+           responder for .fips name resolution.
+          Installed-Size: ${PKG_SIZE}
+          EOF
+
+          printf '/etc/fips/fips.yaml\n' > "$CTRL/conffiles"
+
+          cat > "$CTRL/postinst" <<'POSTINST'
+          #!/bin/sh
+          [ -x /etc/uci-defaults/90-fips-setup ] && \
+            /etc/uci-defaults/90-fips-setup && \
+            rm -f /etc/uci-defaults/90-fips-setup
+          /etc/init.d/fips enable
+          /etc/init.d/fips start
+          exit 0
+          POSTINST
+          chmod 0755 "$CTRL/postinst"
+
+          cat > "$CTRL/prerm" <<'PRERM'
+          #!/bin/sh
+          /etc/init.d/fips stop    2>/dev/null || true
+          /etc/init.d/fips disable 2>/dev/null || true
+          exit 0
+          PRERM
+          chmod 0755 "$CTRL/prerm"
+
+          # --- pack ---
+          # .ipk is a gzip-compressed tar (NOT ar like Debian .deb).
+          # --format=gnu and --numeric-owner match what ipkg-build produces.
+          IPK="$WORK/ipk"
+          mkdir -p "$IPK"
+          echo "2.0" > "$IPK/debian-binary"
+          tar --format=gnu --numeric-owner -czf "$IPK/control.tar.gz" -C "$CTRL" .
+          tar --format=gnu --numeric-owner -czf "$IPK/data.tar.gz"    -C "$DATA" .
+
+          mkdir -p dist
+          ( cd "$IPK" && tar --format=gnu --numeric-owner \
+              -czf "$GITHUB_WORKSPACE/dist/${{ steps.version.outputs.filename }}" \
+              ./debian-binary ./control.tar.gz ./data.tar.gz )
+
+          ls -lh "dist/${{ steps.version.outputs.filename }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.filename }}
+          path: dist/${{ steps.version.outputs.filename }}
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all .ipk artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.ipk
+          generate_release_notes: true

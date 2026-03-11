@@ -1,0 +1,58 @@
+# FIPS Node Configuration
+#
+# Edit this file before starting the FIPS daemon.
+# Full reference: https://github.com/fips-network/fips/blob/master/docs/design/fips-configuration.md
+#
+# After editing, restart the daemon:
+#   /etc/init.d/fips restart
+
+node:
+  identity:
+    # A persistent keypair is generated on first start and saved to
+    # /etc/fips/fips.key (private) and /etc/fips/fips.pub (public).
+    # The router keeps the same FIPS identity across reboots.
+    #
+    # To use an explicit key instead, comment out 'persistent' and set:
+    #   nsec: "your-64-char-hex-private-key"
+    persistent: true
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+  port: 5354
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+
+  # Ethernet transport — uncomment and set your interface names.
+  # Use physical port names, NOT bridge names (e.g. eth1, not br-lan).
+  # Run 'ip link show' on the router to identify port names.
+  # See: https://github.com/fips-network/fips/blob/master/deploy/native/README.md
+  #
+  # ethernet:
+  #   wan:
+  #     interface: "eth0" # WAN
+  #     discovery: true
+  #     announce: true
+  #     auto_connect: true
+  #     accept_connections: true
+  #   lan:
+  #     interface: "br-lan"       # LAN
+  #     discovery: true
+  #     announce: true
+  #     auto_connect: true
+  #     accept_connections: true
+
+peers: []
+  # Static peers for bootstrapping (add at least one if using UDP-only):
+  # - npub: "npub1..."
+  #   alias: "gateway"
+  #   addresses:
+  #     - transport: udp
+  #       addr: "1.2.3.4:2121"

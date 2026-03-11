@@ -1,0 +1,72 @@
+#!/bin/sh
+# FIPS first-boot setup — runs once after package installation.
+# Configures the firewall and kernel modules for FIPS operation.
+# This script is executed by /etc/rc.d/S19sysctl on first boot and
+# then deleted by the UCI defaults mechanism.
+
+# ---------------------------------------------------------------------------
+# 1. Kernel modules
+# ---------------------------------------------------------------------------
+
+# kmod-tun is listed as a package dependency, but ensure the module is loaded.
+modprobe tun 2>/dev/null || true
+echo "tun" > /etc/modules.d/tun
+
+# kmod-br-netfilter makes AF_PACKET visible on bridge member ports.
+modprobe br_netfilter 2>/dev/null || true
+echo "br_netfilter" > /etc/modules.d/br-netfilter
+
+# Apply the sysctl settings shipped in /etc/sysctl.d/fips-bridge.conf now
+# (the file will be applied automatically on subsequent boots).
+sysctl -p /etc/sysctl.d/fips-bridge.conf 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 2. Firewall — add fips0 to the lan zone (fw4 / UCI)
+# ---------------------------------------------------------------------------
+# fw4 (nftables) matches zones by device name, so adding fips0 as a 'device'
+# to the lan zone makes all traffic on the TUN interface accepted without
+# needing raw nft rules in the base chains.
+
+z=0
+while uci -q get "firewall.@zone[$z]" >/dev/null 2>&1; do
+	if [ "$(uci -q get "firewall.@zone[$z].name" 2>/dev/null)" = "lan" ]; then
+		uci -q del_list "firewall.@zone[$z].device=fips0" 2>/dev/null || true
+		uci add_list "firewall.@zone[$z].device=fips0"
+		break
+	fi
+	z=$((z + 1))
+done
+
+# Install a firewall include so /etc/fips/firewall.sh is re-applied on every
+# firewall reload (belt-and-suspenders for iptables-based OpenWrt builds).
+FOUND=0
+j=0
+while uci -q get "firewall.@include[$j]" >/dev/null 2>&1; do
+	if [ "$(uci -q get "firewall.@include[$j].path" 2>/dev/null)" = "/etc/fips/firewall.sh" ]; then
+		FOUND=1
+		break
+	fi
+	j=$((j + 1))
+done
+if [ "$FOUND" = "0" ]; then
+	uci add firewall include
+	uci set "firewall.@include[-1].path=/etc/fips/firewall.sh"
+	uci set "firewall.@include[-1].reload=1"
+fi
+
+uci commit firewall
+
+# ---------------------------------------------------------------------------
+# 3. dnsmasq UCI registration
+# ---------------------------------------------------------------------------
+# /etc/dnsmasq.d/fips.conf already handles runtime forwarding.
+# Register via UCI as well so the settings survive a full dnsmasq config
+# regeneration (e.g. after a firmware upgrade that rebuilds dnsmasq.conf).
+
+uci -q del_list dhcp.@dnsmasq[0].server="/fips/127.0.0.1#5354" 2>/dev/null || true
+uci add_list dhcp.@dnsmasq[0].server="/fips/127.0.0.1#5354"
+uci -q del_list dhcp.@dnsmasq[0].rebind_domain="fips" 2>/dev/null || true
+uci add_list dhcp.@dnsmasq[0].rebind_domain="fips"
+uci commit dhcp
+
+exit 0

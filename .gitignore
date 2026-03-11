@@ -16,3 +16,8 @@
 
 deploy/
 vps.env
+
+reference/
+
+dist/
+*.ipk

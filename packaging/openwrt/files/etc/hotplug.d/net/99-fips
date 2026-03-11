@@ -1,0 +1,8 @@
+#!/bin/sh
+# FIPS hotplug — apply firewall rules when the FIPS TUN interface comes up.
+# The kernel fires net hotplug events for every interface including TUN devices.
+
+[ "$INTERFACE" = "fips0" ] || exit 0
+[ "$ACTION" = "add" ] || [ "$ACTION" = "register" ] || exit 0
+
+/etc/fips/firewall.sh

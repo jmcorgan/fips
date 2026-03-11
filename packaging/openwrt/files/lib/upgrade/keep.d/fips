@@ -1,0 +1,2 @@
+# Preserve FIPS configuration and persistent identity key across sysupgrade.
+/etc/fips/
