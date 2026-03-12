@@ -25,14 +25,13 @@ jobs:
             openwrt_arch: aarch64_cortex-a53
             rust_channel: stable
             # MT3000, MT6000, Flint 2, RPi 3/4/5
-          - rust_target: mipsel-unknown-linux-musl
-            openwrt_arch: mipsel_24kc
-            rust_channel: nightly
-            # Older GL.iNet, TP-Link, Netgear (Tier 3 — needs -Zbuild-std)
-          - rust_target: mips-unknown-linux-musl
-            openwrt_arch: mips_24kc
-            rust_channel: nightly
-            # ath79 (Archer C7, etc.) (Tier 3 — needs -Zbuild-std)
+          # MIPS disabled: 32-bit MIPS lacks AtomicU64; needs portable-atomic crate
+          # - rust_target: mipsel-unknown-linux-musl
+          #   openwrt_arch: mipsel_24kc
+          #   rust_channel: nightly
+          # - rust_target: mips-unknown-linux-musl
+          #   openwrt_arch: mips_24kc
+          #   rust_channel: nightly
           - rust_target: x86_64-unknown-linux-musl
             openwrt_arch: x86_64
             rust_channel: stable
