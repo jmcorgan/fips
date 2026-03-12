@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: fips
 Upstream-Contact: Johnathan Corgan <jcorgan@corganlabs.com>
-Source: https://github.com/fips-network/fips
+Source: https://github.com/jmcorgan/fips
 
 Files: *
 Copyright: 2026 Johnathan Corgan

@@ -59,7 +59,7 @@ endpoints.
 ## Building
 
 ```bash
-git clone https://github.com/fips-network/fips.git
+git clone https://github.com/jmcorgan/fips.git
 cd fips
 cargo build --release
 ```
@@ -264,13 +264,13 @@ UDP, TCP, and Ethernet but has not been tested beyond small meshes.
 - Additional transports (Bluetooth, Tor)
 - Improved routing resilience under churn
 - Security audit of cryptographic protocols
-- CI pipeline and published crate
 
 ### Longer-term
 
 - Mobile platform support
 - Bandwidth-aware routing and QoS
 - Protocol stability and versioned wire format
+- Published crate
 
 ## License
 

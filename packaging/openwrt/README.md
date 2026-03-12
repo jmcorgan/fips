@@ -76,7 +76,7 @@ ln -s /path/to/fips/packaging/openwrt package/fips
 Or add the FIPS repository as a feed in `feeds.conf`:
 
 ```
-src-git-full fips https://github.com/fips-network/fips.git
+src-git-full fips https://github.com/jmcorgan/fips.git
 ```
 
 Then update and install feeds:

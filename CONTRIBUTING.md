@@ -5,7 +5,7 @@
 Clone the repo and verify your setup:
 
 ```
-git clone https://github.com/fips-network/fips.git
+git clone https://github.com/jmcorgan/fips.git
 cd fips
 cargo build
 cargo test

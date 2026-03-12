@@ -7,64 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.1.0] - 2026-03-12
 
-- Ethernet transport with beacon discovery and auto-connect
-- TCP transport with configurable bind address and static peer support
-- Docker sidecar deployment for containerized services
-- Comprehensive node and transport statistics via control socket
-- fipstop TUI monitoring tool with smoothed metrics and quality indices
-- fipstop peers display: transport type, direction, and tree roles
-- Estimated mesh size from bloom filter cardinality
-- ECN congestion signaling and transport congestion detection
-- Persistent identity with key file management (`fipsctl keygen`)
-- Periodic Noise rekey with fresh DH for forward secrecy (FMP + FSP)
-- Host-to-npub static mapping: resolve `hostname.fips` via host map
+### Added (Initial Release)
+
+#### Session Layer (FSP)
+
+- End-to-end encrypted datagram service between mesh nodes addressed by Nostr npub
+- Noise XK sessions with mutual authentication, replay protection, and forward secrecy
+- Automatic session rekeying with configurable time/message thresholds and drain window for in-flight packets
+- Port multiplexing for multiple services over a single session
+- Session-layer metrics: sender/receiver reports with RTT, jitter, delivery ratio, and burst loss tracking
+- Passive RTT measurement via spin bit
+
+#### IPv6 Adapter
+
+- IPv6 adapter interface allowing tunneling TCP/IPv6 through FIPS mesh
+  for traditional IP applications (TUN interface)
+- DNS resolver allowing IP applications to reach nodes by npub.fips name
+- Host-to-npub static mappings: resolve `hostname.fips` via host map
   populated from peer config aliases and `/etc/fips/hosts` file
-- DNS responder auto-reloads hosts file on modification (no restart needed)
+
+#### Mesh Layer (FMP)
+
+- Self-organized core mesh routing protocol with adaptive least cost forwarding
+- Noise IK hop-by-hop link encryption with mutual authentication and replay protection between peer nodes
+- Distributed spanning tree construction with cost-based parent selection and adaptive reconfiguration
+- Destination route discovery via bloom filter-based directed search protocol
+- Path MTU discovery with per-link MTU tracking and MtuExceeded error signaling
+- Link-layer MMP: SRTT, jitter, one-way delay trends, packet loss, and ETX metrics
+- Link-layer heartbeat with configurable liveness timeout for dead peer detection
+- Epoch-based peer restart detection
+- Automatic link rekeying with K-bit epoch coordination and drain window
+- Static peer auto-reconnect with exponential backoff
+- Multi-address peers with transport priority-based failover
+- Msg1 rate limiting for handshake DoS protection
+
+#### Mesh Peer Transports
+
+- UDP overlay transport with inbound and static outbound peer configuration
+- TCP overlay transport with listening port and static outbound peer support
+- Ethernet/WiFi transport (MAC address based, no IP stack) with optional automatic peer discovery and auto-connect
+
+#### Operator Tooling
+
+- Ephemeral or persistent node identity with key file management
+- Unix domain control socket for runtime observability
+- `fipsctl` CLI tool for control socket interaction and node management
+- Comprehensive node and transport statistics via control socket
+- `fipstop` TUI monitoring tool with real-time session, peer, and transport configuration and metrics display
+
+#### Packaging and Deployment
+
 - Debian/Ubuntu `.deb` packaging via cargo-deb
 - Systemd service packaging with tarball installer
+- OpenWRT package with opkg feed and init script
+- Docker sidecar deployment for containerized services
 - Build version metadata: git commit hash, dirty flag, and target triple
   embedded in all binaries via `--version`
-- Local CI runner script (`testing/ci-local.sh`)
-- TCP transport node-level integration tests
-- CI: expanded integration matrix, nextest JUnit reporting, workflow_dispatch
-- CHANGELOG.md following Keep a Changelog format
 
-### Fixed
+#### Testing and CI
 
-- Spanning tree coordinate loop: reject parents whose ancestry contains us
-- PMTUD per-destination path MTU check and ICMPv6 MTU field width
-- Ethernet AEAD decryption failures caused by minimum-frame padding
-- Link-dead detection skipping peers that never send data
-- FMP version check added to TCP stream reader
-- Control socket path mismatch between daemon and clients
-- fips-dns.service pulling in systemd-resolved and hanging on missing fips0
-
-### Changed
-
-- GitHub repository moved from `jmcorgan/fips` to `fips-network/fips`
-
-## [0.1.0-alpha] - 2026-02-24
-
-### Added
-
-- Core mesh routing protocol with greedy coordinate-based forwarding
-- Noise IK handshake at FMP (link layer) and Noise XK at FSP (session layer)
-- UDP transport with configurable bind address and static peers
-- TUN-based virtual network interface (fips0) with ICMPv6 Packet Too Big
-- DNS resolver for .fips domain names (port 5354)
-- Spanning tree construction with cost-based parent selection and
-  flap dampening
-- Bloom filter-based identity discovery protocol with reverse-path routing
-- MMP (Mesh Management Protocol) for link and session layer measurement
-- Hybrid coordinate warmup (CoordsWarmup message and proactive fallback)
-- Handshake retry with exponential backoff (link and session layer)
-- Link-layer heartbeat and liveness timeout for dead peer detection
-- Epoch-based peer restart detection
-- Per-link MTU support and reactive MtuExceeded error signal
-- Session idle timeout and identity cache expiry
-- Unix domain control socket for runtime observability (fipsctl)
+- Comprehensive unit and integration tests covering all protocol layers and transports
 - Docker test harness with static and stochastic topologies
-- CI with GitHub Actions (x86_64 and aarch64, unit and integration tests)
+- Chaos testing with simulated severe network conditions: latency, packet loss, reordering, and peer churn
+- CI with GitHub Actions: x86_64 and aarch64, integration test matrix, nextest JUnit reporting
+- Local CI runner script (`testing/ci-local.sh`)
+
+#### Project
+
 - Design documentation suite covering all protocol layers
+- CHANGELOG.md following Keep a Changelog format
+- Repository mirrored to [ngit](https://gitworkshop.dev/npub1y0gja7r4re0wyelmvdqa03qmjs62rwvcd8szzt4nf4t2hd43969qj000ly/relay.ngit.dev/fips)

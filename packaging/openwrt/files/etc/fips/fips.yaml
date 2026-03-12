@@ -1,7 +1,7 @@
 # FIPS Node Configuration
 #
 # Edit this file before starting the FIPS daemon.
-# Full reference: https://github.com/fips-network/fips/blob/master/docs/design/fips-configuration.md
+# Full reference: https://github.com/jmcorgan/fips/blob/master/docs/design/fips-configuration.md
 #
 # After editing, restart the daemon:
 #   /etc/init.d/fips restart
@@ -33,7 +33,7 @@ transports:
   # Ethernet transport — uncomment and set your interface names.
   # Use physical port names, NOT bridge names (e.g. eth1, not br-lan).
   # Run 'ip link show' on the router to identify port names.
-  # See: https://github.com/fips-network/fips/blob/master/deploy/native/README.md
+  # See: https://github.com/jmcorgan/fips/blob/master/deploy/native/README.md
   #
   # ethernet:
   #   wan:

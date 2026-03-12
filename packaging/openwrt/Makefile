@@ -7,7 +7,7 @@ PKG_RELEASE:=1
 # Pin to a specific commit for reproducible builds.
 # Update PKG_SOURCE_VERSION and PKG_MIRROR_HASH when upgrading.
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/fips-network/fips.git
+PKG_SOURCE_URL:=https://github.com/jmcorgan/fips.git
 PKG_SOURCE_VERSION:=master
 PKG_MIRROR_HASH:=skip
 
@@ -48,7 +48,7 @@ define Package/fips
   SECTION:=net
   CATEGORY:=Network
   TITLE:=FIPS Mesh Network Daemon
-  URL:=https://github.com/fips-network/fips
+  URL:=https://github.com/jmcorgan/fips
   DEPENDS:=+kmod-tun +kmod-br-netfilter
 endef
 
