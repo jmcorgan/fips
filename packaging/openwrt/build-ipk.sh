@@ -81,7 +81,7 @@ FILES_DIR="$SCRIPT_DIR/files"
 DIST_DIR="$PROJECT_ROOT/dist"
 
 PKG_NAME="fips"
-PKG_VERSION="$(cd "$PROJECT_ROOT" && git describe --tags --always --dirty 2>/dev/null || echo "0.1.0")"
+PKG_VERSION="${PKG_VERSION:-$(cd "$PROJECT_ROOT" && git describe --tags --always --dirty 2>/dev/null || echo "0.1.0")}"
 
 echo "==> Building $PKG_NAME $PKG_VERSION for $OPENWRT_ARCH ($RUST_TARGET)"
 
