@@ -2,9 +2,6 @@ name: OpenWrt Package
 
 on:
   push:
-    tags:
-      - "openwrt-packaging"
-      - "v*"
   workflow_dispatch:
     inputs:
       arch:
@@ -26,15 +23,19 @@ jobs:
         include:
           - rust_target: aarch64-unknown-linux-musl
             openwrt_arch: aarch64_cortex-a53
+            rust_channel: stable
             # MT3000, MT6000, Flint 2, RPi 3/4/5
           - rust_target: mipsel-unknown-linux-musl
             openwrt_arch: mipsel_24kc
-            # Older GL.iNet, TP-Link, Netgear
+            rust_channel: nightly
+            # Older GL.iNet, TP-Link, Netgear (Tier 3 — needs -Zbuild-std)
           - rust_target: mips-unknown-linux-musl
             openwrt_arch: mips_24kc
-            # ath79 (Archer C7, etc.)
+            rust_channel: nightly
+            # ath79 (Archer C7, etc.) (Tier 3 — needs -Zbuild-std)
           - rust_target: x86_64-unknown-linux-musl
             openwrt_arch: x86_64
+            rust_channel: stable
             # x86 routers / VMs
 
     steps:
@@ -56,10 +57,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "filename=fips_${VERSION}_${{ matrix.openwrt_arch }}.ipk" >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (stable)
+        if: matrix.rust_channel == 'stable'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
+
+      - name: Install Rust toolchain (nightly, Tier 3)
+        if: matrix.rust_channel == 'nightly'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
 
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
@@ -80,17 +88,25 @@ jobs:
 
       - name: Build binaries
         run: |
+          BUILD_STD_FLAG=""
+          if [ "${{ matrix.rust_channel }}" = "nightly" ]; then
+            BUILD_STD_FLAG="-Zbuild-std=std,panic_abort"
+          fi
           cargo zigbuild \
             --release \
             --target ${{ matrix.rust_target }} \
             --bin fips \
             --bin fipsctl \
-            --bin fipstop
+            --bin fipstop \
+            $BUILD_STD_FLAG
+
+      - name: Install llvm-strip
+        run: sudo apt-get install -y --no-install-recommends llvm
 
       - name: Strip binaries
         run: |
           for bin in fips fipsctl fipstop; do
-            strip target/${{ matrix.rust_target }}/release/$bin
+            llvm-strip target/${{ matrix.rust_target }}/release/$bin
           done
 
       - name: Assemble .ipk
