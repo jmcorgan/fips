@@ -42,6 +42,12 @@ transports:
   #     announce: true
   #     auto_connect: true
   #     accept_connections: true
+  #   wwan:
+  #     interface: "phy0-sta0" # WWAN
+  #     discovery: true
+  #     announce: true
+  #     auto_connect: true
+  #     accept_connections: true
   #   lan:
   #     interface: "br-lan"       # LAN
   #     discovery: true
