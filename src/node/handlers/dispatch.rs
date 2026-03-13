@@ -109,12 +109,28 @@ impl Node {
         }
 
         // MMP teardown log (before we drop the peer)
+        let peer_name = self.peer_aliases.get(node_addr)
+            .cloned()
+            .unwrap_or_else(|| peer.identity().short_npub());
         if let Some(mmp) = peer.mmp() {
-            let name = self.peer_aliases.get(node_addr)
-                .cloned()
-                .unwrap_or_else(|| peer.identity().short_npub());
-            Self::log_mmp_teardown(&name, mmp);
+            Self::log_mmp_teardown(&peer_name, mmp);
         }
+
+        // Remove any end-to-end session associated with this peer.
+        //
+        // Sessions are tracked separately from peers (self.sessions vs self.peers).
+        // Leaving a stale session alive after removing the peer causes:
+        //   1. check_session_mmp_reports() keeps logging stale "MMP session metrics"
+        //      with frozen counters until purge_idle_sessions() eventually fires.
+        //   2. initiate_session() finds is_established() == true on the stale entry
+        //      and silently returns Ok(()), preventing a new session from being
+        //      established even after the link layer reconnects successfully.
+        if let Some(session_entry) = self.sessions.remove(node_addr) {
+            if let Some(mmp) = session_entry.mmp() {
+                Self::log_session_mmp_teardown(&peer_name, mmp);
+            }
+        }
+        self.pending_tun_packets.remove(node_addr);
 
         let link_id = peer.link_id();
         let transport_id = peer.transport_id();

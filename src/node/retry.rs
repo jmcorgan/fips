@@ -131,6 +131,12 @@ impl Node {
     ///
     /// Looks up the peer in auto-connect config and checks `auto_reconnect`.
     /// If enabled, feeds the peer into the retry system with unlimited retries.
+    ///
+    /// If a retry entry already exists (e.g. from a previous failed handshake
+    /// attempt during an earlier reconnect cycle), the existing retry count is
+    /// preserved and incremented rather than reset to zero. This ensures
+    /// exponential backoff accumulates across repeated link-dead events instead
+    /// of resetting to the base interval on every peer removal.
     pub(super) fn schedule_reconnect(&mut self, node_addr: NodeAddr, now_ms: u64) {
         // Find peer in auto-connect config
         let peer_config = self
@@ -157,6 +163,24 @@ impl Node {
 
         let base_interval_ms = self.config.node.retry.base_interval_secs * 1000;
         let max_backoff_ms = self.config.node.retry.max_backoff_secs * 1000;
+        let peer_name = self.peer_display_name(&node_addr);
+
+        // If we already have accumulated backoff from previous failed attempts,
+        // preserve and bump it rather than resetting to zero. This prevents the
+        // exponential backoff from being discarded on each link-dead cycle.
+        if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+            state.reconnect = true;
+            state.retry_count += 1;
+            let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
+            state.retry_after_ms = now_ms + delay;
+            info!(
+                peer = %peer_name,
+                retry = state.retry_count,
+                delay_secs = delay / 1000,
+                "Scheduling auto-reconnect after link-dead removal (backoff preserved)"
+            );
+            return;
+        }
 
         let mut state = RetryState::new(pc);
         state.reconnect = true;
@@ -164,7 +188,7 @@ impl Node {
         state.retry_after_ms = now_ms + delay;
 
         info!(
-            peer = %self.peer_display_name(&node_addr),
+            peer = %peer_name,
             delay_secs = delay / 1000,
             "Scheduling auto-reconnect after link-dead removal"
         );
