@@ -79,7 +79,12 @@ impl Node {
         if let Some(state) = self.retry_pending.get_mut(&node_addr) {
             // Already tracking — increment
             state.retry_count += 1;
-            if !state.reconnect && state.retry_count > max_retries {
+            // Respect max_retries only for peers that don't have auto_reconnect.
+            // auto_reconnect peers (and peers already in reconnect mode after a
+            // link-dead event) retry indefinitely — giving up permanently would
+            // leave a configured peer unreachable after a transient outage.
+            let unlimited = state.reconnect || state.peer_config.auto_reconnect;
+            if !unlimited && state.retry_count > max_retries {
                 info!(
                     peer = %peer_name,
                     attempts = state.retry_count,

@@ -606,7 +606,10 @@ fn test_schedule_retry_increments() {
     assert_eq!(state.retry_after_ms, 11_000 + 20_000);
 }
 
-/// Test that schedule_retry gives up after max_retries.
+/// Test that schedule_retry gives up after max_retries for non-auto-reconnect peers.
+///
+/// max_retries only applies when auto_reconnect is false. auto_reconnect peers
+/// retry indefinitely so they are never permanently abandoned after an outage.
 #[test]
 fn test_schedule_retry_max_retries_exhausted() {
     let peer_identity = Identity::generate();
@@ -615,11 +618,9 @@ fn test_schedule_retry_max_retries_exhausted() {
 
     let mut config = Config::new();
     config.node.retry.max_retries = 2;
-    config.peers.push(crate::config::PeerConfig::new(
-        peer_npub,
-        "udp",
-        "10.0.0.2:2121",
-    ));
+    let mut peer_cfg = crate::config::PeerConfig::new(peer_npub, "udp", "10.0.0.2:2121");
+    peer_cfg.auto_reconnect = false; // must opt out to be subject to max_retries
+    config.peers.push(peer_cfg);
 
     let mut node = Node::new(config).unwrap();
 
@@ -635,6 +636,47 @@ fn test_schedule_retry_max_retries_exhausted() {
     assert!(
         !node.retry_pending.contains_key(&peer_node_addr),
         "Should be removed after max retries exhausted"
+    );
+}
+
+/// Test that auto_reconnect peers are NOT subject to max_retries.
+///
+/// Regression: previously auto_reconnect peers were abandoned after max_retries
+/// failed startup handshakes, leaving configured peers permanently disconnected
+/// after a transient outage.
+#[test]
+fn test_schedule_retry_auto_reconnect_ignores_max_retries() {
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    config.node.retry.max_retries = 2; // would exhaust after 2 retries
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:2121",
+    )); // auto_reconnect defaults to true
+
+    let mut node = Node::new(config).unwrap();
+
+    // Exhaust what would be max_retries for a non-auto-reconnect peer
+    node.schedule_retry(peer_node_addr, 1000, false);
+    node.schedule_retry(peer_node_addr, 2000, false);
+    node.schedule_retry(peer_node_addr, 3000, false); // would give up here if not auto_reconnect
+
+    assert!(
+        node.retry_pending.contains_key(&peer_node_addr),
+        "auto_reconnect peer must keep retrying past max_retries"
+    );
+
+    // Keep going well past max_retries
+    for t in 4..20 {
+        node.schedule_retry(peer_node_addr, t * 1000, false);
+    }
+    assert!(
+        node.retry_pending.contains_key(&peer_node_addr),
+        "auto_reconnect peer must never be permanently abandoned"
     );
 }
 
