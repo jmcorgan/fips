@@ -14,7 +14,7 @@ address, deliver the datagram to that address, and push inbound datagrams up
 to the FIPS Mesh Protocol (FMP) above.
 
 The transport layer deals exclusively in **transport addresses** — IP:port
-tuples, MAC addresses, .onion identifiers, radio device addresses. These are
+or hostname:port addresses, MAC addresses, .onion identifiers, radio device addresses. These are
 opaque to every layer above FMP. The mapping from transport address to FIPS
 identity happens at the link layer after the Noise IK link handshake completes.
 The word "peer" belongs to the link layer and above; the transport layer
@@ -115,8 +115,8 @@ for internet connectivity:
 
 | Transport | Addressing | MTU | Reliability | Notes |
 | --------- | ---------- | --- | ----------- | ----- |
-| UDP/IP | IP:port | 1280–1472 | Unreliable | Primary internet transport |
-| TCP/IP | IP:port | Stream | Reliable | Requires length-prefix framing |
+| UDP/IP | host:port | 1280–1472 | Unreliable | Primary internet transport |
+| TCP/IP | host:port | Stream | Reliable | Requires length-prefix framing |
 | WebSocket | URL | Stream | Reliable | Browser-compatible |
 | Tor | .onion | Stream | Reliable | High latency, strong anonymity |
 
@@ -364,7 +364,7 @@ optional `TcpListener` for inbound connections.
 
 | Property | Value |
 | -------- | ----- |
-| Addressing | IP:port (same as UDP) |
+| Addressing | host:port — IP address or DNS hostname |
 | Default MTU | 1400 bytes |
 | Per-link MTU | Derived from `TCP_MAXSEG` socket option |
 | Framing | FMP header-based (zero overhead) |
@@ -480,7 +480,7 @@ X." FMP does not need to distinguish beacons from query responses.
 
 For internet-reachable transports, a node publishes a signed Nostr event
 containing its FIPS discovery information — public key and reachable
-transport endpoints (UDP IP:port, TCP IP:port, .onion address). Other FIPS
+transport endpoints (UDP host:port, TCP host:port, .onion address). Other FIPS
 nodes subscribing on the same relays learn about available peers.
 
 Nostr relay discovery is not a transport — it is a discovery service that
@@ -588,7 +588,7 @@ on all forwarded datagrams.
 ### Transport Addresses
 
 Transport addresses (`TransportAddr`) are opaque byte vectors. The transport
-layer interprets them (e.g., UDP parses "ip:port" strings); all layers above
+layer interprets them (e.g., UDP/TCP resolve "host:port" strings (IP fast path, DNS fallback with 60s cache for UDP)); all layers above
 treat them as opaque handles passed back to the transport for sending.
 
 ### Transport State Machine

@@ -35,9 +35,9 @@ pub struct PeerAddress {
     /// Transport-specific address string.
     ///
     /// Format depends on transport type:
-    /// - UDP: "host:port" (e.g., "192.168.1.1:2121")
-    /// - Tor: "onion_address:port" (e.g., "xyz...abc.onion:2121")
-    /// - Ethernet: "interface/mac" (future)
+    /// - UDP/TCP: "host:port" — IP address or DNS hostname
+    ///   (e.g., "192.168.1.1:2121" or "peer1.example.com:2121")
+    /// - Ethernet: "interface/mac" (e.g., "eth0/aa:bb:cc:dd:ee:ff")
     pub addr: String,
 
     /// Priority for address selection (lower = preferred).

@@ -72,7 +72,7 @@ peers:
     alias: "gateway"
     addresses:
       - transport: udp
-        addr: "217.77.8.91:2121"  # public FIPS testing node
+        addr: "217.77.8.91:2121"  # IP or hostname (e.g., "peer.example.com:2121")
     connect_policy: auto_connect
 ```
 
