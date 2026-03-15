@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- DNS hostname support in peer addresses for UDP and TCP transports — addresses
+  can now use `host:port` with either IP addresses or DNS hostnames (e.g.,
+  `"peer1.example.com:2121"`). DNS resolution with 60-second cache for UDP,
+  one-shot resolution at connect time for TCP.
+
 ## [0.1.0] - 2026-03-12
 
 ### Added (Initial Release)

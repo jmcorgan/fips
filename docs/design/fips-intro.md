@@ -216,7 +216,7 @@ address prepends `fd` to the first 15 bytes of the node_addr, providing a
 ULA overlay address for unmodified IP applications via the TUN interface.
 
 Below the FIPS identity layer, each transport uses its own native addressing
-— IP:port tuples, MAC addresses, .onion identifiers. These **link
+— IP:port or hostname:port addresses, MAC addresses, .onion identifiers. These **link
 addresses** are opaque to everything above FMP and discarded once link
 authentication completes.
 

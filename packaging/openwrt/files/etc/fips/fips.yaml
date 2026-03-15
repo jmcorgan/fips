@@ -61,4 +61,4 @@ peers: []
   #   alias: "gateway"
   #   addresses:
   #     - transport: udp
-  #       addr: "1.2.3.4:2121"
+  #       addr: "1.2.3.4:2121"  # IP or hostname

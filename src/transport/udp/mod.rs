@@ -10,11 +10,17 @@ mod socket;
 mod stats;
 use socket::{AsyncUdpSocket, UdpRawSocket};
 use stats::UdpStats;
+use super::resolve_socket_addr;
 use crate::config::UdpConfig;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
+
+/// DNS cache TTL for hostname resolution (60 seconds).
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// UDP transport for FIPS.
 ///
@@ -40,6 +46,8 @@ pub struct UdpTransport {
     local_addr: Option<SocketAddr>,
     /// Transport statistics.
     stats: Arc<UdpStats>,
+    /// DNS resolution cache for hostname addresses.
+    dns_cache: StdMutex<HashMap<TransportAddr, (SocketAddr, Instant)>>,
 }
 
 impl UdpTransport {
@@ -60,6 +68,7 @@ impl UdpTransport {
             recv_task: None,
             local_addr: None,
             stats: Arc::new(UdpStats::new()),
+            dns_cache: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -76,6 +85,41 @@ impl UdpTransport {
     /// Get the transport statistics.
     pub fn stats(&self) -> &Arc<UdpStats> {
         &self.stats
+    }
+
+    /// Resolve a transport address, using cached results for hostnames.
+    ///
+    /// Numeric IP addresses bypass the cache entirely. Hostnames are
+    /// resolved via DNS and cached for `DNS_CACHE_TTL` to avoid
+    /// per-packet resolution overhead.
+    async fn resolve_cached(&self, addr: &TransportAddr) -> Result<SocketAddr, TransportError> {
+        // Fast path: try numeric IP parse (no cache, no DNS)
+        if let Some(s) = addr.as_str()
+            && let Ok(sock_addr) = s.parse::<SocketAddr>()
+        {
+            return Ok(sock_addr);
+        }
+
+        // Check cache
+        {
+            let cache = self.dns_cache.lock().unwrap();
+            if let Some((resolved, cached_at)) = cache.get(addr)
+                && cached_at.elapsed() < DNS_CACHE_TTL
+            {
+                return Ok(*resolved);
+            }
+        }
+
+        // Cache miss or expired — resolve via DNS
+        let resolved = resolve_socket_addr(addr).await?;
+
+        // Store in cache
+        {
+            let mut cache = self.dns_cache.lock().unwrap();
+            cache.insert(addr.clone(), (resolved, Instant::now()));
+        }
+
+        Ok(resolved)
     }
 
     /// Query transport-local congestion indicators.
@@ -194,7 +238,7 @@ impl UdpTransport {
             });
         }
 
-        let socket_addr = parse_socket_addr(addr)?;
+        let socket_addr = self.resolve_cached(addr).await?;
         let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
 
         match socket.send_to(data, &socket_addr).await {
@@ -259,14 +303,6 @@ impl Transport for UdpTransport {
         // Peer configuration is handled at the node level, not transport level
         Ok(Vec::new())
     }
-}
-
-/// Parse a TransportAddr as SocketAddr.
-fn parse_socket_addr(addr: &TransportAddr) -> Result<SocketAddr, TransportError> {
-    addr.as_str()
-        .ok_or_else(|| TransportError::InvalidAddress("not valid UTF-8".into()))?
-        .parse()
-        .map_err(|e| TransportError::InvalidAddress(format!("{}", e)))
 }
 
 /// UDP receive loop - runs as a spawned task.
@@ -528,17 +564,29 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_parse_socket_addr() {
+    #[tokio::test]
+    async fn test_resolve_socket_addr_ip() {
         let addr = TransportAddr::from_string("192.168.1.1:2121");
-        let result = parse_socket_addr(&addr).unwrap();
+        let result = resolve_socket_addr(&addr).await.unwrap();
         assert_eq!(result.to_string(), "192.168.1.1:2121");
+    }
 
-        let invalid = TransportAddr::from_string("not_an_address");
-        assert!(parse_socket_addr(&invalid).is_err());
+    #[tokio::test]
+    async fn test_resolve_socket_addr_invalid() {
+        let invalid = TransportAddr::from_string("nonexistent.invalid:2121");
+        assert!(resolve_socket_addr(&invalid).await.is_err());
 
         let binary = TransportAddr::new(vec![0xff, 0x80]);
-        assert!(parse_socket_addr(&binary).is_err());
+        assert!(resolve_socket_addr(&binary).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_socket_addr_hostname() {
+        let addr = TransportAddr::from_string("localhost:2121");
+        let result = resolve_socket_addr(&addr).await.unwrap();
+        // localhost should resolve to 127.0.0.1 or [::1]
+        assert!(result.ip().is_loopback());
+        assert_eq!(result.port(), 2121);
     }
 
     #[tokio::test]
@@ -549,5 +597,38 @@ mod tests {
         // Before start, congestion should still report (from stats)
         let cong = transport.congestion();
         assert_eq!(cong.recv_drops, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_send_recv_hostname() {
+        let (tx1, _rx1) = packet_channel(100);
+        let (tx2, mut rx2) = packet_channel(100);
+
+        let mut t1 = UdpTransport::new(TransportId::new(1), None, make_config(0), tx1);
+        let mut t2 = UdpTransport::new(TransportId::new(2), None, make_config(0), tx2);
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let port2 = t2.local_addr().unwrap().port();
+
+        // Send using hostname instead of IP
+        let data = b"hello via hostname";
+        let bytes_sent = t1
+            .send_async(&TransportAddr::from_string(&format!("localhost:{}", port2)), data)
+            .await
+            .unwrap();
+        assert_eq!(bytes_sent, data.len());
+
+        // Receive on t2
+        let packet = timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+
+        assert_eq!(packet.data, data);
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
     }
 }

@@ -25,6 +25,7 @@
 pub mod stats;
 pub mod stream;
 
+use super::resolve_socket_addr;
 use super::{
     ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
@@ -339,7 +340,7 @@ impl TcpTransport {
         &self,
         addr: &TransportAddr,
     ) -> Result<Arc<Mutex<OwnedWriteHalf>>, TransportError> {
-        let socket_addr = parse_socket_addr(addr)?;
+        let socket_addr = resolve_socket_addr(addr).await?;
         let timeout_ms = self.config.connect_timeout_ms();
 
         // Connect with timeout
@@ -453,7 +454,11 @@ impl TcpTransport {
             }
         }
 
-        let socket_addr = parse_socket_addr(addr)?;
+        // Validate address is UTF-8 before spawning (fail fast on bad input)
+        let addr_string = addr
+            .as_str()
+            .ok_or_else(|| TransportError::InvalidAddress("not valid UTF-8".into()))?
+            .to_string();
         let timeout_ms = self.config.connect_timeout_ms();
         let config = self.config.clone();
         let transport_id = self.transport_id;
@@ -467,6 +472,27 @@ impl TcpTransport {
         );
 
         let task = tokio::spawn(async move {
+            // Resolve address (may involve DNS for hostnames)
+            let socket_addr: SocketAddr = if let Ok(sa) = addr_string.parse() {
+                sa
+            } else {
+                tokio::net::lookup_host(&addr_string)
+                    .await
+                    .map_err(|e| {
+                        TransportError::InvalidAddress(format!(
+                            "DNS resolution failed for {}: {}",
+                            addr_string, e
+                        ))
+                    })?
+                    .next()
+                    .ok_or_else(|| {
+                        TransportError::InvalidAddress(format!(
+                            "DNS resolution returned no addresses for {}",
+                            addr_string
+                        ))
+                    })?
+            };
+
             // Connect with timeout
             let stream = match tokio::time::timeout(
                 Duration::from_millis(timeout_ms),
@@ -902,14 +928,6 @@ async fn tcp_receive_loop(
 // ============================================================================
 // Socket Configuration Helpers
 // ============================================================================
-
-/// Parse a TransportAddr as SocketAddr.
-fn parse_socket_addr(addr: &TransportAddr) -> Result<SocketAddr, TransportError> {
-    addr.as_str()
-        .ok_or_else(|| TransportError::InvalidAddress("not valid UTF-8".into()))?
-        .parse()
-        .map_err(|e| TransportError::InvalidAddress(format!("{}", e)))
-}
 
 /// Configure a TCP socket with the transport's settings.
 fn configure_socket(
@@ -1510,5 +1528,89 @@ mod tests {
             &TransportAddr::from_string("unknown:1234"),
         );
         assert_eq!(state, ConnectionState::None);
+    }
+
+    #[tokio::test]
+    async fn test_connect_hostname() {
+        let (tx1, _rx1) = packet_channel(100);
+        let (tx2, mut rx2) = packet_channel(100);
+
+        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_config(), tx1);
+        let mut t2 = TcpTransport::new(
+            TransportId::new(2),
+            None,
+            TcpConfig {
+                bind_addr: Some("0.0.0.0:0".to_string()),
+                ..Default::default()
+            },
+            tx2,
+        );
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let port2 = t2.local_addr().unwrap().port();
+
+        // Connect using hostname — build a valid FMP frame (114 bytes)
+        let hostname_addr = TransportAddr::from_string(&format!("localhost:{}", port2));
+        let mut frame = vec![0xAA; 114];
+        frame[0] = 0x01; // ver=0, phase=1
+        frame[1] = 0x00; // flags
+        frame[2..4].copy_from_slice(&110u16.to_le_bytes()); // payload_len
+        t1.send_async(&hostname_addr, &frame).await.unwrap();
+
+        // Receive on t2
+        let packet = tokio::time::timeout(Duration::from_secs(5), rx2.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+
+        assert_eq!(packet.data, frame);
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_async_hostname() {
+        let (tx1, _rx1) = packet_channel(100);
+        let (tx2, _rx2) = packet_channel(100);
+
+        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_config(), tx1);
+        let mut t2 = TcpTransport::new(
+            TransportId::new(2),
+            None,
+            TcpConfig {
+                bind_addr: Some("0.0.0.0:0".to_string()),
+                ..Default::default()
+            },
+            tx2,
+        );
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let port2 = t2.local_addr().unwrap().port();
+        let hostname_addr = TransportAddr::from_string(&format!("localhost:{}", port2));
+
+        // Non-blocking connect via hostname
+        t1.connect_async(&hostname_addr).await.unwrap();
+
+        // Poll until connected
+        for _ in 0..50 {
+            let state = t1.connection_state_sync(&hostname_addr);
+            if state == ConnectionState::Connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert_eq!(
+            t1.connection_state_sync(&hostname_addr),
+            ConnectionState::Connected,
+        );
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
     }
 }

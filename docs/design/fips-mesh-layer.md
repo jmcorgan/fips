@@ -15,7 +15,7 @@ updates, coordinate discovery, and forwarded session datagrams — all encrypted
 per-hop.
 
 FMP is the boundary between opaque transport addresses and identified peers.
-Below FMP, everything is transport-specific addresses (IP:port, MAC, .onion).
+Below FMP, everything is transport-specific addresses (host:port, MAC, .onion).
 Above FMP, everything is peers identified by public keys and routable by
 node_addr. The transport layer never sees FIPS-level structure; FSP never sees
 transport addresses or routing details.
@@ -280,7 +280,7 @@ authenticated peer regardless of what transport address the packet arrived
 from. FMP updates the peer's current address to the packet's source address,
 and subsequent outbound packets use the updated address.
 
-This allows peers to change transport addresses (e.g., IP:port for UDP)
+This allows peers to change transport addresses (e.g., host:port for UDP)
 without session interruption. The mechanism is:
 
 1. Packet arrives from a different address than expected

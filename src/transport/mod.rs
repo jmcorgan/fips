@@ -16,6 +16,7 @@ use tcp::TcpTransport;
 #[cfg(target_os = "linux")]
 use ethernet::EthernetTransport;
 use std::fmt;
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -362,9 +363,8 @@ impl fmt::Display for LinkDirection {
 /// Opaque transport-specific address.
 ///
 /// Each transport type interprets this differently:
-/// - UDP: "ip:port"
+/// - UDP/TCP: "host:port" (IP address or DNS hostname)
 /// - Ethernet: MAC address (6 bytes)
-/// - Tor: ".onion:port"
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TransportAddr(Vec<u8>);
 
@@ -1079,6 +1079,43 @@ impl TransportHandle {
             }
         }
     }
+}
+
+// ============================================================================
+// DNS Resolution
+// ============================================================================
+
+/// Resolve a TransportAddr to a SocketAddr.
+///
+/// Fast path: if the address parses as a numeric IP:port, returns
+/// immediately with no DNS lookup. Otherwise, treats the address as
+/// `hostname:port` and performs async DNS resolution via the system
+/// resolver.
+pub(crate) async fn resolve_socket_addr(
+    addr: &TransportAddr,
+) -> Result<SocketAddr, TransportError> {
+    let s = addr
+        .as_str()
+        .ok_or_else(|| TransportError::InvalidAddress("not valid UTF-8".into()))?;
+
+    // Fast path: numeric IP address — no DNS lookup
+    if let Ok(sock_addr) = s.parse::<SocketAddr>() {
+        return Ok(sock_addr);
+    }
+
+    // Slow path: DNS resolution
+    tokio::net::lookup_host(s)
+        .await
+        .map_err(|e| {
+            TransportError::InvalidAddress(format!("DNS resolution failed for {}: {}", s, e))
+        })?
+        .next()
+        .ok_or_else(|| {
+            TransportError::InvalidAddress(format!(
+                "DNS resolution returned no addresses for {}",
+                s
+            ))
+        })
 }
 
 // ============================================================================
