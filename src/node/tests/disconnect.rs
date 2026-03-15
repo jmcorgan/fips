@@ -228,6 +228,94 @@ async fn test_disconnect_chain_partition() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// Removing a peer via disconnect must also remove the associated end-to-end session.
+///
+/// Regression test for issue #5: `remove_active_peer` previously left the
+/// `SessionEntry` alive in `self.sessions` after evicting the peer from
+/// `self.peers`. This caused:
+///   1. Stale "MMP session metrics" logs with frozen counters until
+///      `purge_idle_sessions` eventually fired (up to idle_timeout_secs later).
+///   2. `initiate_session` silently returning `Ok(())` on the stale Established
+///      entry's guard check, preventing a new session from being created even
+///      after the link layer reconnected successfully.
+#[tokio::test]
+async fn test_disconnect_clears_session() {
+    use crate::identity::Identity;
+    use crate::node::session::{EndToEndState, SessionEntry};
+    use crate::noise::HandshakeState;
+
+    // Two-node topology: 0 -- 1.
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    // Inject a synthetic Established session entry into node 1's session table
+    // to simulate the state after a completed XK handshake with node 0.
+    let remote_identity = Identity::generate();
+    {
+        let our_identity = nodes[1].node.identity().clone();
+
+        let mut initiator = HandshakeState::new_initiator(
+            our_identity.keypair(),
+            remote_identity.pubkey_full(),
+        );
+        let mut responder = HandshakeState::new_responder(remote_identity.keypair());
+        let mut init_epoch = [0u8; 8];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut init_epoch);
+        initiator.set_local_epoch(init_epoch);
+        let mut resp_epoch = [0u8; 8];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
+        responder.set_local_epoch(resp_epoch);
+        let msg1 = initiator.write_message_1().unwrap();
+        responder.read_message_1(&msg1).unwrap();
+        let msg2 = responder.write_message_2().unwrap();
+        initiator.read_message_2(&msg2).unwrap();
+        let session = initiator.into_session().unwrap();
+
+        let entry = SessionEntry::new(
+            node0_addr,
+            remote_identity.pubkey_full(),
+            EndToEndState::Established(session),
+            1_000,
+            true,
+        );
+        nodes[1].node.sessions.insert(node0_addr, entry);
+    }
+
+    assert_eq!(nodes[1].node.session_count(), 1, "Session should exist before disconnect");
+    assert_eq!(nodes[1].node.peer_count(), 1, "Peer should exist before disconnect");
+
+    // Node 0 sends Disconnect to node 1.
+    let disconnect = crate::protocol::Disconnect::new(DisconnectReason::Shutdown);
+    nodes[0]
+        .node
+        .send_encrypted_link_message(&node1_addr, &disconnect.encode())
+        .await
+        .expect("Failed to send disconnect");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    process_available_packets(&mut nodes).await;
+
+    // Peer must be gone.
+    assert_eq!(
+        nodes[1].node.peer_count(), 0,
+        "Peer should be removed after disconnect"
+    );
+
+    // Session must also be gone — core regression check for issue #5.
+    // Before the fix, session_count() would still be 1 here because
+    // remove_active_peer didn't remove self.sessions[node0_addr].
+    assert_eq!(
+        nodes[1].node.session_count(), 0,
+        "Session must be cleaned up when peer is removed (regression: issue #5)"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// Verify that different disconnect reasons are handled correctly.
 ///
 /// Sends each reason code and verifies the peer is removed regardless.

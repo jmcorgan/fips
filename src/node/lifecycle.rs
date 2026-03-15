@@ -17,15 +17,29 @@ impl Node {
     /// For each peer configured with AutoConnect policy, creates a link and
     /// peer entry, then starts the Noise handshake by sending the first message.
     pub(super) async fn initiate_peer_connections(&mut self) {
-        // Build display name map from all configured peers (alias or short npub)
-        for peer_config in self.config.peers() {
-            if let Ok(identity) = PeerIdentity::from_npub(&peer_config.npub) {
-                let name = peer_config
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| identity.short_npub());
-                self.peer_aliases.insert(*identity.node_addr(), name);
-            }
+        // Build display name map from all configured peers (alias or short npub),
+        // and pre-seed the identity cache from each peer's npub so that TUN packets
+        // addressed to a configured peer can be dispatched (and trigger session
+        // initiation) immediately on startup — without waiting for the link-layer
+        // handshake to complete first.
+        let peer_identities: Vec<(PeerIdentity, Option<String>)> = self
+            .config
+            .peers()
+            .iter()
+            .filter_map(|pc| {
+                PeerIdentity::from_npub(&pc.npub)
+                    .ok()
+                    .map(|id| (id, pc.alias.clone()))
+            })
+            .collect();
+
+        for (identity, alias) in peer_identities {
+            let name = alias.unwrap_or_else(|| identity.short_npub());
+            self.peer_aliases.insert(*identity.node_addr(), name);
+            // Pre-seed identity cache. The parity may be wrong (npub is x-only)
+            // but will be corrected to the real value when the peer is promoted
+            // after a successful Noise handshake.
+            self.register_identity(*identity.node_addr(), identity.pubkey_full());
         }
 
         // Collect peer configs to avoid borrow conflicts
