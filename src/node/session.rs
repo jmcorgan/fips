@@ -107,6 +107,9 @@ pub(crate) struct SessionEntry {
     rekey_initiator: bool,
     /// Dampening: last time peer sent us a rekey msg1 (Unix ms).
     last_peer_rekey_ms: u64,
+    /// When the FSP rekey handshake completed (initiator sent msg3, Unix ms).
+    /// Used to defer cutover until msg3 has time to reach the responder.
+    rekey_completed_ms: u64,
 }
 
 impl SessionEntry {
@@ -142,6 +145,7 @@ impl SessionEntry {
             pending_new_session: None,
             rekey_initiator: false,
             last_peer_rekey_ms: 0,
+            rekey_completed_ms: 0,
         }
     }
 
@@ -369,6 +373,16 @@ impl SessionEntry {
         }
     }
 
+    /// When the FSP rekey handshake completed (initiator sent msg3).
+    pub(crate) fn rekey_completed_ms(&self) -> u64 {
+        self.rekey_completed_ms
+    }
+
+    /// Record when the FSP rekey handshake completed (initiator side).
+    pub(crate) fn set_rekey_completed_ms(&mut self, ms: u64) {
+        self.rekey_completed_ms = ms;
+    }
+
     /// Store a completed rekey session.
     pub(crate) fn set_pending_session(&mut self, session: NoiseSession) {
         self.pending_new_session = Some(session);
@@ -408,6 +422,12 @@ impl SessionEntry {
         self.session_start_ms = now_ms;
         self.rekey_state = None;
         self.rekey_initiator = false;
+        self.rekey_completed_ms = 0;
+
+        // Reset MMP counters to avoid metric discontinuity
+        if let Some(mmp) = &mut self.mmp {
+            mmp.reset_for_rekey();
+        }
         true
     }
 
@@ -430,6 +450,11 @@ impl SessionEntry {
         self.session_start_ms = now_ms;
         self.rekey_state = None;
         self.rekey_initiator = false;
+
+        // Reset MMP counters to avoid metric discontinuity
+        if let Some(mmp) = &mut self.mmp {
+            mmp.reset_for_rekey();
+        }
         true
     }
 

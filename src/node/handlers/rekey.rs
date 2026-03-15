@@ -19,6 +19,10 @@ const DRAIN_WINDOW_SECS: u64 = 10;
 /// a peer's rekey msg1.
 const REKEY_DAMPENING_SECS: u64 = 30;
 
+/// Delay FSP initiator cutover after handshake completion to allow
+/// XK msg3 to reach the responder before K-bit-flipped data arrives.
+const FSP_CUTOVER_DELAY_MS: u64 = 2000;
+
 impl Node {
     /// Periodic rekey check. Called from the tick loop.
     ///
@@ -79,14 +83,16 @@ impl Node {
             if let Some(peer) = self.peers.get_mut(&node_addr)
                 && let Some(_old_our_index) = peer.cutover_to_new_session()
             {
-                if let (Some(transport_id), Some(new_our_index)) =
-                    (peer.transport_id(), peer.our_index())
-                {
-                    self.peers_by_index.insert(
-                        (transport_id, new_our_index.as_u32()),
-                        node_addr,
-                    );
-                }
+                // New index was pre-registered in peers_by_index during
+                // msg2 handling (handshake.rs). Verify, don't duplicate.
+                debug_assert!(
+                    peer.transport_id().is_some()
+                        && peer.our_index().is_some()
+                        && self.peers_by_index.contains_key(
+                            &(peer.transport_id().unwrap(), peer.our_index().unwrap().as_u32())
+                        ),
+                    "peers_by_index should contain pre-registered new index after cutover"
+                );
                 info!(
                     peer = %self.peer_display_name(&node_addr),
                     "Rekey cutover complete (initiator), K-bit flipped"
@@ -281,10 +287,14 @@ impl Node {
                 continue;
             }
 
-            // 1. Initiator-side cutover: completed rekey, pending session ready
+            // 1. Initiator-side cutover: completed rekey, pending session ready.
+            //    Defer cutover until msg3 has had time to reach the responder.
+            //    Without this delay, K-bit-flipped data can arrive before
+            //    msg3, causing decryption failures on the responder.
             if entry.pending_new_session().is_some()
                 && !entry.has_rekey_in_progress()
                 && entry.is_rekey_initiator()
+                && now_ms.saturating_sub(entry.rekey_completed_ms()) >= FSP_CUTOVER_DELAY_MS
             {
                 sessions_to_cutover.push(*node_addr);
                 continue;

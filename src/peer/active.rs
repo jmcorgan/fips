@@ -880,6 +880,11 @@ impl ActivePeer {
         self.rekey_in_progress = false;
         self.reset_replay_suppressed();
 
+        // Reset MMP counters to avoid metric discontinuity
+        if let Some(mmp) = &mut self.mmp {
+            mmp.reset_for_rekey();
+        }
+
         self.previous_our_index
     }
 
@@ -908,6 +913,11 @@ impl ActivePeer {
         self.session_start = Instant::now();
         self.rekey_in_progress = false;
         self.reset_replay_suppressed();
+
+        // Reset MMP counters to avoid metric discontinuity
+        if let Some(mmp) = &mut self.mmp {
+            mmp.reset_for_rekey();
+        }
 
         self.previous_our_index
     }

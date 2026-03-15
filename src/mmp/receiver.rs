@@ -198,6 +198,28 @@ impl ReceiverState {
         }
     }
 
+    /// Reset counter-dependent state for rekey cutover.
+    ///
+    /// After cutover, the new session starts with counter 0 and reset
+    /// timestamps. Without resetting, the old `highest_counter` and
+    /// `GapTracker.expected_next` cause false reorder/loss detection.
+    pub fn reset_for_rekey(&mut self) {
+        self.highest_counter = 0;
+        self.cumulative_reorder_count = 0;
+        self.gap_tracker = GapTracker::new();
+        self.interval_packets_recv = 0;
+        self.interval_bytes_recv = 0;
+        self.jitter = JitterEstimator::new();
+        self.owd_trend.clear();
+        self.owd_seq = 0;
+        self.last_sender_timestamp = 0;
+        self.last_recv_time = None;
+        self.ecn_ce_count = 0;
+        self.interval_has_data = false;
+        // Keep cumulative_packets_recv, cumulative_bytes_recv (lifetime stats)
+        // Keep last_report_time, report_interval (report scheduling)
+    }
+
     /// Record a received frame from this peer.
     ///
     /// Called on the RX path after AEAD decryption, before message dispatch.

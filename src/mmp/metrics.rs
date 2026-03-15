@@ -48,6 +48,22 @@ pub struct MmpMetrics {
 }
 
 impl MmpMetrics {
+    /// Reset state derived from ReceiverReport counters for rekey cutover.
+    ///
+    /// The new session starts with counter 0, so the prev_rr deltas must
+    /// be reset to avoid computing bogus loss/goodput from the counter
+    /// discontinuity. RTT (SRTT) is preserved since it remains valid.
+    pub fn reset_for_rekey(&mut self) {
+        self.prev_rr_cum_packets = 0;
+        self.prev_rr_cum_bytes = 0;
+        self.prev_rr_highest_counter = 0;
+        self.prev_rr_ecn_ce = 0;
+        self.prev_rr_reorder = 0;
+        self.prev_rr_time = None;
+        self.delivery_ratio_forward = 1.0;
+        // Keep srtt, etx, trends, goodput_bps — they'll refresh from data
+    }
+
     pub fn new() -> Self {
         Self {
             srtt: SrttEstimator::new(),

@@ -595,6 +595,7 @@ impl Node {
             };
 
             entry.set_pending_session(session);
+            entry.set_rekey_completed_ms(Self::now_ms());
             self.sessions.insert(*src_addr, entry);
 
             debug!(

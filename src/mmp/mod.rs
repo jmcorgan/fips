@@ -197,6 +197,12 @@ impl MmpPeerState {
         }
     }
 
+    /// Reset counter-dependent state for rekey cutover.
+    pub fn reset_for_rekey(&mut self) {
+        self.receiver.reset_for_rekey();
+        self.metrics.reset_for_rekey();
+    }
+
     /// Current operating mode.
     pub fn mode(&self) -> MmpMode {
         self.mode
@@ -254,6 +260,12 @@ impl MmpSessionState {
             last_log_time: None,
             path_mtu: PathMtuState::new(),
         }
+    }
+
+    /// Reset counter-dependent state for rekey cutover.
+    pub fn reset_for_rekey(&mut self) {
+        self.receiver.reset_for_rekey();
+        self.metrics.reset_for_rekey();
     }
 
     /// Current operating mode.

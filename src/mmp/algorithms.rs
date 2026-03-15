@@ -192,6 +192,11 @@ impl OwdTrendDetector {
         }
     }
 
+    /// Clear all samples, keeping the same capacity.
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
     /// Add an OWD sample.
     ///
     /// `seq` is a monotonic sequence number (e.g., truncated frame counter).

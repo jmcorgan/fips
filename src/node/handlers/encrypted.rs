@@ -64,13 +64,16 @@ impl Node {
                 );
 
                 let peer = self.peers.get_mut(&node_addr).unwrap();
-                if let Some(_old_our_index) = peer.handle_peer_kbit_flip()
-                    && let (Some(transport_id), Some(new_our_index)) =
-                        (peer.transport_id(), peer.our_index())
-                {
-                    self.peers_by_index.insert(
-                        (transport_id, new_our_index.as_u32()),
-                        node_addr,
+                if let Some(_old_our_index) = peer.handle_peer_kbit_flip() {
+                    // New index was pre-registered in peers_by_index during
+                    // msg1 handling (handshake.rs). Verify, don't duplicate.
+                    debug_assert!(
+                        peer.transport_id().is_some()
+                            && peer.our_index().is_some()
+                            && self.peers_by_index.contains_key(
+                                &(peer.transport_id().unwrap(), peer.our_index().unwrap().as_u32())
+                            ),
+                        "peers_by_index should contain pre-registered new index after K-bit flip"
                     );
                 }
             }

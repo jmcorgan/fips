@@ -537,6 +537,9 @@ impl Node {
                                 "Rekey msg2 processing failed"
                             );
                             if let Some(idx) = peer.abandon_rekey() {
+                                if let Some(tid) = peer.transport_id() {
+                                    self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                }
                                 let _ = self.index_allocator.free(idx);
                             }
                         }
