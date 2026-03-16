@@ -1779,6 +1779,14 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     assert_eq!(ptb[40], 2, "ICMPv6 type should be Packet Too Big (2)");
     assert_eq!(ptb[41], 0, "ICMPv6 code should be 0");
 
+    // Verify PTB source is the *remote peer* (original packet's destination),
+    // NOT the local node. Linux ignores PTBs whose source matches a local
+    // address, causing a PMTUD blackhole.
+    let ptb_src = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[8..24]).unwrap());
+    let ptb_dst = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[24..40]).unwrap());
+    assert_eq!(ptb_src, dst_fips.to_ipv6(), "PTB source must be remote peer (original dst), not local node");
+    assert_eq!(ptb_dst, src_fips.to_ipv6(), "PTB destination must be local node (original src)");
+
     // Verify reported MTU (32-bit field at ICMPv6 header bytes 4-7)
     let reported_mtu = u32::from_be_bytes([ptb[44], ptb[45], ptb[46], ptb[47]]);
     assert_eq!(reported_mtu, reduced_ipv6_mtu as u32, "Reported MTU should match path IPv6 MTU");
@@ -1903,6 +1911,14 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     assert_eq!(ptb[6], 58, "Next header should be ICMPv6 (58)");
     assert_eq!(ptb[40], 2, "ICMPv6 type should be Packet Too Big (2)");
     assert_eq!(ptb[41], 0, "ICMPv6 code should be 0");
+
+    // Verify PTB source is the *remote peer* (original packet's destination),
+    // NOT the local node. Linux ignores PTBs whose source matches a local
+    // address, causing a PMTUD blackhole.
+    let ptb_src = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[8..24]).unwrap());
+    let ptb_dst = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[24..40]).unwrap());
+    assert_eq!(ptb_src, dst_fips.to_ipv6(), "PTB source must be remote peer (original dst), not local node");
+    assert_eq!(ptb_dst, src_fips.to_ipv6(), "PTB destination must be local node (original src)");
 
     // Verify reported MTU is the path MTU (not local MTU)
     let reported_mtu = u32::from_be_bytes([ptb[44], ptb[45], ptb[46], ptb[47]]);
