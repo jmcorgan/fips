@@ -261,7 +261,6 @@ pub fn run_tun_reader(
     our_addr: FipsAddress,
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
-    transport_mtu: u16,
 ) {
     use super::icmp::{build_dest_unreachable, effective_ipv6_mtu, should_send_icmp_error, DestUnreachableCode};
     use super::tcp_mss::clamp_tcp_mss;
@@ -269,10 +268,21 @@ pub fn run_tun_reader(
     let name = device.name().to_string();
     let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
 
-    // Calculate maximum safe TCP MSS from the effective IPv6 MTU
+    // Calculate maximum safe TCP MSS from the TUN MTU.
+    //
+    // fips0 MTU (e.g. 1280) is the inner IPv6 window visible to the OS, but
+    // FIPS still needs FIPS_IPV6_OVERHEAD (77 bytes) of encapsulation on top
+    // of every inner IPv6 packet.  The actual maximum IPv6 payload that can
+    // traverse the mesh is therefore:
+    //
+    //   effective_ipv6_mtu(tun_mtu) = tun_mtu - FIPS_IPV6_OVERHEAD
+    //
+    // Using the local transport MTU here would give a larger (incorrect) value
+    // when the bottleneck path has a lower transport MTU, causing oversized
+    // segments that FIPS must drop with Packet Too Big errors.
     const IPV6_HEADER: u16 = 40;
     const TCP_HEADER: u16 = 20;
-    let effective_mtu = effective_ipv6_mtu(transport_mtu);
+    let effective_mtu = effective_ipv6_mtu(mtu);
     let max_mss = effective_mtu
         .saturating_sub(IPV6_HEADER)
         .saturating_sub(TCP_HEADER);
@@ -280,7 +290,6 @@ pub fn run_tun_reader(
     debug!(
         name = %name,
         tun_mtu = mtu,
-        transport_mtu = transport_mtu,
         effective_mtu = effective_mtu,
         max_mss = max_mss,
         "TUN reader starting"

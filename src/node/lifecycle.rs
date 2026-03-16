@@ -556,10 +556,12 @@ impl Node {
                     info!("  address: {}", device.address());
                     info!("      mtu: {}", mtu);
 
-                    // Calculate max MSS for TCP clamping
-                    let effective_mtu = self.effective_ipv6_mtu();
+                    // Calculate max MSS for TCP clamping from the TUN MTU.
+                    // effective_ipv6_mtu(tun_mtu) subtracts FIPS_IPV6_OVERHEAD (77 bytes)
+                    // to account for FIPS encapsulation on top of the inner IPv6 packet.
+                    let effective_mtu = crate::upper::icmp::effective_ipv6_mtu(mtu);
                     let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
-                    
+
                     info!("effective MTU: {} bytes", effective_mtu);
                     info!("   max TCP MSS: {} bytes", max_mss);
 
@@ -579,9 +581,8 @@ impl Node {
                     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
 
                     // Spawn reader thread
-                    let transport_mtu = self.transport_mtu();
                     let reader_handle = thread::spawn(move || {
-                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu);
+                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx);
                     });
 
                     self.tun_state = TunState::Active;
