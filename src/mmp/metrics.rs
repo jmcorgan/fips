@@ -45,6 +45,8 @@ pub struct MmpMetrics {
     prev_rr_reorder: u32,
     /// Time of previous ReceiverReport (for goodput rate computation).
     prev_rr_time: Option<Instant>,
+    /// Whether we have a previous ReceiverReport for delta computation.
+    has_prev_rr: bool,
 
     // --- State for reverse delivery ratio delta computation ---
     /// Previous reverse-side cumulative packets received (our receiver state).
@@ -68,6 +70,7 @@ impl MmpMetrics {
         self.prev_rr_ecn_ce = 0;
         self.prev_rr_reorder = 0;
         self.prev_rr_time = None;
+        self.has_prev_rr = false;
         self.delivery_ratio_forward = 1.0;
         self.prev_reverse_packets = 0;
         self.prev_reverse_highest = 0;
@@ -93,6 +96,7 @@ impl MmpMetrics {
             prev_rr_ecn_ce: 0,
             prev_rr_reorder: 0,
             prev_rr_time: None,
+            has_prev_rr: false,
             prev_reverse_packets: 0,
             prev_reverse_highest: 0,
             has_prev_reverse: false,
@@ -133,7 +137,7 @@ impl MmpMetrics {
 
         // --- Loss rate from cumulative counters ---
         // Delta: frames the peer should have received vs. actually received
-        if self.prev_rr_highest_counter > 0 {
+        if self.has_prev_rr {
             let counter_span = rr.highest_counter.saturating_sub(self.prev_rr_highest_counter);
             let packets_delta = rr.cumulative_packets_recv.saturating_sub(self.prev_rr_cum_packets);
 
@@ -148,7 +152,7 @@ impl MmpMetrics {
         }
 
         // --- Goodput from cumulative bytes + time delta ---
-        if self.prev_rr_cum_bytes > 0 {
+        if self.has_prev_rr {
             let bytes_delta = rr.cumulative_bytes_recv.saturating_sub(self.prev_rr_cum_bytes);
             self.goodput_trend.update(bytes_delta as f64);
 
@@ -178,6 +182,7 @@ impl MmpMetrics {
         self.prev_rr_ecn_ce = rr.ecn_ce_count;
         self.prev_rr_reorder = rr.cumulative_reorder_count;
         self.prev_rr_time = Some(now);
+        self.has_prev_rr = true;
 
         !had_srtt && self.srtt.initialized()
     }
