@@ -551,15 +551,15 @@ impl Node {
                     let name = device.name().to_string();
                     let our_addr = *device.address();
 
+                    // Store TUN MTU so effective_ipv6_mtu() uses it from here on.
+                    self.tun_mtu = Some(mtu);
+
                     info!("TUN device active:");
                     info!("     name: {}", name);
                     info!("  address: {}", device.address());
                     info!("      mtu: {}", mtu);
 
-                    // Calculate max MSS for TCP clamping from the TUN MTU.
-                    // effective_ipv6_mtu(tun_mtu) subtracts FIPS_IPV6_OVERHEAD (77 bytes)
-                    // to account for FIPS encapsulation on top of the inner IPv6 packet.
-                    let effective_mtu = crate::upper::icmp::effective_ipv6_mtu(mtu);
+                    let effective_mtu = self.effective_ipv6_mtu();
                     let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
 
                     info!("effective MTU: {} bytes", effective_mtu);

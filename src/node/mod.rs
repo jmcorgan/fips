@@ -346,6 +346,8 @@ pub struct Node {
     // === TUN Interface ===
     /// TUN device state.
     tun_state: TunState,
+    /// TUN device MTU (set when device is created, None until then).
+    tun_mtu: Option<u16>,
     /// TUN interface name (for cleanup).
     tun_name: Option<String>,
     /// TUN packet sender channel.
@@ -510,6 +512,7 @@ impl Node {
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
             tun_state,
+            tun_mtu: None,
             tun_name: None,
             tun_tx: None,
             tun_outbound_rx: None,
@@ -613,6 +616,7 @@ impl Node {
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
             tun_state,
+            tun_mtu: None,
             tun_name: None,
             tun_tx: None,
             tun_outbound_rx: None,
@@ -833,11 +837,12 @@ impl Node {
 
     /// Calculate the effective IPv6 MTU that can be sent over FIPS.
     ///
-    /// Delegates to `upper::icmp::effective_ipv6_mtu()` with this node's
-    /// transport MTU. Returns the maximum IPv6 packet size (including
-    /// IPv6 header) that can be transmitted through the FIPS mesh.
+    /// When the TUN device is active, uses the TUN MTU (the window visible
+    /// to the OS). Falls back to `transport_mtu()` before TUN is up, which
+    /// is used for PTB generation and session fragmentation decisions.
     pub fn effective_ipv6_mtu(&self) -> u16 {
-        crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
+        let mtu = self.tun_mtu.unwrap_or_else(|| self.transport_mtu());
+        crate::upper::icmp::effective_ipv6_mtu(mtu)
     }
 
     /// Get the transport MTU for a specific transport.
@@ -1005,6 +1010,11 @@ impl Node {
     /// Get the TUN state.
     pub fn tun_state(&self) -> TunState {
         self.tun_state
+    }
+
+    /// Get the TUN device MTU, if the device is active.
+    pub fn tun_mtu(&self) -> Option<u16> {
+        self.tun_mtu
     }
 
     /// Get the TUN interface name, if active.

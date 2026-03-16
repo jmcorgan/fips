@@ -105,9 +105,9 @@ pub const FIPS_IPV6_OVERHEAD: u16 = 77;
 
 /// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
 ///
-/// Given a transport MTU (e.g., UDP payload size), returns the maximum
-/// IPv6 packet size (including IPv6 header) that can be transmitted
-/// through the FIPS mesh after IPv6 header compression.
+/// Given a TUN MTU (the IPv6 window visible to the OS), returns the maximum
+/// IPv6 packet size (including IPv6 header) that can be transmitted through
+/// the FIPS mesh after subtracting [`FIPS_IPV6_OVERHEAD`].
 pub fn effective_ipv6_mtu(transport_mtu: u16) -> u16 {
     transport_mtu.saturating_sub(FIPS_IPV6_OVERHEAD)
 }
@@ -202,7 +202,7 @@ pub fn build_dest_unreachable(
     // === IPv6 Header ===
     // Version (4) + Traffic Class (8) + Flow Label (20)
     response[0] = 0x60; // Version 6, TC high bits = 0
-    // response[1..4] = 0 (TC low bits + flow label)
+                        // response[1..4] = 0 (TC low bits + flow label)
 
     // Payload length (ICMPv6 header + body)
     let payload_len = icmpv6_len as u16;
@@ -319,7 +319,7 @@ pub fn build_packet_too_big(
     // === IPv6 Header ===
     // Version (4) + Traffic Class (8) + Flow Label (20)
     response[0] = 0x60; // Version 6, TC high bits = 0
-    // response[1..4] = 0 (TC low bits + flow label)
+                        // response[1..4] = 0 (TC low bits + flow label)
 
     // Payload length (ICMPv6 header + body)
     let payload_len = icmpv6_len as u16;
@@ -543,7 +543,8 @@ mod tests {
         let short_packet = vec![0u8; 20];
         let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
 
-        let response = build_dest_unreachable(&short_packet, DestUnreachableCode::NoRoute, our_addr);
+        let response =
+            build_dest_unreachable(&short_packet, DestUnreachableCode::NoRoute, our_addr);
         assert!(response.is_none());
     }
 
@@ -686,5 +687,64 @@ mod tests {
 
         // Response must not exceed minimum MTU
         assert!(response.len() <= MIN_IPV6_MTU);
+    }
+
+    // === TCP MSS calculation tests ===
+
+    /// Helper: compute max_mss from a TUN MTU the same way lifecycle.rs and
+    /// run_tun_reader do: effective_ipv6_mtu(tun_mtu) - IPv6_hdr(40) - TCP_hdr(20).
+    fn max_mss_for_tun_mtu(tun_mtu: u16) -> u16 {
+        effective_ipv6_mtu(tun_mtu)
+            .saturating_sub(40)
+            .saturating_sub(20)
+    }
+
+    #[test]
+    fn test_effective_ipv6_mtu_default_tun_mtu() {
+        // Default TUN MTU is 1280 (IPv6 minimum).
+        // effective = 1280 - 77 = 1203
+        assert_eq!(effective_ipv6_mtu(1280), 1203);
+    }
+
+    #[test]
+    fn test_max_mss_default_tun_mtu() {
+        // max_mss = 1280 - 77 - 40 - 20 = 1143
+        assert_eq!(max_mss_for_tun_mtu(1280), 1143);
+    }
+
+    #[test]
+    fn test_effective_ipv6_mtu_non_default_tun_mtu() {
+        // Non-default TUN MTU of 1500.
+        // effective = 1500 - 77 = 1423
+        assert_eq!(effective_ipv6_mtu(1500), 1423);
+    }
+
+    #[test]
+    fn test_max_mss_non_default_tun_mtu() {
+        // max_mss = 1500 - 77 - 40 - 20 = 1363
+        assert_eq!(max_mss_for_tun_mtu(1500), 1363);
+    }
+
+    #[test]
+    fn test_max_mss_is_less_than_kernel_formula() {
+        // Kernel computes mss = tun_mtu - 60. FIPS must clamp lower due to
+        // FIPS_IPV6_OVERHEAD. Verify for both common TUN MTU values.
+        for tun_mtu in [1280u16, 1400, 1500] {
+            let kernel_mss = tun_mtu.saturating_sub(60);
+            let fips_mss = max_mss_for_tun_mtu(tun_mtu);
+            assert!(
+                fips_mss < kernel_mss,
+                "tun_mtu={tun_mtu}: fips_mss {fips_mss} should be < kernel_mss {kernel_mss}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_effective_ipv6_mtu_saturates_at_zero() {
+        // Should not underflow for tiny or zero MTU.
+        assert_eq!(effective_ipv6_mtu(0), 0);
+        assert_eq!(effective_ipv6_mtu(10), 0);
+        assert_eq!(effective_ipv6_mtu(77), 0);
+        assert_eq!(effective_ipv6_mtu(78), 1);
     }
 }
