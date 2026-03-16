@@ -5,6 +5,8 @@
 //! (SessionSetup/SessionAck/SessionMsg3) carried inside SessionDatagram
 //! envelopes through the mesh.
 
+use std::time::Instant;
+
 use crate::config::SessionMmpConfig;
 use crate::mmp::MmpSessionState;
 use crate::noise::{HandshakeState, NoiseSession};
@@ -425,8 +427,9 @@ impl SessionEntry {
         self.rekey_completed_ms = 0;
 
         // Reset MMP counters to avoid metric discontinuity
+        let now = Instant::now();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey();
+            mmp.reset_for_rekey(now);
         }
         true
     }
@@ -452,8 +455,9 @@ impl SessionEntry {
         self.rekey_initiator = false;
 
         // Reset MMP counters to avoid metric discontinuity
+        let now = Instant::now();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey();
+            mmp.reset_for_rekey(now);
         }
         true
     }

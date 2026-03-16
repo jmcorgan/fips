@@ -887,8 +887,9 @@ impl ActivePeer {
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
+        let now = Instant::now();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey();
+            mmp.reset_for_rekey(now);
         }
 
         self.previous_our_index
@@ -921,8 +922,9 @@ impl ActivePeer {
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
+        let now = Instant::now();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey();
+            mmp.reset_for_rekey(now);
         }
 
         self.previous_our_index

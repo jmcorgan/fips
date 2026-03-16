@@ -198,8 +198,8 @@ impl MmpPeerState {
     }
 
     /// Reset counter-dependent state for rekey cutover.
-    pub fn reset_for_rekey(&mut self) {
-        self.receiver.reset_for_rekey();
+    pub fn reset_for_rekey(&mut self, now: Instant) {
+        self.receiver.reset_for_rekey(now);
         self.metrics.reset_for_rekey();
     }
 
@@ -263,8 +263,8 @@ impl MmpSessionState {
     }
 
     /// Reset counter-dependent state for rekey cutover.
-    pub fn reset_for_rekey(&mut self) {
-        self.receiver.reset_for_rekey();
+    pub fn reset_for_rekey(&mut self, now: Instant) {
+        self.receiver.reset_for_rekey(now);
         self.metrics.reset_for_rekey();
     }
 

@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backoff capped at 300 seconds.
 - Control socket permissions: non-root users couldn't connect. Daemon now
   chowns socket and directory to `root:fips` group at bind time.
+- Post-rekey jitter spikes: old-session frames arriving via the drain window
+  produced 2,000–7,000ms jitter spikes that corrupted the EWMA estimator.
+  Added a 15-second grace period after rekey cutover that suppresses jitter
+  updates until drain-window frames have flushed. (#10)
 
 ## [0.1.0] - 2026-03-12
 
