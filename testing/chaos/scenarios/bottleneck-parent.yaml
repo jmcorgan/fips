@@ -35,7 +35,7 @@
 scenario:
   name: "bottleneck-parent"
   seed: 42
-  duration_secs: 120
+  duration_secs: 60
 
 topology:
   algorithm: explicit

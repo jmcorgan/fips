@@ -6,8 +6,7 @@ networks:
         - subnet: 172.20.0.0/24
 
 x-fips-common: &fips-common
-  build:
-    context: .
+  image: fips-test:latest
   cap_add:
     - NET_ADMIN
   devices:
@@ -28,7 +27,7 @@ services:
     container_name: fips-node-a
     hostname: node-a
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -40,7 +39,7 @@ services:
     container_name: fips-node-b
     hostname: node-b
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -52,7 +51,7 @@ services:
     container_name: fips-node-c
     hostname: node-c
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -64,7 +63,7 @@ services:
     container_name: fips-node-d
     hostname: node-d
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -76,7 +75,7 @@ services:
     container_name: fips-node-e
     hostname: node-e
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -89,7 +88,7 @@ services:
     container_name: fips-node-a
     hostname: node-a
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh-public/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -101,7 +100,7 @@ services:
     container_name: fips-node-b
     hostname: node-b
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh-public/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -113,7 +112,7 @@ services:
     container_name: fips-node-c
     hostname: node-c
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh-public/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -125,7 +124,7 @@ services:
     container_name: fips-node-d
     hostname: node-d
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh-public/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -137,7 +136,7 @@ services:
     container_name: fips-node-e
     hostname: node-e
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh-public/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -150,7 +149,7 @@ services:
     container_name: fips-node-a
     hostname: node-a
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/chain/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -162,7 +161,7 @@ services:
     container_name: fips-node-b
     hostname: node-b
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/chain/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -174,7 +173,7 @@ services:
     container_name: fips-node-c
     hostname: node-c
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/chain/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -186,7 +185,7 @@ services:
     container_name: fips-node-d
     hostname: node-d
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/chain/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -198,7 +197,7 @@ services:
     container_name: fips-node-e
     hostname: node-e
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/chain/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -211,7 +210,7 @@ services:
     container_name: fips-node-a
     hostname: node-a
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -223,7 +222,7 @@ services:
     container_name: fips-node-b
     hostname: node-b
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -235,7 +234,7 @@ services:
     container_name: fips-node-c
     hostname: node-c
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -247,7 +246,7 @@ services:
     container_name: fips-node-d
     hostname: node-d
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -259,7 +258,7 @@ services:
     container_name: fips-node-e
     hostname: node-e
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -272,7 +271,7 @@ services:
     container_name: fips-node-a
     hostname: node-a
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/tcp-chain/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -284,7 +283,7 @@ services:
     container_name: fips-node-b
     hostname: node-b
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/tcp-chain/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -296,7 +295,7 @@ services:
     container_name: fips-node-c
     hostname: node-c
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/tcp-chain/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:

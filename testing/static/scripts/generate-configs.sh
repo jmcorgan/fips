@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$SCRIPT_DIR/../configs"
 GENERATED_DIR="$SCRIPT_DIR/../generated-configs"
 TEMPLATE_FILE="$CONFIG_DIR/node.template.yaml"
-DERIVE_KEYS="$SCRIPT_DIR/derive-keys.py"
+DERIVE_KEYS="$SCRIPT_DIR/../../lib/derive_keys.py"
 
 # Parse topology YAML to extract node attributes
 # Usage: get_node_attr <topology_file> <node_id> <attr_name>

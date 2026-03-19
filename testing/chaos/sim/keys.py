@@ -1,14 +1,11 @@
-"""Key derivation wrapper, reusing logic from scripts/derive-keys.py."""
+"""Key derivation wrapper, importing from shared testing library."""
 
-import importlib.util
 import os
+import sys
 
-# Import derive() from scripts/derive-keys.py
-_SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "scripts")
-_DERIVE_KEYS_PATH = os.path.join(_SCRIPTS_DIR, "derive-keys.py")
+# Add testing/ to sys.path so we can import testing.lib.derive_keys
+_TESTING_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+if _TESTING_DIR not in sys.path:
+    sys.path.insert(0, _TESTING_DIR)
 
-_spec = importlib.util.spec_from_file_location("derive_keys", _DERIVE_KEYS_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-
-derive = _mod.derive  # derive(mesh_name, node_name) -> (nsec_hex, npub_bech32)
+from lib.derive_keys import derive  # noqa: E402

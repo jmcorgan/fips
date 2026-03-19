@@ -58,8 +58,10 @@ trap cleanup EXIT
 # ── Build ──────────────────────────────────────────────────────────────────
 
 if [[ "${1:-}" != "--skip-build" ]]; then
-    log "Building sidecar images..."
-    docker compose $COMPOSE_BASE build
+    log "Building test images..."
+    DOCKER_DIR="$(cd "$SIDECAR_DIR/../docker" && pwd)"
+    docker build -t fips-test:latest "$DOCKER_DIR"
+    docker build -t fips-test-app:latest -f "$DOCKER_DIR/Dockerfile.app" "$DOCKER_DIR"
 fi
 
 # ── Start nodes ────────────────────────────────────────────────────────────

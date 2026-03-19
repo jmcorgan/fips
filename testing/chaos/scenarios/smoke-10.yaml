@@ -1,7 +1,7 @@
 scenario:
   name: "smoke-10"
   seed: 42
-  duration_secs: 60
+  duration_secs: 30
 
 topology:
   num_nodes: 10

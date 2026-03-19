@@ -125,8 +125,8 @@ jobs:
 # Runs only when both build and test succeed.  Each topology / scenario is a
 # separate matrix entry so they run in parallel.
 #
-# Static topologies  → build Docker images, start containers, ping-test
-# Chaos scenarios    → build sim image, run stochastic simulation
+# All harnesses share a single Docker image (fips-test:latest) built once
+# in the setup step from testing/docker/.
 # ─────────────────────────────────────────────────────────────────────────────
   integration:
     name: Integration (${{ matrix.suite }})
@@ -153,24 +153,25 @@ jobs:
           - suite: chaos-smoke-10
             type: chaos
             scenario: smoke-10
-          - suite: chaos-10
+          - suite: churn-mixed-10
             type: chaos
-            scenario: chaos-10
+            scenario: churn-mixed
+            chaos_flags: "--nodes 10 --duration 120"
           - suite: ethernet-mesh
             type: chaos
             scenario: ethernet-mesh
           - suite: ethernet-only
             type: chaos
             scenario: ethernet-only
+          - suite: tcp-mesh
+            type: chaos
+            scenario: tcp-mesh
           - suite: bottleneck-parent
             type: chaos
             scenario: bottleneck-parent
           - suite: cost-avoidance
             type: chaos
             scenario: cost-avoidance
-          - suite: cost-mixed-7node
-            type: chaos
-            scenario: cost-mixed-7node
           - suite: cost-reeval
             type: chaos
             scenario: cost-reeval
@@ -183,6 +184,9 @@ jobs:
           - suite: mixed-technology
             type: chaos
             scenario: mixed-technology
+          - suite: congestion-stress
+            type: chaos
+            scenario: congestion-stress
           # ── Sidecar deployment ──────────────────────────────────────────
           - suite: sidecar
             type: sidecar
@@ -197,23 +201,21 @@ jobs:
           name: fips-linux
           path: _bin
 
-      # ── Static topology ────────────────────────────────────────────────────
-      - name: Install binary (static)
-        if: matrix.type == 'static'
+      # Install binaries to unified docker context and build shared image
+      - name: Install binaries and build Docker image
         run: |
           chmod +x _bin/fips _bin/fipsctl
-          cp _bin/fips    testing/static/fips
-          cp _bin/fipsctl testing/static/fipsctl
+          [ -f _bin/fipstop ] && chmod +x _bin/fipstop || true
+          cp _bin/fips    testing/docker/fips
+          cp _bin/fipsctl testing/docker/fipsctl
+          [ -f _bin/fipstop ] && cp _bin/fipstop testing/docker/fipstop || true
+          docker build -t fips-test:latest testing/docker
+          docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker
 
+      # ── Static topology ────────────────────────────────────────────────────
       - name: Generate configs (static)
         if: matrix.type == 'static'
         run: bash testing/static/scripts/generate-configs.sh ${{ matrix.topology }}
-
-      - name: Build Docker images (static)
-        if: matrix.type == 'static'
-        run: |
-          docker compose -f testing/static/docker-compose.yml \
-            --profile ${{ matrix.topology }} build
 
       - name: Start containers (static)
         if: matrix.type == 'static'
@@ -238,24 +240,11 @@ jobs:
             --profile ${{ matrix.topology }} down --volumes --remove-orphans
 
       # ── Rekey integration test ──────────────────────────────────────────────
-      - name: Install binary (rekey)
-        if: matrix.type == 'rekey'
-        run: |
-          chmod +x _bin/fips _bin/fipsctl
-          cp _bin/fips    testing/static/fips
-          cp _bin/fipsctl testing/static/fipsctl
-
       - name: Generate and inject configs (rekey)
         if: matrix.type == 'rekey'
         run: |
           bash testing/static/scripts/generate-configs.sh rekey
           bash testing/static/scripts/rekey-test.sh inject-config
-
-      - name: Build Docker images (rekey)
-        if: matrix.type == 'rekey'
-        run: |
-          docker compose -f testing/static/docker-compose.yml \
-            --profile rekey build
 
       - name: Start containers (rekey)
         if: matrix.type == 'rekey'
@@ -284,20 +273,9 @@ jobs:
         if: matrix.type == 'chaos'
         run: pip3 install --quiet pyyaml jinja2
 
-      - name: Install binary (chaos)
-        if: matrix.type == 'chaos'
-        run: |
-          chmod +x _bin/fips _bin/fipsctl
-          cp _bin/fips    testing/chaos/fips
-          cp _bin/fipsctl testing/chaos/fipsctl
-
-      - name: Build chaos Docker image
-        if: matrix.type == 'chaos'
-        run: docker build -t fips-chaos:latest testing/chaos
-
       - name: Run chaos scenario
         if: matrix.type == 'chaos'
-        run: bash testing/chaos/scripts/chaos.sh ${{ matrix.scenario }}
+        run: bash testing/chaos/scripts/chaos.sh ${{ matrix.scenario }} ${{ matrix.chaos_flags }}
 
       - name: Upload sim results on failure (chaos)
         if: matrix.type == 'chaos' && failure()
@@ -308,17 +286,9 @@ jobs:
           retention-days: 7
 
       # ── Sidecar deployment ──────────────────────────────────────────────
-      - name: Install binary (sidecar)
-        if: matrix.type == 'sidecar'
-        run: |
-          chmod +x _bin/fips _bin/fipsctl _bin/fipstop
-          cp _bin/fips    testing/sidecar/fips
-          cp _bin/fipsctl testing/sidecar/fipsctl
-          cp _bin/fipstop testing/sidecar/fipstop
-
       - name: Run sidecar integration test
         if: matrix.type == 'sidecar'
-        run: bash testing/sidecar/scripts/test-sidecar.sh
+        run: bash testing/sidecar/scripts/test-sidecar.sh --skip-build
 
       - name: Collect logs on failure (sidecar)
         if: matrix.type == 'sidecar' && failure()

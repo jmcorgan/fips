@@ -34,7 +34,7 @@
 scenario:
   name: "mixed-technology"
   seed: 42
-  duration_secs: 180
+  duration_secs: 90
 
 topology:
   algorithm: explicit

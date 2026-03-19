@@ -27,7 +27,7 @@
 scenario:
   name: "depth-vs-cost"
   seed: 42
-  duration_secs: 120
+  duration_secs: 45
 
 topology:
   algorithm: explicit

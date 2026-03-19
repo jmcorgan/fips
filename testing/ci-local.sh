@@ -15,9 +15,10 @@
 #
 # Integration suites:
 #   static-mesh, static-chain, rekey,
-#   chaos-smoke-10, chaos-10, ethernet-mesh, ethernet-only,
-#   bottleneck-parent, cost-avoidance, cost-mixed-7node,
-#   cost-reeval, cost-stability, depth-vs-cost, mixed-technology,
+#   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
+#   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
+#   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
+#   chaos-depth-vs-cost, chaos-mixed-technology, chaos-congestion-stress,
 #   sidecar
 #
 # Exit codes:
@@ -47,11 +48,20 @@ ONLY_SUITE=""
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
 REKEY_SUITES=(rekey)
+# Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
-    chaos-smoke-10 chaos-10
-    ethernet-mesh ethernet-only
-    bottleneck-parent cost-avoidance cost-mixed-7node
-    cost-reeval cost-stability depth-vs-cost mixed-technology
+    "smoke-10 smoke-10"
+    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
+    "ethernet-mesh ethernet-mesh"
+    "ethernet-only ethernet-only"
+    "tcp-mesh tcp-mesh"
+    "bottleneck-parent bottleneck-parent"
+    "cost-avoidance cost-avoidance"
+    "cost-reeval cost-reeval"
+    "cost-stability cost-stability"
+    "depth-vs-cost depth-vs-cost"
+    "mixed-technology mixed-technology"
+    "congestion-stress congestion-stress"
 )
 SIDECAR_SUITES=(sidecar)
 
@@ -83,7 +93,10 @@ list_suites() {
     for s in "${REKEY_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Chaos scenarios:"
-    for s in "${CHAOS_SUITES[@]}"; do echo "    $s"; done
+    for entry in "${CHAOS_SUITES[@]}"; do
+        read -ra parts <<< "$entry"
+        echo "    chaos-${parts[0]}  (${parts[*]:1})"
+    done
     echo ""
     echo "  Sidecar:"
     for s in "${SIDECAR_SUITES[@]}"; do echo "    $s"; done
@@ -195,9 +208,6 @@ run_static() {
     info "[$topology] Generating configs"
     bash testing/static/scripts/generate-configs.sh "$topology" || { record "static-$topology" 1; return; }
 
-    info "[$topology] Building Docker images"
-    docker compose -f "$compose" --profile "$topology" build --quiet || { record "static-$topology" 1; return; }
-
     info "[$topology] Starting containers"
     docker compose -f "$compose" --profile "$topology" up -d || { record "static-$topology" 1; return; }
 
@@ -223,9 +233,6 @@ run_rekey() {
     bash testing/static/scripts/generate-configs.sh rekey || { record "rekey" 1; return; }
     bash testing/static/scripts/rekey-test.sh inject-config || { record "rekey" 1; return; }
 
-    info "[rekey] Building Docker images"
-    docker compose -f "$compose" --profile rekey build --quiet || { record "rekey" 1; return; }
-
     info "[rekey] Starting containers"
     docker compose -f "$compose" --profile rekey up -d || { record "rekey" 1; return; }
 
@@ -244,17 +251,18 @@ run_rekey() {
 
 # Run a chaos scenario
 run_chaos() {
-    local scenario="$1"
+    local name="$1"
+    shift
     local rc=0
 
-    info "[chaos/$scenario] Running simulation"
-    if bash testing/chaos/scripts/chaos.sh "$scenario" 2>&1; then
+    info "[chaos/$name] Running simulation"
+    if bash testing/chaos/scripts/chaos.sh "$@" 2>&1; then
         rc=0
     else
         rc=1
     fi
 
-    record "chaos-$scenario" $rc
+    record "chaos-$name" $rc
 }
 
 # Run sidecar test
@@ -262,7 +270,7 @@ run_sidecar() {
     local rc=0
 
     info "[sidecar] Running integration test"
-    if bash testing/sidecar/scripts/test-sidecar.sh 2>&1; then
+    if bash testing/sidecar/scripts/test-sidecar.sh --skip-build 2>&1; then
         rc=0
     else
         rc=1
@@ -275,24 +283,14 @@ run_sidecar() {
 run_integration() {
     stage "Stage 3: Integration Tests"
 
-    # Install binaries to test directories
-    info "Installing release binaries to test directories"
-    install_binaries testing/static
-    install_binaries testing/chaos
-    install_binaries testing/sidecar
+    # Install binaries to shared docker context
+    info "Installing release binaries"
+    install_binaries testing/docker
 
-    # Build chaos Docker image once (shared by all chaos scenarios)
-    local need_chaos=false
-    if [[ -z "$ONLY_SUITE" && "$SKIP_CHAOS" != true ]]; then
-        need_chaos=true
-    elif [[ "$ONLY_SUITE" == chaos-* ]]; then
-        need_chaos=true
-    fi
-
-    if [[ "$need_chaos" == true ]]; then
-        info "Building chaos Docker image"
-        docker build -t fips-chaos:latest testing/chaos --quiet || { record "chaos-build" 1; return; }
-    fi
+    # Build unified test image once (used by all harnesses)
+    info "Building fips-test Docker image"
+    docker build -t fips-test:latest testing/docker --quiet || { record "docker-build" 1; return; }
+    docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker --quiet || { record "docker-build-app" 1; return; }
 
     # Single suite mode
     if [[ -n "$ONLY_SUITE" ]]; then
@@ -300,7 +298,7 @@ run_integration() {
         return
     fi
 
-    # Static topologies (sequential — they share the docker-compose)
+    # Static topologies (sequential — profiles share container names)
     for topo in "${STATIC_SUITES[@]}"; do
         local topology="${topo#static-}"
         run_static "$topology"
@@ -316,8 +314,11 @@ run_integration() {
         local suite_names=()
         local running=0
 
-        for suite in "${CHAOS_SUITES[@]}"; do
-            local scenario="${suite#chaos-}"
+        for entry in "${CHAOS_SUITES[@]}"; do
+            # Parse: "display-name scenario [flags...]"
+            read -ra parts <<< "$entry"
+            local name="${parts[0]}"
+            local args=("${parts[@]:1}")
 
             # Throttle: wait for a slot
             while [[ $running -ge $PARALLEL_JOBS ]]; do
@@ -327,12 +328,12 @@ run_integration() {
 
             # Run in background, capture output to temp file
             local logfile
-            logfile=$(mktemp "/tmp/ci-chaos-${scenario}.XXXXXX")
+            logfile=$(mktemp "/tmp/ci-chaos-${name}.XXXXXX")
             (
-                run_chaos "$scenario" >"$logfile" 2>&1
+                run_chaos "$name" "${args[@]}" >"$logfile" 2>&1
             ) &
             pids+=($!)
-            suite_names+=("$scenario:$logfile")
+            suite_names+=("$name:$logfile")
             running=$((running + 1))
         done
 
@@ -369,7 +370,21 @@ run_suite() {
         rekey)
             run_rekey ;;
         chaos-*)
-            run_chaos "${suite#chaos-}" ;;
+            local chaos_name="${suite#chaos-}"
+            local found=false
+            for entry in "${CHAOS_SUITES[@]}"; do
+                read -ra parts <<< "$entry"
+                if [[ "${parts[0]}" == "$chaos_name" ]]; then
+                    run_chaos "$chaos_name" "${parts[@]:1}"
+                    found=true
+                    break
+                fi
+            done
+            if [[ "$found" != true ]]; then
+                # Fall back to using the name as the scenario directly
+                run_chaos "$chaos_name" "$chaos_name"
+            fi
+            ;;
         sidecar)
             run_sidecar ;;
         *)

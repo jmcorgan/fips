@@ -1,72 +1,31 @@
-"""Log collection and post-run analysis."""
+"""Log collection and post-run analysis for chaos simulations.
+
+Delegates core analysis to the shared testing.lib.log_analysis module.
+Adds chaos-specific collection (Docker container logs, sim metadata).
+"""
 
 from __future__ import annotations
 
-import os
-import re
-import subprocess
 import logging
-from dataclasses import dataclass, field
+import os
+import subprocess
+
+# Import shared analysis from testing/lib/
+import sys
+_TESTING_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+if _TESTING_DIR not in sys.path:
+    sys.path.insert(0, _TESTING_DIR)
+
+from lib.log_analysis import (  # noqa: E402
+    AnalysisResult,
+    analyze_logs,
+    strip_ansi,
+)
 
 log = logging.getLogger(__name__)
 
-# Regex to strip ANSI escape codes from tracing output
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-@dataclass
-class AnalysisResult:
-    errors: list[tuple[str, str]] = field(default_factory=list)
-    warnings: list[tuple[str, str]] = field(default_factory=list)
-    sessions_established: list[tuple[str, str]] = field(default_factory=list)
-    peers_promoted: list[tuple[str, str]] = field(default_factory=list)
-    peer_removals: list[tuple[str, str]] = field(default_factory=list)
-    parent_switches: list[tuple[str, str]] = field(default_factory=list)
-    mmp_link_metrics: list[tuple[str, str]] = field(default_factory=list)
-    mmp_session_metrics: list[tuple[str, str]] = field(default_factory=list)
-    handshake_timeouts: list[tuple[str, str]] = field(default_factory=list)
-    panics: list[tuple[str, str]] = field(default_factory=list)
-    congestion_detected: list[tuple[str, str]] = field(default_factory=list)
-    kernel_drop_events: list[tuple[str, str]] = field(default_factory=list)
-
-    def summary(self) -> str:
-        lines = [
-            "=== Simulation Analysis ===",
-            "",
-            f"Panics:               {len(self.panics)}",
-            f"Errors:               {len(self.errors)}",
-            f"Warnings:             {len(self.warnings)}",
-            f"Sessions established:  {len(self.sessions_established)}",
-            f"Peers promoted:        {len(self.peers_promoted)}",
-            f"Peer removals:         {len(self.peer_removals)}",
-            f"Parent switches:       {len(self.parent_switches)}",
-            f"Handshake timeouts:    {len(self.handshake_timeouts)}",
-            f"MMP link samples:      {len(self.mmp_link_metrics)}",
-            f"MMP session samples:   {len(self.mmp_session_metrics)}",
-            f"Congestion events:     {len(self.congestion_detected)}",
-            f"Kernel drop events:    {len(self.kernel_drop_events)}",
-        ]
-
-        if self.panics:
-            lines.append("")
-            lines.append("--- PANICS ---")
-            for container, line in self.panics[:10]:
-                lines.append(f"  [{container}] {line.strip()}")
-
-        if self.errors:
-            lines.append("")
-            lines.append("--- ERRORS (first 20) ---")
-            for container, line in self.errors[:20]:
-                lines.append(f"  [{container}] {line.strip()}")
-
-        if self.handshake_timeouts:
-            lines.append("")
-            lines.append("--- HANDSHAKE TIMEOUTS (first 10) ---")
-            for container, line in self.handshake_timeouts[:10]:
-                lines.append(f"  [{container}] {line.strip()}")
-
-        lines.append("")
-        return "\n".join(lines)
+# Re-export for existing callers
+__all__ = ["AnalysisResult", "analyze_logs", "collect_logs", "write_sim_metadata"]
 
 
 def collect_logs(container_names: list[str], output_dir: str) -> dict[str, str]:
@@ -82,11 +41,8 @@ def collect_logs(container_names: list[str], output_dir: str) -> dict[str, str]:
                 text=True,
                 timeout=30,
             )
-            # Combine stdout and stderr — tracing may go to either
-            # depending on the subscriber configuration.
-            # Strip ANSI escape codes for clean log files.
             raw = result.stdout + result.stderr
-            log_text = _ANSI_RE.sub("", raw)
+            log_text = strip_ansi(raw)
             logs[name] = log_text
 
             path = os.path.join(output_dir, f"{name}.log")
@@ -98,53 +54,6 @@ def collect_logs(container_names: list[str], output_dir: str) -> dict[str, str]:
             logs[name] = ""
 
     return logs
-
-
-def analyze_logs(logs: dict[str, str]) -> AnalysisResult:
-    """Parse structured tracing output and categorize events."""
-    result = AnalysisResult()
-
-    for container, log_text in logs.items():
-        for raw_line in log_text.splitlines():
-            # Strip ANSI escape codes for reliable matching
-            line = _ANSI_RE.sub("", raw_line)
-
-            # Panics
-            if "panicked" in line or "PANIC" in line:
-                result.panics.append((container, line))
-            # Errors and warnings
-            elif " ERROR " in line:
-                result.errors.append((container, line))
-            elif " WARN " in line:
-                result.warnings.append((container, line))
-
-            # Session establishment
-            if "Session established" in line:
-                result.sessions_established.append((container, line))
-            # Peer promotion
-            if "Inbound peer promoted" in line or "Outbound handshake completed" in line:
-                result.peers_promoted.append((container, line))
-            # Peer removal
-            if "Peer removed" in line:
-                result.peer_removals.append((container, line))
-            # Parent switches
-            if "Parent switched" in line:
-                result.parent_switches.append((container, line))
-            # Handshake timeouts
-            if "timed out" in line and ("handshake" in line.lower() or "Handshake" in line):
-                result.handshake_timeouts.append((container, line))
-            # MMP metrics
-            if "MMP link metrics" in line:
-                result.mmp_link_metrics.append((container, line))
-            if "MMP session metrics" in line:
-                result.mmp_session_metrics.append((container, line))
-            # Congestion events
-            if "Congestion detected" in line:
-                result.congestion_detected.append((container, line))
-            if "Kernel recv drops first observed" in line:
-                result.kernel_drop_events.append((container, line))
-
-    return result
 
 
 def write_sim_metadata(
