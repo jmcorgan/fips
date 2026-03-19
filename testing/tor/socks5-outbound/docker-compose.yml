@@ -22,8 +22,7 @@ services:
       tor-test:
 
   fips-a:
-    build:
-      context: ../common
+    image: fips-test:latest
     cap_add:
       - NET_ADMIN
     devices:
@@ -36,16 +35,15 @@ services:
     depends_on:
       - tor-daemon
     volumes:
-      - ../common/resolv.conf:/etc/resolv.conf:ro
       - ./configs/node-a.yaml:/etc/fips/fips.yaml:ro
     environment:
       - RUST_LOG=info,fips::transport::tor=debug
+      - FIPS_TEST_MODE=tor-socks5
     networks:
       tor-test:
 
   fips-b:
-    build:
-      context: ../common
+    image: fips-test:latest
     cap_add:
       - NET_ADMIN
     devices:
@@ -58,9 +56,9 @@ services:
     depends_on:
       - tor-daemon
     volumes:
-      - ../common/resolv.conf:/etc/resolv.conf:ro
       - ./configs/node-b.yaml:/etc/fips/fips.yaml:ro
     environment:
       - RUST_LOG=info,fips::transport::tor=debug
+      - FIPS_TEST_MODE=tor-socks5
     networks:
       tor-test:

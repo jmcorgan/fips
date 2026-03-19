@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import signal
+import subprocess
 import sys
 import time
 
@@ -119,9 +120,14 @@ class SimRunner:
         self.compose_file = generate_compose(self.topology, self.scenario, config_dir)
         log.info("Wrote %s", self.compose_file)
 
-        # 4. Build images (reuses Docker cache)
-        log.info("Building Docker images...")
-        docker_compose(self.compose_file, ["build"])
+        # 4. Build the test image once (avoids per-service build at scale)
+        log.info("Building Docker image...")
+        from .compose import FIPS_SIM_IMAGE
+        docker_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docker")
+        subprocess.run(
+            ["docker", "build", "-t", FIPS_SIM_IMAGE, docker_dir],
+            check=True,
+        )
 
         # 5. Start containers
         log.info("Starting %d containers...", len(self.topology.nodes))

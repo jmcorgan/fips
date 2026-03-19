@@ -15,7 +15,7 @@
 scenario:
   name: "ethernet-only"
   seed: 42
-  duration_secs: 90
+  duration_secs: 30
 
 topology:
   algorithm: explicit

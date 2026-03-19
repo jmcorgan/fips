@@ -1,11 +1,13 @@
-# 20-node churn test with mixed transports (UDP, Ethernet, TCP)
+# Parameterized churn test with mixed transports (UDP, Ethernet, TCP)
 #
-# Based on churn-20 but with transport_mix assigning each edge a
-# random transport type by weight. Tests spanning tree convergence,
-# link flaps, node churn, and traffic across heterogeneous transports.
+# Default: 20 nodes. Override num_nodes with --nodes flag in chaos.sh,
+# or copy this file and adjust topology.num_nodes directly.
+#
+# Tests spanning tree convergence, link flaps, node churn, and traffic
+# across heterogeneous transports at configurable scale.
 
 scenario:
-  name: "churn-20-mixed"
+  name: "churn-mixed"
   seed: 42
   duration_secs: 600
 
@@ -15,7 +17,7 @@ topology:
   params:
     p: 0.3
   ensure_connected: true
-  subnet: "172.20.0.0/23"
+  subnet: "172.20.0.0/16"
   ip_start: 10
   transport_mix:
     udp: 0.6

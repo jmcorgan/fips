@@ -8,8 +8,7 @@ networks:
 
 services:
   fips:
-    build:
-      context: .
+    image: fips-test:latest
     hostname: fips-sidecar
     cap_add:
       - NET_ADMIN
@@ -20,6 +19,7 @@ services:
     restart: "no"
     environment:
       - RUST_LOG=${RUST_LOG:-info}
+      - FIPS_TEST_MODE=sidecar
       - FIPS_NSEC=${FIPS_NSEC}
       - FIPS_PEER_NPUB=${FIPS_PEER_NPUB:-}
       - FIPS_PEER_ADDR=${FIPS_PEER_ADDR:-}
@@ -27,19 +27,15 @@ services:
       - FIPS_UDP_BIND=${FIPS_UDP_BIND:-0.0.0.0:2121}
       - FIPS_TUN_MTU=${FIPS_TUN_MTU:-1280}
       - FIPS_PEER_TRANSPORT=${FIPS_PEER_TRANSPORT:-udp}
-    volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
     networks:
       fips-net:
         ipv4_address: ${FIPS_IPV4:-172.20.1.20}
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile.app
+    image: fips-test-app:latest
     network_mode: "service:fips"
     depends_on:
       - fips
     volumes:
-      - ./resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
     command: ["sleep", "infinity"]

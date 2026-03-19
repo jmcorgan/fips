@@ -18,6 +18,7 @@ FAILED=0
 
 # Node identities (from generated env file)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../lib/wait-converge.sh"
 ENV_FILE="$SCRIPT_DIR/../generated-configs/npubs.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo "Error: $ENV_FILE not found. Run generate-configs.sh first." >&2
@@ -51,9 +52,15 @@ ping_test() {
 echo "=== FIPS Ping Test ($PROFILE topology) ==="
 echo ""
 
-# Wait for nodes to converge
-echo "Waiting 5s for mesh convergence..."
-sleep 5
+# Wait for nodes to converge — peers + discovery propagation
+echo "Waiting for mesh convergence..."
+if [ "$PROFILE" = "chain" ]; then
+    wait_for_peers fips-node-b 2 15 || true
+else
+    wait_for_peers fips-node-a 2 15 || true
+fi
+# Allow extra time for discovery to propagate across the mesh
+sleep 3
 
 if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     # Sparse mesh topology: A-B, B-C, C-D, D-E, E-A, A-D

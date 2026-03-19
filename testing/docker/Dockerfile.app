@@ -1,3 +1,6 @@
+# Sidecar companion container: shares the FIPS container's network namespace.
+# Provides basic networking tools for testing mesh connectivity.
+
 FROM debian:trixie-slim
 
 RUN apt-get update && \
@@ -7,7 +10,7 @@ RUN apt-get update && \
         tcpdump netcat-openbsd curl iperf3 && \
     rm -rf /var/lib/apt/lists/*
 
-# Setup SSH server with no authentication (test only!)
+# SSH server with no authentication (test only!)
 RUN mkdir -p /var/run/sshd && \
     ssh-keygen -A && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \

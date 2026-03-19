@@ -28,7 +28,7 @@ trap 'echo ""; echo "Test interrupted — cleaning up..."; docker compose down 2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOR_DIR="$SCRIPT_DIR/.."
-DERIVE_KEYS="$SCRIPT_DIR/../../../static/scripts/derive-keys.py"
+DERIVE_KEYS="$SCRIPT_DIR/../../../lib/derive_keys.py"
 cd "$TOR_DIR"
 
 PASSED=0
@@ -80,7 +80,7 @@ echo ""
 # ── Phase 1: Build and start ─────────────────────────────────────
 echo "Phase 1: Starting Tor daemon and FIPS nodes..."
 docker compose down 2>/dev/null || true
-docker compose up -d --build
+docker compose up -d
 echo ""
 
 # ── Phase 2: Wait for Tor bootstrap ─────────────────────────────
