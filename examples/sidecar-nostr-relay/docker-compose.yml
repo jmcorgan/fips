@@ -1,0 +1,54 @@
+networks:
+  fips-net:
+    name: ${FIPS_NETWORK:-fips-sidecar-net}
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${FIPS_SUBNET:-172.20.1.0/24}
+
+services:
+  fips:
+    build:
+      context: .
+    hostname: fips-sidecar
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    restart: "no"
+    ports:
+      - "2121:2121/udp"   # FIPS UDP transport
+      - "8443:8443/tcp"   # FIPS TCP transport
+      - "80:80/tcp"       # Nostr relay WebSocket (via nginx)
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - FIPS_NSEC=${FIPS_NSEC}
+      - FIPS_PEER_NPUB=${FIPS_PEER_NPUB:-}
+      - FIPS_PEER_ADDR=${FIPS_PEER_ADDR:-}
+      - FIPS_PEER_ALIAS=${FIPS_PEER_ALIAS:-peer}
+      - FIPS_UDP_BIND=${FIPS_UDP_BIND:-0.0.0.0:2121}
+      - FIPS_TUN_MTU=${FIPS_TUN_MTU:-1280}
+      - FIPS_PEER_TRANSPORT=${FIPS_PEER_TRANSPORT:-udp}
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+    networks:
+      fips-net:
+        ipv4_address: ${FIPS_IPV4:-172.20.1.20}
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    network_mode: "service:fips"
+    restart: unless-stopped
+    depends_on:
+      - fips
+    volumes:
+      - relay-data:/usr/src/app/strfry-db
+      - ./relay/strfry.conf:/usr/src/app/strfry.conf:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+
+volumes:
+  relay-data:

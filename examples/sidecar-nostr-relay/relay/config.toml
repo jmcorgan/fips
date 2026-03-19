@@ -1,0 +1,49 @@
+# nostr-rs-relay configuration for FIPS mesh deployment.
+# Full reference: https://github.com/scsibug/nostr-rs-relay
+
+[info]
+# Shown in NIP-11 relay information document.
+relay_url = ""          # Set to ws://[<your-fips-ipv6>]:8080 after first start
+name = "FIPS Nostr Relay"
+description = "A Nostr relay accessible over the FIPS mesh network."
+pubkey = ""             # Optional: your npub (hex) as relay operator
+contact = ""            # Optional: contact address
+
+[database]
+# SQLite database path inside the container (mapped to relay-data volume).
+data_directory = "/usr/src/app/db"
+
+[network]
+# Bind on all interfaces (IPv4 + IPv6) — FIPS delivers traffic via the fips0
+# TUN as IPv6 (fd00::/8). Using 0.0.0.0 with port 8080; the relay also needs
+# to accept IPv6 connections so we set port separately and rely on the OS
+# dual-stack socket (IPV6_V6ONLY=0).
+# nostr-rs-relay address field is just the IP, port is separate.
+address = "0.0.0.0"
+port = 8080
+ping_interval_seconds = 300
+
+[limits]
+# Adjust to taste. These are conservative defaults for a personal relay.
+messages_per_sec = 10
+subscriptions_per_min = 20
+max_blocking_threads = 4
+max_event_bytes = 131072       # 128 KiB per event
+max_ws_message_bytes = 131072
+max_ws_frame_bytes = 131072
+broadcast_buffer = 16384
+event_persist_buffer = 4096
+
+[authorization]
+# Set to true to require NIP-42 AUTH before accepting events.
+# Useful for a private relay — only authenticated users can publish.
+nip42_auth = false
+nip42_dms = false
+
+[verified_users]
+# NIP-05 verification (optional).
+mode = "disabled"
+
+[pay_to_relay]
+# Lightning payments for relay access (optional).
+enabled = false

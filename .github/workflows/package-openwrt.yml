@@ -96,7 +96,7 @@ jobs:
         env:
           PKG_VERSION: ${{ steps.version.outputs.version }}
           LLVM_STRIP: llvm-strip
-        run: ./packaging/openwrt/build-ipk.sh --arch ${{ matrix.build_arch }}
+        run: ./packaging/openwrt-ipk/build-ipk.sh --arch ${{ matrix.build_arch }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

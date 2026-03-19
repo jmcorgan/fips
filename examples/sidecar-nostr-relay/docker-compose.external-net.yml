@@ -1,0 +1,6 @@
+# Override: use a pre-existing external network instead of creating one.
+# Used by test-sidecar.sh for multi-instance testing on a shared network.
+networks:
+  fips-net:
+    external: true
+    name: ${FIPS_NETWORK:-fips-sidecar-net}
