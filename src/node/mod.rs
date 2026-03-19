@@ -18,6 +18,8 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
+use tracing::{debug, trace};
+
 use crate::bloom::BloomState;
 use crate::cache::CoordCache;
 use crate::utils::index::IndexAllocator;
@@ -1358,7 +1360,29 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_coords = self.coord_cache.get_and_touch(dest_node_addr, now_ms)?.clone();
+        let dest_coords = match self.coord_cache.get_and_touch(dest_node_addr, now_ms) {
+            Some(coords) => coords.clone(),
+            None => {
+                // No cached coordinates. For leaf-only nodes without other peers,
+                // route through the parent as a fallback. This handles the case where
+                // a leaf node needs to reach destinations beyond its parent but hasn't
+                // learned coordinates yet.
+                // 
+                // Skip this fallback if we have other direct peers (transit node case)
+                // because routing without coords would create loops.
+                if !self.tree_state.is_root() && self.is_leaf_only() {
+                    let parent_id = *self.tree_state.my_declaration().parent_id();
+                    // Don't route to parent if that's the destination (should have coords)
+                    if dest_node_addr != &parent_id {
+                        debug!(dest = %self.peer_display_name(dest_node_addr), parent = %self.peer_display_name(&parent_id),
+                            "Leaf-only fallback: routing to parent without cached coords");
+                        return self.peers.get(&parent_id).filter(|p| p.can_send());
+                    }
+                }
+                trace!(dest = ?dest_node_addr, "No route: no cached coords and not leaf-only fallback");
+                return None;
+            }
+        };
 
         // 3. Bloom filter candidates — requires dest_coords for loop-free selection
         let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);
