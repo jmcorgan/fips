@@ -1,0 +1,76 @@
+# Maelstrom: topology mutation + node churn + ephemeral identity
+#
+# Combines all chaos dimensions: netem impairments, link flaps, node
+# churn, AND peer-level topology mutation (connect/disconnect).
+# Half the nodes have ephemeral identities that change on restart.
+#
+# Default: 20 nodes. Override with --nodes flag.
+
+scenario:
+  name: "maelstrom"
+  seed: 42
+  duration_secs: 600
+
+topology:
+  num_nodes: 20
+  algorithm: erdos_renyi
+  params:
+    p: 0.3
+  ensure_connected: true
+  subnet: "172.20.0.0/16"
+  ip_start: 10
+  transport_mix:
+    udp: 0.8
+    tcp: 0.2
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: { min: 5, max: 50 }
+    jitter_ms: { min: 1, max: 10 }
+    loss_pct: { min: 0, max: 2 }
+  mutation:
+    interval_secs: { min: 20, max: 45 }
+    fraction: 0.3
+    policies:
+      normal:
+        delay_ms: [5, 20]
+        loss_pct: [0, 1]
+      degraded:
+        delay_ms: [50, 100]
+        jitter_ms: [10, 30]
+        loss_pct: [3, 8]
+
+link_flaps:
+  enabled: true
+  interval_secs: { min: 30, max: 60 }
+  max_down_links: 3
+  down_duration_secs: { min: 10, max: 30 }
+  protect_connectivity: true
+
+traffic:
+  enabled: true
+  max_concurrent: 5
+  interval_secs: { min: 5, max: 30 }
+  duration_secs: { min: 5, max: 60 }
+  parallel_streams: 4
+
+node_churn:
+  enabled: true
+  interval_secs: { min: 60, max: 120 }
+  max_down_nodes: 3
+  down_duration_secs: { min: 30, max: 90 }
+  protect_connectivity: false
+
+peer_churn:
+  enabled: true
+  interval_secs: { min: 8, max: 12 }
+  ephemeral_fraction: 0.5
+
+bandwidth:
+  enabled: true
+  tiers_mbps: [1, 10, 100, 1000]
+
+logging:
+  rust_log: "debug"
+  output_dir: "./sim-results"

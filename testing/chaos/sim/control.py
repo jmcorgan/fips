@@ -56,6 +56,52 @@ def query_node(container: str, command: str, timeout: int = 10) -> dict | None:
     return response.get("data", {})
 
 
+def send_command(
+    container: str, command: str, params: dict, timeout: int = 10
+) -> dict | None:
+    """Send a mutating command with params to a node's control socket.
+
+    Returns the response data dict, or None on failure.
+    Uses base64-encoded JSON to avoid shell quoting issues with
+    embedded quotes in the payload.
+    """
+    import base64
+
+    payload = json.dumps({"command": command, "params": params})
+    b64 = base64.b64encode(payload.encode()).decode()
+    script = (
+        "import socket,json,sys,base64; "
+        "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); "
+        f"s.connect('{CONTROL_SOCKET}'); "
+        f"s.sendall(base64.b64decode('{b64}')+b'\\n'); "
+        "s.shutdown(socket.SHUT_WR); "
+        "chunks=[]; "
+        "[chunks.append(d) for d in iter(lambda:s.recv(65536),b'')]; "
+        "print(b''.join(chunks).decode())"
+    )
+    stdout = docker_exec_quiet(container, f"python3 -c \"{script}\"", timeout=timeout)
+    if stdout is None:
+        return None
+
+    try:
+        response = json.loads(stdout.strip())
+    except json.JSONDecodeError as e:
+        log.warning("Invalid JSON from %s: %s", container, e)
+        return None
+
+    if response.get("status") != "ok":
+        msg = response.get("message", "unknown error")
+        log.debug("Command %s on %s: %s", command, container, msg)
+        return None
+
+    return response.get("data", {})
+
+
+def query_status(container: str) -> dict | None:
+    """Query a node's status (npub, ipv6, uptime, etc.)."""
+    return query_node(container, "show_status")
+
+
 def query_tree(container: str) -> dict | None:
     """Query a node's spanning tree state."""
     return query_node(container, "show_tree")

@@ -107,6 +107,20 @@ class NodeChurnConfig:
 
 
 @dataclass
+class PeerChurnConfig:
+    """Peer-level topology churn via connect/disconnect commands.
+
+    When enabled, periodically disconnects a random active link and
+    connects a random unconnected node pair, causing the mesh topology
+    to evolve over time.
+    """
+
+    enabled: bool = False
+    interval_secs: Range = field(default_factory=lambda: Range(8, 12))
+    ephemeral_fraction: float = 0.0
+
+
+@dataclass
 class BandwidthConfig:
     """Per-link bandwidth pacing via HTB rate limiting.
 
@@ -152,6 +166,7 @@ class Scenario:
     link_flaps: LinkFlapsConfig = field(default_factory=LinkFlapsConfig)
     traffic: TrafficConfig = field(default_factory=TrafficConfig)
     node_churn: NodeChurnConfig = field(default_factory=NodeChurnConfig)
+    peer_churn: PeerChurnConfig = field(default_factory=PeerChurnConfig)
     bandwidth: BandwidthConfig = field(default_factory=BandwidthConfig)
     ingress: IngressConfig = field(default_factory=IngressConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -279,6 +294,13 @@ def load_scenario(path: str) -> Scenario:
         )
     s.node_churn.protect_connectivity = nc2.get("protect_connectivity", True)
 
+    # Peer churn section
+    pc = raw.get("peer_churn", {})
+    s.peer_churn.enabled = pc.get("enabled", False)
+    if "interval_secs" in pc:
+        s.peer_churn.interval_secs = _parse_range(pc["interval_secs"], "peer_churn.interval_secs")
+    s.peer_churn.ephemeral_fraction = float(pc.get("ephemeral_fraction", 0.0))
+
     # Bandwidth section
     bw = raw.get("bandwidth", {})
     s.bandwidth.enabled = bw.get("enabled", False)
@@ -399,6 +421,10 @@ def _validate(s: Scenario):
         s.node_churn.down_duration_secs.validate("node_churn.down_duration_secs")
         if s.node_churn.max_down_nodes >= s.topology.num_nodes:
             raise ValueError("node_churn.max_down_nodes must be < topology.num_nodes")
+    if s.peer_churn.enabled:
+        s.peer_churn.interval_secs.validate("peer_churn.interval_secs")
+        if not 0.0 <= s.peer_churn.ephemeral_fraction <= 1.0:
+            raise ValueError("peer_churn.ephemeral_fraction must be between 0.0 and 1.0")
     if s.bandwidth.enabled:
         for tier in s.bandwidth.tiers_mbps:
             if tier <= 0:

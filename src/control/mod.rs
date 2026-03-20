@@ -1,9 +1,10 @@
-//! Control socket for runtime observability.
+//! Control socket for runtime management and observability.
 //!
-//! Provides a Unix domain socket that accepts query commands and returns
-//! structured JSON data about the node's current state. Read-only queries
-//! only — no state mutation through this channel.
+//! Provides a Unix domain socket that accepts commands and returns
+//! structured JSON responses. Supports both read-only queries (show_*)
+//! and mutating commands (connect, disconnect).
 
+pub mod commands;
 pub mod protocol;
 pub mod queries;
 

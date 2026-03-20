@@ -19,6 +19,7 @@ from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
 from .netem import NetemManager
 from .nodes import NodeManager
+from .peer_churn import PeerChurnManager
 from .scenario import Scenario
 from .topology import SimTopology, generate_topology
 from .traffic import TrafficManager
@@ -46,6 +47,7 @@ class SimRunner:
         self.link_mgr: LinkManager | None = None
         self.traffic_mgr: TrafficManager | None = None
         self.node_mgr: NodeManager | None = None
+        self.peer_churn_mgr: PeerChurnManager | None = None
 
     def run(self) -> AnalysisResult | None:
         """Run the full simulation lifecycle."""
@@ -113,7 +115,23 @@ class SimRunner:
         config_dir = os.path.normpath(
             os.path.join(docker_network_dir, "generated-configs", "sim")
         )
-        write_configs(self.topology, config_dir, self.scenario.fips_overrides)
+        # Select ephemeral identity nodes (if peer churn enabled)
+        self._ephemeral_nodes: set[str] = set()
+        if s.peer_churn.enabled and s.peer_churn.ephemeral_fraction > 0:
+            all_nodes = sorted(self.topology.nodes.keys())
+            count = int(len(all_nodes) * s.peer_churn.ephemeral_fraction)
+            self._ephemeral_nodes = set(self.rng.sample(all_nodes, count))
+            log.info(
+                "Ephemeral identity nodes (%d/%d): %s",
+                len(self._ephemeral_nodes),
+                len(all_nodes),
+                ", ".join(sorted(self._ephemeral_nodes)),
+            )
+
+        write_configs(
+            self.topology, config_dir, self.scenario.fips_overrides,
+            ephemeral_nodes=self._ephemeral_nodes,
+        )
         log.info("Wrote node configs to %s", config_dir)
 
         # 3. Generate docker-compose.yml
@@ -167,6 +185,14 @@ class SimRunner:
                 self.topology, s.node_churn, self.rng,
                 netem_mgr=self.netem_mgr, down_nodes=self._down_nodes,
                 veth_mgr=self.veth_mgr,
+                on_node_restart=self._handle_node_restart,
+            )
+
+        if s.peer_churn.enabled:
+            self.peer_churn_mgr = PeerChurnManager(
+                self.topology, s.peer_churn, self.rng,
+                down_nodes=self._down_nodes,
+                ephemeral_nodes=self._ephemeral_nodes,
             )
 
     def _warmup(self):
@@ -176,6 +202,30 @@ class SimRunner:
         log.info("Waiting %ds for mesh convergence...", wait)
         self._sleep(wait)
         self._take_snapshot("warmup")
+
+        # Populate npub cache after convergence (nodes must be running)
+        if self.peer_churn_mgr:
+            self.peer_churn_mgr.refresh_all_npubs()
+
+    def _handle_node_restart(self, node_id: str):
+        """Called after a node container is restarted.
+
+        For ephemeral identity nodes, waits briefly for the daemon to
+        start, then queries its new npub and updates the peer churn
+        manager's cache.
+        """
+        if not self.peer_churn_mgr:
+            return
+        if node_id not in self.peer_churn_mgr.ephemeral_nodes:
+            return
+
+        # Brief delay for daemon startup before querying control socket
+        time.sleep(2)
+        new_npub = self.peer_churn_mgr.refresh_npub(node_id)
+        if new_npub:
+            log.info("Ephemeral node %s new identity: %s...%s", node_id, new_npub[:12], new_npub[-6:])
+        else:
+            log.warning("Failed to refresh npub for ephemeral node %s", node_id)
 
     def _simulation_loop(self):
         """Main event loop driving stochastic behavior."""
@@ -189,6 +239,7 @@ class SimRunner:
         next_flap = self._schedule_next(start, s.link_flaps.interval_secs) if self.link_mgr else float("inf")
         next_traffic = self._schedule_next(start, s.traffic.interval_secs) if self.traffic_mgr else float("inf")
         next_churn = self._schedule_next(start, s.node_churn.interval_secs) if self.node_mgr else float("inf")
+        next_peer_churn = self._schedule_next(start, s.peer_churn.interval_secs) if self.peer_churn_mgr else float("inf")
 
         while not self._interrupted:
             now = time.time()
@@ -222,17 +273,26 @@ class SimRunner:
                     next_churn = self._schedule_next(now, s.node_churn.interval_secs)
                 self.node_mgr.restore_expired()
 
+            # Peer churn (topology mutation)
+            if self.peer_churn_mgr:
+                if now >= next_peer_churn:
+                    self.peer_churn_mgr.maybe_churn()
+                    next_peer_churn = self._schedule_next(now, s.peer_churn.interval_secs)
+
             # Status line
             down_links = self.link_mgr.down_count if self.link_mgr else 0
             down_nodes = self.node_mgr.down_count if self.node_mgr else 0
             active = self.traffic_mgr.active_count if self.traffic_mgr else 0
+            peer_churns = self.peer_churn_mgr.churn_count if self.peer_churn_mgr else 0
+            status_extra = f" peer_churns={peer_churns}" if self.peer_churn_mgr else ""
             print(
                 f"\r  [{elapsed:.0f}s/{duration}s] "
                 f"nodes={len(self.topology.nodes)} "
                 f"edges={len(self.topology.edges)} "
                 f"links_down={down_links} "
                 f"nodes_down={down_nodes} "
-                f"traffic={active}   ",
+                f"traffic={active}"
+                f"{status_extra}   ",
                 end="",
                 flush=True,
             )

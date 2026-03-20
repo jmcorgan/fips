@@ -739,4 +739,76 @@ impl Node {
 
         info!(sent, total = peer_addrs.len(), reason = %reason, "Sent disconnect notifications");
     }
+
+    // === Control API methods ===
+
+    /// Connect to a peer via the control API.
+    ///
+    /// Creates an ephemeral peer connection (not persisted to config, no
+    /// auto-reconnect). Reuses the same connection path as auto-connect
+    /// peers. Returns JSON data on success or an error message.
+    pub(crate) async fn api_connect(
+        &mut self,
+        npub: &str,
+        address: &str,
+        transport: &str,
+    ) -> Result<serde_json::Value, String> {
+        let peer_config = crate::config::PeerConfig {
+            npub: npub.to_string(),
+            alias: None,
+            addresses: vec![crate::config::PeerAddress::new(transport, address)],
+            connect_policy: crate::config::ConnectPolicy::Manual,
+            auto_reconnect: false,
+        };
+
+        // Pre-seed identity cache (same as initiate_peer_connections does)
+        if let Ok(identity) = PeerIdentity::from_npub(npub) {
+            self.peer_aliases
+                .insert(*identity.node_addr(), identity.short_npub());
+            self.register_identity(*identity.node_addr(), identity.pubkey_full());
+        }
+
+        self.initiate_peer_connection(&peer_config)
+            .await
+            .map(|()| {
+                info!(
+                    npub = %npub,
+                    address = %address,
+                    transport = %transport,
+                    "API connect initiated"
+                );
+                serde_json::json!({
+                    "npub": npub,
+                    "address": address,
+                    "transport": transport,
+                })
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Disconnect a peer via the control API.
+    ///
+    /// Removes the peer and suppresses auto-reconnect.
+    pub(crate) fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
+        let peer_identity = PeerIdentity::from_npub(npub)
+            .map_err(|e| format!("invalid npub '{npub}': {e}"))?;
+        let node_addr = *peer_identity.node_addr();
+
+        if !self.peers.contains_key(&node_addr) {
+            return Err(format!("peer not found: {npub}"));
+        }
+
+        // Remove the peer (full cleanup: sessions, indices, links, tree, bloom)
+        self.remove_active_peer(&node_addr);
+
+        // Suppress any pending auto-reconnect
+        self.retry_pending.remove(&node_addr);
+
+        info!(npub = %npub, "API disconnect completed");
+
+        Ok(serde_json::json!({
+            "npub": npub,
+            "disconnected": true,
+        }))
+    }
 }

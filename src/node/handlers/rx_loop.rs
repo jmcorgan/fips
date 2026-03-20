@@ -1,6 +1,6 @@
 //! RX event loop and packet dispatch.
 
-use crate::control::ControlSocket;
+use crate::control::{commands, ControlSocket};
 use crate::control::queries;
 use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
@@ -98,7 +98,15 @@ impl Node {
                     self.register_identity(identity.node_addr, identity.pubkey);
                 }
                 Some((request, response_tx)) = control_rx.recv() => {
-                    let response = queries::dispatch(self, &request.command);
+                    let response = if request.command.starts_with("show_") {
+                        queries::dispatch(self, &request.command)
+                    } else {
+                        commands::dispatch(
+                            self,
+                            &request.command,
+                            request.params.as_ref(),
+                        ).await
+                    };
                     let _ = response_tx.send(response);
                 }
                 _ = tick.tick() => {

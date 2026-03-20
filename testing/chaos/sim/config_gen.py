@@ -107,8 +107,13 @@ def generate_node_config(
     node_id: str,
     outbound_peers: list[str],
     fips_overrides: dict | None = None,
+    ephemeral: bool = False,
 ) -> str:
-    """Generate a complete FIPS config YAML for one node."""
+    """Generate a complete FIPS config YAML for one node.
+
+    If ephemeral is True, the nsec is omitted from the config so the
+    daemon generates a fresh keypair on each restart.
+    """
     template = _load_template()
     node = topology.nodes[node_id]
     peers_yaml = generate_peers_block(topology, node_id, outbound_peers)
@@ -119,6 +124,13 @@ def generate_node_config(
     config = config.replace("{{NPUB}}", node.npub)
     config = config.replace("{{NSEC}}", node.nsec)
     config = config.replace("{{PEERS}}", peers_yaml)
+
+    # Ephemeral nodes: remove nsec so daemon generates fresh keys on restart
+    if ephemeral:
+        parsed = yaml.safe_load(config)
+        identity = parsed.get("node", {}).get("identity", {})
+        identity.pop("nsec", None)
+        config = yaml.dump(parsed, default_flow_style=False, sort_keys=False)
 
     # Determine which transports this node participates in
     eth_ifaces = topology.ethernet_interfaces(node_id)
@@ -168,14 +180,17 @@ def write_configs(
     topology: SimTopology,
     output_dir: str,
     fips_overrides: dict | None = None,
+    ephemeral_nodes: set[str] | None = None,
 ):
     """Write all node configs and npubs.env to the output directory."""
     os.makedirs(output_dir, exist_ok=True)
+    ephemeral_nodes = ephemeral_nodes or set()
 
     outbound = topology.directed_outbound()
     for node_id in topology.nodes:
         config = generate_node_config(
-            topology, node_id, outbound[node_id], fips_overrides
+            topology, node_id, outbound[node_id], fips_overrides,
+            ephemeral=(node_id in ephemeral_nodes),
         )
         path = os.path.join(output_dir, f"{node_id}.yaml")
         with open(path, "w") as f:

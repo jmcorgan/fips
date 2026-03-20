@@ -43,6 +43,7 @@ class NodeManager:
         netem_mgr=None,
         down_nodes: set[str] | None = None,
         veth_mgr=None,
+        on_node_restart=None,
     ):
         self.topology = topology
         self.config = config
@@ -50,6 +51,7 @@ class NodeManager:
         self.netem_mgr = netem_mgr
         self.veth_mgr = veth_mgr
         self.down_nodes = down_nodes or set()
+        self.on_node_restart = on_node_restart
         self.node_states: dict[str, NodeState] = {
             nid: NodeState(node_id=nid) for nid in topology.nodes
         }
@@ -161,6 +163,10 @@ class NodeManager:
             if not self.veth_mgr:
                 time.sleep(1)
             self.netem_mgr.setup_node(node_id)
+
+        # Notify callback (e.g., refresh npub for ephemeral identity nodes)
+        if self.on_node_restart:
+            self.on_node_restart(node_id)
 
     def _would_disconnect(self, node_id: str) -> bool:
         """Check if removing this node (plus currently-down nodes) disconnects the graph.

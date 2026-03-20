@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 /// A control request from a client.
 #[derive(Debug, Deserialize)]
 pub struct Request {
-    /// The command to execute (e.g., "show_status", "show_peers").
+    /// The command to execute (e.g., "show_status", "connect").
     pub command: String,
+    /// Optional parameters for mutating commands.
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
 }
 
 /// A control response to a client.
@@ -79,6 +82,24 @@ mod tests {
         let json = r#"{"command": "show_peers", "extra": true}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         assert_eq!(req.command, "show_peers");
+    }
+
+    #[test]
+    fn test_deserialize_request_with_params() {
+        let json = r#"{"command": "connect", "params": {"npub": "npub1abc", "address": "1.2.3.4:2121", "transport": "udp"}}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(req.command, "connect");
+        let params = req.params.unwrap();
+        assert_eq!(params["npub"], "npub1abc");
+        assert_eq!(params["transport"], "udp");
+    }
+
+    #[test]
+    fn test_deserialize_request_without_params() {
+        let json = r#"{"command": "show_status"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(req.command, "show_status");
+        assert!(req.params.is_none());
     }
 
     #[test]
