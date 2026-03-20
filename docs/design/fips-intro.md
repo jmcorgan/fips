@@ -708,7 +708,7 @@ Ethernet, Bluetooth, radio, serial — through a uniform transport abstraction.
 Several mesh overlays have demonstrated transport-agnostic design:
 [CJDNS](https://github.com/cjdelisle/cjdns) runs over UDP and Ethernet,
 [Yggdrasil](https://yggdrasil-network.github.io/) supports TCP and TLS
-transports, and [Tor](https://www.torproject.org/) can use pluggable
+transport but has IPv6 link-local discovery and therefore is zeroconf, and [Tor](https://www.torproject.org/) can use pluggable
 transports to tunnel through various media. FIPS extends this pattern to
 shared-medium transports (radio, BLE) with per-transport MTU and discovery
 capabilities.
