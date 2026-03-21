@@ -45,9 +45,16 @@ cp "${SCRIPT_DIR}/README.install.md" "${STAGING_DIR}/"
 
 chmod +x "${STAGING_DIR}/install.sh" "${STAGING_DIR}/uninstall.sh"
 
-# Create tarball
+# Create tarball (reproducible: normalize timestamps and ownership)
 cd "${DEPLOY_DIR}"
-tar czf "${TARBALL_NAME}.tar.gz" "${TARBALL_NAME}/"
+TAR_REPRO_FLAGS=""
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+    TAR_REPRO_FLAGS="--mtime=@${SOURCE_DATE_EPOCH}"
+fi
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+    TAR_REPRO_FLAGS="${TAR_REPRO_FLAGS} --numeric-owner --owner=0 --group=0"
+fi
+COPYFILE_DISABLE=1 tar ${TAR_REPRO_FLAGS} -czf "${TARBALL_NAME}.tar.gz" "${TARBALL_NAME}/"
 rm -rf "${STAGING_DIR}"
 
 echo ""

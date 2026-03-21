@@ -244,7 +244,11 @@ fi
 ipk_tar() {
     # ipk_tar <output.tar.gz> <source-dir> [paths...]
     local out="$1" src="$2"; shift 2
-    COPYFILE_DISABLE=1 "$TAR_CMD" $TAR_EXTRA_FLAGS -czf "$out" -C "$src" "$@"
+    local mtime_flags=""
+    if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+        mtime_flags="--mtime=@$SOURCE_DATE_EPOCH"
+    fi
+    COPYFILE_DISABLE=1 "$TAR_CMD" $TAR_EXTRA_FLAGS $mtime_flags -czf "$out" -C "$src" "$@"
 }
 
 ipk_tar "$IPK_WORK/control.tar.gz" "$CONTROL_DIR" .

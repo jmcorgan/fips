@@ -18,6 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SOURCE_DATE_EPOCH: 0  # overridden per-step after checkout
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 1 – Build matrix
@@ -40,6 +41,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -56,6 +60,9 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      - name: SHA-256 hashes
+        run: sha256sum target/release/fips target/release/fipsctl target/release/fipstop
 
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
@@ -81,6 +88,9 @@ jobs:
     needs: [build]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

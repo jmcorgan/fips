@@ -19,6 +19,11 @@ if ! command -v cargo-deb &>/dev/null; then
     exit 1
 fi
 
+# Derive SOURCE_DATE_EPOCH from git if not already set (reproducible builds)
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+fi
+
 # Build the .deb package
 echo "Building .deb package..."
 cargo deb
