@@ -1,5 +1,4 @@
 name: OpenWrt Package
-
 on:
   push:
   workflow_dispatch:
@@ -11,12 +10,57 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SOURCE_DATE_EPOCH: 0  # overridden per-step after checkout
+  PACKAGE_NAME: "fips"
 
 jobs:
+  determine-versioning:
+    runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+      release_channel: ${{ steps.channel.outputs.release_channel }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive package version
+        id: version
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "package_version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g')
+            HEIGHT=$(git rev-list --count HEAD)
+            HASH=$(git rev-parse --short HEAD)
+            echo "package_version=${BRANCH}.${HEIGHT}.${HASH}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine release channel
+        id: channel
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            if [[ $TAG_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha ]]; then
+              echo "release_channel=alpha" >> "$GITHUB_OUTPUT"
+            elif [[ $TAG_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta ]]; then
+              echo "release_channel=beta" >> "$GITHUB_OUTPUT"
+            elif [[ $TAG_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "release_channel=stable" >> "$GITHUB_OUTPUT"
+            else
+              echo "release_channel=dev" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "release_channel=dev" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build .ipk (${{ matrix.openwrt_arch }})
     runs-on: ubuntu-latest
+    needs: determine-versioning
 
     strategy:
       fail-fast: false
@@ -50,19 +94,10 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      - name: Derive package version
-        id: version
+      - name: Initialize
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g')
-            HEIGHT=$(git rev-list --count HEAD)
-            HASH=$(git rev-parse --short HEAD)
-            VERSION="${BRANCH}.${HEIGHT}.${HASH}"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "filename=fips_${VERSION}_${{ matrix.openwrt_arch }}.ipk" >> "$GITHUB_OUTPUT"
+          PACKAGE_FILENAME=${{ env.PACKAGE_NAME }}_${{ needs.determine-versioning.outputs.package_version }}_${{ matrix.openwrt_arch }}.ipk
+          echo "PACKAGE_FILENAME=$PACKAGE_FILENAME" >> $GITHUB_ENV
 
       - name: Install Rust toolchain (stable)
         if: matrix.rust_channel == 'stable'
@@ -77,6 +112,7 @@ jobs:
           components: rust-src
 
       - name: Cache Cargo registry + build
+        if: ${{ env.ACT != 'true' }}
         uses: actions/cache@v4
         with:
           path: |
@@ -91,14 +127,69 @@ jobs:
         run: cargo install cargo-zigbuild --version 0.19.8 --locked
 
       - name: Install zig (required by cargo-zigbuild)
-        uses: goto-bus-stop/setup-zig@v2
+        run: |
+          ZIG_VERSION="0.13.0"
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64|amd64) ZIG_ARCH="x86_64" ;;
+            aarch64|arm64) ZIG_ARCH="aarch64" ;;
+            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+          esac
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar xJ -C /opt
+          sudo ln -sf /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
+          zig version
 
       - name: Install llvm-strip
-        run: sudo apt-get install -y --no-install-recommends llvm
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends llvm
 
+      - name: Install nak
+        shell: bash
+        run: |
+          NAK_VERSION="0.16.2"
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64|amd64) NAK_ARCH="amd64" ;;
+            aarch64|arm64) NAK_ARCH="arm64" ;;
+            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/fiatjaf/nak/releases/download/v${NAK_VERSION}/nak-v${NAK_VERSION}-linux-${NAK_ARCH}" \
+            -o /usr/local/bin/nak
+          chmod +x /usr/local/bin/nak
+          nak --version
+
+      - name: Install jq
+        run: |
+          if ! command -v jq &>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
+      # Priority: HIVE_CI_NSEC from env (loom job) > repo secret > generate ephemeral
+      - name: Resolve signing key
+        id: keys
+        shell: bash
+        env:
+          SECRET_NSEC: ${{ secrets.HIVE_CI_NSEC }}
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          if [ -n "${HIVE_CI_NSEC:-}" ]; then
+            echo "Using HIVE_CI_NSEC from loom job environment"
+            NSEC="$HIVE_CI_NSEC"
+          elif [ -n "$SECRET_NSEC" ]; then
+            echo "Using HIVE_CI_NSEC from repository secrets"
+            NSEC="$SECRET_NSEC"
+          else
+            echo "No nsec provided -- generating ephemeral keypair"
+            NSEC=$(nak key generate)
+          fi
+
+          PUBKEY=$(echo "$NSEC" | nak key public)
+          echo "::add-mask::$NSEC"
+          echo "nsec=$NSEC" >> "$GITHUB_OUTPUT"
+          echo "pubkey=$PUBKEY" >> "$GITHUB_OUTPUT"
+          echo "Publisher pubkey (hex): $PUBKEY"
       - name: Build .ipk
         env:
-          PKG_VERSION: ${{ steps.version.outputs.version }}
+          PKG_VERSION: ${{ needs.determine-versioning.outputs.package_version }}
           LLVM_STRIP: llvm-strip
         run: ./packaging/openwrt-ipk/build-ipk.sh --arch ${{ matrix.build_arch }}
 
@@ -107,17 +198,126 @@ jobs:
           echo "==> Binaries:"
           sha256sum target/${{ matrix.rust_target }}/release/fips target/${{ matrix.rust_target }}/release/fipsctl target/${{ matrix.rust_target }}/release/fipstop
           echo "==> Package:"
-          sha256sum dist/${{ steps.version.outputs.filename }}
+          sha256sum dist/${{ env.PACKAGE_FILENAME }}
 
-      - name: Upload artifact
+      - name: Upload artifact (GitHub only)
+        if: ${{ env.ACT != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.version.outputs.filename }}
-          path: dist/${{ steps.version.outputs.filename }}
+          name: ${{ env.PACKAGE_FILENAME }}
+          path: dist/${{ env.PACKAGE_FILENAME }}
           retention-days: 30
 
+      - name: Upload to Blossom
+        id: blossom_upload
+        shell: bash
+        env:
+          BLOSSOM_SERVER: "https://blossom.primal.net"
+          NSEC: ${{ steps.keys.outputs.nsec }}
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+
+          UPLOAD_RESPONSE=$(nak blossom upload \
+            --server "$BLOSSOM_SERVER" \
+            --sec "$NSEC" \
+            "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null)
+
+          echo "Upload response:"
+          echo "$UPLOAD_RESPONSE"
+
+          FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
+          if [ -z "$FILE_HASH" ] || [ "$FILE_HASH" = "null" ]; then
+            echo "Failed to extract hash from upload response"
+            exit 1
+          fi
+
+          BLOSSOM_URL="${BLOSSOM_SERVER}/${FILE_HASH}"
+          echo "url=$BLOSSOM_URL" >> "$GITHUB_OUTPUT"
+          echo "hash=$FILE_HASH" >> "$GITHUB_OUTPUT"
+          echo "Uploaded to Blossom: $BLOSSOM_URL"
+
+      - name: Publish NIP-94 release event
+        id: publish
+        shell: bash
+        env:
+          RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://relay.primal.net"
+          NSEC: ${{ steps.keys.outputs.nsec }}
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          set -e
+
+          VERSION="${{ needs.determine-versioning.outputs.package_version }}"
+          CHANNEL="${{ needs.determine-versioning.outputs.release_channel }}"
+
+          nak event --sec "$NSEC" -k 1063 \
+            -c "FIPS Package: ${{ env.PACKAGE_NAME }} for ${{ matrix.openwrt_arch }}" \
+            --tag url="${{ steps.blossom_upload.outputs.url }}" \
+            --tag m="application/octet-stream" \
+            --tag x="${{ steps.blossom_upload.outputs.hash }}" \
+            --tag ox="${{ steps.blossom_upload.outputs.hash }}" \
+            --tag filename="${{ env.PACKAGE_FILENAME }}" \
+            --tag A="${{ matrix.openwrt_arch }}" \
+            --tag v="$VERSION" \
+            --tag n="${{ env.PACKAGE_NAME }}" \
+            --tag compression="none" \
+            > event.json 2> event.err
+
+          if [ ! -s event.json ]; then
+            echo "Failed to create event"
+            cat event.err 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "=== Event JSON ==="
+          cat event.json
+          echo "=================="
+
+          EVENT_ID=$(jq -r '.id' event.json)
+          if [ -z "$EVENT_ID" ] || [ "$EVENT_ID" = "null" ]; then
+            echo "Failed to extract event ID"
+            exit 1
+          fi
+
+          # Publish to relays
+          cat event.json | nak event $RELAYS 2>&1
+
+          echo "eventId=$EVENT_ID" >> "$GITHUB_OUTPUT"
+          echo "Published NIP-94 event: $EVENT_ID"
+
+      - name: Verify NIP-94 event on relays
+        if: ${{ steps.publish.outputs.eventId != '' }}
+        env:
+          EVENT_ID: ${{ steps.publish.outputs.eventId }}
+          RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://relay.primal.net"
+        run: |
+          echo "Verifying event $EVENT_ID on relays..."
+          FOUND=0
+          for relay in $RELAYS; do
+            echo "Checking $relay..."
+            RESULT=$(nak req -i "$EVENT_ID" "$relay" 2>/dev/null || echo "")
+            if [ -n "$RESULT" ]; then
+              echo "Found on $relay"
+              FOUND=1
+            else
+              echo "Not found on $relay"
+            fi
+          done
+
+          if [ $FOUND -eq 0 ]; then
+            echo "Warning: Event not found on any relay yet (may still be propagating)"
+          else
+            echo "Event verified on at least one relay"
+          fi
+
+      - name: Build Summary
+        run: |
+          echo "Build Summary for ${{ matrix.openwrt_arch }}:"
+          echo "  Package: ${{ env.PACKAGE_FILENAME }}"
+          echo "  Release EventId: ${{ steps.publish.outputs.eventId }}"
+          echo "  Blossom URL: ${{ steps.blossom_upload.outputs.url }}"
+
   release:
-    name: Publish GitHub Release
+    name: Publish GitHub Release (github only)
     runs-on: ubuntu-latest
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
