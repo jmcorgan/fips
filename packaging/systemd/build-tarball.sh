@@ -45,12 +45,16 @@ cp "${SCRIPT_DIR}/README.install.md" "${STAGING_DIR}/"
 
 chmod +x "${STAGING_DIR}/install.sh" "${STAGING_DIR}/uninstall.sh"
 
-# Create tarball (reproducible: normalize timestamps and ownership)
+# Create tarball (reproducible: normalize timestamps, ownership, and sort order)
 cd "${DEPLOY_DIR}"
-TAR_REPRO_FLAGS=""
-if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
-    TAR_REPRO_FLAGS="--mtime=@${SOURCE_DATE_EPOCH}"
+
+# Default SOURCE_DATE_EPOCH to git commit timestamp if not set
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH=$(git -C "${PROJECT_ROOT}" log -1 --format=%ct)
+    export SOURCE_DATE_EPOCH
 fi
+
+TAR_REPRO_FLAGS="--mtime=@${SOURCE_DATE_EPOCH} --sort=name"
 if tar --version 2>/dev/null | grep -q 'GNU tar'; then
     TAR_REPRO_FLAGS="${TAR_REPRO_FLAGS} --numeric-owner --owner=0 --group=0"
 fi
