@@ -17,7 +17,12 @@ cd examples/sidecar-nostr-relay
 ./scripts/build.sh
 ```
 
-Cross-compilation from macOS is supported via `cargo-zigbuild`.
+On macOS, install the cross-compilation dependencies first:
+
+```bash
+brew install zig
+cargo install cargo-zigbuild
+```
 
 ### 2. Set your node identity
 
