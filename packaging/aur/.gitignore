@@ -1,0 +1,5 @@
+src/
+pkg/
+fips/
+*.pkg.tar.zst
+*.log

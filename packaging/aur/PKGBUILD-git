@@ -29,20 +29,18 @@ pkgver() {
 
 prepare() {
     cd fips
-    export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
     cd fips
-    export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release --all-features
+    export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+    cargo build --frozen --release
 }
 
 check() {
     cd fips
-    export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo test --frozen --lib
 }

@@ -15,27 +15,25 @@ install=fips.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/jmcorgan/fips/archive/v$pkgver.tar.gz"
         "fips.sysusers"
         "fips.tmpfiles")
-b2sums=('67f6daa83115598a3e0a7a2626b9b16e54af3968c10369f94e1e18059194f1a121cfad40849888313f1379696a87e772407507cb733ff6e0e367033d7928c2c7'
+b2sums=('SKIP'  # tarball hash computed by CI via updpkgsums on release
         '25a0552f3d67d12f48dfd40fe4776ad7c46afeeab76bd2674b48e234db3c145810a24569a8c1a7f4c186eb546f0fae2ebe1550080c0e91d8eb72ba9934c752a6'
         '844257cb8e09cd935d0d6345922d0f3ec777411daca20e24175b346a7b3cb95ebce12631a9466c4d94f1588ed8d62d92514ff24025ccfd0efb358e542b454b00')
 options=('!lto')
 
 prepare() {
     cd "$pkgname-$pkgver"
-    export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
     cd "$pkgname-$pkgver"
-    export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release --all-features
+    export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+    cargo build --frozen --release
 }
 
 check() {
     cd "$pkgname-$pkgver"
-    export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo test --frozen --lib
 }
