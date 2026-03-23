@@ -85,11 +85,6 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      - name: Initialize
-        run: |
-          PACKAGE_FILENAME=${{ env.PACKAGE_NAME }}_${{ needs.determine-versioning.outputs.package_version }}_${{ matrix.openwrt_arch }}.apk
-          echo "PACKAGE_FILENAME=$PACKAGE_FILENAME" >> $GITHUB_ENV
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -177,6 +172,11 @@ jobs:
           PKG_VERSION: ${{ needs.determine-versioning.outputs.package_version }}
           LLVM_STRIP: llvm-strip
         run: ./packaging/openwrt-apk/build-apk.sh --arch ${{ matrix.build_arch }}
+
+      - name: Set package filename
+        run: |
+          PACKAGE_FILENAME=$(basename dist/*_${{ matrix.openwrt_arch }}.apk)
+          echo "PACKAGE_FILENAME=$PACKAGE_FILENAME" >> "$GITHUB_ENV"
 
       - name: SHA-256 hashes
         run: |
