@@ -209,6 +209,8 @@ services:
     profiles: ["rekey"]
     container_name: fips-node-a
     hostname: node-a
+    environment:
+      - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-a.yaml:/etc/fips/fips.yaml:ro
@@ -221,6 +223,8 @@ services:
     profiles: ["rekey"]
     container_name: fips-node-b
     hostname: node-b
+    environment:
+      - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-b.yaml:/etc/fips/fips.yaml:ro
@@ -233,6 +237,8 @@ services:
     profiles: ["rekey"]
     container_name: fips-node-c
     hostname: node-c
+    environment:
+      - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-c.yaml:/etc/fips/fips.yaml:ro
@@ -245,6 +251,8 @@ services:
     profiles: ["rekey"]
     container_name: fips-node-d
     hostname: node-d
+    environment:
+      - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-d.yaml:/etc/fips/fips.yaml:ro
@@ -257,6 +265,8 @@ services:
     profiles: ["rekey"]
     container_name: fips-node-e
     hostname: node-e
+    environment:
+      - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/rekey/node-e.yaml:/etc/fips/fips.yaml:ro
