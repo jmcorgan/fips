@@ -9,6 +9,7 @@ All build outputs go to `deploy/` at the project root.
 make deb        # Debian/Ubuntu .deb
 make tarball    # systemd install tarball
 make ipk        # OpenWrt .ipk
+make aur        # Arch Linux AUR package (fips-git, local build + namcap)
 make all        # deb + tarball (default)
 ```
 
@@ -16,6 +17,7 @@ make all        # deb + tarball (default)
 
 ```text
 packaging/
+  aur/            Arch Linux AUR packaging (PKGBUILD, supporting files)
   common/         Shared assets (default config, hosts file)
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
   systemd/        Generic Linux systemd tarball packaging
@@ -77,6 +79,23 @@ bash packaging/openwrt/build-ipk.sh --arch mipsel
 
 See [openwrt/README.md](openwrt/README.md) for router-specific
 installation instructions.
+
+### Arch Linux (AUR)
+
+Two AUR packages are maintained: `fips` (release, builds from tagged
+tarball) and `fips-git` (development, builds from latest git master).
+
+```sh
+# Build and validate locally (git variant)
+make aur
+
+# Install from AUR
+yay -S fips-git    # development build from master
+yay -S fips        # release build from latest tag
+```
+
+See [aur/README.md](aur/README.md) for AUR publication instructions
+and maintainer guide.
 
 ## Shared Assets
 
