@@ -467,6 +467,15 @@ async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(),
         .await
         .map_err(|e| TunError::Configure(format!("failed to add fd00::/8 route: {}", e)))?;
 
+    // Add ip6 rule to ensure fd00::/8 uses the main table, preventing other
+    // routing software (e.g. Tailscale) from intercepting FIPS traffic via
+    // catch-all rules in auxiliary routing tables.
+    let mut rule_req = handle.rule().add().v6().destination_prefix(fd_prefix, 8).table_id(254).priority(5265);
+    rule_req.message_mut().header.action = 1.into(); // FR_ACT_TO_TBL
+    if let Err(e) = rule_req.execute().await {
+        debug!("ip6 rule for fd00::/8 not added (may already exist): {e}");
+    }
+
     Ok(())
 }
 
