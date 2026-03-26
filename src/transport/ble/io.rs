@@ -421,6 +421,21 @@ mod bluer_impl {
         }
 
         async fn start_scanning(&self) -> Result<Self::Scanner, TransportError> {
+            // Clear cached devices so BlueZ fires DeviceAdded for every
+            // advertisement. Without this, already-known devices only
+            // produce PropertyChanged events (which bluer doesn't expose
+            // at the device level), causing the scanner to miss peers
+            // after a daemon restart.
+            if let Ok(cached) = self.adapter.device_addresses().await {
+                let count = cached.len();
+                for addr in cached {
+                    let _ = self.adapter.remove_device(addr).await;
+                }
+                if count > 0 {
+                    debug!(count, "BLE scanner: cleared cached devices");
+                }
+            }
+
             // Set discovery filter for LE transport with FIPS UUID
             let filter = DiscoveryFilter {
                 transport: DiscoveryTransport::Le,

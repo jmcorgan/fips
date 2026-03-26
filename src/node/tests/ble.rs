@@ -119,6 +119,18 @@ fn install_connect_handler(nodes: &[TestNode], i: usize, bank: &StreamBank) {
     }
 }
 
+/// Establish a BLE connection from node `i` to node `j` via connect_async.
+///
+/// Must be called after `wire_ble_connection` and `install_connect_handler`.
+/// BLE send_async fails fast if no connection exists, so connections must
+/// be pre-established before initiating handshakes.
+async fn establish_ble_connection(nodes: &[TestNode], i: usize, j: usize) {
+    let transport = nodes[i].node.transports.get(&nodes[i].transport_id).unwrap();
+    transport.connect(&nodes[j].addr).await.unwrap();
+    // Let the background connect task complete
+    tokio::task::yield_now().await;
+}
+
 /// Two BLE nodes complete a Noise handshake and establish bidirectional peering.
 #[tokio::test]
 async fn test_ble_two_node_handshake() {
@@ -128,8 +140,9 @@ async fn test_ble_two_node_handshake() {
     let bank: StreamBank = Arc::new(StdMutex::new(HashMap::new()));
     wire_ble_connection(&nodes, 0, 1, &bank).await;
     install_connect_handler(&nodes, 0, &bank);
+    establish_ble_connection(&nodes, 0, 1).await;
 
-    // Initiate handshake (connect-on-send creates the BLE connection)
+    // Initiate handshake
     initiate_handshake(&mut nodes, 0, 1).await;
 
     // Drain all packets (handshake + TreeAnnounce exchange)
@@ -167,6 +180,8 @@ async fn test_ble_three_node_chain() {
     wire_ble_connection(&nodes, 1, 2, &bank).await;
     install_connect_handler(&nodes, 0, &bank);
     install_connect_handler(&nodes, 1, &bank);
+    establish_ble_connection(&nodes, 0, 1).await;
+    establish_ble_connection(&nodes, 1, 2).await;
 
     initiate_handshake(&mut nodes, 0, 1).await;
     initiate_handshake(&mut nodes, 1, 2).await;
@@ -212,6 +227,7 @@ async fn test_ble_mixed_transport() {
     let bank: StreamBank = Arc::new(StdMutex::new(HashMap::new()));
     wire_ble_connection(&nodes, 2, 3, &bank).await;
     install_connect_handler(&nodes, 2, &bank);
+    establish_ble_connection(&nodes, 2, 3).await;
 
     // Handshake within each component
     initiate_handshake(&mut nodes, 0, 1).await; // UDP pair
