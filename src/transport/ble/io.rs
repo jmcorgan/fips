@@ -165,6 +165,13 @@ mod bluer_impl {
             let recv_mtu = conn
                 .recv_mtu()
                 .map_err(|e| map_io_err("recv_mtu", e))? as u16;
+
+            // Log negotiated PHY for diagnostics (2M vs 1M)
+            match conn.as_ref().phy() {
+                Ok(phy) => debug!(addr = %remote, phy, send_mtu, recv_mtu, "BLE connection established"),
+                Err(_) => debug!(addr = %remote, send_mtu, recv_mtu, "BLE connection established (PHY query unsupported)"),
+            }
+
             Ok(Self { conn, remote, send_mtu, recv_mtu })
         }
     }
@@ -339,6 +346,11 @@ mod bluer_impl {
                 .set_recv_mtu(self.mtu)
                 .map_err(|e| map_io_err("set_recv_mtu", e))?;
 
+            // Prevent sniff mode to reduce latency during data transfer
+            if let Err(e) = listener.as_ref().set_power_forced_active(true) {
+                debug!(error = %e, "BLE listener: set_power_forced_active not supported");
+            }
+
             debug!(psm, mtu = self.mtu, "BLE listener bound");
 
             Ok(BluerAcceptor {
@@ -363,6 +375,11 @@ mod bluer_impl {
                 .set_recv_mtu(self.mtu)
                 .map_err(|e| map_io_err("set_recv_mtu", e))?;
 
+            // Prevent sniff mode to reduce latency during data transfer
+            if let Err(e) = socket.set_power_forced_active(true) {
+                debug!(error = %e, "BLE connect: set_power_forced_active not supported");
+            }
+
             let conn = socket
                 .connect(target_sa)
                 .await
@@ -381,6 +398,8 @@ mod bluer_impl {
                     s
                 },
                 local_name: Some("fips".to_string()),
+                min_interval: Some(std::time::Duration::from_millis(400)),
+                max_interval: Some(std::time::Duration::from_millis(600)),
                 ..Default::default()
             };
 

@@ -401,6 +401,7 @@ impl<I: BleIo> BleTransport<I> {
             self.packet_tx.clone(),
             self.transport_id,
             Arc::clone(&self.stats),
+            recv_mtu,
         ));
 
         let conn = BleConnection {
@@ -491,6 +492,7 @@ impl<I: BleIo> BleTransport<I> {
                         packet_tx,
                         transport_id,
                         Arc::clone(&stats),
+                        recv_mtu,
                     ));
 
                     let conn = BleConnection {
@@ -757,6 +759,7 @@ async fn accept_loop<A>(
                     packet_tx.clone(),
                     transport_id,
                     Arc::clone(&stats),
+                    recv_mtu,
                 ));
 
                 let conn = BleConnection {
@@ -802,8 +805,9 @@ async fn receive_loop<S: BleStream>(
     packet_tx: PacketTx,
     transport_id: TransportId,
     stats: Arc<BleStats>,
+    recv_mtu: u16,
 ) {
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; recv_mtu as usize];
     loop {
         match stream.recv(&mut buf).await {
             Ok(0) => {
