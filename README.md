@@ -232,6 +232,12 @@ Protocol design documentation is in [docs/design/](docs/design/), organized as
 a layered protocol specification. Start with
 [fips-intro.md](docs/design/fips-intro.md) for the full protocol overview.
 
+If you want to contribute, start with:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [docs/design/README.md](docs/design/README.md)
+- [testing/README.md](testing/README.md)
+
 ## Project Structure
 
 ```text
