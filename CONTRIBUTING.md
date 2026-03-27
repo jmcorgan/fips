@@ -17,7 +17,8 @@ Before changing code, read the protocol docs in this order:
 
 ## Prerequisites
 
-- Rust 1.85+ and Linux with TUN support
+- Rust 1.94.0 and Linux with TUN support
+- Use the pinned toolchain from [rust-toolchain.toml](rust-toolchain.toml) for deterministic builds
 - For the default BLE-enabled build on Debian/Ubuntu:
   `sudo apt install bluez libdbus-1-dev pkg-config`
 - Docker is required for the integration harnesses under [testing/](testing/)
