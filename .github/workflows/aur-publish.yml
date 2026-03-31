@@ -10,6 +10,7 @@ jobs:
     name: Publish fips to AUR
     runs-on: ubuntu-latest
     continue-on-error: true
+    if: "!contains(github.ref_name, '-')"
 
     steps:
       - uses: actions/checkout@v4
@@ -33,25 +34,3 @@ jobs:
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: "Update to ${{ github.ref_name }}"
-
-  aur-publish-git:
-    name: Publish fips-git to AUR
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
-        with:
-          pkgname: fips-git
-          pkgbuild: packaging/aur/PKGBUILD-git
-          assets: |
-            packaging/aur/fips.sysusers
-            packaging/aur/fips.tmpfiles
-            packaging/aur/fips.install
-          commit_username: ${{ github.repository_owner }}
-          commit_email: ${{ secrets.AUR_EMAIL }}
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Bump for ${{ github.ref_name }} release"
