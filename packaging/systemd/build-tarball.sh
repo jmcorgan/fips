@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build FIPS release binaries and create an install tarball.
 #
-# Usage: ./packaging/build-tarball.sh
+# Usage: ./packaging/build-tarball.sh [--target <triple>] [--version <version>] [--arch <arch>] [--no-build]
 # Output: deploy/fips-<version>-linux-<arch>.tar.gz
 
 set -euo pipefail
@@ -10,29 +10,108 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PACKAGING_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_ROOT="$(cd "${PACKAGING_DIR}/.." && pwd)"
 
-# Extract version from Cargo.toml
-VERSION=$(grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
-ARCH=$(uname -m)
+usage() {
+    cat <<'EOF'
+Usage: packaging/systemd/build-tarball.sh [options]
+
+Options:
+  --target <triple>   Rust target triple to build/package
+  --version <version> Override artifact version
+  --arch <arch>       Override artifact architecture name
+  --no-build          Package existing binaries without running cargo build
+  -h, --help          Show this help
+EOF
+}
+
+target_to_arch() {
+    local target="$1"
+    printf '%s\n' "${target%%-*}"
+}
+
+VERSION_OVERRIDE=""
+TARGET_TRIPLE=""
+ARCH_OVERRIDE=""
+NO_BUILD=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target)
+            TARGET_TRIPLE="${2:?missing value for --target}"
+            shift 2
+            ;;
+        --version)
+            VERSION_OVERRIDE="${2:?missing value for --version}"
+            shift 2
+            ;;
+        --arch)
+            ARCH_OVERRIDE="${2:?missing value for --arch}"
+            shift 2
+            ;;
+        --no-build)
+            NO_BUILD=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+VERSION="${VERSION_OVERRIDE:-$(grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+if [[ -n "${ARCH_OVERRIDE}" ]]; then
+    ARCH="${ARCH_OVERRIDE}"
+elif [[ -n "${TARGET_TRIPLE}" ]]; then
+    ARCH="$(target_to_arch "${TARGET_TRIPLE}")"
+else
+    ARCH="$(uname -m)"
+fi
 TARBALL_NAME="fips-${VERSION}-linux-${ARCH}"
 DEPLOY_DIR="${PROJECT_ROOT}/deploy"
 STAGING_DIR="${DEPLOY_DIR}/${TARBALL_NAME}"
+STRIP_BIN="${STRIP:-strip}"
+
+if [[ -n "${TARGET_TRIPLE}" ]]; then
+    BINARY_DIR="${PROJECT_ROOT}/target/${TARGET_TRIPLE}/release"
+else
+    BINARY_DIR="${PROJECT_ROOT}/target/release"
+fi
 
 echo "Building FIPS v${VERSION} for ${ARCH}..."
 
 # Build release binaries (tui is a default feature, includes fipstop)
-cargo build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml"
+if [[ "${NO_BUILD}" -eq 0 ]]; then
+    cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml")
+    if [[ -n "${TARGET_TRIPLE}" ]]; then
+        cargo_args+=(--target "${TARGET_TRIPLE}")
+    fi
+    cargo "${cargo_args[@]}"
+fi
 
 # Create staging directory
 rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}"
 
 # Copy binaries
-cp "${PROJECT_ROOT}/target/release/fips" "${STAGING_DIR}/"
-cp "${PROJECT_ROOT}/target/release/fipsctl" "${STAGING_DIR}/"
-cp "${PROJECT_ROOT}/target/release/fipstop" "${STAGING_DIR}/"
+for bin in fips fipsctl fipstop; do
+    if [[ ! -f "${BINARY_DIR}/${bin}" ]]; then
+        echo "Missing binary: ${BINARY_DIR}/${bin}" >&2
+        exit 1
+    fi
+    cp "${BINARY_DIR}/${bin}" "${STAGING_DIR}/"
+done
 
 # Strip binaries to reduce size
-strip "${STAGING_DIR}/fips" "${STAGING_DIR}/fipsctl" "${STAGING_DIR}/fipstop"
+if ! command -v "${STRIP_BIN}" &>/dev/null; then
+    echo "Strip tool not found: ${STRIP_BIN}" >&2
+    exit 1
+fi
+"${STRIP_BIN}" "${STAGING_DIR}/fips" "${STAGING_DIR}/fipsctl" "${STAGING_DIR}/fipstop"
 
 # Copy packaging files
 cp "${SCRIPT_DIR}/install.sh" "${STAGING_DIR}/"

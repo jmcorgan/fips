@@ -1,0 +1,196 @@
+name: Linux Package
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  determine-versioning:
+    runs-on: ubuntu-latest
+    outputs:
+      linux_package_version: ${{ steps.linux_version.outputs.linux_package_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive Linux package version
+        id: linux_version
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+
+          BASE_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|[^A-Za-z0-9]|.|g; s/\.\.+/./g; s/^\.//; s/\.$//')
+            HEIGHT=$(git rev-list --count HEAD)
+            HASH=$(git rev-parse --short HEAD)
+            if [[ -z "$BRANCH" ]]; then
+              BRANCH="ref"
+            fi
+            VERSION="${BASE_VERSION}+${BRANCH}.${HEIGHT}.${HASH}"
+          fi
+
+          echo "linux_package_version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Linux artifacts (${{ matrix.artifact_arch }})
+    runs-on: ${{ matrix.os }}
+    needs: determine-versioning
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_arch: x86_64
+            deb_arch: amd64
+          - os: ubuntu-24.04-arm
+            artifact_arch: aarch64
+            deb_arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev llvm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        if: ${{ env.ACT != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-release-${{ runner.os }}-${{ matrix.artifact_arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-release-${{ runner.os }}-${{ matrix.artifact_arch }}-
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --version 3.6.3 --locked
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Build systemd tarball
+        env:
+          STRIP: llvm-strip
+        run: |
+          packaging/systemd/build-tarball.sh \
+            --version "${{ needs.determine-versioning.outputs.linux_package_version }}" \
+            --arch "${{ matrix.artifact_arch }}" \
+            --no-build
+
+      - name: Build Debian package
+        run: |
+          packaging/debian/build-deb.sh \
+            --version "${{ needs.determine-versioning.outputs.linux_package_version }}" \
+            --no-build
+
+      - name: Resolve Linux asset paths
+        id: linux-assets
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+
+          TARBALL="deploy/fips-${{ needs.determine-versioning.outputs.linux_package_version }}-linux-${{ matrix.artifact_arch }}.tar.gz"
+          if [[ ! -f "$TARBALL" ]]; then
+            echo "Missing tarball: $TARBALL" >&2
+            exit 1
+          fi
+
+          DEB_FILE=$(find deploy -maxdepth 1 -type f -name "fips_*_${{ matrix.deb_arch }}.deb" | sort | head -n 1)
+          if [[ -z "$DEB_FILE" ]]; then
+            echo "Missing Debian package for ${{ matrix.deb_arch }}" >&2
+            exit 1
+          fi
+
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "deb=$DEB_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: SHA-256 hashes
+        run: |
+          echo "==> Linux release assets:"
+          sha256sum \
+            "${{ steps.linux-assets.outputs.tarball }}" \
+            "${{ steps.linux-assets.outputs.deb }}"
+
+      - name: Upload artifact (GitHub only)
+        if: ${{ env.ACT != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fips_${{ needs.determine-versioning.outputs.linux_package_version }}_${{ matrix.artifact_arch }}_linux
+          path: |
+            ${{ steps.linux-assets.outputs.tarball }}
+            ${{ steps.linux-assets.outputs.deb }}
+          retention-days: 30
+
+      - name: Build Summary
+        run: |
+          echo "Build Summary for linux/${{ matrix.artifact_arch }}:"
+          echo "  Tarball: ${{ steps.linux-assets.outputs.tarball }}"
+          echo "  Debian:  ${{ steps.linux-assets.outputs.deb }}"
+
+  release:
+    name: Publish Linux assets to GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate Linux release checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.deb' -o -name '*.tar.gz' \) -printf '%P\n' \
+            | LC_ALL=C sort \
+            | xargs sha256sum \
+            > checksums-linux.txt
+
+      - name: Wait for tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 20); do
+            if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Release ${GITHUB_REF_NAME} not available yet; waiting..."
+            sleep 15
+          done
+
+          echo "Timed out waiting for release ${GITHUB_REF_NAME}" >&2
+          exit 1
+
+      - name: Upload Linux assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/*.deb \
+            dist/*.tar.gz \
+            dist/checksums-linux.txt \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"
