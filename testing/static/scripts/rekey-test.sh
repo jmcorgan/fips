@@ -19,6 +19,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../lib/wait-converge.sh"
 TOPOLOGY="rekey"
 NODES="a b c d e"
 
@@ -58,12 +59,17 @@ fi
 trap 'echo ""; echo "Test interrupted"; exit 130' INT
 
 # Wait times derived from rekey timer
-CONVERGE_WAIT=15
-FIRST_REKEY_WAIT=40    # > REKEY_AFTER_SECS, allow margin
+BASELINE_CONVERGENCE_TIMEOUT=36
 REKEY_SETTLE=5         # settle time after rekey for cutover to complete
+# First FMP rekey should follow shortly after the 35s interval once the mesh is
+# fully converged. Keep this bounded to preserve a meaningful scheduling check
+# while still allowing for log visibility at the timeout edge.
+FIRST_REKEY_TIMEOUT=$((REKEY_AFTER_SECS + 15))
 SECOND_REKEY_WAIT=40   # wait for second cycle
+LOG_EVENT_POLL_INTERVAL=1
 
 TIMEOUT=5
+CONVERGENCE_PING_TIMEOUT=1
 PASSED=0
 FAILED=0
 TOTAL_PASSED=0
@@ -87,8 +93,9 @@ ping_one() {
     local to_npub="$2"
     local label="$3"
     local quiet="${4:-}"
+    local ping_timeout="${5:-$TIMEOUT}"
 
-    if output=$(docker exec "fips-$from" ping6 -c 1 -W "$TIMEOUT" "${to_npub}.fips" 2>&1); then
+    if output=$(docker exec "fips-$from" ping6 -c 1 -W "$ping_timeout" "${to_npub}.fips" 2>&1); then
         local rtt=$(echo "$output" | grep -oE 'time=[0-9.]+' | cut -d= -f2)
         if [ -z "$quiet" ]; then
             echo "  $label ... OK (${rtt:-?}ms)"
@@ -105,6 +112,7 @@ ping_one() {
 # Run all 20 directed pairs
 ping_all() {
     local quiet="${1:-}"
+    local ping_timeout="${2:-$TIMEOUT}"
     PASSED=0
     FAILED=0
     for i in 0 1 2 3 4; do
@@ -114,9 +122,32 @@ ping_all() {
         for j in 0 1 2 3 4; do
             [ "$i" -eq "$j" ] && continue
             ping_one "node-${LABELS[$i],,}" "${NPUBS[$j]}" \
-                "${LABELS[$i]} → ${LABELS[$j]}" "$quiet"
+                "${LABELS[$i]} → ${LABELS[$j]}" "$quiet" "$ping_timeout"
         done
     done
+}
+
+wait_for_full_baseline() {
+    local timeout="${1:-30}"
+    local start_secs=$SECONDS
+    local best_passed=0
+    local best_failed=20
+
+    while (( SECONDS - start_secs < timeout )); do
+        ping_all quiet "$CONVERGENCE_PING_TIMEOUT"
+        if [ "$PASSED" -gt "$best_passed" ]; then
+            best_passed="$PASSED"
+            best_failed="$FAILED"
+        fi
+        if [ "$FAILED" -eq 0 ]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    PASSED="$best_passed"
+    FAILED="$best_failed"
+    return 1
 }
 
 phase_result() {
@@ -139,6 +170,30 @@ count_log_pattern() {
         total=$((total + count))
     done
     echo "$total"
+}
+
+wait_for_log_pattern_count() {
+    local pattern="$1"
+    local min_count="$2"
+    local timeout="$3"
+    local start_secs=$SECONDS
+
+    while (( SECONDS - start_secs < timeout )); do
+        local count
+        count=$(count_log_pattern "$pattern")
+        if [ "$count" -ge "$min_count" ]; then
+            return 0
+        fi
+        sleep "$LOG_EVENT_POLL_INTERVAL"
+    done
+
+    local count
+    count=$(count_log_pattern "$pattern")
+    if [ "$count" -ge "$min_count" ]; then
+        return 0
+    fi
+
+    return 1
 }
 
 # Check that a pattern appears at least N times across all logs
@@ -170,6 +225,15 @@ assert_zero_count() {
     fi
 }
 
+dump_peer_connectivity() {
+    echo "=== Peer connectivity snapshot ==="
+    for node in $NODES; do
+        echo "--- node-$node ---"
+        docker exec "fips-node-$node" fipsctl show peers 2>/dev/null || true
+        echo ""
+    done
+}
+
 # ── Main ───────────────────────────────────────────────────────────────
 
 echo "=== FIPS Rekey Integration Test ==="
@@ -178,21 +242,30 @@ echo "Config: rekey.after_secs=$REKEY_AFTER_SECS"
 echo ""
 
 # ── Phase 1: Pre-rekey baseline ───────────────────────────────────────
-echo "Phase 1: Pre-rekey connectivity (waiting ${CONVERGE_WAIT}s for convergence)"
-sleep "$CONVERGE_WAIT"
-ping_all
-phase_result "Pre-rekey baseline (all 20 pairs)"
+echo "Phase 1: Pre-rekey connectivity (waiting for convergence)"
+wait_for_peers fips-node-a 2 "$BASELINE_CONVERGENCE_TIMEOUT" || true
+if wait_for_full_baseline "$BASELINE_CONVERGENCE_TIMEOUT"; then
+    ping_all
+    phase_result "Pre-rekey baseline (all 20 pairs)"
+else
+    echo "  Best observed baseline before timeout: $PASSED/$((PASSED + FAILED)) passed"
+    phase_result "Pre-rekey baseline (all 20 pairs)"
+    echo ""
+    dump_peer_connectivity
+    echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
+    exit 1
+fi
 echo ""
 
 # ── Phase 2: Wait for first FMP rekey cycle ───────────────────────────
-echo "Phase 2: First rekey cycle (waiting ${FIRST_REKEY_WAIT}s for rekey)"
-sleep "$FIRST_REKEY_WAIT"
-
-# Verify rekey events fired
+echo "Phase 2: First rekey cycle (waiting up to ${FIRST_REKEY_TIMEOUT}s for rekey)"
 PASSED=0
 FAILED=0
 echo "  Checking FMP rekey events..."
-assert_min_count "Rekey cutover complete (initiator), K-bit flipped" 1 "FMP rekey initiator cutovers"
+wait_for_log_pattern_count \
+    "Rekey cutover complete (initiator), K-bit flipped" 1 "$FIRST_REKEY_TIMEOUT" || true
+assert_min_count "Rekey cutover complete (initiator), K-bit flipped" 1 \
+    "FMP rekey initiator cutovers"
 phase_result "FMP rekey events"
 echo ""
 
@@ -217,6 +290,11 @@ echo ""
 echo "Phase 6: Log analysis"
 PASSED=0
 FAILED=0
+
+# FSP session rekey trails link-layer rekey in practice. Wait boundedly for
+# at least one initiator and responder cutover before the final assertions.
+wait_for_log_pattern_count "FSP rekey cutover complete" 1 "$FIRST_REKEY_TIMEOUT" || true
+wait_for_log_pattern_count "Peer FSP K-bit flip detected" 1 "$REKEY_SETTLE" || true
 
 # Positive checks: rekey machinery worked
 assert_min_count "Rekey cutover complete (initiator), K-bit flipped" 4 \
