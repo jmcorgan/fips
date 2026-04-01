@@ -52,12 +52,22 @@ ping_test() {
 echo "=== FIPS Ping Test ($PROFILE topology) ==="
 echo ""
 
-# Wait for nodes to converge — peers + discovery propagation
+# Wait for nodes to converge — all nodes must reach expected peer counts.
 echo "Waiting for mesh convergence..."
 if [ "$PROFILE" = "chain" ]; then
-    wait_for_peers fips-node-b 2 15 || true
-else
-    wait_for_peers fips-node-a 2 15 || true
+    # Chain: A-B-C-D-E, each interior node has 2 peers, endpoints have 1
+    wait_for_peers fips-node-a 1 20 || true
+    wait_for_peers fips-node-b 2 20 || true
+    wait_for_peers fips-node-c 2 20 || true
+    wait_for_peers fips-node-d 2 20 || true
+    wait_for_peers fips-node-e 1 20 || true
+elif [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
+    # Mesh: check all nodes reach their configured peer counts
+    wait_for_peers fips-node-a 2 20 || true
+    wait_for_peers fips-node-b 1 20 || true
+    wait_for_peers fips-node-c 3 20 || true
+    wait_for_peers fips-node-d 3 20 || true
+    wait_for_peers fips-node-e 3 20 || true
 fi
 # Allow extra time for discovery to propagate across the mesh
 sleep 3
