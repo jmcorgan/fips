@@ -20,7 +20,7 @@ const DRAIN_WINDOW_SECS: u64 = 10;
 const REKEY_DAMPENING_SECS: u64 = 30;
 
 /// Delay FSP initiator cutover after handshake completion to allow
-/// XK msg3 to reach the responder before K-bit-flipped data arrives.
+/// XX msg3 to reach the responder before K-bit-flipped data arrives.
 const FSP_CUTOVER_DELAY_MS: u64 = 2000;
 
 impl Node {
@@ -162,10 +162,10 @@ impl Node {
 
         // Create XX initiator handshake directly (no PeerConnection)
         let our_keypair = self.identity.keypair();
-        let mut hs = HandshakeState::new_xx_initiator(our_keypair);
+        let mut hs = HandshakeState::new_initiator(our_keypair);
         hs.set_local_epoch(self.startup_epoch);
 
-        let noise_msg1 = match hs.write_xx_message_1() {
+        let noise_msg1 = match hs.write_message_1() {
             Ok(msg) => msg,
             Err(e) => {
                 warn!(
@@ -269,7 +269,7 @@ impl Node {
     /// For each established session:
     /// - If the initiator has a pending session, perform K-bit cutover
     /// - If the drain window has expired, clean up the previous session
-    /// - If the rekey timer/counter fires, initiate a new XK handshake
+    /// - If the rekey timer/counter fires, initiate a new XX handshake
     pub(in crate::node) async fn check_session_rekey(&mut self) {
         if !self.config.node.rekey.enabled {
             return;
@@ -358,7 +358,7 @@ impl Node {
 
     /// Initiate an FSP session rekey.
     ///
-    /// Creates a new XK handshake as initiator, sends SessionSetup msg1
+    /// Creates a new XX handshake as initiator, sends SessionSetup msg1
     /// through the mesh, and stores the handshake state on the existing entry.
     async fn initiate_session_rekey(&mut self, dest_addr: &NodeAddr) {
         // Check route availability before paying crypto cost
@@ -378,10 +378,10 @@ impl Node {
 
         // Create Noise XX initiator handshake (rekey: no negotiation payload)
         let our_keypair = self.identity.keypair();
-        let mut handshake = HandshakeState::new_xx_initiator(our_keypair);
+        let mut handshake = HandshakeState::new_initiator(our_keypair);
         handshake.set_local_epoch(self.startup_epoch);
 
-        let msg1 = match handshake.write_xx_message_1() {
+        let msg1 = match handshake.write_message_1() {
             Ok(m) => m,
             Err(e) => {
                 warn!(

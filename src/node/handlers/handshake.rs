@@ -736,7 +736,7 @@ impl Node {
         // Identity-based restart/rekey detection.
         //
         // Now that we know the initiator's identity from msg3, perform the
-        // same checks that IK handle_msg1 used to do after decrypting msg1.
+        // same checks that the old handle_msg1 used to do after decrypting msg1.
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
             let new_epoch = conn.remote_epoch();
             let existing_epoch = existing_peer.remote_epoch();

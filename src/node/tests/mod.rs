@@ -35,7 +35,7 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
     PeerIdentity::from_pubkey(identity.pubkey())
 }
 
-/// Create a PeerConnection with a completed Noise IK handshake.
+/// Create a PeerConnection with a completed Noise XX handshake.
 ///
 /// Returns (connection, peer_identity) where the connection is outbound,
 /// in Complete state, with session, indices, and transport info set.

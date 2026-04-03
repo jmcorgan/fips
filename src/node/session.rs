@@ -1,7 +1,7 @@
 //! End-to-end session state.
 //!
-//! Tracks Noise XK sessions between this node and remote endpoints.
-//! Sessions are established via a three-message XK handshake
+//! Tracks Noise XX sessions between this node and remote endpoints.
+//! Sessions are established via a three-message XX handshake
 //! (SessionSetup/SessionAck/SessionMsg3) carried inside SessionDatagram
 //! envelopes through the mesh.
 
@@ -15,9 +15,9 @@ use secp256k1::PublicKey;
 
 /// State machine for an end-to-end session.
 pub(crate) enum EndToEndState {
-    /// We initiated: sent SessionSetup with Noise XK msg1, awaiting SessionAck.
+    /// We initiated: sent SessionSetup with Noise XX msg1, awaiting SessionAck.
     Initiating(HandshakeState),
-    /// XK responder: processed msg1, sent msg2, awaiting msg3.
+    /// XX responder: processed msg1, sent msg2, awaiting msg3.
     /// Transitions to Established when msg3 arrives.
     AwaitingMsg3(HandshakeState),
     /// Handshake complete, NoiseSession available for encrypt/decrypt.
@@ -35,7 +35,7 @@ impl EndToEndState {
         matches!(self, EndToEndState::Initiating(_))
     }
 
-    /// Check if we are an XK responder awaiting msg3.
+    /// Check if we are an XX responder awaiting msg3.
     pub(crate) fn is_awaiting_msg3(&self) -> bool {
         matches!(self, EndToEndState::AwaitingMsg3(_))
     }
@@ -202,7 +202,7 @@ impl SessionEntry {
         self.state.as_ref().is_some_and(|s| s.is_initiating())
     }
 
-    /// Check if we are an XK responder awaiting msg3.
+    /// Check if we are an XX responder awaiting msg3.
     pub(crate) fn is_awaiting_msg3(&self) -> bool {
         self.state.as_ref().is_some_and(|s| s.is_awaiting_msg3())
     }
@@ -400,7 +400,7 @@ impl SessionEntry {
         self.rekey_state = None;
     }
 
-    /// Set the rekey handshake state (in-progress XK handshake).
+    /// Set the rekey handshake state (in-progress XX handshake).
     pub(crate) fn set_rekey_state(&mut self, state: HandshakeState, is_initiator: bool) {
         self.rekey_state = Some(state);
         self.rekey_initiator = is_initiator;

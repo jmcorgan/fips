@@ -240,7 +240,7 @@ async fn test_response_proof_verification_failure() {
 #[tokio::test]
 async fn test_response_identity_cache_miss() {
     // Verify that a response is discarded when the origin lacks the
-    // target's pubkey in identity_cache (e.g., XK responder before msg3).
+    // target's pubkey in identity_cache (e.g., XX responder before msg3).
     let mut node = make_node();
     let from = make_node_addr(0xAA);
 

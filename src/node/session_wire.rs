@@ -28,9 +28,9 @@
 //! |-------|--------|------------------|-----------------------------------|
 //! | 0x0   | 0      | Encrypted        | Post-handshake encrypted data     |
 //! | 0x0   | 1      | Plaintext error  | CoordsRequired, PathBroken        |
-//! | 0x1   | -      | Handshake msg1   | SessionSetup (Noise XK msg1)      |
-//! | 0x2   | -      | Handshake msg2   | SessionAck (Noise XK msg2)        |
-//! | 0x3   | -      | Handshake msg3   | SessionMsg3 (Noise XK msg3)       |
+//! | 0x1   | -      | Handshake msg1   | SessionSetup (Noise XX msg1)      |
+//! | 0x2   | -      | Handshake msg2   | SessionAck (Noise XX msg2)        |
+//! | 0x3   | -      | Handshake msg3   | SessionMsg3 (Noise XX msg3)       |
 
 use crate::protocol::{ProtocolError, decode_optional_coords};
 use crate::tree::TreeCoordinate;
@@ -45,13 +45,13 @@ pub const FSP_VERSION: u8 = 0;
 /// Phase value for established (encrypted or plaintext error) messages.
 pub const FSP_PHASE_ESTABLISHED: u8 = 0x0;
 
-/// Phase value for SessionSetup (Noise IK message 1).
+/// Phase value for SessionSetup (Noise XX message 1).
 pub const FSP_PHASE_MSG1: u8 = 0x1;
 
 /// Phase value for SessionAck (Noise handshake message 2).
 pub const FSP_PHASE_MSG2: u8 = 0x2;
 
-/// Phase value for XK message 3 (initiator's encrypted static).
+/// Phase value for XX message 3 (initiator's encrypted static).
 pub const FSP_PHASE_MSG3: u8 = 0x3;
 
 /// Size of the common packet prefix (all FSP message types).

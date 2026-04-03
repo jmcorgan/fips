@@ -96,7 +96,7 @@ pub struct BleTransport<I: BleIo> {
     ///
     /// BLE advertisements carry only the FIPS UUID, not the pubkey.
     /// After L2CAP connection, both sides exchange `[0x00][pubkey:32]`
-    /// so the node layer can initiate the IK handshake.
+    /// so the node layer can initiate the XX handshake.
     /// Temporary — removed when FMP switches to XX.
     local_pubkey: Option<[u8; 32]>,
 }
@@ -662,7 +662,7 @@ impl<I: BleIo> Transport for BleTransport<I> {
 /// Pre-handshake pubkey exchange prefix byte.
 ///
 /// Distinguishes the identity exchange from FMP packets (version ≥ 0x01).
-/// Temporary — removed when FMP switches from IK to XX handshake.
+/// Temporary — removed when FMP uses XX handshake for BLE.
 const PUBKEY_EXCHANGE_PREFIX: u8 = 0x00;
 
 /// Pre-handshake pubkey exchange message size: `[0x00][pubkey:32]`.

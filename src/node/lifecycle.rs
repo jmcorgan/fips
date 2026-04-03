@@ -190,7 +190,7 @@ impl Node {
     /// Initiate a connection to a peer on a specific transport and address.
     ///
     /// For connectionless transports (UDP, Ethernet): allocates a link, starts
-    /// the Noise IK handshake, sends msg1, and registers the connection for
+    /// the Noise XX handshake, sends msg1, and registers the connection for
     /// msg2 dispatch.
     ///
     /// For connection-oriented transports (TCP, Tor): allocates a link and

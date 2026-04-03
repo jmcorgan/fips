@@ -330,7 +330,7 @@ impl FspInnerFlags {
 ///
 /// Carried inside a SessionDatagram envelope which provides src_addr and
 /// dest_addr. The SessionSetup payload contains coordinates, session flags,
-/// and the Noise IK handshake message for session establishment.
+/// and the Noise XX handshake message for session establishment.
 ///
 /// ## Wire Format
 ///
@@ -343,7 +343,7 @@ impl FspInnerFlags {
 /// | ...    | dest_coords_count| 2 bytes | u16 LE, number of dest coord entries|
 /// | ...    | dest_coords      | 16 × m  | NodeAddr array (dest → root)        |
 /// | ...    | handshake_len    | 2 bytes  | u16 LE, Noise payload length        |
-/// | ...    | handshake_payload| variable| Noise IK msg1 (82 bytes typical)    |
+/// | ...    | handshake_payload| variable| Noise XX msg1 (33 bytes — ephemeral key)    |
 #[derive(Clone, Debug)]
 pub struct SessionSetup {
     /// Source coordinates (for return path caching).
@@ -352,7 +352,7 @@ pub struct SessionSetup {
     pub dest_coords: TreeCoordinate,
     /// Session options.
     pub flags: SessionFlags,
-    /// Noise IK handshake message 1.
+    /// Noise XX handshake message 1.
     pub handshake_payload: Vec<u8>,
 }
 
@@ -456,7 +456,7 @@ impl SessionSetup {
 /// dest_addr. The SessionAck payload contains both the acknowledger's and
 /// initiator's coordinates for route cache warming (ensuring return-path
 /// transit nodes can route independently of the forward path) and the Noise
-/// IK handshake response.
+/// XX handshake response.
 ///
 /// ## Wire Format
 ///
@@ -469,7 +469,7 @@ impl SessionSetup {
 /// | ...    | dest_coords_count| 2 bytes | u16 LE                              |
 /// | ...    | dest_coords      | 16 × m  | Initiator's coords (for return path)|
 /// | ...    | handshake_len    | 2 bytes  | u16 LE, Noise payload length        |
-/// | ...    | handshake_payload| variable| Noise IK msg2 (33 bytes typical)    |
+/// | ...    | handshake_payload| variable| Noise XX msg2 (106+ bytes — ephemeral + static + epoch + negotiation)    |
 #[derive(Clone, Debug)]
 pub struct SessionAck {
     /// Acknowledger's coordinates.
@@ -478,7 +478,7 @@ pub struct SessionAck {
     pub dest_coords: TreeCoordinate,
     /// Reserved flags byte (for forward compatibility).
     pub flags: u8,
-    /// Noise IK handshake message 2.
+    /// Noise XX handshake message 2.
     pub handshake_payload: Vec<u8>,
 }
 
@@ -567,10 +567,10 @@ impl SessionAck {
 }
 
 // ============================================================================
-// Session Msg3 (XK Handshake Message 3)
+// Session Msg3 (XX Handshake Message 3)
 // ============================================================================
 
-/// XK handshake message 3 (initiator -> responder).
+/// XX handshake message 3 (initiator -> responder).
 ///
 /// Carries the initiator's encrypted static key and epoch. Sent by the
 /// initiator after receiving msg2. The responder learns the initiator's
@@ -582,12 +582,12 @@ impl SessionAck {
 /// |--------|------------------|---------|-------------------------------------|
 /// | 0      | flags            | 1 byte  | Reserved                            |
 /// | 1      | handshake_len    | 2 bytes | u16 LE, Noise payload length        |
-/// | 3      | handshake_payload| variable| Noise XK msg3 (73 bytes typical)    |
+/// | 3      | handshake_payload| variable| Noise XX msg3 (73 bytes typical)    |
 #[derive(Clone, Debug)]
 pub struct SessionMsg3 {
     /// Reserved flags byte.
     pub flags: u8,
-    /// Noise XK handshake message 3.
+    /// Noise XX handshake message 3.
     pub handshake_payload: Vec<u8>,
 }
 
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[test]
     fn test_session_setup_encode_decode() {
-        let handshake = vec![0xAA; 82]; // typical Noise IK msg1
+        let handshake = vec![0xAA; 82]; // typical Noise XX msg1
         let setup = SessionSetup::new(make_coords(&[1, 2, 0]), make_coords(&[3, 4, 0]))
             .with_flags(SessionFlags::new().with_ack().bidirectional())
             .with_handshake(handshake.clone());
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn test_session_ack_encode_decode() {
-        let handshake = vec![0xBB; 33]; // typical Noise IK msg2
+        let handshake = vec![0xBB; 33]; // typical Noise XX msg2
         let ack = SessionAck::new(make_coords(&[7, 8, 0]), make_coords(&[3, 4, 0]))
             .with_handshake(handshake.clone());
 
@@ -1666,7 +1666,7 @@ mod tests {
 
     #[test]
     fn test_session_msg3_encode_decode() {
-        let handshake = vec![0xCC; 73]; // typical XK msg3
+        let handshake = vec![0xCC; 73]; // typical XX msg3
         let msg3 = SessionMsg3::new(handshake.clone());
 
         let encoded = msg3.encode();

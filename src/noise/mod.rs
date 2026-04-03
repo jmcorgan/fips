@@ -1,36 +1,9 @@
-//! Noise Protocol Implementations for FIPS
+//! Noise Protocol Implementation for FIPS
 //!
-//! Implements Noise Protocol Framework patterns using secp256k1:
-//!
-//! - **IK pattern**: Used by FMP (link layer) for hop-by-hop peer authentication.
-//!   The initiator knows the responder's static key and sends its encrypted
-//!   static in msg1. Two-message handshake.
-//!
-//! - **XK pattern**: Used by FSP (session layer) for end-to-end sessions.
-//!   The initiator knows the responder's static key but defers revealing its
-//!   own identity until msg3, providing stronger identity hiding. Three-message
-//!   handshake.
-//!
-//! - **XX pattern**: Neither side knows the other's static key. Both identities
-//!   are revealed during the handshake: responder in msg2, initiator in msg3.
-//!   Three-message handshake. Will replace IK/XK for both layers.
-//!
-//! ## IK Handshake Pattern (Link Layer)
-//!
-//! ```text
-//!   <- s                    (pre-message: responder's static known)
-//!   -> e, es, s, ss         (msg1: ephemeral + encrypted static)
-//!   <- e, ee, se            (msg2: ephemeral)
-//! ```
-//!
-//! ## XK Handshake Pattern (Session Layer)
-//!
-//! ```text
-//!   <- s                    (pre-message: responder's static known)
-//!   -> e, es                (msg1: ephemeral + DH with responder's static)
-//!   <- e, ee                (msg2: ephemeral + DH)
-//!   -> s, se                (msg3: encrypted static + DH)
-//! ```
+//! Implements the Noise XX pattern using secp256k1 for both link-layer and
+//! session-layer encryption. Neither side knows the other's static key before
+//! the handshake. Both identities are revealed during the handshake: responder
+//! in msg2, initiator in msg3. Three-message handshake.
 //!
 //! ## XX Handshake Pattern
 //!
@@ -40,12 +13,9 @@
 //!   -> s, se                (msg3: encrypted static)
 //! ```
 //!
-//! ## Separation of Concerns
-//!
-//! The IK pattern handles **link-layer peer authentication** — securing the
-//! direct link between neighboring nodes. The XK pattern handles **session-layer
-//! end-to-end encryption** between arbitrary network addresses, with stronger
-//! initiator identity protection.
+//! The XX pattern handles both **link-layer peer authentication** (securing the
+//! direct link between neighboring nodes) and **session-layer end-to-end
+//! encryption** between arbitrary network addresses.
 
 mod handshake;
 mod replay;
@@ -61,14 +31,6 @@ use thiserror::Error;
 pub use handshake::HandshakeState;
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;
-
-/// Protocol name for Noise IK with secp256k1 (link layer).
-/// Format: Noise_IK_secp256k1_ChaChaPoly_SHA256
-pub(crate) const PROTOCOL_NAME_IK: &[u8] = b"Noise_IK_secp256k1_ChaChaPoly_SHA256";
-
-/// Protocol name for Noise XK with secp256k1 (session layer).
-/// Format: Noise_XK_secp256k1_ChaChaPoly_SHA256
-pub(crate) const PROTOCOL_NAME_XK: &[u8] = b"Noise_XK_secp256k1_ChaChaPoly_SHA256";
 
 /// Protocol name for Noise XX with secp256k1.
 /// Format: Noise_XX_secp256k1_ChaChaPoly_SHA256
@@ -89,29 +51,14 @@ pub const EPOCH_SIZE: usize = 8;
 /// Size of encrypted epoch (epoch + AEAD tag).
 pub const EPOCH_ENCRYPTED_SIZE: usize = EPOCH_SIZE + TAG_SIZE;
 
-/// Size of IK handshake message 1: ephemeral (33) + encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag).
-pub const HANDSHAKE_MSG1_SIZE: usize = PUBKEY_SIZE + PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
+/// Handshake msg1: ephemeral only (33 bytes). No DH, no encryption.
+pub const HANDSHAKE_MSG1_SIZE: usize = PUBKEY_SIZE;
 
-/// Size of IK handshake message 2: ephemeral (33) + encrypted epoch (8 + 16 tag).
-pub const HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + EPOCH_ENCRYPTED_SIZE;
+/// Handshake msg2: ephemeral (33) + encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 106 bytes.
+pub const HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
 
-/// XK msg1: ephemeral only (33 bytes).
-pub const XK_HANDSHAKE_MSG1_SIZE: usize = PUBKEY_SIZE;
-
-/// XK msg2: ephemeral (33) + encrypted epoch (8 + 16 tag) = 57 bytes.
-pub const XK_HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + EPOCH_ENCRYPTED_SIZE;
-
-/// XK msg3: encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 73 bytes.
-pub const XK_HANDSHAKE_MSG3_SIZE: usize = PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
-
-/// XX msg1: ephemeral only (33 bytes). No DH, no encryption.
-pub const XX_HANDSHAKE_MSG1_SIZE: usize = PUBKEY_SIZE;
-
-/// XX msg2: ephemeral (33) + encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 106 bytes.
-pub const XX_HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
-
-/// XX msg3: encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 73 bytes.
-pub const XX_HANDSHAKE_MSG3_SIZE: usize = PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
+/// Handshake msg3: encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 73 bytes.
+pub const HANDSHAKE_MSG3_SIZE: usize = PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
 
 /// Replay window size in packets (matching WireGuard).
 pub const REPLAY_WINDOW_SIZE: usize = 2048;
@@ -174,10 +121,6 @@ impl fmt::Display for HandshakeRole {
 /// Which Noise pattern is being used for this handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoisePattern {
-    /// Noise IK: two-message handshake (link layer).
-    Ik,
-    /// Noise XK: three-message handshake (session layer).
-    Xk,
     /// Noise XX: three-message handshake, no prior key knowledge.
     Xx,
 }
@@ -189,7 +132,7 @@ pub enum HandshakeProgress {
     Initial,
     /// Message 1 sent/received, ready for message 2.
     Message1Done,
-    /// Message 2 sent/received, ready for message 3 (XK/XX only).
+    /// Message 2 sent/received, ready for message 3.
     Message2Done,
     /// Handshake complete, ready for transport.
     Complete,

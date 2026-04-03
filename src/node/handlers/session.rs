@@ -15,7 +15,7 @@ use crate::node::session_wire::{
 use crate::protocol::{coords_wire_size, encode_coords};
 use crate::upper::icmp::FIPS_OVERHEAD;
 use crate::node::{Node, NodeError};
-use crate::noise::{HandshakeState, XX_HANDSHAKE_MSG1_SIZE, XX_HANDSHAKE_MSG2_SIZE, XX_HANDSHAKE_MSG3_SIZE};
+use crate::noise::{HandshakeState, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE};
 use crate::protocol::NegotiationPayload;
 use crate::mmp::report::ReceiverReport;
 use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
@@ -153,7 +153,7 @@ impl Node {
                 }
             };
             // Drop encrypted data if session is not yet established.
-            // With XK, the responder must wait for msg3 before it can decrypt.
+            // With XX, the responder must wait for msg3 before it can decrypt.
             if !entry.is_established() {
                 debug!(
                     src = %self.peer_display_name(src_addr),
@@ -357,7 +357,7 @@ impl Node {
     /// Handle an incoming SessionSetup (Noise XX msg1).
     ///
     /// The remote node wants to establish an end-to-end session with us.
-    /// We create an XK responder handshake, process msg1, send SessionAck with msg2,
+    /// We create an XX responder handshake, process msg1, send SessionAck with msg2,
     /// and transition to AwaitingMsg3.
     async fn handle_session_setup(&mut self, src_addr: &NodeAddr, inner: &[u8]) {
         let setup = match SessionSetup::decode(inner) {
@@ -368,10 +368,10 @@ impl Node {
             }
         };
 
-        if setup.handshake_payload.len() != XX_HANDSHAKE_MSG1_SIZE {
+        if setup.handshake_payload.len() != HANDSHAKE_MSG1_SIZE {
             debug!(
                 len = setup.handshake_payload.len(),
-                expected = XX_HANDSHAKE_MSG1_SIZE,
+                expected = HANDSHAKE_MSG1_SIZE,
                 "Invalid handshake payload size in SessionSetup"
             );
             return;
@@ -443,16 +443,16 @@ impl Node {
                         return;
                     }
                     let our_keypair = self.identity.keypair();
-                    let mut handshake = HandshakeState::new_xx_responder(our_keypair);
+                    let mut handshake = HandshakeState::new_responder(our_keypair);
                     handshake.set_local_epoch(self.startup_epoch);
 
-                    if let Err(e) = handshake.read_xx_message_1(&setup.handshake_payload) {
+                    if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
                         debug!(error = %e, "Failed to process rekey XX msg1");
                         return;
                     }
 
                     // Generate msg2
-                    let msg2 = match handshake.write_xx_message_2() {
+                    let msg2 = match handshake.write_message_2() {
                         Ok(m) => m,
                         Err(e) => {
                             debug!(error = %e, "Failed to generate rekey XX msg2");
@@ -491,22 +491,22 @@ impl Node {
             }
         }
 
-        // Create XK responder handshake and process msg1
+        // Create XX responder handshake and process msg1
         let our_keypair = self.identity.keypair();
-        let mut handshake = HandshakeState::new_xx_responder(our_keypair);
+        let mut handshake = HandshakeState::new_responder(our_keypair);
         handshake.set_local_epoch(self.startup_epoch);
 
-        if let Err(e) = handshake.read_xx_message_1(&setup.handshake_payload) {
+        if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
             debug!(error = %e, "Failed to process Noise XX msg1 in SessionSetup");
             return;
         }
 
-        // XK: responder does NOT learn initiator's identity until msg3
+        // XX: responder does NOT learn initiator's identity until msg3
         // Use a placeholder pubkey from src_addr for the session entry.
         // The real pubkey will be registered when msg3 arrives.
 
         // Generate msg2 with negotiation payload
-        let mut msg2 = match handshake.write_xx_message_2() {
+        let mut msg2 = match handshake.write_message_2() {
             Ok(m) => m,
             Err(e) => {
                 debug!(error = %e, "Failed to generate Noise XX msg2 for SessionAck");
@@ -563,10 +563,10 @@ impl Node {
             }
         };
 
-        if ack.handshake_payload.len() < XX_HANDSHAKE_MSG2_SIZE {
+        if ack.handshake_payload.len() < HANDSHAKE_MSG2_SIZE {
             debug!(
                 len = ack.handshake_payload.len(),
-                min = XX_HANDSHAKE_MSG2_SIZE,
+                min = HANDSHAKE_MSG2_SIZE,
                 "Handshake payload too short in SessionAck"
             );
             return;
@@ -591,16 +591,16 @@ impl Node {
                 }
             };
 
-            // Process XK msg2
-            if let Err(e) = handshake.read_xx_message_2(&ack.handshake_payload) {
+            // Process XX msg2
+            if let Err(e) = handshake.read_message_2(&ack.handshake_payload) {
                 debug!(error = %e, "Failed to process rekey XX msg2");
                 entry.abandon_rekey();
                 self.sessions.insert(*src_addr, entry);
                 return;
             }
 
-            // Generate XK msg3
-            let msg3 = match handshake.write_xx_message_3() {
+            // Generate XX msg3
+            let msg3 = match handshake.write_message_3() {
                 Ok(m) => m,
                 Err(e) => {
                     debug!(error = %e, "Failed to generate rekey XX msg3");
@@ -641,7 +641,7 @@ impl Node {
 
             debug!(
                 src = %self.peer_display_name(src_addr),
-                "FSP rekey: completed XK as initiator, pending cutover"
+                "FSP rekey: completed XX as initiator, pending cutover"
             );
             return;
         }
@@ -658,14 +658,14 @@ impl Node {
         };
 
         // Split msg2 into base XX part and optional negotiation payload
-        let (base_msg2, neg_bytes) = if ack.handshake_payload.len() > XX_HANDSHAKE_MSG2_SIZE {
-            (&ack.handshake_payload[..XX_HANDSHAKE_MSG2_SIZE], Some(&ack.handshake_payload[XX_HANDSHAKE_MSG2_SIZE..]))
+        let (base_msg2, neg_bytes) = if ack.handshake_payload.len() > HANDSHAKE_MSG2_SIZE {
+            (&ack.handshake_payload[..HANDSHAKE_MSG2_SIZE], Some(&ack.handshake_payload[HANDSHAKE_MSG2_SIZE..]))
         } else {
             (ack.handshake_payload.as_slice(), None)
         };
 
         // Process XX msg2 (learns responder's identity and epoch)
-        if let Err(e) = handshake.read_xx_message_2(base_msg2) {
+        if let Err(e) = handshake.read_message_2(base_msg2) {
             debug!(error = %e, "Failed to process Noise XX msg2 in SessionAck");
             return;
         }
@@ -698,7 +698,7 @@ impl Node {
         }
 
         // Generate XX msg3 with negotiation payload
-        let mut msg3 = match handshake.write_xx_message_3() {
+        let mut msg3 = match handshake.write_message_3() {
             Ok(m) => m,
             Err(e) => {
                 debug!(error = %e, "Failed to generate Noise XX msg3");
@@ -732,7 +732,7 @@ impl Node {
         let session = match handshake.into_session() {
             Ok(s) => s,
             Err(e) => {
-                debug!(error = %e, "Failed to create session after XK msg3");
+                debug!(error = %e, "Failed to create session after XX msg3");
                 return;
             }
         };
@@ -750,7 +750,7 @@ impl Node {
         // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;
 
-        info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XK)");
+        info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XX)");
     }
 
     /// Handle an incoming SessionMsg3 (Noise XX msg3).
@@ -767,10 +767,10 @@ impl Node {
             }
         };
 
-        if msg3.handshake_payload.len() < XX_HANDSHAKE_MSG3_SIZE {
+        if msg3.handshake_payload.len() < HANDSHAKE_MSG3_SIZE {
             debug!(
                 len = msg3.handshake_payload.len(),
-                min = XX_HANDSHAKE_MSG3_SIZE,
+                min = HANDSHAKE_MSG3_SIZE,
                 "Handshake payload too short in SessionMsg3"
             );
             return;
@@ -795,8 +795,8 @@ impl Node {
                 }
             };
 
-            // Process XK msg3
-            if let Err(e) = handshake.read_xx_message_3(&msg3.handshake_payload) {
+            // Process XX msg3
+            if let Err(e) = handshake.read_message_3(&msg3.handshake_payload) {
                 debug!(error = %e, "Failed to process rekey XX msg3");
                 entry.abandon_rekey();
                 self.sessions.insert(*src_addr, entry);
@@ -819,7 +819,7 @@ impl Node {
 
             debug!(
                 src = %self.peer_display_name(src_addr),
-                "FSP rekey: completed XK as responder, pending cutover"
+                "FSP rekey: completed XX as responder, pending cutover"
             );
             return;
         }
@@ -836,14 +836,14 @@ impl Node {
         };
 
         // Split msg3 into base XX part and optional negotiation payload
-        let (base_msg3, neg_bytes) = if msg3.handshake_payload.len() > XX_HANDSHAKE_MSG3_SIZE {
-            (&msg3.handshake_payload[..XX_HANDSHAKE_MSG3_SIZE], Some(&msg3.handshake_payload[XX_HANDSHAKE_MSG3_SIZE..]))
+        let (base_msg3, neg_bytes) = if msg3.handshake_payload.len() > HANDSHAKE_MSG3_SIZE {
+            (&msg3.handshake_payload[..HANDSHAKE_MSG3_SIZE], Some(&msg3.handshake_payload[HANDSHAKE_MSG3_SIZE..]))
         } else {
             (msg3.handshake_payload.as_slice(), None)
         };
 
         // Process XX msg3 (learns initiator's identity and epoch)
-        if let Err(e) = handshake.read_xx_message_3(base_msg3) {
+        if let Err(e) = handshake.read_message_3(base_msg3) {
             debug!(error = %e, "Failed to process Noise XX msg3");
             return;
         }
@@ -865,7 +865,7 @@ impl Node {
         let remote_pubkey = match handshake.remote_static() {
             Some(pk) => *pk,
             None => {
-                debug!("No remote static key after processing XK msg3");
+                debug!("No remote static key after processing XX msg3");
                 return;
             }
         };
@@ -877,7 +877,7 @@ impl Node {
         let session = match handshake.into_session() {
             Ok(s) => s,
             Err(e) => {
-                debug!(error = %e, "Failed to create session from XK handshake");
+                debug!(error = %e, "Failed to create session from XX handshake");
                 return;
             }
         };
@@ -894,7 +894,7 @@ impl Node {
         // Flush any pending packets
         self.flush_pending_packets(src_addr).await;
 
-        info!(src = %self.peer_display_name(src_addr), "Session established (responder, XK)");
+        info!(src = %self.peer_display_name(src_addr), "Session established (responder, XX)");
     }
 
     // === Session-layer MMP report handlers ===
@@ -1126,7 +1126,7 @@ impl Node {
 
         // Trigger re-discovery to get fresh coordinates, but only if we have
         // the target's identity cached — otherwise we can't verify the
-        // LookupResponse proof. This avoids a race when the XK responder
+        // LookupResponse proof. This avoids a race when the XX responder
         // receives PathBroken before msg3 completes (identity unknown).
         if self.has_cached_identity(&msg.dest_addr) {
             self.maybe_initiate_lookup(&msg.dest_addr).await;
@@ -1212,9 +1212,9 @@ impl Node {
 
         // Create Noise XX initiator handshake
         let our_keypair = self.identity.keypair();
-        let mut handshake = HandshakeState::new_xx_initiator(our_keypair);
+        let mut handshake = HandshakeState::new_initiator(our_keypair);
         handshake.set_local_epoch(self.startup_epoch);
-        let msg1 = handshake.write_xx_message_1().map_err(|e| NodeError::SendFailed {
+        let msg1 = handshake.write_message_1().map_err(|e| NodeError::SendFailed {
             node_addr: dest_addr,
             reason: format!("Noise XX msg1 generation failed: {}", e),
         })?;

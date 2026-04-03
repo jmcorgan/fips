@@ -45,7 +45,7 @@ impl DiscoveryBuffer {
     ///
     /// Used after the pre-handshake pubkey exchange confirms the peer's
     /// identity. The pubkey_hint enables the node's auto-connect path
-    /// to initiate the IK handshake.
+    /// to initiate the XX handshake.
     pub fn add_peer_with_pubkey(&self, addr: &BleAddr, pubkey: XOnlyPublicKey) {
         let ta = addr.to_transport_addr();
         let peer = DiscoveredPeer::with_hint(self.transport_id, ta.clone(), pubkey);

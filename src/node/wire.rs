@@ -19,7 +19,7 @@
 //! | 0x3   | Noise XX msg3   | 85+ bytes  | Handshake completion           |
 
 use crate::utils::index::SessionIndex;
-use crate::noise::{XX_HANDSHAKE_MSG1_SIZE, XX_HANDSHAKE_MSG2_SIZE, XX_HANDSHAKE_MSG3_SIZE, TAG_SIZE};
+use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, TAG_SIZE};
 
 // ============================================================================
 // Constants
@@ -47,15 +47,15 @@ pub const COMMON_PREFIX_SIZE: usize = 4;
 pub const ESTABLISHED_HEADER_SIZE: usize = 16;
 
 /// Size of handshake msg1 wire packet: prefix + sender_idx + noise_msg1.
-pub const MSG1_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + XX_HANDSHAKE_MSG1_SIZE; // 41 bytes
+pub const MSG1_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + HANDSHAKE_MSG1_SIZE; // 41 bytes
 
 /// Minimum size of handshake msg2 wire packet: prefix + sender_idx + receiver_idx + noise_msg2.
 /// Actual size may be larger due to optional negotiation payload.
-pub const MSG2_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + XX_HANDSHAKE_MSG2_SIZE; // 118 bytes
+pub const MSG2_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + HANDSHAKE_MSG2_SIZE; // 118 bytes
 
 /// Minimum size of handshake msg3 wire packet: prefix + sender_idx + receiver_idx + noise_msg3.
 /// Actual size may be larger due to optional negotiation payload.
-pub const MSG3_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + XX_HANDSHAKE_MSG3_SIZE; // 85 bytes
+pub const MSG3_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + HANDSHAKE_MSG3_SIZE; // 85 bytes
 
 /// Minimum size for encrypted frame: header + tag (no plaintext).
 pub const ENCRYPTED_MIN_SIZE: usize = ESTABLISHED_HEADER_SIZE + TAG_SIZE; // 32 bytes
@@ -395,7 +395,7 @@ impl Msg3Header {
 ///
 /// Format: `[0x11][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:33]`
 pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(noise_msg1.len(), XX_HANDSHAKE_MSG1_SIZE);
+    debug_assert_eq!(noise_msg1.len(), HANDSHAKE_MSG1_SIZE);
 
     let payload_len = (4 + noise_msg1.len()) as u16; // sender_idx + noise_msg1
 
@@ -413,7 +413,7 @@ pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
 /// Format: `[0x12][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:106+]`
 /// The noise_msg2 may include an optional negotiation payload beyond the base XX msg2.
 pub fn build_msg2(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_msg2: &[u8]) -> Vec<u8> {
-    debug_assert!(noise_msg2.len() >= XX_HANDSHAKE_MSG2_SIZE);
+    debug_assert!(noise_msg2.len() >= HANDSHAKE_MSG2_SIZE);
 
     let payload_len = (4 + 4 + noise_msg2.len()) as u16; // sender + receiver + noise
     let total = COMMON_PREFIX_SIZE + 4 + 4 + noise_msg2.len();
@@ -433,7 +433,7 @@ pub fn build_msg2(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_ms
 /// Format: `[0x13][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg3:73+]`
 /// The noise_msg3 may include an optional negotiation payload beyond the base XX msg3.
 pub fn build_msg3(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_msg3: &[u8]) -> Vec<u8> {
-    debug_assert!(noise_msg3.len() >= XX_HANDSHAKE_MSG3_SIZE);
+    debug_assert!(noise_msg3.len() >= HANDSHAKE_MSG3_SIZE);
 
     let payload_len = (4 + 4 + noise_msg3.len()) as u16; // sender + receiver + noise
     let total = COMMON_PREFIX_SIZE + 4 + 4 + noise_msg3.len();
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn test_msg1_header_parse() {
         let sender_idx = SessionIndex::new(0xABCDEF01);
-        let noise_msg1 = vec![0xbb; XX_HANDSHAKE_MSG1_SIZE];
+        let noise_msg1 = vec![0xbb; HANDSHAKE_MSG1_SIZE];
 
         let packet = build_msg1(sender_idx, &noise_msg1);
 
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_msg1_header_nonzero_flags() {
-        let mut packet = build_msg1(SessionIndex::new(1), &[0u8; XX_HANDSHAKE_MSG1_SIZE]);
+        let mut packet = build_msg1(SessionIndex::new(1), &[0u8; HANDSHAKE_MSG1_SIZE]);
         packet[1] = 0x01; // flags must be zero during handshake
         assert!(Msg1Header::parse(&packet).is_none());
     }
@@ -615,7 +615,7 @@ mod tests {
     fn test_msg2_header_parse() {
         let sender_idx = SessionIndex::new(0x11223344);
         let receiver_idx = SessionIndex::new(0x55667788);
-        let noise_msg2 = vec![0xcc; XX_HANDSHAKE_MSG2_SIZE];
+        let noise_msg2 = vec![0xcc; HANDSHAKE_MSG2_SIZE];
 
         let packet = build_msg2(sender_idx, receiver_idx, &noise_msg2);
 
@@ -664,7 +664,7 @@ mod tests {
     fn test_roundtrip_indices() {
         let idx = SessionIndex::new(0xDEADBEEF);
 
-        let msg1 = build_msg1(idx, &[0u8; XX_HANDSHAKE_MSG1_SIZE]);
+        let msg1 = build_msg1(idx, &[0u8; HANDSHAKE_MSG1_SIZE]);
         let parsed = Msg1Header::parse(&msg1).unwrap();
         assert_eq!(parsed.sender_idx.as_u32(), 0xDEADBEEF);
 
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_payload_len_in_msg1() {
-        let packet = build_msg1(SessionIndex::new(1), &[0u8; XX_HANDSHAKE_MSG1_SIZE]);
+        let packet = build_msg1(SessionIndex::new(1), &[0u8; HANDSHAKE_MSG1_SIZE]);
         let prefix = CommonPrefix::parse(&packet).unwrap();
         // payload_len = sender_idx(4) + noise_msg1(33) = 37
         assert_eq!(prefix.payload_len, 37);
@@ -729,7 +729,7 @@ mod tests {
         let packet = build_msg2(
             SessionIndex::new(1),
             SessionIndex::new(2),
-            &[0u8; XX_HANDSHAKE_MSG2_SIZE],
+            &[0u8; HANDSHAKE_MSG2_SIZE],
         );
         let prefix = CommonPrefix::parse(&packet).unwrap();
         // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg2(106) = 114
@@ -740,7 +740,7 @@ mod tests {
     fn test_msg3_header_parse() {
         let sender_idx = SessionIndex::new(0xAABBCCDD);
         let receiver_idx = SessionIndex::new(0x11223344);
-        let noise_msg3 = vec![0xdd; XX_HANDSHAKE_MSG3_SIZE];
+        let noise_msg3 = vec![0xdd; HANDSHAKE_MSG3_SIZE];
 
         let packet = build_msg3(sender_idx, receiver_idx, &noise_msg3);
 
@@ -779,7 +779,7 @@ mod tests {
         let mut packet = build_msg3(
             SessionIndex::new(1),
             SessionIndex::new(2),
-            &[0u8; XX_HANDSHAKE_MSG3_SIZE],
+            &[0u8; HANDSHAKE_MSG3_SIZE],
         );
         packet[1] = 0x01; // flags must be zero during handshake
         assert!(Msg3Header::parse(&packet).is_none());
@@ -790,7 +790,7 @@ mod tests {
         let packet = build_msg3(
             SessionIndex::new(1),
             SessionIndex::new(2),
-            &[0u8; XX_HANDSHAKE_MSG3_SIZE],
+            &[0u8; HANDSHAKE_MSG3_SIZE],
         );
         let prefix = CommonPrefix::parse(&packet).unwrap();
         // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg3(73) = 81

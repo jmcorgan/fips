@@ -63,7 +63,7 @@ async fn test_two_node_handshake_udp() {
     // Allocate session index for A's outbound
     let our_index_a = node_a.index_allocator.allocate().unwrap();
 
-    // Start handshake (generates Noise IK msg1)
+    // Start handshake (generates Noise XX msg1)
     let our_keypair_a = node_a.identity.keypair();
     let noise_msg1 = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
     conn_a.set_our_index(our_index_a);

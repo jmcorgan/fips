@@ -421,9 +421,9 @@ impl PeerConnection {
         }
 
         // XX initiator: no remote static needed upfront
-        let mut hs = noise::HandshakeState::new_xx_initiator(our_keypair);
+        let mut hs = noise::HandshakeState::new_initiator(our_keypair);
         hs.set_local_epoch(epoch);
-        let msg1 = hs.write_xx_message_1()?;
+        let msg1 = hs.write_message_1()?;
 
         self.noise_handshake = Some(hs);
         self.handshake_state = HandshakeState::SentMsg1;
@@ -463,14 +463,14 @@ impl PeerConnection {
             });
         }
 
-        let mut hs = noise::HandshakeState::new_xx_responder(our_keypair);
+        let mut hs = noise::HandshakeState::new_responder(our_keypair);
         hs.set_local_epoch(epoch);
 
         // Process XX message 1 (ephemeral only — no identity learned)
-        hs.read_xx_message_1(message)?;
+        hs.read_message_1(message)?;
 
         // Generate XX message 2 (sends our static + epoch)
-        let mut msg2 = hs.write_xx_message_2()?;
+        let mut msg2 = hs.write_message_2()?;
 
         // Append encrypted negotiation payload if provided
         if let Some(payload) = negotiation_payload {
@@ -515,7 +515,7 @@ impl PeerConnection {
             .expect("noise handshake must exist in SentMsg1 state");
 
         // Split msg2 into base XX part and optional negotiation
-        let base_size = noise::XX_HANDSHAKE_MSG2_SIZE;
+        let base_size = noise::HANDSHAKE_MSG2_SIZE;
         let (base_msg2, extra) = if message.len() > base_size {
             (&message[..base_size], Some(&message[base_size..]))
         } else {
@@ -523,7 +523,7 @@ impl PeerConnection {
         };
 
         // Process XX msg2 (learns responder identity + epoch)
-        hs.read_xx_message_2(base_msg2)?;
+        hs.read_message_2(base_msg2)?;
 
         // Decrypt negotiation payload from msg2 if present
         let received_negotiation = if let Some(encrypted) = extra {
@@ -542,7 +542,7 @@ impl PeerConnection {
         self.remote_epoch = hs.remote_epoch();
 
         // Generate XX msg3
-        let mut msg3 = hs.write_xx_message_3()?;
+        let mut msg3 = hs.write_message_3()?;
 
         // Append encrypted negotiation payload if provided
         if let Some(payload) = negotiation_payload {
@@ -584,7 +584,7 @@ impl PeerConnection {
             .expect("noise handshake must exist in ReceivedMsg1 state");
 
         // Split msg3 into base XX part and optional negotiation
-        let base_size = noise::XX_HANDSHAKE_MSG3_SIZE;
+        let base_size = noise::HANDSHAKE_MSG3_SIZE;
         let (base_msg3, extra) = if message.len() > base_size {
             (&message[..base_size], Some(&message[base_size..]))
         } else {
@@ -592,7 +592,7 @@ impl PeerConnection {
         };
 
         // Process XX msg3 (learns initiator identity + epoch)
-        hs.read_xx_message_3(base_msg3)?;
+        hs.read_message_3(base_msg3)?;
 
         // Decrypt negotiation payload from msg3 if present
         let received_negotiation = if let Some(encrypted) = extra {

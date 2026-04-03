@@ -1021,14 +1021,14 @@ impl ActivePeer {
             })?;
 
         // Split msg2 into base XX part and any extra (negotiation payload)
-        let base_size = crate::noise::XX_HANDSHAKE_MSG2_SIZE;
+        let base_size = crate::noise::HANDSHAKE_MSG2_SIZE;
         let (base_msg2, extra) = if msg2_bytes.len() > base_size {
             (&msg2_bytes[..base_size], Some(&msg2_bytes[base_size..]))
         } else {
             (msg2_bytes, None)
         };
 
-        hs.read_xx_message_2(base_msg2)?;
+        hs.read_message_2(base_msg2)?;
 
         // Must decrypt negotiation payload (if present) to keep hash chain
         // in sync, even though rekey doesn't use the negotiation result.
@@ -1036,7 +1036,7 @@ impl ActivePeer {
             let _ = hs.decrypt_payload(encrypted_neg)?;
         }
 
-        let msg3 = hs.write_xx_message_3()?;
+        let msg3 = hs.write_message_3()?;
         let session = hs.into_session()?;
 
         // Clear msg1 resend state
@@ -1062,14 +1062,14 @@ impl ActivePeer {
             })?;
 
         // Split msg3 into base XX part and any extra (negotiation payload)
-        let base_size = crate::noise::XX_HANDSHAKE_MSG3_SIZE;
+        let base_size = crate::noise::HANDSHAKE_MSG3_SIZE;
         let (base_msg3, extra) = if msg3_bytes.len() > base_size {
             (&msg3_bytes[..base_size], Some(&msg3_bytes[base_size..]))
         } else {
             (msg3_bytes, None)
         };
 
-        hs.read_xx_message_3(base_msg3)?;
+        hs.read_message_3(base_msg3)?;
 
         // Must decrypt negotiation payload (if present) to keep hash chain
         // in sync, even though rekey doesn't use the negotiation result.

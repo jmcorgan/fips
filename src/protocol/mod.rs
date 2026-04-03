@@ -8,7 +8,7 @@
 //! links. Includes spanning tree gossip, bloom filter propagation, discovery
 //! protocol, and forwarding of session-layer datagrams.
 //!
-//! Link-layer peer authentication uses Noise IK (see `noise.rs`), which
+//! Link-layer peer authentication uses Noise XX (see `noise.rs`), which
 //! establishes the encrypted channel before any of these messages are sent.
 //!
 //! ## Session Layer (end-to-end, between FIPS addresses)

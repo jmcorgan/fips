@@ -24,11 +24,8 @@ fn test_full_handshake() {
     let initiator_epoch = generate_epoch();
     let responder_epoch = generate_epoch();
 
-    let responder_pub = responder_keypair.public_key();
-
-    // Initiator knows responder's static key
-    // Responder does NOT know initiator's static key (IK pattern)
-    let mut initiator = HandshakeState::new_initiator(initiator_keypair, responder_pub);
+    // XX: neither side knows the other's static key
+    let mut initiator = HandshakeState::new_initiator(initiator_keypair);
     initiator.set_local_epoch(initiator_epoch);
     let mut responder = HandshakeState::new_responder(responder_keypair);
     responder.set_local_epoch(responder_epoch);
@@ -36,37 +33,60 @@ fn test_full_handshake() {
     assert_eq!(initiator.role(), HandshakeRole::Initiator);
     assert_eq!(responder.role(), HandshakeRole::Responder);
 
-    // Initially, responder doesn't know initiator's identity
+    // Neither side knows the other's identity
+    assert!(initiator.remote_static().is_none());
     assert!(responder.remote_static().is_none());
 
-    // Message 1: Initiator -> Responder
+    // Message 1: Initiator -> Responder (e only)
     let msg1 = initiator.write_message_1().unwrap();
     assert_eq!(msg1.len(), HANDSHAKE_MSG1_SIZE);
+    assert_eq!(msg1.len(), 33);
 
     responder.read_message_1(&msg1).unwrap();
 
-    // Now responder knows initiator's identity!
+    // After msg1: still no identities known
+    assert!(initiator.remote_static().is_none());
+    assert!(responder.remote_static().is_none());
+
+    // Message 2: Responder -> Initiator (e, ee, s, es + epoch)
+    let msg2 = responder.write_message_2().unwrap();
+    assert_eq!(msg2.len(), HANDSHAKE_MSG2_SIZE);
+    assert_eq!(msg2.len(), 106);
+
+    initiator.read_message_2(&msg2).unwrap();
+
+    // After msg2: initiator knows responder's identity
+    assert!(initiator.remote_static().is_some());
+    assert_eq!(
+        initiator.remote_static().unwrap(),
+        &responder_keypair.public_key()
+    );
+    assert_eq!(initiator.remote_epoch(), Some(responder_epoch));
+    // Responder still doesn't know initiator
+    assert!(responder.remote_static().is_none());
+
+    // Neither side is complete yet
+    assert!(!initiator.is_complete());
+    assert!(!responder.is_complete());
+
+    // Message 3: Initiator -> Responder (s, se + epoch)
+    let msg3 = initiator.write_message_3().unwrap();
+    assert_eq!(msg3.len(), HANDSHAKE_MSG3_SIZE);
+    assert_eq!(msg3.len(), 73);
+
+    responder.read_message_3(&msg3).unwrap();
+
+    // Both should be complete now
+    assert!(initiator.is_complete());
+    assert!(responder.is_complete());
+
+    // After msg3: responder knows initiator's identity
     assert!(responder.remote_static().is_some());
     assert_eq!(
         responder.remote_static().unwrap(),
         &initiator_keypair.public_key()
     );
-
-    // Responder learned initiator's epoch
     assert_eq!(responder.remote_epoch(), Some(initiator_epoch));
-
-    // Message 2: Responder -> Initiator
-    let msg2 = responder.write_message_2().unwrap();
-    assert_eq!(msg2.len(), HANDSHAKE_MSG2_SIZE);
-
-    initiator.read_message_2(&msg2).unwrap();
-
-    // Both should be complete
-    assert!(initiator.is_complete());
-    assert!(responder.is_complete());
-
-    // Initiator learned responder's epoch
-    assert_eq!(initiator.remote_epoch(), Some(responder_epoch));
 
     // Handshake hashes should match
     assert_eq!(initiator.handshake_hash(), responder.handshake_hash());
@@ -75,79 +95,188 @@ fn test_full_handshake() {
     let mut initiator_session = initiator.into_session().unwrap();
     let mut responder_session = responder.into_session().unwrap();
 
-    // Test encryption/decryption
-    let plaintext = b"Hello, secure world!";
-
+    // Test bidirectional encryption
+    let plaintext = b"Hello via XX!";
     let ciphertext = initiator_session.encrypt(plaintext).unwrap();
     let decrypted = responder_session.decrypt(&ciphertext).unwrap();
     assert_eq!(decrypted, plaintext);
 
-    // Test reverse direction
-    let plaintext2 = b"Hello back!";
+    let plaintext2 = b"XX reply!";
     let ciphertext2 = responder_session.encrypt(plaintext2).unwrap();
     let decrypted2 = initiator_session.decrypt(&ciphertext2).unwrap();
     assert_eq!(decrypted2, plaintext2);
 }
 
 #[test]
-fn test_multiple_messages() {
+fn test_message_sizes() {
+    assert_eq!(HANDSHAKE_MSG1_SIZE, 33); // ephemeral only
+    assert_eq!(HANDSHAKE_MSG2_SIZE, 33 + 33 + 16 + 24); // e + encrypted static + encrypted epoch
+    assert_eq!(HANDSHAKE_MSG3_SIZE, 33 + 16 + 24); // encrypted static + encrypted epoch
+}
+
+#[test]
+fn test_identity_timing() {
+    // XX property: initiator learns responder in msg2, responder learns initiator in msg3
     let initiator_keypair = generate_keypair();
     let responder_keypair = generate_keypair();
 
-    let mut initiator =
-        HandshakeState::new_initiator(initiator_keypair, responder_keypair.public_key());
+    let mut initiator = HandshakeState::new_initiator(initiator_keypair);
     initiator.set_local_epoch(generate_epoch());
     let mut responder = HandshakeState::new_responder(responder_keypair);
+    responder.set_local_epoch(generate_epoch());
+
+    // Before any messages: neither side knows
+    assert!(initiator.remote_static().is_none());
+    assert!(responder.remote_static().is_none());
+
+    // After msg1
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    assert!(initiator.remote_static().is_none(), "XX: initiator should NOT know identity after msg1");
+    assert!(responder.remote_static().is_none(), "XX: responder should NOT know identity after msg1");
+
+    // After msg2: initiator learns responder
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+    assert!(initiator.remote_static().is_some(), "XX: initiator should know responder after msg2");
+    assert_eq!(initiator.remote_static().unwrap(), &responder_keypair.public_key());
+    assert!(responder.remote_static().is_none(), "XX: responder should NOT know initiator after msg2");
+
+    // After msg3: responder learns initiator
+    let msg3 = initiator.write_message_3().unwrap();
+    responder.read_message_3(&msg3).unwrap();
+    assert!(responder.remote_static().is_some(), "XX: responder should know initiator after msg3");
+    assert_eq!(responder.remote_static().unwrap(), &initiator_keypair.public_key());
+}
+
+#[test]
+fn test_wrong_state_errors() {
+    let keypair1 = generate_keypair();
+    let keypair2 = generate_keypair();
+
+    // Initiator can't read msg1
+    let mut initiator = HandshakeState::new_initiator(keypair1);
+    initiator.set_local_epoch(generate_epoch());
+    assert!(initiator.read_message_1(&[0u8; HANDSHAKE_MSG1_SIZE]).is_err());
+
+    // Initiator can't write msg2
+    assert!(initiator.write_message_2().is_err());
+
+    // Initiator can't write msg3 before msg2
+    assert!(initiator.write_message_3().is_err());
+
+    // Responder can't write msg1
+    let mut responder = HandshakeState::new_responder(keypair2);
+    responder.set_local_epoch(generate_epoch());
+    assert!(responder.write_message_1().is_err());
+
+    // Responder can't read msg3 before msg2
+    assert!(responder.read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE]).is_err());
+}
+
+#[test]
+fn test_multiple_messages_after_handshake() {
+    let keypair1 = generate_keypair();
+    let keypair2 = generate_keypair();
+
+    let mut initiator = HandshakeState::new_initiator(keypair1);
+    initiator.set_local_epoch(generate_epoch());
+    let mut responder = HandshakeState::new_responder(keypair2);
     responder.set_local_epoch(generate_epoch());
 
     let msg1 = initiator.write_message_1().unwrap();
     responder.read_message_1(&msg1).unwrap();
     let msg2 = responder.write_message_2().unwrap();
     initiator.read_message_2(&msg2).unwrap();
+    let msg3 = initiator.write_message_3().unwrap();
+    responder.read_message_3(&msg3).unwrap();
 
-    let mut initiator_session = initiator.into_session().unwrap();
-    let mut responder_session = responder.into_session().unwrap();
+    let mut init_session = initiator.into_session().unwrap();
+    let mut resp_session = responder.into_session().unwrap();
 
-    // Send many messages to test nonce increment
+    // Send many messages
     for i in 0..100 {
-        let msg = format!("Message {}", i);
-        let ct = initiator_session.encrypt(msg.as_bytes()).unwrap();
-        let pt = responder_session.decrypt(&ct).unwrap();
+        let msg = format!("XX message {}", i);
+        let ct = init_session.encrypt(msg.as_bytes()).unwrap();
+        let pt = resp_session.decrypt(&ct).unwrap();
         assert_eq!(pt, msg.as_bytes());
     }
 
-    assert_eq!(initiator_session.send_nonce(), 100);
-    assert_eq!(responder_session.recv_nonce(), 100);
+    assert_eq!(init_session.send_nonce(), 100);
+    assert_eq!(resp_session.recv_nonce(), 100);
 }
 
 #[test]
-fn test_wrong_role_errors() {
+fn test_with_odd_parity() {
+    // XX: no pre-message normalization needed, but ECDH x-only hashing
+    // must still produce matching shared secrets regardless of parity.
+    let secp = secp256k1::Secp256k1::new();
+
+    // Node A (initiator) - even parity key
+    let sk_a = secp256k1::SecretKey::from_slice(
+        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+            .unwrap(),
+    )
+    .unwrap();
+    let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
+
+    // Node B (responder) - odd parity key
+    let sk_b = secp256k1::SecretKey::from_slice(
+        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0")
+            .unwrap(),
+    )
+    .unwrap();
+    let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
+    let (_, parity_b) = kp_b.public_key().x_only_public_key();
+    assert_eq!(parity_b, Parity::Odd, "Test requires odd-parity responder key");
+
+    let mut initiator = HandshakeState::new_initiator(kp_a);
+    initiator.set_local_epoch(generate_epoch());
+    let mut responder = HandshakeState::new_responder(kp_b);
+    responder.set_local_epoch(generate_epoch());
+
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+    let msg3 = initiator.write_message_3().unwrap();
+    responder.read_message_3(&msg3).unwrap();
+
+    assert!(initiator.is_complete());
+    assert!(responder.is_complete());
+
+    let mut sender = initiator.into_session().unwrap();
+    let mut receiver = responder.into_session().unwrap();
+
+    let counter = sender.current_send_counter();
+    let ciphertext = sender.encrypt(b"xx parity test").unwrap();
+    let plaintext = receiver.decrypt_with_replay_check(&ciphertext, counter).unwrap();
+    assert_eq!(plaintext, b"xx parity test");
+}
+
+#[test]
+fn test_invalid_msg_sizes() {
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();
 
-    let mut initiator = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    // Wrong size for msg1
+    let mut responder = HandshakeState::new_responder(keypair1);
+    responder.set_local_epoch(generate_epoch());
+    assert!(responder.read_message_1(&[0u8; 10]).is_err());
+
+    // Wrong size for msg3
+    let mut initiator = HandshakeState::new_initiator(keypair1);
     initiator.set_local_epoch(generate_epoch());
-
-    // Initiator can't read message 1
-    assert!(
-        initiator
-            .read_message_1(&[0u8; HANDSHAKE_MSG1_SIZE])
-            .is_err()
-    );
-
-    // Initiator can't write message 2 before message 1
-    assert!(initiator.write_message_2().is_err());
-}
-
-#[test]
-fn test_invalid_pubkey_in_msg1() {
-    let keypair = generate_keypair();
-    let mut responder = HandshakeState::new_responder(keypair);
+    let mut responder = HandshakeState::new_responder(keypair2);
     responder.set_local_epoch(generate_epoch());
 
-    // Invalid pubkey bytes (first 33 bytes are zero)
-    let invalid_msg = [0u8; HANDSHAKE_MSG1_SIZE];
-    assert!(responder.read_message_1(&invalid_msg).is_err());
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let _msg2 = responder.write_message_2().unwrap();
+
+    // Responder is now in Message2Done, try wrong-size msg3
+    assert!(responder.read_message_3(&[0u8; 10]).is_err());
+    assert!(responder.read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE + 1]).is_err());
 }
 
 #[test]
@@ -157,7 +286,7 @@ fn test_decryption_failure_wrong_key() {
     let keypair3 = generate_keypair();
 
     // Session between 1 and 2
-    let mut init1 = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    let mut init1 = HandshakeState::new_initiator(keypair1);
     init1.set_local_epoch(generate_epoch());
     let mut resp1 = HandshakeState::new_responder(keypair2);
     resp1.set_local_epoch(generate_epoch());
@@ -166,11 +295,13 @@ fn test_decryption_failure_wrong_key() {
     resp1.read_message_1(&msg1).unwrap();
     let msg2 = resp1.write_message_2().unwrap();
     init1.read_message_2(&msg2).unwrap();
+    let msg3 = init1.write_message_3().unwrap();
+    resp1.read_message_3(&msg3).unwrap();
 
     let mut session1 = init1.into_session().unwrap();
 
     // Session between 1 and 3
-    let mut init2 = HandshakeState::new_initiator(keypair1, keypair3.public_key());
+    let mut init2 = HandshakeState::new_initiator(keypair1);
     init2.set_local_epoch(generate_epoch());
     let mut resp2 = HandshakeState::new_responder(keypair3);
     resp2.set_local_epoch(generate_epoch());
@@ -179,6 +310,8 @@ fn test_decryption_failure_wrong_key() {
     resp2.read_message_1(&msg1).unwrap();
     let msg2 = resp2.write_message_2().unwrap();
     init2.read_message_2(&msg2).unwrap();
+    let msg3 = init2.write_message_3().unwrap();
+    resp2.read_message_3(&msg3).unwrap();
 
     let mut session2 = resp2.into_session().unwrap();
 
@@ -206,7 +339,7 @@ fn test_session_remote_static() {
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();
 
-    let mut init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    let mut init = HandshakeState::new_initiator(keypair1);
     init.set_local_epoch(generate_epoch());
     let mut resp = HandshakeState::new_responder(keypair2);
     resp.set_local_epoch(generate_epoch());
@@ -215,6 +348,8 @@ fn test_session_remote_static() {
     resp.read_message_1(&msg1).unwrap();
     let msg2 = resp.write_message_2().unwrap();
     init.read_message_2(&msg2).unwrap();
+    let msg3 = init.write_message_3().unwrap();
+    resp.read_message_3(&msg3).unwrap();
 
     let session1 = init.into_session().unwrap();
     let session2 = resp.into_session().unwrap();
@@ -222,40 +357,6 @@ fn test_session_remote_static() {
     // Each session should know the other's static key
     assert_eq!(session1.remote_static(), &keypair2.public_key());
     assert_eq!(session2.remote_static(), &keypair1.public_key());
-}
-
-#[test]
-fn test_message_sizes() {
-    // Verify our size constants are correct
-    assert_eq!(EPOCH_SIZE, 8);
-    assert_eq!(EPOCH_ENCRYPTED_SIZE, 8 + 16); // epoch + AEAD tag
-    assert_eq!(HANDSHAKE_MSG1_SIZE, 33 + 33 + 16 + 24); // e + encrypted_s + encrypted_epoch
-    assert_eq!(HANDSHAKE_MSG2_SIZE, 33 + 24); // e + encrypted_epoch
-}
-
-#[test]
-fn test_responder_identity_discovery() {
-    // This test verifies the key IK property: responder learns initiator's identity
-    let initiator_keypair = generate_keypair();
-    let responder_keypair = generate_keypair();
-
-    let mut responder = HandshakeState::new_responder(responder_keypair);
-    responder.set_local_epoch(generate_epoch());
-
-    // Before message 1: responder has no idea who's connecting
-    assert!(responder.remote_static().is_none());
-
-    let mut initiator =
-        HandshakeState::new_initiator(initiator_keypair, responder_keypair.public_key());
-    initiator.set_local_epoch(generate_epoch());
-    let msg1 = initiator.write_message_1().unwrap();
-
-    // After processing message 1: responder knows initiator's identity
-    responder.read_message_1(&msg1).unwrap();
-    let discovered_initiator = responder.remote_static().unwrap();
-    assert_eq!(discovered_initiator, &initiator_keypair.public_key());
-
-    // The discovered key can be used to look up peer config, verify against allow-list, etc.
 }
 
 // ===== ReplayWindow Tests =====
@@ -339,11 +440,7 @@ fn test_replay_window_sequential() {
 
     // All should be marked as seen
     for i in 0..1000 {
-        assert!(
-            !window.check(i),
-            "Counter {} should be rejected as replay",
-            i
-        );
+        assert!(!window.check(i), "Counter {} should be rejected as replay", i);
     }
 
     assert_eq!(window.highest(), 999);
@@ -368,7 +465,7 @@ fn test_session_replay_protection() {
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();
 
-    let mut init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
+    let mut init = HandshakeState::new_initiator(keypair1);
     init.set_local_epoch(generate_epoch());
     let mut resp = HandshakeState::new_responder(keypair2);
     resp.set_local_epoch(generate_epoch());
@@ -377,6 +474,8 @@ fn test_session_replay_protection() {
     resp.read_message_1(&msg1).unwrap();
     let msg2 = resp.write_message_2().unwrap();
     init.read_message_2(&msg2).unwrap();
+    let msg3 = init.write_message_3().unwrap();
+    resp.read_message_3(&msg3).unwrap();
 
     let mut sender = init.into_session().unwrap();
     let mut receiver = resp.into_session().unwrap();
@@ -397,715 +496,4 @@ fn test_session_replay_protection() {
 
     // Check method alone also detects replay
     assert!(receiver.check_replay(counter).is_err());
-}
-
-#[test]
-fn test_handshake_with_odd_parity_responder() {
-    // Node B's secret key produces an odd-parity public key (0x03 prefix).
-    // When the initiator only has the npub (x-only), PeerIdentity::pubkey_full()
-    // returns even parity (0x02). The pre-message mix_hash must normalize
-    // parity so both sides produce matching hash chains.
-    let secp = secp256k1::Secp256k1::new();
-
-    // Node B (responder) - odd parity key
-    let sk_b = secp256k1::SecretKey::from_slice(
-        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0").unwrap(),
-    )
-    .unwrap();
-    let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
-    let (xonly_b, parity_b) = kp_b.public_key().x_only_public_key();
-    assert_eq!(
-        parity_b,
-        Parity::Odd,
-        "Test requires odd-parity responder key"
-    );
-
-    // Node A (initiator) - even parity key
-    let sk_a = secp256k1::SecretKey::from_slice(
-        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20").unwrap(),
-    )
-    .unwrap();
-    let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
-
-    // Simulate the production path: initiator gets responder's key via npub
-    // (x-only -> assumed even parity)
-    let assumed_even_b = xonly_b.public_key(Parity::Even);
-    assert_ne!(
-        assumed_even_b,
-        kp_b.public_key(),
-        "Even assumption should differ from actual odd key"
-    );
-
-    // Handshake using assumed-even key (as production code does)
-    let mut initiator = HandshakeState::new_initiator(kp_a, assumed_even_b);
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_responder(kp_b);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_message_1().unwrap();
-    responder.read_message_1(&msg1).unwrap();
-
-    let msg2 = responder.write_message_2().unwrap();
-    initiator.read_message_2(&msg2).unwrap();
-
-    assert!(initiator.is_complete());
-    assert!(responder.is_complete());
-
-    // Verify sessions can communicate
-    let mut sender = initiator.into_session().unwrap();
-    let mut receiver = responder.into_session().unwrap();
-
-    let counter = sender.current_send_counter();
-    let ciphertext = sender.encrypt(b"parity test").unwrap();
-    let plaintext = receiver
-        .decrypt_with_replay_check(&ciphertext, counter)
-        .unwrap();
-    assert_eq!(plaintext, b"parity test");
-}
-
-// ===== XK Handshake Tests =====
-
-#[test]
-fn test_xk_full_handshake() {
-    let initiator_keypair = generate_keypair();
-    let responder_keypair = generate_keypair();
-    let initiator_epoch = generate_epoch();
-    let responder_epoch = generate_epoch();
-
-    let responder_pub = responder_keypair.public_key();
-
-    // XK: initiator knows responder's static, responder learns initiator's in msg3
-    let mut initiator = HandshakeState::new_xk_initiator(initiator_keypair, responder_pub);
-    initiator.set_local_epoch(initiator_epoch);
-    let mut responder = HandshakeState::new_xk_responder(responder_keypair);
-    responder.set_local_epoch(responder_epoch);
-
-    assert_eq!(initiator.role(), HandshakeRole::Initiator);
-    assert_eq!(responder.role(), HandshakeRole::Responder);
-
-    // Initially, responder doesn't know initiator's identity
-    assert!(responder.remote_static().is_none());
-
-    // Message 1: Initiator -> Responder (e, es)
-    let msg1 = initiator.write_xk_message_1().unwrap();
-    assert_eq!(msg1.len(), XK_HANDSHAKE_MSG1_SIZE);
-    assert_eq!(msg1.len(), 33); // ephemeral only
-
-    responder.read_xk_message_1(&msg1).unwrap();
-
-    // After msg1: responder still doesn't know initiator's identity (XK property)
-    assert!(responder.remote_static().is_none());
-    assert!(responder.remote_epoch().is_none());
-
-    // Message 2: Responder -> Initiator (e, ee + epoch)
-    let msg2 = responder.write_xk_message_2().unwrap();
-    assert_eq!(msg2.len(), XK_HANDSHAKE_MSG2_SIZE);
-    assert_eq!(msg2.len(), 57); // 33 ephemeral + 24 encrypted epoch
-
-    initiator.read_xk_message_2(&msg2).unwrap();
-
-    // After msg2: initiator learned responder's epoch
-    assert_eq!(initiator.remote_epoch(), Some(responder_epoch));
-    // Neither side is complete yet
-    assert!(!initiator.is_complete());
-    assert!(!responder.is_complete());
-
-    // Message 3: Initiator -> Responder (s, se + epoch)
-    let msg3 = initiator.write_xk_message_3().unwrap();
-    assert_eq!(msg3.len(), XK_HANDSHAKE_MSG3_SIZE);
-    assert_eq!(msg3.len(), 73); // 49 encrypted static + 24 encrypted epoch
-
-    responder.read_xk_message_3(&msg3).unwrap();
-
-    // Both should be complete now
-    assert!(initiator.is_complete());
-    assert!(responder.is_complete());
-
-    // After msg3: responder now knows initiator's identity
-    assert!(responder.remote_static().is_some());
-    assert_eq!(
-        responder.remote_static().unwrap(),
-        &initiator_keypair.public_key()
-    );
-
-    // Responder learned initiator's epoch from msg3
-    assert_eq!(responder.remote_epoch(), Some(initiator_epoch));
-
-    // Handshake hashes should match
-    assert_eq!(initiator.handshake_hash(), responder.handshake_hash());
-
-    // Convert to sessions
-    let mut initiator_session = initiator.into_session().unwrap();
-    let mut responder_session = responder.into_session().unwrap();
-
-    // Test bidirectional encryption
-    let plaintext = b"Hello via XK!";
-    let ciphertext = initiator_session.encrypt(plaintext).unwrap();
-    let decrypted = responder_session.decrypt(&ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
-
-    let plaintext2 = b"XK reply!";
-    let ciphertext2 = responder_session.encrypt(plaintext2).unwrap();
-    let decrypted2 = initiator_session.decrypt(&ciphertext2).unwrap();
-    assert_eq!(decrypted2, plaintext2);
-}
-
-#[test]
-fn test_xk_message_sizes() {
-    assert_eq!(XK_HANDSHAKE_MSG1_SIZE, 33); // ephemeral only
-    assert_eq!(XK_HANDSHAKE_MSG2_SIZE, 33 + 24); // ephemeral + encrypted epoch
-    assert_eq!(XK_HANDSHAKE_MSG3_SIZE, 33 + 16 + 24); // encrypted static + encrypted epoch
-}
-
-#[test]
-fn test_xk_identity_timing() {
-    // XK property: responder doesn't learn initiator identity until msg3
-    let initiator_keypair = generate_keypair();
-    let responder_keypair = generate_keypair();
-
-    let mut initiator =
-        HandshakeState::new_xk_initiator(initiator_keypair, responder_keypair.public_key());
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xk_responder(responder_keypair);
-    responder.set_local_epoch(generate_epoch());
-
-    // Before any messages
-    assert!(responder.remote_static().is_none());
-
-    // After msg1
-    let msg1 = initiator.write_xk_message_1().unwrap();
-    responder.read_xk_message_1(&msg1).unwrap();
-    assert!(
-        responder.remote_static().is_none(),
-        "XK: responder should NOT know identity after msg1"
-    );
-
-    // After msg2
-    let msg2 = responder.write_xk_message_2().unwrap();
-    initiator.read_xk_message_2(&msg2).unwrap();
-    assert!(
-        responder.remote_static().is_none(),
-        "XK: responder should NOT know identity after msg2"
-    );
-
-    // After msg3
-    let msg3 = initiator.write_xk_message_3().unwrap();
-    responder.read_xk_message_3(&msg3).unwrap();
-    assert!(
-        responder.remote_static().is_some(),
-        "XK: responder should know identity after msg3"
-    );
-    assert_eq!(
-        responder.remote_static().unwrap(),
-        &initiator_keypair.public_key()
-    );
-}
-
-#[test]
-fn test_xk_wrong_state_errors() {
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-
-    // Initiator can't read XK msg1
-    let mut initiator = HandshakeState::new_xk_initiator(keypair1, keypair2.public_key());
-    initiator.set_local_epoch(generate_epoch());
-    assert!(
-        initiator
-            .read_xk_message_1(&[0u8; XK_HANDSHAKE_MSG1_SIZE])
-            .is_err()
-    );
-
-    // Initiator can't write msg2
-    assert!(initiator.write_xk_message_2().is_err());
-
-    // Initiator can't write msg3 before msg2
-    assert!(initiator.write_xk_message_3().is_err());
-
-    // Responder can't write msg1
-    let mut responder = HandshakeState::new_xk_responder(keypair2);
-    responder.set_local_epoch(generate_epoch());
-    assert!(responder.write_xk_message_1().is_err());
-
-    // Responder can't read msg3 before msg2
-    assert!(
-        responder
-            .read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE])
-            .is_err()
-    );
-}
-
-#[test]
-fn test_xk_handshake_hash_differs_from_ik() {
-    // XK and IK should produce different handshake hashes (different protocol names)
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-    let epoch1 = generate_epoch();
-    let epoch2 = generate_epoch();
-
-    // Complete an IK handshake
-    let mut ik_init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
-    ik_init.set_local_epoch(epoch1);
-    let mut ik_resp = HandshakeState::new_responder(keypair2);
-    ik_resp.set_local_epoch(epoch2);
-    let msg1 = ik_init.write_message_1().unwrap();
-    ik_resp.read_message_1(&msg1).unwrap();
-    let msg2 = ik_resp.write_message_2().unwrap();
-    ik_init.read_message_2(&msg2).unwrap();
-    let ik_hash = ik_init.handshake_hash();
-
-    // Complete an XK handshake with the same keys
-    let mut xk_init = HandshakeState::new_xk_initiator(keypair1, keypair2.public_key());
-    xk_init.set_local_epoch(epoch1);
-    let mut xk_resp = HandshakeState::new_xk_responder(keypair2);
-    xk_resp.set_local_epoch(epoch2);
-    let msg1 = xk_init.write_xk_message_1().unwrap();
-    xk_resp.read_xk_message_1(&msg1).unwrap();
-    let msg2 = xk_resp.write_xk_message_2().unwrap();
-    xk_init.read_xk_message_2(&msg2).unwrap();
-    let msg3 = xk_init.write_xk_message_3().unwrap();
-    xk_resp.read_xk_message_3(&msg3).unwrap();
-    let xk_hash = xk_init.handshake_hash();
-
-    assert_ne!(
-        ik_hash, xk_hash,
-        "IK and XK should produce different handshake hashes"
-    );
-}
-
-#[test]
-fn test_xk_multiple_messages_after_handshake() {
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-
-    let mut initiator = HandshakeState::new_xk_initiator(keypair1, keypair2.public_key());
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xk_responder(keypair2);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xk_message_1().unwrap();
-    responder.read_xk_message_1(&msg1).unwrap();
-    let msg2 = responder.write_xk_message_2().unwrap();
-    initiator.read_xk_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_xk_message_3().unwrap();
-    responder.read_xk_message_3(&msg3).unwrap();
-
-    let mut init_session = initiator.into_session().unwrap();
-    let mut resp_session = responder.into_session().unwrap();
-
-    // Send many messages
-    for i in 0..100 {
-        let msg = format!("XK message {}", i);
-        let ct = init_session.encrypt(msg.as_bytes()).unwrap();
-        let pt = resp_session.decrypt(&ct).unwrap();
-        assert_eq!(pt, msg.as_bytes());
-    }
-
-    assert_eq!(init_session.send_nonce(), 100);
-    assert_eq!(resp_session.recv_nonce(), 100);
-}
-
-#[test]
-fn test_xk_with_odd_parity_responder() {
-    let secp = secp256k1::Secp256k1::new();
-
-    // Node B (responder) - odd parity key
-    let sk_b = secp256k1::SecretKey::from_slice(
-        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0").unwrap(),
-    )
-    .unwrap();
-    let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
-    let (xonly_b, parity_b) = kp_b.public_key().x_only_public_key();
-    assert_eq!(
-        parity_b,
-        Parity::Odd,
-        "Test requires odd-parity responder key"
-    );
-
-    // Node A (initiator)
-    let sk_a = secp256k1::SecretKey::from_slice(
-        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20").unwrap(),
-    )
-    .unwrap();
-    let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
-
-    // Simulate npub path: x-only → assumed even parity
-    let assumed_even_b = xonly_b.public_key(Parity::Even);
-
-    let mut initiator = HandshakeState::new_xk_initiator(kp_a, assumed_even_b);
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xk_responder(kp_b);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xk_message_1().unwrap();
-    responder.read_xk_message_1(&msg1).unwrap();
-    let msg2 = responder.write_xk_message_2().unwrap();
-    initiator.read_xk_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_xk_message_3().unwrap();
-    responder.read_xk_message_3(&msg3).unwrap();
-
-    assert!(initiator.is_complete());
-    assert!(responder.is_complete());
-
-    let mut sender = initiator.into_session().unwrap();
-    let mut receiver = responder.into_session().unwrap();
-
-    let counter = sender.current_send_counter();
-    let ciphertext = sender.encrypt(b"xk parity test").unwrap();
-    let plaintext = receiver
-        .decrypt_with_replay_check(&ciphertext, counter)
-        .unwrap();
-    assert_eq!(plaintext, b"xk parity test");
-}
-
-#[test]
-fn test_xk_invalid_msg1_size() {
-    let keypair = generate_keypair();
-    let mut responder = HandshakeState::new_xk_responder(keypair);
-    responder.set_local_epoch(generate_epoch());
-
-    // Wrong size (IK msg1 size instead of XK)
-    assert!(
-        responder
-            .read_xk_message_1(&[0u8; HANDSHAKE_MSG1_SIZE])
-            .is_err()
-    );
-    // Too short
-    assert!(responder.read_xk_message_1(&[0u8; 10]).is_err());
-}
-
-#[test]
-fn test_xk_invalid_msg3_size() {
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-
-    let mut initiator = HandshakeState::new_xk_initiator(keypair1, keypair2.public_key());
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xk_responder(keypair2);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xk_message_1().unwrap();
-    responder.read_xk_message_1(&msg1).unwrap();
-    let _msg2 = responder.write_xk_message_2().unwrap();
-
-    // Responder is now in Message2Done, try wrong-size msg3
-    assert!(responder.read_xk_message_3(&[0u8; 10]).is_err());
-    assert!(
-        responder
-            .read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE + 1])
-            .is_err()
-    );
-}
-
-// ===== XX Handshake Tests =====
-
-#[test]
-fn test_xx_full_handshake() {
-    let initiator_keypair = generate_keypair();
-    let responder_keypair = generate_keypair();
-    let initiator_epoch = generate_epoch();
-    let responder_epoch = generate_epoch();
-
-    // XX: neither side knows the other's static key
-    let mut initiator = HandshakeState::new_xx_initiator(initiator_keypair);
-    initiator.set_local_epoch(initiator_epoch);
-    let mut responder = HandshakeState::new_xx_responder(responder_keypair);
-    responder.set_local_epoch(responder_epoch);
-
-    assert_eq!(initiator.role(), HandshakeRole::Initiator);
-    assert_eq!(responder.role(), HandshakeRole::Responder);
-
-    // Neither side knows the other's identity
-    assert!(initiator.remote_static().is_none());
-    assert!(responder.remote_static().is_none());
-
-    // Message 1: Initiator -> Responder (e only)
-    let msg1 = initiator.write_xx_message_1().unwrap();
-    assert_eq!(msg1.len(), XX_HANDSHAKE_MSG1_SIZE);
-    assert_eq!(msg1.len(), 33);
-
-    responder.read_xx_message_1(&msg1).unwrap();
-
-    // After msg1: still no identities known
-    assert!(initiator.remote_static().is_none());
-    assert!(responder.remote_static().is_none());
-
-    // Message 2: Responder -> Initiator (e, ee, s, es + epoch)
-    let msg2 = responder.write_xx_message_2().unwrap();
-    assert_eq!(msg2.len(), XX_HANDSHAKE_MSG2_SIZE);
-    assert_eq!(msg2.len(), 106);
-
-    initiator.read_xx_message_2(&msg2).unwrap();
-
-    // After msg2: initiator knows responder's identity
-    assert!(initiator.remote_static().is_some());
-    assert_eq!(
-        initiator.remote_static().unwrap(),
-        &responder_keypair.public_key()
-    );
-    assert_eq!(initiator.remote_epoch(), Some(responder_epoch));
-    // Responder still doesn't know initiator
-    assert!(responder.remote_static().is_none());
-
-    // Neither side is complete yet
-    assert!(!initiator.is_complete());
-    assert!(!responder.is_complete());
-
-    // Message 3: Initiator -> Responder (s, se + epoch)
-    let msg3 = initiator.write_xx_message_3().unwrap();
-    assert_eq!(msg3.len(), XX_HANDSHAKE_MSG3_SIZE);
-    assert_eq!(msg3.len(), 73);
-
-    responder.read_xx_message_3(&msg3).unwrap();
-
-    // Both should be complete now
-    assert!(initiator.is_complete());
-    assert!(responder.is_complete());
-
-    // After msg3: responder knows initiator's identity
-    assert!(responder.remote_static().is_some());
-    assert_eq!(
-        responder.remote_static().unwrap(),
-        &initiator_keypair.public_key()
-    );
-    assert_eq!(responder.remote_epoch(), Some(initiator_epoch));
-
-    // Handshake hashes should match
-    assert_eq!(initiator.handshake_hash(), responder.handshake_hash());
-
-    // Convert to sessions
-    let mut initiator_session = initiator.into_session().unwrap();
-    let mut responder_session = responder.into_session().unwrap();
-
-    // Test bidirectional encryption
-    let plaintext = b"Hello via XX!";
-    let ciphertext = initiator_session.encrypt(plaintext).unwrap();
-    let decrypted = responder_session.decrypt(&ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
-
-    let plaintext2 = b"XX reply!";
-    let ciphertext2 = responder_session.encrypt(plaintext2).unwrap();
-    let decrypted2 = initiator_session.decrypt(&ciphertext2).unwrap();
-    assert_eq!(decrypted2, plaintext2);
-}
-
-#[test]
-fn test_xx_message_sizes() {
-    assert_eq!(XX_HANDSHAKE_MSG1_SIZE, 33); // ephemeral only
-    assert_eq!(XX_HANDSHAKE_MSG2_SIZE, 33 + 33 + 16 + 24); // e + encrypted static + encrypted epoch
-    assert_eq!(XX_HANDSHAKE_MSG3_SIZE, 33 + 16 + 24); // encrypted static + encrypted epoch
-}
-
-#[test]
-fn test_xx_identity_timing() {
-    // XX property: initiator learns responder in msg2, responder learns initiator in msg3
-    let initiator_keypair = generate_keypair();
-    let responder_keypair = generate_keypair();
-
-    let mut initiator = HandshakeState::new_xx_initiator(initiator_keypair);
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xx_responder(responder_keypair);
-    responder.set_local_epoch(generate_epoch());
-
-    // Before any messages: neither side knows
-    assert!(initiator.remote_static().is_none());
-    assert!(responder.remote_static().is_none());
-
-    // After msg1
-    let msg1 = initiator.write_xx_message_1().unwrap();
-    responder.read_xx_message_1(&msg1).unwrap();
-    assert!(initiator.remote_static().is_none(), "XX: initiator should NOT know identity after msg1");
-    assert!(responder.remote_static().is_none(), "XX: responder should NOT know identity after msg1");
-
-    // After msg2: initiator learns responder
-    let msg2 = responder.write_xx_message_2().unwrap();
-    initiator.read_xx_message_2(&msg2).unwrap();
-    assert!(initiator.remote_static().is_some(), "XX: initiator should know responder after msg2");
-    assert_eq!(initiator.remote_static().unwrap(), &responder_keypair.public_key());
-    assert!(responder.remote_static().is_none(), "XX: responder should NOT know initiator after msg2");
-
-    // After msg3: responder learns initiator
-    let msg3 = initiator.write_xx_message_3().unwrap();
-    responder.read_xx_message_3(&msg3).unwrap();
-    assert!(responder.remote_static().is_some(), "XX: responder should know initiator after msg3");
-    assert_eq!(responder.remote_static().unwrap(), &initiator_keypair.public_key());
-}
-
-#[test]
-fn test_xx_wrong_state_errors() {
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-
-    // Initiator can't read XX msg1
-    let mut initiator = HandshakeState::new_xx_initiator(keypair1);
-    initiator.set_local_epoch(generate_epoch());
-    assert!(initiator.read_xx_message_1(&[0u8; XX_HANDSHAKE_MSG1_SIZE]).is_err());
-
-    // Initiator can't write msg2
-    assert!(initiator.write_xx_message_2().is_err());
-
-    // Initiator can't write msg3 before msg2
-    assert!(initiator.write_xx_message_3().is_err());
-
-    // Responder can't write msg1
-    let mut responder = HandshakeState::new_xx_responder(keypair2);
-    responder.set_local_epoch(generate_epoch());
-    assert!(responder.write_xx_message_1().is_err());
-
-    // Responder can't read msg3 before msg2
-    assert!(responder.read_xx_message_3(&[0u8; XX_HANDSHAKE_MSG3_SIZE]).is_err());
-}
-
-#[test]
-fn test_xx_handshake_hash_differs() {
-    // XX should produce different handshake hashes from both IK and XK
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-    let epoch1 = generate_epoch();
-    let epoch2 = generate_epoch();
-
-    // Complete an IK handshake
-    let mut ik_init = HandshakeState::new_initiator(keypair1, keypair2.public_key());
-    ik_init.set_local_epoch(epoch1);
-    let mut ik_resp = HandshakeState::new_responder(keypair2);
-    ik_resp.set_local_epoch(epoch2);
-    let msg1 = ik_init.write_message_1().unwrap();
-    ik_resp.read_message_1(&msg1).unwrap();
-    let msg2 = ik_resp.write_message_2().unwrap();
-    ik_init.read_message_2(&msg2).unwrap();
-    let ik_hash = ik_init.handshake_hash();
-
-    // Complete an XK handshake with the same keys
-    let mut xk_init = HandshakeState::new_xk_initiator(keypair1, keypair2.public_key());
-    xk_init.set_local_epoch(epoch1);
-    let mut xk_resp = HandshakeState::new_xk_responder(keypair2);
-    xk_resp.set_local_epoch(epoch2);
-    let msg1 = xk_init.write_xk_message_1().unwrap();
-    xk_resp.read_xk_message_1(&msg1).unwrap();
-    let msg2 = xk_resp.write_xk_message_2().unwrap();
-    xk_init.read_xk_message_2(&msg2).unwrap();
-    let msg3 = xk_init.write_xk_message_3().unwrap();
-    xk_resp.read_xk_message_3(&msg3).unwrap();
-    let xk_hash = xk_init.handshake_hash();
-
-    // Complete an XX handshake with the same keys
-    let mut xx_init = HandshakeState::new_xx_initiator(keypair1);
-    xx_init.set_local_epoch(epoch1);
-    let mut xx_resp = HandshakeState::new_xx_responder(keypair2);
-    xx_resp.set_local_epoch(epoch2);
-    let msg1 = xx_init.write_xx_message_1().unwrap();
-    xx_resp.read_xx_message_1(&msg1).unwrap();
-    let msg2 = xx_resp.write_xx_message_2().unwrap();
-    xx_init.read_xx_message_2(&msg2).unwrap();
-    let msg3 = xx_init.write_xx_message_3().unwrap();
-    xx_resp.read_xx_message_3(&msg3).unwrap();
-    let xx_hash = xx_init.handshake_hash();
-
-    assert_ne!(ik_hash, xx_hash, "IK and XX should produce different handshake hashes");
-    assert_ne!(xk_hash, xx_hash, "XK and XX should produce different handshake hashes");
-}
-
-#[test]
-fn test_xx_multiple_messages_after_handshake() {
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-
-    let mut initiator = HandshakeState::new_xx_initiator(keypair1);
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xx_responder(keypair2);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xx_message_1().unwrap();
-    responder.read_xx_message_1(&msg1).unwrap();
-    let msg2 = responder.write_xx_message_2().unwrap();
-    initiator.read_xx_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_xx_message_3().unwrap();
-    responder.read_xx_message_3(&msg3).unwrap();
-
-    let mut init_session = initiator.into_session().unwrap();
-    let mut resp_session = responder.into_session().unwrap();
-
-    // Send many messages
-    for i in 0..100 {
-        let msg = format!("XX message {}", i);
-        let ct = init_session.encrypt(msg.as_bytes()).unwrap();
-        let pt = resp_session.decrypt(&ct).unwrap();
-        assert_eq!(pt, msg.as_bytes());
-    }
-
-    assert_eq!(init_session.send_nonce(), 100);
-    assert_eq!(resp_session.recv_nonce(), 100);
-}
-
-#[test]
-fn test_xx_with_odd_parity() {
-    // XX: no pre-message normalization needed, but ECDH x-only hashing
-    // must still produce matching shared secrets regardless of parity.
-    let secp = secp256k1::Secp256k1::new();
-
-    // Node A (initiator) - even parity key
-    let sk_a = secp256k1::SecretKey::from_slice(
-        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
-            .unwrap(),
-    )
-    .unwrap();
-    let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
-
-    // Node B (responder) - odd parity key
-    let sk_b = secp256k1::SecretKey::from_slice(
-        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0")
-            .unwrap(),
-    )
-    .unwrap();
-    let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
-    let (_, parity_b) = kp_b.public_key().x_only_public_key();
-    assert_eq!(parity_b, Parity::Odd, "Test requires odd-parity responder key");
-
-    let mut initiator = HandshakeState::new_xx_initiator(kp_a);
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xx_responder(kp_b);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xx_message_1().unwrap();
-    responder.read_xx_message_1(&msg1).unwrap();
-    let msg2 = responder.write_xx_message_2().unwrap();
-    initiator.read_xx_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_xx_message_3().unwrap();
-    responder.read_xx_message_3(&msg3).unwrap();
-
-    assert!(initiator.is_complete());
-    assert!(responder.is_complete());
-
-    let mut sender = initiator.into_session().unwrap();
-    let mut receiver = responder.into_session().unwrap();
-
-    let counter = sender.current_send_counter();
-    let ciphertext = sender.encrypt(b"xx parity test").unwrap();
-    let plaintext = receiver.decrypt_with_replay_check(&ciphertext, counter).unwrap();
-    assert_eq!(plaintext, b"xx parity test");
-}
-
-#[test]
-fn test_xx_invalid_msg_sizes() {
-    let keypair1 = generate_keypair();
-    let keypair2 = generate_keypair();
-
-    // Wrong size for msg1
-    let mut responder = HandshakeState::new_xx_responder(keypair1);
-    responder.set_local_epoch(generate_epoch());
-    assert!(responder.read_xx_message_1(&[0u8; HANDSHAKE_MSG1_SIZE]).is_err()); // IK msg1 size
-    assert!(responder.read_xx_message_1(&[0u8; 10]).is_err());
-
-    // Wrong size for msg3
-    let mut initiator = HandshakeState::new_xx_initiator(keypair1);
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xx_responder(keypair2);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xx_message_1().unwrap();
-    responder.read_xx_message_1(&msg1).unwrap();
-    let _msg2 = responder.write_xx_message_2().unwrap();
-
-    // Responder is now in Message2Done, try wrong-size msg3
-    assert!(responder.read_xx_message_3(&[0u8; 10]).is_err());
-    assert!(responder.read_xx_message_3(&[0u8; XX_HANDSHAKE_MSG3_SIZE + 1]).is_err());
 }
