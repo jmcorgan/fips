@@ -64,11 +64,14 @@ pub(super) fn make_completed_connection(
     let mut resp_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
     let msg2 = resp_conn
-        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, current_time_ms)
+        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, None, current_time_ms)
         .unwrap();
 
-    // Complete initiator handshake
-    conn.complete_handshake(&msg2, current_time_ms).unwrap();
+    // Complete initiator handshake (XX: generates msg3)
+    let (msg3, _neg) = conn.complete_handshake(&msg2, None, current_time_ms).unwrap();
+
+    // Complete responder handshake (XX: processes msg3)
+    resp_conn.complete_handshake_msg3(&msg3, current_time_ms).unwrap();
 
     // Set indices and transport info
     let our_index = node.index_allocator.allocate().unwrap();

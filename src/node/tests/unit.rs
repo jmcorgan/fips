@@ -505,12 +505,13 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let mut resp_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
     let msg2 = resp_conn
-        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, completing_time_ms)
+        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, None, completing_time_ms)
         .unwrap();
 
-    completing_conn
-        .complete_handshake(&msg2, completing_time_ms)
+    let (msg3, _neg) = completing_conn
+        .complete_handshake(&msg2, None, completing_time_ms)
         .unwrap();
+    resp_conn.complete_handshake_msg3(&msg3, completing_time_ms).unwrap();
 
     let completing_index = node.index_allocator.allocate().unwrap();
     completing_conn.set_our_index(completing_index);

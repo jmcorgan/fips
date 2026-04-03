@@ -71,10 +71,11 @@ impl Node {
             None => return,
         };
 
-        // Free session index and pending_outbound if allocated
+        // Free session index and pending_outbound/pending_inbound if allocated
         if let Some(idx) = conn.our_index() {
             if let Some(tid) = conn.transport_id() {
                 self.pending_outbound.remove(&(tid, idx.as_u32()));
+                self.pending_inbound.remove(&(tid, idx.as_u32()));
             }
             let _ = self.index_allocator.free(idx);
         }

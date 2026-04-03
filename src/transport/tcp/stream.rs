@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 const PHASE_ESTABLISHED: u8 = 0x0;
 const PHASE_MSG1: u8 = 0x1;
 const PHASE_MSG2: u8 = 0x2;
+const PHASE_MSG3: u8 = 0x3;
 
 /// Size of the FMP common prefix.
 const PREFIX_SIZE: usize = 4;
@@ -36,6 +37,7 @@ pub enum StreamError {
         max_payload_len: u16,
     },
     /// Handshake packet has unexpected payload_len for its phase.
+    /// For msg1, expected is exact; for msg2/msg3, expected is the minimum.
     HandshakeSizeMismatch { phase: u8, expected: u16, got: u16 },
     /// I/O error (including EOF).
     Io(std::io::Error),
@@ -80,17 +82,22 @@ impl From<std::io::Error> for StreamError {
     }
 }
 
-/// Known wire sizes for handshake messages.
-/// msg1: 4 (prefix) + 4 (sender_idx) + 106 (noise_msg1) = 114 bytes
-/// msg2: 4 (prefix) + 4 (sender_idx) + 4 (receiver_idx) + 57 (noise_msg2) = 69 bytes
-const MSG1_WIRE_SIZE: usize = 114;
-const MSG2_WIRE_SIZE: usize = 69;
+/// Known wire sizes for handshake messages (Noise XX).
+/// msg1: 4 (prefix) + 4 (sender_idx) + 33 (noise_msg1) = 41 bytes (exact)
+/// msg2: 4 (prefix) + 4 (sender_idx) + 4 (receiver_idx) + 106+ (noise_msg2) = 118+ bytes (minimum)
+/// msg3: 4 (prefix) + 4 (sender_idx) + 4 (receiver_idx) + 73+ (noise_msg3) = 85+ bytes (minimum)
+const MSG1_WIRE_SIZE: usize = 41;
+const MSG2_MIN_WIRE_SIZE: usize = 118;
+const MSG3_MIN_WIRE_SIZE: usize = 85;
 
-/// Expected payload_len for msg1: sender_idx(4) + noise_msg1(106) = 110.
+/// Expected payload_len for msg1: sender_idx(4) + noise_msg1(33) = 37.
 const MSG1_PAYLOAD_LEN: u16 = (MSG1_WIRE_SIZE - PREFIX_SIZE) as u16;
 
-/// Expected payload_len for msg2: sender_idx(4) + receiver_idx(4) + noise_msg2(57) = 65.
-const MSG2_PAYLOAD_LEN: u16 = (MSG2_WIRE_SIZE - PREFIX_SIZE) as u16;
+/// Minimum payload_len for msg2: sender_idx(4) + receiver_idx(4) + noise_msg2(106) = 114.
+const MSG2_MIN_PAYLOAD_LEN: u16 = (MSG2_MIN_WIRE_SIZE - PREFIX_SIZE) as u16;
+
+/// Minimum payload_len for msg3: sender_idx(4) + receiver_idx(4) + noise_msg3(73) = 81.
+const MSG3_MIN_PAYLOAD_LEN: u16 = (MSG3_MIN_WIRE_SIZE - PREFIX_SIZE) as u16;
 
 /// Read one complete FMP packet from an async reader.
 ///
@@ -120,7 +127,7 @@ pub async fn read_fmp_packet<R: AsyncRead + Unpin>(
     let version = prefix[0] >> 4;
     let phase = prefix[0] & 0x0F;
 
-    if version != 0 {
+    if version != 1 {
         return Err(StreamError::UnknownVersion(version));
     }
 
@@ -155,10 +162,20 @@ pub async fn read_fmp_packet<R: AsyncRead + Unpin>(
             payload_len as usize
         }
         PHASE_MSG2 => {
-            if payload_len != MSG2_PAYLOAD_LEN {
+            if payload_len < MSG2_MIN_PAYLOAD_LEN {
                 return Err(StreamError::HandshakeSizeMismatch {
                     phase,
-                    expected: MSG2_PAYLOAD_LEN,
+                    expected: MSG2_MIN_PAYLOAD_LEN,
+                    got: payload_len,
+                });
+            }
+            payload_len as usize
+        }
+        PHASE_MSG3 => {
+            if payload_len < MSG3_MIN_PAYLOAD_LEN {
+                return Err(StreamError::HandshakeSizeMismatch {
+                    phase,
+                    expected: MSG3_MIN_PAYLOAD_LEN,
                     got: payload_len,
                 });
             }
@@ -193,7 +210,7 @@ mod tests {
         let total =
             PREFIX_SIZE + ESTABLISHED_REMAINING_HEADER + payload_len as usize + AEAD_TAG_SIZE;
         let mut frame = vec![0u8; total];
-        frame[0] = 0x00; // ver=0, phase=0 (established)
+        frame[0] = 0x10; // ver=1, phase=0 (established)
         frame[1] = 0x00; // flags
         frame[2..4].copy_from_slice(&payload_len.to_le_bytes());
         // Fill remaining with pattern for verification
@@ -203,21 +220,30 @@ mod tests {
         frame
     }
 
-    /// Build a msg1 frame (114 bytes total).
+    /// Build a msg1 frame (41 bytes total).
     fn build_msg1_frame() -> Vec<u8> {
         let mut frame = vec![0xAA; MSG1_WIRE_SIZE];
-        frame[0] = 0x01; // ver=0, phase=1
+        frame[0] = 0x11; // ver=1, phase=1
         frame[1] = 0x00; // flags
         frame[2..4].copy_from_slice(&MSG1_PAYLOAD_LEN.to_le_bytes());
         frame
     }
 
-    /// Build a msg2 frame (69 bytes total).
+    /// Build a msg2 frame (minimum 118 bytes).
     fn build_msg2_frame() -> Vec<u8> {
-        let mut frame = vec![0xBB; MSG2_WIRE_SIZE];
-        frame[0] = 0x02; // ver=0, phase=2
+        let mut frame = vec![0xBB; MSG2_MIN_WIRE_SIZE];
+        frame[0] = 0x12; // ver=1, phase=2
         frame[1] = 0x00; // flags
-        frame[2..4].copy_from_slice(&MSG2_PAYLOAD_LEN.to_le_bytes());
+        frame[2..4].copy_from_slice(&MSG2_MIN_PAYLOAD_LEN.to_le_bytes());
+        frame
+    }
+
+    /// Build a msg3 frame (minimum 85 bytes).
+    fn build_msg3_frame() -> Vec<u8> {
+        let mut frame = vec![0xCC; MSG3_MIN_WIRE_SIZE];
+        frame[0] = 0x13; // ver=1, phase=3
+        frame[1] = 0x00; // flags
+        frame[2..4].copy_from_slice(&MSG3_MIN_PAYLOAD_LEN.to_le_bytes());
         frame
     }
 
@@ -250,7 +276,7 @@ mod tests {
 
         let mut cursor = Cursor::new(frame);
         let packet = read_fmp_packet(&mut cursor, 1400).await.unwrap();
-        assert_eq!(packet.len(), MSG2_WIRE_SIZE);
+        assert_eq!(packet.len(), MSG2_MIN_WIRE_SIZE);
         assert_eq!(packet, expected);
     }
 
@@ -272,24 +298,48 @@ mod tests {
         assert_eq!(p2, est);
 
         let p3 = read_fmp_packet(&mut cursor, 1400).await.unwrap();
-        assert_eq!(p3.len(), MSG2_WIRE_SIZE);
+        assert_eq!(p3.len(), MSG2_MIN_WIRE_SIZE);
+    }
+
+    #[tokio::test]
+    async fn test_read_msg3_frame() {
+        let frame = build_msg3_frame();
+        let expected = frame.clone();
+
+        let mut cursor = Cursor::new(frame);
+        let packet = read_fmp_packet(&mut cursor, 1400).await.unwrap();
+        assert_eq!(packet.len(), MSG3_MIN_WIRE_SIZE);
+        assert_eq!(packet, expected);
     }
 
     #[tokio::test]
     async fn test_unknown_version_error() {
         // TLS ClientHello starts with 0x16 (record type "Handshake"),
-        // which parses as FMP version=1, phase=6.
+        // which parses as FMP version=1, phase=6. But now FMP version IS 1,
+        // so test with version=0 (old protocol) instead.
         let mut frame = vec![0u8; 100];
-        frame[0] = 0x16;
+        frame[0] = 0x00; // version 0 (old), phase 0
         let mut cursor = Cursor::new(frame);
         let err = read_fmp_packet(&mut cursor, 1400).await.unwrap_err();
-        assert!(matches!(err, StreamError::UnknownVersion(1)));
+        assert!(matches!(err, StreamError::UnknownVersion(0)));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_version_tls() {
+        // TLS ClientHello: 0x16 → version=1, phase=6.
+        // Version 1 is now valid, so this triggers UnknownPhase, not UnknownVersion.
+        let mut frame = vec![0u8; 100];
+        frame[0] = 0x16;
+        frame[2..4].copy_from_slice(&10u16.to_le_bytes());
+        let mut cursor = Cursor::new(frame);
+        let err = read_fmp_packet(&mut cursor, 1400).await.unwrap_err();
+        assert!(matches!(err, StreamError::UnknownPhase(0x6)));
     }
 
     #[tokio::test]
     async fn test_unknown_phase_error() {
         let mut frame = vec![0u8; 100];
-        frame[0] = 0x05; // unknown phase
+        frame[0] = 0x15; // ver=1, unknown phase 5
         frame[2..4].copy_from_slice(&10u16.to_le_bytes());
 
         let mut cursor = Cursor::new(frame);
@@ -302,7 +352,7 @@ mod tests {
         // mtu=100, max_payload_len = 100 - 32 = 68
         let payload_len = 100u16; // exceeds max of 68
         let mut prefix = [0u8; 4];
-        prefix[0] = 0x00; // established
+        prefix[0] = 0x10; // ver=1, established
         prefix[2..4].copy_from_slice(&payload_len.to_le_bytes());
 
         // Provide enough bytes for the reader to read prefix
@@ -317,8 +367,8 @@ mod tests {
     #[tokio::test]
     async fn test_handshake_size_mismatch_msg1() {
         let mut frame = vec![0u8; 200];
-        frame[0] = 0x01; // msg1
-        // Wrong payload_len (should be 110)
+        frame[0] = 0x11; // ver=1, msg1
+        // Wrong payload_len (should be 37)
         frame[2..4].copy_from_slice(&50u16.to_le_bytes());
 
         let mut cursor = Cursor::new(frame);
@@ -332,8 +382,8 @@ mod tests {
     #[tokio::test]
     async fn test_handshake_size_mismatch_msg2() {
         let mut frame = vec![0u8; 200];
-        frame[0] = 0x02; // msg2
-        // Wrong payload_len (should be 65)
+        frame[0] = 0x12; // ver=1, msg2
+        // Wrong payload_len (should be >= 114)
         frame[2..4].copy_from_slice(&50u16.to_le_bytes());
 
         let mut cursor = Cursor::new(frame);
@@ -342,6 +392,18 @@ mod tests {
             err,
             StreamError::HandshakeSizeMismatch { phase: 0x2, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_handshake_size_mismatch_msg3() {
+        let mut frame = vec![0u8; 200];
+        frame[0] = 0x13; // ver=1, msg3
+        // Wrong payload_len (should be >= 81)
+        frame[2..4].copy_from_slice(&50u16.to_le_bytes());
+
+        let mut cursor = Cursor::new(frame);
+        let err = read_fmp_packet(&mut cursor, 1400).await.unwrap_err();
+        assert!(matches!(err, StreamError::HandshakeSizeMismatch { phase: 0x3, .. }));
     }
 
     #[tokio::test]
@@ -356,8 +418,8 @@ mod tests {
     #[tokio::test]
     async fn test_eof_on_body() {
         // Valid msg1 prefix but truncated body
-        let mut data = vec![0u8; 10]; // need 114 total
-        data[0] = 0x01; // msg1
+        let mut data = vec![0u8; 10]; // need 41 total
+        data[0] = 0x11; // ver=1, msg1
         data[2..4].copy_from_slice(&MSG1_PAYLOAD_LEN.to_le_bytes());
 
         let mut cursor = Cursor::new(data);
@@ -394,7 +456,7 @@ mod tests {
         // mtu=1400, max_payload_len = 1368, try 1369
         let over = 1400u16 - 32 + 1;
         let mut prefix = [0u8; 4];
-        prefix[0] = 0x00; // established
+        prefix[0] = 0x10; // ver=1, established
         prefix[2..4].copy_from_slice(&over.to_le_bytes());
 
         let mut data = prefix.to_vec();

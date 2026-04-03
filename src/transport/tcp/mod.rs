@@ -1153,7 +1153,7 @@ mod tests {
         let payload_len = 4u16;
         let total = 4 + 12 + payload_len as usize + 16;
         let mut frame = vec![0u8; total];
-        frame[0] = 0x00; // ver=0, phase=0 (established)
+        frame[0] = 0x10; // ver=1, phase=0 (established)
         frame[1] = 0x00; // flags
         frame[2..4].copy_from_slice(&payload_len.to_le_bytes());
         // Fill the rest with a recognizable pattern
@@ -1194,10 +1194,10 @@ mod tests {
         let addr2 = t2.local_addr().unwrap();
 
         // Build valid FMP msg1 frame (114 bytes)
-        let mut msg1_frame = vec![0xAA; 114];
-        msg1_frame[0] = 0x01; // phase=msg1
+        let mut msg1_frame = vec![0xAA; 41];
+        msg1_frame[0] = 0x11; // ver=1, phase=msg1
         msg1_frame[1] = 0x00;
-        msg1_frame[2..4].copy_from_slice(&110u16.to_le_bytes()); // payload_len = 110
+        msg1_frame[2..4].copy_from_slice(&37u16.to_le_bytes()); // payload_len = 37
 
         // Send from t1 to t2
         t1.send_async(&TransportAddr::from_string(&addr2.to_string()), &msg1_frame)
@@ -1211,10 +1211,10 @@ mod tests {
         assert_eq!(packet.data, msg1_frame);
 
         // Build valid FMP msg2 frame (69 bytes)
-        let mut msg2_frame = vec![0xBB; 69];
-        msg2_frame[0] = 0x02; // phase=msg2
+        let mut msg2_frame = vec![0xBB; 118];
+        msg2_frame[0] = 0x12; // ver=1, phase=msg2
         msg2_frame[1] = 0x00;
-        msg2_frame[2..4].copy_from_slice(&65u16.to_le_bytes()); // payload_len = 65
+        msg2_frame[2..4].copy_from_slice(&114u16.to_le_bytes()); // payload_len = 114
 
         // Send from t2 to t1
         t2.send_async(&TransportAddr::from_string(&addr1.to_string()), &msg2_frame)
@@ -1270,10 +1270,10 @@ mod tests {
         let remote = TransportAddr::from_string(&addr2.to_string());
 
         // Build valid msg1 frame to establish connection
-        let mut msg1 = vec![0xAA; 114];
-        msg1[0] = 0x01;
+        let mut msg1 = vec![0xAA; 41];
+        msg1[0] = 0x11;
         msg1[1] = 0x00;
-        msg1[2..4].copy_from_slice(&110u16.to_le_bytes());
+        msg1[2..4].copy_from_slice(&37u16.to_le_bytes());
 
         t1.send_async(&remote, &msg1).await.unwrap();
 
@@ -1371,10 +1371,10 @@ mod tests {
         let remote = TransportAddr::from_string(&addr2.to_string());
 
         // Build valid msg1 frame
-        let mut msg1 = vec![0xAA; 114];
-        msg1[0] = 0x01;
+        let mut msg1 = vec![0xAA; 41];
+        msg1[0] = 0x11;
         msg1[1] = 0x00;
-        msg1[2..4].copy_from_slice(&110u16.to_le_bytes());
+        msg1[2..4].copy_from_slice(&37u16.to_le_bytes());
 
         // First send establishes connection
         t1.send_async(&remote, &msg1).await.unwrap();
@@ -1424,10 +1424,10 @@ mod tests {
         assert_eq!(state, ConnectionState::Connected);
 
         // Now send should work (connection already established)
-        let mut msg1 = vec![0xAA; 114];
-        msg1[0] = 0x01;
+        let mut msg1 = vec![0xAA; 41];
+        msg1[0] = 0x11;
         msg1[1] = 0x00;
-        msg1[2..4].copy_from_slice(&110u16.to_le_bytes());
+        msg1[2..4].copy_from_slice(&37u16.to_le_bytes());
 
         t1.send_async(&remote, &msg1).await.unwrap();
 
@@ -1527,10 +1527,10 @@ mod tests {
         );
 
         // Build valid FMP msg1 frame
-        let mut msg1 = vec![0xAA; 114];
-        msg1[0] = 0x01;
+        let mut msg1 = vec![0xAA; 41];
+        msg1[0] = 0x11;
         msg1[1] = 0x00;
-        msg1[2..4].copy_from_slice(&110u16.to_le_bytes());
+        msg1[2..4].copy_from_slice(&37u16.to_le_bytes());
 
         // Send using the pre-established connection
         t1.send_async(&remote, &msg1).await.unwrap();
@@ -1577,10 +1577,10 @@ mod tests {
 
         // Connect using IP string — build a valid FMP frame (114 bytes)
         let addr = TransportAddr::from_string(&format!("127.0.0.1:{}", port2));
-        let mut frame = vec![0xAA; 114];
-        frame[0] = 0x01; // ver=0, phase=1
+        let mut frame = vec![0xAA; 41];
+        frame[0] = 0x11; // ver=1, phase=1
         frame[1] = 0x00; // flags
-        frame[2..4].copy_from_slice(&110u16.to_le_bytes()); // payload_len
+        frame[2..4].copy_from_slice(&37u16.to_le_bytes()); // payload_len
         t1.send_async(&addr, &frame).await.unwrap();
 
         // Receive on t2

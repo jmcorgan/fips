@@ -1557,14 +1557,14 @@ mod tests {
     use mock_socks5::MockSocks5Server;
 
     /// msg1 wire size: 4 prefix + 4 sender_idx + 106 noise_msg1 = 114 bytes.
-    const MSG1_WIRE_SIZE: usize = 114;
-    /// msg1 payload_len: sender_idx(4) + noise_msg1(106) = 110.
+    const MSG1_WIRE_SIZE: usize = 41;
+    /// msg1 payload_len: sender_idx(4) + noise_msg1(33) = 37.
     const MSG1_PAYLOAD_LEN: u16 = (MSG1_WIRE_SIZE - 4) as u16;
 
-    /// Build a msg1 frame (114 bytes) for testing.
+    /// Build a msg1 frame (41 bytes) for testing.
     fn build_msg1_frame() -> Vec<u8> {
         let mut frame = vec![0xAA; MSG1_WIRE_SIZE];
-        frame[0] = 0x01; // ver=0, phase=1
+        frame[0] = 0x11; // ver=1, phase=1
         frame[1] = 0x00; // flags
         frame[2..4].copy_from_slice(&MSG1_PAYLOAD_LEN.to_le_bytes());
         frame

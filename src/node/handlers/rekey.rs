@@ -128,7 +128,7 @@ impl Node {
 
     /// Initiate an outbound rekey to a peer.
     ///
-    /// Creates a new IK handshake as initiator, sends msg1 over the existing
+    /// Creates a new XX handshake as initiator, sends msg1 over the existing
     /// link (same transport, same remote address), and stores the handshake
     /// state on the ActivePeer. No new Link or PeerConnection is created.
     async fn initiate_rekey(&mut self, node_addr: &NodeAddr) {
@@ -146,7 +146,6 @@ impl Node {
             None => return,
         };
         let link_id = peer.link_id();
-        let peer_pubkey = peer.identity().pubkey_full();
 
         // Allocate a new session index for the rekey
         let our_index = match self.index_allocator.allocate() {
@@ -161,12 +160,12 @@ impl Node {
             }
         };
 
-        // Create IK initiator handshake directly (no PeerConnection)
+        // Create XX initiator handshake directly (no PeerConnection)
         let our_keypair = self.identity.keypair();
-        let mut hs = HandshakeState::new_initiator(our_keypair, peer_pubkey);
+        let mut hs = HandshakeState::new_xx_initiator(our_keypair);
         hs.set_local_epoch(self.startup_epoch);
 
-        let noise_msg1 = match hs.write_message_1() {
+        let noise_msg1 = match hs.write_xx_message_1() {
             Ok(msg) => msg,
             Err(e) => {
                 warn!(

@@ -14,27 +14,31 @@
 //! | Phase | Type            | Size       | Description                    |
 //! |-------|-----------------|------------|--------------------------------|
 //! | 0x0   | Encrypted frame | 32+ bytes  | Post-handshake encrypted data  |
-//! | 0x1   | Noise IK msg1   | 114 bytes  | Handshake initiation           |
-//! | 0x2   | Noise IK msg2   | 69 bytes   | Handshake response             |
+//! | 0x1   | Noise XX msg1   | 41 bytes   | Handshake initiation           |
+//! | 0x2   | Noise XX msg2   | 118+ bytes | Handshake response             |
+//! | 0x3   | Noise XX msg3   | 85+ bytes  | Handshake completion           |
 
-use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, TAG_SIZE};
 use crate::utils::index::SessionIndex;
+use crate::noise::{XX_HANDSHAKE_MSG1_SIZE, XX_HANDSHAKE_MSG2_SIZE, XX_HANDSHAKE_MSG3_SIZE, TAG_SIZE};
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 /// FMP protocol version (4 high bits of byte 0).
-pub const FMP_VERSION: u8 = 0;
+pub const FMP_VERSION: u8 = 1;
 
 /// Phase value for established (encrypted) frames.
 pub const PHASE_ESTABLISHED: u8 = 0x0;
 
-/// Phase value for Noise IK message 1 (handshake initiation).
+/// Phase value for handshake message 1 (initiation).
 pub const PHASE_MSG1: u8 = 0x1;
 
-/// Phase value for Noise IK message 2 (handshake response).
+/// Phase value for handshake message 2 (response).
 pub const PHASE_MSG2: u8 = 0x2;
+
+/// Phase value for handshake message 3 (completion, XX only).
+pub const PHASE_MSG3: u8 = 0x3;
 
 /// Size of the common packet prefix (all packet types).
 pub const COMMON_PREFIX_SIZE: usize = 4;
@@ -42,11 +46,16 @@ pub const COMMON_PREFIX_SIZE: usize = 4;
 /// Size of the full established frame header (prefix + receiver_idx + counter).
 pub const ESTABLISHED_HEADER_SIZE: usize = 16;
 
-/// Size of Noise IK message 1 wire packet: prefix + sender_idx + noise_msg1.
-pub const MSG1_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + HANDSHAKE_MSG1_SIZE; // 114 bytes
+/// Size of handshake msg1 wire packet: prefix + sender_idx + noise_msg1.
+pub const MSG1_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + XX_HANDSHAKE_MSG1_SIZE; // 41 bytes
 
-/// Size of Noise IK message 2 wire packet: prefix + sender_idx + receiver_idx + noise_msg2.
-pub const MSG2_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + HANDSHAKE_MSG2_SIZE; // 69 bytes
+/// Minimum size of handshake msg2 wire packet: prefix + sender_idx + receiver_idx + noise_msg2.
+/// Actual size may be larger due to optional negotiation payload.
+pub const MSG2_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + XX_HANDSHAKE_MSG2_SIZE; // 118 bytes
+
+/// Minimum size of handshake msg3 wire packet: prefix + sender_idx + receiver_idx + noise_msg3.
+/// Actual size may be larger due to optional negotiation payload.
+pub const MSG3_WIRE_SIZE: usize = COMMON_PREFIX_SIZE + 4 + 4 + XX_HANDSHAKE_MSG3_SIZE; // 85 bytes
 
 /// Minimum size for encrypted frame: header + tag (no plaintext).
 pub const ENCRYPTED_MIN_SIZE: usize = ESTABLISHED_HEADER_SIZE + TAG_SIZE; // 32 bytes
@@ -164,7 +173,8 @@ impl EncryptedHeader {
         let payload_len = u16::from_le_bytes([data[2], data[3]]);
         let receiver_idx = SessionIndex::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let counter = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+            data[8], data[9], data[10], data[11],
+            data[12], data[13], data[14], data[15],
         ]);
 
         let mut header_bytes = [0u8; ESTABLISHED_HEADER_SIZE];
@@ -195,11 +205,11 @@ impl EncryptedHeader {
 // Msg1 Header
 // ============================================================================
 
-/// Parsed Noise IK message 1 header (phase 0x1).
+/// Parsed handshake message 1 header (phase 0x1).
 ///
-/// Wire format (114 bytes):
+/// Wire format (41 bytes, Noise XX):
 /// ```text
-/// [0x01][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:106]
+/// [0x11][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:33]
 /// ```
 #[derive(Clone, Debug)]
 pub struct Msg1Header {
@@ -249,12 +259,13 @@ impl Msg1Header {
 // Msg2 Header
 // ============================================================================
 
-/// Parsed Noise IK message 2 header (phase 0x2).
+/// Parsed handshake message 2 header (phase 0x2).
 ///
-/// Wire format (69 bytes):
+/// Wire format (118+ bytes, Noise XX):
 /// ```text
-/// [0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:57]
+/// [0x12][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:106+]
 /// ```
+/// Size is variable due to optional negotiation payload appended after base XX msg2.
 #[derive(Clone, Debug)]
 pub struct Msg2Header {
     /// Session index chosen by the responder.
@@ -268,9 +279,10 @@ pub struct Msg2Header {
 impl Msg2Header {
     /// Parse a msg2 header from packet data.
     ///
-    /// Returns None if the packet has wrong size or version/phase.
+    /// Returns None if the packet is too short or has wrong version/phase.
+    /// Accepts variable size (base + optional negotiation payload).
     pub fn parse(data: &[u8]) -> Option<Self> {
-        if data.len() != MSG2_WIRE_SIZE {
+        if data.len() < MSG2_WIRE_SIZE {
             return None;
         }
 
@@ -296,10 +308,82 @@ impl Msg2Header {
         })
     }
 
-    /// Get the Noise msg2 payload from the original packet.
+    /// Get the Noise msg2 payload from the original packet (variable length).
     #[cfg(test)]
     pub fn noise_msg2<'a>(&self, data: &'a [u8]) -> &'a [u8] {
         &data[self.noise_msg2_offset..]
+    }
+
+    /// Get the total noise payload length (base + optional negotiation).
+    #[allow(dead_code)]
+    pub fn noise_payload_len(&self, data: &[u8]) -> usize {
+        data.len() - self.noise_msg2_offset
+    }
+}
+
+// ============================================================================
+// Msg3 Header
+// ============================================================================
+
+/// Parsed handshake message 3 header (phase 0x3, XX pattern).
+///
+/// Wire format (85+ bytes, Noise XX):
+/// ```text
+/// [0x13][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg3:73+]
+/// ```
+/// Size is variable due to optional negotiation payload appended after base XX msg3.
+#[derive(Clone, Debug)]
+pub struct Msg3Header {
+    /// Session index chosen by the initiator (echo of msg1 sender_idx).
+    pub sender_idx: SessionIndex,
+    /// Echo of the responder's sender_idx from msg2.
+    pub receiver_idx: SessionIndex,
+    /// Offset where Noise msg3 payload begins.
+    pub noise_msg3_offset: usize,
+}
+
+impl Msg3Header {
+    /// Parse a msg3 header from packet data.
+    ///
+    /// Returns None if the packet is too short or has wrong version/phase.
+    /// Accepts variable size (base + optional negotiation payload).
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < MSG3_WIRE_SIZE {
+            return None;
+        }
+
+        let version = data[0] >> 4;
+        let phase = data[0] & 0x0F;
+
+        if version != FMP_VERSION || phase != PHASE_MSG3 {
+            return None;
+        }
+
+        // flags must be zero during handshake
+        if data[1] != 0 {
+            return None;
+        }
+
+        let sender_idx = SessionIndex::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let receiver_idx = SessionIndex::from_le_bytes([data[8], data[9], data[10], data[11]]);
+
+        Some(Self {
+            sender_idx,
+            receiver_idx,
+            noise_msg3_offset: COMMON_PREFIX_SIZE + 4 + 4, // 12
+        })
+    }
+
+    /// Get the Noise msg3 payload from the original packet (variable length).
+    #[cfg(test)]
+    pub fn noise_msg3<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        &data[self.noise_msg3_offset..]
+    }
+
+    /// Get the total noise payload length (base + optional negotiation).
+    #[allow(dead_code)]
+    pub fn noise_payload_len(&self, data: &[u8]) -> usize {
+        data.len() - self.noise_msg3_offset
     }
 }
 
@@ -309,9 +393,9 @@ impl Msg2Header {
 
 /// Build a wire-format msg1 packet.
 ///
-/// Format: `[0x01][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:106]`
+/// Format: `[0x11][0x00][payload_len:2 LE][sender_idx:4 LE][noise_msg1:33]`
 pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(noise_msg1.len(), HANDSHAKE_MSG1_SIZE);
+    debug_assert_eq!(noise_msg1.len(), XX_HANDSHAKE_MSG1_SIZE);
 
     let payload_len = (4 + noise_msg1.len()) as u16; // sender_idx + noise_msg1
 
@@ -326,23 +410,41 @@ pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
 
 /// Build a wire-format msg2 packet.
 ///
-/// Format: `[0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:57]`
-pub fn build_msg2(
-    sender_idx: SessionIndex,
-    receiver_idx: SessionIndex,
-    noise_msg2: &[u8],
-) -> Vec<u8> {
-    debug_assert_eq!(noise_msg2.len(), HANDSHAKE_MSG2_SIZE);
+/// Format: `[0x12][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:106+]`
+/// The noise_msg2 may include an optional negotiation payload beyond the base XX msg2.
+pub fn build_msg2(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_msg2: &[u8]) -> Vec<u8> {
+    debug_assert!(noise_msg2.len() >= XX_HANDSHAKE_MSG2_SIZE);
 
     let payload_len = (4 + 4 + noise_msg2.len()) as u16; // sender + receiver + noise
+    let total = COMMON_PREFIX_SIZE + 4 + 4 + noise_msg2.len();
 
-    let mut packet = Vec::with_capacity(MSG2_WIRE_SIZE);
+    let mut packet = Vec::with_capacity(total);
     packet.push(CommonPrefix::ver_phase_byte(FMP_VERSION, PHASE_MSG2));
     packet.push(0x00); // flags must be zero
     packet.extend_from_slice(&payload_len.to_le_bytes());
     packet.extend_from_slice(&sender_idx.to_le_bytes());
     packet.extend_from_slice(&receiver_idx.to_le_bytes());
     packet.extend_from_slice(noise_msg2);
+    packet
+}
+
+/// Build a wire-format msg3 packet (XX handshake completion).
+///
+/// Format: `[0x13][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg3:73+]`
+/// The noise_msg3 may include an optional negotiation payload beyond the base XX msg3.
+pub fn build_msg3(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_msg3: &[u8]) -> Vec<u8> {
+    debug_assert!(noise_msg3.len() >= XX_HANDSHAKE_MSG3_SIZE);
+
+    let payload_len = (4 + 4 + noise_msg3.len()) as u16; // sender + receiver + noise
+    let total = COMMON_PREFIX_SIZE + 4 + 4 + noise_msg3.len();
+
+    let mut packet = Vec::with_capacity(total);
+    packet.push(CommonPrefix::ver_phase_byte(FMP_VERSION, PHASE_MSG3));
+    packet.push(0x00); // flags must be zero
+    packet.extend_from_slice(&payload_len.to_le_bytes());
+    packet.extend_from_slice(&sender_idx.to_le_bytes());
+    packet.extend_from_slice(&receiver_idx.to_le_bytes());
+    packet.extend_from_slice(noise_msg3);
     packet
 }
 
@@ -414,9 +516,9 @@ mod tests {
 
     #[test]
     fn test_common_prefix_parse() {
-        let data = [0x00, 0x04, 0x20, 0x00]; // ver=0, phase=0, flags=SP, payload_len=32
+        let data = [0x10, 0x04, 0x20, 0x00]; // ver=1, phase=0, flags=SP, payload_len=32
         let prefix = CommonPrefix::parse(&data).unwrap();
-        assert_eq!(prefix.version, 0);
+        assert_eq!(prefix.version, 1);
         assert_eq!(prefix.phase, 0);
         assert_eq!(prefix.flags, FLAG_SP);
         assert_eq!(prefix.payload_len, 32);
@@ -439,7 +541,7 @@ mod tests {
         let packet = build_encrypted(&header, &ciphertext);
 
         assert_eq!(packet.len(), ESTABLISHED_HEADER_SIZE + 48);
-        assert_eq!(packet[0], 0x00); // ver=0, phase=0
+        assert_eq!(packet[0], 0x10); // ver=1, phase=0
 
         let parsed = EncryptedHeader::parse(&packet).expect("should parse");
         assert_eq!(parsed.receiver_idx, receiver_idx);
@@ -459,26 +561,26 @@ mod tests {
     #[test]
     fn test_encrypted_header_wrong_phase() {
         let mut packet = vec![0x00; ENCRYPTED_MIN_SIZE];
-        packet[0] = 0x01; // phase 1 (msg1), not established
+        packet[0] = 0x11; // ver=1, phase 1 (msg1), not established
         assert!(EncryptedHeader::parse(&packet).is_none());
     }
 
     #[test]
     fn test_encrypted_header_wrong_version() {
         let mut packet = vec![0x00; ENCRYPTED_MIN_SIZE];
-        packet[0] = 0x10; // version 1, phase 0
+        packet[0] = 0x00; // version 0 (old), phase 0
         assert!(EncryptedHeader::parse(&packet).is_none());
     }
 
     #[test]
     fn test_msg1_header_parse() {
         let sender_idx = SessionIndex::new(0xABCDEF01);
-        let noise_msg1 = vec![0xbb; HANDSHAKE_MSG1_SIZE];
+        let noise_msg1 = vec![0xbb; XX_HANDSHAKE_MSG1_SIZE];
 
         let packet = build_msg1(sender_idx, &noise_msg1);
 
         assert_eq!(packet.len(), MSG1_WIRE_SIZE);
-        assert_eq!(packet[0], 0x01); // ver=0, phase=1
+        assert_eq!(packet[0], 0x11); // ver=1, phase=1
 
         let header = Msg1Header::parse(&packet).expect("should parse");
         assert_eq!(header.sender_idx, sender_idx);
@@ -488,23 +590,23 @@ mod tests {
 
     #[test]
     fn test_msg1_header_wrong_size() {
-        let packet = vec![0x01; MSG1_WIRE_SIZE - 1];
+        let packet = vec![0x11; MSG1_WIRE_SIZE - 1];
         assert!(Msg1Header::parse(&packet).is_none());
 
-        let packet = vec![0x01; MSG1_WIRE_SIZE + 1];
+        let packet = vec![0x11; MSG1_WIRE_SIZE + 1];
         assert!(Msg1Header::parse(&packet).is_none());
     }
 
     #[test]
     fn test_msg1_header_wrong_phase() {
         let mut packet = vec![0x00; MSG1_WIRE_SIZE];
-        packet[0] = 0x02; // phase 2, not phase 1
+        packet[0] = 0x12; // ver=1, phase 2, not phase 1
         assert!(Msg1Header::parse(&packet).is_none());
     }
 
     #[test]
     fn test_msg1_header_nonzero_flags() {
-        let mut packet = build_msg1(SessionIndex::new(1), &[0u8; HANDSHAKE_MSG1_SIZE]);
+        let mut packet = build_msg1(SessionIndex::new(1), &[0u8; XX_HANDSHAKE_MSG1_SIZE]);
         packet[1] = 0x01; // flags must be zero during handshake
         assert!(Msg1Header::parse(&packet).is_none());
     }
@@ -513,12 +615,12 @@ mod tests {
     fn test_msg2_header_parse() {
         let sender_idx = SessionIndex::new(0x11223344);
         let receiver_idx = SessionIndex::new(0x55667788);
-        let noise_msg2 = vec![0xcc; HANDSHAKE_MSG2_SIZE];
+        let noise_msg2 = vec![0xcc; XX_HANDSHAKE_MSG2_SIZE];
 
         let packet = build_msg2(sender_idx, receiver_idx, &noise_msg2);
 
         assert_eq!(packet.len(), MSG2_WIRE_SIZE);
-        assert_eq!(packet[0], 0x02); // ver=0, phase=2
+        assert_eq!(packet[0], 0x12); // ver=1, phase=2
 
         let header = Msg2Header::parse(&packet).expect("should parse");
         assert_eq!(header.sender_idx, sender_idx);
@@ -529,24 +631,29 @@ mod tests {
 
     #[test]
     fn test_msg2_header_wrong_size() {
-        let packet = vec![0x02; MSG2_WIRE_SIZE - 1];
+        let packet = vec![0x12; MSG2_WIRE_SIZE - 1];
         assert!(Msg2Header::parse(&packet).is_none());
 
-        let packet = vec![0x02; MSG2_WIRE_SIZE + 1];
-        assert!(Msg2Header::parse(&packet).is_none());
+        // Larger than minimum is now accepted (variable-length negotiation payload)
+        let mut packet = vec![0x12; MSG2_WIRE_SIZE + 10];
+        packet[0] = 0x12; // ver=1, phase=2
+        packet[1] = 0x00;
+        let header = Msg2Header::parse(&packet);
+        assert!(header.is_some());
     }
 
     #[test]
     fn test_msg2_header_wrong_phase() {
         let mut packet = vec![0x00; MSG2_WIRE_SIZE];
-        packet[0] = 0x00; // phase 0, not phase 2
+        packet[0] = 0x10; // ver=1, phase 0, not phase 2
         assert!(Msg2Header::parse(&packet).is_none());
     }
 
     #[test]
     fn test_wire_sizes() {
-        assert_eq!(MSG1_WIRE_SIZE, 114); // 4 + 4 + 106
-        assert_eq!(MSG2_WIRE_SIZE, 69); // 4 + 4 + 4 + 57
+        assert_eq!(MSG1_WIRE_SIZE, 41);    // 4 + 4 + 33 (XX msg1)
+        assert_eq!(MSG2_WIRE_SIZE, 118);   // 4 + 4 + 4 + 106 (XX msg2 minimum)
+        assert_eq!(MSG3_WIRE_SIZE, 85);    // 4 + 4 + 4 + 73 (XX msg3 minimum)
         assert_eq!(ENCRYPTED_MIN_SIZE, 32); // 16 + 16
         assert_eq!(COMMON_PREFIX_SIZE, 4);
         assert_eq!(ESTABLISHED_HEADER_SIZE, 16);
@@ -557,7 +664,7 @@ mod tests {
     fn test_roundtrip_indices() {
         let idx = SessionIndex::new(0xDEADBEEF);
 
-        let msg1 = build_msg1(idx, &[0u8; HANDSHAKE_MSG1_SIZE]);
+        let msg1 = build_msg1(idx, &[0u8; XX_HANDSHAKE_MSG1_SIZE]);
         let parsed = Msg1Header::parse(&msg1).unwrap();
         assert_eq!(parsed.sender_idx.as_u32(), 0xDEADBEEF);
 
@@ -588,17 +695,22 @@ mod tests {
 
     #[test]
     fn test_flags_byte() {
-        let header =
-            build_established_header(SessionIndex::new(1), 0, FLAG_KEY_EPOCH | FLAG_SP, 100);
+        let header = build_established_header(
+            SessionIndex::new(1),
+            0,
+            FLAG_KEY_EPOCH | FLAG_SP,
+            100,
+        );
         assert_eq!(header[1], 0x05); // bits 0 and 2 set
 
         let parsed = EncryptedHeader::parse(&[
-            header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
-            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
-            header[15], // minimum: TAG_SIZE bytes of ciphertext
+            header[0], header[1], header[2], header[3],
+            header[4], header[5], header[6], header[7],
+            header[8], header[9], header[10], header[11],
+            header[12], header[13], header[14], header[15],
+            // minimum: TAG_SIZE bytes of ciphertext
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ])
-        .unwrap();
+        ]).unwrap();
         assert_eq!(parsed.flags & FLAG_KEY_EPOCH, FLAG_KEY_EPOCH);
         assert_eq!(parsed.flags & FLAG_CE, 0);
         assert_eq!(parsed.flags & FLAG_SP, FLAG_SP);
@@ -606,10 +718,10 @@ mod tests {
 
     #[test]
     fn test_payload_len_in_msg1() {
-        let packet = build_msg1(SessionIndex::new(1), &[0u8; HANDSHAKE_MSG1_SIZE]);
+        let packet = build_msg1(SessionIndex::new(1), &[0u8; XX_HANDSHAKE_MSG1_SIZE]);
         let prefix = CommonPrefix::parse(&packet).unwrap();
-        // payload_len = sender_idx(4) + noise_msg1(106) = 110
-        assert_eq!(prefix.payload_len, 110);
+        // payload_len = sender_idx(4) + noise_msg1(33) = 37
+        assert_eq!(prefix.payload_len, 37);
     }
 
     #[test]
@@ -617,10 +729,71 @@ mod tests {
         let packet = build_msg2(
             SessionIndex::new(1),
             SessionIndex::new(2),
-            &[0u8; HANDSHAKE_MSG2_SIZE],
+            &[0u8; XX_HANDSHAKE_MSG2_SIZE],
         );
         let prefix = CommonPrefix::parse(&packet).unwrap();
-        // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg2(57) = 65
-        assert_eq!(prefix.payload_len, 65);
+        // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg2(106) = 114
+        assert_eq!(prefix.payload_len, 114);
+    }
+
+    #[test]
+    fn test_msg3_header_parse() {
+        let sender_idx = SessionIndex::new(0xAABBCCDD);
+        let receiver_idx = SessionIndex::new(0x11223344);
+        let noise_msg3 = vec![0xdd; XX_HANDSHAKE_MSG3_SIZE];
+
+        let packet = build_msg3(sender_idx, receiver_idx, &noise_msg3);
+
+        assert_eq!(packet.len(), MSG3_WIRE_SIZE);
+        assert_eq!(packet[0], 0x13); // ver=1, phase=3
+
+        let header = Msg3Header::parse(&packet).expect("should parse");
+        assert_eq!(header.sender_idx, sender_idx);
+        assert_eq!(header.receiver_idx, receiver_idx);
+        assert_eq!(header.noise_msg3_offset, 12);
+        assert_eq!(header.noise_msg3(&packet), &noise_msg3[..]);
+    }
+
+    #[test]
+    fn test_msg3_header_wrong_size() {
+        let packet = vec![0x13; MSG3_WIRE_SIZE - 1];
+        assert!(Msg3Header::parse(&packet).is_none());
+
+        // Larger than minimum is now accepted (variable-length negotiation payload)
+        let mut packet = vec![0x13; MSG3_WIRE_SIZE + 10];
+        packet[0] = 0x13; // ver=1, phase=3
+        packet[1] = 0x00;
+        let header = Msg3Header::parse(&packet);
+        assert!(header.is_some());
+    }
+
+    #[test]
+    fn test_msg3_header_wrong_phase() {
+        let mut packet = vec![0x00; MSG3_WIRE_SIZE];
+        packet[0] = 0x12; // ver=1, phase 2, not phase 3
+        assert!(Msg3Header::parse(&packet).is_none());
+    }
+
+    #[test]
+    fn test_msg3_header_nonzero_flags() {
+        let mut packet = build_msg3(
+            SessionIndex::new(1),
+            SessionIndex::new(2),
+            &[0u8; XX_HANDSHAKE_MSG3_SIZE],
+        );
+        packet[1] = 0x01; // flags must be zero during handshake
+        assert!(Msg3Header::parse(&packet).is_none());
+    }
+
+    #[test]
+    fn test_payload_len_in_msg3() {
+        let packet = build_msg3(
+            SessionIndex::new(1),
+            SessionIndex::new(2),
+            &[0u8; XX_HANDSHAKE_MSG3_SIZE],
+        );
+        let prefix = CommonPrefix::parse(&packet).unwrap();
+        // payload_len = sender_idx(4) + receiver_idx(4) + noise_msg3(73) = 81
+        assert_eq!(prefix.payload_len, 81);
     }
 }

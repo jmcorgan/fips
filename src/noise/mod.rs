@@ -11,6 +11,10 @@
 //!   own identity until msg3, providing stronger identity hiding. Three-message
 //!   handshake.
 //!
+//! - **XX pattern**: Neither side knows the other's static key. Both identities
+//!   are revealed during the handshake: responder in msg2, initiator in msg3.
+//!   Three-message handshake. Will replace IK/XK for both layers.
+//!
 //! ## IK Handshake Pattern (Link Layer)
 //!
 //! ```text
@@ -26,6 +30,14 @@
 //!   -> e, es                (msg1: ephemeral + DH with responder's static)
 //!   <- e, ee                (msg2: ephemeral + DH)
 //!   -> s, se                (msg3: encrypted static + DH)
+//! ```
+//!
+//! ## XX Handshake Pattern
+//!
+//! ```text
+//!   -> e                    (msg1: ephemeral only, no DH)
+//!   <- e, ee, s, es         (msg2: ephemeral + encrypted static)
+//!   -> s, se                (msg3: encrypted static)
 //! ```
 //!
 //! ## Separation of Concerns
@@ -58,6 +70,10 @@ pub(crate) const PROTOCOL_NAME_IK: &[u8] = b"Noise_IK_secp256k1_ChaChaPoly_SHA25
 /// Format: Noise_XK_secp256k1_ChaChaPoly_SHA256
 pub(crate) const PROTOCOL_NAME_XK: &[u8] = b"Noise_XK_secp256k1_ChaChaPoly_SHA256";
 
+/// Protocol name for Noise XX with secp256k1.
+/// Format: Noise_XX_secp256k1_ChaChaPoly_SHA256
+pub(crate) const PROTOCOL_NAME_XX: &[u8] = b"Noise_XX_secp256k1_ChaChaPoly_SHA256";
+
 /// Maximum message size for noise transport messages.
 pub const MAX_MESSAGE_SIZE: usize = 65535;
 
@@ -87,6 +103,15 @@ pub const XK_HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + EPOCH_ENCRYPTED_SIZE;
 
 /// XK msg3: encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 73 bytes.
 pub const XK_HANDSHAKE_MSG3_SIZE: usize = PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
+
+/// XX msg1: ephemeral only (33 bytes). No DH, no encryption.
+pub const XX_HANDSHAKE_MSG1_SIZE: usize = PUBKEY_SIZE;
+
+/// XX msg2: ephemeral (33) + encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 106 bytes.
+pub const XX_HANDSHAKE_MSG2_SIZE: usize = PUBKEY_SIZE + PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
+
+/// XX msg3: encrypted static (33 + 16 tag) + encrypted epoch (8 + 16 tag) = 73 bytes.
+pub const XX_HANDSHAKE_MSG3_SIZE: usize = PUBKEY_SIZE + TAG_SIZE + EPOCH_ENCRYPTED_SIZE;
 
 /// Replay window size in packets (matching WireGuard).
 pub const REPLAY_WINDOW_SIZE: usize = 2048;
@@ -153,6 +178,8 @@ pub enum NoisePattern {
     Ik,
     /// Noise XK: three-message handshake (session layer).
     Xk,
+    /// Noise XX: three-message handshake, no prior key knowledge.
+    Xx,
 }
 
 /// Handshake state machine states.
@@ -162,7 +189,7 @@ pub enum HandshakeProgress {
     Initial,
     /// Message 1 sent/received, ready for message 2.
     Message1Done,
-    /// Message 2 sent/received, ready for message 3 (XK only).
+    /// Message 2 sent/received, ready for message 3 (XK/XX only).
     Message2Done,
     /// Handshake complete, ready for transport.
     Complete,
