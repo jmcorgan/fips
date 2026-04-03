@@ -6,6 +6,11 @@ node:
   identity:
     nsec: "{{NSEC}}"
 
+  discovery:
+    backoff_base_secs: 3
+  rate_limit:
+    handshake_timeout_secs: 10
+
 tun:
   enabled: true
   name: fips0

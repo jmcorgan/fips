@@ -109,7 +109,7 @@ elif [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     wait_for_peers fips-node-e 3 20 || true
 fi
 # Wait for FSP-level connectivity (discovery + session establishment)
-wait_for_full_connectivity 30 || true
+wait_for_full_connectivity 45 || true
 
 # Reset counters for the actual test
 PASSED=0

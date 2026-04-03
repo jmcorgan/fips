@@ -374,20 +374,20 @@ impl Node {
             Some(e) => e,
             None => return,
         };
-        let dest_pubkey = *entry.remote_pubkey();
+        let _dest_pubkey = *entry.remote_pubkey();
 
-        // Create Noise XK initiator handshake
+        // Create Noise XX initiator handshake (rekey: no negotiation payload)
         let our_keypair = self.identity.keypair();
-        let mut handshake = HandshakeState::new_xk_initiator(our_keypair, dest_pubkey);
+        let mut handshake = HandshakeState::new_xx_initiator(our_keypair);
         handshake.set_local_epoch(self.startup_epoch);
 
-        let msg1 = match handshake.write_xk_message_1() {
+        let msg1 = match handshake.write_xx_message_1() {
             Ok(m) => m,
             Err(e) => {
                 warn!(
                     peer = %self.peer_display_name(dest_addr),
                     error = %e,
-                    "Failed to generate FSP rekey XK msg1"
+                    "Failed to generate FSP rekey XX msg1"
                 );
                 return;
             }

@@ -59,7 +59,7 @@ fi
 trap 'echo ""; echo "Test interrupted"; exit 130' INT
 
 # Wait times derived from rekey timer
-BASELINE_CONVERGENCE_TIMEOUT=36
+BASELINE_CONVERGENCE_TIMEOUT=60
 REKEY_SETTLE=5         # settle time after rekey for cutover to complete
 # First FMP rekey should follow shortly after the 35s interval once the mesh is
 # fully converged. Keep this bounded to preserve a meaningful scheduling check

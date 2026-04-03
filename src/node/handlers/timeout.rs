@@ -22,9 +22,7 @@ impl Node {
             .unwrap_or(0);
         let timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
 
-        let stale: Vec<LinkId> = self
-            .connections
-            .iter()
+        let stale: Vec<LinkId> = self.connections.iter()
             .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())
             .map(|(link_id, _)| *link_id)
             .collect();
@@ -99,15 +97,19 @@ impl Node {
 
         // Collect resend candidates: outbound, in SentMsg1, with stored msg1,
         // under max resends, and past the scheduled time.
-        let candidates: Vec<(LinkId, Vec<u8>)> = self
-            .connections
-            .iter()
+        // Skip resend if the target peer is already promoted — a cross-connection
+        // was resolved via the inbound path and resending msg1 would start a new
+        // handshake on the peer, creating a session mismatch.
+        let candidates: Vec<(LinkId, Vec<u8>)> = self.connections.iter()
             .filter(|(_, conn)| {
                 conn.is_outbound()
                     && conn.handshake_state() == HandshakeState::SentMsg1
                     && conn.resend_count() < max_resends
                     && conn.next_resend_at_ms() > 0
                     && now_ms >= conn.next_resend_at_ms()
+                    && !conn.expected_identity()
+                        .map(|id| self.peers.contains_key(id.node_addr()))
+                        .unwrap_or(false)
             })
             .filter_map(|(link_id, conn)| {
                 conn.handshake_msg1().map(|msg1| (*link_id, msg1.to_vec()))
@@ -141,7 +143,9 @@ impl Node {
                 false
             };
 
-            if sent && let Some(conn) = self.connections.get_mut(&link_id) {
+            if sent
+                && let Some(conn) = self.connections.get_mut(&link_id)
+            {
                 let count = conn.resend_count() + 1;
                 let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
                 conn.record_resend(next);
@@ -172,11 +176,10 @@ impl Node {
         let ttl = self.config.node.session.default_ttl;
 
         // First pass: find timed-out sessions to remove
-        let timed_out: Vec<crate::NodeAddr> = self
-            .sessions
-            .iter()
+        let timed_out: Vec<crate::NodeAddr> = self.sessions.iter()
             .filter(|(_, entry)| {
-                !entry.is_established() && now_ms.saturating_sub(entry.last_activity()) > timeout_ms
+                !entry.is_established()
+                    && now_ms.saturating_sub(entry.last_activity()) > timeout_ms
             })
             .map(|(addr, _)| *addr)
             .collect();
@@ -190,9 +193,7 @@ impl Node {
 
         // Second pass: collect resend candidates
         let my_addr = *self.node_addr();
-        let candidates: Vec<(crate::NodeAddr, Vec<u8>)> = self
-            .sessions
-            .iter()
+        let candidates: Vec<(crate::NodeAddr, Vec<u8>)> = self.sessions.iter()
             .filter(|(_, entry)| {
                 !entry.is_established()
                     && entry.handshake_payload().is_some()
@@ -206,7 +207,8 @@ impl Node {
         for (dest_addr, payload) in candidates {
             use crate::protocol::SessionDatagram;
 
-            let mut datagram = SessionDatagram::new(my_addr, dest_addr, payload).with_ttl(ttl);
+            let mut datagram = SessionDatagram::new(my_addr, dest_addr, payload)
+                .with_ttl(ttl);
             let sent = match self.send_session_datagram(&mut datagram).await {
                 Ok(_) => true,
                 Err(e) => {
@@ -219,7 +221,9 @@ impl Node {
                 }
             };
 
-            if sent && let Some(entry) = self.sessions.get_mut(&dest_addr) {
+            if sent
+                && let Some(entry) = self.sessions.get_mut(&dest_addr)
+            {
                 let count = entry.resend_count() + 1;
                 let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
                 entry.record_resend(next);
@@ -242,11 +246,10 @@ impl Node {
             return; // disabled
         }
 
-        let idle: Vec<_> = self
-            .sessions
-            .iter()
+        let idle: Vec<_> = self.sessions.iter()
             .filter(|(_, entry)| {
-                entry.is_established() && now_ms.saturating_sub(entry.last_activity()) > timeout_ms
+                entry.is_established()
+                    && now_ms.saturating_sub(entry.last_activity()) > timeout_ms
             })
             .map(|(addr, _)| *addr)
             .collect();
