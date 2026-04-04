@@ -2,6 +2,7 @@
 
 use crate::NodeAddr;
 use crate::protocol::error::ProtocolError;
+use crate::protocol::negotiation::TlvEntry;
 use crate::protocol::session::{decode_coords, encode_coords};
 use crate::tree::TreeCoordinate;
 use secp256k1::schnorr::Signature;
@@ -19,13 +20,13 @@ pub struct LookupRequest {
     pub target: NodeAddr,
     /// Who's asking (for response routing).
     pub origin: NodeAddr,
-    /// Origin's coordinates (for return path).
-    pub origin_coords: TreeCoordinate,
     /// Remaining propagation hops.
     pub ttl: u8,
     /// Minimum transport MTU the origin requires for a viable route.
     /// 0 means no requirement.
     pub min_mtu: u16,
+    /// Optional TLV extension entries.
+    pub tlv_entries: Vec<TlvEntry>,
 }
 
 impl LookupRequest {
@@ -34,7 +35,6 @@ impl LookupRequest {
         request_id: u64,
         target: NodeAddr,
         origin: NodeAddr,
-        origin_coords: TreeCoordinate,
         ttl: u8,
         min_mtu: u16,
     ) -> Self {
@@ -42,9 +42,9 @@ impl LookupRequest {
             request_id,
             target,
             origin,
-            origin_coords,
             ttl,
             min_mtu,
+            tlv_entries: Vec::new(),
         }
     }
 
@@ -52,13 +52,18 @@ impl LookupRequest {
     pub fn generate(
         target: NodeAddr,
         origin: NodeAddr,
-        origin_coords: TreeCoordinate,
         ttl: u8,
         min_mtu: u16,
     ) -> Self {
         use rand::RngExt;
         let request_id = rand::rng().random();
-        Self::new(request_id, target, origin, origin_coords, ttl, min_mtu)
+        Self::new(request_id, target, origin, ttl, min_mtu)
+    }
+
+    /// Add a TLV entry.
+    pub fn with_tlv(mut self, field_num: u16, value: Vec<u8>) -> Self {
+        self.tlv_entries.push(TlvEntry { field_num, value });
+        self
     }
 
     /// Decrement TTL for forwarding.
@@ -79,10 +84,9 @@ impl LookupRequest {
 
     /// Encode as wire format (includes msg_type byte).
     ///
-    /// Format: `[0x30][request_id:8][target:16][origin:16][ttl:1][min_mtu:2]`
-    ///         `[origin_coords_cnt:2][origin_coords:16×n]`
+    /// Format: `[0x30][request_id:8][target:16][origin:16][ttl:1][min_mtu:2][tlv entries...]`
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(46 + self.origin_coords.depth() * 16);
+        let mut buf = Vec::with_capacity(44);
 
         buf.push(0x30); // msg_type
         buf.extend_from_slice(&self.request_id.to_le_bytes());
@@ -90,18 +94,23 @@ impl LookupRequest {
         buf.extend_from_slice(self.origin.as_bytes());
         buf.push(self.ttl);
         buf.extend_from_slice(&self.min_mtu.to_le_bytes());
-        encode_coords(&self.origin_coords, &mut buf);
+
+        for entry in &self.tlv_entries {
+            buf.extend_from_slice(&entry.field_num.to_le_bytes());
+            let len = entry.value.len() as u16;
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(&entry.value);
+        }
 
         buf
     }
 
     /// Decode from wire format (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        // Minimum: request_id(8) + target(16) + origin(16) + ttl(1) + min_mtu(2)
-        //          + coords_count(2) = 45 bytes
-        if payload.len() < 45 {
+        // Minimum: request_id(8) + target(16) + origin(16) + ttl(1) + min_mtu(2) = 43 bytes
+        if payload.len() < 43 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 45,
+                expected: 43,
                 got: payload.len(),
             });
         }
@@ -135,22 +144,46 @@ impl LookupRequest {
         );
         pos += 2;
 
-        let (origin_coords, _consumed) = decode_coords(&payload[pos..])?;
+        // Parse TLV entries from remaining bytes
+        let mut tlv_entries = Vec::new();
+        while pos < payload.len() {
+            if pos + 4 > payload.len() {
+                return Err(ProtocolError::Malformed(
+                    "truncated TLV header in LookupRequest".to_string(),
+                ));
+            }
+            let field_num =
+                u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
+            let length =
+                u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap())
+                    as usize;
+            pos += 4;
+            if pos + length > payload.len() {
+                return Err(ProtocolError::Malformed(format!(
+                    "TLV field {field_num}: declared length {length} exceeds remaining data {}",
+                    payload.len() - pos
+                )));
+            }
+            let value = payload[pos..pos + length].to_vec();
+            pos += length;
+            tlv_entries.push(TlvEntry { field_num, value });
+        }
 
         Ok(Self {
             request_id,
             target,
             origin,
-            origin_coords,
             ttl,
             min_mtu,
+            tlv_entries,
         })
     }
 }
 
 /// Response to a lookup request with target's coordinates.
 ///
-/// Routed back to the origin using the origin_coords from the request.
+/// Routed back to the origin using reverse-path routing or tree
+/// routing toward the origin's NodeAddr.
 #[derive(Clone, Debug)]
 pub struct LookupResponse {
     /// Echoed request identifier.
@@ -167,6 +200,8 @@ pub struct LookupResponse {
     pub target_coords: TreeCoordinate,
     /// Proof that target authorized this response (signature over request).
     pub proof: Signature,
+    /// Optional TLV extension entries.
+    pub tlv_entries: Vec<TlvEntry>,
 }
 
 impl LookupResponse {
@@ -186,7 +221,14 @@ impl LookupResponse {
             path_mtu: u16::MAX,
             target_coords,
             proof,
+            tlv_entries: Vec::new(),
         }
+    }
+
+    /// Add a TLV entry.
+    pub fn with_tlv(mut self, field_num: u16, value: Vec<u8>) -> Self {
+        self.tlv_entries.push(TlvEntry { field_num, value });
+        self
     }
 
     /// Get the bytes that should be signed as proof.
@@ -207,7 +249,7 @@ impl LookupResponse {
 
     /// Encode as wire format (includes msg_type byte).
     ///
-    /// Format: `[0x31][request_id:8][target:16][path_mtu:2][target_coords_cnt:2][target_coords:16×n][proof:64]`
+    /// Format: `[0x31][request_id:8][target:16][path_mtu:2][coords_cnt:2][coords:16×n][proof:64][tlv entries...]`
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(93 + self.target_coords.depth() * 16);
 
@@ -217,6 +259,13 @@ impl LookupResponse {
         buf.extend_from_slice(&self.path_mtu.to_le_bytes());
         encode_coords(&self.target_coords, &mut buf);
         buf.extend_from_slice(self.proof.as_ref());
+
+        for entry in &self.tlv_entries {
+            buf.extend_from_slice(&entry.field_num.to_le_bytes());
+            let len = entry.value.len() as u16;
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(&entry.value);
+        }
 
         buf
     }
@@ -263,6 +312,32 @@ impl LookupResponse {
         }
         let proof = Signature::from_slice(&payload[pos..pos + 64])
             .map_err(|_| ProtocolError::Malformed("bad proof signature".into()))?;
+        pos += 64;
+
+        // Parse TLV entries from remaining bytes after proof
+        let mut tlv_entries = Vec::new();
+        while pos < payload.len() {
+            if pos + 4 > payload.len() {
+                return Err(ProtocolError::Malformed(
+                    "truncated TLV header in LookupResponse".to_string(),
+                ));
+            }
+            let field_num =
+                u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
+            let length =
+                u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap())
+                    as usize;
+            pos += 4;
+            if pos + length > payload.len() {
+                return Err(ProtocolError::Malformed(format!(
+                    "TLV field {field_num}: declared length {length} exceeds remaining data {}",
+                    payload.len() - pos
+                )));
+            }
+            let value = payload[pos..pos + length].to_vec();
+            pos += length;
+            tlv_entries.push(TlvEntry { field_num, value });
+        }
 
         Ok(Self {
             request_id,
@@ -270,6 +345,7 @@ impl LookupResponse {
             path_mtu,
             target_coords,
             proof,
+            tlv_entries,
         })
     }
 }
@@ -288,13 +364,28 @@ mod tests {
         TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
     }
 
+    fn make_test_sig() -> Signature {
+        use secp256k1::Secp256k1;
+        let secp = Secp256k1::new();
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
+        let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
+            .expect("32 random bytes is a valid secret key");
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+        let target = make_node_addr(42);
+        let coords = make_coords(&[42, 1, 0]);
+        let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
+        use sha2::Digest;
+        let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();
+        secp.sign_schnorr(&digest, &keypair)
+    }
+
     #[test]
     fn test_lookup_request_forward() {
         let target = make_node_addr(1);
         let origin = make_node_addr(2);
-        let coords = make_coords(&[2, 0]);
 
-        let mut request = LookupRequest::new(123, target, origin, coords, 5, 0);
+        let mut request = LookupRequest::new(123, target, origin, 5, 0);
 
         assert!(request.can_forward());
         assert!(request.forward());
@@ -305,9 +396,8 @@ mod tests {
     fn test_lookup_request_ttl_exhausted() {
         let target = make_node_addr(1);
         let origin = make_node_addr(2);
-        let coords = make_coords(&[2, 0]);
 
-        let mut request = LookupRequest::new(123, target, origin, coords, 1, 0);
+        let mut request = LookupRequest::new(123, target, origin, 1, 0);
 
         assert!(request.forward());
         assert!(!request.can_forward());
@@ -318,10 +408,9 @@ mod tests {
     fn test_lookup_request_generate() {
         let target = make_node_addr(1);
         let origin = make_node_addr(2);
-        let coords = make_coords(&[2, 0]);
 
-        let req1 = LookupRequest::generate(target, origin, coords.clone(), 5, 0);
-        let req2 = LookupRequest::generate(target, origin, coords, 5, 0);
+        let req1 = LookupRequest::generate(target, origin, 5, 0);
+        let req2 = LookupRequest::generate(target, origin, 5, 0);
 
         // Random IDs should differ
         assert_ne!(req1.request_id, req2.request_id);
@@ -347,9 +436,8 @@ mod tests {
     fn test_lookup_request_encode_decode_roundtrip() {
         let target = make_node_addr(10);
         let origin = make_node_addr(20);
-        let coords = make_coords(&[20, 0]);
 
-        let mut request = LookupRequest::new(12345, target, origin, coords, 8, 1386);
+        let mut request = LookupRequest::new(12345, target, origin, 8, 1386);
         request.forward();
 
         let encoded = request.encode();
@@ -361,6 +449,7 @@ mod tests {
         assert_eq!(decoded.origin, origin);
         assert_eq!(decoded.ttl, 7); // decremented by forward()
         assert_eq!(decoded.min_mtu, 1386);
+        assert!(decoded.tlv_entries.is_empty());
     }
 
     #[test]
@@ -373,10 +462,9 @@ mod tests {
     fn test_lookup_request_min_mtu_boundary_values() {
         let target = make_node_addr(10);
         let origin = make_node_addr(20);
-        let coords = make_coords(&[20, 0]);
 
         for mtu_val in [0u16, 1386, u16::MAX] {
-            let request = LookupRequest::new(100, target, origin, coords.clone(), 5, mtu_val);
+            let request = LookupRequest::new(100, target, origin, 5, mtu_val);
             let encoded = request.encode();
             let decoded = LookupRequest::decode(&encoded[1..]).unwrap();
             assert_eq!(decoded.min_mtu, mtu_val);
@@ -384,23 +472,54 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_response_encode_decode_roundtrip() {
-        use secp256k1::Secp256k1;
+    fn test_lookup_request_with_tlv_roundtrip() {
+        let target = make_node_addr(10);
+        let origin = make_node_addr(20);
 
+        let request = LookupRequest::new(555, target, origin, 5, 1280)
+            .with_tlv(1, vec![0xAA, 0xBB])
+            .with_tlv(256, vec![0x01, 0x02, 0x03, 0x04]);
+
+        let encoded = request.encode();
+        let decoded = LookupRequest::decode(&encoded[1..]).unwrap();
+
+        assert_eq!(decoded.request_id, 555);
+        assert_eq!(decoded.min_mtu, 1280);
+        assert_eq!(decoded.tlv_entries.len(), 2);
+        assert_eq!(decoded.tlv_entries[0].field_num, 1);
+        assert_eq!(decoded.tlv_entries[0].value, vec![0xAA, 0xBB]);
+        assert_eq!(decoded.tlv_entries[1].field_num, 256);
+        assert_eq!(decoded.tlv_entries[1].value, vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_lookup_request_tlv_forward_compat() {
+        // Unknown field_nums should be preserved through decode→encode
+        let target = make_node_addr(10);
+        let origin = make_node_addr(20);
+
+        let request = LookupRequest::new(777, target, origin, 5, 0)
+            .with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
+
+        let encoded = request.encode();
+        let mut decoded = LookupRequest::decode(&encoded[1..]).unwrap();
+
+        // Simulate transit: forward then re-encode
+        decoded.forward();
+        let re_encoded = decoded.encode();
+        let final_decoded = LookupRequest::decode(&re_encoded[1..]).unwrap();
+
+        assert_eq!(final_decoded.ttl, 4);
+        assert_eq!(final_decoded.tlv_entries.len(), 1);
+        assert_eq!(final_decoded.tlv_entries[0].field_num, 9999);
+        assert_eq!(final_decoded.tlv_entries[0].value, vec![0xFF, 0xFE, 0xFD]);
+    }
+
+    #[test]
+    fn test_lookup_response_encode_decode_roundtrip() {
         let target = make_node_addr(42);
         let coords = make_coords(&[42, 1, 0]);
-
-        // Create a dummy signature for testing
-        let secp = Secp256k1::new();
-        let mut secret_bytes = [0u8; 32];
-        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
-        let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
-            .expect("32 random bytes is a valid secret key");
-        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
-        let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
-        use sha2::Digest;
-        let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();
-        let sig = secp.sign_schnorr(&digest, &keypair);
+        let sig = make_test_sig();
 
         let response = LookupResponse::new(999, target, coords, sig);
 
@@ -415,25 +534,14 @@ mod tests {
         assert_eq!(decoded.target, target);
         assert_eq!(decoded.path_mtu, u16::MAX);
         assert_eq!(decoded.proof, sig);
+        assert!(decoded.tlv_entries.is_empty());
     }
 
     #[test]
     fn test_lookup_response_path_mtu_roundtrip() {
-        use secp256k1::Secp256k1;
-
         let target = make_node_addr(42);
         let coords = make_coords(&[42, 1, 0]);
-
-        let secp = Secp256k1::new();
-        let mut secret_bytes = [0u8; 32];
-        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
-        let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
-            .expect("32 random bytes is a valid secret key");
-        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
-        let proof_data = LookupResponse::proof_bytes(999, &target, &coords);
-        use sha2::Digest;
-        let digest: [u8; 32] = sha2::Sha256::digest(&proof_data).into();
-        let sig = secp.sign_schnorr(&digest, &keypair);
+        let sig = make_test_sig();
 
         for mtu_val in [0u16, 1280, 1386, 9000, u16::MAX] {
             let mut response = LookupResponse::new(999, target, coords.clone(), sig);
@@ -462,5 +570,51 @@ mod tests {
     fn test_lookup_response_decode_too_short() {
         assert!(LookupResponse::decode(&[]).is_err());
         assert!(LookupResponse::decode(&[0u8; 50]).is_err());
+    }
+
+    #[test]
+    fn test_lookup_response_with_tlv_roundtrip() {
+        let target = make_node_addr(42);
+        let coords = make_coords(&[42, 1, 0]);
+        let sig = make_test_sig();
+
+        let response = LookupResponse::new(999, target, coords, sig)
+            .with_tlv(1, vec![0xAA, 0xBB])
+            .with_tlv(500, vec![0x01, 0x02, 0x03]);
+
+        let encoded = response.encode();
+        let decoded = LookupResponse::decode(&encoded[1..]).unwrap();
+
+        assert_eq!(decoded.request_id, 999);
+        assert_eq!(decoded.proof, sig);
+        assert_eq!(decoded.tlv_entries.len(), 2);
+        assert_eq!(decoded.tlv_entries[0].field_num, 1);
+        assert_eq!(decoded.tlv_entries[0].value, vec![0xAA, 0xBB]);
+        assert_eq!(decoded.tlv_entries[1].field_num, 500);
+        assert_eq!(decoded.tlv_entries[1].value, vec![0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn test_lookup_response_tlv_forward_compat() {
+        // Unknown field_nums preserved through decode→modify path_mtu→encode
+        let target = make_node_addr(42);
+        let coords = make_coords(&[42, 1, 0]);
+        let sig = make_test_sig();
+
+        let response = LookupResponse::new(999, target, coords, sig)
+            .with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
+
+        let encoded = response.encode();
+        let mut decoded = LookupResponse::decode(&encoded[1..]).unwrap();
+
+        // Simulate transit: modify path_mtu then re-encode
+        decoded.path_mtu = 1280;
+        let re_encoded = decoded.encode();
+        let final_decoded = LookupResponse::decode(&re_encoded[1..]).unwrap();
+
+        assert_eq!(final_decoded.path_mtu, 1280);
+        assert_eq!(final_decoded.tlv_entries.len(), 1);
+        assert_eq!(final_decoded.tlv_entries[0].field_num, 9999);
+        assert_eq!(final_decoded.tlv_entries[0].value, vec![0xFF, 0xFE, 0xFD]);
     }
 }

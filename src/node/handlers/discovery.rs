@@ -326,6 +326,7 @@ impl Node {
         }
 
         // Collect full tree peers whose bloom filter contains the target
+        let min_mtu = request.min_mtu;
         let forward_to: Vec<NodeAddr> = self
             .peers
             .iter()
@@ -333,6 +334,7 @@ impl Node {
                 peer.peer_profile() == crate::protocol::NodeProfile::Full
                     && self.is_tree_peer(addr)
                     && peer.may_reach(&request.target)
+                    && self.peer_meets_mtu(peer, min_mtu)
             })
             .map(|(addr, _)| *addr)
             .collect();
@@ -346,6 +348,7 @@ impl Node {
                     peer.peer_profile() == crate::protocol::NodeProfile::Full
                         && !self.is_tree_peer(addr)
                         && peer.may_reach(&request.target)
+                        && self.peer_meets_mtu(peer, min_mtu)
                 })
                 .map(|(addr, _)| *addr)
                 .collect();
@@ -404,8 +407,8 @@ impl Node {
         self.stats_mut().discovery.req_initiated += 1;
 
         let origin = *self.node_addr();
-        let origin_coords = self.tree_state().my_coords().clone();
-        let request = LookupRequest::generate(*target, origin, origin_coords, ttl, 0);
+        let min_mtu = self.config.tun.mtu();
+        let request = LookupRequest::generate(*target, origin, ttl, min_mtu);
 
         // Send only to full tree peers whose bloom filter contains the target
         let peer_addrs: Vec<NodeAddr> = self
@@ -415,6 +418,7 @@ impl Node {
                 peer.peer_profile() == crate::protocol::NodeProfile::Full
                     && self.is_tree_peer(addr)
                     && peer.may_reach(target)
+                    && self.peer_meets_mtu(peer, request.min_mtu)
             })
             .map(|(addr, _)| *addr)
             .collect();
@@ -590,6 +594,28 @@ impl Node {
                 "Resetting discovery backoff on topology change"
             );
             self.discovery_backoff.reset_all();
+        }
+    }
+
+    /// Check if a peer's outgoing link MTU meets the min_mtu requirement.
+    ///
+    /// Returns true if min_mtu is 0 (no requirement) or if the peer's
+    /// transport link MTU is >= min_mtu.
+    fn peer_meets_mtu(&self, peer: &crate::peer::ActivePeer, min_mtu: u16) -> bool {
+        if min_mtu == 0 {
+            return true;
+        }
+        if let Some(tid) = peer.transport_id()
+            && let Some(transport) = self.transports.get(&tid)
+        {
+            let link_mtu = peer
+                .current_addr()
+                .map(|addr| transport.link_mtu(addr))
+                .unwrap_or_else(|| transport.mtu());
+            link_mtu >= min_mtu
+        } else {
+            // No transport info available — don't prune
+            true
         }
     }
 

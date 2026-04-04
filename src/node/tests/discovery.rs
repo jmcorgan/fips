@@ -32,9 +32,8 @@ async fn test_request_dedup() {
     let from = make_node_addr(0xAA);
     let target = make_node_addr(0xBB);
     let origin = make_node_addr(0xCC);
-    let coords = TreeCoordinate::from_addrs(vec![origin, make_node_addr(0)]).unwrap();
 
-    let request = LookupRequest::new(999, target, origin, coords, 5, 0);
+    let request = LookupRequest::new(999, target, origin, 5, 0);
     let payload = &request.encode()[1..]; // skip msg_type byte
 
     // First request: accepted
@@ -52,10 +51,9 @@ async fn test_request_target_is_self() {
     let from = make_node_addr(0xAA);
     let origin = make_node_addr(0xCC);
     let my_addr = *node.node_addr();
-    let coords = TreeCoordinate::from_addrs(vec![origin, make_node_addr(0)]).unwrap();
 
     // Request targeting us
-    let request = LookupRequest::new(777, my_addr, origin, coords, 5, 0);
+    let request = LookupRequest::new(777, my_addr, origin, 5, 0);
     let payload = &request.encode()[1..];
 
     // Should succeed without panic (response send will fail silently
@@ -70,9 +68,8 @@ async fn test_request_ttl_zero_not_forwarded() {
     let from = make_node_addr(0xAA);
     let target = make_node_addr(0xBB);
     let origin = make_node_addr(0xCC);
-    let coords = TreeCoordinate::from_addrs(vec![origin, make_node_addr(0)]).unwrap();
 
-    let request = LookupRequest::new(666, target, origin, coords, 0, 0);
+    let request = LookupRequest::new(666, target, origin, 0, 0);
     let payload = &request.encode()[1..];
 
     node.handle_lookup_request(&from, payload).await;
@@ -331,8 +328,7 @@ async fn test_recent_request_expiry() {
     // Trigger purge via a new lookup request
     let target = make_node_addr(0xBB);
     let origin = make_node_addr(0xCC);
-    let coords = TreeCoordinate::from_addrs(vec![origin, make_node_addr(0)]).unwrap();
-    let request = LookupRequest::new(789, target, origin, coords, 3, 0);
+    let request = LookupRequest::new(789, target, origin, 3, 0);
     let payload = &request.encode()[1..];
     node.handle_lookup_request(&make_node_addr(0xAA), payload)
         .await;
@@ -357,10 +353,8 @@ async fn test_request_forwarding_two_node() {
 
     let node0_addr = *nodes[0].node.node_addr();
     let target = *nodes[1].node.node_addr(); // target node1 (in bloom filters)
-    let root = make_node_addr(0);
 
-    let coords = TreeCoordinate::from_addrs(vec![node0_addr, root]).unwrap();
-    let request = LookupRequest::new(42, target, node0_addr, coords, 5, 0);
+    let request = LookupRequest::new(42, target, node0_addr, 5, 0);
     let payload = &request.encode()[1..];
 
     // Handle on node0 as if we received it from outside
@@ -481,10 +475,8 @@ async fn test_request_dedup_convergent_paths() {
 
     let node0_addr = *nodes[0].node.node_addr();
     let target = *nodes[2].node.node_addr(); // target node2 (in bloom filters)
-    let root = make_node_addr(0);
 
-    let coords = TreeCoordinate::from_addrs(vec![node0_addr, root]).unwrap();
-    let request = LookupRequest::new(300, target, node0_addr, coords, 5, 0);
+    let request = LookupRequest::new(300, target, node0_addr, 5, 0);
     let payload = &request.encode()[1..];
 
     // Node0 handles the request (forwards to peers whose bloom filter
@@ -841,9 +833,8 @@ async fn test_request_min_mtu_preserved_through_encode_decode() {
     // Verify min_mtu survives encode/decode in the handler test context
     let target = make_node_addr(0xBB);
     let origin = make_node_addr(0xCC);
-    let coords = TreeCoordinate::from_addrs(vec![origin, make_node_addr(0)]).unwrap();
 
-    let request = LookupRequest::new(100, target, origin, coords, 5, 1386);
+    let request = LookupRequest::new(100, target, origin, 5, 1386);
     let encoded = request.encode();
     let decoded = LookupRequest::decode(&encoded[1..]).unwrap();
     assert_eq!(decoded.min_mtu, 1386);
