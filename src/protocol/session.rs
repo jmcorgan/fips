@@ -295,30 +295,24 @@ impl FspFlags {
 ///
 /// | Bit | Name | Description                     |
 /// |-----|------|---------------------------------|
-/// | 0   | SP   | Spin bit for RTT measurement    |
-/// | 1-7 |      | Reserved                        |
+/// | 0-7 |      | Reserved (all zero)             |
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FspInnerFlags {
-    /// Spin bit for passive RTT measurement.
-    pub spin_bit: bool,
-}
+pub struct FspInnerFlags;
 
 impl FspInnerFlags {
     /// Create default inner flags (all clear).
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// Convert to a byte.
     pub fn to_byte(&self) -> u8 {
-        if self.spin_bit { 0x01 } else { 0x00 }
+        0x00
     }
 
     /// Convert from a byte.
-    pub fn from_byte(byte: u8) -> Self {
-        Self {
-            spin_bit: byte & 0x01 != 0,
-        }
+    pub fn from_byte(_byte: u8) -> Self {
+        Self
     }
 }
 
@@ -664,47 +658,40 @@ impl SessionMsg3 {
 /// Session-layer sender report (msg_type 0x11).
 ///
 /// Mirrors the FMP `SenderReport` fields but carried as an FSP session
-/// message inside the AEAD envelope. The msg_type is in the FSP inner
-/// header, so the body starts with reserved bytes.
+/// message inside the AEAD envelope. Uses the same extensibility header
+/// as the link-layer format: `[format_version:1][total_length:2 LE]`.
 ///
-/// ## Wire Format (46 bytes body, after inner header stripped)
+/// ## Wire Format (19 bytes body, after inner header stripped)
 ///
 /// ```text
-/// [0-1]   reserved (zero)
-/// [2-9]   interval_start_counter: u64 LE
-/// [10-17] interval_end_counter: u64 LE
-/// [18-21] interval_start_timestamp: u32 LE
-/// [22-25] interval_end_timestamp: u32 LE
-/// [26-29] interval_bytes_sent: u32 LE
-/// [30-37] cumulative_packets_sent: u64 LE
-/// [38-45] cumulative_bytes_sent: u64 LE
+/// [0]     format_version = 0
+/// [1-2]   total_length: u16 LE (= 16)
+/// [3-6]   interval_packets_sent: u32 LE
+/// [7-10]  interval_bytes_sent: u32 LE
+/// [11-18] cumulative_packets_sent: u64 LE
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSenderReport {
-    pub interval_start_counter: u64,
-    pub interval_end_counter: u64,
-    pub interval_start_timestamp: u32,
-    pub interval_end_timestamp: u32,
+    pub interval_packets_sent: u32,
     pub interval_bytes_sent: u32,
     pub cumulative_packets_sent: u64,
-    pub cumulative_bytes_sent: u64,
 }
 
-/// Body size for SessionSenderReport: 2 reserved + 44 fields.
-pub const SESSION_SENDER_REPORT_SIZE: usize = 46;
+/// Body size for SessionSenderReport: format_version(1) + total_length(2) + payload(16).
+pub const SESSION_SENDER_REPORT_SIZE: usize = 19;
+
+/// Payload size after total_length field for SessionSenderReport format v0.
+const SESSION_SR_PAYLOAD: u16 = 16;
 
 impl SessionSenderReport {
-    /// Encode to wire format (46 bytes body).
+    /// Encode to wire format (19 bytes body).
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(SESSION_SENDER_REPORT_SIZE);
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-        buf.extend_from_slice(&self.interval_start_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_start_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_timestamp.to_le_bytes());
+        buf.push(0x00); // format_version
+        buf.extend_from_slice(&SESSION_SR_PAYLOAD.to_le_bytes());
+        buf.extend_from_slice(&self.interval_packets_sent.to_le_bytes());
         buf.extend_from_slice(&self.interval_bytes_sent.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_packets_sent.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_bytes_sent.to_le_bytes());
         buf
     }
 
@@ -716,16 +703,19 @@ impl SessionSenderReport {
                 got: body.len(),
             });
         }
-        // Skip 2 reserved bytes
-        let p = &body[2..];
+        let _format_version = body[0];
+        let total_length = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
+        if body.len() < 3 + total_length {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 3 + total_length,
+                got: body.len(),
+            });
+        }
+        let p = &body[3..];
         Ok(Self {
-            interval_start_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            interval_end_counter: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            interval_start_timestamp: u32::from_le_bytes(p[16..20].try_into().unwrap()),
-            interval_end_timestamp: u32::from_le_bytes(p[20..24].try_into().unwrap()),
-            interval_bytes_sent: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            cumulative_packets_sent: u64::from_le_bytes(p[28..36].try_into().unwrap()),
-            cumulative_bytes_sent: u64::from_le_bytes(p[36..44].try_into().unwrap()),
+            interval_packets_sent: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            interval_bytes_sent: u32::from_le_bytes(p[4..8].try_into().unwrap()),
+            cumulative_packets_sent: u64::from_le_bytes(p[8..16].try_into().unwrap()),
         })
     }
 }
@@ -733,69 +723,61 @@ impl SessionSenderReport {
 /// Session-layer receiver report (msg_type 0x12).
 ///
 /// Mirrors the FMP `ReceiverReport` fields but carried as an FSP session
-/// message inside the AEAD envelope.
+/// message inside the AEAD envelope. Uses the same extensibility header
+/// as the link-layer format: `[format_version:1][total_length:2 LE]`.
 ///
-/// ## Wire Format (66 bytes body, after inner header stripped)
+/// ## Wire Format (53 bytes body, after inner header stripped)
 ///
 /// ```text
-/// [0-1]   reserved (zero)
-/// [2-9]   highest_counter: u64 LE
-/// [10-17] cumulative_packets_recv: u64 LE
-/// [18-25] cumulative_bytes_recv: u64 LE
-/// [26-29] timestamp_echo: u32 LE
-/// [30-31] dwell_time: u16 LE
-/// [32-33] max_burst_loss: u16 LE
-/// [34-35] mean_burst_loss: u16 LE (u8.8 fixed-point)
-/// [36-37] reserved: u16 LE
-/// [38-41] jitter: u32 LE (microseconds)
-/// [42-45] ecn_ce_count: u32 LE
-/// [46-49] owd_trend: i32 LE (µs/s)
-/// [50-53] burst_loss_count: u32 LE
-/// [54-57] cumulative_reorder_count: u32 LE
-/// [58-61] interval_packets_recv: u32 LE
-/// [62-65] interval_bytes_recv: u32 LE
+/// [0]     format_version = 0
+/// [1-2]   total_length: u16 LE (= 50)
+/// [3-6]   timestamp_echo: u32 LE
+/// [7-8]   dwell_time: u16 LE
+/// [9-16]  highest_counter: u64 LE
+/// [17-24] cumulative_packets_recv: u64 LE
+/// [25-32] cumulative_bytes_recv: u64 LE
+/// [33-36] jitter: u32 LE (microseconds)
+/// [37-40] ecn_ce_count: u32 LE
+/// [41-44] owd_trend: i32 LE (µs/s)
+/// [45-48] burst_loss_count: u32 LE
+/// [49-52] cumulative_reorder_count: u32 LE
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionReceiverReport {
+    pub timestamp_echo: u32,
+    pub dwell_time: u16,
     pub highest_counter: u64,
     pub cumulative_packets_recv: u64,
     pub cumulative_bytes_recv: u64,
-    pub timestamp_echo: u32,
-    pub dwell_time: u16,
-    pub max_burst_loss: u16,
-    pub mean_burst_loss: u16,
     pub jitter: u32,
     pub ecn_ce_count: u32,
     pub owd_trend: i32,
     pub burst_loss_count: u32,
     pub cumulative_reorder_count: u32,
-    pub interval_packets_recv: u32,
-    pub interval_bytes_recv: u32,
 }
 
-/// Body size for SessionReceiverReport: 2 reserved + 64 fields.
-pub const SESSION_RECEIVER_REPORT_SIZE: usize = 66;
+/// Body size for SessionReceiverReport: format_version(1) + total_length(2) + payload(50).
+pub const SESSION_RECEIVER_REPORT_SIZE: usize = 53;
+
+/// Payload size after total_length field for SessionReceiverReport format v0.
+const SESSION_RR_PAYLOAD: u16 = 50;
 
 impl SessionReceiverReport {
-    /// Encode to wire format (66 bytes body).
+    /// Encode to wire format (53 bytes body).
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(SESSION_RECEIVER_REPORT_SIZE);
-        buf.extend_from_slice(&[0u8; 2]); // reserved
+        buf.push(0x00); // format_version
+        buf.extend_from_slice(&SESSION_RR_PAYLOAD.to_le_bytes());
+        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
+        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
         buf.extend_from_slice(&self.highest_counter.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_packets_recv.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_bytes_recv.to_le_bytes());
-        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
-        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
-        buf.extend_from_slice(&self.max_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&self.mean_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 2]); // reserved
         buf.extend_from_slice(&self.jitter.to_le_bytes());
         buf.extend_from_slice(&self.ecn_ce_count.to_le_bytes());
         buf.extend_from_slice(&self.owd_trend.to_le_bytes());
         buf.extend_from_slice(&self.burst_loss_count.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_reorder_count.to_le_bytes());
-        buf.extend_from_slice(&self.interval_packets_recv.to_le_bytes());
-        buf.extend_from_slice(&self.interval_bytes_recv.to_le_bytes());
         buf
     }
 
@@ -807,24 +789,26 @@ impl SessionReceiverReport {
                 got: body.len(),
             });
         }
-        // Skip 2 reserved bytes
-        let p = &body[2..];
+        let _format_version = body[0];
+        let total_length = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
+        if body.len() < 3 + total_length {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 3 + total_length,
+                got: body.len(),
+            });
+        }
+        let p = &body[3..];
         Ok(Self {
-            highest_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            cumulative_packets_recv: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            cumulative_bytes_recv: u64::from_le_bytes(p[16..24].try_into().unwrap()),
-            timestamp_echo: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            dwell_time: u16::from_le_bytes(p[28..30].try_into().unwrap()),
-            max_burst_loss: u16::from_le_bytes(p[30..32].try_into().unwrap()),
-            mean_burst_loss: u16::from_le_bytes(p[32..34].try_into().unwrap()),
-            // skip 2 reserved bytes at p[34..36]
-            jitter: u32::from_le_bytes(p[36..40].try_into().unwrap()),
-            ecn_ce_count: u32::from_le_bytes(p[40..44].try_into().unwrap()),
-            owd_trend: i32::from_le_bytes(p[44..48].try_into().unwrap()),
-            burst_loss_count: u32::from_le_bytes(p[48..52].try_into().unwrap()),
-            cumulative_reorder_count: u32::from_le_bytes(p[52..56].try_into().unwrap()),
-            interval_packets_recv: u32::from_le_bytes(p[56..60].try_into().unwrap()),
-            interval_bytes_recv: u32::from_le_bytes(p[60..64].try_into().unwrap()),
+            timestamp_echo: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            dwell_time: u16::from_le_bytes(p[4..6].try_into().unwrap()),
+            highest_counter: u64::from_le_bytes(p[6..14].try_into().unwrap()),
+            cumulative_packets_recv: u64::from_le_bytes(p[14..22].try_into().unwrap()),
+            cumulative_bytes_recv: u64::from_le_bytes(p[22..30].try_into().unwrap()),
+            jitter: u32::from_le_bytes(p[30..34].try_into().unwrap()),
+            ecn_ce_count: u32::from_le_bytes(p[34..38].try_into().unwrap()),
+            owd_trend: i32::from_le_bytes(p[38..42].try_into().unwrap()),
+            burst_loss_count: u32::from_le_bytes(p[42..46].try_into().unwrap()),
+            cumulative_reorder_count: u32::from_le_bytes(p[46..50].try_into().unwrap()),
         })
     }
 }
@@ -1430,30 +1414,14 @@ mod tests {
     #[test]
     fn test_fsp_inner_flags_default() {
         let flags = FspInnerFlags::new();
-        assert!(!flags.spin_bit);
         assert_eq!(flags.to_byte(), 0x00);
     }
 
     #[test]
-    fn test_fsp_inner_flags_roundtrip() {
-        let flags = FspInnerFlags::from_byte(0x01);
-        assert!(flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x01);
-
-        let flags = FspInnerFlags::from_byte(0x00);
-        assert!(!flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x00);
-    }
-
-    #[test]
-    fn test_fsp_inner_flags_ignores_reserved() {
-        let flags = FspInnerFlags::from_byte(0xFE);
-        assert!(!flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x00);
-
+    fn test_fsp_inner_flags_from_byte() {
+        // All bits are reserved; from_byte always returns default
         let flags = FspInnerFlags::from_byte(0xFF);
-        assert!(flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x01);
+        assert_eq!(flags.to_byte(), 0x00);
     }
 
     // ===== New SessionMessageType Values =====
@@ -1485,13 +1453,9 @@ mod tests {
 
     fn sample_session_sender_report() -> SessionSenderReport {
         SessionSenderReport {
-            interval_start_counter: 100,
-            interval_end_counter: 200,
-            interval_start_timestamp: 5000,
-            interval_end_timestamp: 6000,
+            interval_packets_sent: 100,
             interval_bytes_sent: 50_000,
             cumulative_packets_sent: 10_000,
-            cumulative_bytes_sent: 5_000_000,
         }
     }
 
@@ -1519,20 +1483,16 @@ mod tests {
 
     fn sample_session_receiver_report() -> SessionReceiverReport {
         SessionReceiverReport {
+            timestamp_echo: 5900,
+            dwell_time: 5,
             highest_counter: 195,
             cumulative_packets_recv: 9_500,
             cumulative_bytes_recv: 4_750_000,
-            timestamp_echo: 5900,
-            dwell_time: 5,
-            max_burst_loss: 3,
-            mean_burst_loss: 384,
             jitter: 1200,
             ecn_ce_count: 0,
             owd_trend: -50,
             burst_loss_count: 2,
             cumulative_reorder_count: 10,
-            interval_packets_recv: 95,
-            interval_bytes_recv: 47_500,
         }
     }
 

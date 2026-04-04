@@ -71,9 +71,6 @@ pub const FLAG_KEY_EPOCH: u8 = 0x01;
 #[allow(dead_code)]
 /// Congestion Experienced echo flag.
 pub const FLAG_CE: u8 = 0x02;
-#[allow(dead_code)]
-/// Spin bit for RTT measurement.
-pub const FLAG_SP: u8 = 0x04;
 
 // ============================================================================
 // Common Prefix
@@ -516,11 +513,11 @@ mod tests {
 
     #[test]
     fn test_common_prefix_parse() {
-        let data = [0x10, 0x04, 0x20, 0x00]; // ver=1, phase=0, flags=SP, payload_len=32
+        let data = [0x10, 0x02, 0x20, 0x00]; // ver=1, phase=0, flags=CE, payload_len=32
         let prefix = CommonPrefix::parse(&data).unwrap();
         assert_eq!(prefix.version, 1);
         assert_eq!(prefix.phase, 0);
-        assert_eq!(prefix.flags, FLAG_SP);
+        assert_eq!(prefix.flags, FLAG_CE);
         assert_eq!(prefix.payload_len, 32);
     }
 
@@ -698,10 +695,10 @@ mod tests {
         let header = build_established_header(
             SessionIndex::new(1),
             0,
-            FLAG_KEY_EPOCH | FLAG_SP,
+            FLAG_KEY_EPOCH | FLAG_CE,
             100,
         );
-        assert_eq!(header[1], 0x05); // bits 0 and 2 set
+        assert_eq!(header[1], 0x03); // bits 0 and 1 set
 
         let parsed = EncryptedHeader::parse(&[
             header[0], header[1], header[2], header[3],
@@ -712,8 +709,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ]).unwrap();
         assert_eq!(parsed.flags & FLAG_KEY_EPOCH, FLAG_KEY_EPOCH);
-        assert_eq!(parsed.flags & FLAG_CE, 0);
-        assert_eq!(parsed.flags & FLAG_SP, FLAG_SP);
+        assert_eq!(parsed.flags & FLAG_CE, FLAG_CE);
     }
 
     #[test]

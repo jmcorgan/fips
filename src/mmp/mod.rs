@@ -23,7 +23,7 @@ pub mod sender;
 
 // Re-exports
 pub use algorithms::{
-    DualEwma, JitterEstimator, OwdTrendDetector, SpinBitState, SrttEstimator, compute_etx,
+    DualEwma, JitterEstimator, OwdTrendDetector, SrttEstimator, compute_etx,
 };
 pub use metrics::MmpMetrics;
 pub use receiver::ReceiverState;
@@ -180,13 +180,12 @@ impl MmpConfig {
 
 /// Combined MMP state for a single peer link.
 ///
-/// Wraps sender, receiver, metrics, and spin bit state. One instance
+/// Wraps sender, receiver, and metrics state. One instance
 /// per `ActivePeer`.
 pub struct MmpPeerState {
     pub sender: SenderState,
     pub receiver: ReceiverState,
     pub metrics: MmpMetrics,
-    pub spin_bit: SpinBitState,
     mode: MmpMode,
     log_interval: Duration,
     last_log_time: Option<Instant>,
@@ -194,15 +193,12 @@ pub struct MmpPeerState {
 
 impl MmpPeerState {
     /// Create MMP state for a new peer link.
-    ///
-    /// `is_initiator`: true if this node initiated the Noise handshake
-    /// (determines spin bit role).
     pub fn new(config: &MmpConfig, is_initiator: bool) -> Self {
+        let _ = is_initiator; // retained for API compatibility
         Self {
             sender: SenderState::new(),
             receiver: ReceiverState::new(config.owd_window_size),
             metrics: MmpMetrics::new(),
-            spin_bit: SpinBitState::new(is_initiator),
             mode: config.mode,
             log_interval: Duration::from_secs(config.log_interval_secs),
             last_log_time: None,
@@ -240,13 +236,12 @@ impl MmpPeerState {
 
 /// Combined MMP state for a single end-to-end session.
 ///
-/// Wraps sender, receiver, metrics, spin bit, and path MTU state.
+/// Wraps sender, receiver, metrics, and path MTU state.
 /// One instance per established `SessionEntry`.
 pub struct MmpSessionState {
     pub sender: SenderState,
     pub receiver: ReceiverState,
     pub metrics: MmpMetrics,
-    pub spin_bit: SpinBitState,
     mode: MmpMode,
     log_interval: Duration,
     last_log_time: Option<Instant>,
@@ -255,10 +250,8 @@ pub struct MmpSessionState {
 
 impl MmpSessionState {
     /// Create MMP state for a new session.
-    ///
-    /// `is_initiator`: true if this node initiated the Noise handshake
-    /// (determines spin bit role).
     pub fn new(config: &crate::config::SessionMmpConfig, is_initiator: bool) -> Self {
+        let _ = is_initiator; // retained for API compatibility
         Self {
             sender: SenderState::new_with_cold_start(SESSION_COLD_START_INTERVAL_MS),
             receiver: ReceiverState::new_with_cold_start(
@@ -266,7 +259,6 @@ impl MmpSessionState {
                 SESSION_COLD_START_INTERVAL_MS,
             ),
             metrics: MmpMetrics::new(),
-            spin_bit: SpinBitState::new(is_initiator),
             mode: config.mode,
             log_interval: Duration::from_secs(config.log_interval_secs),
             last_log_time: None,

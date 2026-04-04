@@ -1,173 +1,203 @@
 //! MMP report wire format: SenderReport and ReceiverReport.
 //!
 //! Serialization and deserialization for the two report types exchanged
-//! between link-layer peers. Wire format follows the MMP design doc.
+//! between link-layer peers. Wire format uses an extensibility header:
+//! `[msg_type:1][format_version:1][total_length:2 LE]` followed by payload.
+//! Format version 0 defines the slim layouts below. Decoders skip unknown
+//! trailing bytes via total_length for forward compatibility.
 
 use crate::protocol::ProtocolError;
 
+/// Current format version for MMP reports.
+const FORMAT_VERSION: u8 = 0;
+
 // ============================================================================
-// SenderReport (msg_type 0x01, 48-byte body including type byte)
+// SenderReport (msg_type 0x01, 20 bytes total)
 // ============================================================================
 
 /// Link-layer sender report.
 ///
-/// Wire layout (48 bytes total, sent as link message):
+/// Wire layout (20 bytes total, sent as link message):
 /// ```text
-/// [0]    msg_type = 0x01
-/// [1-3]  reserved (zero)
-/// [4-11] interval_start_counter: u64 LE
-/// [12-19] interval_end_counter: u64 LE
-/// [20-23] interval_start_timestamp: u32 LE
-/// [24-27] interval_end_timestamp: u32 LE
-/// [28-31] interval_bytes_sent: u32 LE
-/// [32-39] cumulative_packets_sent: u64 LE
-/// [40-47] cumulative_bytes_sent: u64 LE
+/// [0]     msg_type = 0x01
+/// [1]     format_version = 0
+/// [2-3]   total_length: u16 LE (= 16, payload bytes after this field)
+/// [4-7]   interval_packets_sent: u32 LE
+/// [8-11]  interval_bytes_sent: u32 LE
+/// [12-19] cumulative_packets_sent: u64 LE
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderReport {
-    pub interval_start_counter: u64,
-    pub interval_end_counter: u64,
-    pub interval_start_timestamp: u32,
-    pub interval_end_timestamp: u32,
+    pub interval_packets_sent: u32,
     pub interval_bytes_sent: u32,
     pub cumulative_packets_sent: u64,
-    pub cumulative_bytes_sent: u64,
 }
 
-/// ReceiverReport (msg_type 0x02, 68-byte body including type byte)
+/// Total wire size for SenderReport.
+pub const SENDER_REPORT_SIZE: usize = 20;
+
+/// Payload size after total_length field for SenderReport format v0.
+const SENDER_REPORT_PAYLOAD: u16 = 16;
+
+/// ReceiverReport (msg_type 0x02, 54 bytes total)
 ///
-/// Wire layout (68 bytes total, sent as link message):
+/// Wire layout (54 bytes total, sent as link message):
 /// ```text
-/// [0]    msg_type = 0x02
-/// [1-3]  reserved (zero)
-/// [4-11] highest_counter: u64 LE
-/// [12-19] cumulative_packets_recv: u64 LE
-/// [20-27] cumulative_bytes_recv: u64 LE
-/// [28-31] timestamp_echo: u32 LE
-/// [32-33] dwell_time: u16 LE
-/// [34-35] max_burst_loss: u16 LE
-/// [36-37] mean_burst_loss: u16 LE (u8.8 fixed-point)
-/// [38-39] reserved: u16 LE
-/// [40-43] jitter: u32 LE (microseconds)
-/// [44-47] ecn_ce_count: u32 LE
-/// [48-51] owd_trend: i32 LE (µs/s)
-/// [52-55] burst_loss_count: u32 LE
-/// [56-59] cumulative_reorder_count: u32 LE
-/// [60-63] interval_packets_recv: u32 LE
-/// [64-67] interval_bytes_recv: u32 LE
+/// [0]     msg_type = 0x02
+/// [1]     format_version = 0
+/// [2-3]   total_length: u16 LE (= 50, payload bytes after this field)
+/// [4-7]   timestamp_echo: u32 LE
+/// [8-9]   dwell_time: u16 LE
+/// [10-17] highest_counter: u64 LE
+/// [18-25] cumulative_packets_recv: u64 LE
+/// [26-33] cumulative_bytes_recv: u64 LE
+/// [34-37] jitter: u32 LE (microseconds)
+/// [38-41] ecn_ce_count: u32 LE
+/// [42-45] owd_trend: i32 LE (µs/s)
+/// [46-49] burst_loss_count: u32 LE
+/// [50-53] cumulative_reorder_count: u32 LE
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiverReport {
+    pub timestamp_echo: u32,
+    pub dwell_time: u16,
     pub highest_counter: u64,
     pub cumulative_packets_recv: u64,
     pub cumulative_bytes_recv: u64,
-    pub timestamp_echo: u32,
-    pub dwell_time: u16,
-    pub max_burst_loss: u16,
-    pub mean_burst_loss: u16,
     pub jitter: u32,
     pub ecn_ce_count: u32,
     pub owd_trend: i32,
     pub burst_loss_count: u32,
     pub cumulative_reorder_count: u32,
-    pub interval_packets_recv: u32,
-    pub interval_bytes_recv: u32,
 }
 
-// Encode/decode will be implemented in Step 2.
+/// Total wire size for ReceiverReport.
+pub const RECEIVER_REPORT_SIZE: usize = 54;
+
+/// Payload size after total_length field for ReceiverReport format v0.
+const RECEIVER_REPORT_PAYLOAD: u16 = 50;
 
 impl SenderReport {
-    /// Encode to wire format (48 bytes: msg_type + 3 reserved + 44 payload).
+    /// Encode to wire format (20 bytes: header + payload).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(48);
+        let mut buf = Vec::with_capacity(SENDER_REPORT_SIZE);
         buf.push(0x01); // msg_type
-        buf.extend_from_slice(&[0u8; 3]); // reserved
-        buf.extend_from_slice(&self.interval_start_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_start_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_timestamp.to_le_bytes());
+        buf.push(FORMAT_VERSION);
+        buf.extend_from_slice(&SENDER_REPORT_PAYLOAD.to_le_bytes());
+        buf.extend_from_slice(&self.interval_packets_sent.to_le_bytes());
         buf.extend_from_slice(&self.interval_bytes_sent.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_packets_sent.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_bytes_sent.to_le_bytes());
         buf
     }
 
     /// Decode from payload after msg_type byte has been consumed.
     ///
-    /// `payload` starts at the reserved bytes (offset 1 in the wire format).
+    /// `payload` starts at format_version (offset 1 in the wire format).
+    /// Unknown trailing bytes (from future format extensions) are skipped
+    /// via total_length.
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        if payload.len() < 47 {
+        // Need at least: format_version(1) + total_length(2) + v0 payload(16) = 19
+        if payload.len() < 19 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 47,
+                expected: 19,
                 got: payload.len(),
             });
         }
-        // Skip 3 reserved bytes
+        let format_version = payload[0];
+        let total_length = u16::from_le_bytes(payload[1..3].try_into().unwrap()) as usize;
+
+        // Verify we have enough data for the declared length
+        if payload.len() < 3 + total_length {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 3 + total_length,
+                got: payload.len(),
+            });
+        }
+
+        // For version 0, parse known fields from offset 3
+        if format_version > 0 {
+            // Future versions: we can still parse v0 fields if total_length >= 14
+            if total_length < SENDER_REPORT_PAYLOAD as usize {
+                return Err(ProtocolError::MessageTooShort {
+                    expected: SENDER_REPORT_PAYLOAD as usize,
+                    got: total_length,
+                });
+            }
+        }
+
         let p = &payload[3..];
         Ok(Self {
-            interval_start_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            interval_end_counter: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            interval_start_timestamp: u32::from_le_bytes(p[16..20].try_into().unwrap()),
-            interval_end_timestamp: u32::from_le_bytes(p[20..24].try_into().unwrap()),
-            interval_bytes_sent: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            cumulative_packets_sent: u64::from_le_bytes(p[28..36].try_into().unwrap()),
-            cumulative_bytes_sent: u64::from_le_bytes(p[36..44].try_into().unwrap()),
+            interval_packets_sent: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            interval_bytes_sent: u32::from_le_bytes(p[4..8].try_into().unwrap()),
+            cumulative_packets_sent: u64::from_le_bytes(p[8..16].try_into().unwrap()),
         })
     }
 }
 
 impl ReceiverReport {
-    /// Encode to wire format (68 bytes: msg_type + 3 reserved + 64 payload).
+    /// Encode to wire format (54 bytes: header + payload).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(68);
+        let mut buf = Vec::with_capacity(RECEIVER_REPORT_SIZE);
         buf.push(0x02); // msg_type
-        buf.extend_from_slice(&[0u8; 3]); // reserved
+        buf.push(FORMAT_VERSION);
+        buf.extend_from_slice(&RECEIVER_REPORT_PAYLOAD.to_le_bytes());
+        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
+        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
         buf.extend_from_slice(&self.highest_counter.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_packets_recv.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_bytes_recv.to_le_bytes());
-        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
-        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
-        buf.extend_from_slice(&self.max_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&self.mean_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 2]); // reserved
         buf.extend_from_slice(&self.jitter.to_le_bytes());
         buf.extend_from_slice(&self.ecn_ce_count.to_le_bytes());
         buf.extend_from_slice(&self.owd_trend.to_le_bytes());
         buf.extend_from_slice(&self.burst_loss_count.to_le_bytes());
         buf.extend_from_slice(&self.cumulative_reorder_count.to_le_bytes());
-        buf.extend_from_slice(&self.interval_packets_recv.to_le_bytes());
-        buf.extend_from_slice(&self.interval_bytes_recv.to_le_bytes());
         buf
     }
 
     /// Decode from payload after msg_type byte has been consumed.
     ///
-    /// `payload` starts at the reserved bytes (offset 1 in the wire format).
+    /// `payload` starts at format_version (offset 1 in the wire format).
+    /// Unknown trailing bytes (from future format extensions) are skipped
+    /// via total_length.
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
-        if payload.len() < 67 {
+        // Need at least: format_version(1) + total_length(2) + v0 payload(50) = 53
+        if payload.len() < 53 {
             return Err(ProtocolError::MessageTooShort {
-                expected: 67,
+                expected: 53,
                 got: payload.len(),
             });
         }
-        // Skip 3 reserved bytes
+        let format_version = payload[0];
+        let total_length = u16::from_le_bytes(payload[1..3].try_into().unwrap()) as usize;
+
+        if payload.len() < 3 + total_length {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 3 + total_length,
+                got: payload.len(),
+            });
+        }
+
+        if format_version > 0
+            && total_length < RECEIVER_REPORT_PAYLOAD as usize
+        {
+            return Err(ProtocolError::MessageTooShort {
+                expected: RECEIVER_REPORT_PAYLOAD as usize,
+                got: total_length,
+            });
+        }
+
         let p = &payload[3..];
         Ok(Self {
-            highest_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            cumulative_packets_recv: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            cumulative_bytes_recv: u64::from_le_bytes(p[16..24].try_into().unwrap()),
-            timestamp_echo: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            dwell_time: u16::from_le_bytes(p[28..30].try_into().unwrap()),
-            max_burst_loss: u16::from_le_bytes(p[30..32].try_into().unwrap()),
-            mean_burst_loss: u16::from_le_bytes(p[32..34].try_into().unwrap()),
-            // skip 2 reserved bytes at p[34..36]
-            jitter: u32::from_le_bytes(p[36..40].try_into().unwrap()),
-            ecn_ce_count: u32::from_le_bytes(p[40..44].try_into().unwrap()),
-            owd_trend: i32::from_le_bytes(p[44..48].try_into().unwrap()),
-            burst_loss_count: u32::from_le_bytes(p[48..52].try_into().unwrap()),
-            cumulative_reorder_count: u32::from_le_bytes(p[52..56].try_into().unwrap()),
-            interval_packets_recv: u32::from_le_bytes(p[56..60].try_into().unwrap()),
-            interval_bytes_recv: u32::from_le_bytes(p[60..64].try_into().unwrap()),
+            timestamp_echo: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            dwell_time: u16::from_le_bytes(p[4..6].try_into().unwrap()),
+            highest_counter: u64::from_le_bytes(p[6..14].try_into().unwrap()),
+            cumulative_packets_recv: u64::from_le_bytes(p[14..22].try_into().unwrap()),
+            cumulative_bytes_recv: u64::from_le_bytes(p[22..30].try_into().unwrap()),
+            jitter: u32::from_le_bytes(p[30..34].try_into().unwrap()),
+            ecn_ce_count: u32::from_le_bytes(p[34..38].try_into().unwrap()),
+            owd_trend: i32::from_le_bytes(p[38..42].try_into().unwrap()),
+            burst_loss_count: u32::from_le_bytes(p[42..46].try_into().unwrap()),
+            cumulative_reorder_count: u32::from_le_bytes(p[46..50].try_into().unwrap()),
         })
     }
 }
@@ -181,13 +211,9 @@ use crate::protocol::{SessionReceiverReport, SessionSenderReport};
 impl From<&SenderReport> for SessionSenderReport {
     fn from(r: &SenderReport) -> Self {
         Self {
-            interval_start_counter: r.interval_start_counter,
-            interval_end_counter: r.interval_end_counter,
-            interval_start_timestamp: r.interval_start_timestamp,
-            interval_end_timestamp: r.interval_end_timestamp,
+            interval_packets_sent: r.interval_packets_sent,
             interval_bytes_sent: r.interval_bytes_sent,
             cumulative_packets_sent: r.cumulative_packets_sent,
-            cumulative_bytes_sent: r.cumulative_bytes_sent,
         }
     }
 }
@@ -195,13 +221,9 @@ impl From<&SenderReport> for SessionSenderReport {
 impl From<&SessionSenderReport> for SenderReport {
     fn from(r: &SessionSenderReport) -> Self {
         Self {
-            interval_start_counter: r.interval_start_counter,
-            interval_end_counter: r.interval_end_counter,
-            interval_start_timestamp: r.interval_start_timestamp,
-            interval_end_timestamp: r.interval_end_timestamp,
+            interval_packets_sent: r.interval_packets_sent,
             interval_bytes_sent: r.interval_bytes_sent,
             cumulative_packets_sent: r.cumulative_packets_sent,
-            cumulative_bytes_sent: r.cumulative_bytes_sent,
         }
     }
 }
@@ -209,20 +231,16 @@ impl From<&SessionSenderReport> for SenderReport {
 impl From<&ReceiverReport> for SessionReceiverReport {
     fn from(r: &ReceiverReport) -> Self {
         Self {
+            timestamp_echo: r.timestamp_echo,
+            dwell_time: r.dwell_time,
             highest_counter: r.highest_counter,
             cumulative_packets_recv: r.cumulative_packets_recv,
             cumulative_bytes_recv: r.cumulative_bytes_recv,
-            timestamp_echo: r.timestamp_echo,
-            dwell_time: r.dwell_time,
-            max_burst_loss: r.max_burst_loss,
-            mean_burst_loss: r.mean_burst_loss,
             jitter: r.jitter,
             ecn_ce_count: r.ecn_ce_count,
             owd_trend: r.owd_trend,
             burst_loss_count: r.burst_loss_count,
             cumulative_reorder_count: r.cumulative_reorder_count,
-            interval_packets_recv: r.interval_packets_recv,
-            interval_bytes_recv: r.interval_bytes_recv,
         }
     }
 }
@@ -230,20 +248,16 @@ impl From<&ReceiverReport> for SessionReceiverReport {
 impl From<&SessionReceiverReport> for ReceiverReport {
     fn from(r: &SessionReceiverReport) -> Self {
         Self {
+            timestamp_echo: r.timestamp_echo,
+            dwell_time: r.dwell_time,
             highest_counter: r.highest_counter,
             cumulative_packets_recv: r.cumulative_packets_recv,
             cumulative_bytes_recv: r.cumulative_bytes_recv,
-            timestamp_echo: r.timestamp_echo,
-            dwell_time: r.dwell_time,
-            max_burst_loss: r.max_burst_loss,
-            mean_burst_loss: r.mean_burst_loss,
             jitter: r.jitter,
             ecn_ce_count: r.ecn_ce_count,
             owd_trend: r.owd_trend,
             burst_loss_count: r.burst_loss_count,
             cumulative_reorder_count: r.cumulative_reorder_count,
-            interval_packets_recv: r.interval_packets_recv,
-            interval_bytes_recv: r.interval_bytes_recv,
         }
     }
 }
@@ -258,32 +272,24 @@ mod tests {
 
     fn sample_sender_report() -> SenderReport {
         SenderReport {
-            interval_start_counter: 100,
-            interval_end_counter: 200,
-            interval_start_timestamp: 5000,
-            interval_end_timestamp: 6000,
+            interval_packets_sent: 100,
             interval_bytes_sent: 50_000,
             cumulative_packets_sent: 10_000,
-            cumulative_bytes_sent: 5_000_000,
         }
     }
 
     fn sample_receiver_report() -> ReceiverReport {
         ReceiverReport {
+            timestamp_echo: 5900,
+            dwell_time: 5,
             highest_counter: 195,
             cumulative_packets_recv: 9_500,
             cumulative_bytes_recv: 4_750_000,
-            timestamp_echo: 5900,
-            dwell_time: 5,
-            max_burst_loss: 3,
-            mean_burst_loss: 384, // 1.5 in u8.8
             jitter: 1200,
             ecn_ce_count: 0,
             owd_trend: -50,
             burst_loss_count: 2,
             cumulative_reorder_count: 10,
-            interval_packets_recv: 95,
-            interval_bytes_recv: 47_500,
         }
     }
 
@@ -291,15 +297,17 @@ mod tests {
     fn test_sender_report_encode_size() {
         let sr = sample_sender_report();
         let encoded = sr.encode();
-        assert_eq!(encoded.len(), 48);
+        assert_eq!(encoded.len(), SENDER_REPORT_SIZE);
         assert_eq!(encoded[0], 0x01); // msg_type
+        assert_eq!(encoded[1], 0x00); // format_version
+        let total_len = u16::from_le_bytes([encoded[2], encoded[3]]);
+        assert_eq!(total_len, SENDER_REPORT_PAYLOAD);
     }
 
     #[test]
     fn test_sender_report_roundtrip() {
         let sr = sample_sender_report();
         let encoded = sr.encode();
-        // decode expects payload after msg_type
         let decoded = SenderReport::decode(&encoded[1..]).unwrap();
         assert_eq!(sr, decoded);
     }
@@ -314,15 +322,17 @@ mod tests {
     fn test_receiver_report_encode_size() {
         let rr = sample_receiver_report();
         let encoded = rr.encode();
-        assert_eq!(encoded.len(), 68);
+        assert_eq!(encoded.len(), RECEIVER_REPORT_SIZE);
         assert_eq!(encoded[0], 0x02); // msg_type
+        assert_eq!(encoded[1], 0x00); // format_version
+        let total_len = u16::from_le_bytes([encoded[2], encoded[3]]);
+        assert_eq!(total_len, RECEIVER_REPORT_PAYLOAD);
     }
 
     #[test]
     fn test_receiver_report_roundtrip() {
         let rr = sample_receiver_report();
         let encoded = rr.encode();
-        // decode expects payload after msg_type
         let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
         assert_eq!(rr, decoded);
     }
@@ -336,13 +346,9 @@ mod tests {
     #[test]
     fn test_sender_report_zero_values() {
         let sr = SenderReport {
-            interval_start_counter: 0,
-            interval_end_counter: 0,
-            interval_start_timestamp: 0,
-            interval_end_timestamp: 0,
+            interval_packets_sent: 0,
             interval_bytes_sent: 0,
             cumulative_packets_sent: 0,
-            cumulative_bytes_sent: 0,
         };
         let encoded = sr.encode();
         let decoded = SenderReport::decode(&encoded[1..]).unwrap();
@@ -352,20 +358,16 @@ mod tests {
     #[test]
     fn test_receiver_report_max_values() {
         let rr = ReceiverReport {
+            timestamp_echo: u32::MAX,
+            dwell_time: u16::MAX,
             highest_counter: u64::MAX,
             cumulative_packets_recv: u64::MAX,
             cumulative_bytes_recv: u64::MAX,
-            timestamp_echo: u32::MAX,
-            dwell_time: u16::MAX,
-            max_burst_loss: u16::MAX,
-            mean_burst_loss: u16::MAX,
             jitter: u32::MAX,
             ecn_ce_count: u32::MAX,
             owd_trend: i32::MAX,
             burst_loss_count: u32::MAX,
             cumulative_reorder_count: u32::MAX,
-            interval_packets_recv: u32::MAX,
-            interval_bytes_recv: u32::MAX,
         };
         let encoded = rr.encode();
         let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
@@ -381,5 +383,31 @@ mod tests {
         let encoded = rr.encode();
         let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
         assert_eq!(decoded.owd_trend, -12345);
+    }
+
+    #[test]
+    fn test_sender_report_forward_compat_trailing_bytes() {
+        let sr = sample_sender_report();
+        let mut encoded = sr.encode();
+        // Simulate a future version with extra trailing bytes:
+        // bump total_length to include 4 extra bytes
+        let new_total_len = SENDER_REPORT_PAYLOAD + 4;
+        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
+        encoded.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        // Decoder should skip trailing bytes and parse v0 fields
+        let decoded = SenderReport::decode(&encoded[1..]).unwrap();
+        assert_eq!(sr, decoded);
+    }
+
+    #[test]
+    fn test_receiver_report_forward_compat_trailing_bytes() {
+        let rr = sample_receiver_report();
+        let mut encoded = rr.encode();
+        // Simulate a future version with extra trailing bytes
+        let new_total_len = RECEIVER_REPORT_PAYLOAD + 8;
+        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
+        encoded.extend_from_slice(&[0x11; 8]);
+        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
+        assert_eq!(rr, decoded);
     }
 }

@@ -40,7 +40,7 @@ use crate::tree::TreeState;
 use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
-use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP};
+use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_CE, FLAG_KEY_EPOCH};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
@@ -1637,11 +1637,7 @@ impl Node {
         // Prepend 4-byte session-relative timestamp (inner header)
         let timestamp_ms = peer.session_elapsed_ms();
 
-        // MMP: read spin bit value before entering session borrow
-        let sp_flag = peer.mmp()
-            .map(|mmp| mmp.spin_bit.tx_bit())
-            .unwrap_or(false);
-        let mut flags = if sp_flag { FLAG_SP } else { 0 };
+        let mut flags = 0u8;
         if ce_flag {
             flags |= FLAG_CE;
         }

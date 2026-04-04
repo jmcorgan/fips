@@ -59,6 +59,7 @@ impl Node {
         trace!(
             from = %self.peer_display_name(from),
             cum_pkts = sr.cumulative_packets_sent,
+            interval_pkts = sr.interval_packets_sent,
             interval_bytes = sr.interval_bytes_sent,
             "Received SenderReport"
         );
@@ -290,7 +291,6 @@ impl Node {
             etx = format_args!("{:.2}", m.etx),
             goodput = %format_throughput(m.goodput_bps()),
             tx_pkts = mmp.sender.cumulative_packets_sent(),
-            tx_bytes = mmp.sender.cumulative_bytes_sent(),
             rx_pkts = mmp.receiver.cumulative_packets_recv(),
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
             "MMP link teardown"
@@ -489,7 +489,6 @@ impl Node {
             send_mtu = mmp.path_mtu.current_mtu(),
             observed_mtu = mmp.path_mtu.last_observed_mtu(),
             tx_pkts = mmp.sender.cumulative_packets_sent(),
-            tx_bytes = mmp.sender.cumulative_bytes_sent(),
             rx_pkts = mmp.receiver.cumulative_packets_recv(),
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
             "MMP session teardown"

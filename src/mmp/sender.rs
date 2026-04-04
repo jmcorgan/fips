@@ -18,16 +18,10 @@ use crate::mmp::{
 pub struct SenderState {
     // --- Cumulative (lifetime) ---
     cumulative_packets_sent: u64,
-    cumulative_bytes_sent: u64,
 
     // --- Current interval ---
-    interval_start_counter: u64,
-    interval_start_timestamp: u32,
+    interval_packets_sent: u32,
     interval_bytes_sent: u32,
-    /// Counter of the most recently sent frame.
-    last_counter: u64,
-    /// Timestamp of the most recently sent frame.
-    last_timestamp: u32,
     /// Whether any frames have been sent in the current interval.
     interval_has_data: bool,
 
@@ -56,12 +50,8 @@ impl SenderState {
     pub fn new_with_cold_start(cold_start_ms: u64) -> Self {
         Self {
             cumulative_packets_sent: 0,
-            cumulative_bytes_sent: 0,
-            interval_start_counter: 0,
-            interval_start_timestamp: 0,
+            interval_packets_sent: 0,
             interval_bytes_sent: 0,
-            last_counter: 0,
-            last_timestamp: 0,
             interval_has_data: false,
             last_report_time: None,
             report_interval: Duration::from_millis(cold_start_ms),
@@ -75,17 +65,11 @@ impl SenderState {
     /// Called on the TX path for every encrypted link message.
     /// `counter` is the AEAD nonce/counter, `timestamp` is the inner header
     /// session-relative timestamp (ms), `bytes` is the wire payload size.
-    pub fn record_sent(&mut self, counter: u64, timestamp: u32, bytes: usize) {
-        if !self.interval_has_data {
-            self.interval_start_counter = counter;
-            self.interval_start_timestamp = timestamp;
-            self.interval_has_data = true;
-        }
-        self.last_counter = counter;
-        self.last_timestamp = timestamp;
+    pub fn record_sent(&mut self, _counter: u64, _timestamp: u32, bytes: usize) {
+        self.interval_has_data = true;
+        self.interval_packets_sent = self.interval_packets_sent.saturating_add(1);
         self.interval_bytes_sent = self.interval_bytes_sent.saturating_add(bytes as u32);
         self.cumulative_packets_sent += 1;
-        self.cumulative_bytes_sent += bytes as u64;
     }
 
     /// Build a SenderReport from current state and reset the interval.
@@ -97,17 +81,14 @@ impl SenderState {
         }
 
         let report = SenderReport {
-            interval_start_counter: self.interval_start_counter,
-            interval_end_counter: self.last_counter,
-            interval_start_timestamp: self.interval_start_timestamp,
-            interval_end_timestamp: self.last_timestamp,
+            interval_packets_sent: self.interval_packets_sent,
             interval_bytes_sent: self.interval_bytes_sent,
             cumulative_packets_sent: self.cumulative_packets_sent,
-            cumulative_bytes_sent: self.cumulative_bytes_sent,
         };
 
         // Reset interval
         self.interval_has_data = false;
+        self.interval_packets_sent = 0;
         self.interval_bytes_sent = 0;
         self.last_report_time = Some(now);
 
@@ -193,10 +174,6 @@ impl SenderState {
         self.cumulative_packets_sent
     }
 
-    pub fn cumulative_bytes_sent(&self) -> u64 {
-        self.cumulative_bytes_sent
-    }
-
     pub fn report_interval(&self) -> Duration {
         self.report_interval
     }
@@ -224,7 +201,6 @@ mod tests {
     fn test_new_sender_state() {
         let s = SenderState::new();
         assert_eq!(s.cumulative_packets_sent(), 0);
-        assert_eq!(s.cumulative_bytes_sent(), 0);
     }
 
     #[test]
@@ -233,7 +209,6 @@ mod tests {
         s.record_sent(1, 100, 500);
         s.record_sent(2, 200, 600);
         assert_eq!(s.cumulative_packets_sent(), 2);
-        assert_eq!(s.cumulative_bytes_sent(), 1100);
     }
 
     #[test]
@@ -250,13 +225,9 @@ mod tests {
         s.record_sent(12, 1200, 400);
 
         let report = s.build_report(Instant::now()).unwrap();
-        assert_eq!(report.interval_start_counter, 10);
-        assert_eq!(report.interval_end_counter, 12);
-        assert_eq!(report.interval_start_timestamp, 1000);
-        assert_eq!(report.interval_end_timestamp, 1200);
+        assert_eq!(report.interval_packets_sent, 3);
         assert_eq!(report.interval_bytes_sent, 1500);
         assert_eq!(report.cumulative_packets_sent, 3);
-        assert_eq!(report.cumulative_bytes_sent, 1500);
     }
 
     #[test]
@@ -271,11 +242,10 @@ mod tests {
         // New data starts a fresh interval
         s.record_sent(2, 200, 300);
         let report = s.build_report(Instant::now()).unwrap();
-        assert_eq!(report.interval_start_counter, 2);
+        assert_eq!(report.interval_packets_sent, 1);
         assert_eq!(report.interval_bytes_sent, 300);
         // Cumulative continues
         assert_eq!(report.cumulative_packets_sent, 2);
-        assert_eq!(report.cumulative_bytes_sent, 800);
     }
 
     #[test]

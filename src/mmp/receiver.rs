@@ -329,23 +329,19 @@ impl ReceiverState {
             .map(|t| now.duration_since(t).as_millis() as u16)
             .unwrap_or(0);
 
-        let (burst_count, max_burst, mean_burst) = self.gap_tracker.take_interval_stats();
+        let (burst_count, _max_burst, _mean_burst) = self.gap_tracker.take_interval_stats();
 
         let report = ReceiverReport {
+            timestamp_echo: self.last_sender_timestamp,
+            dwell_time,
             highest_counter: self.highest_counter,
             cumulative_packets_recv: self.cumulative_packets_recv,
             cumulative_bytes_recv: self.cumulative_bytes_recv,
-            timestamp_echo: self.last_sender_timestamp,
-            dwell_time,
-            max_burst_loss: max_burst,
-            mean_burst_loss: mean_burst,
             jitter: self.jitter.jitter_us(),
             ecn_ce_count: self.ecn_ce_count,
             owd_trend: self.owd_trend.trend_us_per_sec(),
             burst_loss_count: burst_count,
             cumulative_reorder_count: self.cumulative_reorder_count as u32,
-            interval_packets_recv: self.interval_packets_recv,
-            interval_bytes_recv: self.interval_bytes_recv,
         };
 
         // Reset interval
@@ -501,8 +497,6 @@ mod tests {
         assert_eq!(report.cumulative_packets_recv, 2);
         assert_eq!(report.cumulative_bytes_recv, 1100);
         assert_eq!(report.timestamp_echo, 200); // last sender timestamp
-        assert_eq!(report.interval_packets_recv, 2);
-        assert_eq!(report.interval_bytes_recv, 1100);
     }
 
     #[test]
@@ -518,8 +512,6 @@ mod tests {
         // New data
         r.record_recv(2, 200, 300, false, t0 + Duration::from_millis(100));
         let report = r.build_report(t0 + Duration::from_millis(150)).unwrap();
-        assert_eq!(report.interval_packets_recv, 1);
-        assert_eq!(report.interval_bytes_recv, 300);
         // Cumulative continues
         assert_eq!(report.cumulative_packets_recv, 2);
     }

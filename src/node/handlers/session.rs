@@ -251,13 +251,7 @@ impl Node {
             mmp.receiver.record_recv(
                 header.counter, timestamp, plaintext.len(), ce_flag, now,
             );
-            // Spin bit: advance state machine for correct TX reflection.
-            // RTT samples not fed into SRTT — timestamp-echo provides
-            // accurate RTT; spin bit includes variable inter-frame delays.
-            let inner_flags = FspInnerFlags::from_byte(inner_flags_byte);
-            let _spin_rtt = mmp.spin_bit.rx_observe(
-                inner_flags.spin_bit, header.counter, now,
-            );
+            let _inner_flags = FspInnerFlags::from_byte(inner_flags_byte);
         }
 
         // Feed path_mtu from datagram envelope to MMP path MTU tracking.
@@ -915,6 +909,7 @@ impl Node {
         trace!(
             src = %self.peer_display_name(src_addr),
             cum_pkts = sr.cumulative_packets_sent,
+            interval_pkts = sr.interval_packets_sent,
             interval_bytes = sr.interval_bytes_sent,
             "Received SessionSenderReport"
         );
@@ -1273,7 +1268,6 @@ impl Node {
         })?;
         let wants_coords = entry.coords_warmup_remaining() > 0;
         let timestamp = entry.session_timestamp(now_ms);
-        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
         if !entry.is_established() {
             return Err(NodeError::SendFailed {
                 node_addr: *dest_addr,
@@ -1289,7 +1283,7 @@ impl Node {
 
         // Build inner plaintext (doesn't depend on counter)
         let msg_type = SessionMessageType::DataPacket.to_byte(); // 0x10
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+        let inner_flags = FspInnerFlags::new().to_byte();
         let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, &port_payload);
 
         // Determine whether coords fit within transport MTU.
@@ -1422,10 +1416,8 @@ impl Node {
             reason: "no session".into(),
         })?;
         let timestamp = entry.session_timestamp(now_ms);
-        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
 
-        // Build inner flags with spin bit
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+        let inner_flags = FspInnerFlags::new().to_byte();
 
         // Get mutable access for encryption
         let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
@@ -1506,7 +1498,6 @@ impl Node {
             reason: "no session".into(),
         })?;
         let timestamp = entry.session_timestamp(now_ms);
-        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
 
         // Get mutable access for encryption
         let entry = self.sessions.get_mut(dest_addr).ok_or_else(|| NodeError::SendFailed {
@@ -1527,7 +1518,7 @@ impl Node {
 
         // FSP inner header only, no body payload
         let msg_type = SessionMessageType::CoordsWarmup.to_byte();
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+        let inner_flags = FspInnerFlags::new().to_byte();
         let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, &[]);
 
         // Build FSP header with CP flag

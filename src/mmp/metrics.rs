@@ -287,20 +287,16 @@ mod tests {
         jitter: u32,
     ) -> ReceiverReport {
         ReceiverReport {
+            timestamp_echo,
+            dwell_time: dwell,
             highest_counter,
             cumulative_packets_recv: cum_packets,
             cumulative_bytes_recv: cum_bytes,
-            timestamp_echo,
-            dwell_time: dwell,
-            max_burst_loss: 0,
-            mean_burst_loss: 0,
             jitter,
             ecn_ce_count: 0,
             owd_trend: 0,
             burst_loss_count: 0,
             cumulative_reorder_count: 0,
-            interval_packets_recv: 0,
-            interval_bytes_recv: 0,
         }
     }
 

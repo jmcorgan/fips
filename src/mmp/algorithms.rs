@@ -4,7 +4,6 @@
 //! Each is independently testable.
 
 use std::collections::VecDeque;
-use std::time::Instant;
 
 use crate::mmp::{EWMA_LONG_ALPHA, EWMA_SHORT_ALPHA};
 
@@ -278,75 +277,6 @@ pub fn compute_etx(d_forward: f64, d_reverse: f64) -> f64 {
 // Spin Bit
 // ============================================================================
 
-/// Spin bit state for passive RTT estimation.
-///
-/// Uses asymmetric roles (initiator/responder) per the MMP design:
-/// - **Initiator**: flips spin value on each received frame; measures RTT
-///   from edge-to-edge intervals.
-/// - **Responder**: copies received spin bit into outgoing frames, with a
-///   counter guard to filter reordered frames.
-pub struct SpinBitState {
-    is_initiator: bool,
-    current_value: bool,
-    /// Highest counter observed with a spin edge (responder guard).
-    highest_counter_for_spin: u64,
-    /// Time of last spin edge (initiator only, for RTT measurement).
-    last_edge_time: Option<Instant>,
-}
-
-impl SpinBitState {
-    pub fn new(is_initiator: bool) -> Self {
-        Self {
-            is_initiator,
-            current_value: false,
-            highest_counter_for_spin: 0,
-            last_edge_time: None,
-        }
-    }
-
-    /// Check if this is the spin bit initiator.
-    pub fn is_initiator(&self) -> bool {
-        self.is_initiator
-    }
-
-    /// Get the spin bit value to set on an outgoing frame.
-    pub fn tx_bit(&self) -> bool {
-        self.current_value
-    }
-
-    /// Process a received frame's spin bit.
-    ///
-    /// Returns an RTT sample duration if an edge was detected (initiator only).
-    pub fn rx_observe(
-        &mut self,
-        received_bit: bool,
-        counter: u64,
-        now: Instant,
-    ) -> Option<std::time::Duration> {
-        if self.is_initiator {
-            // Initiator: when the reflected bit matches what we sent,
-            // that completes a round trip. Record the edge time, then
-            // flip for the next cycle.
-            if received_bit == self.current_value {
-                let rtt = self.last_edge_time.map(|t| now.duration_since(t));
-                self.last_edge_time = Some(now);
-                self.current_value = !self.current_value;
-                rtt
-            } else {
-                None
-            }
-        } else {
-            // Responder: copy received bit, but only if counter is higher
-            // (reordering guard)
-            if counter > self.highest_counter_for_spin {
-                self.highest_counter_for_spin = counter;
-                self.current_value = received_bit;
-            }
-            None
-        }
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -473,54 +403,4 @@ mod tests {
         assert_eq!(compute_etx(1.0, 0.0), 100.0);
     }
 
-    #[test]
-    fn test_spin_bit_initiator_rtt() {
-        let mut initiator = SpinBitState::new(true);
-        let mut responder = SpinBitState::new(false);
-
-        let t0 = Instant::now();
-        let t1 = t0 + std::time::Duration::from_millis(10);
-        let t2 = t0 + std::time::Duration::from_millis(20);
-
-        // Initiator sends with spin=false (initial)
-        let bit_to_send = initiator.tx_bit();
-        assert!(!bit_to_send);
-
-        // Responder receives, copies bit
-        responder.rx_observe(bit_to_send, 1, t0);
-        assert!(!responder.tx_bit());
-
-        // Responder sends back, initiator receives
-        let resp_bit = responder.tx_bit();
-        let rtt1 = initiator.rx_observe(resp_bit, 2, t1);
-        // First edge: no previous edge to compare
-        assert!(rtt1.is_none());
-
-        // Now initiator's spin flipped to true
-        let bit2 = initiator.tx_bit();
-        assert!(bit2);
-
-        // Responder receives new bit
-        responder.rx_observe(bit2, 3, t1);
-        assert!(responder.tx_bit());
-
-        // Responder sends back, initiator receives
-        let resp_bit2 = responder.tx_bit();
-        let rtt2 = initiator.rx_observe(resp_bit2, 4, t2);
-        // Second edge: should produce an RTT sample
-        assert!(rtt2.is_some());
-    }
-
-    #[test]
-    fn test_spin_bit_responder_counter_guard() {
-        let mut responder = SpinBitState::new(false);
-
-        // Receive counter=5 with spin=true
-        responder.rx_observe(true, 5, Instant::now());
-        assert!(responder.tx_bit());
-
-        // Reordered packet with counter=3 and spin=false should be ignored
-        responder.rx_observe(false, 3, Instant::now());
-        assert!(responder.tx_bit()); // unchanged
-    }
 }

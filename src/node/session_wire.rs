@@ -89,11 +89,6 @@ pub const FSP_FLAG_K: u8 = 0x02;
 /// Unencrypted — payload is plaintext (error signals).
 pub const FSP_FLAG_U: u8 = 0x04;
 
-// Inner flag bit constants (byte 5 of decrypted inner header).
-
-/// Spin bit for end-to-end RTT measurement (inside AEAD).
-#[allow(dead_code)]
-pub const FSP_INNER_FLAG_SP: u8 = 0x01;
 
 // ============================================================================
 // Common Prefix

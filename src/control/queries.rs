@@ -373,7 +373,6 @@ pub fn show_mmp(node: &Node) -> Value {
             "loss_rate": metrics.loss_rate(),
             "etx": metrics.etx,
             "goodput_bps": metrics.goodput_bps,
-            "spin_bit_role": if mmp.spin_bit.is_initiator() { "initiator" } else { "responder" },
         });
 
         if let Some(smoothed_loss) = metrics.smoothed_loss() {
