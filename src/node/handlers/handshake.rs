@@ -124,8 +124,8 @@ impl Node {
             packet.timestamp_ms,
         );
 
-        // Create negotiation payload for msg2
-        let neg_payload = NegotiationPayload::new(1, 1, 0).encode();
+        // Create FMP negotiation payload for msg2 (includes profile, MMP bits, bloom TLV)
+        let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
 
         let our_keypair = self.identity.keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
@@ -383,12 +383,12 @@ impl Node {
 
         let conn = self.connections.get_mut(&link_id).unwrap();
 
-        // Create negotiation payload for msg3
-        let neg_payload = NegotiationPayload::new(1, 1, 0).encode();
+        // Create FMP negotiation payload for msg3 (includes profile, MMP bits, bloom TLV)
+        let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
 
         // Process Noise msg2 and generate msg3
         let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-        let (msg3_bytes, _received_negotiation) = match conn.complete_handshake(noise_msg2, Some(&neg_payload), packet.timestamp_ms) {
+        let (msg3_bytes, received_negotiation) = match conn.complete_handshake(noise_msg2, Some(&neg_payload), packet.timestamp_ms) {
             Ok(result) => result,
             Err(e) => {
                 warn!(
@@ -400,6 +400,18 @@ impl Node {
                 return;
             }
         };
+
+        // Process peer's FMP negotiation payload from msg2
+        if let Some(neg_bytes) = &received_negotiation {
+            match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!(link_id = %link_id, error = %e, "FMP negotiation failed");
+                    conn.mark_failed();
+                    return;
+                }
+            }
+        }
 
         // Store their index
         conn.set_their_index(header.sender_idx);
@@ -701,7 +713,7 @@ impl Node {
 
         // Process msg3 — learns initiator's identity and epoch
         let noise_msg3 = &packet.data[header.noise_msg3_offset..];
-        let _received_negotiation = match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
+        let received_negotiation = match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
             Ok(neg) => neg,
             Err(e) => {
                 warn!(
@@ -718,6 +730,19 @@ impl Node {
                 return;
             }
         };
+
+        // Process peer's FMP negotiation payload from msg3
+        if let Some(neg_bytes) = &received_negotiation {
+            match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!(link_id = %link_id, error = %e, "FMP negotiation failed");
+                    self.connections.remove(&link_id);
+                    self.remove_link(&link_id);
+                    return;
+                }
+            }
+        }
 
         // Learn peer identity from msg3
         let peer_identity = match conn.expected_identity() {
@@ -1042,12 +1067,34 @@ impl Node {
     /// Promote a connection to active peer after successful authentication.
     ///
     /// Handles cross-connection detection and resolution using tie-breaker rules.
+    /// Leaf nodes enforce single-peer constraint.
     pub(in crate::node) fn promote_connection(
         &mut self,
         link_id: LinkId,
         verified_identity: PeerIdentity,
         current_time_ms: u64,
     ) -> Result<PromotionResult, NodeError> {
+        // Leaf nodes: reject if we already have a peer (single-peer enforcement)
+        let peer_node_addr_check = *verified_identity.node_addr();
+        if self.node_profile == crate::protocol::NodeProfile::Leaf
+            && !self.peers.is_empty()
+            && !self.peers.contains_key(&peer_node_addr_check)
+        {
+            info!(
+                peer = %self.peer_display_name(&peer_node_addr_check),
+                link_id = %link_id,
+                "Leaf node rejecting additional peer (single-peer enforcement)"
+            );
+            // Clean up the connection
+            if let Some(conn) = self.connections.remove(&link_id)
+                && let Some(idx) = conn.our_index()
+            {
+                let _ = self.index_allocator.free(idx);
+            }
+            self.remove_link(&link_id);
+            return Err(NodeError::MaxPeersExceeded { max: 1 });
+        }
+
         // Remove the connection from pending
         let mut connection = self
             .connections
@@ -1089,6 +1136,10 @@ impl Node {
         })?.clone();
         let link_stats = connection.link_stats().clone();
         let remote_epoch = connection.remote_epoch();
+        let peer_profile = connection.peer_profile()
+            .unwrap_or(crate::protocol::NodeProfile::Full);
+        let agreed_bloom_size_class = connection.agreed_bloom_size_class()
+            .unwrap_or(crate::bloom::V1_SIZE_CLASS);
 
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = connection.is_outbound();
@@ -1131,6 +1182,9 @@ impl Node {
                     is_outbound,
                     &self.config.node.mmp,
                     remote_epoch,
+                    self.node_profile,
+                    peer_profile,
+                    agreed_bloom_size_class,
                 );
                 new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 
@@ -1139,6 +1193,12 @@ impl Node {
                     .insert((transport_id, our_index.as_u32()), peer_node_addr);
                 self.retry_pending.remove(&peer_node_addr);
                 self.register_identity(peer_node_addr, verified_identity.pubkey_full());
+
+                // Non-routing peers don't send filters; include them as
+                // dependents so our bloom filter advertises their identity.
+                if peer_profile != crate::protocol::NodeProfile::Full {
+                    self.bloom_state.add_leaf_dependent(peer_node_addr);
+                }
 
                 debug!(
                     peer = %self.peer_display_name(&peer_node_addr),
@@ -1220,6 +1280,9 @@ impl Node {
                 is_outbound,
                 &self.config.node.mmp,
                 remote_epoch,
+                self.node_profile,
+                peer_profile,
+                agreed_bloom_size_class,
             );
             new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
             if let Some(ts) = old_announce_ts {
@@ -1232,6 +1295,12 @@ impl Node {
             self.retry_pending.remove(&peer_node_addr);
             self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
+            // Non-routing peers don't send filters; include them as
+            // dependents so our bloom filter advertises their identity.
+            if peer_profile != crate::protocol::NodeProfile::Full {
+                self.bloom_state.add_leaf_dependent(peer_node_addr);
+            }
+
             info!(
                 peer = %self.peer_display_name(&peer_node_addr),
                 link_id = %link_id,
@@ -1243,4 +1312,37 @@ impl Node {
             Ok(PromotionResult::Promoted(peer_node_addr))
         }
     }
+
+}
+
+/// Process an FMP negotiation payload received from a peer.
+///
+/// Decodes the payload, validates profile pairing, agrees on bloom
+/// filter size, and stores the results on the PeerConnection.
+fn process_fmp_negotiation(
+    our_profile: crate::protocol::NodeProfile,
+    conn: &mut PeerConnection,
+    neg_bytes: &[u8],
+) -> Result<(), crate::protocol::ProtocolError> {
+    let our_payload = NegotiationPayload::fmp(1, 1, our_profile);
+    let their_payload = NegotiationPayload::decode(neg_bytes)?;
+
+    // Validate profile pairing (at least one Full)
+    let their_profile = their_payload.node_profile()?;
+    NegotiationPayload::validate_profiles(our_profile, their_profile)?;
+
+    // Agree on bloom filter size
+    let agreed_bloom = our_payload.agree_bloom_size(&their_payload)?;
+
+    conn.set_negotiation_results(their_profile, agreed_bloom);
+
+    debug!(
+        link_id = %conn.link_id(),
+        our_profile = ?our_profile,
+        peer_profile = ?their_profile,
+        agreed_bloom_size_class = agreed_bloom,
+        "FMP negotiation complete"
+    );
+
+    Ok(())
 }

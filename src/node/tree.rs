@@ -30,11 +30,15 @@ impl Node {
     /// Send a TreeAnnounce to a specific peer, respecting rate limits.
     ///
     /// If the peer is rate-limited, the announce is marked pending for
-    /// delivery on the next tick cycle.
+    /// delivery on the next tick cycle. Leaf nodes do not send tree
+    /// announces (they don't participate in the spanning tree).
     pub(super) async fn send_tree_announce_to_peer(
         &mut self,
         peer_addr: &NodeAddr,
     ) -> Result<(), NodeError> {
+        if self.node_profile == crate::protocol::NodeProfile::Leaf {
+            return Ok(());
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -221,7 +225,8 @@ impl Node {
             .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
-        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
+        let skip = self.non_full_peers();
+        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs, &skip) {
             let new_seq = self.tree_state.my_declaration().sequence() + 1;
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -372,7 +377,8 @@ impl Node {
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
 
-        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
+        let skip = self.non_full_peers();
+        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs, &skip) {
             let new_seq = self.tree_state.my_declaration().sequence() + 1;
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

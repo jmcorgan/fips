@@ -4,13 +4,6 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/24
-  gateway-lan:
-    driver: bridge
-    enable_ipv6: true
-    ipam:
-      config:
-        - subnet: 172.20.1.0/24
-        - subnet: fd02::/64
 
 x-fips-common: &fips-common
   image: fips-test:latest
@@ -318,60 +311,52 @@ services:
       fips-net:
         ipv4_address: 172.20.0.12
 
-  # ── Gateway integration test (gateway + server + non-FIPS client) ─
-  gw-gateway:
+  # ── Mixed-profile topology ─────────────────────────────────────────
+  # A (Full) + B (Full) + C (NonRouting) + D (Leaf)
+  mixed-a:
     <<: *fips-common
-    profiles: ["gateway"]
-    container_name: fips-gw-gateway
-    hostname: gw-gateway
-    # Privileged required: gateway must enable IPv6 on eth1 (second network,
-    # attached after container start) and manage nftables NAT rules.
-    privileged: true
-    environment:
-      - RUST_LOG=info
-      - FIPS_TEST_MODE=gateway
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv6.conf.default.disable_ipv6=0
-      - net.ipv6.conf.all.forwarding=1
-      - net.ipv6.conf.all.proxy_ndp=1
+    profiles: ["mixed-profile"]
+    container_name: fips-node-a
+    hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/gateway/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mixed-profile/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.10
-      gateway-lan:
-        ipv4_address: 172.20.1.10
-        ipv6_address: fd02::10
 
-  gw-server:
+  mixed-b:
     <<: *fips-common
-    profiles: ["gateway"]
-    container_name: fips-gw-server
-    hostname: gw-server
+    profiles: ["mixed-profile"]
+    container_name: fips-node-b
+    hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/gateway/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/mixed-profile/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.11
 
-  gw-client:
-    image: fips-test-app:latest
-    profiles: ["gateway"]
-    container_name: fips-gw-client
-    hostname: gw-client
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
+  mixed-c:
+    <<: *fips-common
+    profiles: ["mixed-profile"]
+    container_name: fips-node-c
+    hostname: node-c
     volumes:
-      - ./configs/gateway-resolv.conf:/etc/resolv.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/mixed-profile/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
-      gateway-lan:
-        ipv4_address: 172.20.1.20
-        ipv6_address: fd02::20
-    restart: "no"
-    env_file:
-      - ./generated-configs/npubs.env
+      fips-net:
+        ipv4_address: 172.20.0.12
+
+  mixed-d:
+    <<: *fips-common
+    profiles: ["mixed-profile"]
+    container_name: fips-node-d
+    hostname: node-d
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/mixed-profile/node-d.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.13

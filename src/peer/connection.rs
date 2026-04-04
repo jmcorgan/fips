@@ -4,6 +4,7 @@
 //! PeerConnection tracks the Noise XX handshake state and transitions to
 //! ActivePeer upon successful authentication.
 
+use crate::protocol::NodeProfile;
 use crate::utils::index::SessionIndex;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
@@ -121,6 +122,12 @@ pub struct PeerConnection {
     /// Remote peer's startup epoch (learned from handshake).
     remote_epoch: Option<[u8; 8]>,
 
+    // === Negotiation Results ===
+    /// Peer's node profile (learned from negotiation payload).
+    peer_profile: Option<NodeProfile>,
+    /// Agreed bloom filter size class.
+    agreed_bloom_size_class: Option<u8>,
+
     // === Handshake Resend ===
     /// Wire-format msg1 bytes for resend (initiator only).
     handshake_msg1: Option<Vec<u8>>,
@@ -161,6 +168,8 @@ impl PeerConnection {
             transport_id: None,
             source_addr: None,
             remote_epoch: None,
+            peer_profile: None,
+            agreed_bloom_size_class: None,
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -189,6 +198,8 @@ impl PeerConnection {
             transport_id: None,
             source_addr: None,
             remote_epoch: None,
+            peer_profile: None,
+            agreed_bloom_size_class: None,
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -221,6 +232,8 @@ impl PeerConnection {
             transport_id: Some(transport_id),
             source_addr: Some(source_addr),
             remote_epoch: None,
+            peer_profile: None,
+            agreed_bloom_size_class: None,
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -352,6 +365,24 @@ impl PeerConnection {
     /// Get the remote peer's startup epoch (available after handshake).
     pub fn remote_epoch(&self) -> Option<[u8; 8]> {
         self.remote_epoch
+    }
+
+    // === Negotiation Results ===
+
+    /// Get peer's negotiated node profile.
+    pub fn peer_profile(&self) -> Option<NodeProfile> {
+        self.peer_profile
+    }
+
+    /// Get agreed bloom filter size class.
+    pub fn agreed_bloom_size_class(&self) -> Option<u8> {
+        self.agreed_bloom_size_class
+    }
+
+    /// Store negotiation results from peer's payload.
+    pub fn set_negotiation_results(&mut self, peer_profile: NodeProfile, bloom_size_class: u8) {
+        self.peer_profile = Some(peer_profile);
+        self.agreed_bloom_size_class = Some(bloom_size_class);
     }
 
     // === Handshake Resend ===

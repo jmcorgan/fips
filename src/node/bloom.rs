@@ -12,14 +12,17 @@ use std::collections::HashMap;
 use tracing::debug;
 
 impl Node {
-    /// Collect inbound filters from all peers for outgoing filter computation.
+    /// Collect inbound filters from full tree peers for outgoing filter computation.
     ///
     /// Returns a map of (peer_node_addr -> filter) for peers that
-    /// have sent us a FilterAnnounce.
+    /// have sent us a FilterAnnounce. Non-routing and leaf peers are
+    /// excluded (they don't send filters; their identity is covered
+    /// via leaf_dependents).
     fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
         let mut filters = HashMap::new();
         for (addr, peer) in &self.peers {
             if self.is_tree_peer(addr)
+                && peer.peer_profile() == crate::protocol::NodeProfile::Full
                 && let Some(filter) = peer.inbound_filter()
             {
                 filters.insert(*addr, filter.clone());
@@ -98,7 +101,14 @@ impl Node {
     }
 
     /// Send pending rate-limited filter announces whose debounce has expired.
+    ///
+    /// Non-routing nodes do not send filters (they receive only).
     pub(super) async fn send_pending_filter_announces(&mut self) {
+        // Non-routing and leaf nodes don't send bloom filters
+        if self.node_profile != crate::protocol::NodeProfile::Full {
+            return;
+        }
+
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

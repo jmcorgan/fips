@@ -214,7 +214,14 @@ impl TreeState {
     /// - No peers have coordinates
     /// - Destination is in a different tree (different root)
     /// - No peer is closer to the destination than we are
-    pub fn find_next_hop(&self, dest_coords: &TreeCoordinate) -> Option<NodeAddr> {
+    ///
+    /// `skip_peers` contains peers that should not be used as transit
+    /// (e.g., non-routing and leaf nodes).
+    pub fn find_next_hop(
+        &self,
+        dest_coords: &TreeCoordinate,
+        skip_peers: &std::collections::HashSet<NodeAddr>,
+    ) -> Option<NodeAddr> {
         if self.my_coords.root_id() != dest_coords.root_id() {
             return None;
         }
@@ -224,6 +231,9 @@ impl TreeState {
         let mut best: Option<(NodeAddr, usize)> = None;
 
         for (peer_id, peer_coords) in &self.peer_ancestry {
+            if skip_peers.contains(peer_id) {
+                continue;
+            }
             let distance = peer_coords.distance_to(dest_coords);
 
             let dominated = match &best {
@@ -301,7 +311,14 @@ impl TreeState {
     ///
     /// Returns `Some(peer_node_addr)` if a parent switch is recommended,
     /// or `None` if the current parent is adequate.
-    pub fn evaluate_parent(&self, peer_costs: &HashMap<NodeAddr, f64>) -> Option<NodeAddr> {
+    ///
+    /// `skip_peers` contains peers that should not be considered as parent
+    /// candidates (e.g., non-routing and leaf nodes that don't forward transit).
+    pub fn evaluate_parent(
+        &self,
+        peer_costs: &HashMap<NodeAddr, f64>,
+        skip_peers: &std::collections::HashSet<NodeAddr>,
+    ) -> Option<NodeAddr> {
         if self.peer_ancestry.is_empty() {
             return None;
         }
@@ -334,6 +351,10 @@ impl TreeState {
         let mut best_peer: Option<(NodeAddr, f64)> = None; // (peer_addr, effective_depth)
         for (peer_id, coords) in &self.peer_ancestry {
             if *coords.root_id() != smallest_root {
+                continue;
+            }
+            // Skip non-routing/leaf peers (can't forward transit)
+            if skip_peers.contains(peer_id) {
                 continue;
             }
             // Reject candidates whose ancestry contains us (would create a loop)
@@ -440,7 +461,9 @@ impl TreeState {
     /// Returns `true` if the tree state changed (caller should re-announce).
     pub fn handle_parent_lost(&mut self, peer_costs: &HashMap<NodeAddr, f64>) -> bool {
         // Try to find an alternative parent
-        if let Some(new_parent) = self.evaluate_parent(peer_costs) {
+        if let Some(new_parent) =
+            self.evaluate_parent(peer_costs, &std::collections::HashSet::new())
+        {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())

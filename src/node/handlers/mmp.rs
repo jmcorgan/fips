@@ -141,7 +141,8 @@ impl Node {
                 .filter(|(_, p)| p.has_srtt())
                 .map(|(a, p)| (*a, p.link_cost()))
                 .collect();
-            if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
+            let skip = self.non_full_peers();
+            if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs, &skip) {
                 let new_seq = self.tree_state.my_declaration().sequence() + 1;
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -194,22 +195,27 @@ impl Node {
                 .cloned()
                 .unwrap_or_else(|| peer.identity().short_npub());
 
+            let send_sr = peer.send_sr();
+            let send_rr = peer.send_rr();
+
             let Some(mmp) = peer.mmp_mut() else {
                 continue;
             };
 
             let mode = mmp.mode();
 
-            // Sender reports: Full mode only
+            // Sender reports: gated by mode, profile wants/provides, and timing
             if mode == MmpMode::Full
+                && send_sr
                 && mmp.sender.should_send_report(now)
                 && let Some(sr) = mmp.sender.build_report(now)
             {
                 sender_reports.push((*node_addr, sr.encode()));
             }
 
-            // Receiver reports: Full and Lightweight modes
+            // Receiver reports: gated by mode, profile wants/provides, and timing
             if mode != MmpMode::Minimal
+                && send_rr
                 && mmp.receiver.should_send_report(now)
                 && let Some(rr) = mmp.receiver.build_report(now)
             {

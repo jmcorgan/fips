@@ -474,6 +474,21 @@ impl Config {
         self.node.leaf_only
     }
 
+    /// Derive the node profile from config.
+    ///
+    /// leaf_only → Leaf (implies non-routing),
+    /// disable_routing → NonRouting,
+    /// otherwise → Full.
+    pub fn node_profile(&self) -> crate::protocol::NodeProfile {
+        if self.node.leaf_only {
+            crate::protocol::NodeProfile::Leaf
+        } else if self.node.disable_routing {
+            crate::protocol::NodeProfile::NonRouting
+        } else {
+            crate::protocol::NodeProfile::Full
+        }
+    }
+
     /// Get the configured peers.
     pub fn peers(&self) -> &[PeerConfig] {
         &self.peers

@@ -571,3 +571,74 @@ fn test_bloom_state_mark_changed_peers_excludes_source() {
 
     assert!(!state.needs_update(&peer1));
 }
+
+// === Non-routing dependent tests ===
+
+#[test]
+fn test_non_routing_peer_included_as_dependent() {
+    // When a non-routing peer connects, F adds it as a dependent.
+    // The outgoing filter should include the non-routing peer's identity.
+    let my_node = make_node_addr(0);
+    let mut state = BloomState::new(my_node);
+
+    let non_routing_peer = make_node_addr(5);
+    state.add_leaf_dependent(non_routing_peer);
+
+    let outgoing = state.compute_outgoing_filter(&make_node_addr(99), &HashMap::new());
+    assert!(outgoing.contains(&my_node));
+    assert!(outgoing.contains(&non_routing_peer));
+}
+
+#[test]
+fn test_non_routing_dependent_removed_on_disconnect() {
+    let my_node = make_node_addr(0);
+    let mut state = BloomState::new(my_node);
+
+    let non_routing_peer = make_node_addr(5);
+    state.add_leaf_dependent(non_routing_peer);
+    assert!(state.leaf_dependents().contains(&non_routing_peer));
+
+    state.remove_leaf_dependent(&non_routing_peer);
+    assert!(!state.leaf_dependents().contains(&non_routing_peer));
+
+    // Filter no longer contains the peer
+    let outgoing = state.compute_outgoing_filter(&make_node_addr(99), &HashMap::new());
+    assert!(!outgoing.contains(&non_routing_peer));
+}
+
+#[test]
+fn test_non_routing_filter_not_merged_into_outgoing() {
+    // Even if a non-routing peer somehow has an inbound filter,
+    // it should not be included in peer_filters passed to
+    // compute_outgoing_filter (enforced at the Node level).
+    // Here we verify that excluding a peer's filter from the map
+    // means their entries don't appear in the outgoing filter.
+    let my_node = make_node_addr(0);
+    let state = BloomState::new(my_node);
+
+    let full_peer = make_node_addr(10);
+    let non_routing_peer = make_node_addr(20);
+
+    let mut full_filter = BloomFilter::new();
+    full_filter.insert(&make_node_addr(100));
+
+    let mut nr_filter = BloomFilter::new();
+    nr_filter.insert(&make_node_addr(200));
+
+    // Only include the full peer's filter (simulating the Node-level exclusion)
+    let mut peer_filters = HashMap::new();
+    peer_filters.insert(full_peer, full_filter);
+    // nr_filter deliberately NOT included
+
+    let outgoing = state.compute_outgoing_filter(&make_node_addr(99), &peer_filters);
+    assert!(outgoing.contains(&my_node));
+    assert!(outgoing.contains(&make_node_addr(100))); // from full peer
+    assert!(!outgoing.contains(&make_node_addr(200))); // non-routing excluded
+
+    // But if non-routing peer is a dependent, its identity IS in the filter
+    let mut state2 = BloomState::new(my_node);
+    state2.add_leaf_dependent(non_routing_peer);
+    let outgoing2 = state2.compute_outgoing_filter(&make_node_addr(99), &peer_filters);
+    assert!(outgoing2.contains(&non_routing_peer)); // identity present
+    assert!(!outgoing2.contains(&make_node_addr(200))); // but not their filter entries
+}

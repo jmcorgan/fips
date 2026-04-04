@@ -1,0 +1,49 @@
+# Mixed Profile Topology Definition
+#
+# Tests node profile negotiation: Full, NonRouting, and Leaf nodes.
+#
+#   A (Full) ─── B (Full)
+#   │  ╲          │
+#   │    ╲        │
+#   D (Leaf)  C (NonRouting)
+#
+# Node A: Full hub, peers with B, C, D
+# Node B: Full, peers with A, C
+# Node C: NonRouting, peers with A, B — receives filters, doesn't send
+# Node D: Leaf, peers with A only — single upstream, no tree/bloom/transit
+#
+# Profile overrides applied by mixed-profile-test.sh inject-config.
+
+nodes:
+  a:
+    nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    npub: "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
+    docker_ip: "172.20.0.10"
+    peers: [b, c, d]
+
+  b:
+    nsec: "b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0"
+    npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
+    docker_ip: "172.20.0.11"
+    peers: [a, c]
+
+  c:
+    nsec: "c102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fc0"
+    npub: "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
+    docker_ip: "172.20.0.12"
+    peers: [a, b]
+    profile: non-routing
+
+  d:
+    nsec: "d102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fd0"
+    npub: "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+    docker_ip: "172.20.0.13"
+    peers: [a]
+    profile: leaf
+
+# Expected behavior:
+# - A↔B: Full F↔F, bidirectional bloom, transit routing
+# - A↔C: F↔N, A sends filters to C, C doesn't send back, A includes C as dependent
+# - A↔D: F↔L, single upstream, A includes D as dependent, D no tree/bloom
+# - B↔C: F↔N, B sends filters to C, C doesn't send back
+# - All nodes reachable via ping (C and D route through their Full peers)

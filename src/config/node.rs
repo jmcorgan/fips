@@ -638,7 +638,18 @@ pub struct NodeConfig {
     #[serde(default)]
     pub identity: IdentityConfig,
 
+    /// Non-routing mode (`node.disable_routing`).
+    ///
+    /// Tree participation and one-way bloom receipt, but no transit
+    /// forwarding or bloom combination/propagation. Overridden by
+    /// `leaf_only` (leaf implies non-routing).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_routing: bool,
+
     /// Leaf-only mode (`node.leaf_only`).
+    ///
+    /// Single upstream peer, no tree/bloom/transit. Implies
+    /// `disable_routing`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leaf_only: bool,
 
@@ -725,6 +736,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             identity: IdentityConfig::default(),
+            disable_routing: false,
             leaf_only: false,
             tick_interval_secs: 1,
             base_rtt_ms: 100,
