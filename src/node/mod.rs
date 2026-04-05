@@ -234,7 +234,9 @@ struct PendingConnect {
     /// The remote address being connected to.
     remote_addr: TransportAddr,
     /// The peer identity (for handshake initiation).
-    peer_identity: PeerIdentity,
+    /// None for anonymous discovery connections where identity isn't
+    /// known until the XX handshake completes.
+    peer_identity: Option<PeerIdentity>,
 }
 
 /// A running FIPS node instance.
@@ -719,11 +721,9 @@ impl Node {
                 .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
                 .collect();
 
-            let xonly = self.identity.pubkey();
             for (name, eth_config) in eth_instances {
                 let transport_id = self.allocate_transport_id();
-                let mut eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
-                eth.set_local_pubkey(xonly);
+                let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
                 transports.push(TransportHandle::Ethernet(eth));
             }
         }
@@ -776,14 +776,13 @@ impl Node {
                 let mtu = ble_config.mtu();
                 match crate::transport::ble::io::BluerIo::new(&adapter, mtu).await {
                     Ok(io) => {
-                        let mut ble = crate::transport::ble::BleTransport::new(
+                        let ble = crate::transport::ble::BleTransport::new(
                             transport_id,
                             name,
                             ble_config,
                             io,
                             packet_tx.clone(),
                         );
-                        ble.set_local_pubkey(self.identity.pubkey().serialize());
                         transports.push(TransportHandle::Ble(ble));
                     }
                     Err(e) => {

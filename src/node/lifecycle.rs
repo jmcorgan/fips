@@ -1,11 +1,11 @@
 //! Node lifecycle management: start, stop, and peer connection initiation.
 
 use super::{Node, NodeError, NodeState};
-use crate::node::wire::build_msg1;
 use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
-use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
-use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
+use crate::transport::{packet_channel, Link, LinkDirection, LinkId, TransportAddr, TransportId};
+use crate::upper::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
+use crate::node::wire::build_msg1;
 use crate::{NodeAddr, PeerIdentity};
 use std::thread;
 use std::time::Duration;
@@ -50,10 +50,7 @@ impl Node {
             return;
         }
 
-        debug!(
-            count = peer_configs.len(),
-            "Initiating static peer connections"
-        );
+        debug!(count = peer_configs.len(), "Initiating static peer connections");
 
         for peer_config in peer_configs {
             if let Err(e) = self.initiate_peer_connection(&peer_config).await {
@@ -70,16 +67,14 @@ impl Node {
     /// Initiate a connection to a single peer.
     ///
     /// Creates a link, starts the Noise handshake, and sends the first message.
-    pub(super) async fn initiate_peer_connection(
-        &mut self,
-        peer_config: &crate::config::PeerConfig,
-    ) -> Result<(), NodeError> {
+    pub(super) async fn initiate_peer_connection(&mut self, peer_config: &crate::config::PeerConfig) -> Result<(), NodeError> {
         // Parse the peer's npub to get their identity
-        let peer_identity =
-            PeerIdentity::from_npub(&peer_config.npub).map_err(|e| NodeError::InvalidPeerNpub {
+        let peer_identity = PeerIdentity::from_npub(&peer_config.npub).map_err(|e| {
+            NodeError::InvalidPeerNpub {
                 npub: peer_config.npub.clone(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         let peer_node_addr = *peer_identity.node_addr();
 
@@ -163,10 +158,7 @@ impl Node {
                 (tid, TransportAddr::from_string(&addr.addr))
             };
 
-            match self
-                .initiate_connection(transport_id, remote_addr, peer_identity)
-                .await
-            {
+            match self.initiate_connection(transport_id, remote_addr, Some(peer_identity)).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     debug!(
@@ -201,13 +193,9 @@ impl Node {
         &mut self,
         transport_id: TransportId,
         remote_addr: TransportAddr,
-        peer_identity: PeerIdentity,
+        peer_identity: Option<PeerIdentity>,
     ) -> Result<(), NodeError> {
-        let peer_node_addr = *peer_identity.node_addr();
-
-        let is_connection_oriented = self
-            .transports
-            .get(&transport_id)
+        let is_connection_oriented = self.transports.get(&transport_id)
             .map(|t| t.transport_type().connection_oriented)
             .unwrap_or(false);
 
@@ -243,13 +231,22 @@ impl Node {
             if let Some(transport) = self.transports.get(&transport_id) {
                 match transport.connect(&remote_addr).await {
                     Ok(()) => {
-                        debug!(
-                            peer = %self.peer_display_name(&peer_node_addr),
-                            transport_id = %transport_id,
-                            remote_addr = %remote_addr,
-                            link_id = %link_id,
-                            "Transport connect initiated (non-blocking)"
-                        );
+                        if let Some(ref id) = peer_identity {
+                            debug!(
+                                peer = %self.peer_display_name(id.node_addr()),
+                                transport_id = %transport_id,
+                                remote_addr = %remote_addr,
+                                link_id = %link_id,
+                                "Transport connect initiated (non-blocking)"
+                            );
+                        } else {
+                            debug!(
+                                transport_id = %transport_id,
+                                remote_addr = %remote_addr,
+                                link_id = %link_id,
+                                "Transport connect initiated (anonymous discovery)"
+                            );
+                        }
                         self.pending_connects.push(super::PendingConnect {
                             link_id,
                             transport_id,
@@ -268,8 +265,7 @@ impl Node {
             Ok(())
         } else {
             // Connectionless: proceed with immediate handshake
-            self.start_handshake(link_id, transport_id, remote_addr, peer_identity)
-                .await
+            self.start_handshake(link_id, transport_id, remote_addr, peer_identity).await
         }
     }
 
@@ -282,16 +278,19 @@ impl Node {
         link_id: LinkId,
         transport_id: TransportId,
         remote_addr: TransportAddr,
-        peer_identity: PeerIdentity,
+        peer_identity: Option<PeerIdentity>,
     ) -> Result<(), NodeError> {
-        let peer_node_addr = *peer_identity.node_addr();
-
-        // Create connection in handshake phase (outbound knows expected identity)
+        // Create connection in handshake phase
         let current_time_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let mut connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
+        let mut connection = if let Some(identity) = peer_identity {
+            PeerConnection::outbound(link_id, identity, current_time_ms)
+        } else {
+            // Anonymous discovery connection — identity learned from XX msg2
+            PeerConnection::outbound_anonymous(link_id, current_time_ms)
+        };
 
         // Allocate a session index for this handshake
         let our_index = match self.index_allocator.allocate() {
@@ -306,17 +305,16 @@ impl Node {
 
         // Start the Noise handshake and get message 1
         let our_keypair = self.identity.keypair();
-        let noise_msg1 =
-            match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    // Clean up the index and link
-                    let _ = self.index_allocator.free(our_index);
-                    self.links.remove(&link_id);
-                    self.addr_to_link.remove(&(transport_id, remote_addr));
-                    return Err(NodeError::HandshakeFailed(e.to_string()));
-                }
-            };
+        let noise_msg1 = match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
+            Ok(msg) => msg,
+            Err(e) => {
+                // Clean up the index and link
+                let _ = self.index_allocator.free(our_index);
+                self.links.remove(&link_id);
+                self.addr_to_link.remove(&(transport_id, remote_addr));
+                return Err(NodeError::HandshakeFailed(e.to_string()));
+            }
+        };
 
         // Set index and transport info on the connection
         connection.set_our_index(our_index);
@@ -326,22 +324,31 @@ impl Node {
         // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
         let wire_msg1 = build_msg1(our_index, &noise_msg1);
 
-        debug!(
-            peer = %self.peer_display_name(&peer_node_addr),
-            transport_id = %transport_id,
-            remote_addr = %remote_addr,
-            link_id = %link_id,
-            our_index = %our_index,
-            "Connection initiated"
-        );
+        if let Some(id) = connection.expected_identity() {
+            debug!(
+                peer = %self.peer_display_name(id.node_addr()),
+                transport_id = %transport_id,
+                remote_addr = %remote_addr,
+                link_id = %link_id,
+                our_index = %our_index,
+                "Connection initiated"
+            );
+        } else {
+            debug!(
+                transport_id = %transport_id,
+                remote_addr = %remote_addr,
+                link_id = %link_id,
+                our_index = %our_index,
+                "Anonymous discovery connection initiated"
+            );
+        }
 
         // Store msg1 for resend and schedule first resend
         let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
         connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
 
         // Track in pending_outbound for msg2 dispatch
-        self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+        self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
         self.connections.insert(link_id, connection);
 
         // Send the wire format handshake message
@@ -380,7 +387,7 @@ impl Node {
     /// newly discovered peers (if auto_connect is enabled).
     pub(super) async fn poll_transport_discovery(&mut self) {
         // Collect discoveries first to avoid borrow conflict with self
-        let mut to_connect = Vec::new();
+        let mut to_connect: Vec<(TransportId, TransportAddr, Option<PeerIdentity>)> = Vec::new();
 
         for (transport_id, transport) in &self.transports {
             if !transport.is_operational() {
@@ -396,46 +403,59 @@ impl Node {
                 Err(_) => continue,
             };
             for peer in discovered {
-                let pubkey = match peer.pubkey_hint {
-                    Some(pk) => pk,
-                    None => continue,
-                };
-                let identity = PeerIdentity::from_pubkey(pubkey);
-                let node_addr = *identity.node_addr();
+                if let Some(pubkey) = peer.pubkey_hint {
+                    // Identity known from discovery (e.g., config-based auto-connect)
+                    let identity = PeerIdentity::from_pubkey(pubkey);
+                    let node_addr = *identity.node_addr();
 
-                // Skip self
-                if node_addr == *self.identity.node_addr() {
-                    continue;
-                }
-                // Skip if already connected
-                if self.peers.contains_key(&node_addr) {
-                    continue;
-                }
-                // Skip if connection already in progress
-                let connecting = self.connections.values().any(|c| {
-                    c.expected_identity()
-                        .map(|id| id.node_addr() == &node_addr)
-                        .unwrap_or(false)
-                });
-                if connecting {
-                    continue;
-                }
+                    // Skip self
+                    if node_addr == *self.identity.node_addr() {
+                        continue;
+                    }
+                    // Skip if already connected
+                    if self.peers.contains_key(&node_addr) {
+                        continue;
+                    }
+                    // Skip if connection already in progress
+                    let connecting = self.connections.values().any(|c| {
+                        c.expected_identity()
+                            .map(|id| id.node_addr() == &node_addr)
+                            .unwrap_or(false)
+                    });
+                    if connecting {
+                        continue;
+                    }
 
-                to_connect.push((*transport_id, peer.addr, identity));
+                    to_connect.push((*transport_id, peer.addr, Some(identity)));
+                } else {
+                    // Anonymous discovery (shared-media beacon without identity).
+                    // Identity will be learned from XX handshake msg2.
+                    // Dedup by transport address — skip if link already exists.
+                    if self.addr_to_link.contains_key(&(*transport_id, peer.addr.clone())) {
+                        continue;
+                    }
+
+                    to_connect.push((*transport_id, peer.addr, None));
+                }
             }
         }
 
         for (transport_id, remote_addr, identity) in to_connect {
-            info!(
-                peer = %self.peer_display_name(identity.node_addr()),
-                transport_id = %transport_id,
-                remote_addr = %remote_addr,
-                "Auto-connecting to discovered peer"
-            );
-            if let Err(e) = self
-                .initiate_connection(transport_id, remote_addr, identity)
-                .await
-            {
+            if let Some(ref id) = identity {
+                info!(
+                    peer = %self.peer_display_name(id.node_addr()),
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    "Auto-connecting to discovered peer"
+                );
+            } else {
+                info!(
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    "Auto-connecting to anonymous discovered peer"
+                );
+            }
+            if let Err(e) = self.initiate_connection(transport_id, remote_addr, identity).await {
                 warn!(error = %e, "Failed to auto-connect to discovered peer");
             }
         }
@@ -489,7 +509,6 @@ impl Node {
                 }
 
                 debug!(
-                    peer = %self.peer_display_name(pending.peer_identity.node_addr()),
                     transport_id = %pending.transport_id,
                     remote_addr = %pending.remote_addr,
                     link_id = %pending.link_id,
@@ -497,15 +516,12 @@ impl Node {
                 );
 
                 // Start the handshake now that the transport is connected
-                if let Err(e) = self
-                    .start_handshake(
-                        pending.link_id,
-                        pending.transport_id,
-                        pending.remote_addr.clone(),
-                        pending.peer_identity,
-                    )
-                    .await
-                {
+                if let Err(e) = self.start_handshake(
+                    pending.link_id,
+                    pending.transport_id,
+                    pending.remote_addr.clone(),
+                    pending.peer_identity,
+                ).await {
                     warn!(
                         link_id = %pending.link_id,
                         error = %e,
@@ -517,7 +533,6 @@ impl Node {
             } else {
                 let reason = reason.unwrap_or_default();
                 warn!(
-                    peer = %self.peer_display_name(pending.peer_identity.node_addr()),
                     transport_id = %pending.transport_id,
                     remote_addr = %pending.remote_addr,
                     link_id = %pending.link_id,
@@ -528,11 +543,14 @@ impl Node {
                 // Clean up link and schedule retry
                 self.remove_link(&pending.link_id);
                 self.links.remove(&pending.link_id);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                self.schedule_retry(*pending.peer_identity.node_addr(), now_ms);
+                if let Some(ref id) = pending.peer_identity {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    self.schedule_retry(*id.node_addr(), now_ms);
+                }
+                // Anonymous connections don't retry — they'll be rediscovered
             }
         }
     }
@@ -602,23 +620,9 @@ impl Node {
                     // Calculate max MSS for TCP clamping
                     let effective_mtu = self.effective_ipv6_mtu();
                     let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
-
+                    
                     info!("effective MTU: {} bytes", effective_mtu);
                     debug!("   max TCP MSS: {} bytes", max_mss);
-
-                    // On macOS, create a shutdown pipe. Writing to it unblocks the
-                    // reader thread's select() loop without closing the TUN fd
-                    // (which would cause a double-close when TunDevice drops).
-                    #[cfg(target_os = "macos")]
-                    let (shutdown_read_fd, shutdown_write_fd) = {
-                        let mut fds = [0i32; 2];
-                        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-                            return Err(NodeError::Tun(crate::upper::tun::TunError::Configure(
-                                "failed to create shutdown pipe".into(),
-                            )));
-                        }
-                        (fds[0], fds[1])
-                    };
 
                     // Create writer (dups the fd for independent write access)
                     let (writer, tun_tx) = device.create_writer(max_mss)?;
@@ -637,28 +641,8 @@ impl Node {
 
                     // Spawn reader thread
                     let transport_mtu = self.transport_mtu();
-                    #[cfg(target_os = "macos")]
                     let reader_handle = thread::spawn(move || {
-                        run_tun_reader(
-                            device,
-                            mtu,
-                            our_addr,
-                            reader_tun_tx,
-                            outbound_tx,
-                            transport_mtu,
-                            shutdown_read_fd,
-                        );
-                    });
-                    #[cfg(not(target_os = "macos"))]
-                    let reader_handle = thread::spawn(move || {
-                        run_tun_reader(
-                            device,
-                            mtu,
-                            our_addr,
-                            reader_tun_tx,
-                            outbound_tx,
-                            transport_mtu,
-                        );
+                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu);
                     });
 
                     self.tun_state = TunState::Active;
@@ -667,10 +651,6 @@ impl Node {
                     self.tun_outbound_rx = Some(outbound_rx);
                     self.tun_reader_handle = Some(reader_handle);
                     self.tun_writer_handle = Some(writer_handle);
-                    #[cfg(target_os = "macos")]
-                    {
-                        self.tun_shutdown_fd = Some(shutdown_write_fd);
-                    }
                 }
                 Err(e) => {
                     self.tun_state = TunState::Failed;
@@ -687,19 +667,11 @@ impl Node {
                     let dns_channel_size = self.config.node.buffers.dns_channel;
                     let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
                     let dns_ttl = self.config.dns.ttl();
-                    let base_hosts =
-                        crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
-                    let hosts_path =
-                        std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
-                    let reloader =
-                        crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
+                    let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
+                    let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
+                    let reloader = crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
                     info!(bind = %bind, hosts = reloader.hosts().len(), "DNS responder started for .fips domain (auto-reload enabled)");
-                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(
-                        socket,
-                        identity_tx,
-                        dns_ttl,
-                        reloader,
-                    ));
+                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(socket, identity_tx, dns_ttl, reloader));
                     self.dns_identity_rx = Some(identity_rx);
                     self.dns_task = Some(handle);
                 }
@@ -735,8 +707,7 @@ impl Node {
         }
 
         // Send disconnect notifications to all active peers before closing transports
-        self.send_disconnect_to_all_peers(DisconnectReason::Shutdown)
-            .await;
+        self.send_disconnect_to_all_peers(DisconnectReason::Shutdown).await;
 
         // Shutdown transports (they're packet producers)
         let transport_ids: Vec<_> = self.transports.keys().cloned().collect();
@@ -770,19 +741,9 @@ impl Node {
             // Drop the tun_tx to signal the writer to stop
             self.tun_tx.take();
 
-            // Delete the interface (on Linux, causes reader to get EFAULT)
+            // Delete the interface (causes reader to get EFAULT)
             if let Err(e) = shutdown_tun_interface(&name).await {
                 warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
-            }
-
-            // On macOS, signal the reader thread to exit by writing to the
-            // shutdown pipe. The reader's select() will wake up and break.
-            #[cfg(target_os = "macos")]
-            if let Some(fd) = self.tun_shutdown_fd.take() {
-                unsafe {
-                    libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);
-                    libc::close(fd);
-                }
             }
 
             // Wait for threads to finish
@@ -810,9 +771,7 @@ impl Node {
         let plaintext = disconnect.encode();
 
         // Collect node_addrs to avoid borrow conflict with send helper
-        let peer_addrs: Vec<NodeAddr> = self
-            .peers
-            .iter()
+        let peer_addrs: Vec<NodeAddr> = self.peers.iter()
             .filter(|(_, peer)| peer.can_send() && peer.has_session())
             .map(|(addr, _)| *addr)
             .collect();
@@ -827,10 +786,7 @@ impl Node {
 
         let mut sent = 0usize;
         for node_addr in &peer_addrs {
-            match self
-                .send_encrypted_link_message(node_addr, &plaintext)
-                .await
-            {
+            match self.send_encrypted_link_message(node_addr, &plaintext).await {
                 Ok(()) => sent += 1,
                 Err(e) => {
                     debug!(
@@ -895,8 +851,8 @@ impl Node {
     ///
     /// Removes the peer and suppresses auto-reconnect.
     pub(crate) fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
-        let peer_identity =
-            PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
+        let peer_identity = PeerIdentity::from_npub(npub)
+            .map_err(|e| format!("invalid npub '{npub}': {e}"))?;
         let node_addr = *peer_identity.node_addr();
 
         if !self.peers.contains_key(&node_addr) {

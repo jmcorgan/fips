@@ -1,9 +1,8 @@
 //! Ethernet Transport Implementation
 //!
-//! Provides raw Ethernet transport for FIPS peer communication. On Linux,
-//! uses AF_PACKET/SOCK_DGRAM sockets; on macOS, uses BPF devices (`/dev/bpf*`).
-//! Works on wired Ethernet and WiFi interfaces (kernel mac80211 abstracts
-//! 802.11 transparently on Linux).
+//! Provides raw Ethernet transport for FIPS peer communication using
+//! AF_PACKET sockets with SOCK_DGRAM. Works on wired Ethernet and WiFi
+//! interfaces (kernel mac80211 abstracts 802.11 transparently).
 
 pub mod discovery;
 pub mod socket;
@@ -14,11 +13,12 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
-use discovery::{DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA, build_beacon, parse_beacon};
-use socket::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
+use discovery::{
+    build_beacon, parse_beacon, DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA,
+};
+use socket::{AsyncPacketSocket, PacketSocket, ETHERNET_BROADCAST};
 use stats::EthernetStats;
 
-use secp256k1::XOnlyPublicKey;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
@@ -49,14 +49,12 @@ pub struct EthernetTransport {
     local_mac: Option<[u8; 6]>,
     /// Interface name (from config).
     interface: String,
-    /// Effective MTU (interface MTU - 1 for frame type prefix).
+    /// Effective MTU (interface MTU - 4 for frame header).
     effective_mtu: u16,
     /// Discovery buffer for discovered peers.
     discovery_buffer: Arc<DiscoveryBuffer>,
     /// Transport-level statistics.
     stats: Arc<EthernetStats>,
-    /// Node's public key for beacon construction.
-    local_pubkey: Option<XOnlyPublicKey>,
 }
 
 impl EthernetTransport {
@@ -82,10 +80,9 @@ impl EthernetTransport {
             beacon_task: None,
             local_mac: None,
             interface,
-            effective_mtu: 1499, // default, updated on start
+            effective_mtu: 1496, // default, updated on start
             discovery_buffer,
             stats,
-            local_pubkey: None,
         }
     }
 
@@ -102,13 +99,6 @@ impl EthernetTransport {
     /// Get the local MAC address (only valid after start).
     pub fn local_mac(&self) -> Option<[u8; 6]> {
         self.local_mac
-    }
-
-    /// Set the node's public key for beacon construction.
-    ///
-    /// Must be called before start if announce is enabled.
-    pub fn set_local_pubkey(&mut self, pubkey: XOnlyPublicKey) {
-        self.local_pubkey = Some(pubkey);
     }
 
     /// Get a reference to the statistics.
@@ -134,13 +124,13 @@ impl EthernetTransport {
         let local_mac = raw_socket.local_mac()?;
         let if_mtu = raw_socket.interface_mtu()?;
 
-        // Effective MTU: interface MTU minus 3 bytes for frame header
-        // (1 byte frame type + 2 bytes LE payload length)
+        // Effective MTU: interface MTU minus 4 bytes for frame header
+        // (1 byte frame type + 1 byte flags + 2 bytes LE payload length)
         let effective_mtu = if let Some(configured_mtu) = self.config.mtu {
-            // Config MTU cannot exceed interface MTU - 3
-            configured_mtu.min(if_mtu.saturating_sub(3))
+            // Config MTU cannot exceed interface MTU - 4
+            configured_mtu.min(if_mtu.saturating_sub(4))
         } else {
-            if_mtu.saturating_sub(3)
+            if_mtu.saturating_sub(4)
         };
         self.effective_mtu = effective_mtu;
         self.local_mac = Some(local_mac);
@@ -179,34 +169,25 @@ impl EthernetTransport {
 
         // Spawn beacon sender if announce is enabled
         if self.config.announce() {
-            if let Some(pubkey) = self.local_pubkey {
-                let beacon_socket = socket.clone();
-                let interval_secs = self.config.beacon_interval_secs();
-                let beacon_stats = self.stats.clone();
-                let beacon_transport_id = self.transport_id;
+            let beacon_socket = socket.clone();
+            let interval_secs = self.config.beacon_interval_secs();
+            let beacon_stats = self.stats.clone();
+            let beacon_transport_id = self.transport_id;
+            let beacon_interface = self.config.interface.clone();
+            let beacon_ethertype = self.config.ethertype();
 
-                let beacon_interface = self.config.interface.clone();
-                let beacon_ethertype = self.config.ethertype();
-
-                let beacon_task = tokio::spawn(async move {
-                    beacon_sender_loop(
-                        beacon_socket,
-                        pubkey,
-                        interval_secs,
-                        beacon_stats,
-                        beacon_transport_id,
-                        beacon_interface,
-                        beacon_ethertype,
-                    )
-                    .await;
-                });
-                self.beacon_task = Some(beacon_task);
-            } else {
-                warn!(
-                    transport_id = %self.transport_id,
-                    "Announce enabled but no local pubkey set; beacons disabled"
-                );
-            }
+            let beacon_task = tokio::spawn(async move {
+                beacon_sender_loop(
+                    beacon_socket,
+                    interval_secs,
+                    beacon_stats,
+                    beacon_transport_id,
+                    beacon_interface,
+                    beacon_ethertype,
+                )
+                .await;
+            });
+            self.beacon_task = Some(beacon_task);
         }
 
         self.state = TransportState::Up;
@@ -239,30 +220,16 @@ impl EthernetTransport {
             return Err(TransportError::NotStarted);
         }
 
-        // Signal the socket to shut down. On macOS this writes to the
-        // shutdown pipe, waking the reader thread's select() immediately.
-        // On Linux this is a no-op (AsyncFd cancellation handles it).
-        if let Some(ref socket) = self.socket {
-            socket.shutdown();
-        }
-
-        // Abort tasks. On Linux, safe to await since all I/O is
-        // AsyncFd-based and cancellation-safe. On macOS, do NOT await —
-        // on a current_thread runtime the aborted task can't be polled
-        // while we're blocked on the JoinHandle, causing a deadlock.
+        // Abort beacon task
         if let Some(task) = self.beacon_task.take() {
             task.abort();
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = task.await;
-            }
+            let _ = task.await;
         }
+
+        // Abort receive task
         if let Some(task) = self.recv_task.take() {
             task.abort();
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = task.await;
-            }
+            let _ = task.await;
         }
 
         // Drop socket
@@ -282,8 +249,7 @@ impl EthernetTransport {
 
     /// Send a packet asynchronously.
     ///
-    /// The data is prepended with a FRAME_TYPE_DATA prefix byte before
-    /// transmission.
+    /// The data is prepended with a 4-byte frame header before transmission.
     pub async fn send_async(
         &self,
         addr: &TransportAddr,
@@ -303,12 +269,13 @@ impl EthernetTransport {
         let dest_mac = parse_mac_addr(addr)?;
         let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
 
-        // Prepend frame type prefix and 2-byte LE payload length.
+        // Prepend 4-byte frame header: type(1) + flags(1) + length(2 LE).
         // The length field lets the receiver trim Ethernet minimum-frame padding
         // (NICs pad frames shorter than 46 bytes payload to 46 bytes with zeros,
         // which would otherwise corrupt AEAD ciphertext verification).
-        let mut frame = Vec::with_capacity(3 + data.len());
+        let mut frame = Vec::with_capacity(4 + data.len());
         frame.push(FRAME_TYPE_DATA);
+        frame.push(0x00); // flags (reserved)
         frame.extend_from_slice(&(data.len() as u16).to_le_bytes());
         frame.extend_from_slice(data);
 
@@ -322,8 +289,8 @@ impl EthernetTransport {
             "Ethernet frame sent"
         );
 
-        // Return the data bytes sent (excluding frame type prefix and length field)
-        Ok(bytes_sent.saturating_sub(3))
+        // Return the data bytes sent (excluding 4-byte frame header)
+        Ok(bytes_sent.saturating_sub(4))
     }
 }
 
@@ -406,22 +373,23 @@ async fn ethernet_receive_loop(
                 let frame_type = buf[0];
                 match frame_type {
                     FRAME_TYPE_DATA => {
-                        // Data frame: [type:1][length:2 LE][payload:N]
-                        // Use the length field to trim Ethernet minimum-frame padding.
-                        if len < 3 {
+                        // Data frame: [type:1][flags:1][length:2 LE][payload:N]
+                        if len < 4 {
                             trace!("Data frame too short ({len} bytes), ignoring");
                             continue;
                         }
-                        let payload_len = u16::from_le_bytes([buf[1], buf[2]]) as usize;
-                        if payload_len > len - 3 {
+                        // buf[1] is flags (reserved, ignored for now)
+                        let payload_len =
+                            u16::from_le_bytes([buf[2], buf[3]]) as usize;
+                        if payload_len > len - 4 {
                             trace!(
                                 "Data frame length field ({payload_len}) exceeds \
                                  available bytes ({}), ignoring",
-                                len - 3
+                                len - 4
                             );
                             continue;
                         }
-                        let data = buf[3..3 + payload_len].to_vec();
+                        let data = buf[4..4 + payload_len].to_vec();
                         let addr = TransportAddr::from_bytes(&src_mac);
                         let packet = ReceivedPacket::new(transport_id, addr, data);
 
@@ -443,8 +411,8 @@ async fn ethernet_receive_loop(
                     FRAME_TYPE_BEACON => {
                         stats.record_beacon_recv();
 
-                        if discovery_enabled && let Some(pubkey) = parse_beacon(&buf[..len]) {
-                            discovery_buffer.add_peer(src_mac, pubkey);
+                        if discovery_enabled && parse_beacon(&buf[..len]) {
+                            discovery_buffer.add_peer(src_mac);
                             trace!(
                                 transport_id = %transport_id,
                                 remote_mac = %format_mac(&src_mac),
@@ -488,7 +456,6 @@ async fn ethernet_receive_loop(
 /// failures, attempts to open a fresh socket on the same interface.
 async fn beacon_sender_loop(
     mut socket: Arc<AsyncPacketSocket>,
-    pubkey: XOnlyPublicKey,
     interval_secs: u64,
     stats: Arc<EthernetStats>,
     transport_id: TransportId,
@@ -498,7 +465,7 @@ async fn beacon_sender_loop(
     /// Number of consecutive ENXIO errors before attempting socket reopen.
     const REOPEN_THRESHOLD: u32 = 3;
 
-    let beacon = build_beacon(&pubkey);
+    let beacon = build_beacon();
     let interval = tokio::time::Duration::from_secs(interval_secs);
 
     debug!(
@@ -712,28 +679,31 @@ mod tests {
 
     #[test]
     fn test_frame_type_data_prefix() {
-        // Verify data frames have type prefix + 2-byte LE length + payload
+        // Verify data frames have 4-byte header + payload
         let data = vec![1, 2, 3, 4];
-        let mut frame = Vec::with_capacity(3 + data.len());
+        let mut frame = Vec::with_capacity(4 + data.len());
         frame.push(FRAME_TYPE_DATA);
+        frame.push(0x00); // flags
         frame.extend_from_slice(&(data.len() as u16).to_le_bytes());
         frame.extend_from_slice(&data);
 
         assert_eq!(frame[0], 0x00); // frame type
-        assert_eq!(u16::from_le_bytes([frame[1], frame[2]]), 4); // length
-        assert_eq!(&frame[3..], &[1, 2, 3, 4]); // payload
+        assert_eq!(frame[1], 0x00); // flags
+        assert_eq!(u16::from_le_bytes([frame[2], frame[3]]), 4); // length
+        assert_eq!(&frame[4..], &[1, 2, 3, 4]); // payload
     }
 
     #[test]
     fn test_data_frame_padding_trimmed() {
         // Simulate Ethernet minimum-frame padding: a 4-byte payload produces
-        // a 7-byte frame (type + len + payload), padded to 46 bytes by NIC.
+        // an 8-byte frame (header + payload), padded to 46 bytes by NIC.
         let payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
         let payload_len = payload.len() as u16;
 
         // Build frame as sender would
-        let mut frame = Vec::with_capacity(3 + payload.len());
+        let mut frame = Vec::with_capacity(4 + payload.len());
         frame.push(FRAME_TYPE_DATA);
+        frame.push(0x00); // flags
         frame.extend_from_slice(&payload_len.to_le_bytes());
         frame.extend_from_slice(&payload);
 
@@ -741,13 +711,26 @@ mod tests {
         frame.resize(46, 0x00);
 
         // Receiver extracts using length field
-        let recv_len = u16::from_le_bytes([frame[1], frame[2]]) as usize;
-        let extracted = &frame[3..3 + recv_len];
+        let recv_len = u16::from_le_bytes([frame[2], frame[3]]) as usize;
+        let extracted = &frame[4..4 + recv_len];
         assert_eq!(extracted, &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
     #[test]
     fn test_beacon_size() {
-        assert_eq!(discovery::BEACON_SIZE, 34);
+        assert_eq!(discovery::BEACON_SIZE, 5);
+    }
+
+    #[test]
+    fn test_unified_header_flags_byte() {
+        // Build a data frame and verify the flags byte at offset 1 is 0x00
+        let data = vec![0x42];
+        let mut frame = Vec::with_capacity(4 + data.len());
+        frame.push(FRAME_TYPE_DATA);
+        frame.push(0x00); // flags
+        frame.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&data);
+
+        assert_eq!(frame[1], 0x00);
     }
 }

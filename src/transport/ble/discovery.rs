@@ -5,7 +5,6 @@
 //! identity is exchanged during the Noise handshake.
 
 use crate::transport::{DiscoveredPeer, TransportId};
-use secp256k1::XOnlyPublicKey;
 use std::sync::Mutex;
 
 use super::addr::BleAddr;
@@ -36,20 +35,6 @@ impl DiscoveryBuffer {
         let peer = DiscoveredPeer::new(self.transport_id, ta.clone());
         let mut peers = self.peers.lock().unwrap();
         // Deduplicate by address string
-        let addr_str = addr.to_string_repr();
-        peers.retain(|p| p.addr.as_str() != Some(addr_str.as_str()));
-        peers.push(peer);
-    }
-
-    /// Add a discovered BLE peer with a known public key.
-    ///
-    /// Used after the pre-handshake pubkey exchange confirms the peer's
-    /// identity. The pubkey_hint enables the node's auto-connect path
-    /// to initiate the XX handshake.
-    pub fn add_peer_with_pubkey(&self, addr: &BleAddr, pubkey: XOnlyPublicKey) {
-        let ta = addr.to_transport_addr();
-        let peer = DiscoveredPeer::with_hint(self.transport_id, ta.clone(), pubkey);
-        let mut peers = self.peers.lock().unwrap();
         let addr_str = addr.to_string_repr();
         peers.retain(|p| p.addr.as_str() != Some(addr_str.as_str()));
         peers.push(peer);

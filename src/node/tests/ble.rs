@@ -278,6 +278,12 @@ async fn test_ble_discovery() {
     };
 
     let io = MockBleIo::new("hci0", addr.clone());
+    // Probe connect must succeed for peers to reach the discovery buffer
+    let local = addr.clone();
+    io.set_connect_handler(move |target, _psm| {
+        let (stream, _peer) = MockBleStream::pair(local.clone(), target.clone(), 2048);
+        Ok(stream)
+    });
     let (packet_tx, packet_rx) = packet_channel(256);
     let mut transport = BleTransport::new(transport_id, None, config, io, packet_tx);
     transport.start_async().await.unwrap();
@@ -292,7 +298,7 @@ async fn test_ble_discovery() {
     tokio::time::advance(std::time::Duration::from_secs(6)).await;
     tokio::task::yield_now().await;
 
-    // Without pubkey set, peers appear as bare MACs in discovery buffer
+    // Peers appear as bare addresses in discovery buffer after probe
     let peers = transport.discover().unwrap();
     assert_eq!(peers.len(), 2);
 

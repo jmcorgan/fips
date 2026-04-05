@@ -177,6 +177,37 @@ impl PeerConnection {
         }
     }
 
+    /// Create a new outbound connection without pre-known identity.
+    ///
+    /// Used for anonymous discovery on shared-media transports (Ethernet,
+    /// BLE) where the beacon doesn't carry identity. The peer's identity
+    /// is learned from XX msg2 during the handshake.
+    pub fn outbound_anonymous(link_id: LinkId, current_time_ms: u64) -> Self {
+        Self {
+            link_id,
+            direction: LinkDirection::Outbound,
+            handshake_state: HandshakeState::Initial,
+            expected_identity: None,
+            noise_handshake: None,
+            noise_session: None,
+            started_at: current_time_ms,
+            last_activity: current_time_ms,
+
+            link_stats: LinkStats::new(),
+            our_index: None,
+            their_index: None,
+            transport_id: None,
+            source_addr: None,
+            remote_epoch: None,
+            peer_profile: None,
+            agreed_bloom_size_class: None,
+            handshake_msg1: None,
+            handshake_msg2: None,
+            resend_count: 0,
+            next_resend_at_ms: 0,
+        }
+    }
+
     /// Create a new inbound connection (they are initiating).
     ///
     /// For inbound, we don't know who they are until we decrypt their

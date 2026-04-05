@@ -428,6 +428,16 @@ impl Node {
 
         let peer_node_addr = *peer_identity.node_addr();
 
+        // Post-handshake identity filtering hook (IDEA-0047).
+        // With XX, shared-media transports discover peers without identity;
+        // this is the first point where the initiator knows the responder.
+        // Future: check allow/deny list here, abort if denied.
+        if peer_node_addr == *self.identity.node_addr() {
+            debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
+            self.connections.remove(&link_id);
+            return;
+        }
+
         // Build and send msg3
         let our_index = conn.our_index().unwrap_or(header.receiver_idx);
         let wire_msg3 = build_msg3(our_index, header.sender_idx, &msg3_bytes);
@@ -756,6 +766,17 @@ impl Node {
         };
 
         let peer_node_addr = *peer_identity.node_addr();
+
+        // Post-handshake identity filtering hook (IDEA-0047).
+        // With XX, this is the first point where the responder knows
+        // the initiator's identity. Future: check allow/deny list here.
+        if peer_node_addr == *self.identity.node_addr() {
+            debug!(link_id = %link_id, "Received msg3 from self, dropping");
+            self.connections.remove(&link_id);
+            self.remove_link(&link_id);
+            return;
+        }
+
         let our_index = conn.our_index().unwrap_or(header.receiver_idx);
 
         // Identity-based restart/rekey detection.
