@@ -1401,14 +1401,47 @@ impl Node {
         self.identity_cache.len()
     }
 
+    /// Iterate over identity cache entries.
+    ///
+    /// Returns `(NodeAddr, PublicKey, last_seen_ms)` for each cached identity.
+    /// Used by the `show_identity_cache` control query.
+    pub fn identity_cache_iter(&self) -> impl Iterator<Item = (&NodeAddr, &secp256k1::PublicKey, u64)> {
+        self.identity_cache.values().map(|(addr, pk, ts)| (addr, pk, *ts))
+    }
+
+    /// Configured maximum identity cache size.
+    pub fn identity_cache_max(&self) -> usize {
+        self.config.node.cache.identity_size
+    }
+
     /// Number of pending discovery lookups.
     pub fn pending_lookup_count(&self) -> usize {
         self.pending_lookups.len()
     }
 
+    /// Iterate over pending discovery lookups for diagnostics.
+    pub fn pending_lookups_iter(&self) -> impl Iterator<Item = (&NodeAddr, &handlers::discovery::PendingLookup)> {
+        self.pending_lookups.iter()
+    }
+
     /// Number of recent discovery requests tracked.
     pub fn recent_request_count(&self) -> usize {
         self.recent_requests.len()
+    }
+
+    /// Count of destinations with queued TUN packets awaiting session setup.
+    pub fn pending_tun_destinations(&self) -> usize {
+        self.pending_tun_packets.len()
+    }
+
+    /// Total TUN packets queued across all destinations.
+    pub fn pending_tun_total_packets(&self) -> usize {
+        self.pending_tun_packets.values().map(|q| q.len()).sum()
+    }
+
+    /// Iterate over retry state for diagnostics.
+    pub fn retry_state_iter(&self) -> impl Iterator<Item = (&NodeAddr, &retry::RetryState)> {
+        self.retry_pending.iter()
     }
 
     // === Routing ===

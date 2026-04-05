@@ -194,13 +194,18 @@ ssh   npub1bbb....fips
 Use `fipsctl` to query a running node:
 
 ```bash
-fipsctl show status       # Node status overview
-fipsctl show peers        # Authenticated peers
-fipsctl show links        # Active links
-fipsctl show tree         # Spanning tree state
-fipsctl show sessions     # End-to-end sessions
-fipsctl show transports   # Transport instances
-fipsctl show routing      # Routing table summary
+fipsctl show status         # Node status overview
+fipsctl show peers          # Authenticated peers and security state
+fipsctl show links          # Active links
+fipsctl show tree           # Spanning tree state
+fipsctl show sessions       # End-to-end sessions and rekey health
+fipsctl show bloom          # Bloom filter state
+fipsctl show mmp            # MMP metrics summary
+fipsctl show cache          # Coordinate cache entries and routes
+fipsctl show connections    # Pending handshake connections
+fipsctl show transports     # Transport instances
+fipsctl show routing        # Routing, discovery, and retry state
+fipsctl show identity-cache # Known node identities (npubs)
 ```
 
 `fipstop` provides an interactive TUI dashboard with live-updating

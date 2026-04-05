@@ -124,6 +124,32 @@ pub fn show_peers(node: &Node) -> Value {
             "bytes_recv": stats.bytes_recv,
         });
 
+        // Security signals
+        peer_json["replay_suppressed"] = json!(peer.replay_suppressed_count());
+        peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures());
+
+        // Noise session counters (rekey urgency, replay window state)
+        if let Some(session) = peer.noise_session() {
+            peer_json["noise"] = json!({
+                "send_counter": session.current_send_counter(),
+                "highest_recv_counter": session.highest_received_counter(),
+            });
+        }
+
+        // Session indices (hijack detection)
+        if let Some(idx) = peer.our_index() {
+            peer_json["our_session_index"] = json!(format!("{:08x}", idx.as_u32()));
+        }
+
+        // Rekey state
+        if peer.rekey_in_progress() {
+            peer_json["rekey_in_progress"] = json!(true);
+        }
+        if peer.is_draining() {
+            peer_json["rekey_draining"] = json!(true);
+        }
+        peer_json["current_k_bit"] = json!(peer.current_k_bit());
+
         // Add MMP metrics if available
         if let Some(mmp) = peer.mmp() {
             let mut mmp_json = json!({
@@ -268,6 +294,19 @@ pub fn show_sessions(node: &Node) -> Value {
             "bytes_sent": bytes_tx,
             "bytes_recv": bytes_rx,
         });
+
+        // Handshake health (visible during initiating/awaiting_msg3)
+        if !entry.is_established() {
+            session_json["resend_count"] = json!(entry.resend_count());
+        }
+
+        // Rekey and session health (visible when established)
+        if entry.is_established() {
+            session_json["session_start_ms"] = json!(entry.session_start_ms());
+            session_json["current_k_bit"] = json!(entry.current_k_bit());
+            session_json["coords_warmup_remaining"] = json!(entry.coords_warmup_remaining());
+            session_json["is_draining"] = json!(entry.is_draining());
+        }
 
         // Add session MMP if available
         if let Some(mmp) = entry.mmp() {
@@ -434,18 +473,42 @@ pub fn show_mmp(node: &Node) -> Value {
     })
 }
 
-/// `show_cache` — Coordinate cache stats.
+/// `show_cache` — Coordinate cache stats and entries.
 pub fn show_cache(node: &Node) -> Value {
     let cache = node.coord_cache();
-    let stats = cache.stats(now_ms());
+    let now = now_ms();
+    let stats = cache.stats(now);
+
+    // Include individual entries for route debugging
+    let entries: Vec<Value> = cache.iter(now).map(|(addr, entry)| {
+        let fips_addr = crate::identity::FipsAddress::from_node_addr(addr);
+        let coord_path: Vec<String> = entry.coords().entries()
+            .iter()
+            .map(|e| hex::encode(e.node_addr.as_bytes()))
+            .collect();
+        let mut entry_json = json!({
+            "node_addr": hex::encode(addr.as_bytes()),
+            "display_name": node.peer_display_name(addr),
+            "ipv6_addr": format!("{}", fips_addr),
+            "depth": entry.coords().depth(),
+            "coords": coord_path,
+            "age_ms": now.saturating_sub(entry.created_at()),
+            "last_used_ms": entry.last_used(),
+        });
+        if let Some(mtu) = entry.path_mtu() {
+            entry_json["path_mtu"] = json!(mtu);
+        }
+        entry_json
+    }).collect();
 
     json!({
-        "entries": stats.entries,
+        "count": stats.entries,
         "max_entries": stats.max_entries,
         "fill_ratio": stats.fill_ratio(),
         "default_ttl_ms": cache.default_ttl_ms(),
         "expired": stats.expired,
         "avg_age_ms": stats.avg_age_ms,
+        "entries": entries,
     })
 }
 
@@ -513,18 +576,73 @@ pub fn show_transports(node: &Node) -> Value {
 /// `show_routing` — Routing table summary and node statistics.
 pub fn show_routing(node: &Node) -> Value {
     let cache = node.coord_cache();
-    let cache_stats = cache.stats(now_ms());
+    let now = now_ms();
+    let cache_stats = cache.stats(now);
     let node_stats = node.stats().snapshot();
+
+    // Pending discovery lookups (individual targets)
+    let lookups: Vec<Value> = node.pending_lookups_iter().map(|(addr, lookup)| {
+        json!({
+            "target": hex::encode(addr.as_bytes()),
+            "display_name": node.peer_display_name(addr),
+            "initiated_ms": lookup.initiated_ms,
+            "last_sent_ms": lookup.last_sent_ms,
+            "attempt": lookup.attempt,
+            "age_ms": now.saturating_sub(lookup.initiated_ms),
+        })
+    }).collect();
+
+    // Connection retry state
+    let retries: Vec<Value> = node.retry_state_iter().map(|(addr, state)| {
+        json!({
+            "node_addr": hex::encode(addr.as_bytes()),
+            "display_name": node.peer_display_name(addr),
+            "retry_count": state.retry_count,
+            "retry_after_ms": state.retry_after_ms,
+            "auto_reconnect": state.reconnect,
+        })
+    }).collect();
 
     json!({
         "coord_cache_entries": cache_stats.entries,
         "identity_cache_entries": node.identity_cache_len(),
-        "pending_lookups": node.pending_lookup_count(),
+        "pending_lookups": lookups,
+        "pending_tun_destinations": node.pending_tun_destinations(),
+        "pending_tun_packets": node.pending_tun_total_packets(),
         "recent_requests": node.recent_request_count(),
+        "retries": retries,
         "forwarding": serde_json::to_value(&node_stats.forwarding).unwrap_or_default(),
         "discovery": serde_json::to_value(&node_stats.discovery).unwrap_or_default(),
         "error_signals": serde_json::to_value(&node_stats.errors).unwrap_or_default(),
         "congestion": serde_json::to_value(&node_stats.congestion).unwrap_or_default(),
+    })
+}
+
+/// `show_identity_cache` — Known node identities.
+///
+/// Lists every node whose public key has been cached by this daemon.
+/// Identities are learned from DNS resolution, peer handshakes, session
+/// establishment, and configured peer npubs.  The cache uses LRU eviction
+/// bounded by `node.cache.identity_size`.
+pub fn show_identity_cache(node: &Node) -> Value {
+    let now = now_ms();
+    let entries: Vec<Value> = node.identity_cache_iter().map(|(node_addr, pubkey, last_seen_ms)| {
+        let (xonly, _parity) = pubkey.x_only_public_key();
+        let fips_addr = crate::identity::FipsAddress::from_node_addr(node_addr);
+        json!({
+            "node_addr": hex::encode(node_addr.as_bytes()),
+            "npub": encode_npub(&xonly),
+            "display_name": node.peer_display_name(node_addr),
+            "ipv6_addr": format!("{}", fips_addr),
+            "last_seen_ms": last_seen_ms,
+            "age_ms": now.saturating_sub(last_seen_ms),
+        })
+    }).collect();
+
+    json!({
+        "entries": entries,
+        "count": entries.len(),
+        "max_entries": node.identity_cache_max(),
     })
 }
 
@@ -542,6 +660,7 @@ pub fn dispatch(node: &Node, command: &str) -> super::protocol::Response {
         "show_connections" => super::protocol::Response::ok(show_connections(node)),
         "show_transports" => super::protocol::Response::ok(show_transports(node)),
         "show_routing" => super::protocol::Response::ok(show_routing(node)),
+        "show_identity_cache" => super::protocol::Response::ok(show_identity_cache(node)),
         _ => super::protocol::Response::error(format!("unknown command: {}", command)),
     }
 }
