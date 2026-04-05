@@ -176,7 +176,7 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         # Discovery
         if "Initiating LookupRequest" in line or "Discovery lookup initiated" in line:
             result.discovery_initiated.append((source, line))
-        if "proof verified, caching route" in line:
+        if "proof verified, route cached" in line:
             result.discovery_succeeded.append((source, line))
         if "target not in any peer bloom filter" in line:
             result.discovery_bloom_miss.append((source, line))
