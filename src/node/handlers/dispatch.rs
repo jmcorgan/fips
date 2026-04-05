@@ -42,6 +42,10 @@ impl Node {
                 // FilterAnnounce
                 self.handle_filter_announce(from, payload).await;
             }
+            0x21 => {
+                // FilterNack
+                self.handle_filter_nack(from, payload).await;
+            }
             0x30 => {
                 // LookupRequest
                 self.handle_lookup_request(from, payload).await;

@@ -39,14 +39,6 @@ pub const FMP_FEAT_WANTS_SR: u64 = 1 << 5;
 /// Bit 6: Want MMP receiver reports from peer.
 pub const FMP_FEAT_WANTS_RR: u64 = 1 << 6;
 
-/// Bit 7: Bloom filter size is negotiable (check TLV).
-pub const FMP_FEAT_BLOOM_SIZE_NEG: u64 = 1 << 7;
-
-// --- TLV field numbers ---
-
-/// TLV field for bloom filter size classes: `[min_class:1][max_class:1]`.
-pub const TLV_BLOOM_SIZE: u16 = 1;
-
 // --- Node profile enum ---
 
 /// Node profile advertised during FMP negotiation.
@@ -79,15 +71,6 @@ impl TryFrom<u8> for NodeProfile {
             ))),
         }
     }
-}
-
-/// Bloom filter size class range from TLV negotiation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BloomSizeRange {
-    /// Minimum supported size class (512 << min_class bytes).
-    pub min_class: u8,
-    /// Maximum supported size class (512 << max_class bytes).
-    pub max_class: u8,
 }
 
 /// A TLV entry in the negotiation payload.
@@ -236,9 +219,7 @@ impl NegotiationPayload {
 
     /// Build an FMP negotiation payload for the given node profile.
     ///
-    /// Sets the profile bits, MMP wants/provides defaults for the profile,
-    /// bloom size negotiable bit, and bloom size TLV with the current
-    /// default size class (min=max=V1_SIZE_CLASS).
+    /// Sets the profile bits and MMP wants/provides defaults for the profile.
     pub fn fmp(version_min: u8, version_max: u8, profile: NodeProfile) -> Self {
         let (provides_sr, provides_rr, wants_sr, wants_rr) = match profile {
             NodeProfile::Full => (true, true, true, true),
@@ -259,12 +240,8 @@ impl NegotiationPayload {
         if wants_rr {
             features |= FMP_FEAT_WANTS_RR;
         }
-        features |= FMP_FEAT_BLOOM_SIZE_NEG;
-
-        let bloom_size_class = crate::bloom::V1_SIZE_CLASS;
 
         Self::new(version_min, version_max, features)
-            .with_tlv(TLV_BLOOM_SIZE, vec![bloom_size_class, bloom_size_class])
     }
 
     /// Extract the node profile from the FMP feature bitfield.
@@ -293,39 +270,6 @@ impl NegotiationPayload {
         self.features & FMP_FEAT_WANTS_RR != 0
     }
 
-    /// Whether bloom filter size is negotiable.
-    pub fn bloom_size_negotiable(&self) -> bool {
-        self.features & FMP_FEAT_BLOOM_SIZE_NEG != 0
-    }
-
-    /// Extract bloom size range from TLV, if present.
-    pub fn bloom_size_range(&self) -> Result<Option<BloomSizeRange>, ProtocolError> {
-        for entry in &self.tlv_entries {
-            if entry.field_num == TLV_BLOOM_SIZE {
-                if entry.value.len() != 2 {
-                    return Err(ProtocolError::Malformed(format!(
-                        "bloom size TLV: expected 2 bytes, got {}",
-                        entry.value.len()
-                    )));
-                }
-                let min_class = entry.value[0];
-                let max_class = entry.value[1];
-                if min_class > max_class {
-                    return Err(ProtocolError::Malformed(format!(
-                        "bloom size: min_class ({min_class}) > max_class ({max_class})"
-                    )));
-                }
-                if max_class as usize >= crate::bloom::SIZE_CLASS_BYTES.len() {
-                    return Err(ProtocolError::Malformed(format!(
-                        "bloom size: max_class ({max_class}) exceeds known size classes"
-                    )));
-                }
-                return Ok(Some(BloomSizeRange { min_class, max_class }));
-            }
-        }
-        Ok(None)
-    }
-
     /// Validate that two profiles form a valid link pairing.
     ///
     /// At least one side must be `Full` or the link is rejected.
@@ -342,35 +286,6 @@ impl NegotiationPayload {
         Ok(())
     }
 
-    /// Agree on a bloom filter size class with a peer.
-    ///
-    /// Returns `min(our_max, their_max)`, rejecting if below either
-    /// side's minimum. Both sides must have the bloom size TLV and the
-    /// negotiable bit set.
-    pub fn agree_bloom_size(&self, other: &Self) -> Result<u8, ProtocolError> {
-        if !self.bloom_size_negotiable() || !other.bloom_size_negotiable() {
-            return Err(ProtocolError::Malformed(
-                "bloom size negotiation: both sides must set negotiable bit".to_string(),
-            ));
-        }
-
-        let ours = self.bloom_size_range()?.ok_or_else(|| {
-            ProtocolError::Malformed("bloom size negotiation: missing TLV (ours)".to_string())
-        })?;
-
-        let theirs = other.bloom_size_range()?.ok_or_else(|| {
-            ProtocolError::Malformed("bloom size negotiation: missing TLV (theirs)".to_string())
-        })?;
-
-        let agreed = ours.max_class.min(theirs.max_class);
-        if agreed < ours.min_class || agreed < theirs.min_class {
-            return Err(ProtocolError::Malformed(format!(
-                "bloom size mismatch: ours [{},{}] theirs [{},{}]",
-                ours.min_class, ours.max_class, theirs.min_class, theirs.max_class
-            )));
-        }
-        Ok(agreed)
-    }
 }
 
 #[cfg(test)]
@@ -515,11 +430,6 @@ mod tests {
         assert!(p.provides_rr());
         assert!(p.wants_sr());
         assert!(p.wants_rr());
-        assert!(p.bloom_size_negotiable());
-
-        let range = p.bloom_size_range().unwrap().unwrap();
-        assert_eq!(range.min_class, crate::bloom::V1_SIZE_CLASS);
-        assert_eq!(range.max_class, crate::bloom::V1_SIZE_CLASS);
     }
 
     #[test]
@@ -610,76 +520,4 @@ mod tests {
         ).is_err());
     }
 
-    // --- Bloom size agreement tests ---
-
-    #[test]
-    fn test_bloom_size_agreement_identical() {
-        let a = NegotiationPayload::fmp(1, 1, NodeProfile::Full);
-        let b = NegotiationPayload::fmp(1, 1, NodeProfile::Full);
-        assert_eq!(a.agree_bloom_size(&b).unwrap(), crate::bloom::V1_SIZE_CLASS);
-    }
-
-    #[test]
-    fn test_bloom_size_agreement_different_ranges() {
-        // a supports [0,2], b supports [1,3]
-        let a = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![0, 2]);
-        let b = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![1, 3]);
-        // agreed = min(2,3) = 2, 2 >= 0 and 2 >= 1 → ok
-        assert_eq!(a.agree_bloom_size(&b).unwrap(), 2);
-        assert_eq!(b.agree_bloom_size(&a).unwrap(), 2);
-    }
-
-    #[test]
-    fn test_bloom_size_agreement_mismatch() {
-        // a supports [0,0], b supports [2,3]
-        let a = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![0, 0]);
-        let b = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![2, 3]);
-        // agreed = min(0,3) = 0, 0 < 2 → reject
-        assert!(a.agree_bloom_size(&b).is_err());
-    }
-
-    #[test]
-    fn test_bloom_size_missing_bit() {
-        let a = NegotiationPayload::fmp(1, 1, NodeProfile::Full);
-        let b = NegotiationPayload::new(1, 1, 0); // no negotiable bit
-        assert!(a.agree_bloom_size(&b).is_err());
-    }
-
-    #[test]
-    fn test_bloom_size_missing_tlv() {
-        let a = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG); // bit set but no TLV
-        let b = NegotiationPayload::fmp(1, 1, NodeProfile::Full);
-        assert!(a.agree_bloom_size(&b).is_err());
-    }
-
-    #[test]
-    fn test_bloom_size_tlv_bad_length() {
-        let p = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![1]); // only 1 byte, need 2
-        assert!(p.bloom_size_range().is_err());
-    }
-
-    #[test]
-    fn test_bloom_size_tlv_inverted_range() {
-        let p = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![3, 1]); // min > max
-        assert!(p.bloom_size_range().is_err());
-    }
-
-    #[test]
-    fn test_bloom_size_tlv_class_out_of_range() {
-        let p = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG)
-            .with_tlv(TLV_BLOOM_SIZE, vec![0, 4]); // max_class=4 exceeds SIZE_CLASS_BYTES
-        assert!(p.bloom_size_range().is_err());
-    }
-
-    #[test]
-    fn test_bloom_size_no_tlv_returns_none() {
-        let p = NegotiationPayload::new(1, 1, FMP_FEAT_BLOOM_SIZE_NEG);
-        assert_eq!(p.bloom_size_range().unwrap(), None);
-    }
 }

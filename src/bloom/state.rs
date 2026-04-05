@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::BloomFilter;
+use super::{size_class_to_bits, BloomFilter, MAX_SIZE_CLASS, MIN_SIZE_CLASS, V1_SIZE_CLASS};
 use crate::NodeAddr;
 
 /// State for managing Bloom filter announcements.
@@ -16,6 +16,8 @@ pub struct BloomState {
     leaf_dependents: HashSet<NodeAddr>,
     /// Whether this node operates in leaf-only mode.
     is_leaf_only: bool,
+    /// This node's filter size class.
+    size_class: u8,
     /// Rate limiting: minimum interval between outgoing updates (milliseconds).
     update_debounce_ms: u64,
     /// Timestamp of last update sent (per peer, in milliseconds).
@@ -24,8 +26,14 @@ pub struct BloomState {
     pending_updates: HashSet<NodeAddr>,
     /// Current sequence number for outgoing filters.
     sequence: u64,
-    /// Last outgoing filter sent to each peer (for change detection).
+    /// Last outgoing filter sent to each peer (for change detection and delta computation).
     last_sent_filters: HashMap<NodeAddr, BloomFilter>,
+    /// Sequence number of the last filter sent to each peer.
+    last_sent_seq: HashMap<NodeAddr, u64>,
+    /// Fill ratio threshold above which to step up to a larger size class.
+    step_up_threshold: f64,
+    /// Fill ratio threshold below which to step down to a smaller size class.
+    step_down_threshold: f64,
 }
 
 impl BloomState {
@@ -35,11 +43,15 @@ impl BloomState {
             own_node_addr,
             leaf_dependents: HashSet::new(),
             is_leaf_only: false,
+            size_class: V1_SIZE_CLASS,
             update_debounce_ms: 500,
             last_update_sent: HashMap::new(),
             pending_updates: HashSet::new(),
             sequence: 0,
             last_sent_filters: HashMap::new(),
+            last_sent_seq: HashMap::new(),
+            step_up_threshold: 0.20,
+            step_down_threshold: 0.05,
         }
     }
 
@@ -58,6 +70,19 @@ impl BloomState {
     /// Check if this is a leaf-only node.
     pub fn is_leaf_only(&self) -> bool {
         self.is_leaf_only
+    }
+
+    /// Get the current filter size class.
+    pub fn size_class(&self) -> u8 {
+        self.size_class
+    }
+
+    /// Set the filter size class.
+    ///
+    /// This does NOT trigger re-sends; the caller must clear sent filters
+    /// and mark all peers for update.
+    pub fn set_size_class(&mut self, size_class: u8) {
+        self.size_class = size_class;
     }
 
     /// Get the current sequence number.
@@ -139,14 +164,43 @@ impl BloomState {
         self.pending_updates.clear();
     }
 
-    /// Record the outgoing filter that was sent to a peer.
+    /// Record the outgoing filter and sequence that was sent to a peer.
     pub fn record_sent_filter(&mut self, peer_id: NodeAddr, filter: BloomFilter) {
+        let seq = self.sequence;
         self.last_sent_filters.insert(peer_id, filter);
+        self.last_sent_seq.insert(peer_id, seq);
+    }
+
+    /// Get the last filter sent to a peer (for delta computation).
+    pub fn last_sent_filter(&self, peer_id: &NodeAddr) -> Option<&BloomFilter> {
+        self.last_sent_filters.get(peer_id)
+    }
+
+    /// Get the sequence number of the last filter sent to a peer.
+    pub fn last_sent_seq(&self, peer_id: &NodeAddr) -> Option<u64> {
+        self.last_sent_seq.get(peer_id).copied()
+    }
+
+    /// Clear the sent filter for a specific peer (e.g., on NACK).
+    ///
+    /// Forces the next send to be a full filter.
+    pub fn clear_sent_filter(&mut self, peer_id: &NodeAddr) {
+        self.last_sent_filters.remove(peer_id);
+        self.last_sent_seq.remove(peer_id);
+    }
+
+    /// Clear all sent filters (e.g., on size class change).
+    ///
+    /// Forces full sends to all peers.
+    pub fn clear_all_sent_filters(&mut self) {
+        self.last_sent_filters.clear();
+        self.last_sent_seq.clear();
     }
 
     /// Remove stored filter state for a peer that was removed.
     pub fn remove_peer_state(&mut self, peer_id: &NodeAddr) {
         self.last_sent_filters.remove(peer_id);
+        self.last_sent_seq.remove(peer_id);
         self.last_update_sent.remove(peer_id);
         self.pending_updates.remove(peer_id);
     }
@@ -179,32 +233,24 @@ impl BloomState {
 
     /// Compute the outgoing filter for a specific peer.
     ///
+    /// The filter is created at this node's size class. Peer filters of
+    /// different sizes are automatically converted (folded or duplicated)
+    /// during the merge operation.
+    ///
     /// The filter includes:
     /// - This node's own ID
     /// - All leaf dependents
     /// - Entries from other peers' inbound filters (excluding the destination peer)
-    ///
-    /// The `peer_filters` map contains inbound filters from each peer.
-    /// The filter for `exclude_peer` is excluded to prevent routing loops.
     pub fn compute_outgoing_filter(
         &self,
         exclude_peer: &NodeAddr,
         peer_filters: &HashMap<NodeAddr, BloomFilter>,
     ) -> BloomFilter {
-        let mut filter = BloomFilter::new();
+        let mut filter = self.base_filter();
 
-        // Always include ourselves
-        filter.insert(&self.own_node_addr);
-
-        // Include leaf dependents
-        for dep in &self.leaf_dependents {
-            filter.insert(dep);
-        }
-
-        // Merge filters from other peers
+        // Merge filters from other peers (auto-converting sizes)
         for (peer_id, peer_filter) in peer_filters {
             if peer_id != exclude_peer {
-                // Ignore merge errors (size mismatches) - just skip that filter
                 let _ = filter.merge(peer_filter);
             }
         }
@@ -212,9 +258,27 @@ impl BloomState {
         filter
     }
 
+    /// Evaluate whether the filter size class should change.
+    ///
+    /// Returns `Some(new_class)` if the outgoing fill ratio crosses a
+    /// threshold, `None` if no change is needed.
+    pub fn evaluate_size_change(&self, fill_ratio: f64) -> Option<u8> {
+        if fill_ratio > self.step_up_threshold && self.size_class < MAX_SIZE_CLASS {
+            Some(self.size_class + 1)
+        } else if fill_ratio < self.step_down_threshold && self.size_class > MIN_SIZE_CLASS {
+            Some(self.size_class - 1)
+        } else {
+            None
+        }
+    }
+
     /// Create a base filter containing just this node and its dependents.
+    ///
+    /// The filter is created at this node's size class.
     pub fn base_filter(&self) -> BloomFilter {
-        let mut filter = BloomFilter::new();
+        let num_bits = size_class_to_bits(self.size_class);
+        let mut filter = BloomFilter::with_params(num_bits, super::DEFAULT_HASH_COUNT)
+            .expect("size_class produces valid params");
         filter.insert(&self.own_node_addr);
         for dep in &self.leaf_dependents {
             filter.insert(dep);

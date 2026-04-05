@@ -35,12 +35,12 @@ pub use link::{
     SESSION_DATAGRAM_HEADER_SIZE,
 };
 pub use tree::TreeAnnounce;
-pub use filter::FilterAnnounce;
+pub use filter::{FilterAnnounce, FilterNack};
 pub use discovery::{LookupRequest, LookupResponse};
 pub use negotiation::{
-    BloomSizeRange, NegotiationPayload, NodeProfile, TlvEntry, NEGOTIATION_HEADER_SIZE,
-    FMP_FEAT_BLOOM_SIZE_NEG, FMP_FEAT_PROFILE_MASK, FMP_FEAT_PROVIDES_RR, FMP_FEAT_PROVIDES_SR,
-    FMP_FEAT_WANTS_RR, FMP_FEAT_WANTS_SR, TLV_BLOOM_SIZE,
+    NegotiationPayload, NodeProfile, TlvEntry, NEGOTIATION_HEADER_SIZE,
+    FMP_FEAT_PROFILE_MASK, FMP_FEAT_PROVIDES_RR, FMP_FEAT_PROVIDES_SR,
+    FMP_FEAT_WANTS_RR, FMP_FEAT_WANTS_SR,
 };
 pub use session::{
     CoordsRequired, FspFlags, FspInnerFlags, MtuExceeded, PathBroken, PathMtuNotification,

@@ -1159,8 +1159,6 @@ impl Node {
         let remote_epoch = connection.remote_epoch();
         let peer_profile = connection.peer_profile()
             .unwrap_or(crate::protocol::NodeProfile::Full);
-        let agreed_bloom_size_class = connection.agreed_bloom_size_class()
-            .unwrap_or(crate::bloom::V1_SIZE_CLASS);
 
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = connection.is_outbound();
@@ -1205,7 +1203,6 @@ impl Node {
                     remote_epoch,
                     self.node_profile,
                     peer_profile,
-                    agreed_bloom_size_class,
                 );
                 new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
 
@@ -1303,7 +1300,6 @@ impl Node {
                 remote_epoch,
                 self.node_profile,
                 peer_profile,
-                agreed_bloom_size_class,
             );
             new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
             if let Some(ts) = old_announce_ts {
@@ -1338,30 +1334,25 @@ impl Node {
 
 /// Process an FMP negotiation payload received from a peer.
 ///
-/// Decodes the payload, validates profile pairing, agrees on bloom
-/// filter size, and stores the results on the PeerConnection.
+/// Decodes the payload, validates profile pairing, and stores the
+/// results on the PeerConnection.
 fn process_fmp_negotiation(
     our_profile: crate::protocol::NodeProfile,
     conn: &mut PeerConnection,
     neg_bytes: &[u8],
 ) -> Result<(), crate::protocol::ProtocolError> {
-    let our_payload = NegotiationPayload::fmp(1, 1, our_profile);
     let their_payload = NegotiationPayload::decode(neg_bytes)?;
 
     // Validate profile pairing (at least one Full)
     let their_profile = their_payload.node_profile()?;
     NegotiationPayload::validate_profiles(our_profile, their_profile)?;
 
-    // Agree on bloom filter size
-    let agreed_bloom = our_payload.agree_bloom_size(&their_payload)?;
-
-    conn.set_negotiation_results(their_profile, agreed_bloom);
+    conn.set_negotiation_results(their_profile);
 
     debug!(
         link_id = %conn.link_id(),
         our_profile = ?our_profile,
         peer_profile = ?their_profile,
-        agreed_bloom_size_class = agreed_bloom,
         "FMP negotiation complete"
     );
 

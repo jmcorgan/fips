@@ -135,8 +135,6 @@ pub struct ActivePeer {
     // === Negotiated Profile ===
     /// Peer's node profile (Full, NonRouting, Leaf).
     peer_profile: NodeProfile,
-    /// Agreed bloom filter size class for this link.
-    agreed_bloom_size_class: u8,
     /// Whether to send sender reports to this peer (our provides_sr AND peer wants_sr).
     send_sr: bool,
     /// Whether to send receiver reports to this peer (our provides_rr AND peer wants_rr).
@@ -228,7 +226,6 @@ impl ActivePeer {
             last_seen: authenticated_at,
             remote_epoch: None,
             peer_profile: NodeProfile::Full,
-            agreed_bloom_size_class: crate::bloom::V1_SIZE_CLASS,
             send_sr: true,
             send_rr: true,
             mmp: None,
@@ -290,7 +287,6 @@ impl ActivePeer {
         remote_epoch: Option<[u8; 8]>,
         our_profile: NodeProfile,
         peer_profile: NodeProfile,
-        agreed_bloom_size_class: u8,
     ) -> Self {
         // Compute MMP report gating: A sends to B iff A.provides AND B.wants
         let our_neg = NegotiationPayload::fmp(0, 0, our_profile);
@@ -323,7 +319,6 @@ impl ActivePeer {
             last_seen: authenticated_at,
             remote_epoch,
             peer_profile,
-            agreed_bloom_size_class,
             send_sr,
             send_rr,
             mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
@@ -541,11 +536,6 @@ impl ActivePeer {
     /// Get peer's node profile.
     pub fn peer_profile(&self) -> NodeProfile {
         self.peer_profile
-    }
-
-    /// Get agreed bloom filter size class for this link.
-    pub fn agreed_bloom_size_class(&self) -> u8 {
-        self.agreed_bloom_size_class
     }
 
     /// Whether to send sender reports to this peer.

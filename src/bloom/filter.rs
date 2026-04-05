@@ -2,7 +2,10 @@
 
 use std::fmt;
 
-use super::{BloomError, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
+use super::{
+    BloomError, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT, MAX_SIZE_CLASS,
+    MIN_SIZE_CLASS, SIZE_CLASS_BYTES,
+};
 use crate::NodeAddr;
 
 /// A Bloom filter for probabilistic set membership.
@@ -10,10 +13,13 @@ use crate::NodeAddr;
 /// Used in FIPS to track which destinations are reachable through a peer.
 /// The filter uses double hashing to generate k hash functions from two
 /// base hashes derived from the input.
+///
+/// Internal storage uses 64-bit words for efficient bitwise operations
+/// and word-level RLE compression.
 #[derive(Clone)]
 pub struct BloomFilter {
-    /// Bit array storage (packed as bytes).
-    bits: Vec<u8>,
+    /// Bit array storage (packed as 64-bit words, little-endian bit order).
+    words: Vec<u64>,
     /// Number of bits in the filter.
     num_bits: usize,
     /// Number of hash functions to use.
@@ -32,19 +38,22 @@ impl BloomFilter {
         if num_bits == 0 || !num_bits.is_multiple_of(8) {
             return Err(BloomError::SizeNotByteAligned(num_bits));
         }
+        if !num_bits.is_multiple_of(64) {
+            return Err(BloomError::SizeNotWordAligned(num_bits));
+        }
         if hash_count == 0 {
             return Err(BloomError::ZeroHashCount);
         }
 
-        let num_bytes = num_bits / 8;
+        let num_words = num_bits / 64;
         Ok(Self {
-            bits: vec![0u8; num_bytes],
+            words: vec![0u64; num_words],
             num_bits,
             hash_count,
         })
     }
 
-    /// Create a Bloom filter from raw bytes.
+    /// Create a Bloom filter from raw bytes (little-endian byte order).
     pub fn from_bytes(bytes: Vec<u8>, hash_count: u8) -> Result<Self, BloomError> {
         if hash_count == 0 {
             return Err(BloomError::ZeroHashCount);
@@ -53,8 +62,18 @@ impl BloomFilter {
             return Err(BloomError::SizeNotByteAligned(0));
         }
         let num_bits = bytes.len() * 8;
+        if !num_bits.is_multiple_of(64) {
+            return Err(BloomError::SizeNotWordAligned(num_bits));
+        }
+
+        let num_words = num_bits / 64;
+        let mut words = Vec::with_capacity(num_words);
+        for chunk in bytes.chunks_exact(8) {
+            words.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+        }
+
         Ok(Self {
-            bits: bytes,
+            words,
             num_bits,
             hash_count,
         })
@@ -102,17 +121,19 @@ impl BloomFilter {
 
     /// Merge another filter into this one (OR operation).
     ///
+    /// If the other filter is a different size, it is converted to this
+    /// filter's size first (fold if larger, duplicate if smaller).
     /// After merge, this filter contains all elements from both filters.
     pub fn merge(&mut self, other: &BloomFilter) -> Result<(), BloomError> {
-        if self.num_bits != other.num_bits {
-            return Err(BloomError::InvalidSize {
-                expected: self.num_bits,
-                got: other.num_bits,
-            });
-        }
-
-        for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
-            *a |= b;
+        if self.num_bits == other.num_bits {
+            for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
+                *a |= b;
+            }
+        } else {
+            let converted = other.convert_to(self.num_bits)?;
+            for (a, b) in self.words.iter_mut().zip(converted.words.iter()) {
+                *a |= b;
+            }
         }
         Ok(())
     }
@@ -124,14 +145,154 @@ impl BloomFilter {
         Ok(result)
     }
 
+    /// Fold the filter in half (large → small).
+    ///
+    /// ORs the top half of words with the bottom half, halving the filter
+    /// size. No false negatives are introduced, but the fill ratio roughly
+    /// doubles.
+    pub fn fold(&self) -> Result<BloomFilter, BloomError> {
+        let min_bits = SIZE_CLASS_BYTES[MIN_SIZE_CLASS as usize] * 8;
+        if self.num_bits <= min_bits {
+            return Err(BloomError::CannotFold(self.num_bits));
+        }
+
+        let half = self.words.len() / 2;
+        let words: Vec<u64> = self.words[..half]
+            .iter()
+            .zip(self.words[half..].iter())
+            .map(|(a, b)| a | b)
+            .collect();
+
+        Ok(BloomFilter {
+            words,
+            num_bits: self.num_bits / 2,
+            hash_count: self.hash_count,
+        })
+    }
+
+    /// Fold repeatedly to reach the target size in bits.
+    pub fn fold_to(&self, target_bits: usize) -> Result<BloomFilter, BloomError> {
+        if target_bits >= self.num_bits {
+            return Err(BloomError::InvalidTargetSize(target_bits));
+        }
+        if !target_bits.is_power_of_two() || target_bits < SIZE_CLASS_BYTES[MIN_SIZE_CLASS as usize] * 8 {
+            return Err(BloomError::InvalidTargetSize(target_bits));
+        }
+
+        let mut result = self.fold()?;
+        while result.num_bits > target_bits {
+            result = result.fold()?;
+        }
+        Ok(result)
+    }
+
+    /// Duplicate the filter (small → large).
+    ///
+    /// Concatenates the filter with itself, doubling the size.
+    /// The duplicated filter is compatible with the larger hash space:
+    /// `h(x) mod 2m` maps to either `h(x) mod m` or `h(x) mod m + m`,
+    /// and both positions have the bit set.
+    pub fn duplicate(&self) -> Result<BloomFilter, BloomError> {
+        let max_bits = SIZE_CLASS_BYTES[MAX_SIZE_CLASS as usize] * 8;
+        if self.num_bits >= max_bits {
+            return Err(BloomError::CannotDuplicate(self.num_bits));
+        }
+
+        let mut words = Vec::with_capacity(self.words.len() * 2);
+        words.extend_from_slice(&self.words);
+        words.extend_from_slice(&self.words);
+
+        Ok(BloomFilter {
+            words,
+            num_bits: self.num_bits * 2,
+            hash_count: self.hash_count,
+        })
+    }
+
+    /// Duplicate repeatedly to reach the target size in bits.
+    pub fn duplicate_to(&self, target_bits: usize) -> Result<BloomFilter, BloomError> {
+        if target_bits <= self.num_bits {
+            return Err(BloomError::InvalidTargetSize(target_bits));
+        }
+        if !target_bits.is_power_of_two() || target_bits > SIZE_CLASS_BYTES[MAX_SIZE_CLASS as usize] * 8 {
+            return Err(BloomError::InvalidTargetSize(target_bits));
+        }
+
+        let mut result = self.duplicate()?;
+        while result.num_bits < target_bits {
+            result = result.duplicate()?;
+        }
+        Ok(result)
+    }
+
+    /// Convert the filter to a different size.
+    ///
+    /// Folds (if target is smaller) or duplicates (if target is larger).
+    /// Returns a clone if the target matches the current size.
+    pub fn convert_to(&self, target_bits: usize) -> Result<BloomFilter, BloomError> {
+        if target_bits == self.num_bits {
+            return Ok(self.clone());
+        }
+        if target_bits < self.num_bits {
+            self.fold_to(target_bits)
+        } else {
+            self.duplicate_to(target_bits)
+        }
+    }
+
+    /// Compute the XOR diff between this filter and another.
+    ///
+    /// The result contains only the bits that differ between the two filters.
+    /// Used for delta compression: `old.xor_diff(&new)` produces a diff that
+    /// can be applied to `old` to reconstruct `new`.
+    pub fn xor_diff(&self, other: &BloomFilter) -> Result<BloomFilter, BloomError> {
+        if self.num_bits != other.num_bits {
+            return Err(BloomError::InvalidSize {
+                expected: self.num_bits,
+                got: other.num_bits,
+            });
+        }
+
+        let words: Vec<u64> = self
+            .words
+            .iter()
+            .zip(other.words.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+
+        Ok(BloomFilter {
+            words,
+            num_bits: self.num_bits,
+            hash_count: self.hash_count,
+        })
+    }
+
+    /// Apply a XOR diff to this filter in place.
+    ///
+    /// This is the inverse of `xor_diff()`: if `diff = old.xor_diff(&new)`,
+    /// then `old.apply_diff(&diff)` transforms `old` into `new`.
+    pub fn apply_diff(&mut self, diff: &BloomFilter) -> Result<(), BloomError> {
+        if self.num_bits != diff.num_bits {
+            return Err(BloomError::InvalidSize {
+                expected: self.num_bits,
+                got: diff.num_bits,
+            });
+        }
+
+        for (a, b) in self.words.iter_mut().zip(diff.words.iter()) {
+            *a ^= b;
+        }
+        Ok(())
+    }
+
     /// Clear all bits in the filter.
     pub fn clear(&mut self) {
-        self.bits.fill(0);
+        self.words.fill(0);
     }
 
     /// Count the number of set bits (population count).
     pub fn count_ones(&self) -> usize {
-        self.bits.iter().map(|b| b.count_ones() as usize).sum()
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
 
     /// Estimate the fill ratio (set bits / total bits).
@@ -157,12 +318,26 @@ impl BloomFilter {
 
     /// Check if the filter is empty.
     pub fn is_empty(&self) -> bool {
-        self.bits.iter().all(|&b| b == 0)
+        self.words.iter().all(|&w| w == 0)
     }
 
-    /// Get the raw bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bits
+    /// Get the filter contents as bytes (little-endian byte order).
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.words.len() * 8);
+        for &word in &self.words {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Get the internal word storage.
+    pub fn as_words(&self) -> &[u64] {
+        &self.words
+    }
+
+    /// Get the number of 64-bit words in the filter.
+    pub fn num_words(&self) -> usize {
+        self.words.len()
     }
 
     /// Get the filter size in bits.
@@ -172,7 +347,7 @@ impl BloomFilter {
 
     /// Get the filter size in bytes.
     pub fn num_bytes(&self) -> usize {
-        self.bits.len()
+        self.words.len() * 8
     }
 
     /// Get the number of hash functions.
@@ -200,15 +375,15 @@ impl BloomFilter {
     }
 
     fn set_bit(&mut self, index: usize) {
-        let byte_index = index / 8;
-        let bit_offset = index % 8;
-        self.bits[byte_index] |= 1 << bit_offset;
+        let word_index = index / 64;
+        let bit_offset = index % 64;
+        self.words[word_index] |= 1 << bit_offset;
     }
 
     fn get_bit(&self, index: usize) -> bool {
-        let byte_index = index / 8;
-        let bit_offset = index % 8;
-        (self.bits[byte_index] >> bit_offset) & 1 == 1
+        let word_index = index / 64;
+        let bit_offset = index % 64;
+        (self.words[word_index] >> bit_offset) & 1 == 1
     }
 }
 
@@ -222,7 +397,7 @@ impl PartialEq for BloomFilter {
     fn eq(&self, other: &Self) -> bool {
         self.num_bits == other.num_bits
             && self.hash_count == other.hash_count
-            && self.bits == other.bits
+            && self.words == other.words
     }
 }
 

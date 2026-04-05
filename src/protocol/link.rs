@@ -90,8 +90,10 @@ pub enum LinkMessageType {
     TreeAnnounce = 0x10,
 
     // Bloom filter (0x20-0x2F)
-    /// Bloom filter reachability update.
+    /// Bloom filter reachability update (full or delta).
     FilterAnnounce = 0x20,
+    /// Request full filter retransmission (NACK for out-of-sequence delta).
+    FilterNack = 0x21,
 
     // Discovery (0x30-0x3F)
     /// Request to discover a node's coordinates.
@@ -116,6 +118,7 @@ impl LinkMessageType {
             0x02 => Some(LinkMessageType::ReceiverReport),
             0x10 => Some(LinkMessageType::TreeAnnounce),
             0x20 => Some(LinkMessageType::FilterAnnounce),
+            0x21 => Some(LinkMessageType::FilterNack),
             0x30 => Some(LinkMessageType::LookupRequest),
             0x31 => Some(LinkMessageType::LookupResponse),
             0x50 => Some(LinkMessageType::Disconnect),
@@ -138,6 +141,7 @@ impl fmt::Display for LinkMessageType {
             LinkMessageType::ReceiverReport => "ReceiverReport",
             LinkMessageType::TreeAnnounce => "TreeAnnounce",
             LinkMessageType::FilterAnnounce => "FilterAnnounce",
+            LinkMessageType::FilterNack => "FilterNack",
             LinkMessageType::LookupRequest => "LookupRequest",
             LinkMessageType::LookupResponse => "LookupResponse",
             LinkMessageType::Disconnect => "Disconnect",
@@ -433,6 +437,7 @@ mod tests {
         let types = [
             LinkMessageType::TreeAnnounce,
             LinkMessageType::FilterAnnounce,
+            LinkMessageType::FilterNack,
             LinkMessageType::LookupRequest,
             LinkMessageType::LookupResponse,
             LinkMessageType::SessionDatagram,

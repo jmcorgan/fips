@@ -208,7 +208,6 @@ pub struct BloomStats {
     pub received: u64,
     pub decode_error: u64,
     pub invalid: u64,
-    pub non_v1: u64,
     pub unknown_peer: u64,
     pub stale: u64,
     pub accepted: u64,
@@ -216,6 +215,13 @@ pub struct BloomStats {
     pub sent: u64,
     pub debounce_suppressed: u64,
     pub send_failed: u64,
+    // Delta compression
+    pub deltas_sent: u64,
+    pub full_sends: u64,
+    pub nacks_sent: u64,
+    pub nacks_received: u64,
+    // Adaptive sizing
+    pub size_changes: u64,
 }
 
 impl BloomStats {
@@ -224,13 +230,17 @@ impl BloomStats {
             received: self.received,
             decode_error: self.decode_error,
             invalid: self.invalid,
-            non_v1: self.non_v1,
             unknown_peer: self.unknown_peer,
             stale: self.stale,
             accepted: self.accepted,
             sent: self.sent,
             debounce_suppressed: self.debounce_suppressed,
             send_failed: self.send_failed,
+            deltas_sent: self.deltas_sent,
+            full_sends: self.full_sends,
+            nacks_sent: self.nacks_sent,
+            nacks_received: self.nacks_received,
+            size_changes: self.size_changes,
         }
     }
 }
@@ -394,13 +404,17 @@ pub struct BloomStatsSnapshot {
     pub received: u64,
     pub decode_error: u64,
     pub invalid: u64,
-    pub non_v1: u64,
     pub unknown_peer: u64,
     pub stale: u64,
     pub accepted: u64,
     pub sent: u64,
     pub debounce_suppressed: u64,
     pub send_failed: u64,
+    pub deltas_sent: u64,
+    pub full_sends: u64,
+    pub nacks_sent: u64,
+    pub nacks_received: u64,
+    pub size_changes: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -107,12 +107,39 @@ fn test_bloom_filter_clear() {
 }
 
 #[test]
-fn test_bloom_filter_merge_size_mismatch() {
-    let mut filter1 = BloomFilter::with_params(1024, 7).unwrap();
-    let filter2 = BloomFilter::with_params(2048, 7).unwrap();
+fn test_bloom_filter_merge_cross_size_fold() {
+    // Merge a 2KB filter into a 1KB filter (fold the larger)
+    let mut filter1 = BloomFilter::with_params(1024 * 8, 5).unwrap();
+    let mut filter2 = BloomFilter::with_params(2048 * 8, 5).unwrap();
 
-    let result = filter1.merge(&filter2);
-    assert!(matches!(result, Err(BloomError::InvalidSize { .. })));
+    let node1 = make_node_addr(1);
+    let node2 = make_node_addr(2);
+    filter1.insert(&node1);
+    filter2.insert(&node2);
+
+    filter1.merge(&filter2).unwrap();
+
+    assert!(filter1.contains(&node1));
+    assert!(filter1.contains(&node2));
+    assert_eq!(filter1.num_bits(), 1024 * 8); // size unchanged
+}
+
+#[test]
+fn test_bloom_filter_merge_cross_size_duplicate() {
+    // Merge a 512B filter into a 2KB filter (duplicate the smaller)
+    let mut filter1 = BloomFilter::with_params(2048 * 8, 5).unwrap();
+    let mut filter2 = BloomFilter::with_params(512 * 8, 5).unwrap();
+
+    let node1 = make_node_addr(1);
+    let node2 = make_node_addr(2);
+    filter1.insert(&node1);
+    filter2.insert(&node2);
+
+    filter1.merge(&filter2).unwrap();
+
+    assert!(filter1.contains(&node1));
+    assert!(filter1.contains(&node2));
+    assert_eq!(filter1.num_bits(), 2048 * 8);
 }
 
 #[test]
@@ -142,6 +169,22 @@ fn test_bloom_filter_invalid_params() {
         BloomFilter::with_params(1024, 0),
         Err(BloomError::ZeroHashCount)
     ));
+
+    // Byte-aligned but not word-aligned (24 bits = 3 bytes, not 8)
+    assert!(matches!(
+        BloomFilter::with_params(24, 5),
+        Err(BloomError::SizeNotWordAligned(24))
+    ));
+}
+
+#[test]
+fn test_bloom_filter_from_bytes_not_word_aligned() {
+    // 5 bytes = 40 bits, not a multiple of 64
+    let result = BloomFilter::from_bytes(vec![0u8; 5], 5);
+    assert!(matches!(result, Err(BloomError::SizeNotWordAligned(40))));
+
+    // 8 bytes = 64 bits, should succeed
+    assert!(BloomFilter::from_bytes(vec![0u8; 8], 5).is_ok());
 }
 
 #[test]
@@ -207,7 +250,7 @@ fn test_bloom_filter_from_slice() {
     original.insert(&make_node_addr(42));
     let bytes = original.as_bytes();
 
-    let restored = BloomFilter::from_slice(bytes, original.hash_count()).unwrap();
+    let restored = BloomFilter::from_slice(&bytes, original.hash_count()).unwrap();
     assert_eq!(original, restored);
 }
 
@@ -226,6 +269,229 @@ fn test_bloom_filter_insert_bytes_contains_bytes() {
     filter.insert_bytes(data2);
     assert!(filter.contains_bytes(data1));
     assert!(filter.contains_bytes(data2));
+}
+
+#[test]
+fn test_bloom_filter_as_bytes_round_trip() {
+    let mut original = BloomFilter::new();
+    for i in 0..50 {
+        original.insert(&make_node_addr(i));
+    }
+
+    let bytes = original.as_bytes();
+    let restored = BloomFilter::from_bytes(bytes, original.hash_count()).unwrap();
+    assert_eq!(original, restored);
+
+    // Verify all inserted elements are still found
+    for i in 0..50 {
+        assert!(restored.contains(&make_node_addr(i)));
+    }
+}
+
+#[test]
+fn test_bloom_filter_as_words() {
+    let filter = BloomFilter::new();
+    // Default 8192 bits = 128 words
+    assert_eq!(filter.as_words().len(), 128);
+    assert_eq!(filter.num_words(), 128);
+    assert!(filter.as_words().iter().all(|&w| w == 0));
+
+    // Small filter: 64 bits = 1 word
+    let small = BloomFilter::with_params(64, 3).unwrap();
+    assert_eq!(small.as_words().len(), 1);
+    assert_eq!(small.num_words(), 1);
+}
+
+#[test]
+fn test_bloom_filter_xor_diff_and_apply() {
+    let mut filter_a = BloomFilter::new();
+    let mut filter_b = BloomFilter::new();
+
+    // Insert different elements into each
+    for i in 0..20 {
+        filter_a.insert(&make_node_addr(i));
+    }
+    for i in 10..30 {
+        filter_b.insert(&make_node_addr(i));
+    }
+
+    // Compute diff: applying diff to A should yield B
+    let diff = filter_a.xor_diff(&filter_b).unwrap();
+
+    let mut reconstructed = filter_a.clone();
+    reconstructed.apply_diff(&diff).unwrap();
+    assert_eq!(reconstructed, filter_b);
+}
+
+#[test]
+fn test_bloom_filter_xor_diff_identical() {
+    let mut filter = BloomFilter::new();
+    for i in 0..10 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    // XOR of identical filters should be all zeros
+    let diff = filter.xor_diff(&filter).unwrap();
+    assert!(diff.is_empty());
+    assert_eq!(diff.count_ones(), 0);
+}
+
+#[test]
+fn test_bloom_filter_xor_diff_size_mismatch() {
+    let filter_a = BloomFilter::with_params(1024, 5).unwrap();
+    let filter_b = BloomFilter::with_params(2048, 5).unwrap();
+
+    assert!(matches!(
+        filter_a.xor_diff(&filter_b),
+        Err(BloomError::InvalidSize { .. })
+    ));
+}
+
+#[test]
+fn test_bloom_filter_apply_diff_size_mismatch() {
+    let mut filter = BloomFilter::new();
+    let diff = BloomFilter::with_params(1024, 5).unwrap();
+
+    assert!(matches!(
+        filter.apply_diff(&diff),
+        Err(BloomError::InvalidSize { .. })
+    ));
+}
+
+// ===== Fold/Duplicate/Convert Tests =====
+
+#[test]
+fn test_bloom_filter_fold() {
+    // 2KB filter → fold to 1KB
+    let mut filter = BloomFilter::with_params(2048 * 8, 5).unwrap();
+    for i in 0..50 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    let folded = filter.fold().unwrap();
+    assert_eq!(folded.num_bits(), 1024 * 8);
+
+    // All inserted elements must still be found (no false negatives)
+    for i in 0..50 {
+        assert!(folded.contains(&make_node_addr(i)), "Node {} not found after fold", i);
+    }
+
+    // Fill ratio should roughly double
+    let original_fill = filter.fill_ratio();
+    let folded_fill = folded.fill_ratio();
+    assert!(folded_fill > original_fill * 1.5, "Fill ratio didn't increase enough");
+}
+
+#[test]
+fn test_bloom_filter_fold_to() {
+    // 4KB → fold to 512B (3 folds)
+    let mut filter = BloomFilter::with_params(4096 * 8, 5).unwrap();
+    for i in 0..20 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    let folded = filter.fold_to(512 * 8).unwrap();
+    assert_eq!(folded.num_bits(), 512 * 8);
+
+    for i in 0..20 {
+        assert!(folded.contains(&make_node_addr(i)));
+    }
+}
+
+#[test]
+fn test_bloom_filter_fold_at_minimum() {
+    let filter = BloomFilter::with_params(512 * 8, 5).unwrap();
+    assert!(matches!(filter.fold(), Err(BloomError::CannotFold(_))));
+}
+
+#[test]
+fn test_bloom_filter_duplicate() {
+    let mut filter = BloomFilter::with_params(1024 * 8, 5).unwrap();
+    for i in 0..50 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    let duped = filter.duplicate().unwrap();
+    assert_eq!(duped.num_bits(), 2048 * 8);
+
+    // All elements still found at the larger size
+    for i in 0..50 {
+        assert!(duped.contains(&make_node_addr(i)), "Node {} not found after duplicate", i);
+    }
+}
+
+#[test]
+fn test_bloom_filter_duplicate_to() {
+    let mut filter = BloomFilter::with_params(512 * 8, 5).unwrap();
+    for i in 0..10 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    let duped = filter.duplicate_to(4096 * 8).unwrap();
+    assert_eq!(duped.num_bits(), 4096 * 8);
+
+    for i in 0..10 {
+        assert!(duped.contains(&make_node_addr(i)));
+    }
+}
+
+#[test]
+fn test_bloom_filter_duplicate_at_maximum() {
+    let filter = BloomFilter::with_params(32768 * 8, 5).unwrap();
+    assert!(matches!(filter.duplicate(), Err(BloomError::CannotDuplicate(_))));
+}
+
+#[test]
+fn test_bloom_filter_duplicate_then_fold_round_trip() {
+    let mut filter = BloomFilter::with_params(1024 * 8, 5).unwrap();
+    for i in 0..30 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    // Duplicate to 2KB then fold back to 1KB should yield equivalent filter
+    let duped = filter.duplicate().unwrap();
+    let folded_back = duped.fold().unwrap();
+
+    // The round-trip should be identical because duplication places
+    // identical copies in both halves, and folding ORs them back
+    assert_eq!(filter, folded_back);
+}
+
+#[test]
+fn test_bloom_filter_convert_to() {
+    let mut filter = BloomFilter::with_params(1024 * 8, 5).unwrap();
+    for i in 0..20 {
+        filter.insert(&make_node_addr(i));
+    }
+
+    // Same size → clone
+    let same = filter.convert_to(1024 * 8).unwrap();
+    assert_eq!(filter, same);
+
+    // Larger → duplicate
+    let larger = filter.convert_to(4096 * 8).unwrap();
+    assert_eq!(larger.num_bits(), 4096 * 8);
+    for i in 0..20 {
+        assert!(larger.contains(&make_node_addr(i)));
+    }
+
+    // Smaller → fold
+    let smaller = filter.convert_to(512 * 8).unwrap();
+    assert_eq!(smaller.num_bits(), 512 * 8);
+    for i in 0..20 {
+        assert!(smaller.contains(&make_node_addr(i)));
+    }
+}
+
+#[test]
+fn test_bloom_filter_convert_to_invalid() {
+    let filter = BloomFilter::with_params(1024 * 8, 5).unwrap();
+
+    // Not a power of two
+    assert!(matches!(
+        filter.convert_to(1000 * 8),
+        Err(BloomError::InvalidTargetSize(_))
+    ));
 }
 
 #[test]
@@ -259,6 +525,60 @@ fn test_bloom_filter_debug_format() {
     let debug = format!("{:?}", filter);
     assert!(debug.contains("fill_ratio"));
     assert!(debug.contains("est_count"));
+}
+
+// ===== Mixed-Size Integration Tests =====
+
+#[test]
+fn test_mixed_size_outgoing_filter_construction() {
+    // Node at 1KB (size_class 1) with peers at different sizes
+    let my_node = make_node_addr(0);
+    let mut state = BloomState::new(my_node);
+    // state defaults to size_class 1 (1KB)
+
+    let peer_a = make_node_addr(10);
+    let peer_b = make_node_addr(20);
+    let peer_c = make_node_addr(30);
+
+    // Peer A: 512B filter
+    let mut filter_a = BloomFilter::with_params(512 * 8, 5).unwrap();
+    filter_a.insert(&make_node_addr(100));
+
+    // Peer B: 2KB filter
+    let mut filter_b = BloomFilter::with_params(2048 * 8, 5).unwrap();
+    filter_b.insert(&make_node_addr(200));
+
+    // Peer C: 4KB filter
+    let mut filter_c = BloomFilter::with_params(4096 * 8, 5).unwrap();
+    filter_c.insert(&make_node_addr(250));
+
+    let mut peer_filters = HashMap::new();
+    peer_filters.insert(peer_a, filter_a);
+    peer_filters.insert(peer_b, filter_b);
+    peer_filters.insert(peer_c, filter_c);
+
+    // Outgoing filter for peer_a should be 1KB (our size)
+    // and should contain entries from peers B and C (converted)
+    let outgoing = state.compute_outgoing_filter(&peer_a, &peer_filters);
+    assert_eq!(outgoing.num_bits(), 1024 * 8); // our size class
+    assert!(outgoing.contains(&my_node));
+    assert!(outgoing.contains(&make_node_addr(200))); // from B (folded 2KB→1KB)
+    assert!(outgoing.contains(&make_node_addr(250))); // from C (folded 4KB→1KB)
+}
+
+#[test]
+fn test_native_size_routing_queries() {
+    // Peer filters stored at native size work for contains() queries
+    let mut filter_2kb = BloomFilter::with_params(2048 * 8, 5).unwrap();
+    let target = make_node_addr(42);
+    filter_2kb.insert(&target);
+
+    // Query at native 2KB resolution
+    assert!(filter_2kb.contains(&target));
+
+    // After folding to 1KB, still found (but higher FPR)
+    let folded = filter_2kb.fold().unwrap();
+    assert!(folded.contains(&target));
 }
 
 // ===== BloomState Tests =====
@@ -570,6 +890,57 @@ fn test_bloom_state_mark_changed_peers_excludes_source() {
     state.mark_changed_peers(&peer1, &peer_addrs, &peer_filters);
 
     assert!(!state.needs_update(&peer1));
+}
+
+// ===== Adaptive Sizing Tests =====
+
+#[test]
+fn test_adaptive_sizing_step_up() {
+    let node = make_node_addr(0);
+    let state = BloomState::new(node); // defaults: size_class=1, up=0.20, down=0.05
+
+    // Above threshold → step up
+    assert_eq!(state.evaluate_size_change(0.25), Some(2));
+}
+
+#[test]
+fn test_adaptive_sizing_step_down() {
+    let node = make_node_addr(0);
+    let mut state = BloomState::new(node);
+    state.set_size_class(2);
+
+    // Below threshold → step down
+    assert_eq!(state.evaluate_size_change(0.03), Some(1));
+}
+
+#[test]
+fn test_adaptive_sizing_deadband() {
+    let node = make_node_addr(0);
+    let state = BloomState::new(node);
+
+    // In deadband → no change
+    assert_eq!(state.evaluate_size_change(0.10), None);
+    assert_eq!(state.evaluate_size_change(0.15), None);
+}
+
+#[test]
+fn test_adaptive_sizing_at_max() {
+    let node = make_node_addr(0);
+    let mut state = BloomState::new(node);
+    state.set_size_class(crate::bloom::MAX_SIZE_CLASS);
+
+    // Above threshold but at max → no change
+    assert_eq!(state.evaluate_size_change(0.30), None);
+}
+
+#[test]
+fn test_adaptive_sizing_at_min() {
+    let node = make_node_addr(0);
+    let mut state = BloomState::new(node);
+    state.set_size_class(crate::bloom::MIN_SIZE_CLASS);
+
+    // Below threshold but at min → no change
+    assert_eq!(state.evaluate_size_change(0.02), None);
 }
 
 // === Non-routing dependent tests ===

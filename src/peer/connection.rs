@@ -125,9 +125,6 @@ pub struct PeerConnection {
     // === Negotiation Results ===
     /// Peer's node profile (learned from negotiation payload).
     peer_profile: Option<NodeProfile>,
-    /// Agreed bloom filter size class.
-    agreed_bloom_size_class: Option<u8>,
-
     // === Handshake Resend ===
     /// Wire-format msg1 bytes for resend (initiator only).
     handshake_msg1: Option<Vec<u8>>,
@@ -169,7 +166,7 @@ impl PeerConnection {
             source_addr: None,
             remote_epoch: None,
             peer_profile: None,
-            agreed_bloom_size_class: None,
+
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -200,7 +197,7 @@ impl PeerConnection {
             source_addr: None,
             remote_epoch: None,
             peer_profile: None,
-            agreed_bloom_size_class: None,
+
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -230,7 +227,7 @@ impl PeerConnection {
             source_addr: None,
             remote_epoch: None,
             peer_profile: None,
-            agreed_bloom_size_class: None,
+
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -264,7 +261,7 @@ impl PeerConnection {
             source_addr: Some(source_addr),
             remote_epoch: None,
             peer_profile: None,
-            agreed_bloom_size_class: None,
+
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
@@ -405,15 +402,9 @@ impl PeerConnection {
         self.peer_profile
     }
 
-    /// Get agreed bloom filter size class.
-    pub fn agreed_bloom_size_class(&self) -> Option<u8> {
-        self.agreed_bloom_size_class
-    }
-
     /// Store negotiation results from peer's payload.
-    pub fn set_negotiation_results(&mut self, peer_profile: NodeProfile, bloom_size_class: u8) {
+    pub fn set_negotiation_results(&mut self, peer_profile: NodeProfile) {
         self.peer_profile = Some(peer_profile);
-        self.agreed_bloom_size_class = Some(bloom_size_class);
     }
 
     // === Handshake Resend ===
