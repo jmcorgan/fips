@@ -48,7 +48,7 @@ transports:
 
 peers: []
   # Static peers for bootstrapping (UDP or TCP):
-  # - npub: "npub1..."
+  # - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
   #   alias: "gateway"
   #   addresses:
   #     - transport: udp

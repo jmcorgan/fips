@@ -112,8 +112,20 @@ async fn main() {
 
     info!("FIPS running, press Ctrl+C to exit");
 
-    // Run the RX event loop until shutdown signal.
+    // Run the RX event loop until shutdown signal (SIGINT or SIGTERM).
     // stop() drops the packet channel, causing run_rx_loop to exit.
+    #[cfg(unix)]
+    let shutdown = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    };
+    #[cfg(not(unix))]
+    let shutdown = tokio::signal::ctrl_c();
+
     tokio::select! {
         result = node.run_rx_loop() => {
             match result {
@@ -121,7 +133,7 @@ async fn main() {
                 Err(e) => error!("RX loop error: {}", e),
             }
         }
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown => {
             info!("Shutdown signal received");
         }
     }

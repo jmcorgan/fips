@@ -587,6 +587,22 @@ impl Node {
                     info!("effective MTU: {} bytes", effective_mtu);
                     debug!("   max TCP MSS: {} bytes", max_mss);
 
+                    // On macOS, create a shutdown pipe. Writing to it unblocks the
+                    // reader thread's select() loop without closing the TUN fd
+                    // (which would cause a double-close when TunDevice drops).
+                    #[cfg(target_os = "macos")]
+                    let (shutdown_read_fd, shutdown_write_fd) = {
+                        let mut fds = [0i32; 2];
+                        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+                            return Err(NodeError::Tun(
+                                crate::upper::tun::TunError::Configure(
+                                    "failed to create shutdown pipe".into(),
+                                ),
+                            ));
+                        }
+                        (fds[0], fds[1])
+                    };
+
                     // Create writer (dups the fd for independent write access)
                     let (writer, tun_tx) = device.create_writer(max_mss)?;
 
@@ -604,6 +620,11 @@ impl Node {
 
                     // Spawn reader thread
                     let transport_mtu = self.transport_mtu();
+                    #[cfg(target_os = "macos")]
+                    let reader_handle = thread::spawn(move || {
+                        run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu, shutdown_read_fd);
+                    });
+                    #[cfg(not(target_os = "macos"))]
                     let reader_handle = thread::spawn(move || {
                         run_tun_reader(device, mtu, our_addr, reader_tun_tx, outbound_tx, transport_mtu);
                     });
@@ -614,6 +635,8 @@ impl Node {
                     self.tun_outbound_rx = Some(outbound_rx);
                     self.tun_reader_handle = Some(reader_handle);
                     self.tun_writer_handle = Some(writer_handle);
+                    #[cfg(target_os = "macos")]
+                    { self.tun_shutdown_fd = Some(shutdown_write_fd); }
                 }
                 Err(e) => {
                     self.tun_state = TunState::Failed;
@@ -704,9 +727,19 @@ impl Node {
             // Drop the tun_tx to signal the writer to stop
             self.tun_tx.take();
 
-            // Delete the interface (causes reader to get EFAULT)
+            // Delete the interface (on Linux, causes reader to get EFAULT)
             if let Err(e) = shutdown_tun_interface(&name).await {
                 warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
+            }
+
+            // On macOS, signal the reader thread to exit by writing to the
+            // shutdown pipe. The reader's select() will wake up and break.
+            #[cfg(target_os = "macos")]
+            if let Some(fd) = self.tun_shutdown_fd.take() {
+                unsafe {
+                    libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);
+                    libc::close(fd);
+                }
             }
 
             // Wait for threads to finish

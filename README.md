@@ -63,11 +63,22 @@ cd fips
 cargo build --release
 ```
 
-Requires Rust 1.85+ (edition 2024) and Linux with TUN support.
+Requires Rust 1.85+ (edition 2024) and a Unix-like OS with TUN support
+(Linux or macOS).
 
-The BLE transport (enabled by default) requires BlueZ and libdbus. On
-Debian/Ubuntu: `sudo apt install bluez libdbus-1-dev`. To build without BLE:
-`cargo build --release --no-default-features --features tui`.
+### Transport support by platform
+
+| Transport | Linux | macOS | Windows |
+|-----------|:-----:|:-----:|:-------:|
+| UDP       |  ✅   |  ✅   |   ❌    |
+| TCP       |  ✅   |  ✅   |   ❌    |
+| Ethernet  |  ✅   |  ✅   |   ❌    |
+| Tor       |  ✅   |  ✅   |   ❌    |
+| BLE       |  ✅   |  ❌   |   ❌    |
+
+On **Linux**, the BLE transport requires BlueZ and libdbus. On
+Debian/Ubuntu: `sudo apt install bluez libdbus-1-dev`. Then build with
+BLE enabled: `cargo build --release --features ble`.
 
 ## Installation
 
@@ -112,6 +123,28 @@ sudo ./install.sh
 
 See [packaging/systemd/README.install.md](packaging/systemd/README.install.md)
 for the full installation and configuration guide.
+
+### macOS (.pkg)
+
+```bash
+./packaging/macos/build-pkg.sh
+sudo installer -pkg deploy/fips-*-macos-*.pkg -target /
+```
+
+This installs binaries to `/usr/local/bin/`, config to
+`/usr/local/etc/fips/`, sets up `.fips` DNS resolution via
+`/etc/resolver/fips`, and registers a launchd daemon. Edit
+`/usr/local/etc/fips/fips.yaml` before starting:
+
+```bash
+sudo nano /usr/local/etc/fips/fips.yaml
+sudo launchctl load -w /Library/LaunchDaemons/com.fips.daemon.plist
+```
+
+Remove with `sudo packaging/macos/uninstall.sh` (preserves config).
+
+> **Note:** On macOS, the TUN device is named `utun<N>` (kernel-assigned)
+> rather than `fips0`.
 
 ## Configuration
 
@@ -175,19 +208,29 @@ for the full reference.
 ### DNS Resolution
 
 FIPS includes a DNS resolver (enabled by default, port 5354) that maps
-`.fips` names to fd00::/8 IPv6 addresses. With systemd-resolved:
+`.fips` names to fd00::/8 IPv6 addresses.
+
+**Linux** (systemd-resolved):
 
 ```bash
 sudo resolvectl dns fips0 127.0.0.1:5354
 sudo resolvectl domain fips0 ~fips
 ```
 
+**macOS**: DNS is configured automatically by the `.pkg` installer via
+`/etc/resolver/fips`. No manual setup is needed.
+
 Then reach any FIPS node by npub with standard IPv6 tools:
 
 ```bash
 ping6 npub1bbb....fips
-ssh   npub1bbb....fips
+ssh -6 npub1bbb....fips
 ```
+
+> **macOS note:** Use `ping6` instead of `ping`. macOS ships separate
+> `ping` (IPv4-only) and `ping6` (IPv6) binaries; `ping` will not
+> resolve AAAA records. Similarly, use `curl -6`, `ssh -6`, etc. when
+> connecting by `.fips` hostname.
 
 ### Monitoring
 
@@ -266,7 +309,7 @@ Ethernet, Tor, and Bluetooth (BLE) with a small live mesh of deployed nodes.
 - UDP, TCP, Ethernet, Tor, and BLE transports (BLE via L2CAP CoC with per-link MTU negotiation)
 - Runtime inspection and peer management via `fipsctl` and `fipstop`
 - Reproducible builds with toolchain pinning and SOURCE_DATE_EPOCH
-- Debian and systemd tarball packaging
+- Linux (Debian, systemd tarball, OpenWrt, AUR) and macOS packaging
 - Docker-based integration and chaos testing
 
 ### Near-term priorities

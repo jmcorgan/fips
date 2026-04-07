@@ -24,7 +24,7 @@ start_dnsmasq() {
 start_services() {
     /usr/sbin/sshd
     iperf3 -s -D
-    python3 -m http.server 8000 -d /root -b :: &>/dev/null &
+    python3 -m http.server 80 -d /root -b :: &>/dev/null &
 }
 
 # ── Chaos: TCP ECN + ethernet wait ──────────────────────────────────────

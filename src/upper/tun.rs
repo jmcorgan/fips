@@ -5,10 +5,10 @@
 //! allowing standard socket applications to communicate over the mesh.
 
 use crate::{FipsAddress, TunConfig};
-use futures::TryStreamExt;
-use rtnetlink::{new_connection, Handle, LinkUnspec, RouteMessageBuilder};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(not(target_os = "macos"))]
+use std::io::Write;
 use std::net::Ipv6Addr;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::mpsc;
@@ -33,6 +33,7 @@ pub enum TunError {
     #[error("failed to configure TUN device: {0}")]
     Configure(String),
 
+    #[cfg(target_os = "linux")]
     #[error("netlink error: {0}")]
     Netlink(#[from] rtnetlink::Error),
 
@@ -87,7 +88,7 @@ impl TunDevice {
     /// This requires CAP_NET_ADMIN capability (run with sudo or setcap).
     pub async fn create(config: &TunConfig, address: FipsAddress) -> Result<Self, TunError> {
         // Check if IPv6 is enabled
-        if is_ipv6_disabled() {
+        if platform::is_ipv6_disabled() {
             return Err(TunError::Ipv6Disabled);
         }
 
@@ -95,9 +96,9 @@ impl TunDevice {
         let mtu = config.mtu();
 
         // Delete existing interface if present (TUN devices are exclusive)
-        if interface_exists(name).await {
+        if platform::interface_exists(name).await {
             debug!(name, "Deleting existing TUN interface");
-            if let Err(e) = delete_interface(name).await {
+            if let Err(e) = platform::delete_interface(name).await {
                 debug!(name, error = %e, "Failed to delete existing interface");
             }
         }
@@ -105,17 +106,32 @@ impl TunDevice {
         // Create the TUN device
         let mut tun_config = tun::Configuration::default();
 
+        // On macOS, utun devices get kernel-assigned names (utun0, utun1, ...),
+        // so we skip setting the name and read it back after creation.
+        #[cfg(target_os = "linux")]
         #[allow(deprecated)]
         tun_config.name(name).layer(Layer::L3).mtu(mtu);
 
+        #[cfg(target_os = "macos")]
+        {
+            #[allow(deprecated)]
+            tun_config.layer(Layer::L3).mtu(mtu);
+        }
+
         let device = tun::create(&tun_config)?;
 
-        // Configure address and bring up via netlink
-        configure_interface(name, address.to_ipv6(), mtu).await?;
+        // Read the actual device name (on macOS this is the kernel-assigned utun* name)
+        let actual_name = {
+            use tun::AbstractDevice;
+            device.tun_name().map_err(|e| TunError::Configure(format!("failed to get device name: {}", e)))?
+        };
+
+        // Configure address and bring up via platform-specific method
+        platform::configure_interface(&actual_name, address.to_ipv6(), mtu).await?;
 
         Ok(Self {
             device,
-            name: name.to_string(),
+            name: actual_name,
             mtu,
             address,
         })
@@ -150,6 +166,10 @@ impl TunDevice {
     ///
     /// Returns the number of bytes read into the buffer, or an error.
     /// The buffer should be at least MTU + header size (typically 1500+ bytes).
+    ///
+    /// The tun crate's `Read` impl transparently strips the macOS utun
+    /// packet information header, so this returns a raw IP packet on all
+    /// platforms.
     pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, TunError> {
         self.device.read(buf).map_err(|e| TunError::Configure(format!("read failed: {}", e)))
     }
@@ -159,7 +179,7 @@ impl TunDevice {
     /// This deletes the interface entirely.
     pub async fn shutdown(&self) -> Result<(), TunError> {
         debug!(name = %self.name, "Deleting TUN device");
-        delete_interface(&self.name).await
+        platform::delete_interface(&self.name).await
     }
 
     /// Create a TunWriter for this device.
@@ -214,6 +234,7 @@ impl TunWriter {
     ///
     /// Blocks forever, reading packets from the channel and writing them
     /// to the TUN device. Returns when the channel is closed (all senders dropped).
+    #[cfg_attr(target_os = "macos", allow(unused_mut))]
     pub fn run(mut self) {
         use super::tcp_mss::clamp_tcp_mss;
 
@@ -229,7 +250,43 @@ impl TunWriter {
                 );
             }
 
-            if let Err(e) = self.file.write_all(&packet) {
+            // On macOS, utun devices require a 4-byte packet information header
+            // prepended to each packet. The tun crate handles this for its own
+            // Read/Write impl, but we use a dup'd fd directly. We use writev
+            // to avoid allocating a buffer on every packet.
+            #[cfg(target_os = "macos")]
+            let write_result = {
+                use std::os::unix::io::AsRawFd;
+                const AF_INET6_HEADER: [u8; 4] = [0, 0, 0, 30];
+                let iov = [
+                    libc::iovec {
+                        iov_base: AF_INET6_HEADER.as_ptr() as *mut libc::c_void,
+                        iov_len: 4,
+                    },
+                    libc::iovec {
+                        iov_base: packet.as_ptr() as *mut libc::c_void,
+                        iov_len: packet.len(),
+                    },
+                ];
+                let ret = unsafe { libc::writev(self.file.as_raw_fd(), iov.as_ptr(), 2) };
+                if ret < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    let expected = 4 + packet.len();
+                    if (ret as usize) < expected {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            format!("short writev: {} of {} bytes", ret, expected),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            #[cfg(not(target_os = "macos"))]
+            let write_result = self.file.write_all(&packet);
+
+            if let Err(e) = write_result {
                 // "Bad address" is expected during shutdown when interface is deleted
                 let err_str = e.to_string();
                 if err_str.contains("Bad address") {
@@ -243,7 +300,7 @@ impl TunWriter {
     }
 }
 
-/// TUN packet reader loop.
+/// TUN packet reader loop (Linux).
 ///
 /// Reads IPv6 packets from the TUN device. Packets destined for FIPS addresses
 /// (fd::/8) are forwarded to the Node via the outbound channel for session
@@ -255,6 +312,7 @@ impl TunWriter {
 /// This is designed to run in a dedicated thread since TUN reads are blocking.
 /// The loop exits when the TUN interface is deleted (EFAULT) or an unrecoverable
 /// error occurs.
+#[cfg(not(target_os = "macos"))]
 pub fn run_tun_reader(
     mut device: TunDevice,
     mtu: u16,
@@ -263,13 +321,117 @@ pub fn run_tun_reader(
     outbound_tx: TunOutboundTx,
     transport_mtu: u16,
 ) {
-    use super::icmp::{build_dest_unreachable, effective_ipv6_mtu, should_send_icmp_error, DestUnreachableCode};
-    use super::tcp_mss::clamp_tcp_mss;
+    let (name, mut buf, max_mss) = tun_reader_setup(&device, mtu, transport_mtu);
+
+    loop {
+        match device.read_packet(&mut buf) {
+            Ok(n) if n > 0 => {
+                if !handle_tun_packet(&mut buf[..n], max_mss, &name, our_addr, &tun_tx, &outbound_tx) {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let err_str = format!("{}", e);
+                if !err_str.contains("Bad address") {
+                    error!(name = %name, error = %e, "TUN read error");
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// TUN packet reader loop (macOS).
+///
+/// Uses `select()` to multiplex between the TUN fd and a shutdown pipe,
+/// avoiding the need to close the TUN fd externally (which would cause a
+/// double-close when `TunDevice` drops).
+#[cfg(target_os = "macos")]
+pub fn run_tun_reader(
+    mut device: TunDevice,
+    mtu: u16,
+    our_addr: FipsAddress,
+    tun_tx: TunTx,
+    outbound_tx: TunOutboundTx,
+    transport_mtu: u16,
+    shutdown_fd: std::os::unix::io::RawFd,
+) {
+    let tun_fd = device.device().as_raw_fd();
+    let (name, mut buf, max_mss) = tun_reader_setup(&device, mtu, transport_mtu);
+
+    // Set TUN fd to non-blocking so we can use select + read without blocking
+    // past the point where select returns readable.
+    unsafe {
+        let flags = libc::fcntl(tun_fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(tun_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
+    let nfds = tun_fd.max(shutdown_fd) + 1;
+
+    loop {
+        // Wait for either TUN data or shutdown signal
+        unsafe {
+            let mut read_fds: libc::fd_set = std::mem::zeroed();
+            libc::FD_ZERO(&mut read_fds);
+            libc::FD_SET(tun_fd, &mut read_fds);
+            libc::FD_SET(shutdown_fd, &mut read_fds);
+
+            let ret = libc::select(nfds, &mut read_fds, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                error!(name = %name, error = %err, "TUN select error");
+                break;
+            }
+
+            // Shutdown signal received
+            if libc::FD_ISSET(shutdown_fd, &read_fds) {
+                debug!(name = %name, "TUN reader received shutdown signal");
+                break;
+            }
+        }
+
+        // TUN fd is readable — drain all available packets
+        loop {
+            match device.read_packet(&mut buf) {
+                Ok(n) if n > 0 => {
+                    if !handle_tun_packet(&mut buf[..n], max_mss, &name, our_addr, &tun_tx, &outbound_tx) {
+                        // Close shutdown pipe read end before returning
+                        unsafe { libc::close(shutdown_fd); }
+                        return;
+                    }
+                }
+                Ok(_) => break, // No more data
+                Err(e) => {
+                    let err_str = format!("{}", e);
+                    if err_str.contains("would block") || err_str.contains("Resource temporarily unavailable") {
+                        break; // Done for this select round
+                    }
+                    if !err_str.contains("Bad file descriptor") {
+                        error!(name = %name, error = %e, "TUN read error");
+                    }
+                    unsafe { libc::close(shutdown_fd); }
+                    return;
+                }
+            }
+        }
+    }
+
+    unsafe { libc::close(shutdown_fd); }
+}
+
+/// Common setup for TUN reader: extracts name, allocates buffer, computes max MSS.
+fn tun_reader_setup(device: &TunDevice, mtu: u16, transport_mtu: u16) -> (String, Vec<u8>, u16) {
+    use super::icmp::effective_ipv6_mtu;
 
     let name = device.name().to_string();
-    let mut buf = vec![0u8; mtu as usize + 100]; // Extra space for headers
+    let buf = vec![0u8; mtu as usize + 100];
 
-    // Calculate maximum safe TCP MSS from the effective IPv6 MTU
     const IPV6_HEADER: u16 = 40;
     const TCP_HEADER: u16 = 20;
     let effective_mtu = effective_ipv6_mtu(transport_mtu);
@@ -286,65 +448,52 @@ pub fn run_tun_reader(
         "TUN reader starting"
     );
 
-    loop {
-        match device.read_packet(&mut buf) {
-            Ok(n) if n > 0 => {
-                let packet = &mut buf[..n];
-                log_ipv6_packet(packet);
+    (name, buf, max_mss)
+}
 
-                // Must be a valid IPv6 packet
-                if packet.len() < 40 || packet[0] >> 4 != 6 {
-                    continue;
-                }
+/// Process a single TUN packet. Returns `false` if the reader should exit.
+fn handle_tun_packet(
+    packet: &mut [u8],
+    max_mss: u16,
+    name: &str,
+    our_addr: FipsAddress,
+    tun_tx: &TunTx,
+    outbound_tx: &TunOutboundTx,
+) -> bool {
+    use super::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+    use super::tcp_mss::clamp_tcp_mss;
 
-                // Check if destination is a FIPS address (fd::/8 prefix)
-                if packet[24] == crate::identity::FIPS_ADDRESS_PREFIX {
-                    // Clamp TCP MSS if this is a SYN packet
-                    if clamp_tcp_mss(packet, max_mss) {
-                        trace!(
-                            name = %name,
-                            max_mss = max_mss,
-                            "Clamped TCP MSS in SYN packet"
-                        );
-                    }
+    log_ipv6_packet(packet);
 
-                    // Forward to Node for session encapsulation and routing
-                    if outbound_tx.blocking_send(packet.to_vec()).is_err() {
-                        break; // Channel closed, shutdown
-                    }
-                } else {
-                    // Non-FIPS destination: send ICMPv6 Destination Unreachable
-                    if should_send_icmp_error(packet)
-                        && let Some(response) = build_dest_unreachable(
-                            packet,
-                            DestUnreachableCode::NoRoute,
-                            our_addr.to_ipv6(),
-                        )
-                    {
-                        trace!(
-                            name = %name,
-                            len = response.len(),
-                            "Sending ICMPv6 Destination Unreachable (non-FIPS destination)"
-                        );
-                        if tun_tx.send(response).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(_) => {
-                // Zero-length read, continue
-            }
-            Err(e) => {
-                // "Bad address" (EFAULT) is expected during shutdown when interface is deleted
-                let err_str = format!("{}", e);
-                if !err_str.contains("Bad address") {
-                    error!(name = %name, error = %e, "TUN read error");
-                }
-                break;
+    // Must be a valid IPv6 packet
+    if packet.len() < 40 || packet[0] >> 4 != 6 {
+        return true;
+    }
+
+    // Check if destination is a FIPS address (fd::/8 prefix)
+    if packet[24] == crate::identity::FIPS_ADDRESS_PREFIX {
+        if clamp_tcp_mss(packet, max_mss) {
+            trace!(name = %name, max_mss = max_mss, "Clamped TCP MSS in SYN packet");
+        }
+        if outbound_tx.blocking_send(packet.to_vec()).is_err() {
+            return false; // Channel closed, shutdown
+        }
+    } else {
+        // Non-FIPS destination: send ICMPv6 Destination Unreachable
+        if should_send_icmp_error(packet)
+            && let Some(response) = build_dest_unreachable(
+                packet,
+                DestUnreachableCode::NoRoute,
+                our_addr.to_ipv6(),
+            )
+        {
+            trace!(name = %name, len = response.len(), "Sending ICMPv6 Destination Unreachable (non-FIPS destination)");
+            if tun_tx.send(response).is_err() {
+                return false;
             }
         }
     }
+    true
 }
 
 /// Log basic information about an IPv6 packet at TRACE level.
@@ -388,7 +537,7 @@ pub fn log_ipv6_packet(packet: &[u8]) {
 /// has been moved to another thread.
 pub async fn shutdown_tun_interface(name: &str) -> Result<(), TunError> {
     debug!("Shutting down TUN interface {}", name);
-    delete_interface(name).await?;
+    platform::delete_interface(name).await?;
     debug!("TUN interface {} stopped", name);
     Ok(())
 }
@@ -403,98 +552,186 @@ impl std::fmt::Debug for TunDevice {
     }
 }
 
-/// Check if a network interface already exists.
-async fn interface_exists(name: &str) -> bool {
-    let Ok((connection, handle, _)) = new_connection() else {
-        return false;
-    };
-    tokio::spawn(connection);
+// =============================================================================
+// Platform-specific TUN configuration
+// =============================================================================
 
-    get_interface_index(&handle, name).await.is_ok()
-}
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::TunError;
+    use futures::TryStreamExt;
+    use rtnetlink::{new_connection, Handle, LinkUnspec, RouteMessageBuilder};
+    use std::net::Ipv6Addr;
+    use tracing::debug;
 
-/// Delete a network interface by name.
-async fn delete_interface(name: &str) -> Result<(), TunError> {
-    let (connection, handle, _) = new_connection()
-        .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
-    tokio::spawn(connection);
-
-    let index = get_interface_index(&handle, name).await?;
-    handle.link().del(index).execute().await?;
-    Ok(())
-}
-
-/// Configure a network interface with an IPv6 address via netlink.
-async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(), TunError> {
-    let (connection, handle, _) = new_connection()
-        .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
-    tokio::spawn(connection);
-
-    // Get interface index
-    let index = get_interface_index(&handle, name).await?;
-
-    // Add IPv6 address with /128 prefix (point-to-point)
-    handle
-        .address()
-        .add(index, std::net::IpAddr::V6(addr), 128)
-        .execute()
-        .await?;
-
-    // Set MTU
-    handle
-        .link()
-        .change(LinkUnspec::new_with_index(index).mtu(mtu as u32).build())
-        .execute()
-        .await?;
-
-    // Bring interface up
-    handle
-        .link()
-        .change(LinkUnspec::new_with_index(index).up().build())
-        .execute()
-        .await?;
-
-    // Add route for fd00::/8 (FIPS address space) via this interface
-    let fd_prefix: Ipv6Addr = "fd00::".parse().unwrap();
-    let route = RouteMessageBuilder::<Ipv6Addr>::new()
-        .destination_prefix(fd_prefix, 8)
-        .output_interface(index)
-        .build();
-    handle
-        .route()
-        .add(route)
-        .execute()
-        .await
-        .map_err(|e| TunError::Configure(format!("failed to add fd00::/8 route: {}", e)))?;
-
-    // Add ip6 rule to ensure fd00::/8 uses the main table, preventing other
-    // routing software (e.g. Tailscale) from intercepting FIPS traffic via
-    // catch-all rules in auxiliary routing tables.
-    let mut rule_req = handle.rule().add().v6().destination_prefix(fd_prefix, 8).table_id(254).priority(5265);
-    rule_req.message_mut().header.action = 1.into(); // FR_ACT_TO_TBL
-    if let Err(e) = rule_req.execute().await {
-        debug!("ip6 rule for fd00::/8 not added (may already exist): {e}");
+    /// Check if IPv6 is disabled system-wide.
+    pub fn is_ipv6_disabled() -> bool {
+        std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6")
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
     }
 
-    Ok(())
-}
+    /// Check if a network interface already exists.
+    pub async fn interface_exists(name: &str) -> bool {
+        let Ok((connection, handle, _)) = new_connection() else {
+            return false;
+        };
+        tokio::spawn(connection);
 
-/// Get the interface index by name.
-async fn get_interface_index(handle: &Handle, name: &str) -> Result<u32, TunError> {
-    let mut links = handle.link().get().match_name(name.to_string()).execute();
+        get_interface_index(&handle, name).await.is_ok()
+    }
 
-    if let Some(link) = links.try_next().await? {
-        Ok(link.header.index)
-    } else {
-        Err(TunError::InterfaceNotFound(name.to_string()))
+    /// Delete a network interface by name.
+    pub async fn delete_interface(name: &str) -> Result<(), TunError> {
+        let (connection, handle, _) = new_connection()
+            .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
+        tokio::spawn(connection);
+
+        let index = get_interface_index(&handle, name).await?;
+        handle.link().del(index).execute().await?;
+        Ok(())
+    }
+
+    /// Configure a network interface with an IPv6 address via netlink.
+    pub async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(), TunError> {
+        let (connection, handle, _) = new_connection()
+            .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
+        tokio::spawn(connection);
+
+        // Get interface index
+        let index = get_interface_index(&handle, name).await?;
+
+        // Add IPv6 address with /128 prefix (point-to-point)
+        handle
+            .address()
+            .add(index, std::net::IpAddr::V6(addr), 128)
+            .execute()
+            .await?;
+
+        // Set MTU
+        handle
+            .link()
+            .change(LinkUnspec::new_with_index(index).mtu(mtu as u32).build())
+            .execute()
+            .await?;
+
+        // Bring interface up
+        handle
+            .link()
+            .change(LinkUnspec::new_with_index(index).up().build())
+            .execute()
+            .await?;
+
+        // Add route for fd00::/8 (FIPS address space) via this interface
+        let fd_prefix: Ipv6Addr = "fd00::".parse().unwrap();
+        let route = RouteMessageBuilder::<Ipv6Addr>::new()
+            .destination_prefix(fd_prefix, 8)
+            .output_interface(index)
+            .build();
+        handle
+            .route()
+            .add(route)
+            .execute()
+            .await
+            .map_err(|e| TunError::Configure(format!("failed to add fd00::/8 route: {}", e)))?;
+
+        // Add ip6 rule to ensure fd00::/8 uses the main table, preventing other
+        // routing software (e.g. Tailscale) from intercepting FIPS traffic via
+        // catch-all rules in auxiliary routing tables.
+        let mut rule_req = handle.rule().add().v6().destination_prefix(fd_prefix, 8).table_id(254).priority(5265);
+        rule_req.message_mut().header.action = 1.into(); // FR_ACT_TO_TBL
+        if let Err(e) = rule_req.execute().await {
+            debug!("ip6 rule for fd00::/8 not added (may already exist): {e}");
+        }
+
+        Ok(())
+    }
+
+    /// Get the interface index by name.
+    async fn get_interface_index(handle: &Handle, name: &str) -> Result<u32, TunError> {
+        let mut links = handle.link().get().match_name(name.to_string()).execute();
+
+        if let Some(link) = links.try_next().await? {
+            Ok(link.header.index)
+        } else {
+            Err(TunError::InterfaceNotFound(name.to_string()))
+        }
     }
 }
 
-/// Check if IPv6 is disabled system-wide.
-fn is_ipv6_disabled() -> bool {
-    std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6")
-        .map(|s| s.trim() == "1")
-        .unwrap_or(false)
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::TunError;
+    use std::net::Ipv6Addr;
+    use tokio::process::Command;
+
+    /// Check if IPv6 is disabled system-wide.
+    pub fn is_ipv6_disabled() -> bool {
+        // macOS: check via sysctl; if the key doesn't exist, IPv6 is enabled
+        std::process::Command::new("sysctl")
+            .args(["-n", "net.inet6.ip6.disabled"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+            .unwrap_or(false)
+    }
+
+    /// Check if a network interface already exists.
+    pub async fn interface_exists(name: &str) -> bool {
+        Command::new("ifconfig")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Shut down a network interface by name.
+    ///
+    /// On macOS, utun devices are automatically destroyed when the file
+    /// descriptor is closed. Bringing the interface down causes any
+    /// blocking reads to return an error, which unblocks the reader thread.
+    pub async fn delete_interface(name: &str) -> Result<(), TunError> {
+        run_cmd("ifconfig", &[name, "down"]).await
+    }
+
+    /// Configure a network interface with an IPv6 address using ifconfig/route.
+    pub async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(), TunError> {
+        // Add IPv6 address with /128 prefix
+        run_cmd("ifconfig", &[name, "inet6", &addr.to_string(), "prefixlen", "128"]).await?;
+
+        // Set MTU
+        run_cmd("ifconfig", &[name, "mtu", &mtu.to_string()]).await?;
+
+        // Bring interface up
+        run_cmd("ifconfig", &[name, "up"]).await?;
+
+        // Add route for fd00::/8 (FIPS address space) via this interface
+        run_cmd("route", &["add", "-inet6", "-prefixlen", "8", "fd00::", "-interface", name]).await?;
+
+        Ok(())
+    }
+
+    /// Run a command and return an error if it fails.
+    async fn run_cmd(program: &str, args: &[&str]) -> Result<(), TunError> {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| TunError::Configure(format!("{} failed: {}", program, e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(TunError::Configure(format!(
+                "{} {} failed: {}",
+                program,
+                args.join(" "),
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

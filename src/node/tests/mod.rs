@@ -9,7 +9,6 @@ mod bloom;
 mod ble;
 mod disconnect;
 mod discovery;
-#[cfg(target_os = "linux")]
 mod ethernet;
 mod forwarding;
 mod handshake;

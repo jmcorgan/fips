@@ -8,6 +8,7 @@
 #   make tarball    Build a systemd install tarball
 #   make ipk        Build an OpenWrt .ipk package
 #   make aur        Build fips-git AUR package and validate with namcap
+#   make pkg        Build a macOS .pkg installer
 #   make all        Build deb and tarball (default)
 #   make clean      Remove deploy/ directory
 
@@ -15,7 +16,7 @@ SHELL := /bin/bash
 PACKAGING_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT  := $(abspath $(PACKAGING_DIR)/..)
 
-.PHONY: all deb tarball ipk aur clean
+.PHONY: all deb tarball ipk aur pkg clean
 
 all: deb tarball
 
@@ -30,6 +31,9 @@ ipk:
 
 aur:
 	@bash $(PACKAGING_DIR)/aur/build-aur.sh
+
+pkg:
+	@bash $(PACKAGING_DIR)/macos/build-pkg.sh
 
 clean:
 	rm -rf $(PROJECT_ROOT)/deploy

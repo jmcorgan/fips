@@ -240,16 +240,26 @@ impl EthernetTransport {
             return Err(TransportError::NotStarted);
         }
 
-        // Abort beacon task
-        if let Some(task) = self.beacon_task.take() {
-            task.abort();
-            let _ = task.await;
+        // Signal the socket to shut down. On macOS this writes to the
+        // shutdown pipe, waking the reader thread's select() immediately.
+        // On Linux this is a no-op (AsyncFd cancellation handles it).
+        if let Some(ref socket) = self.socket {
+            socket.shutdown();
         }
 
-        // Abort receive task
+        // Abort tasks. On Linux, safe to await since all I/O is
+        // AsyncFd-based and cancellation-safe. On macOS, do NOT await —
+        // on a current_thread runtime the aborted task can't be polled
+        // while we're blocked on the JoinHandle, causing a deadlock.
+        if let Some(task) = self.beacon_task.take() {
+            task.abort();
+            #[cfg(not(target_os = "macos"))]
+            { let _ = task.await; }
+        }
         if let Some(task) = self.recv_task.take() {
             task.abort();
-            let _ = task.await;
+            #[cfg(not(target_os = "macos"))]
+            { let _ = task.await; }
         }
 
         // Drop socket

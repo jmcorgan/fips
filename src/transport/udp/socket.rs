@@ -152,7 +152,10 @@ impl UdpRawSocket {
 
         // Control message buffer sized for SO_RXQ_OVFL (u32).
         // CMSG_SPACE computes the aligned size including header.
+        #[cfg(target_os = "linux")]
         const CMSG_BUF_SIZE: usize = unsafe { libc::CMSG_SPACE(4) } as usize;
+        #[cfg(not(target_os = "linux"))]
+        const CMSG_BUF_SIZE: usize = 64;
         let mut cmsg_buf = [0u8; CMSG_BUF_SIZE];
 
         let mut src_addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -160,7 +163,7 @@ impl UdpRawSocket {
         msg.msg_name = &mut src_addr as *mut _ as *mut libc::c_void;
         msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
+        msg.msg_iovlen = 1 as _;
         msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
         msg.msg_controllen = cmsg_buf.len() as _;
 
@@ -173,7 +176,10 @@ impl UdpRawSocket {
         let addr = sockaddr_to_socket_addr(&src_addr)?;
 
         // Walk cmsg chain for SO_RXQ_OVFL drop counter
+        #[cfg(target_os = "linux")]
         let mut drops: u32 = 0;
+        #[cfg(not(target_os = "linux"))]
+        let drops: u32 = 0;
         #[cfg(target_os = "linux")]
         unsafe {
             let mut cmsg = libc::CMSG_FIRSTHDR(&msg);

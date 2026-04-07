@@ -1,0 +1,164 @@
+name: macOS Package
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  determine-versioning:
+    runs-on: macos-latest
+    outputs:
+      macos_package_version: ${{ steps.macos_version.outputs.macos_package_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive macOS package version
+        id: macos_version
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+
+          BASE_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|[^A-Za-z0-9]|.|g; s/\.\.+/./g; s/^\.//; s/\.$//')
+            HEIGHT=$(git rev-list --count HEAD)
+            HASH=$(git rev-parse --short HEAD)
+            if [[ -z "$BRANCH" ]]; then
+              BRANCH="ref"
+            fi
+            VERSION="${BASE_VERSION}+${BRANCH}.${HEIGHT}.${HASH}"
+          fi
+
+          echo "macos_package_version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build macOS package (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    needs: determine-versioning
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-release-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macos-release-${{ matrix.arch }}-
+
+      - name: Build release binaries
+        run: cargo build --release --no-default-features --features tui
+
+      - name: Build macOS package
+        run: |
+          packaging/macos/build-pkg.sh \
+            --version "${{ needs.determine-versioning.outputs.macos_package_version }}" \
+            --no-build
+
+      - name: Resolve macOS asset path
+        id: macos-assets
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+
+          PKG_FILE=$(find deploy -maxdepth 1 -type f -name "fips-*-macos-*.pkg" | sort | head -n 1)
+          if [[ -z "$PKG_FILE" ]]; then
+            echo "Missing macOS package" >&2
+            exit 1
+          fi
+
+          echo "pkg=$PKG_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: SHA-256 hash
+        run: |
+          echo "==> macOS release asset:"
+          shasum -a 256 "${{ steps.macos-assets.outputs.pkg }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fips_${{ needs.determine-versioning.outputs.macos_package_version }}_${{ matrix.arch }}_macos
+          path: ${{ steps.macos-assets.outputs.pkg }}
+          retention-days: 30
+
+      - name: Build summary
+        run: |
+          echo "Build Summary for macOS/${{ matrix.arch }}:"
+          echo "  Package: ${{ steps.macos-assets.outputs.pkg }}"
+
+  release:
+    name: Publish macOS assets to GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate macOS release checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f -name '*.pkg' -printf '%P\n' \
+            | LC_ALL=C sort \
+            | xargs sha256sum \
+            > checksums-macos.txt
+
+      - name: Wait for tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 20); do
+            if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Release ${GITHUB_REF_NAME} not available yet; waiting..."
+            sleep 15
+          done
+
+          echo "Timed out waiting for release ${GITHUB_REF_NAME}" >&2
+          exit 1
+
+      - name: Upload macOS assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/*.pkg \
+            dist/checksums-macos.txt \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"

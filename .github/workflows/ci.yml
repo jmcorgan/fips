@@ -23,8 +23,7 @@ env:
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 1 – Build matrix
 #
-# Builds on Linux x86_64 and Linux aarch64.  macOS and Windows are in a
-# separate ci-compat.yml workflow so their failures don't mark this run red.
+# Builds on Linux x86_64, Linux aarch64, and macOS.
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
   build:
@@ -37,6 +36,7 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
+          - os: macos-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +44,8 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux only)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
 
       - name: Install Rust toolchain
@@ -62,10 +63,15 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release ${{ runner.os == 'macOS' && '--no-default-features --features tui' || '' }}
 
-      - name: SHA-256 hashes
+      - name: SHA-256 hashes (Linux)
+        if: runner.os == 'Linux'
         run: sha256sum target/release/fips target/release/fipsctl target/release/fipstop
+
+      - name: SHA-256 hashes (macOS)
+        if: runner.os == 'macOS'
+        run: shasum -a 256 target/release/fips target/release/fipsctl target/release/fipstop
 
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
@@ -134,6 +140,39 @@ jobs:
           report_paths: target/nextest/ci/junit.xml
           check_name: Unit Tests Summary
           fail_on_failure: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2b – Unit tests (macOS)
+# ─────────────────────────────────────────────────────────────────────────────
+  test-macos:
+    name: Unit tests (macOS)
+    runs-on: macos-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run unit tests
+        run: cargo nextest run --all --profile ci --no-default-features --features tui
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 3 – Integration tests (static mesh + chaos simulation)

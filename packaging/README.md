@@ -10,6 +10,7 @@ make deb        # Debian/Ubuntu .deb
 make tarball    # systemd install tarball
 make ipk        # OpenWrt .ipk
 make aur        # Arch Linux AUR package (fips-git, local build + namcap)
+make pkg        # macOS .pkg installer
 make all        # deb + tarball (default)
 ```
 
@@ -20,6 +21,7 @@ packaging/
   aur/            Arch Linux AUR packaging (PKGBUILD, supporting files)
   common/         Shared assets (default config, hosts file)
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
+  macos/          macOS .pkg installer via pkgbuild
   systemd/        Generic Linux systemd tarball packaging
   openwrt/        OpenWrt .ipk packaging via cargo-zigbuild
 ```
@@ -79,6 +81,25 @@ bash packaging/openwrt/build-ipk.sh --arch mipsel
 
 See [openwrt/README.md](openwrt/README.md) for router-specific
 installation instructions.
+
+### macOS (`.pkg`)
+
+Built with `pkgbuild` (included with Xcode command-line tools). Installs
+binaries to `/usr/local/bin/`, config to `/usr/local/etc/fips/`, sets up
+the `/etc/resolver/fips` DNS resolver for `.fips` domains, and loads a
+launchd daemon. The TUN device is named `utun<N>` (kernel-assigned)
+rather than `fips0`.
+
+```sh
+# Build
+make pkg
+
+# Install
+sudo installer -pkg deploy/fips-<version>-macos-<arch>.pkg -target /
+
+# Remove
+sudo packaging/macos/uninstall.sh
+```
 
 ### Arch Linux (AUR)
 

@@ -272,12 +272,20 @@ mod tests {
         }
         assert!(!bucket.available());
 
-        // Wait for refill
-        thread::sleep(Duration::from_millis(50)); // Should refill ~5 tokens
+        // Wait for refill, measuring actual elapsed time to avoid sensitivity
+        // to OS scheduler variance (sleep can overshoot by a large margin).
+        let before = Instant::now();
+        thread::sleep(Duration::from_millis(50));
+        let elapsed_secs = before.elapsed().as_secs_f64();
 
-        // Should have tokens now
+        // Expected tokens = elapsed * rate, capped at capacity.
+        // Allow ±20% tolerance around the actual elapsed time.
+        let expected = (elapsed_secs * 100.0).min(10.0);
+        let lo = (expected * 0.8).min(expected - 0.5).max(0.0);
+        let hi = (expected * 1.2).max(expected + 0.5).min(10.0);
+
         let tokens = bucket.tokens();
-        assert!((4.0..=6.0).contains(&tokens), "tokens: {}", tokens);
+        assert!((lo..=hi).contains(&tokens), "tokens: {}, expected ~{:.2} (range {:.2}..={:.2})", tokens, expected, lo, hi);
     }
 
     #[test]

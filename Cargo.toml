@@ -32,12 +32,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tun = { version = "0.8.5", features = ["async"] }
 libc = "0.2"
-rtnetlink = "0.20.0"
-tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process"] }
 futures = "0.3"
 simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.20.0"
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap"], optional = true }
 
 [package.metadata.deb]
