@@ -1,0 +1,48 @@
+node:
+  identity:
+    persistent: true
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+
+peers:
+  - npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
+    alias: "node-b"
+    addresses:
+      - transport: udp
+        addr: "172.31.0.11:2121"
+    connect_policy: auto_connect
+  - npub: "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
+    alias: "node-c"
+    addresses:
+      - transport: udp
+        addr: "172.31.0.12:2121"
+    connect_policy: auto_connect
+  - npub: "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+    alias: "node-d"
+    addresses:
+      - transport: udp
+        addr: "172.31.0.13:2121"
+    connect_policy: auto_connect
+  - npub: "npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6"
+    alias: "node-e"
+    addresses:
+      - transport: udp
+        addr: "172.31.0.14:2121"
+    connect_policy: auto_connect
+  - npub: "npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
+    alias: "node-f"
+    addresses:
+      - transport: udp
+        addr: "172.31.0.15:2121"
+    connect_policy: auto_connect
