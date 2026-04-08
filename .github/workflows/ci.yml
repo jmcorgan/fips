@@ -73,7 +73,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --release ${{ runner.os == 'macOS' && '--no-default-features --features tui' || '--features gateway' }}
+        run: cargo build --release ${{ runner.os == 'macOS' && '--no-default-features --features tui,ble-macos' || '--features gateway' }}
 
       - name: SHA-256 hashes (Linux)
         if: runner.os == 'Linux'
@@ -183,7 +183,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Run unit tests
-        run: cargo nextest run --all --profile ci --no-default-features --features tui
+        run: cargo nextest run --all --profile ci --no-default-features --features tui,ble-macos
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 3 – Integration tests (static mesh + chaos simulation)

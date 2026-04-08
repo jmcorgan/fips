@@ -86,7 +86,7 @@ jobs:
             macos-release-${{ matrix.arch }}-
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features tui
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features tui,ble-macos
 
       - name: Build macOS package
         run: |

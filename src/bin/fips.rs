@@ -24,10 +24,50 @@ struct Args {
     config: Option<PathBuf>,
 }
 
+/// On macOS with BLE support, CoreBluetooth's L2CAP I/O delegates are
+/// scheduled on the main NSRunLoop. The main thread must pump that run
+/// loop, so we spawn tokio on a background thread and dedicate the main
+/// thread to CFRunLoopRun().
+///
+/// On all other platforms, the standard #[tokio::main] approach is used.
+#[cfg(feature = "ble-macos")]
+fn main() {
+    let args = Args::parse();
+
+    // Build the tokio runtime on a background thread
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create tokio runtime");
+
+    // Spawn the async main on the runtime thread
+    let handle = std::thread::Builder::new()
+        .name("tokio-main".into())
+        .spawn(move || {
+            rt.block_on(async_main(args));
+        })
+        .expect("failed to spawn tokio thread");
+
+    // Main thread: pump the NSRunLoop so CoreBluetooth delegates fire
+    unsafe {
+        unsafe extern "C" {
+            fn CFRunLoopRun();
+        }
+        CFRunLoopRun();
+    }
+
+    // If CFRunLoopRun returns (shouldn't normally), wait for tokio
+    handle.join().expect("tokio thread panicked");
+}
+
+#[cfg(not(feature = "ble-macos"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();
+    async_main(args).await;
+}
 
+async fn async_main(args: Args) {
     // Load configuration before initializing logging so we can use
     // the config's log_level as the tracing filter default.
     let (config, loaded_paths) = if let Some(config_path) = &args.config {
@@ -152,4 +192,14 @@ async fn main() {
     }
 
     info!("FIPS shutdown complete");
+
+    // On macOS with BLE, stop the main run loop so the process exits
+    #[cfg(feature = "ble-macos")]
+    unsafe {
+        unsafe extern "C" {
+            fn CFRunLoopGetMain() -> *mut std::ffi::c_void;
+            fn CFRunLoopStop(rl: *mut std::ffi::c_void);
+        }
+        CFRunLoopStop(CFRunLoopGetMain());
+    }
 }

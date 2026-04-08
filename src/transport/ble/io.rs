@@ -109,7 +109,7 @@ pub trait BleIo: Send + Sync + 'static {
 // BluerIo — Production BLE I/O via BlueZ D-Bus
 // ============================================================================
 
-#[cfg(feature = "ble")]
+#[cfg(all(feature = "ble", target_os = "linux"))]
 mod bluer_impl {
     use super::*;
     use crate::transport::TransportError;
@@ -180,18 +180,37 @@ mod bluer_impl {
 
     impl BleStream for BluerStream {
         async fn send(&self, data: &[u8]) -> Result<(), TransportError> {
+            // Length-prefix framing: [len:2 BE][payload]
+            // Required for interop with macOS (CoreBluetooth byte-stream L2CAP).
+            let mut framed = Vec::with_capacity(2 + data.len());
+            framed.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            framed.extend_from_slice(data);
             self.conn
-                .send(data)
+                .send(&framed)
                 .await
                 .map(|_| ())
                 .map_err(|e| TransportError::SendFailed(format!("{}", e)))
         }
 
         async fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError> {
-            self.conn
-                .recv(buf)
+            // SeqPacket preserves message boundaries, so each recv is one
+            // framed message: [len:2 BE][payload]. Strip the 2-byte prefix.
+            let mut raw = vec![0u8; buf.len() + 2];
+            let n = self
+                .conn
+                .recv(&mut raw)
                 .await
-                .map_err(|e| TransportError::RecvFailed(format!("{}", e)))
+                .map_err(|e| TransportError::RecvFailed(format!("{}", e)))?;
+            if n < 2 {
+                return Err(TransportError::RecvFailed(format!(
+                    "BLE frame too short: {n} bytes"
+                )));
+            }
+            let payload_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+            let available = n - 2;
+            let copy_len = payload_len.min(available).min(buf.len());
+            buf[..copy_len].copy_from_slice(&raw[2..2 + copy_len]);
+            Ok(copy_len)
         }
 
         fn send_mtu(&self) -> u16 {
@@ -486,8 +505,19 @@ mod bluer_impl {
     }
 }
 
-#[cfg(feature = "ble")]
+#[cfg(all(feature = "ble", target_os = "linux"))]
 pub use bluer_impl::{BluerAcceptor, BluerIo, BluerScanner, BluerStream, FIPS_SERVICE_UUID};
+
+// ============================================================================
+// BluestIo — macOS BLE I/O via CoreBluetooth (bluest)
+// ============================================================================
+
+#[cfg(feature = "ble-macos")]
+#[path = "io_macos.rs"]
+mod bluest_impl;
+
+#[cfg(feature = "ble-macos")]
+pub use bluest_impl::{BluestAcceptor, BluestIo, BluestScanner, BluestStream};
 
 // ============================================================================
 // Mock BLE I/O (for testing without hardware)
@@ -527,8 +557,12 @@ impl MockBleStream {
 
 impl BleStream for MockBleStream {
     async fn send(&self, data: &[u8]) -> Result<(), TransportError> {
+        // Length-prefix framing to match real BLE streams.
+        let mut framed = Vec::with_capacity(2 + data.len());
+        framed.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        framed.extend_from_slice(data);
         self.tx
-            .send(data.to_vec())
+            .send(framed)
             .await
             .map_err(|_| TransportError::SendFailed("channel closed".into()))
     }
@@ -537,8 +571,14 @@ impl BleStream for MockBleStream {
         let mut rx = self.rx.lock().await;
         match rx.recv().await {
             Some(data) => {
-                let len = data.len().min(buf.len());
-                buf[..len].copy_from_slice(&data[..len]);
+                // Strip 2-byte length prefix (channel preserves boundaries).
+                if data.len() < 2 {
+                    return Err(TransportError::RecvFailed("frame too short".into()));
+                }
+                let payload_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+                let payload = &data[2..];
+                let len = payload_len.min(payload.len()).min(buf.len());
+                buf[..len].copy_from_slice(&payload[..len]);
                 Ok(len)
             }
             None => Ok(0), // channel closed = connection closed = zero-length read

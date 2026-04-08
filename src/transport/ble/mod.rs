@@ -52,10 +52,16 @@ pub const DEFAULT_PSM: u16 = 0x0085;
 ///
 /// Production builds with the `ble` feature use `BluerIo` (real BlueZ stack).
 /// Test builds and builds without `ble` use `MockBleIo`.
-#[cfg(all(feature = "ble", not(test)))]
+#[cfg(all(feature = "ble", target_os = "linux", not(test)))]
 pub type DefaultBleTransport = BleTransport<io::BluerIo>;
 
-#[cfg(any(not(feature = "ble"), test))]
+#[cfg(all(feature = "ble-macos", not(test)))]
+pub type DefaultBleTransport = BleTransport<io::BluestIo>;
+
+#[cfg(any(
+    not(any(all(feature = "ble", target_os = "linux"), feature = "ble-macos",)),
+    test
+))]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
 
 // ============================================================================

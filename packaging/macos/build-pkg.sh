@@ -72,7 +72,7 @@ echo "Building FIPS v${VERSION} for macOS ${ARCH}..."
 
 # Build release binaries
 if [[ "${NO_BUILD}" -eq 0 ]]; then
-    cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml" --no-default-features --features tui)
+    cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml" --no-default-features --features tui,ble-macos)
     [[ -n "${TARGET_TRIPLE}" ]] && cargo_args+=(--target "${TARGET_TRIPLE}")
     cargo "${cargo_args[@]}"
 fi
