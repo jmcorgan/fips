@@ -780,6 +780,12 @@ impl ActivePeer {
         self.session_established_at
     }
 
+    /// Shift the session establishment time backwards for tests.
+    #[cfg(test)]
+    pub(crate) fn age_session_for_test(&mut self, age: std::time::Duration) {
+        self.session_established_at = Instant::now() - age;
+    }
+
     /// Current K-bit epoch value.
     pub fn current_k_bit(&self) -> bool {
         self.current_k_bit

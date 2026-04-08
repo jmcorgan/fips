@@ -10,6 +10,13 @@ use crate::PeerIdentity;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+fn should_reject_new_inbound_msg1(
+    transport_accepts_connections: bool,
+    possible_restart: bool,
+) -> bool {
+    !transport_accepts_connections && !possible_restart
+}
+
 impl Node {
     /// Handle handshake message 1 (phase 0x1).
     ///
@@ -23,14 +30,6 @@ impl Node {
                 remote_addr = %packet.remote_addr,
                 "Msg1 rate limited"
             );
-            return;
-        }
-
-        // Check if this transport accepts inbound connections
-        if let Some(transport) = self.transports.get(&packet.transport_id)
-            && !transport.accept_connections()
-        {
-            self.msg1_rate_limiter.complete_handshake();
             return;
         }
 
@@ -113,6 +112,25 @@ impl Node {
                     );
                 }
             }
+        }
+
+        // `accept_connections` only gates truly new inbound handshakes.
+        // Once a msg1 is recognized as belonging to an existing peer path
+        // (restart or rekey), we must continue processing it even when the
+        // transport does not accept brand-new inbound connections.
+        let transport_accepts_connections = self
+            .transports
+            .get(&packet.transport_id)
+            .map(|transport| transport.accept_connections())
+            .unwrap_or(true);
+        if should_reject_new_inbound_msg1(transport_accepts_connections, possible_restart) {
+            debug!(
+                transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                "Dropping new inbound msg1: transport does not accept inbound connections"
+            );
+            self.msg1_rate_limiter.complete_handshake();
+            return;
         }
 
         // === CRYPTO COST PAID HERE ===
@@ -1052,5 +1070,20 @@ impl Node {
 
             Ok(PromotionResult::Promoted(peer_node_addr))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_reject_new_inbound_msg1;
+
+    #[test]
+    fn rejects_new_inbound_when_transport_disallows_it() {
+        assert!(should_reject_new_inbound_msg1(false, false));
+    }
+
+    #[test]
+    fn allows_existing_peer_paths_even_when_transport_disallows_inbound() {
+        assert!(!should_reject_new_inbound_msg1(false, true));
     }
 }
