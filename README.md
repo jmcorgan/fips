@@ -143,6 +143,24 @@ sudo launchctl load -w /Library/LaunchDaemons/com.fips.daemon.plist
 
 Remove with `sudo packaging/macos/uninstall.sh` (preserves config).
 
+To use `fipsctl` and `fipstop` without sudo, add your user to the `fips` group:
+
+```bash
+sudo dscl . -create /Groups/fips RecordName fips
+sudo dscl . -create /Groups/fips PrimaryGroupID 999
+sudo dscl . -append /Groups/fips GroupMembership $USER
+sudo chgrp fips /tmp/fips-control.sock
+sudo chmod 660 /tmp/fips-control.sock
+```
+
+Then **log out and back in** for the group membership to take effect.
+
+Alternatively, start a new login shell with:
+
+```bash
+exec su -l $USER
+```
+
 > **Note:** On macOS, the TUN device is named `utun<N>` (kernel-assigned)
 > rather than `fips0`.
 
