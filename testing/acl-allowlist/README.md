@@ -3,13 +3,13 @@
 Six Docker nodes use per-node ACL files mounted at the hardcoded runtime paths:
 
 - `node-a` and `node-b` carry the insider allowlist (`a`, `b`, `e`, `f`)
-- `node-c` and `node-d` each carry a self-only allowlist containing their own npub
+- `node-c` and `node-d` each carry a broad allowlist containing every test npub
 - `node-e` and `node-f` do not mount any ACL files locally
 
 This lets us test three different node behaviors at once:
 
 - insiders (`a`, `b`) explicitly allow `a`, `b`, `e`, and `f`
-- outsiders (`c`, `d`) only allow themselves, so they reject outbound connects to `a`
+- outsiders (`c`, `d`) allow everyone locally, but still cannot join because insiders reject them
 - allowed remotes (`e`, `f`) rely on the insider ACLs and do not need local ACL files
 
 ## Test Identities
@@ -79,7 +79,7 @@ ACL paths are fixed in this branch:
 Mounted ACL files in this harness:
 
 - `node-a` and `node-b`: insider allowlist
-- `node-c` and `node-d`: self-only allowlist
+- `node-c` and `node-d`: broad local allowlist used by outsider nodes trying to blend in
 - `node-e` and `node-f`: no ACL files mounted
 
 Generated fixture location:
@@ -112,11 +112,18 @@ Visible rejection logs:
 docker compose -f testing/acl-allowlist/docker-compose.yml logs -f node-a node-b node-c node-d node-e node-f
 ```
 
-You should see warnings like:
+On startup, `node-c` and `node-d` immediately try their configured outbound
+static connection to `node-a`. Their own ACLs permit that attempt, but the
+insider ACL on `node-a` rejects both peers during the inbound handshake. That
+startup path emits warnings like:
 
 ```text
-Rejected peer by ACL ... context=outbound_connect decision=not in allowlist
+Rejected peer by ACL ... context=inbound_handshake decision=not in allowlist
 ```
+
+A later `ping6` from `node-c` does not emit a new `inbound_handshake` warning.
+The ping uses the data-plane session path, and since no peer session to
+`node-a` was established, it just times out.
 
 Stop and clean up:
 

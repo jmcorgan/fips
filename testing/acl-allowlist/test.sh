@@ -114,11 +114,9 @@ assert_peer_set fips-acl-e "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8
 assert_peer_set fips-acl-f "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
 
 log "Checking ACL rejection logs"
-assert_log_contains fips-acl-c "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
-assert_log_contains fips-acl-c "context=outbound_connect"
-assert_log_contains fips-acl-c "decision=not in allowlist"
-assert_log_contains fips-acl-d "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
-assert_log_contains fips-acl-d "context=outbound_connect"
-assert_log_contains fips-acl-d "decision=not in allowlist"
+assert_log_contains fips-acl-a "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
+assert_log_contains fips-acl-a "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+assert_log_contains fips-acl-a "context=inbound_handshake"
+assert_log_contains fips-acl-a "decision=not in allowlist"
 
 log "ACL allowlist integration test passed"
