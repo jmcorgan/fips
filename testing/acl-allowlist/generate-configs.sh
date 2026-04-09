@@ -89,7 +89,7 @@ node-f
 EOF
 
 write_file "$GENERATED_DIR/node-a/peers.deny" <<'EOF'
-# Intentionally empty.
+ALL
 EOF
 
 write_file "$GENERATED_DIR/node-b/fips.yaml" <<'EOF'
@@ -143,7 +143,7 @@ node-f
 EOF
 
 write_file "$GENERATED_DIR/node-b/peers.deny" <<'EOF'
-# Intentionally empty.
+ALL
 EOF
 
 write_file "$GENERATED_DIR/node-c/fips.yaml" <<'EOF'

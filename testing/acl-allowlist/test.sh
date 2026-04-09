@@ -120,31 +120,31 @@ docker compose -f "$COMPOSE_FILE" down >/dev/null 2>&1 || true
 docker compose -f "$COMPOSE_FILE" up -d --build
 
 log "Waiting for expected peer convergence"
-wait_for_peers_exact fips-acl-a 3 40
-wait_for_peers_exact fips-acl-b 1 40
-wait_for_peers_exact fips-acl-c 0 5
-wait_for_peers_exact fips-acl-d 0 5
-wait_for_peers_exact fips-acl-e 1 40
-wait_for_peers_exact fips-acl-f 1 40
+wait_for_peers_exact fips-acl-container-a 3 40
+wait_for_peers_exact fips-acl-container-b 1 40
+wait_for_peers_exact fips-acl-container-c 0 5
+wait_for_peers_exact fips-acl-container-d 0 5
+wait_for_peers_exact fips-acl-container-e 1 40
+wait_for_peers_exact fips-acl-container-f 1 40
 
 log "Verifying peer sets"
-assert_peer_set fips-acl-a "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
-assert_peer_set fips-acl-b "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
-assert_peer_set fips-acl-c ""
-assert_peer_set fips-acl-d ""
-assert_peer_set fips-acl-e "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
-assert_peer_set fips-acl-f "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
+assert_peer_set fips-acl-container-a "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
+assert_peer_set fips-acl-container-b "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
+assert_peer_set fips-acl-container-c ""
+assert_peer_set fips-acl-container-d ""
+assert_peer_set fips-acl-container-e "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
+assert_peer_set fips-acl-container-f "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
 
 log "Checking alias-based ACL resolution"
-assert_acl_field fips-acl-a allow_raw_entries "node-a node-b node-e node-f"
-assert_acl_field fips-acl-a allow_entries "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
-assert_acl_field fips-acl-c allow_raw_entries "node-a node-b node-c node-d node-e node-f"
-assert_acl_field fips-acl-c allow_entries "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6 npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
+assert_acl_field fips-acl-container-a allow_raw_entries "node-a node-b node-e node-f"
+assert_acl_field fips-acl-container-a allow_entries "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
+assert_acl_field fips-acl-container-c allow_raw_entries "node-a node-b node-c node-d node-e node-f"
+assert_acl_field fips-acl-container-c allow_entries "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6 npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
 
 log "Checking ACL rejection logs"
-assert_log_contains fips-acl-a "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
-assert_log_contains fips-acl-a "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
-assert_log_contains fips-acl-a "context=inbound_handshake"
-assert_log_contains fips-acl-a "decision=not in allowlist"
+assert_log_contains fips-acl-container-a "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
+assert_log_contains fips-acl-container-a "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+assert_log_contains fips-acl-container-a "context=inbound_handshake"
+assert_log_contains fips-acl-container-a "decision=denylist match"
 
 log "ACL allowlist integration test passed"

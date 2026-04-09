@@ -24,10 +24,10 @@ x-fips-common: &fips-common
     - ../docker/resolv.conf:/etc/resolv.conf:ro
 
 services:
-  node-a:
+  service-a:
     <<: *fips-common
-    container_name: fips-acl-a
-    hostname: node-a
+    container_name: fips-acl-container-a
+    hostname: host-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/node-a/hosts:/etc/fips/hosts:ro
@@ -39,10 +39,10 @@ services:
       acl-net:
         ipv4_address: 172.31.0.10
 
-  node-b:
+  service-b:
     <<: *fips-common
-    container_name: fips-acl-b
-    hostname: node-b
+    container_name: fips-acl-container-b
+    hostname: host-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/node-b/hosts:/etc/fips/hosts:ro
@@ -54,10 +54,10 @@ services:
       acl-net:
         ipv4_address: 172.31.0.11
 
-  node-c:
+  service-c:
     <<: *fips-common
-    container_name: fips-acl-c
-    hostname: node-c
+    container_name: fips-acl-container-c
+    hostname: host-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/node-c/hosts:/etc/fips/hosts:ro
@@ -69,10 +69,10 @@ services:
       acl-net:
         ipv4_address: 172.31.0.12
 
-  node-d:
+  service-d:
     <<: *fips-common
-    container_name: fips-acl-d
-    hostname: node-d
+    container_name: fips-acl-container-d
+    hostname: host-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/node-d/hosts:/etc/fips/hosts:ro
@@ -84,10 +84,10 @@ services:
       acl-net:
         ipv4_address: 172.31.0.13
 
-  node-e:
+  service-e:
     <<: *fips-common
-    container_name: fips-acl-e
-    hostname: node-e
+    container_name: fips-acl-container-e
+    hostname: host-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/node-e/hosts:/etc/fips/hosts:ro
@@ -97,10 +97,10 @@ services:
       acl-net:
         ipv4_address: 172.31.0.14
 
-  node-f:
+  service-f:
     <<: *fips-common
-    container_name: fips-acl-f
-    hostname: node-f
+    container_name: fips-acl-container-f
+    hostname: host-f
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/node-f/hosts:/etc/fips/hosts:ro

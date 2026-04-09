@@ -74,6 +74,11 @@ The ACL harness pins the expected test entrypoint explicitly so it does not
 accidentally reuse an older `fips-test:latest` image with a different startup
 script.
 
+Docker service/container/hostname identifiers in this harness intentionally use
+`service-*`, `fips-acl-container-*`, and `host-*` names so they do not collide with the logical FIPS aliases
+`node-a` through `node-f`. For data-plane checks and operator examples, use the
+explicit FIPS names such as `node-a.fips` and `node-d.fips`.
+
 ACL paths are fixed in this branch:
 
 - `/etc/fips/peers.allow`
@@ -81,7 +86,7 @@ ACL paths are fixed in this branch:
 
 Mounted ACL files in this harness:
 
-- `node-a` and `node-b`: insider allowlist
+- `node-a` and `node-b`: insider allowlist plus `ALL` deny fallback
 - `node-c` and `node-d`: broad local allowlist used by outsider nodes trying to blend in
 - `node-e` and `node-f`: no ACL files mounted
 - all nodes: `/etc/fips/hosts` aliases for `node-a` through `node-f`
@@ -93,18 +98,25 @@ Generated fixture location:
 Inspect peer state:
 
 ```bash
-docker exec fips-acl-a fipsctl show peers
-docker exec fips-acl-b fipsctl show peers
-docker exec fips-acl-c fipsctl show peers
-docker exec fips-acl-d fipsctl show peers
-docker exec fips-acl-e fipsctl show peers
-docker exec fips-acl-f fipsctl show peers
+docker exec fips-acl-container-a fipsctl show peers
+docker exec fips-acl-container-b fipsctl show peers
+docker exec fips-acl-container-c fipsctl show peers
+docker exec fips-acl-container-d fipsctl show peers
+docker exec fips-acl-container-e fipsctl show peers
+docker exec fips-acl-container-f fipsctl show peers
 ```
 
 Inspect the loaded ACL state directly:
 
 ```bash
-docker exec fips-acl-a fipsctl acl show
+docker exec fips-acl-container-a fipsctl acl show
+```
+
+Use explicit `.fips` names when checking reachability through the FIPS overlay:
+
+```bash
+docker exec fips-acl-container-a ping node-d.fips
+docker exec fips-acl-container-a ping npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl.fips
 ```
 
 The output shows both the raw alias tokens from the ACL files and the resolved
@@ -122,7 +134,7 @@ Expected:
 Visible rejection logs:
 
 ```bash
-docker compose -f testing/acl-allowlist/docker-compose.yml logs -f node-a node-b node-c node-d node-e node-f
+docker compose -f testing/acl-allowlist/docker-compose.yml logs -f service-a service-b service-c service-d service-e service-f
 ```
 
 On startup, `node-c` and `node-d` immediately try their configured outbound
@@ -133,7 +145,7 @@ static peer stanzas for `node-c` and `node-d`, you may see both
 The outsider-initiated path emits messages like:
 
 ```text
-Rejected peer by ACL ... context=inbound_handshake decision=not in allowlist
+Rejected peer by ACL ... context=inbound_handshake decision=denylist match
 ```
 
 Those messages are now emitted at debug level. This harness enables
@@ -141,9 +153,9 @@ Those messages are now emitted at debug level. This harness enables
 test logs, and operators can temporarily raise log level the same way when
 diagnosing ACL issues locally.
 
-A later `ping6` from `node-c` does not emit a new `inbound_handshake` message.
+A later `ping6` from `node-c.fips` does not emit a new `inbound_handshake` message.
 The ping uses the data-plane session path, and since no peer session to
-`node-a` was established, it just times out.
+`node-a.fips` was established, it just times out.
 
 Stop and clean up:
 
