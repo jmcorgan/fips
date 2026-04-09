@@ -97,6 +97,12 @@ docker exec fips-acl-e fipsctl show peers
 docker exec fips-acl-f fipsctl show peers
 ```
 
+Inspect the loaded ACL state directly:
+
+```bash
+docker exec fips-acl-a fipsctl acl show
+```
+
 Expected:
 
 - `node-a` sees `node-b`, `node-e`, and `node-f`
@@ -114,14 +120,21 @@ docker compose -f testing/acl-allowlist/docker-compose.yml logs -f node-a node-b
 
 On startup, `node-c` and `node-d` immediately try their configured outbound
 static connection to `node-a`. Their own ACLs permit that attempt, but the
-insider ACL on `node-a` rejects both peers during the inbound handshake. That
-startup path emits warnings like:
+insider ACL on `node-a` still rejects both peers. Because `node-a` also has
+static peer stanzas for `node-c` and `node-d`, you may see both
+`outbound_connect` and `inbound_handshake` rejection messages during startup.
+The outsider-initiated path emits messages like:
 
 ```text
 Rejected peer by ACL ... context=inbound_handshake decision=not in allowlist
 ```
 
-A later `ping6` from `node-c` does not emit a new `inbound_handshake` warning.
+Those messages are now emitted at debug level. This harness enables
+`RUST_LOG=info,fips::node=debug` so the ACL rejection details stay visible in
+test logs, and operators can temporarily raise log level the same way when
+diagnosing ACL issues locally.
+
+A later `ping6` from `node-c` does not emit a new `inbound_handshake` message.
 The ping uses the data-plane session path, and since no peer session to
 `node-a` was established, it just times out.
 

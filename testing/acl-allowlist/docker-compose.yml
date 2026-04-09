@@ -19,7 +19,7 @@ x-fips-common: &fips-common
   restart: "no"
   environment:
     - FIPS_TEST_MODE=default
-    - RUST_LOG=info
+    - RUST_LOG=info,fips::node=debug
   volumes:
     - ../docker/resolv.conf:/etc/resolv.conf:ro
 
