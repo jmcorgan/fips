@@ -1,4 +1,13 @@
 //! Peer access control lists (ACLs) keyed by npub or alias.
+//!
+//! Evaluation follows TCP Wrappers ordering:
+//! 1. If `peers.allow` matches a peer, allow it.
+//! 2. Otherwise, if `peers.deny` matches a peer, deny it.
+//! 3. Otherwise, allow it.
+//!
+//! `ALL` acts as a wildcard entry in either file. Because allow rules are
+//! evaluated first, an allowlist match overrides a denylist match for the
+//! same peer.
 
 use crate::upper::hosts::{file_mtime, HostMap, HostMapReloader, DEFAULT_HOSTS_PATH};
 use crate::{NodeAddr, PeerIdentity};
@@ -19,11 +28,9 @@ pub const DEFAULT_PEERS_DENY_PATH: &str = "/etc/fips/peers.deny";
 pub enum PeerAclDecision {
     /// Explicitly permitted by `peers.allow`.
     AllowList,
-    /// Rejected because an allow list exists and this peer is not on it.
-    NotInAllowList,
     /// Explicitly rejected by `peers.deny`.
     DenyList,
-    /// No rule matched and no allow list is active.
+    /// No rule matched after evaluating allow and deny rules.
     DefaultAllow,
 }
 
@@ -38,7 +45,6 @@ impl fmt::Display for PeerAclDecision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AllowList => write!(f, "allowlist match"),
-            Self::NotInAllowList => write!(f, "not in allowlist"),
             Self::DenyList => write!(f, "denylist match"),
             Self::DefaultAllow => write!(f, "default allow"),
         }
@@ -129,8 +135,6 @@ impl PeerAcl {
 
         if self.allow_all || self.allow.contains(addr) {
             PeerAclDecision::AllowList
-        } else if !self.allow.is_empty() {
-            PeerAclDecision::NotInAllowList
         } else if self.deny_all || self.deny.contains(addr) {
             PeerAclDecision::DenyList
         } else {
@@ -147,6 +151,10 @@ impl PeerAcl {
     pub fn effective_mode(&self) -> &'static str {
         if self.allow_all {
             "allow_all"
+        } else if !self.allow.is_empty() && self.deny_all {
+            "allow_then_deny_all"
+        } else if !self.allow.is_empty() && !self.deny.is_empty() {
+            "allow_then_deny"
         } else if !self.allow.is_empty() {
             "allowlist"
         } else if self.deny_all {
@@ -158,11 +166,11 @@ impl PeerAcl {
         }
     }
 
-    /// Return the decision applied to peers that do not match an explicit entry.
+    /// Return the decision applied to peers that are not named in either file.
     pub fn default_decision(&self) -> &'static str {
-        if self.allow_all || self.deny.is_empty() && !self.deny_all && self.allow.is_empty() {
+        if self.allow_all || (self.deny.is_empty() && !self.deny_all && self.allow.is_empty()) {
             "allow"
-        } else if !self.allow.is_empty() || self.deny_all {
+        } else if self.deny_all {
             "deny"
         } else {
             "allow"
@@ -416,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_acl_allowlist_is_authoritative_when_non_empty() {
+    fn test_acl_allowlist_miss_falls_through_to_default_allow() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
@@ -433,7 +441,7 @@ mod tests {
         );
         assert_eq!(
             acl.check(&PeerIdentity::from_npub(&denied).unwrap()),
-            PeerAclDecision::NotInAllowList
+            PeerAclDecision::DefaultAllow
         );
     }
 
@@ -474,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn test_acl_deny_ignored_when_allowlist_is_non_empty() {
+    fn test_acl_deny_applies_after_allowlist_miss() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
@@ -488,7 +496,7 @@ mod tests {
 
         assert_eq!(
             acl.check(&PeerIdentity::from_npub(&denied).unwrap()),
-            PeerAclDecision::NotInAllowList
+            PeerAclDecision::DenyList
         );
     }
 
@@ -552,12 +560,27 @@ mod tests {
         assert_eq!(status.allow_file, allow.display().to_string());
         assert_eq!(status.deny_file, deny.display().to_string());
         assert!(status.enforcement_active);
-        assert_eq!(status.effective_mode, "allowlist");
-        assert_eq!(status.default_decision, "deny");
+        assert_eq!(status.effective_mode, "allow_then_deny");
+        assert_eq!(status.default_decision, "allow");
         assert_eq!(status.allow_raw_entries, vec![allowed.clone()]);
         assert_eq!(status.deny_raw_entries, vec![denied.clone()]);
         assert_eq!(status.allow_entries, vec![allowed]);
         assert_eq!(status.deny_entries, vec![denied]);
+    }
+
+    #[test]
+    fn test_acl_status_reports_deny_all_default_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+
+        std::fs::write(&deny, "ALL\n").unwrap();
+
+        let reloader = PeerAclReloader::with_paths(allow, deny);
+        let status = reloader.status();
+
+        assert_eq!(status.effective_mode, "deny_all");
+        assert_eq!(status.default_decision, "deny");
     }
 
     #[test]

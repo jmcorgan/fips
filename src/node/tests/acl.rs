@@ -20,12 +20,15 @@ fn allow_path(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("peers.allow")
 }
 
+fn deny_path(dir: &tempfile::TempDir) -> PathBuf {
+    dir.path().join("peers.deny")
+}
+
 #[tokio::test]
-async fn test_outbound_connect_denied_by_allowlist() {
+async fn test_outbound_connect_denied_by_denylist() {
     let (dir, mut node) = make_acl_node();
     let denied = Identity::generate();
-    let allowed = Identity::generate();
-    std::fs::write(allow_path(&dir), format!("{}\n", allowed.npub())).unwrap();
+    std::fs::write(deny_path(&dir), format!("{}\n", denied.npub())).unwrap();
     node.reload_peer_acl();
 
     let result = node
@@ -46,9 +49,8 @@ async fn test_outbound_connect_denied_by_allowlist() {
 async fn test_inbound_msg1_denied_by_acl() {
     let (dir, mut node_b) = make_acl_node();
     let node_a = make_node();
-    let allowed = Identity::generate();
 
-    std::fs::write(allow_path(&dir), format!("{}\n", allowed.npub())).unwrap();
+    std::fs::write(deny_path(&dir), format!("{}\n", node_a.npub())).unwrap();
     node_b.reload_peer_acl();
 
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
@@ -75,7 +77,6 @@ async fn test_inbound_msg1_denied_by_acl() {
 async fn test_outbound_msg2_denied_after_acl_reload() {
     let (dir, mut node_a) = make_acl_node();
     let node_b = make_node();
-    let allowed = Identity::generate();
     let transport_id = TransportId::new(1);
     let remote_addr = TransportAddr::from_string("127.0.0.1:5001");
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
@@ -119,7 +120,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let our_index_b = SessionIndex::new(9);
     let wire_msg2 = build_msg2(our_index_b, our_index_a, &noise_msg2);
 
-    std::fs::write(allow_path(&dir), format!("{}\n", allowed.npub())).unwrap();
+    std::fs::write(deny_path(&dir), format!("{}\n", node_b.npub())).unwrap();
     assert!(node_a.reload_peer_acl());
 
     let packet = ReceivedPacket::with_timestamp(transport_id, remote_addr, wire_msg2, 1100);
@@ -129,4 +130,23 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     assert_eq!(node_a.connection_count(), 0);
     assert_eq!(node_a.link_count(), 0);
     assert!(node_a.pending_outbound.is_empty());
+}
+
+#[tokio::test]
+async fn test_outbound_connect_not_denied_by_allowlist_miss() {
+    let (dir, mut node) = make_acl_node();
+    let denied = Identity::generate();
+    let allowed = Identity::generate();
+    std::fs::write(allow_path(&dir), format!("{}\n", allowed.npub())).unwrap();
+    node.reload_peer_acl();
+
+    let result = node
+        .initiate_connection(
+            TransportId::new(1),
+            TransportAddr::from_string("127.0.0.1:9000"),
+            PeerIdentity::from_pubkey_full(denied.pubkey_full()),
+        )
+        .await;
+
+    assert!(!matches!(result, Err(NodeError::AccessDenied(_))));
 }

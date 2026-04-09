@@ -2,9 +2,6 @@
 # Build FIPS binaries and the unified test Docker image.
 #
 # Supports cross-compilation from macOS to Linux using cargo-zigbuild.
-# The test harness needs `fips` and `fipsctl`, and ships `fipstop` for
-# manual debugging. Build with `tui` enabled for `fipstop` while still
-# avoiding the optional BLE/DBus dependencies.
 #
 # Usage: ./build.sh [--no-docker]
 #   --no-docker  Skip Docker image build (just compile and copy binaries)
@@ -47,13 +44,13 @@ if [ "$UNAME_S" = "Darwin" ]; then
         rustup target add "$CARGO_TARGET"
     fi
 
-    echo "Building test binaries for Linux (release) using cargo-zigbuild..."
-    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" --no-default-features --features tui --bin fips --bin fipsctl --bin fipstop
+    echo "Building FIPS for Linux (release) using cargo-zigbuild..."
+    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml"
 
     TARGET_DIR="$PROJECT_ROOT/target/$CARGO_TARGET/release"
 else
-    echo "Building test binaries (release)..."
-    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml" --no-default-features --features tui --bin fips --bin fipsctl --bin fipstop
+    echo "Building FIPS (release)..."
+    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml"
 
     TARGET_DIR="$PROJECT_ROOT/target/release"
 fi
@@ -61,9 +58,9 @@ fi
 echo "Copying binaries to $DOCKER_DIR/"
 cp "$TARGET_DIR/fips" "$DOCKER_DIR/fips"
 cp "$TARGET_DIR/fipsctl" "$DOCKER_DIR/fipsctl"
-cp "$TARGET_DIR/fipstop" "$DOCKER_DIR/fipstop"
+[ -f "$TARGET_DIR/fipstop" ] && cp "$TARGET_DIR/fipstop" "$DOCKER_DIR/fipstop" || true
 chmod +x "$DOCKER_DIR/fips" "$DOCKER_DIR/fipsctl"
-chmod +x "$DOCKER_DIR/fipstop"
+[ -f "$DOCKER_DIR/fipstop" ] && chmod +x "$DOCKER_DIR/fipstop" || true
 
 echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl,fipstop}"
 
