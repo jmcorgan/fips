@@ -2,9 +2,10 @@
 
 Six Docker nodes use per-node ACL files mounted at the hardcoded runtime paths:
 
-- `node-a` and `node-b` carry the insider allowlist (`a`, `b`, `e`, `f`)
-- `node-c` and `node-d` each carry a broad allowlist containing every test npub
+- `node-a` and `node-b` carry the insider allowlist (`node-a`, `node-b`, `node-e`, `node-f`)
+- `node-c` and `node-d` each carry a broad allowlist containing every node alias
 - `node-e` and `node-f` do not mount any ACL files locally
+- every node gets a generated `/etc/fips/hosts` with aliases for `node-a` through `node-f`
 
 This lets us test three different node behaviors at once:
 
@@ -66,6 +67,8 @@ Or run the full integration check:
 ```
 
 `test.sh` regenerates the ACL fixtures automatically before starting Docker.
+The generated ACL files use alias names, and the generated hosts file makes
+those aliases resolvable at runtime.
 
 The ACL harness pins the expected test entrypoint explicitly so it does not
 accidentally reuse an older `fips-test:latest` image with a different startup
@@ -81,6 +84,7 @@ Mounted ACL files in this harness:
 - `node-a` and `node-b`: insider allowlist
 - `node-c` and `node-d`: broad local allowlist used by outsider nodes trying to blend in
 - `node-e` and `node-f`: no ACL files mounted
+- all nodes: `/etc/fips/hosts` aliases for `node-a` through `node-f`
 
 Generated fixture location:
 
@@ -102,6 +106,9 @@ Inspect the loaded ACL state directly:
 ```bash
 docker exec fips-acl-a fipsctl acl show
 ```
+
+The output shows both the raw alias tokens from the ACL files and the resolved
+effective npub entries.
 
 Expected:
 

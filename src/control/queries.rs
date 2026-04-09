@@ -75,6 +75,8 @@ pub fn show_acl(node: &Node) -> Value {
         "default_decision": status.default_decision,
         "allow_all": status.allow_all,
         "deny_all": status.deny_all,
+        "allow_raw_entries": status.allow_raw_entries,
+        "deny_raw_entries": status.deny_raw_entries,
         "allow_entries": status.allow_entries,
         "deny_entries": status.deny_entries,
     })

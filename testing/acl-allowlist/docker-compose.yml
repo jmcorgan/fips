@@ -30,6 +30,7 @@ services:
     hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-a/hosts:/etc/fips/hosts:ro
       - ./generated-configs/node-a/peers.allow:/etc/fips/peers.allow:ro
       - ./generated-configs/node-a/peers.deny:/etc/fips/peers.deny:ro
       - ./generated-configs/node-a/fips.yaml:/etc/fips/fips.yaml:ro
@@ -44,6 +45,7 @@ services:
     hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-b/hosts:/etc/fips/hosts:ro
       - ./generated-configs/node-b/peers.allow:/etc/fips/peers.allow:ro
       - ./generated-configs/node-b/peers.deny:/etc/fips/peers.deny:ro
       - ./generated-configs/node-b/fips.yaml:/etc/fips/fips.yaml:ro
@@ -58,6 +60,7 @@ services:
     hostname: node-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-c/hosts:/etc/fips/hosts:ro
       - ./generated-configs/node-c/peers.allow:/etc/fips/peers.allow:ro
       - ./generated-configs/node-c/peers.deny:/etc/fips/peers.deny:ro
       - ./generated-configs/node-c/fips.yaml:/etc/fips/fips.yaml:ro
@@ -72,6 +75,7 @@ services:
     hostname: node-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-d/hosts:/etc/fips/hosts:ro
       - ./generated-configs/node-d/peers.allow:/etc/fips/peers.allow:ro
       - ./generated-configs/node-d/peers.deny:/etc/fips/peers.deny:ro
       - ./generated-configs/node-d/fips.yaml:/etc/fips/fips.yaml:ro
@@ -86,6 +90,7 @@ services:
     hostname: node-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-e/hosts:/etc/fips/hosts:ro
       - ./generated-configs/node-e/fips.yaml:/etc/fips/fips.yaml:ro
       - ./generated-configs/node-e/fips.key:/etc/fips/fips.key:ro
     networks:
@@ -98,6 +103,7 @@ services:
     hostname: node-f
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-f/hosts:/etc/fips/hosts:ro
       - ./generated-configs/node-f/fips.yaml:/etc/fips/fips.yaml:ro
       - ./generated-configs/node-f/fips.key:/etc/fips/fips.key:ro
     networks:

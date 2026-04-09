@@ -1,5 +1,6 @@
-//! Peer access control lists (ACLs) keyed by npub.
+//! Peer access control lists (ACLs) keyed by npub or alias.
 
+use crate::upper::hosts::{file_mtime, HostMap, HostMapReloader, DEFAULT_HOSTS_PATH};
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -62,6 +63,8 @@ pub struct PeerAclStatus {
     pub default_decision: String,
     pub allow_all: bool,
     pub deny_all: bool,
+    pub allow_raw_entries: Vec<String>,
+    pub deny_raw_entries: Vec<String>,
     pub allow_entries: Vec<String>,
     pub deny_entries: Vec<String>,
 }
@@ -81,6 +84,8 @@ impl fmt::Display for PeerAclContext {
 pub struct PeerAcl {
     allow: HashSet<NodeAddr>,
     deny: HashSet<NodeAddr>,
+    allow_raw_entries: BTreeSet<String>,
+    deny_raw_entries: BTreeSet<String>,
     allow_npubs: BTreeSet<String>,
     deny_npubs: BTreeSet<String>,
     allow_all: bool,
@@ -95,9 +100,15 @@ impl PeerAcl {
 
     /// Load the allow/deny files into a new ACL.
     pub fn load_files(allow_path: &Path, deny_path: &Path) -> Self {
+        let hosts = HostMap::new();
+        Self::load_files_with_hosts(allow_path, deny_path, &hosts)
+    }
+
+    /// Load the allow/deny files into a new ACL using alias resolution.
+    pub fn load_files_with_hosts(allow_path: &Path, deny_path: &Path, hosts: &HostMap) -> Self {
         let mut acl = Self::new();
-        acl.load_file(allow_path, true);
-        acl.load_file(deny_path, false);
+        acl.load_file(allow_path, true, hosts);
+        acl.load_file(deny_path, false, hosts);
 
         if !acl.is_empty() {
             debug!(
@@ -163,12 +174,22 @@ impl PeerAcl {
         self.allow_npubs.iter().cloned().collect()
     }
 
+    /// Return the loaded allowlist tokens exactly as written in the ACL file.
+    pub fn allow_raw_entries(&self) -> Vec<String> {
+        self.allow_raw_entries.iter().cloned().collect()
+    }
+
     /// Return the loaded denylist entries as npubs.
     pub fn deny_entries(&self) -> Vec<String> {
         self.deny_npubs.iter().cloned().collect()
     }
 
-    fn load_file(&mut self, path: &Path, is_allow: bool) {
+    /// Return the loaded denylist tokens exactly as written in the ACL file.
+    pub fn deny_raw_entries(&self) -> Vec<String> {
+        self.deny_raw_entries.iter().cloned().collect()
+    }
+
+    fn load_file(&mut self, path: &Path, is_allow: bool, hosts: &HostMap) {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -209,12 +230,13 @@ impl PeerAcl {
                 continue;
             }
 
-            let peer = match PeerIdentity::from_npub(entry) {
-                Ok(peer) => peer,
+            let (peer, resolved_npub) = match Self::resolve_entry(entry, hosts) {
+                Ok(resolved) => resolved,
                 Err(e) => {
                     warn!(
                         path = %path.display(),
                         line = line_num + 1,
+                        entry = %entry,
                         error = %e,
                         "Skipping invalid ACL entry"
                     );
@@ -224,18 +246,34 @@ impl PeerAcl {
 
             if is_allow {
                 self.allow.insert(*peer.node_addr());
-                self.allow_npubs.insert(entry.to_string());
+                self.allow_raw_entries.insert(entry.to_string());
+                self.allow_npubs.insert(resolved_npub);
             } else {
                 self.deny.insert(*peer.node_addr());
-                self.deny_npubs.insert(entry.to_string());
+                self.deny_raw_entries.insert(entry.to_string());
+                self.deny_npubs.insert(resolved_npub);
             }
         }
+    }
+
+    fn resolve_entry(entry: &str, hosts: &HostMap) -> Result<(PeerIdentity, String), String> {
+        if let Ok(peer) = PeerIdentity::from_npub(entry) {
+            return Ok((peer, entry.to_string()));
+        }
+
+        let mapped = hosts
+            .lookup_npub(entry)
+            .ok_or_else(|| "unknown alias or invalid npub".to_string())?;
+        let peer = PeerIdentity::from_npub(mapped)
+            .map_err(|e| format!("alias resolves to invalid npub: {e}"))?;
+        Ok((peer, mapped.to_string()))
     }
 }
 
 /// Tracks peer ACL files and reloads them on mtime changes.
 pub struct PeerAclReloader {
     acl: PeerAcl,
+    hosts: HostMapReloader,
     allow_path: PathBuf,
     deny_path: PathBuf,
     last_allow_mtime: Option<SystemTime>,
@@ -245,20 +283,40 @@ pub struct PeerAclReloader {
 impl PeerAclReloader {
     /// Create a reloader using the standard ACL file locations.
     pub fn new() -> Self {
-        Self::with_paths(
+        Self::with_alias_sources(
             PathBuf::from(DEFAULT_PEERS_ALLOW_PATH),
             PathBuf::from(DEFAULT_PEERS_DENY_PATH),
+            HostMap::new(),
+            PathBuf::from(DEFAULT_HOSTS_PATH),
         )
     }
 
     /// Create a reloader for explicit file paths.
+    #[cfg(test)]
     pub(crate) fn with_paths(allow_path: PathBuf, deny_path: PathBuf) -> Self {
-        let last_allow_mtime = crate::upper::hosts::file_mtime(&allow_path);
-        let last_deny_mtime = crate::upper::hosts::file_mtime(&deny_path);
-        let acl = PeerAcl::load_files(&allow_path, &deny_path);
+        Self::with_alias_sources(
+            allow_path,
+            deny_path,
+            HostMap::new(),
+            PathBuf::from(DEFAULT_HOSTS_PATH),
+        )
+    }
+
+    /// Create a reloader with explicit ACL paths and alias sources.
+    pub(crate) fn with_alias_sources(
+        allow_path: PathBuf,
+        deny_path: PathBuf,
+        base_hosts: HostMap,
+        hosts_path: PathBuf,
+    ) -> Self {
+        let last_allow_mtime = file_mtime(&allow_path);
+        let last_deny_mtime = file_mtime(&deny_path);
+        let hosts = HostMapReloader::new(base_hosts, hosts_path);
+        let acl = PeerAcl::load_files_with_hosts(&allow_path, &deny_path, hosts.hosts());
 
         Self {
             acl,
+            hosts,
             allow_path,
             deny_path,
             last_allow_mtime,
@@ -281,6 +339,8 @@ impl PeerAclReloader {
             default_decision: self.acl.default_decision().to_string(),
             allow_all: self.acl.allow_all,
             deny_all: self.acl.deny_all,
+            allow_raw_entries: self.acl.allow_raw_entries(),
+            deny_raw_entries: self.acl.deny_raw_entries(),
             allow_entries: self.acl.allow_entries(),
             deny_entries: self.acl.deny_entries(),
         }
@@ -288,22 +348,28 @@ impl PeerAclReloader {
 
     /// Check whether either ACL file changed and reload if needed.
     pub fn check_reload(&mut self) -> bool {
-        let allow_mtime = crate::upper::hosts::file_mtime(&self.allow_path);
-        let deny_mtime = crate::upper::hosts::file_mtime(&self.deny_path);
+        let allow_mtime = file_mtime(&self.allow_path);
+        let deny_mtime = file_mtime(&self.deny_path);
+        let hosts_changed = self.hosts.check_reload();
 
-        if allow_mtime == self.last_allow_mtime && deny_mtime == self.last_deny_mtime {
+        if allow_mtime == self.last_allow_mtime
+            && deny_mtime == self.last_deny_mtime
+            && !hosts_changed
+        {
             return false;
         }
 
         self.last_allow_mtime = allow_mtime;
         self.last_deny_mtime = deny_mtime;
-        self.acl = PeerAcl::load_files(&self.allow_path, &self.deny_path);
+        self.acl =
+            PeerAcl::load_files_with_hosts(&self.allow_path, &self.deny_path, self.hosts.hosts());
 
         info!(
             allow_file = %self.allow_path.display(),
             deny_file = %self.deny_path.display(),
             allow_entries = self.acl.allow.len(),
             deny_entries = self.acl.deny.len(),
+            alias_entries = self.hosts.hosts().len(),
             allow_all = self.acl.allow_all,
             deny_all = self.acl.deny_all,
             "Reloaded peer ACL files"
@@ -488,7 +554,59 @@ mod tests {
         assert!(status.enforcement_active);
         assert_eq!(status.effective_mode, "allowlist");
         assert_eq!(status.default_decision, "deny");
+        assert_eq!(status.allow_raw_entries, vec![allowed.clone()]);
+        assert_eq!(status.deny_raw_entries, vec![denied.clone()]);
         assert_eq!(status.allow_entries, vec![allowed]);
         assert_eq!(status.deny_entries, vec![denied]);
+    }
+
+    #[test]
+    fn test_acl_alias_resolves_from_host_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+        let npub = test_npub();
+        let mut hosts = HostMap::new();
+
+        hosts.insert("node-a", &npub).unwrap();
+        std::fs::write(&allow, "node-a\n").unwrap();
+
+        let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
+        let peer = PeerIdentity::from_npub(&npub).unwrap();
+
+        assert_eq!(acl.allow_raw_entries(), vec!["node-a".to_string()]);
+        assert_eq!(acl.allow_entries(), vec![npub]);
+        assert_eq!(acl.check(&peer), PeerAclDecision::AllowList);
+    }
+
+    #[test]
+    fn test_acl_reloader_detects_hosts_change_for_alias_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+        let hosts = dir.path().join("hosts");
+        let npub = test_npub();
+
+        std::fs::write(&allow, "node-a\n").unwrap();
+
+        let mut reloader =
+            PeerAclReloader::with_alias_sources(allow.clone(), deny, HostMap::new(), hosts.clone());
+        assert!(reloader.acl().is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&hosts, format!("node-a {npub}\n")).unwrap();
+
+        assert!(reloader.check_reload());
+        assert_eq!(
+            reloader.acl().allow_raw_entries(),
+            vec!["node-a".to_string()]
+        );
+        assert_eq!(reloader.acl().allow_entries(), vec![npub.clone()]);
+        assert_eq!(
+            reloader
+                .acl()
+                .check(&PeerIdentity::from_npub(&npub).unwrap()),
+            PeerAclDecision::AllowList
+        );
     }
 }
