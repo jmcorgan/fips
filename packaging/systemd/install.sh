@@ -100,8 +100,11 @@ fi
 
 install -m 0644 "${SCRIPT_DIR}/fips.service" "${SYSTEMD_DIR}/fips.service"
 install -m 0644 "${SCRIPT_DIR}/fips-dns.service" "${SYSTEMD_DIR}/fips-dns.service"
+install -d -m 0755 /usr/lib/fips
+install -m 0755 "${SCRIPT_DIR}/../common/fips-dns-setup" /usr/lib/fips/fips-dns-setup
+install -m 0755 "${SCRIPT_DIR}/../common/fips-dns-teardown" /usr/lib/fips/fips-dns-teardown
 systemctl daemon-reload
-echo "systemd units installed."
+echo "systemd units and DNS scripts installed."
 
 # --- Configure runtime directory group ownership ---
 # systemd creates /run/fips/ with RuntimeDirectory, but we need the
@@ -116,14 +119,8 @@ echo "tmpfiles.d entry created for /run/fips/ ownership."
 # --- Enable service ---
 
 systemctl enable fips.service
-if systemctl is-active --quiet systemd-resolved.service 2>/dev/null; then
-    systemctl enable fips-dns.service
-    echo "Services enabled (will start on boot)."
-else
-    echo "fips.service enabled (will start on boot)."
-    echo "  Note: fips-dns.service not enabled (systemd-resolved is not running)."
-    echo "  To enable .fips DNS later: sudo systemctl enable --now fips-dns.service"
-fi
+systemctl enable fips-dns.service
+echo "Services enabled (will start on boot)."
 
 # Restart if they were running before
 if $was_active; then

@@ -1,0 +1,77 @@
+#!/bin/bash
+# fips-dns-teardown — Remove DNS routing for the .fips domain.
+#
+# Reverses whatever fips-dns-setup configured. Reads the backend from
+# the state file, or cleans up all possible backends if state is missing.
+
+set -e
+
+FIPS_INTERFACE="fips0"
+DNS_DELEGATE_FILE="/etc/systemd/dns-delegate/fips.dns-delegate"
+DNSMASQ_CONF="/etc/dnsmasq.d/fips.conf"
+NM_DNSMASQ_CONF="/etc/NetworkManager/dnsmasq.d/fips.conf"
+STATE_FILE="/run/fips/dns-backend"
+
+log() { echo "fips-dns: $*"; }
+
+is_active() {
+    systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+teardown_dns_delegate() {
+    [ -f "$DNS_DELEGATE_FILE" ] || return 0
+    log "Removing dns-delegate config"
+    rm -f "$DNS_DELEGATE_FILE"
+    is_active systemd-resolved.service && systemctl restart systemd-resolved
+    return 0
+}
+
+teardown_resolvectl() {
+    command -v resolvectl >/dev/null 2>&1 || return 0
+    is_active systemd-resolved.service || return 0
+    ip link show "$FIPS_INTERFACE" >/dev/null 2>&1 || return 0
+    log "Reverting resolvectl config"
+    resolvectl revert "$FIPS_INTERFACE" 2>/dev/null || true
+    return 0
+}
+
+teardown_dnsmasq() {
+    [ -f "$DNSMASQ_CONF" ] || return 0
+    log "Removing dnsmasq config"
+    rm -f "$DNSMASQ_CONF"
+    is_active dnsmasq.service && systemctl reload dnsmasq || true
+    return 0
+}
+
+teardown_nm_dnsmasq() {
+    [ -f "$NM_DNSMASQ_CONF" ] || return 0
+    log "Removing NetworkManager dnsmasq config"
+    rm -f "$NM_DNSMASQ_CONF"
+    is_active NetworkManager.service && nmcli general reload 2>/dev/null || true
+    return 0
+}
+
+# --- Main ---
+
+backend=""
+if [ -f "$STATE_FILE" ]; then
+    backend=$(cat "$STATE_FILE")
+fi
+
+case "$backend" in
+    dns-delegate)  teardown_dns_delegate ;;
+    resolvectl)    teardown_resolvectl ;;
+    dnsmasq)       teardown_dnsmasq ;;
+    nm-dnsmasq)    teardown_nm_dnsmasq ;;
+    none)          ;; # Nothing was configured
+    *)
+        # State unknown — clean up everything
+        teardown_dns_delegate
+        teardown_resolvectl
+        teardown_dnsmasq
+        teardown_nm_dnsmasq
+        ;;
+esac
+
+rm -f "$STATE_FILE"
+exit 0

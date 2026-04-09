@@ -1,0 +1,141 @@
+#!/bin/bash
+# fips-dns-setup — Configure DNS routing for the .fips domain.
+#
+# Detects the system's DNS resolver and configures it to forward .fips
+# queries to the FIPS DNS responder on 127.0.0.1:5354.
+#
+# Backends (tried in order):
+#   1. systemd dns-delegate (systemd >= 258, declarative drop-in)
+#   2. systemd-resolved via resolvectl (most systemd distros)
+#   3. dnsmasq (standalone)
+#   4. NetworkManager with dnsmasq plugin
+#   5. Warning with manual instructions
+
+set -e
+
+FIPS_DNS_ADDR="127.0.0.1"
+FIPS_DNS_PORT="5354"
+FIPS_INTERFACE="fips0"
+
+DNS_DELEGATE_DIR="/etc/systemd/dns-delegate"
+DNS_DELEGATE_FILE="${DNS_DELEGATE_DIR}/fips.dns-delegate"
+DNSMASQ_CONF="/etc/dnsmasq.d/fips.conf"
+NM_DNSMASQ_CONF="/etc/NetworkManager/dnsmasq.d/fips.conf"
+
+# Record which backend was configured for teardown.
+STATE_DIR="/run/fips"
+STATE_FILE="${STATE_DIR}/dns-backend"
+
+log() { echo "fips-dns: $*"; }
+
+save_backend() {
+    mkdir -p "$STATE_DIR"
+    echo "$1" > "$STATE_FILE"
+}
+
+# Wait for fips0 interface (up to 30s).
+wait_for_interface() {
+    for i in $(seq 1 30); do
+        ip link show "$FIPS_INTERFACE" >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    log "ERROR: $FIPS_INTERFACE interface not found after 30s"
+    return 1
+}
+
+# Get systemd version number.
+systemd_version() {
+    systemctl --version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1
+}
+
+# Check if a systemd service is active.
+is_active() {
+    systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+# Backend 1: systemd dns-delegate (>= 258)
+try_dns_delegate() {
+    local ver
+    ver=$(systemd_version)
+    [ -z "$ver" ] && return 1
+    [ "$ver" -lt 258 ] && return 1
+    is_active systemd-resolved.service || return 1
+
+    log "Configuring via dns-delegate (systemd $ver)"
+    mkdir -p "$DNS_DELEGATE_DIR"
+    cat > "$DNS_DELEGATE_FILE" <<EOF
+[Delegate]
+DNS=${FIPS_DNS_ADDR}:${FIPS_DNS_PORT}
+Domains=fips
+EOF
+    systemctl restart systemd-resolved
+    save_backend "dns-delegate"
+    return 0
+}
+
+# Backend 2: resolvectl
+try_resolvectl() {
+    command -v resolvectl >/dev/null 2>&1 || return 1
+    is_active systemd-resolved.service || return 1
+
+    log "Configuring via resolvectl"
+    resolvectl dns "$FIPS_INTERFACE" "${FIPS_DNS_ADDR}:${FIPS_DNS_PORT}"
+    resolvectl domain "$FIPS_INTERFACE" "~fips"
+    save_backend "resolvectl"
+    return 0
+}
+
+# Backend 3: standalone dnsmasq
+try_dnsmasq() {
+    is_active dnsmasq.service || return 1
+    [ -d /etc/dnsmasq.d ] || return 1
+
+    log "Configuring via dnsmasq"
+    cat > "$DNSMASQ_CONF" <<EOF
+# FIPS .fips domain forwarding (managed by fips-dns.service)
+server=/fips/${FIPS_DNS_ADDR}#${FIPS_DNS_PORT}
+EOF
+    systemctl reload dnsmasq || log "WARNING: dnsmasq reload failed (config written, may need manual reload)"
+    save_backend "dnsmasq"
+    return 0
+}
+
+# Backend 4: NetworkManager with dnsmasq plugin
+try_nm_dnsmasq() {
+    is_active NetworkManager.service || return 1
+
+    # Check if NM is configured to use dnsmasq
+    local nm_dns
+    nm_dns=$(grep -sh '^dns=' /etc/NetworkManager/NetworkManager.conf \
+             /etc/NetworkManager/conf.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)
+    [ "$nm_dns" = "dnsmasq" ] || return 1
+    [ -d /etc/NetworkManager/dnsmasq.d ] || return 1
+
+    log "Configuring via NetworkManager dnsmasq plugin"
+    cat > "$NM_DNSMASQ_CONF" <<EOF
+# FIPS .fips domain forwarding (managed by fips-dns.service)
+server=/fips/${FIPS_DNS_ADDR}#${FIPS_DNS_PORT}
+EOF
+    nmcli general reload || log "WARNING: NetworkManager reload failed (config written, may need manual reload)"
+    save_backend "nm-dnsmasq"
+    return 0
+}
+
+# --- Main ---
+
+wait_for_interface || exit 1
+
+try_dns_delegate && exit 0
+try_resolvectl && exit 0
+try_dnsmasq && exit 0
+try_nm_dnsmasq && exit 0
+
+log "WARNING: No supported DNS resolver detected."
+log "To resolve .fips domains, configure your DNS resolver to forward"
+log "the .fips domain to ${FIPS_DNS_ADDR} port ${FIPS_DNS_PORT}."
+log ""
+log "Examples:"
+log "  systemd-resolved: sudo apt install systemd-resolved"
+log "  dnsmasq:          echo 'server=/fips/${FIPS_DNS_ADDR}#${FIPS_DNS_PORT}' | sudo tee /etc/dnsmasq.d/fips.conf"
+save_backend "none"
+exit 0

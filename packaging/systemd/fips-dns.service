@@ -1,22 +1,12 @@
 [Unit]
 Description=Configure DNS routing for .fips domain
-After=fips.service systemd-resolved.service
+After=fips.service
 Requires=fips.service
-ConditionPathExists=/run/systemd/resolve
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c '\
-  for i in $(seq 1 30); do \
-    ip link show fips0 >/dev/null 2>&1 && break; \
-    sleep 1; \
-  done; \
-  if ! ip link show fips0 >/dev/null 2>&1; then \
-    echo "fips0 interface not found after 30s" >&2; \
-    exit 1; \
-  fi; \
-  /usr/bin/resolvectl dns fips0 127.0.0.1:5354; \
-  /usr/bin/resolvectl domain fips0 ~fips'
+ExecStart=/usr/lib/fips/fips-dns-setup
+ExecStop=/usr/lib/fips/fips-dns-teardown
 RemainAfterExit=yes
 
 [Install]

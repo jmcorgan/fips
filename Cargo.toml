@@ -74,6 +74,8 @@ assets = [
     ["packaging/common/hosts", "/etc/fips/hosts", "644"],
     ["packaging/debian/fips.service", "/lib/systemd/system/fips.service", "644"],
     ["packaging/debian/fips-dns.service", "/lib/systemd/system/fips-dns.service", "644"],
+    ["packaging/common/fips-dns-setup", "/usr/lib/fips/fips-dns-setup", "755"],
+    ["packaging/common/fips-dns-teardown", "/usr/lib/fips/fips-dns-teardown", "755"],
     ["packaging/debian/fips.tmpfiles", "/usr/lib/tmpfiles.d/fips.conf", "644"],
     ["target/release/fips-gateway", "/usr/bin/", "755"],
     ["packaging/debian/fips-gateway.service", "/lib/systemd/system/fips-gateway.service", "644"],
