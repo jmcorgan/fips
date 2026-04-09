@@ -30,10 +30,10 @@ services:
     hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./node-a/peers.allow:/etc/fips/peers.allow:ro
-      - ./node-a/peers.deny:/etc/fips/peers.deny:ro
-      - ./node-a/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./node-a/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs/node-a/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-a/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-a/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-a/fips.key:/etc/fips/fips.key:ro
     networks:
       acl-net:
         ipv4_address: 172.31.0.10
@@ -44,10 +44,10 @@ services:
     hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./node-b/peers.allow:/etc/fips/peers.allow:ro
-      - ./node-b/peers.deny:/etc/fips/peers.deny:ro
-      - ./node-b/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./node-b/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs/node-b/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-b/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-b/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-b/fips.key:/etc/fips/fips.key:ro
     networks:
       acl-net:
         ipv4_address: 172.31.0.11
@@ -58,10 +58,10 @@ services:
     hostname: node-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./node-c/peers.allow:/etc/fips/peers.allow:ro
-      - ./node-c/peers.deny:/etc/fips/peers.deny:ro
-      - ./node-c/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./node-c/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs/node-c/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-c/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-c/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-c/fips.key:/etc/fips/fips.key:ro
     networks:
       acl-net:
         ipv4_address: 172.31.0.12
@@ -72,10 +72,10 @@ services:
     hostname: node-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./node-d/peers.allow:/etc/fips/peers.allow:ro
-      - ./node-d/peers.deny:/etc/fips/peers.deny:ro
-      - ./node-d/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./node-d/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs/node-d/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-d/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-d/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-d/fips.key:/etc/fips/fips.key:ro
     networks:
       acl-net:
         ipv4_address: 172.31.0.13
@@ -86,8 +86,8 @@ services:
     hostname: node-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./node-e/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./node-e/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs/node-e/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-e/fips.key:/etc/fips/fips.key:ro
     networks:
       acl-net:
         ipv4_address: 172.31.0.14
@@ -98,8 +98,8 @@ services:
     hostname: node-f
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./node-f/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./node-f/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs/node-f/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-f/fips.key:/etc/fips/fips.key:ro
     networks:
       acl-net:
         ipv4_address: 172.31.0.15

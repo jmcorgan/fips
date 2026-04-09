@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TESTING_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+GENERATE_CONFIGS="$SCRIPT_DIR/generate-configs.sh"
 
 SKIP_BUILD=false
 KEEP_UP=false
@@ -88,6 +89,9 @@ if [ "$SKIP_BUILD" = false ]; then
     log "Building Linux test binaries"
     "$TESTING_DIR/scripts/build.sh" --no-docker
 fi
+
+log "Generating ACL allowlist fixtures"
+"$GENERATE_CONFIGS"
 
 log "Starting ACL allowlist harness"
 docker compose -f "$COMPOSE_FILE" down >/dev/null 2>&1 || true

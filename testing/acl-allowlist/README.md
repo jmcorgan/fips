@@ -41,7 +41,7 @@ Additional allowed:
   - `npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c`
   - `nsec1afh3nysthqh47awpdewcw59wvvp499f8dvlyclmnv4gvpxdk56dsa6eqsn`
 
-The committed `fips.key` fixtures use a mix of bare hex and `nsec1...` values.
+The generated `fips.key` fixtures use a mix of bare hex and `nsec1...` values.
 FIPS accepts either format in key files.
 
 ## Run
@@ -55,6 +55,7 @@ Build the Linux binaries and test image:
 Start the ACL test mesh:
 
 ```bash
+./testing/acl-allowlist/generate-configs.sh
 docker compose -f testing/acl-allowlist/docker-compose.yml up -d --build
 ```
 
@@ -63,6 +64,8 @@ Or run the full integration check:
 ```bash
 ./testing/acl-allowlist/test.sh
 ```
+
+`test.sh` regenerates the ACL fixtures automatically before starting Docker.
 
 The ACL harness pins the expected test entrypoint explicitly so it does not
 accidentally reuse an older `fips-test:latest` image with a different startup
@@ -78,6 +81,10 @@ Mounted ACL files in this harness:
 - `node-a` and `node-b`: insider allowlist
 - `node-c` and `node-d`: self-only allowlist
 - `node-e` and `node-f`: no ACL files mounted
+
+Generated fixture location:
+
+- `testing/acl-allowlist/generated-configs/`
 
 Inspect peer state:
 
