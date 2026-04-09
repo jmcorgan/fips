@@ -9,9 +9,10 @@ repository = "https://github.com/jmcorgan/fips"
 readme = "README.md"
 
 [features]
-default = ["tui", "ble"]
+default = ["tui", "ble", "tun-support"]
 tui = ["dep:ratatui"]
 ble = ["dep:bluer"]
+tun-support = ["dep:tun", "dep:rtnetlink"]
 
 [dependencies]
 ratatui = { version = "0.30", optional = true }
@@ -30,9 +31,9 @@ hex = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tun = { version = "0.8.5", features = ["async"] }
+tun = { version = "0.8.5", features = ["async"], optional = true }
 libc = "0.2"
-rtnetlink = "0.20.0"
+rtnetlink = { version = "0.20.0", optional = true }
 tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time"] }
 futures = "0.3"
 simple-dns = "0.11.2"
