@@ -81,6 +81,9 @@ async fn test_two_node_handshake_udp() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
+    node_a
+        .addr_to_link
+        .insert((transport_id_a, remote_addr_b.clone()), link_id_a);
     node_a.connections.insert(link_id_a, conn_a);
     node_a.pending_outbound.insert(
         (transport_id_a, our_index_a.as_u32()),
@@ -224,6 +227,183 @@ async fn test_two_node_handshake_udp() {
     );
 
     // Clean up transports
+    for (_, t) in node_a.transports.iter_mut() {
+        t.stop().await.ok();
+    }
+    for (_, t) in node_b.transports.iter_mut() {
+        t.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_rekey_msg1_allowed_when_existing_peer_and_accept_connections_false() {
+    /*
+     * Given: a transport where accept_connections == false, and a connection that is already
+     *        established and old enough for a 'rekey'
+     * When: an existing peer attempts a rekey
+     * Then: we shouldn't reject the rekey merely because accept_connections == false (that
+     * condition is only for *new* connections)
+     *
+     * This test sets up a connection, including the initial Noise key exchange. Then it
+     * sets the age of the connection to be old, so that rekey can be attempted.
+     */
+    use crate::config::UdpConfig;
+    use crate::node::wire::{build_msg1, Msg1Header, Msg2Header};
+    use crate::transport::udp::UdpTransport;
+    use tokio::time::{timeout, Duration};
+
+    let mut node_a = make_node();
+    let mut node_b = make_node();
+
+    let transport_id_a = TransportId::new(1);
+    let transport_id_b = TransportId::new(1);
+
+    let udp_config = UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        mtu: Some(1280),
+        ..Default::default()
+    };
+
+    let (packet_tx_a, mut packet_rx_a) = packet_channel(64);
+    let (packet_tx_b, mut packet_rx_b) = packet_channel(64);
+
+    let mut transport_a =
+        UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
+    transport_a.set_accept_connections_for_test(false);
+    let mut transport_b =
+        UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
+
+    transport_a.start_async().await.unwrap();
+    transport_b.start_async().await.unwrap();
+
+    let _addr_a = transport_a.local_addr().unwrap();
+    let addr_b = transport_b.local_addr().unwrap();
+    let _remote_addr_a = TransportAddr::from_string(&_addr_a.to_string());
+    let remote_addr_b = TransportAddr::from_string(&addr_b.to_string());
+
+    node_a
+        .transports
+        .insert(transport_id_a, TransportHandle::Udp(transport_a));
+    node_b
+        .transports
+        .insert(transport_id_b, TransportHandle::Udp(transport_b));
+
+    // Phase 1: establish the initial outbound handshake A -> B.
+    let peer_b_identity =
+        PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_node_addr = *peer_b_identity.node_addr();
+
+    let link_id_a = node_a.allocate_link_id();
+    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
+    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_keypair_a = node_a.identity.keypair();
+    let noise_msg1 = conn_a
+        .start_handshake(our_keypair_a, node_a.startup_epoch, 1000)
+        .unwrap();
+    conn_a.set_our_index(our_index_a);
+    conn_a.set_transport_id(transport_id_a);
+    conn_a.set_source_addr(remote_addr_b.clone());
+
+    let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
+    let link_a = Link::connectionless(
+        link_id_a,
+        transport_id_a,
+        remote_addr_b.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    node_a.links.insert(link_id_a, link_a);
+    node_a
+        .addr_to_link
+        .insert((transport_id_a, remote_addr_b.clone()), link_id_a);
+    node_a.connections.insert(link_id_a, conn_a);
+    node_a.pending_outbound.insert(
+        (transport_id_a, our_index_a.as_u32()),
+        link_id_a,
+    );
+
+    let transport = node_a.transports.get(&transport_id_a).unwrap();
+    transport
+        .send(&remote_addr_b, &wire_msg1)
+        .await
+        .expect("failed to send initial msg1");
+
+    let packet_b = timeout(Duration::from_secs(1), packet_rx_b.recv())
+        .await
+        .expect("timeout waiting for initial msg1")
+        .expect("channel closed");
+    node_b.handle_msg1(packet_b).await;
+
+    let peer_a_node_addr = *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full())
+        .node_addr();
+    let packet_a = timeout(Duration::from_secs(1), packet_rx_a.recv())
+        .await
+        .expect("timeout waiting for initial msg2")
+        .expect("channel closed");
+    node_a.handle_msg2(packet_a).await;
+
+    assert_eq!(node_a.peer_count(), 1, "Node A should have one active peer");
+    assert_eq!(node_b.peer_count(), 1, "Node B should have one active peer");
+
+    // The initial promotion path can emit Tree/Bloom traffic. Drain any queued
+    // post-handshake packets so the next receive is the rekey msg1/msg2 pair.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while packet_rx_a.try_recv().is_ok() {}
+    while packet_rx_b.try_recv().is_ok() {}
+
+    // Phase 2: age both active sessions into the rekey path.
+    node_a
+        .get_peer_mut(&peer_b_node_addr)
+        .unwrap()
+        .age_session_for_test(Duration::from_secs(31));
+    node_b
+        .get_peer_mut(&peer_a_node_addr)
+        .unwrap()
+        .age_session_for_test(Duration::from_secs(31));
+
+    // Phase 3: B initiates rekey. A must process the inbound msg1 even though
+    // its transport rejects brand-new inbound handshakes.
+    node_b.config.node.rekey.after_secs = 0;
+    node_b.check_rekey().await;
+
+    let expected_rekey_index = node_b
+        .get_peer(&peer_a_node_addr)
+        .unwrap()
+        .rekey_our_index()
+        .expect("Node B should have an in-progress rekey index");
+
+    let rekey_packet_a = timeout(Duration::from_secs(1), packet_rx_a.recv())
+        .await
+        .expect("timeout waiting for rekey msg1")
+        .expect("channel closed");
+    let rekey_header_a = Msg1Header::parse(&rekey_packet_a.data)
+        .expect("expected a rekey msg1 packet");
+    assert_eq!(
+        rekey_header_a.sender_idx,
+        expected_rekey_index,
+        "Node A should receive the rekey msg1 that Node B initiated"
+    );
+    node_a.handle_msg1(rekey_packet_a).await;
+
+    let rekey_packet_b = timeout(Duration::from_secs(1), packet_rx_b.recv())
+        .await
+        .expect("timeout waiting for rekey msg2")
+        .expect("channel closed");
+    let rekey_header_b = Msg2Header::parse(&rekey_packet_b.data)
+        .expect("expected a rekey msg2 packet");
+    assert_eq!(
+        rekey_header_b.receiver_idx,
+        expected_rekey_index,
+        "Node A should respond with msg2 for the in-progress rekey"
+    );
+    node_b.handle_msg2(rekey_packet_b).await;
+
+    let peer_a_on_b = node_b.get_peer(&peer_a_node_addr).unwrap();
+    assert!(
+        peer_a_on_b.pending_new_session().is_some(),
+        "Node B should complete initiator-side rekey and store a pending session"
+    );
+
     for (_, t) in node_a.transports.iter_mut() {
         t.stop().await.ok();
     }

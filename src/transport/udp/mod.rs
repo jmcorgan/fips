@@ -48,6 +48,9 @@ pub struct UdpTransport {
     stats: Arc<UdpStats>,
     /// DNS resolution cache for hostname addresses.
     dns_cache: StdMutex<HashMap<TransportAddr, (SocketAddr, Instant)>>,
+    /// Test-only override for inbound-acceptance behavior.
+    #[cfg(test)]
+    accept_connections_override: Option<bool>,
 }
 
 impl UdpTransport {
@@ -69,7 +72,15 @@ impl UdpTransport {
             local_addr: None,
             stats: Arc::new(UdpStats::new()),
             dns_cache: StdMutex::new(HashMap::new()),
+            #[cfg(test)]
+            accept_connections_override: None,
         }
+    }
+
+    /// Override `accept_connections()` for tests.
+    #[cfg(test)]
+    pub(crate) fn set_accept_connections_for_test(&mut self, accept_connections: bool) {
+        self.accept_connections_override = Some(accept_connections);
     }
 
     /// Get the instance name (if configured as a named instance).
@@ -302,6 +313,15 @@ impl Transport for UdpTransport {
         // UDP discovery not yet implemented (would use multicast/DNS-SD)
         // Peer configuration is handled at the node level, not transport level
         Ok(Vec::new())
+    }
+
+    fn accept_connections(&self) -> bool {
+        #[cfg(test)]
+        if let Some(accept_connections) = self.accept_connections_override {
+            return accept_connections;
+        }
+
+        true
     }
 }
 
