@@ -10,10 +10,12 @@ use crate::node::session_wire::{
     build_fsp_header, fsp_prepend_inner_header, fsp_strip_inner_header,
     parse_encrypted_coords, FspCommonPrefix, FspEncryptedHeader, FSP_COMMON_PREFIX_SIZE,
     FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1,
-    FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,
+    FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE,
 };
+#[cfg(feature = "tun-support")]
+use crate::node::session_wire::FSP_PORT_IPV6_SHIM;
 use crate::protocol::{coords_wire_size, encode_coords};
-use crate::upper::icmp::FIPS_OVERHEAD;
+use crate::protocol::FIPS_OVERHEAD;
 use crate::node::{Node, NodeError};
 use crate::noise::{HandshakeState, XK_HANDSHAKE_MSG1_SIZE, XK_HANDSHAKE_MSG2_SIZE, XK_HANDSHAKE_MSG3_SIZE};
 use crate::mmp::report::ReceiverReport;
@@ -280,6 +282,7 @@ impl Node {
                 let service_payload = &rest[FSP_PORT_HEADER_SIZE..];
 
                 match dst_port {
+                    #[cfg(feature = "tun-support")]
                     FSP_PORT_IPV6_SHIM => {
                         use crate::FipsAddress;
                         let src_ipv6 = FipsAddress::from_node_addr(src_addr).to_ipv6().octets();
@@ -1312,6 +1315,7 @@ impl Node {
     ///
     /// Compresses the IPv6 header (format 0x00), then sends via `send_session_data`
     /// with `src_port=256, dst_port=256`.
+    #[cfg(feature = "tun-support")]
     pub(in crate::node) async fn send_ipv6_packet(
         &mut self,
         dest_addr: &NodeAddr,
@@ -1564,6 +1568,7 @@ impl Node {
 
     // === TUN Outbound (Data Plane) ===
 
+    #[cfg(feature = "tun-support")]
     /// Handle an outbound IPv6 packet from the TUN reader.
     ///
     /// Extracts the destination FipsAddress, looks up the NodeAddr and PublicKey
@@ -1638,6 +1643,7 @@ impl Node {
     }
 
     /// Send ICMPv6 Destination Unreachable back through TUN.
+    #[cfg(feature = "tun-support")]
     pub(in crate::node) fn send_icmpv6_dest_unreachable(&self, original_packet: &[u8]) {
         use crate::upper::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
         use crate::FipsAddress;
@@ -1660,6 +1666,7 @@ impl Node {
     ///
     /// Rate-limited per source address to prevent ICMP floods from
     /// misconfigured applications sending repeated oversized packets.
+    #[cfg(feature = "tun-support")]
     pub(in crate::node) fn send_icmpv6_packet_too_big(&mut self, original_packet: &[u8], mtu: u32) {
         use crate::upper::icmp::build_packet_too_big;
         use std::net::Ipv6Addr;
@@ -1720,15 +1727,23 @@ impl Node {
 
     /// Flush pending packets for a destination whose session just reached Established.
     async fn flush_pending_packets(&mut self, dest_addr: &NodeAddr) {
-        let packets = match self.pending_tun_packets.remove(dest_addr) {
-            Some(q) => q,
-            None => return,
-        };
-        for packet in packets {
-            if let Err(e) = self.send_ipv6_packet(dest_addr, &packet).await {
-                debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
-                break;
+        #[cfg(feature = "tun-support")]
+        {
+            let packets = match self.pending_tun_packets.remove(dest_addr) {
+                Some(q) => q,
+                None => return,
+            };
+            for packet in packets {
+                if let Err(e) = self.send_ipv6_packet(dest_addr, &packet).await {
+                    debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
+                    break;
+                }
             }
+        }
+        #[cfg(not(feature = "tun-support"))]
+        {
+            // No TUN — just drain and discard any queued packets
+            self.pending_tun_packets.remove(dest_addr);
         }
     }
 

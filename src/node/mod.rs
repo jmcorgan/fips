@@ -996,8 +996,15 @@ impl Node {
     /// Delegates to `upper::icmp::effective_ipv6_mtu()` with this node's
     /// transport MTU. Returns the maximum IPv6 packet size (including
     /// IPv6 header) that can be transmitted through the FIPS mesh.
+    #[cfg(feature = "tun-support")]
     pub fn effective_ipv6_mtu(&self) -> u16 {
         crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
+    }
+
+    /// When TUN support is disabled, return 0 (no IPv6 transport).
+    #[cfg(not(feature = "tun-support"))]
+    pub fn effective_ipv6_mtu(&self) -> u16 {
+        0
     }
 
     /// Get the transport MTU for a specific transport.

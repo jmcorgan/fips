@@ -563,6 +563,7 @@ impl Node {
                 failures = failures,
                 "Discovery lookup timed out, destination unreachable"
             );
+            #[cfg(feature = "tun-support")]
             if let Some(packets) = queued {
                 for pkt in &packets {
                     self.send_icmpv6_dest_unreachable(pkt);

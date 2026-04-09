@@ -35,6 +35,7 @@ impl Node {
         // Take the TUN outbound receiver, or create a dummy channel that never
         // produces messages (when TUN is disabled). Holding the sender prevents
         // the channel from closing.
+        #[cfg(feature = "tun-support")]
         let (mut tun_outbound_rx, _tun_guard) = match self.tun_outbound_rx.take() {
             Some(rx) => (rx, None),
             None => {
@@ -42,9 +43,18 @@ impl Node {
                 (rx, Some(tx))
             }
         };
+        #[cfg(not(feature = "tun-support"))]
+        let (mut tun_outbound_rx, _tun_guard): (
+            tokio::sync::mpsc::Receiver<Vec<u8>>,
+            Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+        ) = {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            (rx, Some(tx))
+        };
 
         // Take the DNS identity receiver, or create a dummy channel (when DNS
         // is disabled). Same pattern as TUN outbound.
+        #[cfg(feature = "tun-support")]
         let (mut dns_identity_rx, _dns_guard) = match self.dns_identity_rx.take() {
             Some(rx) => (rx, None),
             None => {
@@ -52,30 +62,46 @@ impl Node {
                 (rx, Some(tx))
             }
         };
+        #[cfg(not(feature = "tun-support"))]
+        let (mut dns_identity_rx, _dns_guard): (
+            tokio::sync::mpsc::Receiver<()>,
+            Option<tokio::sync::mpsc::Sender<()>>,
+        ) = {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            (rx, Some(tx))
+        };
 
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.node.tick_interval_secs));
 
-        // Set up control socket channel
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<
-            crate::control::ControlMessage,
-        >(32);
+        // Set up control channel — use pre-set channel (for embedding) or create
+        // a new one with ControlSocket (for standalone daemon).
+        let mut control_rx = if let Some(rx) = self.control_rx.take() {
+            // In-process embedding: channel was set via set_control_channel()
+            rx
+        } else {
+            // Standalone: create channel and wire up ControlSocket
+            let (control_tx, control_rx) = tokio::sync::mpsc::channel::<
+                crate::control::ControlMessage,
+            >(32);
 
-        if self.config.node.control.enabled {
-            let config = self.config.node.control.clone();
-            let tx = control_tx.clone();
-            tokio::spawn(async move {
-                match ControlSocket::bind(&config) {
-                    Ok(socket) => {
-                        socket.accept_loop(tx).await;
+            if self.config.node.control.enabled {
+                let config = self.config.node.control.clone();
+                let tx = control_tx.clone();
+                tokio::spawn(async move {
+                    match ControlSocket::bind(&config) {
+                        Ok(socket) => {
+                            socket.accept_loop(tx).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to bind control socket");
+                        }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to bind control socket");
-                    }
-                }
-            });
-        }
-        // Drop unused sender to avoid keeping channel open if control is disabled
-        drop(control_tx);
+                });
+            }
+            // Drop unused sender to avoid keeping channel open if control is disabled
+            drop(control_tx);
+            control_rx
+        };
 
         info!("RX event loop started");
 
@@ -87,15 +113,29 @@ impl Node {
                         None => break, // channel closed
                     }
                 }
-                Some(ipv6_packet) = tun_outbound_rx.recv() => {
-                    self.handle_tun_outbound(ipv6_packet).await;
+                Some(tun_msg) = tun_outbound_rx.recv() => {
+                    #[cfg(feature = "tun-support")]
+                    {
+                        self.handle_tun_outbound(tun_msg).await;
+                    }
+                    #[cfg(not(feature = "tun-support"))]
+                    {
+                        let _ = tun_msg; // dummy channel, never fires
+                    }
                 }
-                Some(identity) = dns_identity_rx.recv() => {
-                    debug!(
-                        node_addr = %identity.node_addr,
-                        "Registering identity from DNS resolution"
-                    );
-                    self.register_identity(identity.node_addr, identity.pubkey);
+                Some(dns_msg) = dns_identity_rx.recv() => {
+                    #[cfg(feature = "tun-support")]
+                    {
+                        debug!(
+                            node_addr = %dns_msg.node_addr,
+                            "Registering identity from DNS resolution"
+                        );
+                        self.register_identity(dns_msg.node_addr, dns_msg.pubkey);
+                    }
+                    #[cfg(not(feature = "tun-support"))]
+                    {
+                        let _ = dns_msg; // dummy channel, never fires
+                    }
                 }
                 Some((request, response_tx)) = control_rx.recv() => {
                     let response = if request.command.starts_with("show_") {

@@ -47,6 +47,13 @@ pub(crate) use session::{coords_wire_size, decode_optional_coords, encode_coords
 /// Protocol version for message compatibility.
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// FIPS wire overhead in bytes.
+///
+/// 16 (outer header) + 16 (MAC) + 5 (inner header)
+/// + 35 (coords worst case) + 12 (session header)
+/// + 6 (port+format+residual) + 16 (AEAD tag) = 106
+pub const FIPS_OVERHEAD: u16 = 106;
+
 // Legacy type alias re-export
 #[allow(deprecated)]
 pub use link::MessageType;

@@ -76,6 +76,7 @@ tokio = { version = "1", features = ["test-util"] }
 [[bin]]
 name = "fipsctl"
 path = "src/bin/fipsctl.rs"
+required-features = ["tun-support"]
 
 [[bin]]
 name = "fipstop"
