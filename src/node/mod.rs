@@ -36,9 +36,19 @@ use crate::transport::tor::TorTransport;
 #[cfg(target_os = "linux")]
 use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
+#[cfg(feature = "tun-support")]
 use crate::upper::hosts::HostMap;
+#[cfg(feature = "tun-support")]
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
+#[cfg(feature = "tun-support")]
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
+
+#[cfg(not(feature = "tun-support"))]
+pub(crate) type TunOutboundRx = tokio::sync::mpsc::Receiver<Vec<u8>>;
+#[cfg(not(feature = "tun-support"))]
+pub(crate) type TunTx = tokio::sync::mpsc::Sender<Vec<u8>>;
+#[cfg(not(feature = "tun-support"))]
+type TunState = &'static str;
 use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use rand::Rng;
@@ -114,6 +124,7 @@ pub enum NodeError {
     #[error("identity error: {0}")]
     Identity(#[from] IdentityError),
 
+    #[cfg(feature = "tun-support")]
     #[error("TUN error: {0}")]
     Tun(#[from] TunError),
 
@@ -303,6 +314,11 @@ pub struct Node {
     /// Packet receiver (for event loop).
     packet_rx: Option<PacketRx>,
 
+    // === Control Channel ===
+    /// Pre-set control channel receiver for in-process embedding.
+    /// When set, run_rx_loop uses this instead of creating its own.
+    control_rx: Option<tokio::sync::mpsc::Receiver<crate::control::ControlMessage>>,
+
     // === Connections (Handshake Phase) ===
     /// Pending connections (handshake in progress).
     /// Indexed by LinkId since we don't know the peer's identity yet.
@@ -353,22 +369,30 @@ pub struct Node {
 
     // === TUN Interface ===
     /// TUN device state.
+    #[cfg(feature = "tun-support")]
     tun_state: TunState,
     /// TUN interface name (for cleanup).
+    #[cfg(feature = "tun-support")]
     tun_name: Option<String>,
     /// TUN packet sender channel.
+    #[cfg(feature = "tun-support")]
     tun_tx: Option<TunTx>,
     /// Receiver for outbound packets from the TUN reader.
+    #[cfg(feature = "tun-support")]
     tun_outbound_rx: Option<TunOutboundRx>,
     /// TUN reader thread handle.
+    #[cfg(feature = "tun-support")]
     tun_reader_handle: Option<JoinHandle<()>>,
     /// TUN writer thread handle.
+    #[cfg(feature = "tun-support")]
     tun_writer_handle: Option<JoinHandle<()>>,
 
     // === DNS Responder ===
     /// Receiver for resolved identities from the DNS responder.
+    #[cfg(feature = "tun-support")]
     dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
     /// DNS responder task handle.
+    #[cfg(feature = "tun-support")]
     dns_task: Option<tokio::task::JoinHandle<()>>,
 
     // === Index-Based Session Dispatch ===
@@ -385,6 +409,7 @@ pub struct Node {
     /// Rate limiter for msg1 processing (DoS protection).
     msg1_rate_limiter: HandshakeRateLimiter,
     /// Rate limiter for ICMP Packet Too Big messages.
+    #[cfg(feature = "tun-support")]
     icmp_rate_limiter: IcmpRateLimiter,
     /// Rate limiter for routing error signals (CoordsRequired / PathBroken).
     routing_error_rate_limiter: RoutingErrorRateLimiter,
@@ -431,6 +456,7 @@ pub struct Node {
     // === Host Map ===
     /// Static hostname → npub mapping for DNS resolution.
     /// Built at construction from peer aliases and /etc/fips/hosts.
+    #[cfg(feature = "tun-support")]
     host_map: Arc<HostMap>,
 }
 
@@ -451,6 +477,7 @@ impl Node {
         };
         bloom_state.set_update_debounce_ms(config.node.bloom.update_debounce_ms);
 
+        #[cfg(feature = "tun-support")]
         let tun_state = if config.tun.enabled {
             TunState::Configured
         } else {
@@ -488,12 +515,15 @@ impl Node {
         let backoff_max_secs = config.node.discovery.backoff_max_secs;
         let forward_min_interval_secs = config.node.discovery.forward_min_interval_secs;
 
-        let mut host_map = HostMap::from_peer_configs(config.peers());
-        let hosts_file = HostMap::load_hosts_file(std::path::Path::new(
-            crate::upper::hosts::DEFAULT_HOSTS_PATH,
-        ));
-        host_map.merge(hosts_file);
-        let host_map = Arc::new(host_map);
+        #[cfg(feature = "tun-support")]
+        let host_map = {
+            let mut hm = HostMap::from_peer_configs(config.peers());
+            let hosts_file = HostMap::load_hosts_file(std::path::Path::new(
+                crate::upper::hosts::DEFAULT_HOSTS_PATH,
+            ));
+            hm.merge(hosts_file);
+            Arc::new(hm)
+        };
 
         Ok(Self {
             identity,
@@ -524,18 +554,27 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
+            #[cfg(feature = "tun-support")]
             tun_state,
+            #[cfg(feature = "tun-support")]
             tun_name: None,
+            #[cfg(feature = "tun-support")]
             tun_tx: None,
+            #[cfg(feature = "tun-support")]
             tun_outbound_rx: None,
+            #[cfg(feature = "tun-support")]
             tun_reader_handle: None,
+            #[cfg(feature = "tun-support")]
             tun_writer_handle: None,
+            #[cfg(feature = "tun-support")]
             dns_identity_rx: None,
+            #[cfg(feature = "tun-support")]
             dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
+            #[cfg(feature = "tun-support")]
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
@@ -555,7 +594,9 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             peer_aliases: HashMap::new(),
+            #[cfg(feature = "tun-support")]
             host_map,
+            control_rx: None,
         })
     }
 
@@ -566,6 +607,7 @@ impl Node {
         let mut startup_epoch = [0u8; 8];
         rand::rng().fill_bytes(&mut startup_epoch);
 
+        #[cfg(feature = "tun-support")]
         let tun_state = if config.tun.enabled {
             TunState::Configured
         } else {
@@ -603,6 +645,7 @@ impl Node {
         let max_links = config.node.limits.max_links;
         let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
 
+        #[cfg(feature = "tun-support")]
         let host_map = Arc::new(HostMap::new());
 
         Self {
@@ -634,18 +677,27 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
+            #[cfg(feature = "tun-support")]
             tun_state,
+            #[cfg(feature = "tun-support")]
             tun_name: None,
+            #[cfg(feature = "tun-support")]
             tun_tx: None,
+            #[cfg(feature = "tun-support")]
             tun_outbound_rx: None,
+            #[cfg(feature = "tun-support")]
             tun_reader_handle: None,
+            #[cfg(feature = "tun-support")]
             tun_writer_handle: None,
+            #[cfg(feature = "tun-support")]
             dns_identity_rx: None,
+            #[cfg(feature = "tun-support")]
             dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
+            #[cfg(feature = "tun-support")]
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
@@ -660,7 +712,9 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             peer_aliases: HashMap::new(),
+            #[cfg(feature = "tun-support")]
             host_map,
+            control_rx: None,
         }
     }
 
@@ -913,6 +967,7 @@ impl Node {
     /// 4. Session endpoint's short npub (end-to-end, may not be direct peer)
     /// 5. Truncated NodeAddr hex (unknown address)
     pub(crate) fn peer_display_name(&self, addr: &NodeAddr) -> String {
+        #[cfg(feature = "tun-support")]
         if let Some(hostname) = self.host_map.lookup_hostname(addr) {
             return hostname.to_string();
         }
@@ -1108,15 +1163,26 @@ impl Node {
     // === TUN Interface ===
 
     /// Get the TUN state.
+    #[cfg(feature = "tun-support")]
     pub fn tun_state(&self) -> TunState {
         self.tun_state
     }
 
     /// Get the TUN interface name, if active.
+    #[cfg(feature = "tun-support")]
     pub fn tun_name(&self) -> Option<&str> {
         self.tun_name.as_deref()
     }
 
+    #[cfg(not(feature = "tun-support"))]
+    pub fn tun_state(&self) -> &str {
+        "disabled"
+    }
+
+    #[cfg(not(feature = "tun-support"))]
+    pub fn tun_name(&self) -> Option<&str> {
+        None
+    }
 
     // === Resource Limits ===
 
@@ -1184,6 +1250,20 @@ impl Node {
     /// Get the packet receiver for the event loop.
     pub fn packet_rx(&mut self) -> Option<&mut PacketRx> {
         self.packet_rx.as_mut()
+    }
+
+    /// Set up an in-process control channel for embedding.
+    ///
+    /// Returns a sender for submitting queries/commands.
+    /// The receiver is consumed by `run_rx_loop()`.
+    /// If not called, `run_rx_loop()` creates its own channel
+    /// connected to a ControlSocket (Unix domain socket).
+    pub fn set_control_channel(
+        &mut self,
+    ) -> tokio::sync::mpsc::Sender<crate::control::ControlMessage> {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        self.control_rx = Some(rx);
+        tx
     }
 
     // === Link Management ===
@@ -1550,6 +1630,7 @@ impl Node {
     /// Get the TUN packet sender channel.
     ///
     /// Returns None if TUN is not active or the node hasn't been started.
+    #[cfg(feature = "tun-support")]
     pub fn tun_tx(&self) -> Option<&TunTx> {
         self.tun_tx.as_ref()
     }
