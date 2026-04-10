@@ -40,13 +40,14 @@ simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 uuid = "1"
-bluest = { version = "0.6", features = ["l2cap", "unstable"], optional = true }
-
 rustables = { version = "0.8.7", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.20.0"
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+bluest = { path = "../bluest-patched", features = ["l2cap", "unstable"], optional = true }
 
 [package.metadata.deb]
 maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"

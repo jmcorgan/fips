@@ -11,9 +11,10 @@ use super::*;
 use crate::transport::TransportError;
 use crate::transport::ble::addr::BleAddr;
 
-use bluest::{Adapter, Device, DeviceId};
+use bluest::{Adapter, Device};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, trace};
@@ -30,73 +31,35 @@ const MACOS_ADAPTER_NAME: &str = "default";
 // BluestStream — wraps a split L2capChannel
 // ============================================================================
 
-/// BLE stream wrapping a bluest L2CAP channel with length-prefix framing.
-///
-/// CoreBluetooth exposes L2CAP channels as byte streams (`NSInputStream`/
-/// `NSOutputStream`), which may coalesce or fragment L2CAP SDUs. This
-/// stream adds 2-byte big-endian length framing to reconstruct message
-/// boundaries, matching the framing added by the Linux `BluerStream`.
+/// BLE stream wrapping a bluest L2CAP channel.
 pub struct BluestStream {
     reader: Mutex<bluest::L2capChannelReader>,
     writer: Mutex<bluest::L2capChannelWriter>,
     remote: BleAddr,
     mtu: u16,
-    /// Byte buffer for reassembling length-prefixed frames from the
-    /// underlying byte stream.
-    recv_buf: Mutex<Vec<u8>>,
 }
 
 impl BleStream for BluestStream {
     async fn send(&self, data: &[u8]) -> Result<(), TransportError> {
-        // Length-prefix framing: [len:2 BE][payload]
-        let mut framed = Vec::with_capacity(2 + data.len());
-        framed.extend_from_slice(&(data.len() as u16).to_be_bytes());
-        framed.extend_from_slice(data);
-        trace!(len = data.len(), framed_len = framed.len(), addr = %self.remote, "BLE macOS send");
+        trace!(len = data.len(), addr = %self.remote, "BLE macOS send");
         self.writer
             .lock()
             .await
-            .write(&framed)
+            .write(data)
             .await
             .map_err(|e| TransportError::Io(std::io::Error::other(format!("BLE send: {e}"))))
     }
 
     async fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        loop {
-            // Check if we have a complete frame in the buffer
-            {
-                let mut recv_buf = self.recv_buf.lock().await;
-                if recv_buf.len() >= 2 {
-                    let payload_len = u16::from_be_bytes([recv_buf[0], recv_buf[1]]) as usize;
-                    if recv_buf.len() >= 2 + payload_len {
-                        let copy_len = payload_len.min(buf.len());
-                        buf[..copy_len].copy_from_slice(&recv_buf[2..2 + copy_len]);
-                        recv_buf.drain(..2 + payload_len);
-                        trace!(
-                            len = copy_len,
-                            buf_remaining = recv_buf.len(),
-                            addr = %self.remote,
-                            "BLE macOS recv frame"
-                        );
-                        return Ok(copy_len);
-                    }
-                }
-            } // drop recv_buf lock
-
-            // Read more bytes from the L2CAP channel
-            let mut tmp = [0u8; 2048];
-            let n =
-                self.reader.lock().await.read(&mut tmp).await.map_err(|e| {
-                    TransportError::Io(std::io::Error::other(format!("BLE recv: {e}")))
-                })?;
-            if n == 0 {
-                return Ok(0);
-            }
-            trace!(raw_bytes = n, addr = %self.remote, "BLE macOS recv raw");
-
-            // Append to buffer
-            self.recv_buf.lock().await.extend_from_slice(&tmp[..n]);
-        }
+        let n = self
+            .reader
+            .lock()
+            .await
+            .read(buf)
+            .await
+            .map_err(|e| TransportError::Io(std::io::Error::other(format!("BLE recv: {e}"))))?;
+        trace!(len = n, addr = %self.remote, "BLE macOS recv");
+        Ok(n)
     }
 
     fn send_mtu(&self) -> u16 {
@@ -187,25 +150,20 @@ impl BluestIo {
     }
 }
 
-/// Derive a 6-byte pseudo-address from a CoreBluetooth DeviceId.
+/// Global counter for generating synthetic 6-byte pseudo-addresses.
 ///
-/// CoreBluetooth doesn't expose real Bluetooth MAC addresses. We use the
-/// first 6 bytes of the DeviceId's UUID as a stable (within this host)
-/// identifier for pool lookups and `BleAddr` compatibility.
-fn device_id_to_bytes(id: &DeviceId) -> [u8; 6] {
-    // DeviceId displays as a UUID string; parse it back
-    let s = format!("{id}");
-    if let Ok(uuid) = uuid::Uuid::parse_str(&s) {
-        let b = uuid.as_bytes();
-        [b[0], b[1], b[2], b[3], b[4], b[5]]
-    } else {
-        // Fallback: hash the display string
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        s.hash(&mut hasher);
-        let h = hasher.finish().to_le_bytes();
-        [h[0], h[1], h[2], h[3], h[4], h[5]]
-    }
+/// CoreBluetooth doesn't expose real Bluetooth MAC addresses, and
+/// `Device::id()` panics on current objc2-foundation (0.3.x) due to an
+/// NSUUID type-encoding bug. We use a monotonic counter instead — the
+/// addresses are only meaningful within this process lifetime.
+static DEVICE_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+/// Generate a unique 6-byte pseudo-address for a discovered device.
+fn next_device_addr() -> [u8; 6] {
+    let n = DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let b = n.to_be_bytes();
+    // Prefix with 0xFE 0xCA to make these visually distinct from real MACs
+    [0xFE, 0xCA, b[0], b[1], b[2], b[3]]
 }
 
 impl BleIo for BluestIo {
@@ -255,7 +213,6 @@ impl BleIo for BluestIo {
             writer: Mutex::new(writer),
             remote: addr.clone(),
             mtu: self.mtu,
-            recv_buf: Mutex::new(Vec::new()),
         })
     }
 
@@ -287,16 +244,9 @@ impl BleIo for BluestIo {
             };
 
             futures::pin_mut!(scan_stream);
-            let mut seen = std::collections::HashSet::new();
             while let Some(discovered) = scan_stream.next().await {
                 let device = discovered.device;
-                let id = device.id();
-                let bytes = device_id_to_bytes(&id);
-
-                // Deduplicate within this scan session
-                if !seen.insert(bytes) {
-                    continue;
-                }
+                let bytes = next_device_addr();
 
                 let name = discovered
                     .adv_data
@@ -304,7 +254,6 @@ impl BleIo for BluestIo {
                     .as_deref()
                     .unwrap_or("unknown");
                 debug!(
-                    device_id = %id,
                     name = name,
                     addr = format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]),
