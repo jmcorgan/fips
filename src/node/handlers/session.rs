@@ -1649,13 +1649,6 @@ impl Node {
             return;
         }
 
-        // Check if packet will fit after FIPS encapsulation
-        let effective_mtu = self.effective_ipv6_mtu() as usize;
-        if ipv6_packet.len() > effective_mtu {
-            self.send_icmpv6_packet_too_big(&ipv6_packet, effective_mtu as u32);
-            return;
-        }
-
         // Extract destination FipsAddress prefix (IPv6 dest bytes 1-15)
         // IPv6 header: bytes 24-39 are dest addr, so prefix = bytes 25-39
         let mut prefix = [0u8; 15];
@@ -1670,6 +1663,18 @@ impl Node {
             }
         };
 
+        // Compute the effective IPv6 MTU for this destination.
+        // Use the per-link MTU from the next-hop's transport when available
+        // (important for BLE where L2CAP supports up to 64K SDUs), falling
+        // back to the node-wide default.
+        let effective_mtu = self.dest_effective_ipv6_mtu(&dest_addr) as usize;
+
+        // Check if packet will fit after FIPS encapsulation
+        if ipv6_packet.len() > effective_mtu {
+            self.send_icmpv6_packet_too_big(&ipv6_packet, effective_mtu as u32);
+            return;
+        }
+
         // Check for established session
         if let Some(entry) = self.sessions.get(&dest_addr) {
             if entry.is_established() {
@@ -1680,7 +1685,7 @@ impl Node {
                 if let Some(mmp) = entry.mmp() {
                     let path_mtu = mmp.path_mtu.current_mtu();
                     let path_ipv6_mtu = crate::upper::icmp::effective_ipv6_mtu(path_mtu) as usize;
-                    if path_ipv6_mtu < effective_mtu && ipv6_packet.len() > path_ipv6_mtu {
+                    if ipv6_packet.len() > path_ipv6_mtu {
                         self.send_icmpv6_packet_too_big(&ipv6_packet, path_ipv6_mtu as u32);
                         return;
                     }
@@ -1725,6 +1730,28 @@ impl Node {
         {
             let _ = tun_tx.send(response);
         }
+    }
+
+    /// Compute the effective IPv6 MTU for a specific destination.
+    ///
+    /// Uses the per-link MTU from the next-hop's transport when the
+    /// destination is routable, falling back to the node-wide default.
+    fn dest_effective_ipv6_mtu(&mut self, dest: &NodeAddr) -> u16 {
+        if let Some(next_hop) = self.find_next_hop(dest) {
+            let next_hop_addr = *next_hop.node_addr();
+            if let Some(peer) = self.peers.get(&next_hop_addr)
+                && let Some(tid) = peer.transport_id()
+                && let Some(transport) = self.transports.get(&tid)
+            {
+                let link_mtu = if let Some(addr) = peer.current_addr() {
+                    transport.link_mtu(addr)
+                } else {
+                    transport.mtu()
+                };
+                return crate::upper::icmp::effective_ipv6_mtu(link_mtu);
+            }
+        }
+        self.effective_ipv6_mtu()
     }
 
     /// Send ICMPv6 Packet Too Big back through TUN.

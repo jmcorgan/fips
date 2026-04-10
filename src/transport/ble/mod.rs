@@ -695,18 +695,24 @@ async fn pubkey_exchange<S: BleStream>(
     msg[1..].copy_from_slice(local_pubkey);
     stream.send(&msg).await?;
 
-    // Receive peer's pubkey (with timeout to prevent indefinite blocking)
+    // Receive peer's pubkey (with timeout to prevent indefinite blocking).
+    // On macOS, CoreBluetooth's byte-stream L2CAP may fragment the 33-byte
+    // message across multiple reads, so we accumulate until complete.
     let mut buf = [0u8; PUBKEY_EXCHANGE_SIZE];
     let timeout = std::time::Duration::from_secs(PUBKEY_EXCHANGE_TIMEOUT_SECS);
-    let n = match tokio::time::timeout(timeout, stream.recv(&mut buf)).await {
-        Ok(result) => result?,
-        Err(_) => return Err(TransportError::Timeout),
-    };
-    if n != PUBKEY_EXCHANGE_SIZE {
-        return Err(TransportError::RecvFailed(format!(
-            "pubkey exchange: expected {} bytes, got {}",
-            PUBKEY_EXCHANGE_SIZE, n
-        )));
+    let mut filled = 0usize;
+    while filled < PUBKEY_EXCHANGE_SIZE {
+        let n = match tokio::time::timeout(timeout, stream.recv(&mut buf[filled..])).await {
+            Ok(result) => result?,
+            Err(_) => return Err(TransportError::Timeout),
+        };
+        if n == 0 {
+            return Err(TransportError::RecvFailed(format!(
+                "pubkey exchange: expected {} bytes, got {}",
+                PUBKEY_EXCHANGE_SIZE, filled
+            )));
+        }
+        filled += n;
     }
     if buf[0] != PUBKEY_EXCHANGE_PREFIX {
         return Err(TransportError::RecvFailed(format!(
@@ -835,6 +841,10 @@ async fn accept_loop<A>(
 }
 
 /// Receive loop: reads packets from a BLE stream and delivers to node.
+///
+/// On Linux (SeqPacket), each recv returns one complete FIPS packet.
+/// On macOS (CoreBluetooth byte stream), we use FMP header framing to
+/// reassemble complete packets from potentially fragmented reads.
 async fn receive_loop<S: BleStream>(
     stream: Arc<S>,
     addr: TransportAddr,
@@ -842,6 +852,27 @@ async fn receive_loop<S: BleStream>(
     packet_tx: PacketTx,
     transport_id: TransportId,
     stats: Arc<BleStats>,
+    recv_mtu: u16,
+) {
+    #[cfg(target_os = "macos")]
+    receive_loop_fmp(stream.as_ref(), &addr, &packet_tx, transport_id, &stats, recv_mtu).await;
+
+    #[cfg(not(target_os = "macos"))]
+    receive_loop_seqpacket(stream.as_ref(), &addr, &packet_tx, transport_id, &stats, recv_mtu).await;
+
+    // Remove from pool
+    let mut pool = pool.lock().await;
+    pool.remove(&addr);
+}
+
+/// Linux SeqPacket receive loop — each recv is one complete packet.
+#[cfg(not(target_os = "macos"))]
+async fn receive_loop_seqpacket<S: BleStream>(
+    stream: &S,
+    addr: &TransportAddr,
+    packet_tx: &PacketTx,
+    transport_id: TransportId,
+    stats: &BleStats,
     recv_mtu: u16,
 ) {
     let mut buf = vec![0u8; recv_mtu as usize];
@@ -866,11 +897,107 @@ async fn receive_loop<S: BleStream>(
             }
         }
     }
-
-    // Remove from pool
-    let mut pool = pool.lock().await;
-    pool.remove(&addr);
 }
+
+/// macOS byte-stream receive loop — uses the FMP common header to
+/// reassemble complete packets from CoreBluetooth's L2CAP byte stream.
+///
+/// FMP prefix: `[ver+phase:1][flags:1][payload_len:2 LE]`
+/// Phase determines remaining byte count after the 4-byte prefix.
+#[cfg(target_os = "macos")]
+async fn receive_loop_fmp<S: BleStream>(
+    stream: &S,
+    addr: &TransportAddr,
+    packet_tx: &PacketTx,
+    transport_id: TransportId,
+    stats: &BleStats,
+    recv_mtu: u16,
+) {
+    const FMP_PREFIX: usize = 4;
+    const PHASE_ESTABLISHED: u8 = 0x0;
+    const PHASE_MSG1: u8 = 0x1;
+    const PHASE_MSG2: u8 = 0x2;
+    // Wire sizes from tcp/stream.rs (msg1=114, msg2=69)
+    const MSG1_WIRE_SIZE: usize = 114;
+    const MSG2_WIRE_SIZE: usize = 69;
+    const ESTABLISHED_REMAINING_HEADER: usize = 12;
+    const AEAD_TAG_SIZE: usize = 16;
+
+    let mut accum: Vec<u8> = Vec::with_capacity(recv_mtu as usize);
+    let mut tmp = vec![0u8; recv_mtu as usize];
+
+    /// Read from the stream until `accum` has at least `need` bytes.
+    /// Returns false on EOF or error.
+    async fn fill<S: BleStream>(
+        stream: &S,
+        accum: &mut Vec<u8>,
+        need: usize,
+        tmp: &mut [u8],
+        addr: &TransportAddr,
+        stats: &BleStats,
+    ) -> bool {
+        while accum.len() < need {
+            match stream.recv(tmp).await {
+                Ok(0) => {
+                    debug!(addr = %addr, "BLE connection closed by peer");
+                    return false;
+                }
+                Ok(n) => accum.extend_from_slice(&tmp[..n]),
+                Err(e) => {
+                    debug!(addr = %addr, error = %e, "BLE receive error");
+                    stats.record_recv_error();
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    loop {
+        // 1. Read the 4-byte FMP prefix
+        if !fill(stream, &mut accum, FMP_PREFIX, &mut tmp, addr, stats).await {
+            return;
+        }
+
+        let version = accum[0] >> 4;
+        let phase = accum[0] & 0x0F;
+        let payload_len = u16::from_le_bytes([accum[2], accum[3]]) as usize;
+
+        if version != 0 {
+            debug!(addr = %addr, version, "BLE FMP unknown version, dropping");
+            stats.record_recv_error();
+            return;
+        }
+
+        // 2. Compute total packet size from phase
+        let total = match phase {
+            PHASE_MSG1 => MSG1_WIRE_SIZE,
+            PHASE_MSG2 => MSG2_WIRE_SIZE,
+            PHASE_ESTABLISHED => FMP_PREFIX + ESTABLISHED_REMAINING_HEADER + payload_len + AEAD_TAG_SIZE,
+            _ => {
+                debug!(addr = %addr, phase, "BLE FMP unknown phase, dropping");
+                stats.record_recv_error();
+                return;
+            }
+        };
+
+        // 3. Accumulate until we have the full packet
+        if !fill(stream, &mut accum, total, &mut tmp, addr, stats).await {
+            return;
+        }
+
+        // 4. Deliver
+        let packet_data: Vec<u8> = accum.drain(..total).collect();
+        stats.record_recv(packet_data.len());
+        let packet = ReceivedPacket::new(transport_id, addr.clone(), packet_data);
+        if packet_tx.send(packet).await.is_err() {
+            trace!("BLE packet_tx closed, stopping receive loop");
+            return;
+        }
+    }
+}
+
+
 
 /// Combined scan + probe loop.
 ///

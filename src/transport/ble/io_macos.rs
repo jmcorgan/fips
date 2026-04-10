@@ -32,6 +32,11 @@ const MACOS_ADAPTER_NAME: &str = "default";
 // ============================================================================
 
 /// BLE stream wrapping a bluest L2CAP channel.
+///
+/// Raw byte-stream — no framing is added at this layer. CoreBluetooth
+/// may fragment or coalesce L2CAP SDUs across reads, so callers that
+/// need message boundaries must handle reassembly (see `receive_loop`
+/// and `pubkey_exchange` in mod.rs).
 pub struct BluestStream {
     reader: Mutex<bluest::L2capChannelReader>,
     writer: Mutex<bluest::L2capChannelWriter>,
