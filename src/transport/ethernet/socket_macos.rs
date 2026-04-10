@@ -42,7 +42,9 @@ impl FdGuard {
 
 impl Drop for FdGuard {
     fn drop(&mut self) {
-        unsafe { libc::close(self.0); }
+        unsafe {
+            libc::close(self.0);
+        }
     }
 }
 
@@ -99,7 +101,8 @@ impl PacketSocket {
             unsafe { libc::close(guard.0) };
             std::mem::forget(guard); // don't double-close via FdGuard
             return Err(TransportError::StartFailed(format!(
-                "pipe() failed: {}", std::io::Error::last_os_error()
+                "pipe() failed: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
@@ -157,7 +160,11 @@ impl PacketSocket {
     /// Signal the reader thread to stop by writing to the shutdown pipe.
     pub fn request_shutdown(&self) {
         unsafe {
-            libc::write(self.shutdown_write_fd, b"x".as_ptr() as *const libc::c_void, 1);
+            libc::write(
+                self.shutdown_write_fd,
+                b"x".as_ptr() as *const libc::c_void,
+                1,
+            );
         }
     }
 
@@ -387,7 +394,9 @@ fn bind_to_interface(fd: RawFd, interface: &str) -> Result<(), TransportError> {
     let ret = unsafe { libc::ioctl(fd, BIOCSETIF, ifreq.as_ptr()) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
-            "BIOCSETIF({}) failed: {}", interface, std::io::Error::last_os_error()
+            "BIOCSETIF({}) failed: {}",
+            interface,
+            std::io::Error::last_os_error()
         )));
     }
     Ok(())
@@ -399,7 +408,8 @@ fn set_bpf_immediate(fd: RawFd) -> Result<(), TransportError> {
     let ret = unsafe { libc::ioctl(fd, BIOCIMMEDIATE, &enable) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
-            "BIOCIMMEDIATE failed: {}", std::io::Error::last_os_error()
+            "BIOCIMMEDIATE failed: {}",
+            std::io::Error::last_os_error()
         )));
     }
     Ok(())
@@ -411,7 +421,8 @@ fn set_bpf_hdrcmplt(fd: RawFd) -> Result<(), TransportError> {
     let ret = unsafe { libc::ioctl(fd, BIOCSHDRCMPLT, &enable) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
-            "BIOCSHDRCMPLT failed: {}", std::io::Error::last_os_error()
+            "BIOCSHDRCMPLT failed: {}",
+            std::io::Error::last_os_error()
         )));
     }
     Ok(())
@@ -425,10 +436,30 @@ fn install_ethertype_filter(fd: RawFd, ethertype: u16) -> Result<(), TransportEr
     //   accept: ret #65535          ; accept entire packet
     //   reject: ret #0              ; drop
     let filter = [
-        BpfInsn { code: 0x28, jt: 0, jf: 0, k: 12 },                     // ldh [12]
-        BpfInsn { code: 0x15, jt: 0, jf: 1, k: ethertype as u32 },       // jeq #ethertype
-        BpfInsn { code: 0x06, jt: 0, jf: 0, k: 0xFFFF },                 // ret #65535
-        BpfInsn { code: 0x06, jt: 0, jf: 0, k: 0 },                     // ret #0
+        BpfInsn {
+            code: 0x28,
+            jt: 0,
+            jf: 0,
+            k: 12,
+        }, // ldh [12]
+        BpfInsn {
+            code: 0x15,
+            jt: 0,
+            jf: 1,
+            k: ethertype as u32,
+        }, // jeq #ethertype
+        BpfInsn {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0xFFFF,
+        }, // ret #65535
+        BpfInsn {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        }, // ret #0
     ];
 
     let prog = BpfProgram {
@@ -439,7 +470,8 @@ fn install_ethertype_filter(fd: RawFd, ethertype: u16) -> Result<(), TransportEr
     let ret = unsafe { libc::ioctl(fd, BIOCSETF, &prog) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
-            "BIOCSETF failed: {}", std::io::Error::last_os_error()
+            "BIOCSETF failed: {}",
+            std::io::Error::last_os_error()
         )));
     }
     Ok(())
@@ -451,7 +483,8 @@ fn get_bpf_buflen(fd: RawFd) -> Result<usize, TransportError> {
     let ret = unsafe { libc::ioctl(fd, BIOCGBLEN, &mut buflen) };
     if ret < 0 {
         return Err(TransportError::StartFailed(format!(
-            "BIOCGBLEN failed: {}", std::io::Error::last_os_error()
+            "BIOCGBLEN failed: {}",
+            std::io::Error::last_os_error()
         )));
     }
     Ok(buflen as usize)
@@ -480,7 +513,8 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
     let ret = unsafe { libc::getifaddrs(&mut addrs) };
     if ret != 0 {
         return Err(TransportError::StartFailed(format!(
-            "getifaddrs() failed: {}", std::io::Error::last_os_error()
+            "getifaddrs() failed: {}",
+            std::io::Error::last_os_error()
         )));
     }
 
@@ -509,7 +543,8 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
             cur = unsafe { (*cur).ifa_next };
         }
         Err(TransportError::StartFailed(format!(
-            "MAC address not found for interface: {}", interface
+            "MAC address not found for interface: {}",
+            interface
         )))
     })();
 
@@ -756,7 +791,10 @@ mod tests {
             libc::close(read_fd);
             libc::close(write_fd);
         }
-        assert!(!readable, "pipe read end should not be readable before write");
+        assert!(
+            !readable,
+            "pipe read end should not be readable before write"
+        );
     }
 
     #[test]
@@ -790,23 +828,19 @@ fn get_if_mtu(if_index: i32) -> Result<u16, TransportError> {
 
     // Get interface name from index
     let mut name_buf = [0i8; libc::IFNAMSIZ];
-    let ret = unsafe {
-        libc::if_indextoname(if_index as libc::c_uint, name_buf.as_mut_ptr())
-    };
+    let ret = unsafe { libc::if_indextoname(if_index as libc::c_uint, name_buf.as_mut_ptr()) };
     if ret.is_null() {
         unsafe { libc::close(sock) };
         return Err(TransportError::StartFailed(format!(
-            "if_indextoname({}) failed: {}", if_index, std::io::Error::last_os_error()
+            "if_indextoname({}) failed: {}",
+            if_index,
+            std::io::Error::last_os_error()
         )));
     }
 
     let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            name_buf.as_ptr(),
-            ifr.ifr_name.as_mut_ptr(),
-            libc::IFNAMSIZ,
-        );
+        std::ptr::copy_nonoverlapping(name_buf.as_ptr(), ifr.ifr_name.as_mut_ptr(), libc::IFNAMSIZ);
     }
 
     let ret = unsafe { libc::ioctl(sock, SIOCGIFMTU, &mut ifr) };

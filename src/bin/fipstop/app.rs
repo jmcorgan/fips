@@ -193,7 +193,10 @@ impl App {
             return;
         }
         let state = self.table_states.entry(self.active_tab).or_default();
-        let i = state.selected().map(|s| (s + 1).min(count - 1)).unwrap_or(0);
+        let i = state
+            .selected()
+            .map(|s| (s + 1).min(count - 1))
+            .unwrap_or(0);
         state.select(Some(i));
     }
 

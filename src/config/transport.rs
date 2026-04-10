@@ -112,15 +112,12 @@ impl<T> TransportInstances<T> {
     /// Named instances have `Some(name)`.
     pub fn iter(&self) -> impl Iterator<Item = (Option<&str>, &T)> {
         match self {
-            TransportInstances::Single(config) => {
-                vec![(None, config)].into_iter()
-            }
-            TransportInstances::Named(map) => {
-                map.iter()
-                    .map(|(k, v)| (Some(k.as_str()), v))
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            }
+            TransportInstances::Single(config) => vec![(None, config)].into_iter(),
+            TransportInstances::Named(map) => map
+                .iter()
+                .map(|(k, v)| (Some(k.as_str()), v))
+                .collect::<Vec<_>>()
+                .into_iter(),
         }
     }
 }
@@ -306,7 +303,8 @@ impl TcpConfig {
 
     /// Get the connect timeout in milliseconds.
     pub fn connect_timeout_ms(&self) -> u64 {
-        self.connect_timeout_ms.unwrap_or(DEFAULT_TCP_CONNECT_TIMEOUT_MS)
+        self.connect_timeout_ms
+            .unwrap_or(DEFAULT_TCP_CONNECT_TIMEOUT_MS)
     }
 
     /// Whether TCP_NODELAY is enabled. Default: true.
@@ -331,7 +329,8 @@ impl TcpConfig {
 
     /// Get the maximum number of inbound connections. Default: 256.
     pub fn max_inbound_connections(&self) -> usize {
-        self.max_inbound_connections.unwrap_or(DEFAULT_TCP_MAX_INBOUND)
+        self.max_inbound_connections
+            .unwrap_or(DEFAULT_TCP_MAX_INBOUND)
     }
 }
 
@@ -447,12 +446,16 @@ pub struct DirectoryServiceConfig {
 impl DirectoryServiceConfig {
     /// Path to the hostname file. Default: "/var/lib/tor/fips_onion_service/hostname".
     pub fn hostname_file(&self) -> &str {
-        self.hostname_file.as_deref().unwrap_or(DEFAULT_HOSTNAME_FILE)
+        self.hostname_file
+            .as_deref()
+            .unwrap_or(DEFAULT_HOSTNAME_FILE)
     }
 
     /// Local bind address for the listener. Default: "127.0.0.1:8443".
     pub fn bind_addr(&self) -> &str {
-        self.bind_addr.as_deref().unwrap_or(DEFAULT_DIRECTORY_BIND_ADDR)
+        self.bind_addr
+            .as_deref()
+            .unwrap_or(DEFAULT_DIRECTORY_BIND_ADDR)
     }
 }
 
@@ -464,12 +467,16 @@ impl TorConfig {
 
     /// Get the SOCKS5 proxy address. Default: "127.0.0.1:9050".
     pub fn socks5_addr(&self) -> &str {
-        self.socks5_addr.as_deref().unwrap_or(DEFAULT_TOR_SOCKS5_ADDR)
+        self.socks5_addr
+            .as_deref()
+            .unwrap_or(DEFAULT_TOR_SOCKS5_ADDR)
     }
 
     /// Get the control port address. Default: "/run/tor/control".
     pub fn control_addr(&self) -> &str {
-        self.control_addr.as_deref().unwrap_or(DEFAULT_TOR_CONTROL_ADDR)
+        self.control_addr
+            .as_deref()
+            .unwrap_or(DEFAULT_TOR_CONTROL_ADDR)
     }
 
     /// Get the control auth string. Default: "cookie".
@@ -479,12 +486,15 @@ impl TorConfig {
 
     /// Get the cookie file path. Default: "/var/run/tor/control.authcookie".
     pub fn cookie_path(&self) -> &str {
-        self.cookie_path.as_deref().unwrap_or(DEFAULT_TOR_COOKIE_PATH)
+        self.cookie_path
+            .as_deref()
+            .unwrap_or(DEFAULT_TOR_COOKIE_PATH)
     }
 
     /// Get the connect timeout in milliseconds. Default: 120000.
     pub fn connect_timeout_ms(&self) -> u64 {
-        self.connect_timeout_ms.unwrap_or(DEFAULT_TOR_CONNECT_TIMEOUT_MS)
+        self.connect_timeout_ms
+            .unwrap_or(DEFAULT_TOR_CONNECT_TIMEOUT_MS)
     }
 
     /// Get the default MTU. Default: 1400.
@@ -494,7 +504,8 @@ impl TorConfig {
 
     /// Get the max inbound connections. Default: 64.
     pub fn max_inbound_connections(&self) -> usize {
-        self.max_inbound_connections.unwrap_or(DEFAULT_TOR_MAX_INBOUND)
+        self.max_inbound_connections
+            .unwrap_or(DEFAULT_TOR_MAX_INBOUND)
     }
 }
 

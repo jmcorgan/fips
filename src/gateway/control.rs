@@ -107,7 +107,10 @@ impl GatewayControlSocket {
         let group_name = CString::new("fips").unwrap();
         let grp = unsafe { libc::getgrnam(group_name.as_ptr()) };
         if grp.is_null() {
-            debug!("'fips' group not found, skipping chown for {}", path.display());
+            debug!(
+                "'fips' group not found, skipping chown for {}",
+                path.display()
+            );
             return;
         }
         let gid = unsafe { (*grp).gr_gid };

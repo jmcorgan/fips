@@ -41,7 +41,11 @@ mod async_impl {
             Ok(Self { inner: async_fd })
         }
 
-        pub async fn send_to(&self, data: &[u8], dest_mac: &[u8; 6]) -> Result<usize, TransportError> {
+        pub async fn send_to(
+            &self,
+            data: &[u8],
+            dest_mac: &[u8; 6],
+        ) -> Result<usize, TransportError> {
             loop {
                 let mut guard = self
                     .inner
@@ -57,10 +61,7 @@ mod async_impl {
             }
         }
 
-        pub async fn recv_from(
-            &self,
-            buf: &mut [u8],
-        ) -> Result<(usize, [u8; 6]), TransportError> {
+        pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, [u8; 6]), TransportError> {
             loop {
                 let mut guard = self
                     .inner
@@ -136,7 +137,10 @@ mod async_impl {
                     loop {
                         // Drain any buffered frames from the previous read
                         while let Some(result) = super::platform::parse_next_frame(
-                            &parse_buf, &mut parse_offset, parse_len, &mut read_buf,
+                            &parse_buf,
+                            &mut parse_offset,
+                            parse_len,
+                            &mut read_buf,
                         ) {
                             match result {
                                 Ok((n, mac)) => {
@@ -207,22 +211,24 @@ mod async_impl {
             })
         }
 
-        pub async fn send_to(&self, data: &[u8], dest_mac: &[u8; 6]) -> Result<usize, TransportError> {
+        pub async fn send_to(
+            &self,
+            data: &[u8],
+            dest_mac: &[u8; 6],
+        ) -> Result<usize, TransportError> {
             let socket = Arc::clone(&self.inner);
             let data = data.to_vec();
             let dest = *dest_mac;
             tokio::task::spawn_blocking(move || {
-                socket.send_to(&data, &dest)
+                socket
+                    .send_to(&data, &dest)
                     .map_err(|e| TransportError::SendFailed(format!("{}", e)))
             })
             .await
             .map_err(|e| TransportError::SendFailed(format!("spawn_blocking: {}", e)))?
         }
 
-        pub async fn recv_from(
-            &self,
-            buf: &mut [u8],
-        ) -> Result<(usize, [u8; 6]), TransportError> {
+        pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, [u8; 6]), TransportError> {
             let mut rx = self.rx.lock().await;
             match rx.recv().await {
                 Some((data, mac)) => {

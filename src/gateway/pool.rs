@@ -215,11 +215,7 @@ impl VirtualIpPool {
 
     /// Periodic tick — drives state transitions. Returns events for
     /// the NAT and network modules.
-    pub fn tick(
-        &mut self,
-        now: Instant,
-        conntrack: &dyn ConntrackQuerier,
-    ) -> Vec<PoolEvent> {
+    pub fn tick(&mut self, now: Instant, conntrack: &dyn ConntrackQuerier) -> Vec<PoolEvent> {
         let mut events = Vec::new();
         let mut to_free = Vec::new();
         let ttl = std::time::Duration::from_secs(self.ttl_secs);
@@ -227,9 +223,7 @@ impl VirtualIpPool {
 
         for (node_addr, mapping) in &mut self.mappings {
             // Query conntrack for active sessions
-            let sessions = conntrack
-                .active_sessions(mapping.virtual_ip)
-                .unwrap_or(0);
+            let sessions = conntrack.active_sessions(mapping.virtual_ip).unwrap_or(0);
             mapping.session_count = sessions;
 
             match mapping.state {
@@ -462,7 +456,10 @@ mod tests {
             pool.allocate(make_node_addr(i), make_mesh_addr(i), "test.fips")
                 .unwrap();
         }
-        assert!(pool.allocate(make_node_addr(4), make_mesh_addr(4), "test.fips").is_err());
+        assert!(
+            pool.allocate(make_node_addr(4), make_mesh_addr(4), "test.fips")
+                .is_err()
+        );
     }
 
     #[test]
@@ -485,7 +482,10 @@ mod tests {
         let events = pool.tick(later, &ct);
         assert!(events.is_empty());
         assert_eq!(pool.mappings.len(), 1);
-        assert_eq!(pool.mappings.values().next().unwrap().state, MappingState::Draining);
+        assert_eq!(
+            pool.mappings.values().next().unwrap().state,
+            MappingState::Draining
+        );
 
         // Tick after grace period — freed
         let after_grace = later + std::time::Duration::from_secs(2);
@@ -541,7 +541,8 @@ mod tests {
         assert_eq!(status.free, 255);
         assert_eq!(status.allocated, 0);
 
-        pool.allocate(make_node_addr(1), make_mesh_addr(1), "test.fips").unwrap();
+        pool.allocate(make_node_addr(1), make_mesh_addr(1), "test.fips")
+            .unwrap();
         let status = pool.status();
         assert_eq!(status.allocated, 1);
         assert_eq!(status.free, 254);

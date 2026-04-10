@@ -54,9 +54,7 @@ pub trait BleScanner: Send {
     /// Wait for the next discovered device.
     ///
     /// Returns `None` when scanning is stopped.
-    fn next(
-        &mut self,
-    ) -> impl std::future::Future<Output = Option<BleAddr>> + Send;
+    fn next(&mut self) -> impl std::future::Future<Output = Option<BleAddr>> + Send;
 }
 
 /// Core BLE I/O operations.
@@ -117,7 +115,9 @@ mod bluer_impl {
     use crate::transport::TransportError;
 
     use bluer::l2cap::{SeqPacket, SeqPacketListener, Socket, SocketAddr};
-    use bluer::{adv::Advertisement, AdapterEvent, AddressType, DiscoveryFilter, DiscoveryTransport};
+    use bluer::{
+        AdapterEvent, AddressType, DiscoveryFilter, DiscoveryTransport, adv::Advertisement,
+    };
     use futures::StreamExt;
     use std::collections::{BTreeSet, HashSet};
     use std::pin::Pin;
@@ -138,10 +138,7 @@ mod bluer_impl {
 
     /// Map a std::io::Error to a TransportError.
     fn map_io_err(context: &str, e: std::io::Error) -> TransportError {
-        TransportError::Io(std::io::Error::new(
-            e.kind(),
-            format!("{}: {}", context, e),
-        ))
+        TransportError::Io(std::io::Error::new(e.kind(), format!("{}: {}", context, e)))
     }
 
     // ----------------------------------------------------------------
@@ -159,20 +156,25 @@ mod bluer_impl {
     impl BluerStream {
         /// Construct from a connected SeqPacket, querying MTU values.
         pub fn new(conn: SeqPacket, remote: BleAddr) -> Result<Self, TransportError> {
-            let send_mtu = conn
-                .send_mtu()
-                .map_err(|e| map_io_err("send_mtu", e))? as u16;
-            let recv_mtu = conn
-                .recv_mtu()
-                .map_err(|e| map_io_err("recv_mtu", e))? as u16;
+            let send_mtu = conn.send_mtu().map_err(|e| map_io_err("send_mtu", e))? as u16;
+            let recv_mtu = conn.recv_mtu().map_err(|e| map_io_err("recv_mtu", e))? as u16;
 
             // Log negotiated PHY for diagnostics (2M vs 1M)
             match conn.as_ref().phy() {
-                Ok(phy) => debug!(addr = %remote, phy, send_mtu, recv_mtu, "BLE connection established"),
-                Err(_) => debug!(addr = %remote, send_mtu, recv_mtu, "BLE connection established (PHY query unsupported)"),
+                Ok(phy) => {
+                    debug!(addr = %remote, phy, send_mtu, recv_mtu, "BLE connection established")
+                }
+                Err(_) => {
+                    debug!(addr = %remote, send_mtu, recv_mtu, "BLE connection established (PHY query unsupported)")
+                }
             }
 
-            Ok(Self { conn, remote, send_mtu, recv_mtu })
+            Ok(Self {
+                conn,
+                remote,
+                send_mtu,
+                recv_mtu,
+            })
         }
     }
 
@@ -250,8 +252,7 @@ mod bluer_impl {
                         if let Ok(device) = self.adapter.device(addr) {
                             match device.uuids().await {
                                 Ok(Some(uuids)) if uuids.contains(&FIPS_SERVICE_UUID) => {
-                                    let ble_addr =
-                                        BleAddr::from_bluer(addr, &self.adapter_name);
+                                    let ble_addr = BleAddr::from_bluer(addr, &self.adapter_name);
                                     debug!(addr = %ble_addr, "BLE scanner: FIPS peer found");
                                     return Some(ble_addr);
                                 }
@@ -359,11 +360,7 @@ mod bluer_impl {
             })
         }
 
-        async fn connect(
-            &self,
-            addr: &BleAddr,
-            psm: u16,
-        ) -> Result<Self::Stream, TransportError> {
+        async fn connect(&self, addr: &BleAddr, psm: u16) -> Result<Self::Stream, TransportError> {
             let target_sa = addr.to_socket_addr(psm);
 
             let socket = Socket::<SeqPacket>::new_seq_packet()
@@ -507,11 +504,7 @@ pub struct MockBleStream {
 
 impl MockBleStream {
     /// Create a linked pair of mock streams simulating an L2CAP connection.
-    pub fn pair(
-        addr_a: BleAddr,
-        addr_b: BleAddr,
-        mtu: u16,
-    ) -> (Self, Self) {
+    pub fn pair(addr_a: BleAddr, addr_b: BleAddr, mtu: u16) -> (Self, Self) {
         let (tx_a, rx_a) = tokio::sync::mpsc::channel(64);
         let (tx_b, rx_b) = tokio::sync::mpsc::channel(64);
         let stream_a = Self {

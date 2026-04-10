@@ -6,8 +6,10 @@
 use std::time::{Duration, Instant};
 
 use crate::mmp::report::SenderReport;
-use crate::mmp::{COLD_START_SAMPLES, DEFAULT_COLD_START_INTERVAL_MS,
-                  MAX_REPORT_INTERVAL_MS, MIN_REPORT_INTERVAL_MS};
+use crate::mmp::{
+    COLD_START_SAMPLES, DEFAULT_COLD_START_INTERVAL_MS, MAX_REPORT_INTERVAL_MS,
+    MIN_REPORT_INTERVAL_MS,
+};
 
 /// Per-peer sender-side MMP state.
 ///
@@ -123,7 +125,9 @@ impl SenderState {
         match self.last_report_time {
             None => true, // Never sent a report — send immediately
             Some(last) => {
-                let effective = self.report_interval.mul_f64(self.send_failure_backoff_multiplier());
+                let effective = self
+                    .report_interval
+                    .mul_f64(self.send_failure_backoff_multiplier());
                 now.duration_since(last) >= effective
             }
         }
@@ -327,11 +331,17 @@ mod tests {
         // 6th sample: now in steady state, floor is MIN_REPORT_INTERVAL_MS (1000ms)
         // 50ms RTT → 100ms sender interval (2× SRTT), clamped to 1000ms
         s.update_report_interval_from_srtt(50_000);
-        assert_eq!(s.report_interval(), Duration::from_millis(MIN_REPORT_INTERVAL_MS));
+        assert_eq!(
+            s.report_interval(),
+            Duration::from_millis(MIN_REPORT_INTERVAL_MS)
+        );
 
         // 3s RTT → 6s, clamped to max 5s
         s.update_report_interval_from_srtt(3_000_000);
-        assert_eq!(s.report_interval(), Duration::from_millis(MAX_REPORT_INTERVAL_MS));
+        assert_eq!(
+            s.report_interval(),
+            Duration::from_millis(MAX_REPORT_INTERVAL_MS)
+        );
     }
 
     #[test]

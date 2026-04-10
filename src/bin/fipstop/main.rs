@@ -154,7 +154,9 @@ fn main() {
     let cli = Cli::parse();
 
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
-    let gateway_socket_path = cli.gateway_socket.unwrap_or_else(default_gateway_socket_path);
+    let gateway_socket_path = cli
+        .gateway_socket
+        .unwrap_or_else(default_gateway_socket_path);
     let refresh = Duration::from_secs(cli.refresh);
 
     // Install panic hook that restores terminal before printing panic

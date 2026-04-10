@@ -284,7 +284,14 @@ mod tests {
         let hi = (expected * 1.2).max(expected + 0.5).min(10.0);
 
         let tokens = bucket.tokens();
-        assert!((lo..=hi).contains(&tokens), "tokens: {}, expected ~{:.2} (range {:.2}..={:.2})", tokens, expected, lo, hi);
+        assert!(
+            (lo..=hi).contains(&tokens),
+            "tokens: {}, expected ~{:.2} (range {:.2}..={:.2})",
+            tokens,
+            expected,
+            lo,
+            hi
+        );
     }
 
     #[test]

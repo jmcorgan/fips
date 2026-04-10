@@ -30,9 +30,7 @@ pub fn check_ipv6_forwarding() {
 }
 
 /// Check that a network interface exists using rtnetlink.
-pub async fn check_interface_exists(
-    name: &str,
-) -> Result<u32, std::io::Error> {
+pub async fn check_interface_exists(name: &str) -> Result<u32, std::io::Error> {
     let index = rustables::iface_index(name)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
     debug!(interface = %name, index, "Interface found");
@@ -80,9 +78,9 @@ impl NetSetup {
                 debug!(cidr = %self.pool_cidr, "Pool route already exists");
                 return Ok(());
             }
-            return Err(std::io::Error::other(
-                format!("Failed to add pool route: {stderr}"),
-            ));
+            return Err(std::io::Error::other(format!(
+                "Failed to add pool route: {stderr}"
+            )));
         }
 
         self.route_added = true;
@@ -94,7 +92,15 @@ impl NetSetup {
     pub async fn add_proxy_ndp(&mut self, addr: Ipv6Addr) -> Result<(), std::io::Error> {
         let addr_str = addr.to_string();
         let output = tokio::process::Command::new("ip")
-            .args(["-6", "neigh", "add", "proxy", &addr_str, "dev", &self.lan_interface])
+            .args([
+                "-6",
+                "neigh",
+                "add",
+                "proxy",
+                &addr_str,
+                "dev",
+                &self.lan_interface,
+            ])
             .output()
             .await?;
 
@@ -104,9 +110,9 @@ impl NetSetup {
                 debug!(addr = %addr, "Proxy NDP entry already exists");
                 return Ok(());
             }
-            return Err(std::io::Error::other(
-                format!("Failed to add proxy NDP: {stderr}"),
-            ));
+            return Err(std::io::Error::other(format!(
+                "Failed to add proxy NDP: {stderr}"
+            )));
         }
 
         self.proxy_entries.push(addr);
@@ -118,7 +124,15 @@ impl NetSetup {
     pub async fn remove_proxy_ndp(&mut self, addr: Ipv6Addr) -> Result<(), std::io::Error> {
         let addr_str = addr.to_string();
         let output = tokio::process::Command::new("ip")
-            .args(["-6", "neigh", "del", "proxy", &addr_str, "dev", &self.lan_interface])
+            .args([
+                "-6",
+                "neigh",
+                "del",
+                "proxy",
+                &addr_str,
+                "dev",
+                &self.lan_interface,
+            ])
             .output()
             .await?;
 

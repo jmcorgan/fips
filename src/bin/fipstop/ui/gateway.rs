@@ -34,8 +34,8 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
     let data = match app.data.get(&Tab::Gateway) {
         Some(d) => d,
         None => {
-            let msg = Paragraph::new("  Waiting for data...")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg =
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
             return;
         }
@@ -49,25 +49,41 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
     .split(area);
 
     // Pool and info section
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Gateway ");
+    let block = Block::default().borders(Borders::ALL).title(" Gateway ");
     let inner = block.inner(chunks[0]);
     frame.render_widget(block, chunks[0]);
 
     let total = data.get("pool_total").and_then(|v| v.as_u64()).unwrap_or(0);
-    let allocated = data.get("pool_allocated").and_then(|v| v.as_u64()).unwrap_or(0);
-    let active = data.get("pool_active").and_then(|v| v.as_u64()).unwrap_or(0);
-    let draining = data.get("pool_draining").and_then(|v| v.as_u64()).unwrap_or(0);
+    let allocated = data
+        .get("pool_allocated")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let active = data
+        .get("pool_active")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let draining = data
+        .get("pool_draining")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let free = data.get("pool_free").and_then(|v| v.as_u64()).unwrap_or(0);
-    let nat = data.get("nat_mappings").and_then(|v| v.as_u64()).unwrap_or(0);
+    let nat = data
+        .get("nat_mappings")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let dns = helpers::str_field(data, "dns_listen");
-    let uptime_secs = data.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let uptime_secs = data
+        .get("uptime_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let pool_cidr = helpers::str_field(data, "pool_cidr");
     let lan_iface = helpers::str_field(data, "lan_interface");
     let dns_upstream = helpers::str_field(data, "dns_upstream");
     let dns_ttl = data.get("dns_ttl").and_then(|v| v.as_u64()).unwrap_or(0);
-    let grace = data.get("pool_grace_period").and_then(|v| v.as_u64()).unwrap_or(0);
+    let grace = data
+        .get("pool_grace_period")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     let label = Style::default().fg(Color::DarkGray);
     let count = Style::default()
@@ -201,9 +217,9 @@ fn draw_mappings(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let widths = [
-        Constraint::Min(18),   // Virtual IP
-        Constraint::Min(30),   // DNS Name
-        Constraint::Min(26),   // Mesh Addr
+        Constraint::Min(18),    // Virtual IP
+        Constraint::Min(30),    // DNS Name
+        Constraint::Min(26),    // Mesh Addr
         Constraint::Length(10), // State
         Constraint::Length(10), // Sessions
         Constraint::Length(10), // Age

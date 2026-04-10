@@ -7,7 +7,7 @@
 //! The daemon resolver populates its identity cache as a side effect
 //! of resolution, which is required for fips0 routing to work.
 
-use simple_dns::{Packet, PacketFlag, RCODE, ResourceRecord, CLASS, rdata};
+use simple_dns::{CLASS, Packet, PacketFlag, RCODE, ResourceRecord, rdata};
 
 use simple_dns::{QTYPE, TYPE};
 use std::net::{Ipv6Addr, SocketAddr};
@@ -241,28 +241,27 @@ async fn handle_query(
         }
     };
 
-    if let Err(e) = upstream_socket.send_to(&upstream_query_bytes, upstream).await {
+    if let Err(e) = upstream_socket
+        .send_to(&upstream_query_bytes, upstream)
+        .await
+    {
         warn!(error = %e, "Failed to forward query to daemon");
         return build_servfail(&query);
     }
 
     let mut resp_buf = vec![0u8; MAX_DNS_SIZE];
-    let resp_len = match tokio::time::timeout(
-        UPSTREAM_TIMEOUT,
-        upstream_socket.recv(&mut resp_buf),
-    )
-    .await
-    {
-        Ok(Ok(len)) => len,
-        Ok(Err(e)) => {
-            warn!(error = %e, "Upstream recv error");
-            return build_servfail(&query);
-        }
-        Err(_) => {
-            warn!("Upstream DNS timeout");
-            return build_servfail(&query);
-        }
-    };
+    let resp_len =
+        match tokio::time::timeout(UPSTREAM_TIMEOUT, upstream_socket.recv(&mut resp_buf)).await {
+            Ok(Ok(len)) => len,
+            Ok(Err(e)) => {
+                warn!(error = %e, "Upstream recv error");
+                return build_servfail(&query);
+            }
+            Err(_) => {
+                warn!("Upstream DNS timeout");
+                return build_servfail(&query);
+            }
+        };
 
     let upstream_response = match Packet::parse(&resp_buf[..resp_len]) {
         Ok(p) => p,

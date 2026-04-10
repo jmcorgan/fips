@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 
 use crate::mmp::algorithms::{JitterEstimator, OwdTrendDetector};
 use crate::mmp::report::ReceiverReport;
-use crate::mmp::{COLD_START_SAMPLES, DEFAULT_COLD_START_INTERVAL_MS,
-                  DEFAULT_OWD_WINDOW_SIZE, MAX_REPORT_INTERVAL_MS,
-                  MIN_REPORT_INTERVAL_MS};
+use crate::mmp::{
+    COLD_START_SAMPLES, DEFAULT_COLD_START_INTERVAL_MS, DEFAULT_OWD_WINDOW_SIZE,
+    MAX_REPORT_INTERVAL_MS, MIN_REPORT_INTERVAL_MS,
+};
 
 /// Grace period after rekey before resuming jitter calculation.
 ///
@@ -234,8 +235,7 @@ impl ReceiverState {
         self.owd_seq = 0;
         self.last_sender_timestamp = 0;
         self.last_recv_time = None;
-        self.rekey_jitter_grace_until =
-            Some(now + Duration::from_secs(REKEY_JITTER_GRACE_SECS));
+        self.rekey_jitter_grace_until = Some(now + Duration::from_secs(REKEY_JITTER_GRACE_SECS));
         self.ecn_ce_count = 0;
         self.interval_has_data = false;
         // Keep cumulative_packets_recv, cumulative_bytes_recv (lifetime stats)
@@ -287,14 +287,14 @@ impl ReceiverState {
         // We can't get absolute µs from Instant, but we can compute the delta
         // between consecutive transits using relative Instant differences.
         // Skip during post-rekey grace period to avoid drain-window spikes.
-        let in_grace = self.rekey_jitter_grace_until
+        let in_grace = self
+            .rekey_jitter_grace_until
             .is_some_and(|deadline| now < deadline);
         if !in_grace {
             self.rekey_jitter_grace_until = None; // clear expired grace
             if let Some(prev_recv) = self.last_recv_time {
                 let recv_delta_us = now.duration_since(prev_recv).as_micros() as i64;
-                let send_delta_us =
-                    sender_us - (self.last_sender_timestamp as i64 * 1000);
+                let send_delta_us = sender_us - (self.last_sender_timestamp as i64 * 1000);
                 let transit_delta = (recv_delta_us - send_delta_us) as i32;
                 self.jitter.update(transit_delta);
             }
@@ -324,7 +324,8 @@ impl ReceiverState {
         }
 
         // Dwell time: ms between last frame reception and report generation
-        let dwell_time = self.last_recv_time
+        let dwell_time = self
+            .last_recv_time
             .map(|t| now.duration_since(t).as_millis() as u16)
             .unwrap_or(0);
 
@@ -604,7 +605,10 @@ mod tests {
         // 6th sample: steady state, floor is MIN_REPORT_INTERVAL_MS (1000ms)
         // 50ms SRTT → 50ms receiver interval (1× SRTT), clamped to 1000ms
         r.update_report_interval_from_srtt(50_000);
-        assert_eq!(r.report_interval(), Duration::from_millis(MIN_REPORT_INTERVAL_MS));
+        assert_eq!(
+            r.report_interval(),
+            Duration::from_millis(MIN_REPORT_INTERVAL_MS)
+        );
 
         // 3s SRTT → 3000ms, within [1000, 5000]
         r.update_report_interval_from_srtt(3_000_000);
@@ -634,8 +638,8 @@ mod tests {
         assert_eq!(r.jitter_us(), 0);
 
         // After grace expires, jitter updates resume
-        let after_grace = t0 + Duration::from_secs(2)
-            + Duration::from_secs(REKEY_JITTER_GRACE_SECS + 1);
+        let after_grace =
+            t0 + Duration::from_secs(2) + Duration::from_secs(REKEY_JITTER_GRACE_SECS + 1);
         r.record_recv(2, 200, 100, false, after_grace);
         r.record_recv(3, 300, 100, false, after_grace + Duration::from_millis(100));
         // Now jitter should be updating (non-zero or zero depending on timing)

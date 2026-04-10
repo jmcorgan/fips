@@ -151,9 +151,7 @@ impl<S> ConnectionPool<S> {
                 .min_by_key(|(_, c)| c.established_at)
                 .map(|(addr, _)| addr.clone())
                 .ok_or_else(|| {
-                    TransportError::NotSupported(
-                        "BLE pool full: all connections are static".into(),
-                    )
+                    TransportError::NotSupported("BLE pool full: all connections are static".into())
                 })
         } else {
             // Non-static peer evicts oldest non-static
@@ -163,9 +161,7 @@ impl<S> ConnectionPool<S> {
                 .min_by_key(|(_, c)| c.established_at)
                 .map(|(addr, _)| addr.clone())
                 .ok_or_else(|| {
-                    TransportError::NotSupported(
-                        "BLE pool full: all connections are static".into(),
-                    )
+                    TransportError::NotSupported("BLE pool full: all connections are static".into())
                 })
         }
     }

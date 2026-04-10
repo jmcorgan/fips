@@ -108,7 +108,6 @@ impl BleStats {
         self.scan_results.fetch_add(1, Ordering::Relaxed);
     }
 
-
     /// Take a snapshot of all counters.
     pub fn snapshot(&self) -> BleStatsSnapshot {
         BleStatsSnapshot {

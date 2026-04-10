@@ -253,12 +253,16 @@ impl EthernetTransport {
         if let Some(task) = self.beacon_task.take() {
             task.abort();
             #[cfg(not(target_os = "macos"))]
-            { let _ = task.await; }
+            {
+                let _ = task.await;
+            }
         }
         if let Some(task) = self.recv_task.take() {
             task.abort();
             #[cfg(not(target_os = "macos"))]
-            { let _ = task.await; }
+            {
+                let _ = task.await;
+            }
         }
 
         // Drop socket

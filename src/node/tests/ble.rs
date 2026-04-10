@@ -6,12 +6,12 @@
 
 use super::*;
 use crate::config::BleConfig;
+use crate::transport::ble::BleTransport;
 use crate::transport::ble::addr::BleAddr;
 use crate::transport::ble::io::{MockBleIo, MockBleStream};
-use crate::transport::ble::BleTransport;
-use crate::transport::{packet_channel, Transport, TransportHandle, TransportId};
+use crate::transport::{Transport, TransportHandle, TransportId, packet_channel};
 use spanning_tree::{
-    cleanup_nodes, drain_all_packets, initiate_handshake, verify_tree_convergence, TestNode,
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, verify_tree_convergence,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -44,8 +44,8 @@ async fn make_test_node_ble(node_num: u8) -> TestNode {
         adapter: Some("hci0".to_string()),
         mtu: Some(2048),
         accept_connections: Some(true),
-        scan: Some(false),       // no auto-scan in tests
-        advertise: Some(false),  // no advertising in tests
+        scan: Some(false),      // no auto-scan in tests
+        advertise: Some(false), // no advertising in tests
         auto_connect: Some(false),
         ..Default::default()
     };
@@ -91,7 +91,11 @@ async fn wire_ble_connection(nodes: &[TestNode], i: usize, j: usize, bank: &Stre
     bank.lock().unwrap().insert(key, stream_i);
 
     // Inject stream_j into node j's accept loop so it sees the inbound.
-    let transport_j = nodes[j].node.transports.get(&nodes[j].transport_id).unwrap();
+    let transport_j = nodes[j]
+        .node
+        .transports
+        .get(&nodes[j].transport_id)
+        .unwrap();
     match transport_j {
         TransportHandle::Ble(t) => {
             t.io().inject_inbound(stream_j).await;
@@ -103,7 +107,11 @@ async fn wire_ble_connection(nodes: &[TestNode], i: usize, j: usize, bank: &Stre
 /// Install a connect handler on node `i` that draws from the stream bank.
 fn install_connect_handler(nodes: &[TestNode], i: usize, bank: &StreamBank) {
     let bank = Arc::clone(bank);
-    let transport_i = nodes[i].node.transports.get(&nodes[i].transport_id).unwrap();
+    let transport_i = nodes[i]
+        .node
+        .transports
+        .get(&nodes[i].transport_id)
+        .unwrap();
     match transport_i {
         TransportHandle::Ble(t) => {
             t.io().set_connect_handler(move |addr, _psm| {
@@ -125,7 +133,11 @@ fn install_connect_handler(nodes: &[TestNode], i: usize, bank: &StreamBank) {
 /// BLE send_async fails fast if no connection exists, so connections must
 /// be pre-established before initiating handshakes.
 async fn establish_ble_connection(nodes: &[TestNode], i: usize, j: usize) {
-    let transport = nodes[i].node.transports.get(&nodes[i].transport_id).unwrap();
+    let transport = nodes[i]
+        .node
+        .transports
+        .get(&nodes[i].transport_id)
+        .unwrap();
     transport.connect(&nodes[j].addr).await.unwrap();
     // Let the background connect task complete
     tokio::task::yield_now().await;
@@ -288,6 +300,11 @@ async fn test_ble_discovery() {
     node.transports
         .insert(transport_id, TransportHandle::Ble(transport));
 
-    let mut nodes = vec![TestNode { node, transport_id, packet_rx, addr: ta }];
+    let mut nodes = vec![TestNode {
+        node,
+        transport_id,
+        packet_rx,
+        addr: ta,
+    }];
     cleanup_nodes(&mut nodes).await;
 }

@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::IdentityConfig;
-use crate::mmp::{MmpConfig, MmpMode, DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE};
+use crate::mmp::{DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MmpConfig, MmpMode};
 
 // ============================================================================
 // Node Configuration Subsections
@@ -42,10 +42,18 @@ impl Default for LimitsConfig {
 }
 
 impl LimitsConfig {
-    fn default_max_connections() -> usize { 256 }
-    fn default_max_peers() -> usize { 128 }
-    fn default_max_links() -> usize { 256 }
-    fn default_max_pending_inbound() -> usize { 1000 }
+    fn default_max_connections() -> usize {
+        256
+    }
+    fn default_max_peers() -> usize {
+        128
+    }
+    fn default_max_links() -> usize {
+        256
+    }
+    fn default_max_pending_inbound() -> usize {
+        1000
+    }
 }
 
 /// Rate limiting (`node.rate_limit.*`).
@@ -86,12 +94,24 @@ impl Default for RateLimitConfig {
 }
 
 impl RateLimitConfig {
-    fn default_handshake_burst() -> u32 { 100 }
-    fn default_handshake_rate() -> f64 { 10.0 }
-    fn default_handshake_timeout_secs() -> u64 { 30 }
-    fn default_handshake_resend_interval_ms() -> u64 { 1000 }
-    fn default_handshake_resend_backoff() -> f64 { 2.0 }
-    fn default_handshake_max_resends() -> u32 { 5 }
+    fn default_handshake_burst() -> u32 {
+        100
+    }
+    fn default_handshake_rate() -> f64 {
+        10.0
+    }
+    fn default_handshake_timeout_secs() -> u64 {
+        30
+    }
+    fn default_handshake_resend_interval_ms() -> u64 {
+        1000
+    }
+    fn default_handshake_resend_backoff() -> f64 {
+        2.0
+    }
+    fn default_handshake_max_resends() -> u32 {
+        5
+    }
 }
 
 /// Retry/backoff configuration (`node.retry.*`).
@@ -119,9 +139,15 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    fn default_max_retries() -> u32 { 5 }
-    fn default_base_interval_secs() -> u64 { 5 }
-    fn default_max_backoff_secs() -> u64 { 300 }
+    fn default_max_retries() -> u32 {
+        5
+    }
+    fn default_base_interval_secs() -> u64 {
+        5
+    }
+    fn default_max_backoff_secs() -> u64 {
+        300
+    }
 }
 
 /// Cache parameters (`node.cache.*`).
@@ -149,9 +175,15 @@ impl Default for CacheConfig {
 }
 
 impl CacheConfig {
-    fn default_coord_size() -> usize { 50_000 }
-    fn default_coord_ttl_secs() -> u64 { 300 }
-    fn default_identity_size() -> usize { 10_000 }
+    fn default_coord_size() -> usize {
+        50_000
+    }
+    fn default_coord_ttl_secs() -> u64 {
+        300
+    }
+    fn default_identity_size() -> usize {
+        10_000
+    }
 }
 
 /// Discovery protocol (`node.discovery.*`).
@@ -205,14 +237,30 @@ impl Default for DiscoveryConfig {
 }
 
 impl DiscoveryConfig {
-    fn default_ttl() -> u8 { 64 }
-    fn default_timeout_secs() -> u64 { 10 }
-    fn default_recent_expiry_secs() -> u64 { 10 }
-    fn default_backoff_base_secs() -> u64 { 30 }
-    fn default_backoff_max_secs() -> u64 { 300 }
-    fn default_forward_min_interval_secs() -> u64 { 2 }
-    fn default_retry_interval_secs() -> u64 { 5 }
-    fn default_max_attempts() -> u8 { 2 }
+    fn default_ttl() -> u8 {
+        64
+    }
+    fn default_timeout_secs() -> u64 {
+        10
+    }
+    fn default_recent_expiry_secs() -> u64 {
+        10
+    }
+    fn default_backoff_base_secs() -> u64 {
+        30
+    }
+    fn default_backoff_max_secs() -> u64 {
+        300
+    }
+    fn default_forward_min_interval_secs() -> u64 {
+        2
+    }
+    fn default_retry_interval_secs() -> u64 {
+        5
+    }
+    fn default_max_attempts() -> u8 {
+        2
+    }
 }
 
 /// Spanning tree (`node.tree.*`).
@@ -267,13 +315,27 @@ impl Default for TreeConfig {
 }
 
 impl TreeConfig {
-    fn default_announce_min_interval_ms() -> u64 { 500 }
-    fn default_parent_hysteresis() -> f64 { 0.2 }
-    fn default_hold_down_secs() -> u64 { 30 }
-    fn default_reeval_interval_secs() -> u64 { 60 }
-    fn default_flap_threshold() -> u32 { 4 }
-    fn default_flap_window_secs() -> u64 { 60 }
-    fn default_flap_dampening_secs() -> u64 { 120 }
+    fn default_announce_min_interval_ms() -> u64 {
+        500
+    }
+    fn default_parent_hysteresis() -> f64 {
+        0.2
+    }
+    fn default_hold_down_secs() -> u64 {
+        30
+    }
+    fn default_reeval_interval_secs() -> u64 {
+        60
+    }
+    fn default_flap_threshold() -> u32 {
+        4
+    }
+    fn default_flap_window_secs() -> u64 {
+        60
+    }
+    fn default_flap_dampening_secs() -> u64 {
+        120
+    }
 }
 
 /// Bloom filter (`node.bloom.*`).
@@ -286,12 +348,16 @@ pub struct BloomConfig {
 
 impl Default for BloomConfig {
     fn default() -> Self {
-        Self { update_debounce_ms: 500 }
+        Self {
+            update_debounce_ms: 500,
+        }
     }
 }
 
 impl BloomConfig {
-    fn default_update_debounce_ms() -> u64 { 500 }
+    fn default_update_debounce_ms() -> u64 {
+        500
+    }
 }
 
 /// Session/data plane (`node.session.*`).
@@ -337,12 +403,24 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
-    fn default_ttl() -> u8 { 64 }
-    fn default_pending_packets_per_dest() -> usize { 16 }
-    fn default_pending_max_destinations() -> usize { 256 }
-    fn default_idle_timeout_secs() -> u64 { 90 }
-    fn default_coords_warmup_packets() -> u8 { 5 }
-    fn default_coords_response_interval_ms() -> u64 { 2000 }
+    fn default_ttl() -> u8 {
+        64
+    }
+    fn default_pending_packets_per_dest() -> usize {
+        16
+    }
+    fn default_pending_max_destinations() -> usize {
+        256
+    }
+    fn default_idle_timeout_secs() -> u64 {
+        90
+    }
+    fn default_coords_warmup_packets() -> u8 {
+        5
+    }
+    fn default_coords_response_interval_ms() -> u64 {
+        2000
+    }
 }
 
 /// Session-layer Metrics Measurement Protocol (`node.session_mmp.*`).
@@ -377,8 +455,12 @@ impl Default for SessionMmpConfig {
 }
 
 impl SessionMmpConfig {
-    fn default_log_interval_secs() -> u64 { DEFAULT_LOG_INTERVAL_SECS }
-    fn default_owd_window_size() -> usize { DEFAULT_OWD_WINDOW_SIZE }
+    fn default_log_interval_secs() -> u64 {
+        DEFAULT_LOG_INTERVAL_SECS
+    }
+    fn default_owd_window_size() -> usize {
+        DEFAULT_OWD_WINDOW_SIZE
+    }
 }
 
 /// Control socket configuration (`node.control.*`).
@@ -402,7 +484,9 @@ impl Default for ControlConfig {
 }
 
 impl ControlConfig {
-    fn default_enabled() -> bool { true }
+    fn default_enabled() -> bool {
+        true
+    }
 
     fn default_socket_path() -> String {
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -440,9 +524,15 @@ impl Default for BuffersConfig {
 }
 
 impl BuffersConfig {
-    fn default_packet_channel() -> usize { 1024 }
-    fn default_tun_channel() -> usize { 1024 }
-    fn default_dns_channel() -> usize { 64 }
+    fn default_packet_channel() -> usize {
+        1024
+    }
+    fn default_tun_channel() -> usize {
+        1024
+    }
+    fn default_dns_channel() -> usize {
+        64
+    }
 }
 
 // ============================================================================
@@ -480,9 +570,15 @@ impl Default for RekeyConfig {
 }
 
 impl RekeyConfig {
-    fn default_enabled() -> bool { true }
-    fn default_after_secs() -> u64 { 120 }
-    fn default_after_messages() -> u64 { 1 << 16 }
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_after_secs() -> u64 {
+        120
+    }
+    fn default_after_messages() -> u64 {
+        1 << 16
+    }
 }
 
 /// ECN congestion signaling configuration (`node.ecn.*`).
@@ -520,9 +616,15 @@ impl Default for EcnConfig {
 }
 
 impl EcnConfig {
-    fn default_enabled() -> bool { true }
-    fn default_loss_threshold() -> f64 { 0.05 }
-    fn default_etx_threshold() -> f64 { 3.0 }
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_loss_threshold() -> f64 {
+        0.05
+    }
+    fn default_etx_threshold() -> f64 {
+        3.0
+    }
 }
 
 // ============================================================================
@@ -650,7 +752,12 @@ impl Default for NodeConfig {
 impl NodeConfig {
     /// Get the log level as a tracing Level. Default: INFO.
     pub fn log_level(&self) -> tracing::Level {
-        match self.log_level.as_deref().map(|s| s.to_lowercase()).as_deref() {
+        match self
+            .log_level
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
             Some("trace") => tracing::Level::TRACE,
             Some("debug") => tracing::Level::DEBUG,
             Some("warn") | Some("warning") => tracing::Level::WARN,
@@ -659,10 +766,18 @@ impl NodeConfig {
         }
     }
 
-    fn default_tick_interval_secs() -> u64 { 1 }
-    fn default_base_rtt_ms() -> u64 { 100 }
-    fn default_heartbeat_interval_secs() -> u64 { 10 }
-    fn default_link_dead_timeout_secs() -> u64 { 30 }
+    fn default_tick_interval_secs() -> u64 {
+        1
+    }
+    fn default_base_rtt_ms() -> u64 {
+        100
+    }
+    fn default_heartbeat_interval_secs() -> u64 {
+        10
+    }
+    fn default_link_dead_timeout_secs() -> u64 {
+        30
+    }
 }
 
 #[cfg(test)]

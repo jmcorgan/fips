@@ -4,9 +4,9 @@ use crate::transport::{LinkDirection, TransportAddr, packet_channel};
 use crate::utils::index::SessionIndex;
 use std::time::Duration;
 
-mod bloom;
 #[cfg(target_os = "linux")]
 mod ble;
+mod bloom;
 mod disconnect;
 mod discovery;
 mod ethernet;

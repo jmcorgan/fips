@@ -123,7 +123,9 @@ impl TunDevice {
         // Read the actual device name (on macOS this is the kernel-assigned utun* name)
         let actual_name = {
             use tun::AbstractDevice;
-            device.tun_name().map_err(|e| TunError::Configure(format!("failed to get device name: {}", e)))?
+            device
+                .tun_name()
+                .map_err(|e| TunError::Configure(format!("failed to get device name: {}", e)))?
         };
 
         // Configure address and bring up via platform-specific method
@@ -329,7 +331,14 @@ pub fn run_tun_reader(
     loop {
         match device.read_packet(&mut buf) {
             Ok(n) if n > 0 => {
-                if !handle_tun_packet(&mut buf[..n], max_mss, &name, our_addr, &tun_tx, &outbound_tx) {
+                if !handle_tun_packet(
+                    &mut buf[..n],
+                    max_mss,
+                    &name,
+                    our_addr,
+                    &tun_tx,
+                    &outbound_tx,
+                ) {
                     break;
                 }
             }
@@ -355,7 +364,9 @@ struct ShutdownFd(std::os::unix::io::RawFd);
 #[cfg(target_os = "macos")]
 impl Drop for ShutdownFd {
     fn drop(&mut self) {
-        unsafe { libc::close(self.0); }
+        unsafe {
+            libc::close(self.0);
+        }
     }
 }
 
@@ -397,7 +408,13 @@ pub fn run_tun_reader(
             libc::FD_SET(tun_fd, &mut read_fds);
             libc::FD_SET(shutdown_fd, &mut read_fds);
 
-            let ret = libc::select(nfds, &mut read_fds, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+            let ret = libc::select(
+                nfds,
+                &mut read_fds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
@@ -418,7 +435,14 @@ pub fn run_tun_reader(
         loop {
             match device.read_packet(&mut buf) {
                 Ok(n) if n > 0 => {
-                    if !handle_tun_packet(&mut buf[..n], max_mss, &name, our_addr, &tun_tx, &outbound_tx) {
+                    if !handle_tun_packet(
+                        &mut buf[..n],
+                        max_mss,
+                        &name,
+                        our_addr,
+                        &tun_tx,
+                        &outbound_tx,
+                    ) {
                         return; // _shutdown_fd closes on drop
                     }
                 }
@@ -474,7 +498,7 @@ fn handle_tun_packet(
     tun_tx: &TunTx,
     outbound_tx: &TunOutboundTx,
 ) -> bool {
-    use super::icmp::{build_dest_unreachable, should_send_icmp_error, DestUnreachableCode};
+    use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
     use super::tcp_mss::clamp_tcp_mss;
 
     log_ipv6_packet(packet);
@@ -495,11 +519,8 @@ fn handle_tun_packet(
     } else {
         // Non-FIPS destination: send ICMPv6 Destination Unreachable
         if should_send_icmp_error(packet)
-            && let Some(response) = build_dest_unreachable(
-                packet,
-                DestUnreachableCode::NoRoute,
-                our_addr.to_ipv6(),
-            )
+            && let Some(response) =
+                build_dest_unreachable(packet, DestUnreachableCode::NoRoute, our_addr.to_ipv6())
         {
             trace!(name = %name, len = response.len(), "Sending ICMPv6 Destination Unreachable (non-FIPS destination)");
             if tun_tx.send(response).is_err() {
@@ -574,7 +595,7 @@ impl std::fmt::Debug for TunDevice {
 mod platform {
     use super::TunError;
     use futures::TryStreamExt;
-    use rtnetlink::{new_connection, Handle, LinkUnspec, RouteMessageBuilder};
+    use rtnetlink::{Handle, LinkUnspec, RouteMessageBuilder, new_connection};
     use std::net::Ipv6Addr;
     use tracing::debug;
 
@@ -652,7 +673,13 @@ mod platform {
         // Add ip6 rule to ensure fd00::/8 uses the main table, preventing other
         // routing software (e.g. Tailscale) from intercepting FIPS traffic via
         // catch-all rules in auxiliary routing tables.
-        let mut rule_req = handle.rule().add().v6().destination_prefix(fd_prefix, 8).table_id(254).priority(5265);
+        let mut rule_req = handle
+            .rule()
+            .add()
+            .v6()
+            .destination_prefix(fd_prefix, 8)
+            .table_id(254)
+            .priority(5265);
         rule_req.message_mut().header.action = 1.into(); // FR_ACT_TO_TBL
         if let Err(e) = rule_req.execute().await {
             debug!("ip6 rule for fd00::/8 not added (may already exist): {e}");
@@ -713,7 +740,11 @@ mod platform {
     /// Configure a network interface with an IPv6 address using ifconfig/route.
     pub async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(), TunError> {
         // Add IPv6 address with /128 prefix
-        run_cmd("ifconfig", &[name, "inet6", &addr.to_string(), "prefixlen", "128"]).await?;
+        run_cmd(
+            "ifconfig",
+            &[name, "inet6", &addr.to_string(), "prefixlen", "128"],
+        )
+        .await?;
 
         // Set MTU
         run_cmd("ifconfig", &[name, "mtu", &mtu.to_string()]).await?;
@@ -722,7 +753,19 @@ mod platform {
         run_cmd("ifconfig", &[name, "up"]).await?;
 
         // Add route for fd00::/8 (FIPS address space) via this interface
-        run_cmd("route", &["add", "-inet6", "-prefixlen", "8", "fd00::", "-interface", name]).await?;
+        run_cmd(
+            "route",
+            &[
+                "add",
+                "-inet6",
+                "-prefixlen",
+                "8",
+                "fd00::",
+                "-interface",
+                name,
+            ],
+        )
+        .await?;
 
         Ok(())
     }

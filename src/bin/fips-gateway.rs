@@ -4,18 +4,18 @@
 //! DNS-allocated virtual IPs and kernel nftables NAT.
 
 use clap::Parser;
+use fips::Config;
 #[cfg(target_os = "linux")]
 use fips::gateway::{control, dns, nat, net, pool};
 use fips::version;
-use fips::Config;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// FIPS outbound LAN gateway
 #[derive(Parser, Debug)]
@@ -60,7 +60,11 @@ async fn main() {
                 config
             }
             Err(e) => {
-                error!("Failed to load config from {}: {}", config_path.display(), e);
+                error!(
+                    "Failed to load config from {}: {}",
+                    config_path.display(),
+                    e
+                );
                 std::process::exit(1);
             }
         }
@@ -151,12 +155,16 @@ async fn main() {
             0x00, 0x00, // NSCOUNT = 0
             0x00, 0x00, // ARCOUNT = 0
             // QNAME: "test.fips"
-            0x04, b't', b'e', b's', b't', 0x04, b'f', b'i', b'p', b's', 0x00,
-            0x00, 0x1C, // QTYPE = AAAA (28)
+            0x04, b't', b'e', b's', b't', 0x04, b'f', b'i', b'p', b's', 0x00, 0x00,
+            0x1C, // QTYPE = AAAA (28)
             0x00, 0x01, // QCLASS = IN (1)
         ];
 
-        let bind_addr = if upstream_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let bind_addr = if upstream_addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         let sock = match tokio::net::UdpSocket::bind(bind_addr).await {
             Ok(s) => s,
             Err(e) => {
@@ -174,11 +182,8 @@ async fn main() {
         }
 
         let mut buf = [0u8; 512];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            sock.recv_from(&mut buf),
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(3), sock.recv_from(&mut buf))
+            .await
         {
             Ok(Ok(_)) => {
                 info!(upstream = %upstream, "DNS upstream is reachable");
@@ -225,10 +230,7 @@ async fn main() {
     };
 
     // Network setup
-    let mut net_setup = net::NetSetup::new(
-        gw_config.lan_interface.clone(),
-        gw_config.pool.clone(),
-    );
+    let mut net_setup = net::NetSetup::new(gw_config.lan_interface.clone(), gw_config.pool.clone());
 
     // Add pool route
     if let Err(e) = net_setup.add_pool_route().await {
@@ -272,8 +274,7 @@ async fn main() {
 
     // --- Snapshot channel for control socket ---
 
-    let (snapshot_tx, snapshot_rx) =
-        watch::channel::<Option<control::GatewaySnapshot>>(None);
+    let (snapshot_tx, snapshot_rx) = watch::channel::<Option<control::GatewaySnapshot>>(None);
     let start_time = Instant::now();
 
     // --- Start control socket ---

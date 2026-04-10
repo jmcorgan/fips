@@ -11,9 +11,7 @@ use rustables::expr::{
     Cmp, CmpOp, HighLevelPayload, IPv6HeaderField, Immediate, Masquerade, Meta, MetaType, Nat,
     NatType, NetworkHeaderField, Register,
 };
-use rustables::{
-    Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Table,
-};
+use rustables::{Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Table};
 
 const TABLE_NAME: &str = "fips_gateway";
 const PREROUTING_CHAIN: &str = "prerouting";
@@ -100,10 +98,13 @@ impl NatManager {
         virtual_ip: Ipv6Addr,
         mesh_addr: Ipv6Addr,
     ) -> Result<(), NatError> {
-        self.mappings.insert(virtual_ip, NatMapping {
+        self.mappings.insert(
             virtual_ip,
-            mesh_addr,
-        });
+            NatMapping {
+                virtual_ip,
+                mesh_addr,
+            },
+        );
         self.rebuild()?;
 
         debug!(
@@ -129,7 +130,9 @@ impl NatManager {
     pub fn cleanup(self) -> Result<(), NatError> {
         let mut batch = Batch::new();
         batch.add(&self.table, MsgType::Del);
-        batch.send().map_err(|e| NatError::Nftables(e.to_string()))?;
+        batch
+            .send()
+            .map_err(|e| NatError::Nftables(e.to_string()))?;
 
         info!("Deleted nftables table '{TABLE_NAME}'");
         Ok(())
@@ -171,10 +174,8 @@ impl NatManager {
                 .with_expr(Meta::new(MetaType::NfProto))
                 .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                 .with_expr(
-                    HighLevelPayload::Network(NetworkHeaderField::IPv6(
-                        IPv6HeaderField::Daddr,
-                    ))
-                    .build(),
+                    HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Daddr))
+                        .build(),
                 )
                 .with_expr(Cmp::new(CmpOp::Eq, mapping.virtual_ip.octets()))
                 .with_expr(Immediate::new_data(
@@ -193,10 +194,8 @@ impl NatManager {
                 .with_expr(Meta::new(MetaType::NfProto))
                 .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                 .with_expr(
-                    HighLevelPayload::Network(NetworkHeaderField::IPv6(
-                        IPv6HeaderField::Saddr,
-                    ))
-                    .build(),
+                    HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Saddr))
+                        .build(),
                 )
                 .with_expr(Cmp::new(CmpOp::Eq, mapping.mesh_addr.octets()))
                 .with_expr(Immediate::new_data(
@@ -212,7 +211,9 @@ impl NatManager {
             batch.add(&snat_rule, MsgType::Add);
         }
 
-        batch.send().map_err(|e| NatError::Nftables(e.to_string()))?;
+        batch
+            .send()
+            .map_err(|e| NatError::Nftables(e.to_string()))?;
         Ok(())
     }
 }

@@ -5,11 +5,11 @@
 //! 2. Drain window expiry (clean up previous session after cutover)
 //! 3. Initiator-side cutover (first send after handshake completion)
 
+use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::wire::build_msg1;
 use crate::noise::HandshakeState;
 use crate::protocol::{SessionDatagram, SessionSetup};
-use crate::NodeAddr;
 use tracing::{debug, trace, warn};
 
 /// Keep previous session alive for this long after cutover.
@@ -69,7 +69,8 @@ impl Node {
             }
 
             let elapsed = peer.session_established_at().elapsed().as_secs();
-            let counter = peer.noise_session()
+            let counter = peer
+                .noise_session()
                 .map(|s| s.current_send_counter())
                 .unwrap_or(0);
 
@@ -88,9 +89,10 @@ impl Node {
                 debug_assert!(
                     peer.transport_id().is_some()
                         && peer.our_index().is_some()
-                        && self.peers_by_index.contains_key(
-                            &(peer.transport_id().unwrap(), peer.our_index().unwrap().as_u32())
-                        ),
+                        && self.peers_by_index.contains_key(&(
+                            peer.transport_id().unwrap(),
+                            peer.our_index().unwrap().as_u32()
+                        )),
                     "peers_by_index should contain pre-registered new index after cutover"
                 );
                 debug!(
@@ -106,7 +108,8 @@ impl Node {
                 && let Some(old_our_index) = peer.complete_drain()
             {
                 if let Some(transport_id) = peer.transport_id() {
-                    self.peers_by_index.remove(&(transport_id, old_our_index.as_u32()));
+                    self.peers_by_index
+                        .remove(&(transport_id, old_our_index.as_u32()));
                 }
                 let _ = self.index_allocator.free(old_our_index);
                 trace!(
@@ -208,7 +211,8 @@ impl Node {
         }
 
         // Register in pending_outbound for msg2 dispatch (maps to existing link)
-        self.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
+        self.pending_outbound
+            .insert((transport_id, our_index.as_u32()), link_id);
     }
 
     /// Resend pending rekey msg1s and abandon timed-out rekeys.

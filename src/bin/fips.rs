@@ -3,12 +3,12 @@
 //! Loads configuration and creates the top-level node instance.
 
 use clap::Parser;
-use fips::config::{resolve_identity, IdentitySource};
+use fips::config::{IdentitySource, resolve_identity};
 use fips::version;
 use fips::{Config, Node};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// FIPS mesh network daemon
 #[derive(Parser, Debug)]
@@ -34,7 +34,11 @@ async fn main() {
         match Config::load_file(config_path) {
             Ok(config) => (config, vec![config_path.clone()]),
             Err(e) => {
-                eprintln!("Failed to load configuration from {}: {}", config_path.display(), e);
+                eprintln!(
+                    "Failed to load configuration from {}: {}",
+                    config_path.display(),
+                    e
+                );
                 std::process::exit(1);
             }
         }
@@ -54,10 +58,7 @@ async fn main() {
         .with_default_directive(log_level.into())
         .from_env_lossy();
 
-    fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .init();
+    fmt().with_env_filter(filter).with_target(true).init();
 
     info!("FIPS {} starting", version::short_version());
 
@@ -79,8 +80,12 @@ async fn main() {
     };
     match &resolved.source {
         IdentitySource::Config => info!("Using identity from configuration"),
-        IdentitySource::KeyFile(p) => info!(path = %p.display(), "Loaded persistent identity from key file"),
-        IdentitySource::Generated(p) => info!(path = %p.display(), "Generated persistent identity, saved to key file"),
+        IdentitySource::KeyFile(p) => {
+            info!(path = %p.display(), "Loaded persistent identity from key file")
+        }
+        IdentitySource::Generated(p) => {
+            info!(path = %p.display(), "Generated persistent identity, saved to key file")
+        }
         IdentitySource::Ephemeral => info!("Using ephemeral identity (new keypair each start)"),
     }
 
@@ -116,8 +121,9 @@ async fn main() {
     // stop() drops the packet channel, causing run_rx_loop to exit.
     #[cfg(unix)]
     let shutdown = async {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},

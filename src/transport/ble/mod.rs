@@ -36,11 +36,11 @@ use io::{BleIo, BleScanner, BleStream};
 use pool::{BleConnection, ConnectionPool};
 use stats::BleStats;
 
+use secp256k1::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use secp256k1::XOnlyPublicKey;
 use tracing::{debug, info, trace, warn};
 
 /// Default FIPS L2CAP PSM (Protocol Service Multiplexer).
@@ -57,7 +57,6 @@ pub type DefaultBleTransport = BleTransport<io::BluerIo>;
 
 #[cfg(any(not(feature = "ble"), test))]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
-
 
 // ============================================================================
 // BLE Transport
@@ -490,8 +489,7 @@ impl<I: BleIo> BleTransport<I> {
                         match pubkey_exchange(&stream, our_pubkey).await {
                             Ok(peer_pubkey) => {
                                 debug!(addr = %addr_clone, "BLE outbound pubkey exchange complete");
-                                discovery_buffer
-                                    .add_peer_with_pubkey(&ble_addr, peer_pubkey);
+                                discovery_buffer.add_peer_with_pubkey(&ble_addr, peer_pubkey);
                             }
                             Err(e) => {
                                 warn!(
@@ -1077,16 +1075,13 @@ mod tests {
 
     fn make_transport(
         io: MockBleIo,
-    ) -> (BleTransport<MockBleIo>, tokio::sync::mpsc::Receiver<ReceivedPacket>) {
+    ) -> (
+        BleTransport<MockBleIo>,
+        tokio::sync::mpsc::Receiver<ReceivedPacket>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let config = BleConfig::default();
-        let transport = BleTransport::new(
-            TransportId::new(1),
-            None,
-            config,
-            io,
-            tx,
-        );
+        let transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
         (transport, rx)
     }
 
@@ -1177,7 +1172,10 @@ mod tests {
         let io = MockBleIo::new("hci0", test_addr(1));
         let (transport, _rx) = make_transport(io);
         let addr = test_addr(2).to_transport_addr();
-        assert_eq!(transport.connection_state_sync(&addr), ConnectionState::None);
+        assert_eq!(
+            transport.connection_state_sync(&addr),
+            ConnectionState::None
+        );
     }
 
     /// Verify that the cross-probe tie-breaker follows the same convention
