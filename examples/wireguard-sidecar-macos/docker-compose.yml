@@ -1,0 +1,25 @@
+services:
+  fips-gateway:
+    build: .
+    image: fips-gateway:latest
+    container_name: fips-gateway
+    hostname: fips-gateway
+    privileged: true
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.all.forwarding=1
+      - net.ipv4.ip_forward=1
+    ports:
+      - "5354:5354/udp"
+      - "5354:5354/tcp"
+      - "2222:22/tcp"
+      - "51820:51820/udp"
+    volumes:
+      - ./fips.yaml:/etc/fips/fips.yaml:ro
+      - ./identity/fips.key:/etc/fips/fips.key
+      - ./identity:/etc/fips/identity
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped

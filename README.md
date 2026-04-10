@@ -282,6 +282,16 @@ sudo journalctl -u fips -f
 See [testing/](testing/) for Docker-based integration test harnesses
 including static topology tests and stochastic chaos simulation.
 
+## Examples
+
+- [examples/wireguard-sidecar-macos/](examples/wireguard-sidecar-macos/) -
+  Run a local WireGuard sidecar on macOS so `.fips` traffic can reach the mesh
+  through Docker.
+
+The macOS WireGuard sidecar only forwards FIPS IPv6 traffic destined for
+`fd00::/8` from `wg0` to `fips0`. Regular internet traffic does not transit the
+sidecar and continues to use the host network normally.
+
 ## Documentation
 
 Protocol design documentation is in [docs/design/](docs/design/), organized as
