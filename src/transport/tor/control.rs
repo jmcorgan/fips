@@ -6,11 +6,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use serde::Serialize;
 use tracing::debug;
 
 // ============================================================================
@@ -67,10 +67,7 @@ impl ControlAuth {
     ///
     /// - `"cookie"` or `"cookie:/path/to/cookie"` → Cookie auth
     /// - `"password:secret"` → Password auth
-    pub fn from_config(
-        auth_str: &str,
-        default_cookie_path: &str,
-    ) -> Result<Self, TorControlError> {
+    pub fn from_config(auth_str: &str, default_cookie_path: &str) -> Result<Self, TorControlError> {
         if auth_str == "cookie" {
             Ok(Self::Cookie(PathBuf::from(default_cookie_path)))
         } else if let Some(path) = auth_str.strip_prefix("cookie:") {
@@ -286,10 +283,7 @@ impl TorControlClient {
     pub async fn traffic_read(&mut self) -> Result<u64, TorControlError> {
         let value = self.getinfo("traffic/read").await?;
         value.trim().parse::<u64>().map_err(|_| {
-            TorControlError::ProtocolError(format!(
-                "invalid traffic/read value: '{}'",
-                value
-            ))
+            TorControlError::ProtocolError(format!("invalid traffic/read value: '{}'", value))
         })
     }
 
@@ -297,10 +291,7 @@ impl TorControlClient {
     pub async fn traffic_written(&mut self) -> Result<u64, TorControlError> {
         let value = self.getinfo("traffic/written").await?;
         value.trim().parse::<u64>().map_err(|_| {
-            TorControlError::ProtocolError(format!(
-                "invalid traffic/written value: '{}'",
-                value
-            ))
+            TorControlError::ProtocolError(format!("invalid traffic/written value: '{}'", value))
         })
     }
 
@@ -327,7 +318,10 @@ impl TorControlClient {
     /// Returns a list of addresses Tor is listening on for SOCKS connections.
     pub async fn socks_listeners(&mut self) -> Result<Vec<String>, TorControlError> {
         let value = self.getinfo("net/listeners/socks").await?;
-        Ok(value.split_whitespace().map(|s| s.trim_matches('"').to_string()).collect())
+        Ok(value
+            .split_whitespace()
+            .map(|s| s.trim_matches('"').to_string())
+            .collect())
     }
 
     /// Collect all monitoring info in a single batch of queries.
@@ -336,7 +330,10 @@ impl TorControlClient {
         let circuit_established = self.is_circuit_established().await.unwrap_or(false);
         let traffic_read = self.traffic_read().await.unwrap_or(0);
         let traffic_written = self.traffic_written().await.unwrap_or(0);
-        let network_liveness = self.network_liveness().await.unwrap_or_else(|_| "unknown".into());
+        let network_liveness = self
+            .network_liveness()
+            .await
+            .unwrap_or_else(|_| "unknown".into());
         let version = self.version().await.unwrap_or_else(|_| "unknown".into());
         let dormant = self.is_dormant().await.unwrap_or(false);
 
@@ -393,10 +390,7 @@ impl TorControlClient {
             }
 
             let code: u16 = line[..3].parse().map_err(|_| {
-                TorControlError::ProtocolError(format!(
-                    "invalid response code in: '{}'",
-                    line
-                ))
+                TorControlError::ProtocolError(format!("invalid response code in: '{}'", line))
             })?;
 
             let separator = line.as_bytes()[3];
@@ -426,8 +420,7 @@ impl TorControlClient {
                                 "connection closed during multi-line response".into(),
                             ));
                         }
-                        let dot_line =
-                            line_buf.trim_end_matches(['\r', '\n']);
+                        let dot_line = line_buf.trim_end_matches(['\r', '\n']);
                         if dot_line == "." {
                             break;
                         }
@@ -464,7 +457,11 @@ struct ControlResponse {
 /// Read a Tor control cookie file (32 bytes of raw binary).
 fn read_cookie_file(path: &Path) -> Result<Vec<u8>, TorControlError> {
     let data = std::fs::read(path).map_err(|e| {
-        TorControlError::AuthFailed(format!("failed to read cookie file '{}': {}", path.display(), e))
+        TorControlError::AuthFailed(format!(
+            "failed to read cookie file '{}': {}",
+            path.display(),
+            e
+        ))
     })?;
 
     if data.len() != 32 {
@@ -644,7 +641,9 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_password() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
 
         let auth = ControlAuth::Password("testpass".to_string());
         client.authenticate(&auth).await.unwrap();
@@ -659,7 +658,9 @@ mod tests {
         let cookie_path = dir.path().join("cookie");
         std::fs::write(&cookie_path, [0xAA; 32]).unwrap();
 
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
         let auth = ControlAuth::Cookie(cookie_path);
         client.authenticate(&auth).await.unwrap();
     }
@@ -667,7 +668,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_bootstrap_phase() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
 
         let auth = ControlAuth::Password("testpass".to_string());
         client.authenticate(&auth).await.unwrap();
@@ -682,7 +685,9 @@ mod tests {
             reject_auth: true,
         })
         .await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
 
         let auth = ControlAuth::Password("wrongpass".to_string());
         let result = client.authenticate(&auth).await;
@@ -705,8 +710,13 @@ mod tests {
     #[tokio::test]
     async fn test_is_circuit_established() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         assert!(client.is_circuit_established().await.unwrap());
     }
@@ -714,8 +724,13 @@ mod tests {
     #[tokio::test]
     async fn test_traffic_counters() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         assert_eq!(client.traffic_read().await.unwrap(), 1048576);
         assert_eq!(client.traffic_written().await.unwrap(), 524288);
@@ -724,8 +739,13 @@ mod tests {
     #[tokio::test]
     async fn test_network_liveness() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         assert_eq!(client.network_liveness().await.unwrap(), "up");
     }
@@ -733,8 +753,13 @@ mod tests {
     #[tokio::test]
     async fn test_version() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         assert_eq!(client.version().await.unwrap(), "0.4.8.10");
     }
@@ -742,8 +767,13 @@ mod tests {
     #[tokio::test]
     async fn test_dormant() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         assert!(!client.is_dormant().await.unwrap());
     }
@@ -751,8 +781,13 @@ mod tests {
     #[tokio::test]
     async fn test_socks_listeners() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         let listeners = client.socks_listeners().await.unwrap();
         assert_eq!(listeners, vec!["127.0.0.1:9050"]);
@@ -761,8 +796,13 @@ mod tests {
     #[tokio::test]
     async fn test_monitoring_snapshot() {
         let mock = MockTorControlServer::start().await;
-        let mut client = TorControlClient::connect(&mock.addr().to_string()).await.unwrap();
-        client.authenticate(&ControlAuth::Password("test".into())).await.unwrap();
+        let mut client = TorControlClient::connect(&mock.addr().to_string())
+            .await
+            .unwrap();
+        client
+            .authenticate(&ControlAuth::Password("test".into()))
+            .await
+            .unwrap();
 
         let info = client.monitoring_snapshot().await.unwrap();
         assert_eq!(info.bootstrap, 100);

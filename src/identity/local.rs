@@ -3,9 +3,9 @@
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use std::fmt;
 
-use super::auth::{auth_challenge_digest, AuthResponse};
+use super::auth::{AuthResponse, auth_challenge_digest};
 use super::encoding::{decode_secret, encode_npub};
-use super::{sha256, FipsAddress, IdentityError, NodeAddr};
+use super::{FipsAddress, IdentityError, NodeAddr, sha256};
 
 /// A FIPS node identity consisting of a keypair and derived identifiers.
 ///
@@ -22,8 +22,8 @@ impl Identity {
     pub fn generate() -> Self {
         let mut secret_bytes = [0u8; 32];
         rand::Rng::fill_bytes(&mut rand::rng(), &mut secret_bytes);
-        let secret_key = SecretKey::from_slice(&secret_bytes)
-            .expect("32 random bytes is a valid secret key");
+        let secret_key =
+            SecretKey::from_slice(&secret_bytes).expect("32 random bytes is a valid secret key");
         Self::from_secret_key(secret_key)
     }
 

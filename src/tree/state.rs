@@ -157,7 +157,8 @@ impl TreeState {
     /// Only records a flap when the parent actually changes.
     pub fn set_parent(&mut self, parent_id: NodeAddr, sequence: u64, timestamp: u64) -> bool {
         let parent_changed = self.is_root() || *self.my_declaration.parent_id() != parent_id;
-        self.my_declaration = ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
+        self.my_declaration =
+            ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
         self.last_parent_switch = Some(Instant::now());
         // Record switch for flap detection only when parent actually changes;
         // coordinates will be recomputed when ancestry is available
@@ -228,8 +229,7 @@ impl TreeState {
             let dominated = match &best {
                 None => true,
                 Some((best_id, best_dist)) => {
-                    distance < *best_dist
-                        || (distance == *best_dist && peer_id < best_id)
+                    distance < *best_dist || (distance == *best_dist && peer_id < best_id)
                 }
             };
 
@@ -353,9 +353,7 @@ impl TreeState {
             match &best_peer {
                 None => best_peer = Some((*peer_id, eff_depth)),
                 Some((best_id, best_eff)) => {
-                    if eff_depth < *best_eff
-                        || (eff_depth == *best_eff && peer_id < best_id)
-                    {
+                    if eff_depth < *best_eff || (eff_depth == *best_eff && peer_id < best_id) {
                         best_peer = Some((*peer_id, eff_depth));
                     }
                 }
@@ -372,7 +370,11 @@ impl TreeState {
         // --- Mandatory switches (bypass hold-down and hysteresis) ---
 
         // If our current parent is gone from peer_ancestry, our path is broken — always switch
-        if !self.is_root() && !self.peer_ancestry.contains_key(self.my_declaration.parent_id()) {
+        if !self.is_root()
+            && !self
+                .peer_ancestry
+                .contains_key(self.my_declaration.parent_id())
+        {
             return Some(best_peer_id);
         }
 
@@ -411,7 +413,11 @@ impl TreeState {
         let current_parent_cost = peer_costs
             .get(self.my_declaration.parent_id())
             .copied()
-            .unwrap_or(if peer_costs.is_empty() { 1.0 } else { f64::INFINITY });
+            .unwrap_or(if peer_costs.is_empty() {
+                1.0
+            } else {
+                f64::INFINITY
+            });
         let current_parent_coords = self.peer_ancestry.get(self.my_declaration.parent_id());
         let current_parent_eff = match current_parent_coords {
             Some(coords) => coords.depth() as f64 + current_parent_cost,
@@ -451,8 +457,7 @@ impl TreeState {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let new_seq = self.my_declaration.sequence() + 1;
-        self.my_declaration =
-            ParentDeclaration::self_root(self.my_node_addr, new_seq, timestamp);
+        self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, new_seq, timestamp);
         self.recompute_coords();
         true
     }

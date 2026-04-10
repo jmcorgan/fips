@@ -4,6 +4,7 @@
 //! periodic report generation on the tick timer, and emits periodic
 //! and teardown metric logs.
 
+use crate::NodeAddr;
 use crate::mmp::MmpMode;
 use crate::mmp::MmpSessionState;
 use crate::mmp::report::{ReceiverReport, SenderReport};
@@ -12,7 +13,6 @@ use crate::protocol::{
     LinkMessageType, PathMtuNotification, SessionMessageType, SessionReceiverReport,
     SessionSenderReport,
 };
-use crate::NodeAddr;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -72,7 +72,11 @@ impl Node {
     ///
     /// The peer is telling us about what they received from us. We feed
     /// this to our metrics to compute RTT, loss rate, and trend indicators.
-    pub(in crate::node) async fn handle_receiver_report(&mut self, from: &NodeAddr, payload: &[u8]) {
+    pub(in crate::node) async fn handle_receiver_report(
+        &mut self,
+        from: &NodeAddr,
+        payload: &[u8],
+    ) {
         let rr = match ReceiverReport::decode(payload) {
             Ok(rr) => rr,
             Err(e) => {
@@ -101,7 +105,9 @@ impl Node {
         // Process the report: computes RTT from timestamp echo, updates
         // loss rate, goodput rate, jitter trend, and ETX.
         let now = Instant::now();
-        let first_rtt = mmp.metrics.process_receiver_report(&rr, our_timestamp_ms, now);
+        let first_rtt = mmp
+            .metrics
+            .process_receiver_report(&rr, our_timestamp_ms, now);
 
         // Feed SRTT back to sender/receiver report interval tuning
         if let Some(srtt_ms) = mmp.metrics.srtt_ms() {
@@ -114,7 +120,8 @@ impl Node {
         // (what fraction of peer's frames we received), using per-interval deltas.
         let our_recv_packets = mmp.receiver.cumulative_packets_recv();
         let peer_highest = mmp.receiver.highest_counter();
-        mmp.metrics.update_reverse_delivery(our_recv_packets, peer_highest);
+        mmp.metrics
+            .update_reverse_delivery(our_recv_packets, peer_highest);
 
         trace!(
             from = %peer_name,
@@ -128,7 +135,9 @@ impl Node {
         // Trigger re-evaluation so the node doesn't wait for the next
         // periodic tick or TreeAnnounce.
         if first_rtt {
-            let peer_costs: std::collections::HashMap<crate::NodeAddr, f64> = self.peers.iter()
+            let peer_costs: std::collections::HashMap<crate::NodeAddr, f64> = self
+                .peers
+                .iter()
                 .filter(|(_, p)| p.has_srtt())
                 .map(|(a, p)| (*a, p.link_cost()))
                 .collect();
@@ -179,7 +188,9 @@ impl Node {
 
         for (node_addr, peer) in self.peers.iter_mut() {
             // Compute display name before taking mutable MMP borrow
-            let peer_name = self.peer_aliases.get(node_addr)
+            let peer_name = self
+                .peer_aliases
+                .get(node_addr)
                 .cloned()
                 .unwrap_or_else(|| peer.identity().short_npub());
 
@@ -261,7 +272,7 @@ impl Node {
 
         let rtt_str = match m.srtt_ms() {
             Some(rtt) => format!("{:.1}ms", rtt),
-            None => "n/a".to_string()
+            None => "n/a".to_string(),
         };
         let loss_str = format!("{:.1}%", m.loss_rate() * 100.0);
 
@@ -294,7 +305,9 @@ impl Node {
 
         for (dest_addr, entry) in self.sessions.iter_mut() {
             // Compute display name before taking mutable MMP borrow
-            let session_name = self.peer_aliases.get(dest_addr)
+            let session_name = self
+                .peer_aliases
+                .get(dest_addr)
                 .cloned()
                 .unwrap_or_else(|| {
                     let (xonly, _) = entry.remote_pubkey().x_only_public_key();
@@ -362,7 +375,9 @@ impl Node {
                 }
                 Err(e) => {
                     // Peek at current failure count for log suppression
-                    let failures = self.sessions.get(&dest_addr)
+                    let failures = self
+                        .sessions
+                        .get(&dest_addr)
                         .and_then(|entry| entry.mmp())
                         .map(|mmp| mmp.sender.consecutive_send_failures())
                         .unwrap_or(0);
@@ -541,7 +556,10 @@ impl Node {
             if let Some(peer) = self.peers.get_mut(&addr) {
                 peer.mark_heartbeat_sent(now);
             }
-            if let Err(e) = self.send_encrypted_link_message(&addr, &heartbeat_msg).await {
+            if let Err(e) = self
+                .send_encrypted_link_message(&addr, &heartbeat_msg)
+                .await
+            {
                 trace!(peer = %self.peer_display_name(&addr), error = %e, "Failed to send heartbeat");
             }
         }

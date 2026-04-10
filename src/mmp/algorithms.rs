@@ -371,7 +371,10 @@ mod tests {
         }
         // Should converge near 1000µs
         let jitter = j.jitter_us();
-        assert!(jitter > 900 && jitter < 1100, "jitter={jitter}, expected ~1000");
+        assert!(
+            jitter > 900 && jitter < 1100,
+            "jitter={jitter}, expected ~1000"
+        );
     }
 
     #[test]
@@ -391,10 +394,7 @@ mod tests {
             s.update(50_000);
         }
         let srtt = s.srtt_us();
-        assert!(
-            (srtt - 50_000).abs() < 1000,
-            "srtt={srtt}, expected ~50000"
-        );
+        assert!((srtt - 50_000).abs() < 1000, "srtt={srtt}, expected ~50000");
     }
 
     #[test]
@@ -417,7 +417,12 @@ mod tests {
             e.update(100.0);
         }
         // Short should be closer to 100 than long
-        assert!(e.short() > e.long(), "short={} long={}", e.short(), e.long());
+        assert!(
+            e.short() > e.long(),
+            "short={} long={}",
+            e.short(),
+            e.long()
+        );
     }
 
     #[test]
@@ -437,7 +442,10 @@ mod tests {
             d.push(i, 5000 + (i as i64) * 100); // increasing by 100µs per packet
         }
         let trend = d.trend_us_per_sec();
-        assert!(trend > 0, "increasing OWD should have positive trend, got {trend}");
+        assert!(
+            trend > 0,
+            "increasing OWD should have positive trend, got {trend}"
+        );
     }
 
     #[test]

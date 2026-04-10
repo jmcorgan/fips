@@ -1,9 +1,9 @@
 //! Discovery messages: LookupRequest and LookupResponse.
 
+use crate::NodeAddr;
 use crate::protocol::error::ProtocolError;
 use crate::protocol::session::{decode_coords, encode_coords};
 use crate::tree::TreeCoordinate;
-use crate::NodeAddr;
 use secp256k1::schnorr::Signature;
 
 /// Request to discover a node's coordinates.
@@ -192,7 +192,11 @@ impl LookupResponse {
     /// Get the bytes that should be signed as proof.
     ///
     /// Format: request_id (8) || target (16) || coords_encoding (2 + 16×n)
-    pub fn proof_bytes(request_id: u64, target: &NodeAddr, target_coords: &TreeCoordinate) -> Vec<u8> {
+    pub fn proof_bytes(
+        request_id: u64,
+        target: &NodeAddr,
+        target_coords: &TreeCoordinate,
+    ) -> Vec<u8> {
         let coord_size = 2 + target_coords.entries().len() * 16;
         let mut bytes = Vec::with_capacity(24 + coord_size);
         bytes.extend_from_slice(&request_id.to_le_bytes());

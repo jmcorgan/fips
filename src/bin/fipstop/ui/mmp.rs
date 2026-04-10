@@ -12,18 +12,15 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let data = match app.data.get(&Tab::Mmp) {
         Some(d) => d,
         None => {
-            let msg = Paragraph::new("  Waiting for data...")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg =
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
             return;
         }
     };
 
-    let chunks = Layout::vertical([
-        Constraint::Percentage(60),
-        Constraint::Percentage(40),
-    ])
-    .split(area);
+    let chunks =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
     draw_link_mmp(frame, data, chunks[0]);
     draw_session_mmp(frame, data, chunks[1]);
@@ -44,8 +41,7 @@ fn draw_link_mmp(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     frame.render_widget(block, area);
 
     if peers.is_empty() {
-        let msg =
-            Paragraph::new("  No peers").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("  No peers").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(msg, inner);
         return;
     }
@@ -152,8 +148,7 @@ fn draw_session_mmp(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     frame.render_widget(block, area);
 
     if sessions.is_empty() {
-        let msg = Paragraph::new("  No sessions")
-            .style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("  No sessions").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(msg, inner);
         return;
     }
@@ -234,4 +229,3 @@ fn trend_color(trend: &str, bad_rising: bool) -> Color {
         _ => Color::DarkGray, // "stable"
     }
 }
-

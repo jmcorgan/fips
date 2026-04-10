@@ -129,9 +129,11 @@ fn test_wrong_role_errors() {
     initiator.set_local_epoch(generate_epoch());
 
     // Initiator can't read message 1
-    assert!(initiator
-        .read_message_1(&[0u8; HANDSHAKE_MSG1_SIZE])
-        .is_err());
+    assert!(
+        initiator
+            .read_message_1(&[0u8; HANDSHAKE_MSG1_SIZE])
+            .is_err()
+    );
 
     // Initiator can't write message 2 before message 1
     assert!(initiator.write_message_2().is_err());
@@ -337,7 +339,11 @@ fn test_replay_window_sequential() {
 
     // All should be marked as seen
     for i in 0..1000 {
-        assert!(!window.check(i), "Counter {} should be rejected as replay", i);
+        assert!(
+            !window.check(i),
+            "Counter {} should be rejected as replay",
+            i
+        );
     }
 
     assert_eq!(window.highest(), 999);
@@ -403,18 +409,20 @@ fn test_handshake_with_odd_parity_responder() {
 
     // Node B (responder) - odd parity key
     let sk_b = secp256k1::SecretKey::from_slice(
-        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0")
-            .unwrap(),
+        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0").unwrap(),
     )
     .unwrap();
     let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
     let (xonly_b, parity_b) = kp_b.public_key().x_only_public_key();
-    assert_eq!(parity_b, Parity::Odd, "Test requires odd-parity responder key");
+    assert_eq!(
+        parity_b,
+        Parity::Odd,
+        "Test requires odd-parity responder key"
+    );
 
     // Node A (initiator) - even parity key
     let sk_a = secp256k1::SecretKey::from_slice(
-        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
-            .unwrap(),
+        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20").unwrap(),
     )
     .unwrap();
     let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
@@ -423,7 +431,8 @@ fn test_handshake_with_odd_parity_responder() {
     // (x-only -> assumed even parity)
     let assumed_even_b = xonly_b.public_key(Parity::Even);
     assert_ne!(
-        assumed_even_b, kp_b.public_key(),
+        assumed_even_b,
+        kp_b.public_key(),
         "Even assumption should differ from actual odd key"
     );
 
@@ -554,7 +563,8 @@ fn test_xk_identity_timing() {
     let initiator_keypair = generate_keypair();
     let responder_keypair = generate_keypair();
 
-    let mut initiator = HandshakeState::new_xk_initiator(initiator_keypair, responder_keypair.public_key());
+    let mut initiator =
+        HandshakeState::new_xk_initiator(initiator_keypair, responder_keypair.public_key());
     initiator.set_local_epoch(generate_epoch());
     let mut responder = HandshakeState::new_xk_responder(responder_keypair);
     responder.set_local_epoch(generate_epoch());
@@ -565,18 +575,30 @@ fn test_xk_identity_timing() {
     // After msg1
     let msg1 = initiator.write_xk_message_1().unwrap();
     responder.read_xk_message_1(&msg1).unwrap();
-    assert!(responder.remote_static().is_none(), "XK: responder should NOT know identity after msg1");
+    assert!(
+        responder.remote_static().is_none(),
+        "XK: responder should NOT know identity after msg1"
+    );
 
     // After msg2
     let msg2 = responder.write_xk_message_2().unwrap();
     initiator.read_xk_message_2(&msg2).unwrap();
-    assert!(responder.remote_static().is_none(), "XK: responder should NOT know identity after msg2");
+    assert!(
+        responder.remote_static().is_none(),
+        "XK: responder should NOT know identity after msg2"
+    );
 
     // After msg3
     let msg3 = initiator.write_xk_message_3().unwrap();
     responder.read_xk_message_3(&msg3).unwrap();
-    assert!(responder.remote_static().is_some(), "XK: responder should know identity after msg3");
-    assert_eq!(responder.remote_static().unwrap(), &initiator_keypair.public_key());
+    assert!(
+        responder.remote_static().is_some(),
+        "XK: responder should know identity after msg3"
+    );
+    assert_eq!(
+        responder.remote_static().unwrap(),
+        &initiator_keypair.public_key()
+    );
 }
 
 #[test]
@@ -587,7 +609,11 @@ fn test_xk_wrong_state_errors() {
     // Initiator can't read XK msg1
     let mut initiator = HandshakeState::new_xk_initiator(keypair1, keypair2.public_key());
     initiator.set_local_epoch(generate_epoch());
-    assert!(initiator.read_xk_message_1(&[0u8; XK_HANDSHAKE_MSG1_SIZE]).is_err());
+    assert!(
+        initiator
+            .read_xk_message_1(&[0u8; XK_HANDSHAKE_MSG1_SIZE])
+            .is_err()
+    );
 
     // Initiator can't write msg2
     assert!(initiator.write_xk_message_2().is_err());
@@ -601,7 +627,11 @@ fn test_xk_wrong_state_errors() {
     assert!(responder.write_xk_message_1().is_err());
 
     // Responder can't read msg3 before msg2
-    assert!(responder.read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE]).is_err());
+    assert!(
+        responder
+            .read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE])
+            .is_err()
+    );
 }
 
 #[test]
@@ -636,7 +666,10 @@ fn test_xk_handshake_hash_differs_from_ik() {
     xk_resp.read_xk_message_3(&msg3).unwrap();
     let xk_hash = xk_init.handshake_hash();
 
-    assert_ne!(ik_hash, xk_hash, "IK and XK should produce different handshake hashes");
+    assert_ne!(
+        ik_hash, xk_hash,
+        "IK and XK should produce different handshake hashes"
+    );
 }
 
 #[test]
@@ -677,18 +710,20 @@ fn test_xk_with_odd_parity_responder() {
 
     // Node B (responder) - odd parity key
     let sk_b = secp256k1::SecretKey::from_slice(
-        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0")
-            .unwrap(),
+        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0").unwrap(),
     )
     .unwrap();
     let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
     let (xonly_b, parity_b) = kp_b.public_key().x_only_public_key();
-    assert_eq!(parity_b, Parity::Odd, "Test requires odd-parity responder key");
+    assert_eq!(
+        parity_b,
+        Parity::Odd,
+        "Test requires odd-parity responder key"
+    );
 
     // Node A (initiator)
     let sk_a = secp256k1::SecretKey::from_slice(
-        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
-            .unwrap(),
+        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20").unwrap(),
     )
     .unwrap();
     let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
@@ -716,7 +751,9 @@ fn test_xk_with_odd_parity_responder() {
 
     let counter = sender.current_send_counter();
     let ciphertext = sender.encrypt(b"xk parity test").unwrap();
-    let plaintext = receiver.decrypt_with_replay_check(&ciphertext, counter).unwrap();
+    let plaintext = receiver
+        .decrypt_with_replay_check(&ciphertext, counter)
+        .unwrap();
     assert_eq!(plaintext, b"xk parity test");
 }
 
@@ -727,7 +764,11 @@ fn test_xk_invalid_msg1_size() {
     responder.set_local_epoch(generate_epoch());
 
     // Wrong size (IK msg1 size instead of XK)
-    assert!(responder.read_xk_message_1(&[0u8; HANDSHAKE_MSG1_SIZE]).is_err());
+    assert!(
+        responder
+            .read_xk_message_1(&[0u8; HANDSHAKE_MSG1_SIZE])
+            .is_err()
+    );
     // Too short
     assert!(responder.read_xk_message_1(&[0u8; 10]).is_err());
 }
@@ -748,5 +789,9 @@ fn test_xk_invalid_msg3_size() {
 
     // Responder is now in Message2Done, try wrong-size msg3
     assert!(responder.read_xk_message_3(&[0u8; 10]).is_err());
-    assert!(responder.read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE + 1]).is_err());
+    assert!(
+        responder
+            .read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE + 1])
+            .is_err()
+    );
 }

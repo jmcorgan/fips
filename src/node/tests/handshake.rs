@@ -5,9 +5,11 @@ use super::*;
 #[tokio::test]
 async fn test_two_node_handshake_udp() {
     use crate::config::UdpConfig;
+    use crate::node::wire::{
+        build_encrypted, build_established_header, build_msg1, prepend_inner_header,
+    };
     use crate::transport::udp::UdpTransport;
-    use crate::node::wire::{build_encrypted, build_established_header, build_msg1, prepend_inner_header};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     // === Setup: Two nodes with UDP transports on localhost ===
 
@@ -26,10 +28,8 @@ async fn test_two_node_handshake_udp() {
     let (packet_tx_a, mut packet_rx_a) = packet_channel(64);
     let (packet_tx_b, mut packet_rx_b) = packet_channel(64);
 
-    let mut transport_a =
-        UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
-    let mut transport_b =
-        UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
+    let mut transport_a = UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
+    let mut transport_b = UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
 
     transport_a.start_async().await.unwrap();
     transport_b.start_async().await.unwrap();
@@ -49,23 +49,20 @@ async fn test_two_node_handshake_udp() {
     // === Phase 1: Node A initiates handshake to Node B ===
 
     // Create peer identity for B (must use full key for ECDH parity)
-    let peer_b_identity =
-        PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
     let peer_b_node_addr = *peer_b_identity.node_addr();
 
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(
-        link_id_a,
-        peer_b_identity,
-        1000,
-    );
+    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
 
     // Allocate session index for A's outbound
     let our_index_a = node_a.index_allocator.allocate().unwrap();
 
     // Start handshake (generates Noise IK msg1)
     let our_keypair_a = node_a.identity.keypair();
-    let noise_msg1 = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
+    let noise_msg1 = conn_a
+        .start_handshake(our_keypair_a, node_a.startup_epoch, 1000)
+        .unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);
     conn_a.set_source_addr(remote_addr_b.clone());
@@ -82,10 +79,9 @@ async fn test_two_node_handshake_udp() {
     );
     node_a.links.insert(link_id_a, link_a);
     node_a.connections.insert(link_id_a, conn_a);
-    node_a.pending_outbound.insert(
-        (transport_id_a, our_index_a.as_u32()),
-        link_id_a,
-    );
+    node_a
+        .pending_outbound
+        .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
 
     // Send msg1 from A to B over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -104,11 +100,13 @@ async fn test_two_node_handshake_udp() {
     node_b.handle_msg1(packet_b).await;
 
     // Verify B promoted the inbound connection
-    let peer_a_node_addr = *PeerIdentity::from_pubkey_full(
-        node_a.identity.pubkey_full(),
-    )
-    .node_addr();
-    assert_eq!(node_b.peer_count(), 1, "Node B should have 1 peer after msg1");
+    let peer_a_node_addr =
+        *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full()).node_addr();
+    assert_eq!(
+        node_b.peer_count(),
+        1,
+        "Node B should have 1 peer after msg1"
+    );
     let peer_a_on_b = node_b
         .get_peer(&peer_a_node_addr)
         .expect("Node B should have peer A");
@@ -134,7 +132,11 @@ async fn test_two_node_handshake_udp() {
     node_a.handle_msg2(packet_a).await;
 
     // Verify A promoted the outbound connection
-    assert_eq!(node_a.peer_count(), 1, "Node A should have 1 peer after msg2");
+    assert_eq!(
+        node_a.peer_count(),
+        1,
+        "Node A should have 1 peer after msg2"
+    );
     let peer_b_on_a = node_a
         .get_peer(&peer_b_node_addr)
         .expect("Node A should have peer B");
@@ -241,8 +243,8 @@ async fn test_two_node_handshake_udp() {
 #[tokio::test]
 async fn test_run_rx_loop_handshake() {
     use crate::config::UdpConfig;
-    use crate::transport::udp::UdpTransport;
     use crate::node::wire::build_msg1;
+    use crate::transport::udp::UdpTransport;
     use tokio::time::Duration;
 
     // === Setup: Two nodes with UDP transports on localhost ===
@@ -262,10 +264,8 @@ async fn test_run_rx_loop_handshake() {
     let (packet_tx_a, packet_rx_a) = packet_channel(64);
     let (packet_tx_b, packet_rx_b) = packet_channel(64);
 
-    let mut transport_a =
-        UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
-    let mut transport_b =
-        UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
+    let mut transport_a = UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
+    let mut transport_b = UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
 
     transport_a.start_async().await.unwrap();
     transport_b.start_async().await.unwrap();
@@ -290,20 +290,17 @@ async fn test_run_rx_loop_handshake() {
 
     // === Phase 1: Node A initiates handshake to Node B ===
 
-    let peer_b_identity =
-        PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
     let peer_b_node_addr = *peer_b_identity.node_addr();
 
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(
-        link_id_a,
-        peer_b_identity,
-        1000,
-    );
+    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
 
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let our_keypair_a = node_a.identity.keypair();
-    let noise_msg1 = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
+    let noise_msg1 = conn_a
+        .start_handshake(our_keypair_a, node_a.startup_epoch, 1000)
+        .unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);
     conn_a.set_source_addr(remote_addr_b.clone());
@@ -319,10 +316,9 @@ async fn test_run_rx_loop_handshake() {
     );
     node_a.links.insert(link_id_a, link_a);
     node_a.connections.insert(link_id_a, conn_a);
-    node_a.pending_outbound.insert(
-        (transport_id_a, our_index_a.as_u32()),
-        link_id_a,
-    );
+    node_a
+        .pending_outbound
+        .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
 
     // Send msg1 from A to B over real UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -350,12 +346,14 @@ async fn test_run_rx_loop_handshake() {
     }
 
     // Verify Node B promoted the inbound connection via rx loop dispatch
-    let peer_a_node_addr = *PeerIdentity::from_pubkey_full(
-        node_a.identity.pubkey_full(),
-    )
-    .node_addr();
+    let peer_a_node_addr =
+        *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full()).node_addr();
 
-    assert_eq!(node_b.peer_count(), 1, "Node B should have 1 peer after rx loop processed msg1");
+    assert_eq!(
+        node_b.peer_count(),
+        1,
+        "Node B should have 1 peer after rx loop processed msg1"
+    );
     let peer_a_on_b = node_b
         .get_peer(&peer_a_node_addr)
         .expect("Node B should have peer A");
@@ -390,7 +388,11 @@ async fn test_run_rx_loop_handshake() {
     }
 
     // Verify Node A promoted the outbound connection via rx loop dispatch
-    assert_eq!(node_a.peer_count(), 1, "Node A should have 1 peer after rx loop processed msg2");
+    assert_eq!(
+        node_a.peer_count(),
+        1,
+        "Node A should have 1 peer after rx loop processed msg2"
+    );
     let peer_b_on_a = node_a
         .get_peer(&peer_b_node_addr)
         .expect("Node A should have peer B");
@@ -432,9 +434,9 @@ async fn test_run_rx_loop_handshake() {
 #[tokio::test]
 async fn test_cross_connection_both_initiate() {
     use crate::config::UdpConfig;
-    use crate::transport::udp::UdpTransport;
     use crate::node::wire::build_msg1;
-    use tokio::time::{timeout, Duration};
+    use crate::transport::udp::UdpTransport;
+    use tokio::time::{Duration, timeout};
 
     // === Setup: Two nodes with UDP transports on localhost ===
 
@@ -453,10 +455,8 @@ async fn test_cross_connection_both_initiate() {
     let (packet_tx_a, mut packet_rx_a) = packet_channel(64);
     let (packet_tx_b, mut packet_rx_b) = packet_channel(64);
 
-    let mut transport_a =
-        UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
-    let mut transport_b =
-        UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
+    let mut transport_a = UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
+    let mut transport_b = UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
 
     transport_a.start_async().await.unwrap();
     transport_b.start_async().await.unwrap();
@@ -474,11 +474,9 @@ async fn test_cross_connection_both_initiate() {
         .insert(transport_id_b, TransportHandle::Udp(transport_b));
 
     // Peer identities (must use full key for ECDH parity)
-    let peer_b_identity =
-        PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
     let peer_b_node_addr = *peer_b_identity.node_addr();
-    let peer_a_identity =
-        PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full());
+    let peer_a_identity = PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full());
     let peer_a_node_addr = *peer_a_identity.node_addr();
 
     // === Phase 1: Both nodes initiate handshakes (simulate auto_connect) ===
@@ -488,7 +486,9 @@ async fn test_cross_connection_both_initiate() {
     let mut conn_a = PeerConnection::outbound(link_id_a_out, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let our_keypair_a = node_a.identity.keypair();
-    let noise_msg1_a = conn_a.start_handshake(our_keypair_a, node_a.startup_epoch, 1000).unwrap();
+    let noise_msg1_a = conn_a
+        .start_handshake(our_keypair_a, node_a.startup_epoch, 1000)
+        .unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);
     conn_a.set_source_addr(remote_addr_b.clone());
@@ -496,20 +496,29 @@ async fn test_cross_connection_both_initiate() {
     let wire_msg1_a = build_msg1(our_index_a, &noise_msg1_a);
 
     let link_a_out = Link::connectionless(
-        link_id_a_out, transport_id_a, remote_addr_b.clone(),
-        LinkDirection::Outbound, Duration::from_millis(100),
+        link_id_a_out,
+        transport_id_a,
+        remote_addr_b.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a_out, link_a_out);
-    node_a.addr_to_link.insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
+    node_a
+        .addr_to_link
+        .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
     node_a.connections.insert(link_id_a_out, conn_a);
-    node_a.pending_outbound.insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
+    node_a
+        .pending_outbound
+        .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
     let mut conn_b = PeerConnection::outbound(link_id_b_out, peer_a_identity, 1000);
     let our_index_b = node_b.index_allocator.allocate().unwrap();
     let our_keypair_b = node_b.identity.keypair();
-    let noise_msg1_b = conn_b.start_handshake(our_keypair_b, node_b.startup_epoch, 1000).unwrap();
+    let noise_msg1_b = conn_b
+        .start_handshake(our_keypair_b, node_b.startup_epoch, 1000)
+        .unwrap();
     conn_b.set_our_index(our_index_b);
     conn_b.set_transport_id(transport_id_b);
     conn_b.set_source_addr(remote_addr_a.clone());
@@ -517,20 +526,33 @@ async fn test_cross_connection_both_initiate() {
     let wire_msg1_b = build_msg1(our_index_b, &noise_msg1_b);
 
     let link_b_out = Link::connectionless(
-        link_id_b_out, transport_id_b, remote_addr_a.clone(),
-        LinkDirection::Outbound, Duration::from_millis(100),
+        link_id_b_out,
+        transport_id_b,
+        remote_addr_a.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
     );
     node_b.links.insert(link_id_b_out, link_b_out);
-    node_b.addr_to_link.insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
+    node_b
+        .addr_to_link
+        .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
     node_b.connections.insert(link_id_b_out, conn_b);
-    node_b.pending_outbound.insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
+    node_b
+        .pending_outbound
+        .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
 
     // Both send msg1 over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
-    transport.send(&remote_addr_b, &wire_msg1_a).await.expect("A send msg1");
+    transport
+        .send(&remote_addr_b, &wire_msg1_a)
+        .await
+        .expect("A send msg1");
 
     let transport = node_b.transports.get(&transport_id_b).unwrap();
-    transport.send(&remote_addr_a, &wire_msg1_b).await.expect("B send msg1");
+    transport
+        .send(&remote_addr_a, &wire_msg1_b)
+        .await
+        .expect("B send msg1");
 
     // === Phase 2: Both nodes receive the other's msg1 ===
     // Before the fix, addr_to_link would reject these because outbound links
@@ -538,21 +560,39 @@ async fn test_cross_connection_both_initiate() {
 
     // B receives A's msg1
     let packet_at_b = timeout(Duration::from_secs(1), packet_rx_b.recv())
-        .await.expect("Timeout").expect("Channel closed");
+        .await
+        .expect("Timeout")
+        .expect("Channel closed");
     node_b.handle_msg1(packet_at_b).await;
 
     // B should have promoted the inbound connection
-    assert_eq!(node_b.peer_count(), 1, "Node B should have 1 peer after processing A's msg1");
-    assert!(node_b.get_peer(&peer_a_node_addr).is_some(), "Node B should have peer A");
+    assert_eq!(
+        node_b.peer_count(),
+        1,
+        "Node B should have 1 peer after processing A's msg1"
+    );
+    assert!(
+        node_b.get_peer(&peer_a_node_addr).is_some(),
+        "Node B should have peer A"
+    );
 
     // A receives B's msg1
     let packet_at_a = timeout(Duration::from_secs(1), packet_rx_a.recv())
-        .await.expect("Timeout").expect("Channel closed");
+        .await
+        .expect("Timeout")
+        .expect("Channel closed");
     node_a.handle_msg1(packet_at_a).await;
 
     // A should have promoted the inbound connection
-    assert_eq!(node_a.peer_count(), 1, "Node A should have 1 peer after processing B's msg1");
-    assert!(node_a.get_peer(&peer_b_node_addr).is_some(), "Node A should have peer B");
+    assert_eq!(
+        node_a.peer_count(),
+        1,
+        "Node A should have 1 peer after processing B's msg1"
+    );
+    assert!(
+        node_a.get_peer(&peer_b_node_addr).is_some(),
+        "Node A should have peer B"
+    );
 
     // === Phase 3: Both nodes receive msg2 responses ===
     // The msg2 was sent during handle_msg1 processing. When handle_msg2
@@ -560,21 +600,37 @@ async fn test_cross_connection_both_initiate() {
 
     // A receives B's msg2 (response to A's original msg1)
     let msg2_at_a = timeout(Duration::from_secs(1), packet_rx_a.recv())
-        .await.expect("Timeout waiting for msg2 at A").expect("Channel closed");
+        .await
+        .expect("Timeout waiting for msg2 at A")
+        .expect("Channel closed");
     node_a.handle_msg2(msg2_at_a).await;
 
     // B receives A's msg2 (response to B's original msg1)
     let msg2_at_b = timeout(Duration::from_secs(1), packet_rx_b.recv())
-        .await.expect("Timeout waiting for msg2 at B").expect("Channel closed");
+        .await
+        .expect("Timeout waiting for msg2 at B")
+        .expect("Channel closed");
     node_b.handle_msg2(msg2_at_b).await;
 
     // === Verification ===
     // Both nodes should have exactly 1 peer each after cross-connection resolution
-    assert_eq!(node_a.peer_count(), 1, "Node A should have exactly 1 peer after cross-connection");
-    assert_eq!(node_b.peer_count(), 1, "Node B should have exactly 1 peer after cross-connection");
+    assert_eq!(
+        node_a.peer_count(),
+        1,
+        "Node A should have exactly 1 peer after cross-connection"
+    );
+    assert_eq!(
+        node_b.peer_count(),
+        1,
+        "Node B should have exactly 1 peer after cross-connection"
+    );
 
-    let peer_b_on_a = node_a.get_peer(&peer_b_node_addr).expect("A should have peer B");
-    let peer_a_on_b = node_b.get_peer(&peer_a_node_addr).expect("B should have peer A");
+    let peer_b_on_a = node_a
+        .get_peer(&peer_b_node_addr)
+        .expect("A should have peer B");
+    let peer_a_on_b = node_b
+        .get_peer(&peer_a_node_addr)
+        .expect("B should have peer A");
 
     assert!(peer_b_on_a.has_session(), "Peer B on A should have session");
     assert!(peer_a_on_b.has_session(), "Peer A on B should have session");
@@ -611,25 +667,35 @@ async fn test_stale_connection_cleanup() {
     // Allocate session index and set transport info
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let _noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, past_time_ms).unwrap();
+    let _noise_msg1 = conn
+        .start_handshake(our_keypair, node.startup_epoch, past_time_ms)
+        .unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
 
     // Set up all the state that initiate_peer_connection would create
     let link = Link::connectionless(
-        link_id, transport_id, remote_addr.clone(),
-        LinkDirection::Outbound, Duration::from_millis(100),
+        link_id,
+        transport_id,
+        remote_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
     );
     node.links.insert(link_id, link);
-    node.addr_to_link.insert((transport_id, remote_addr.clone()), link_id);
+    node.addr_to_link
+        .insert((transport_id, remote_addr.clone()), link_id);
     node.connections.insert(link_id, conn);
-    node.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
+    node.pending_outbound
+        .insert((transport_id, our_index.as_u32()), link_id);
 
     // Verify state before timeout check
     assert_eq!(node.connection_count(), 1);
     assert_eq!(node.link_count(), 1);
-    assert!(node.pending_outbound.contains_key(&(transport_id, our_index.as_u32())));
+    assert!(
+        node.pending_outbound
+            .contains_key(&(transport_id, our_index.as_u32()))
+    );
     assert_eq!(node.index_allocator.count(), 1);
 
     // Connection was created at time 1000ms. check_timeouts uses SystemTime::now(),
@@ -637,13 +703,27 @@ async fn test_stale_connection_cleanup() {
     node.check_timeouts();
 
     // Verify everything was cleaned up
-    assert_eq!(node.connection_count(), 0, "Stale connection should be removed");
+    assert_eq!(
+        node.connection_count(),
+        0,
+        "Stale connection should be removed"
+    );
     assert_eq!(node.link_count(), 0, "Stale link should be removed");
-    assert!(!node.pending_outbound.contains_key(&(transport_id, our_index.as_u32())),
-        "pending_outbound should be cleaned up");
-    assert_eq!(node.index_allocator.count(), 0, "Session index should be freed");
-    assert!(!node.addr_to_link.contains_key(&(transport_id, remote_addr)),
-        "addr_to_link should be cleaned up");
+    assert!(
+        !node
+            .pending_outbound
+            .contains_key(&(transport_id, our_index.as_u32())),
+        "pending_outbound should be cleaned up"
+    );
+    assert_eq!(
+        node.index_allocator.count(),
+        0,
+        "Session index should be freed"
+    );
+    assert!(
+        !node.addr_to_link.contains_key(&(transport_id, remote_addr)),
+        "addr_to_link should be cleaned up"
+    );
 }
 
 /// Test that failed connections are cleaned up by check_timeouts().
@@ -665,29 +745,44 @@ async fn test_failed_connection_cleanup() {
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let _noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, now_ms).unwrap();
+    let _noise_msg1 = conn
+        .start_handshake(our_keypair, node.startup_epoch, now_ms)
+        .unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
     conn.mark_failed(); // Simulate send failure
 
     let link = Link::connectionless(
-        link_id, transport_id, remote_addr.clone(),
-        LinkDirection::Outbound, Duration::from_millis(100),
+        link_id,
+        transport_id,
+        remote_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
     );
     node.links.insert(link_id, link);
-    node.addr_to_link.insert((transport_id, remote_addr.clone()), link_id);
+    node.addr_to_link
+        .insert((transport_id, remote_addr.clone()), link_id);
     node.connections.insert(link_id, conn);
-    node.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
+    node.pending_outbound
+        .insert((transport_id, our_index.as_u32()), link_id);
 
     assert_eq!(node.connection_count(), 1);
 
     // Failed connections should be cleaned up immediately regardless of age
     node.check_timeouts();
 
-    assert_eq!(node.connection_count(), 0, "Failed connection should be removed");
+    assert_eq!(
+        node.connection_count(),
+        0,
+        "Failed connection should be removed"
+    );
     assert_eq!(node.link_count(), 0, "Failed link should be removed");
-    assert_eq!(node.index_allocator.count(), 0, "Session index should be freed");
+    assert_eq!(
+        node.index_allocator.count(),
+        0,
+        "Session index should be freed"
+    );
 }
 
 /// Test that msg1 bytes are stored on connection for resend.
@@ -710,7 +805,9 @@ async fn test_msg1_stored_for_resend() {
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, now_ms).unwrap();
+    let noise_msg1 = conn
+        .start_handshake(our_keypair, node.startup_epoch, now_ms)
+        .unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
@@ -741,7 +838,9 @@ async fn test_resend_scheduling() {
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity.keypair();
-    let noise_msg1 = conn.start_handshake(our_keypair, node.startup_epoch, now_ms).unwrap();
+    let noise_msg1 = conn
+        .start_handshake(our_keypair, node.startup_epoch, now_ms)
+        .unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
@@ -751,12 +850,17 @@ async fn test_resend_scheduling() {
     conn.set_handshake_msg1(wire_msg1, now_ms + 1000);
 
     let link = Link::connectionless(
-        link_id, transport_id, remote_addr.clone(),
-        LinkDirection::Outbound, Duration::from_millis(100),
+        link_id,
+        transport_id,
+        remote_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
     );
     node.links.insert(link_id, link);
-    node.addr_to_link.insert((transport_id, remote_addr), link_id);
-    node.pending_outbound.insert((transport_id, our_index.as_u32()), link_id);
+    node.addr_to_link
+        .insert((transport_id, remote_addr), link_id);
+    node.pending_outbound
+        .insert((transport_id, our_index.as_u32()), link_id);
     node.connections.insert(link_id, conn);
 
     // Before resend time: nothing should happen (no transport = can't send,
@@ -772,7 +876,11 @@ async fn test_resend_scheduling() {
     // No transport registered, so send fails — count stays 0.
     // That's the expected behavior (transport absence is a transient condition).
     let conn = node.connections.get(&link_id).unwrap();
-    assert_eq!(conn.resend_count(), 0, "No transport means no resend recorded");
+    assert_eq!(
+        conn.resend_count(),
+        0,
+        "No transport means no resend recorded"
+    );
 }
 
 /// Test that msg2 is stored on PeerConnection for responder resend.

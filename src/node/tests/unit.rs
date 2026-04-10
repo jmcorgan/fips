@@ -96,7 +96,10 @@ fn test_node_link_management() {
     assert_eq!(node.link_count(), 0);
 
     // Lookup should be gone
-    assert!(node.find_link_by_addr(TransportId::new(1), &TransportAddr::from_string("test")).is_none());
+    assert!(
+        node.find_link_by_addr(TransportId::new(1), &TransportAddr::from_string("test"))
+            .is_none()
+    );
 }
 
 #[test]
@@ -183,8 +186,14 @@ fn test_node_promote_connection() {
     let peer = node.get_peer(&node_addr).unwrap();
     assert_eq!(peer.authenticated_at(), 2000);
     assert!(peer.has_session(), "Promoted peer should have NoiseSession");
-    assert!(peer.our_index().is_some(), "Promoted peer should have our_index");
-    assert!(peer.their_index().is_some(), "Promoted peer should have their_index");
+    assert!(
+        peer.our_index().is_some(),
+        "Promoted peer should have our_index"
+    );
+    assert!(
+        peer.their_index().is_some(),
+        "Promoted peer should have their_index"
+    );
 
     // Verify peers_by_index is populated
     let our_index = peer.our_index().unwrap();
@@ -201,8 +210,7 @@ fn test_node_cross_connection_resolution() {
 
     // First connection and promotion (becomes active peer)
     let link_id1 = LinkId::new(1);
-    let (conn1, identity) =
-        make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let (conn1, identity) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
     let node_addr = *identity.node_addr();
 
     node.add_connection(conn1).unwrap();
@@ -236,8 +244,7 @@ fn test_node_peer_limit() {
     // Add two peers via promotion
     for i in 0..2 {
         let link_id = LinkId::new(i as u64 + 1);
-        let (conn, identity) =
-            make_completed_connection(&mut node, link_id, transport_id, 1000);
+        let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
         node.add_connection(conn).unwrap();
         node.promote_connection(link_id, identity, 2000).unwrap();
     }
@@ -246,8 +253,7 @@ fn test_node_peer_limit() {
 
     // Third should fail
     let link_id = LinkId::new(3);
-    let (conn, identity) =
-        make_completed_connection(&mut node, link_id, transport_id, 3000);
+    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 3000);
     node.add_connection(conn).unwrap();
 
     let result = node.promote_connection(link_id, identity, 4000);
@@ -296,23 +302,20 @@ fn test_node_sendable_peers() {
 
     // Add a healthy peer
     let link_id1 = LinkId::new(1);
-    let (conn1, identity1) =
-        make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let (conn1, identity1) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
     let node_addr1 = *identity1.node_addr();
     node.add_connection(conn1).unwrap();
     node.promote_connection(link_id1, identity1, 2000).unwrap();
 
     // Add another peer and mark it stale (still sendable)
     let link_id2 = LinkId::new(2);
-    let (conn2, identity2) =
-        make_completed_connection(&mut node, link_id2, transport_id, 1000);
+    let (conn2, identity2) = make_completed_connection(&mut node, link_id2, transport_id, 1000);
     node.add_connection(conn2).unwrap();
     node.promote_connection(link_id2, identity2, 2000).unwrap();
 
     // Add a third peer and mark it disconnected (not sendable)
     let link_id3 = LinkId::new(3);
-    let (conn3, identity3) =
-        make_completed_connection(&mut node, link_id3, transport_id, 1000);
+    let (conn3, identity3) = make_completed_connection(&mut node, link_id3, transport_id, 1000);
     let node_addr3 = *identity3.node_addr();
     node.add_connection(conn3).unwrap();
     node.promote_connection(link_id3, identity3, 2000).unwrap();
@@ -345,14 +348,16 @@ fn test_node_pending_outbound_tracking() {
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in pending_outbound
-    node.pending_outbound.insert((transport_id, index.as_u32()), link_id);
+    node.pending_outbound
+        .insert((transport_id, index.as_u32()), link_id);
 
     // Verify we can look it up
     let found = node.pending_outbound.get(&(transport_id, index.as_u32()));
     assert_eq!(found, Some(&link_id));
 
     // Clean up
-    node.pending_outbound.remove(&(transport_id, index.as_u32()));
+    node.pending_outbound
+        .remove(&(transport_id, index.as_u32()));
     let _ = node.index_allocator.free(index);
 
     assert_eq!(node.index_allocator.count(), 0);
@@ -369,7 +374,8 @@ fn test_node_peers_by_index_tracking() {
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in peers_by_index
-    node.peers_by_index.insert((transport_id, index.as_u32()), node_addr);
+    node.peers_by_index
+        .insert((transport_id, index.as_u32()), node_addr);
 
     // Verify lookup
     let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
@@ -450,7 +456,9 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         PeerConnection::outbound(pending_link_id, peer_b_identity, pending_time_ms);
 
     let our_keypair = node.identity.keypair();
-    let _msg1 = pending_conn.start_handshake(our_keypair, node.startup_epoch, pending_time_ms).unwrap();
+    let _msg1 = pending_conn
+        .start_handshake(our_keypair, node.startup_epoch, pending_time_ms)
+        .unwrap();
 
     let pending_index = node.index_allocator.allocate().unwrap();
     pending_conn.set_our_index(pending_index);
@@ -483,11 +491,8 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let completing_link_id = LinkId::new(2);
     let completing_time_ms = 2000;
 
-    let mut completing_conn = PeerConnection::outbound(
-        completing_link_id,
-        peer_b_identity,
-        completing_time_ms,
-    );
+    let mut completing_conn =
+        PeerConnection::outbound(completing_link_id, peer_b_identity, completing_time_ms);
 
     let our_keypair = node.identity.keypair();
     let msg1 = completing_conn
@@ -573,7 +578,10 @@ fn test_schedule_retry_creates_entry() {
     assert_eq!(node.retry_pending.len(), 1);
     let state = node.retry_pending.get(&peer_node_addr).unwrap();
     assert_eq!(state.retry_count, 1);
-    assert!(state.reconnect, "Auto-connect peers always get reconnect=true");
+    assert!(
+        state.reconnect,
+        "Auto-connect peers always get reconnect=true"
+    );
     // Default base = 5s, 2^1 = 10s, but first retry is 2^0... let me check:
     // retry_count is set to 1, backoff_ms(5000) = 5000 * 2^1 = 10000
     assert_eq!(state.retry_after_ms, 1000 + 10_000);
@@ -597,7 +605,10 @@ fn test_schedule_retry_increments() {
 
     // First failure
     node.schedule_retry(peer_node_addr, 1000);
-    assert_eq!(node.retry_pending.get(&peer_node_addr).unwrap().retry_count, 1);
+    assert_eq!(
+        node.retry_pending.get(&peer_node_addr).unwrap().retry_count,
+        1
+    );
 
     // Second failure
     node.schedule_retry(peer_node_addr, 11_000);
@@ -637,7 +648,10 @@ fn test_schedule_retry_auto_connect_never_exhausts() {
         node.retry_pending.contains_key(&peer_node_addr),
         "Auto-connect peers should never exhaust retries"
     );
-    assert_eq!(node.retry_pending.get(&peer_node_addr).unwrap().retry_count, 3);
+    assert_eq!(
+        node.retry_pending.get(&peer_node_addr).unwrap().retry_count,
+        3
+    );
 }
 
 /// Test that schedule_retry does nothing when max_retries is 0.
@@ -725,7 +739,7 @@ fn test_schedule_reconnect_preserves_backoff() {
     let mut node = Node::new(config).unwrap();
 
     // Simulate two stale handshake timeouts incrementing the retry count.
-    node.schedule_retry(peer_node_addr, 1_000);  // count=1, delay=10s
+    node.schedule_retry(peer_node_addr, 1_000); // count=1, delay=10s
     node.schedule_retry(peer_node_addr, 11_000); // count=2, delay=20s
     {
         let state = node.retry_pending.get(&peer_node_addr).unwrap();
@@ -738,10 +752,7 @@ fn test_schedule_reconnect_preserves_backoff() {
     node.schedule_reconnect(peer_node_addr, 31_000);
 
     let state = node.retry_pending.get(&peer_node_addr).unwrap();
-    assert!(
-        state.reconnect,
-        "Entry should be marked as reconnect"
-    );
+    assert!(state.reconnect, "Entry should be marked as reconnect");
     assert_eq!(
         state.retry_count, 3,
         "schedule_reconnect should increment existing count (was 2), not reset to 0 (regression: issue #5)"
@@ -752,7 +763,8 @@ fn test_schedule_reconnect_preserves_backoff() {
     let max_ms = node.config.node.retry.max_backoff_secs * 1000;
     let expected_delay = state.backoff_ms(base_ms, max_ms);
     assert_eq!(
-        state.retry_after_ms, 31_000 + expected_delay,
+        state.retry_after_ms,
+        31_000 + expected_delay,
         "retry_after_ms should reflect count=3 backoff"
     );
 }
@@ -778,7 +790,10 @@ fn test_schedule_reconnect_fresh_state() {
 
     let state = node.retry_pending.get(&peer_node_addr).unwrap();
     assert!(state.reconnect, "Entry should be marked as reconnect");
-    assert_eq!(state.retry_count, 0, "Fresh reconnect should start at count=0");
+    assert_eq!(
+        state.retry_count, 0,
+        "Fresh reconnect should start at count=0"
+    );
     // Base delay: 5s * 2^0 = 5s
     let base_ms = node.config.node.retry.base_interval_secs * 1000;
     let max_ms = node.config.node.retry.max_backoff_secs * 1000;

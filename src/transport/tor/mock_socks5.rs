@@ -70,7 +70,10 @@ impl MockSocks5Server {
             // === Method negotiation ===
             // Client sends: [version, nmethods, methods...]
             let mut ver_nmethods = [0u8; 2];
-            client.read_exact(&mut ver_nmethods).await.expect("read version+nmethods");
+            client
+                .read_exact(&mut ver_nmethods)
+                .await
+                .expect("read version+nmethods");
             assert_eq!(ver_nmethods[0], SOCKS_VERSION, "expected SOCKS5");
             let nmethods = ver_nmethods[1] as usize;
 
@@ -87,14 +90,23 @@ impl MockSocks5Server {
             };
 
             // Reply: [version, selected_method]
-            client.write_all(&[SOCKS_VERSION, selected]).await.expect("write method reply");
+            client
+                .write_all(&[SOCKS_VERSION, selected])
+                .await
+                .expect("write method reply");
 
             // === Username/password sub-negotiation (RFC 1929) ===
             if selected == AUTH_PASSWORD {
                 // Client sends: [ver(1), ulen(1), uname(ulen), plen(1), passwd(plen)]
                 let mut subneg_header = [0u8; 2];
-                client.read_exact(&mut subneg_header).await.expect("read subneg header");
-                assert_eq!(subneg_header[0], AUTH_SUBNEG_VERSION, "expected auth subneg v1");
+                client
+                    .read_exact(&mut subneg_header)
+                    .await
+                    .expect("read subneg header");
+                assert_eq!(
+                    subneg_header[0], AUTH_SUBNEG_VERSION,
+                    "expected auth subneg v1"
+                );
 
                 let ulen = subneg_header[1] as usize;
                 let mut uname = vec![0u8; ulen];
@@ -107,14 +119,19 @@ impl MockSocks5Server {
                 client.read_exact(&mut passwd).await.expect("read password");
 
                 // Always accept (Tor uses these as isolation keys, not real auth)
-                client.write_all(&[AUTH_SUBNEG_VERSION, AUTH_SUBNEG_SUCCESS])
-                    .await.expect("write subneg reply");
+                client
+                    .write_all(&[AUTH_SUBNEG_VERSION, AUTH_SUBNEG_SUCCESS])
+                    .await
+                    .expect("write subneg reply");
             }
 
             // === Connect request ===
             // Client sends: [version, cmd, rsv, atyp, addr..., port]
             let mut header = [0u8; 4];
-            client.read_exact(&mut header).await.expect("read connect header");
+            client
+                .read_exact(&mut header)
+                .await
+                .expect("read connect header");
             assert_eq!(header[0], SOCKS_VERSION);
             assert_eq!(header[1], CMD_CONNECT);
 
@@ -122,14 +139,23 @@ impl MockSocks5Server {
             match header[3] {
                 ATYP_IPV4 => {
                     let mut addr_port = [0u8; 6]; // 4 IP + 2 port
-                    client.read_exact(&mut addr_port).await.expect("read IPv4 addr");
+                    client
+                        .read_exact(&mut addr_port)
+                        .await
+                        .expect("read IPv4 addr");
                 }
                 ATYP_DOMAIN => {
                     let mut len_buf = [0u8; 1];
-                    client.read_exact(&mut len_buf).await.expect("read domain len");
+                    client
+                        .read_exact(&mut len_buf)
+                        .await
+                        .expect("read domain len");
                     let domain_len = len_buf[0] as usize;
                     let mut domain_port = vec![0u8; domain_len + 2]; // domain + 2 port
-                    client.read_exact(&mut domain_port).await.expect("read domain addr");
+                    client
+                        .read_exact(&mut domain_port)
+                        .await
+                        .expect("read domain addr");
                 }
                 other => panic!("unsupported ATYP: {}", other),
             }
@@ -145,8 +171,12 @@ impl MockSocks5Server {
                 REP_SUCCESS,
                 0x00, // RSV
                 ATYP_IPV4,
-                0, 0, 0, 0, // bind addr
-                0, 0, // bind port
+                0,
+                0,
+                0,
+                0, // bind addr
+                0,
+                0, // bind port
             ];
             client.write_all(&reply).await.expect("write connect reply");
 

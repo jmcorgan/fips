@@ -4,7 +4,7 @@ use secp256k1::XOnlyPublicKey;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-use super::{hex_encode, IdentityError};
+use super::{IdentityError, hex_encode};
 
 /// 16-byte node identifier derived from truncated SHA-256(pubkey).
 ///

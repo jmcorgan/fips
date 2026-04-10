@@ -8,9 +8,9 @@
 use super::*;
 use crate::config::TcpConfig;
 use crate::transport::tcp::TcpTransport;
-use crate::transport::{packet_channel, TransportAddr, TransportHandle, TransportId};
+use crate::transport::{TransportAddr, TransportHandle, TransportId, packet_channel};
 use spanning_tree::{
-    cleanup_nodes, drain_all_packets, initiate_handshake, verify_tree_convergence, TestNode,
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, verify_tree_convergence,
 };
 use std::time::Duration;
 

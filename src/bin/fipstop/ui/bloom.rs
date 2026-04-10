@@ -12,8 +12,8 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let data = match app.data.get(&Tab::Bloom) {
         Some(d) => d,
         None => {
-            let msg = Paragraph::new("  Waiting for data...")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg =
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
             return;
         }
@@ -22,7 +22,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(7),  // Bloom Filter State
         Constraint::Length(15), // Bloom Announce Stats
-        Constraint::Min(3),    // Peer Filters
+        Constraint::Min(3),     // Peer Filters
     ])
     .split(area);
 
@@ -64,16 +64,28 @@ fn draw_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         helpers::section_header("Inbound"),
         helpers::kv_line("Received", &helpers::nested_u64(data, "stats", "received")),
         helpers::kv_line("Accepted", &helpers::nested_u64(data, "stats", "accepted")),
-        helpers::kv_line("Decode Error", &helpers::nested_u64(data, "stats", "decode_error")),
+        helpers::kv_line(
+            "Decode Error",
+            &helpers::nested_u64(data, "stats", "decode_error"),
+        ),
         helpers::kv_line("Invalid", &helpers::nested_u64(data, "stats", "invalid")),
         helpers::kv_line("Non-V1", &helpers::nested_u64(data, "stats", "non_v1")),
-        helpers::kv_line("Unknown Peer", &helpers::nested_u64(data, "stats", "unknown_peer")),
+        helpers::kv_line(
+            "Unknown Peer",
+            &helpers::nested_u64(data, "stats", "unknown_peer"),
+        ),
         helpers::kv_line("Stale", &helpers::nested_u64(data, "stats", "stale")),
         Line::from(""),
         helpers::section_header("Outbound"),
         helpers::kv_line("Sent", &helpers::nested_u64(data, "stats", "sent")),
-        helpers::kv_line("Debounce Suppressed", &helpers::nested_u64(data, "stats", "debounce_suppressed")),
-        helpers::kv_line("Send Failed", &helpers::nested_u64(data, "stats", "send_failed")),
+        helpers::kv_line(
+            "Debounce Suppressed",
+            &helpers::nested_u64(data, "stats", "debounce_suppressed"),
+        ),
+        helpers::kv_line(
+            "Send Failed",
+            &helpers::nested_u64(data, "stats", "send_failed"),
+        ),
     ];
 
     let max_lines = inner.height as usize;
@@ -97,8 +109,7 @@ fn draw_peer_filters(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     frame.render_widget(block, area);
 
     if filters.is_empty() {
-        let msg =
-            Paragraph::new("  No peers").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("  No peers").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(msg, inner);
         return;
     }

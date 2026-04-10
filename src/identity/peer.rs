@@ -4,7 +4,7 @@ use secp256k1::{Parity, PublicKey, Secp256k1, XOnlyPublicKey};
 use std::fmt;
 
 use super::encoding::{decode_npub, encode_npub};
-use super::{sha256, FipsAddress, IdentityError, NodeAddr};
+use super::{FipsAddress, IdentityError, NodeAddr, sha256};
 
 /// A known peer's identity (public key only, no signing capability).
 ///
@@ -99,7 +99,8 @@ impl PeerIdentity {
     pub fn verify(&self, data: &[u8], signature: &secp256k1::schnorr::Signature) -> bool {
         let secp = Secp256k1::new();
         let digest = sha256(data);
-        secp.verify_schnorr(signature, &digest, &self.pubkey).is_ok()
+        secp.verify_schnorr(signature, &digest, &self.pubkey)
+            .is_ok()
     }
 }
 

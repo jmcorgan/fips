@@ -17,27 +17,29 @@ impl EventHandler {
     pub fn new(tick_rate: Duration) -> Self {
         let (tx, rx) = mpsc::channel();
 
-        thread::spawn(move || loop {
-            if event::poll(tick_rate).unwrap_or(false) {
-                if let Ok(evt) = event::read() {
-                    match evt {
-                        CrosstermEvent::Key(key) => {
-                            if tx.send(Event::Key(key)).is_err() {
-                                return;
+        thread::spawn(move || {
+            loop {
+                if event::poll(tick_rate).unwrap_or(false) {
+                    if let Ok(evt) = event::read() {
+                        match evt {
+                            CrosstermEvent::Key(key) => {
+                                if tx.send(Event::Key(key)).is_err() {
+                                    return;
+                                }
                             }
-                        }
-                        CrosstermEvent::Resize(..) => {
-                            if tx.send(Event::Resize).is_err() {
-                                return;
+                            CrosstermEvent::Resize(..) => {
+                                if tx.send(Event::Resize).is_err() {
+                                    return;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
-                }
-            } else {
-                // Poll timed out — send a tick
-                if tx.send(Event::Tick).is_err() {
-                    return;
+                } else {
+                    // Poll timed out — send a tick
+                    if tx.send(Event::Tick).is_err() {
+                        return;
+                    }
                 }
             }
         });

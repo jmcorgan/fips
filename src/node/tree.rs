@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use crate::protocol::TreeAnnounce;
 use crate::NodeAddr;
+use crate::protocol::TreeAnnounce;
 
 use super::{Node, NodeError};
 use tracing::{debug, info, trace, warn};
@@ -105,7 +105,9 @@ impl Node {
         let ready: Vec<NodeAddr> = self
             .peers
             .iter()
-            .filter(|(_, peer)| peer.has_pending_tree_announce() && peer.can_send_tree_announce(now_ms))
+            .filter(|(_, peer)| {
+                peer.has_pending_tree_announce() && peer.can_send_tree_announce(now_ms)
+            })
             .map(|(addr, _)| *addr)
             .collect();
 
@@ -185,10 +187,9 @@ impl Node {
         }
 
         // Update in TreeState
-        let updated = self.tree_state.update_peer(
-            announce.declaration.clone(),
-            announce.ancestry.clone(),
-        );
+        let updated = self
+            .tree_state
+            .update_peer(announce.declaration.clone(), announce.ancestry.clone());
 
         if !updated {
             self.stats_mut().tree.stale += 1;
@@ -214,7 +215,9 @@ impl Node {
         // Re-evaluate parent selection with current link costs.
         // Exclude peers without MMP RTT data — they are not yet eligible
         // as parent candidates (prevents oscillation from optimistic defaults).
-        let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+        let peer_costs: HashMap<NodeAddr, f64> = self
+            .peers
+            .iter()
             .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
@@ -266,7 +269,9 @@ impl Node {
                     parent = %self.peer_display_name(from),
                     "Parent ancestry contains us — loop detected, dropping parent"
                 );
-                let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+                let peer_costs: HashMap<NodeAddr, f64> = self
+                    .peers
+                    .iter()
                     .filter(|(_, peer)| peer.has_srtt())
                     .map(|(addr, peer)| (*addr, peer.link_cost()))
                     .collect();
@@ -276,7 +281,7 @@ impl Node {
                         return;
                     }
                     self.coord_cache.clear();
-            self.reset_discovery_backoff();
+                    self.reset_discovery_backoff();
                     self.send_tree_announce_to_all().await;
                 }
                 return;
@@ -360,7 +365,9 @@ impl Node {
 
         self.last_parent_reeval = Some(now);
 
-        let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+        let peer_costs: HashMap<NodeAddr, f64> = self
+            .peers
+            .iter()
             .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
@@ -411,14 +418,16 @@ impl Node {
     ///
     /// Returns `true` if our tree state changed (caller should announce).
     pub(super) fn handle_peer_removal_tree_cleanup(&mut self, node_addr: &NodeAddr) -> bool {
-        let was_parent = !self.tree_state.is_root()
-            && self.tree_state.my_declaration().parent_id() == node_addr;
+        let was_parent =
+            !self.tree_state.is_root() && self.tree_state.my_declaration().parent_id() == node_addr;
 
         self.tree_state.remove_peer(node_addr);
 
         if was_parent {
             self.stats_mut().tree.parent_losses += 1;
-            let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+            let peer_costs: HashMap<NodeAddr, f64> = self
+                .peers
+                .iter()
                 .filter(|(_, peer)| peer.has_srtt())
                 .map(|(addr, peer)| (*addr, peer.link_cost()))
                 .collect();

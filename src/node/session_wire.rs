@@ -208,8 +208,7 @@ impl FspEncryptedHeader {
 
         let payload_len = u16::from_le_bytes([data[2], data[3]]);
         let counter = u64::from_le_bytes([
-            data[4], data[5], data[6], data[7],
-            data[8], data[9], data[10], data[11],
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
         ]);
 
         let mut header_bytes = [0u8; FSP_HEADER_SIZE];
@@ -242,11 +241,7 @@ impl FspEncryptedHeader {
 /// Build the 12-byte cleartext header for an encrypted FSP message.
 ///
 /// Returns the header bytes for use as AEAD AAD.
-pub fn build_fsp_header(
-    counter: u64,
-    flags: u8,
-    payload_len: u16,
-) -> [u8; FSP_HEADER_SIZE] {
+pub fn build_fsp_header(counter: u64, flags: u8, payload_len: u16) -> [u8; FSP_HEADER_SIZE] {
     let mut header = [0u8; FSP_HEADER_SIZE];
     header[0] = FspCommonPrefix::ver_phase_byte(FSP_VERSION, FSP_PHASE_ESTABLISHED);
     header[1] = flags;
@@ -323,12 +318,15 @@ pub fn fsp_strip_inner_header(plaintext: &[u8]) -> Option<(u32, u8, u8, &[u8])> 
     if plaintext.len() < FSP_INNER_HEADER_SIZE {
         return None;
     }
-    let timestamp = u32::from_le_bytes([
-        plaintext[0], plaintext[1], plaintext[2], plaintext[3],
-    ]);
+    let timestamp = u32::from_le_bytes([plaintext[0], plaintext[1], plaintext[2], plaintext[3]]);
     let msg_type = plaintext[4];
     let inner_flags = plaintext[5];
-    Some((timestamp, msg_type, inner_flags, &plaintext[FSP_INNER_HEADER_SIZE..]))
+    Some((
+        timestamp,
+        msg_type,
+        inner_flags,
+        &plaintext[FSP_INNER_HEADER_SIZE..],
+    ))
 }
 
 // ============================================================================
@@ -465,8 +463,8 @@ mod tests {
         assert_eq!(u16::from_le_bytes([header[2], header[3]]), 200);
         assert_eq!(
             u64::from_le_bytes([
-                header[4], header[5], header[6], header[7],
-                header[8], header[9], header[10], header[11],
+                header[4], header[5], header[6], header[7], header[8], header[9], header[10],
+                header[11],
             ]),
             1000
         );

@@ -1,7 +1,7 @@
 //! Parent declarations for the spanning tree.
 
-use secp256k1::schnorr::Signature;
 use secp256k1::XOnlyPublicKey;
+use secp256k1::schnorr::Signature;
 use std::fmt;
 
 use super::TreeError;

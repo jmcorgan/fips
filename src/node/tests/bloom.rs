@@ -16,10 +16,7 @@ fn get_tree_edges(nodes: &[TestNode]) -> Vec<(usize, usize)> {
         let ts = tn.node.tree_state();
         if !ts.is_root() {
             let parent_addr = ts.my_declaration().parent_id();
-            if let Some(j) = nodes
-                .iter()
-                .position(|n| n.node.node_addr() == parent_addr)
-            {
+            if let Some(j) = nodes.iter().position(|n| n.node.node_addr() == parent_addr) {
                 edges.push((i, j));
             }
         }
@@ -174,8 +171,7 @@ async fn test_bloom_filter_star() {
 /// entries, and so on. Both endpoints should see all other nodes.
 #[tokio::test]
 async fn test_bloom_filter_chain_propagation() {
-    let edges: Vec<(usize, usize)> =
-        vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)];
+    let edges: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)];
     let mut nodes = run_tree_test(8, &edges, false).await;
     verify_tree_convergence(&nodes);
     verify_filter_exchange(&nodes, &edges);
@@ -315,8 +311,7 @@ fn collect_subtree(
 #[tokio::test]
 async fn test_bloom_filter_split_horizon() {
     // Pure tree: 7 nodes, 6 edges
-    let edges: Vec<(usize, usize)> =
-        vec![(0, 1), (0, 2), (1, 3), (1, 4), (2, 5), (5, 6)];
+    let edges: Vec<(usize, usize)> = vec![(0, 1), (0, 2), (1, 3), (1, 4), (2, 5), (5, 6)];
     let mut nodes = run_tree_test(7, &edges, false).await;
     verify_tree_convergence(&nodes);
     verify_filter_exchange(&nodes, &edges);
@@ -340,9 +335,7 @@ async fn test_bloom_filter_split_horizon() {
     // - parent's filter to child contains the complement only
     for &(child_idx, parent_idx) in &tree_edges {
         let child_subtree = collect_subtree(child_idx, Some(parent_idx), &tree_adj);
-        let complement: Vec<usize> = (0..n)
-            .filter(|i| !child_subtree.contains(i))
-            .collect();
+        let complement: Vec<usize> = (0..n).filter(|i| !child_subtree.contains(i)).collect();
 
         // --- Upward filter: child → parent ---
         // This is stored as parent's inbound filter from child
@@ -358,7 +351,9 @@ async fn test_bloom_filter_split_horizon() {
             assert!(
                 filter_up.contains(&addrs[idx]),
                 "Upward filter (n{}→n{}): should contain subtree member n{} but doesn't",
-                child_idx, parent_idx, idx
+                child_idx,
+                parent_idx,
+                idx
             );
         }
 
@@ -367,7 +362,9 @@ async fn test_bloom_filter_split_horizon() {
             assert!(
                 !filter_up.contains(&addrs[idx]),
                 "Upward filter (n{}→n{}): should NOT contain complement member n{} but does",
-                child_idx, parent_idx, idx
+                child_idx,
+                parent_idx,
+                idx
             );
         }
 
@@ -376,7 +373,10 @@ async fn test_bloom_filter_split_horizon() {
         assert!(
             (up_est - child_subtree.len() as f64).abs() < 1.5,
             "Upward filter (n{}→n{}): expected ~{} entries, got {:.1}",
-            child_idx, parent_idx, child_subtree.len(), up_est
+            child_idx,
+            parent_idx,
+            child_subtree.len(),
+            up_est
         );
 
         // --- Downward filter: parent → child ---
@@ -393,7 +393,9 @@ async fn test_bloom_filter_split_horizon() {
             assert!(
                 filter_down.contains(&addrs[idx]),
                 "Downward filter (n{}→n{}): should contain complement member n{} but doesn't",
-                parent_idx, child_idx, idx
+                parent_idx,
+                child_idx,
+                idx
             );
         }
 
@@ -405,7 +407,9 @@ async fn test_bloom_filter_split_horizon() {
             assert!(
                 !filter_down.contains(&addrs[idx]),
                 "Downward filter (n{}→n{}): should NOT contain subtree member n{} but does",
-                parent_idx, child_idx, idx
+                parent_idx,
+                child_idx,
+                idx
             );
         }
 
@@ -414,7 +418,10 @@ async fn test_bloom_filter_split_horizon() {
         assert!(
             (down_est - complement.len() as f64).abs() < 1.5,
             "Downward filter (n{}→n{}): expected ~{} entries, got {:.1}",
-            parent_idx, child_idx, complement.len(), down_est
+            parent_idx,
+            child_idx,
+            complement.len(),
+            down_est
         );
 
         // Together, subtree + complement = all nodes

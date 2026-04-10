@@ -12,8 +12,8 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let data = match app.data.get(&Tab::Tree) {
         Some(d) => d,
         None => {
-            let msg = Paragraph::new("  Waiting for data...")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg =
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
             return;
         }
@@ -22,7 +22,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(10), // Tree Position
         Constraint::Length(22), // Tree Announce Stats
-        Constraint::Min(3),    // Tree Peers
+        Constraint::Min(3),     // Tree Peers
     ])
     .split(area);
 
@@ -70,16 +70,12 @@ fn draw_position(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         )];
 
         if coords.is_empty() {
-            path_parts.push(Span::styled(
-                "[root]",
-                Style::default().fg(Color::Yellow),
-            ));
+            path_parts.push(Span::styled("[root]", Style::default().fg(Color::Yellow)));
         } else {
             // Reverse: root first, self last
             for (i, entry) in coords.iter().rev().enumerate() {
                 if i > 0 {
-                    path_parts
-                        .push(Span::styled(" > ", Style::default().fg(Color::DarkGray)));
+                    path_parts.push(Span::styled(" > ", Style::default().fg(Color::DarkGray)));
                 }
                 let hex = entry.as_str().unwrap_or("-");
                 let color = if i == 0 {
@@ -87,8 +83,10 @@ fn draw_position(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
                 } else {
                     Color::White
                 };
-                path_parts
-                    .push(Span::styled(helpers::truncate_hex(hex, 8), Style::default().fg(color)));
+                path_parts.push(Span::styled(
+                    helpers::truncate_hex(hex, 8),
+                    Style::default().fg(color),
+                ));
             }
             path_parts.push(Span::styled(" > ", Style::default().fg(Color::DarkGray)));
             path_parts.push(Span::styled(
@@ -121,24 +119,60 @@ fn draw_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         helpers::section_header("Inbound"),
         helpers::kv_line("Received", &helpers::nested_u64(data, "stats", "received")),
         helpers::kv_line("Accepted", &helpers::nested_u64(data, "stats", "accepted")),
-        helpers::kv_line("Decode Error", &helpers::nested_u64(data, "stats", "decode_error")),
-        helpers::kv_line("Unknown Peer", &helpers::nested_u64(data, "stats", "unknown_peer")),
-        helpers::kv_line("Addr Mismatch", &helpers::nested_u64(data, "stats", "addr_mismatch")),
-        helpers::kv_line("Sig Failed", &helpers::nested_u64(data, "stats", "sig_failed")),
+        helpers::kv_line(
+            "Decode Error",
+            &helpers::nested_u64(data, "stats", "decode_error"),
+        ),
+        helpers::kv_line(
+            "Unknown Peer",
+            &helpers::nested_u64(data, "stats", "unknown_peer"),
+        ),
+        helpers::kv_line(
+            "Addr Mismatch",
+            &helpers::nested_u64(data, "stats", "addr_mismatch"),
+        ),
+        helpers::kv_line(
+            "Sig Failed",
+            &helpers::nested_u64(data, "stats", "sig_failed"),
+        ),
         helpers::kv_line("Stale", &helpers::nested_u64(data, "stats", "stale")),
-        helpers::kv_line("Parent Switched", &helpers::nested_u64(data, "stats", "parent_switched")),
-        helpers::kv_line("Loop Detected", &helpers::nested_u64(data, "stats", "loop_detected")),
-        helpers::kv_line("Ancestry Changed", &helpers::nested_u64(data, "stats", "ancestry_changed")),
+        helpers::kv_line(
+            "Parent Switched",
+            &helpers::nested_u64(data, "stats", "parent_switched"),
+        ),
+        helpers::kv_line(
+            "Loop Detected",
+            &helpers::nested_u64(data, "stats", "loop_detected"),
+        ),
+        helpers::kv_line(
+            "Ancestry Changed",
+            &helpers::nested_u64(data, "stats", "ancestry_changed"),
+        ),
         Line::from(""),
         helpers::section_header("Outbound"),
         helpers::kv_line("Sent", &helpers::nested_u64(data, "stats", "sent")),
-        helpers::kv_line("Rate Limited", &helpers::nested_u64(data, "stats", "rate_limited")),
-        helpers::kv_line("Send Failed", &helpers::nested_u64(data, "stats", "send_failed")),
+        helpers::kv_line(
+            "Rate Limited",
+            &helpers::nested_u64(data, "stats", "rate_limited"),
+        ),
+        helpers::kv_line(
+            "Send Failed",
+            &helpers::nested_u64(data, "stats", "send_failed"),
+        ),
         Line::from(""),
         helpers::section_header("Cumulative"),
-        helpers::kv_line("Parent Switches", &helpers::nested_u64(data, "stats", "parent_switches")),
-        helpers::kv_line("Parent Losses", &helpers::nested_u64(data, "stats", "parent_losses")),
-        helpers::kv_line("Flap Dampened", &helpers::nested_u64(data, "stats", "flap_dampened")),
+        helpers::kv_line(
+            "Parent Switches",
+            &helpers::nested_u64(data, "stats", "parent_switches"),
+        ),
+        helpers::kv_line(
+            "Parent Losses",
+            &helpers::nested_u64(data, "stats", "parent_losses"),
+        ),
+        helpers::kv_line(
+            "Flap Dampened",
+            &helpers::nested_u64(data, "stats", "flap_dampened"),
+        ),
     ];
 
     // Trim to fit available height
@@ -164,8 +198,7 @@ fn draw_peers(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     frame.render_widget(block, area);
 
     if peers.is_empty() {
-        let msg =
-            Paragraph::new("  No peers").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("  No peers").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(msg, inner);
         return;
     }

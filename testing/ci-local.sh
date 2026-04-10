@@ -157,6 +157,14 @@ run_build() {
         return 1
     fi
 
+    info "cargo fmt --check"
+    if cargo fmt --check 2>&1; then
+        record "fmt" 0
+    else
+        record "fmt" 1
+        return 1
+    fi
+
     info "cargo clippy --all -- -D warnings"
     if cargo clippy --all -- -D warnings 2>&1; then
         record "clippy" 0

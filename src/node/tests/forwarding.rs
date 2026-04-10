@@ -5,12 +5,11 @@
 //! multi-hop forwarding through live node topologies.
 
 use super::*;
-use crate::node::session_wire::{build_fsp_header, FSP_FLAG_CP};
+use crate::node::session_wire::{FSP_FLAG_CP, build_fsp_header};
 use crate::protocol::{SessionAck, SessionDatagram, SessionSetup, encode_coords};
 use crate::tree::TreeCoordinate;
 use spanning_tree::{
-    cleanup_nodes, process_available_packets, run_tree_test, verify_tree_convergence,
-    TestNode,
+    TestNode, cleanup_nodes, process_available_packets, run_tree_test, verify_tree_convergence,
 };
 
 // ============================================================================
@@ -35,11 +34,11 @@ async fn test_forwarding_hop_limit_exhausted() {
     let from = make_node_addr(0xAA);
     let src = make_node_addr(0x01);
     let dest = make_node_addr(0x02);
-    let dg = SessionDatagram::new(src, dest, vec![0x10, 0x00, 0x00, 0x00])
-        .with_ttl(0);
+    let dg = SessionDatagram::new(src, dest, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(0);
     let encoded = dg.encode();
     // Dispatch with payload after msg_type byte
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
     // No panic, no send (node has no peers)
 }
 
@@ -52,11 +51,11 @@ async fn test_forwarding_hop_limit_one_drops_at_transit() {
     let from = make_node_addr(0xAA);
     let my_addr = *node.node_addr();
     let src = make_node_addr(0x01);
-    let dg = SessionDatagram::new(src, my_addr, vec![0x10, 0x00, 0x00, 0x00])
-        .with_ttl(1);
+    let dg = SessionDatagram::new(src, my_addr, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(1);
     let encoded = dg.encode();
     // Should succeed — ttl=1 decrements to 0 but packet is still processed
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
 }
 
 // --- Local delivery ---
@@ -69,7 +68,8 @@ async fn test_forwarding_local_delivery() {
     let dg = SessionDatagram::new(from, my_addr, vec![0x10, 0x00, 0x00, 0x00]);
     let encoded = dg.encode();
     // Should detect local delivery and return without forwarding
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
 }
 
 // --- Direct peer forwarding ---
@@ -135,7 +135,8 @@ async fn test_coord_cache_warming_session_setup() {
 
     // Handle the datagram (will be local delivery or no-route, but cache warming
     // happens before routing decision)
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
 
     // After: both src and dest coords should be cached
     let cached_src = node.coord_cache().get(&src_addr, now_ms);
@@ -175,15 +176,22 @@ async fn test_coord_cache_warming_session_ack() {
     assert!(node.coord_cache().get(&src_addr, now_ms).is_none());
     assert!(node.coord_cache().get(&dest_addr, now_ms).is_none());
 
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
 
     // SessionAck caches both src_coords and dest_coords
     let cached_src = node.coord_cache().get(&src_addr, now_ms);
-    assert!(cached_src.is_some(), "src_addr coords not cached from SessionAck");
+    assert!(
+        cached_src.is_some(),
+        "src_addr coords not cached from SessionAck"
+    );
     assert_eq!(cached_src.unwrap().root_id(), &root_addr);
 
     let cached_dest = node.coord_cache().get(&dest_addr, now_ms);
-    assert!(cached_dest.is_some(), "dest_addr coords not cached from SessionAck");
+    assert!(
+        cached_dest.is_some(),
+        "dest_addr coords not cached from SessionAck"
+    );
     assert_eq!(cached_dest.unwrap().root_id(), &root_addr);
 }
 
@@ -217,7 +225,8 @@ async fn test_coord_cache_warming_encrypted_msg_with_coords() {
     assert!(node.coord_cache().get(&src_addr, now_ms).is_none());
     assert!(node.coord_cache().get(&dest_addr, now_ms).is_none());
 
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
 
     assert!(
         node.coord_cache().get(&src_addr, now_ms).is_some(),
@@ -250,7 +259,8 @@ async fn test_coord_cache_warming_encrypted_msg_no_coords() {
         .unwrap()
         .as_millis() as u64;
 
-    node.handle_session_datagram(&from, &encoded[1..], false).await;
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
 
     assert!(
         node.coord_cache().get(&src_addr, now_ms).is_none(),
@@ -512,8 +522,16 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
                 // Give each node coords for its direct peers only
                 let j_addr = *nodes[j].node.node_addr();
                 if nodes[i].node.get_peer(&j_addr).is_some() {
-                    let coords = all_coords.iter().find(|(a, _)| a == &j_addr).unwrap().1.clone();
-                    nodes[i].node.coord_cache_mut().insert(j_addr, coords, now_ms);
+                    let coords = all_coords
+                        .iter()
+                        .find(|(a, _)| a == &j_addr)
+                        .unwrap()
+                        .1
+                        .clone();
+                    nodes[i]
+                        .node
+                        .coord_cache_mut()
+                        .insert(j_addr, coords, now_ms);
                 }
             }
         }
@@ -572,8 +590,8 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
 // ECN Tests
 // ============================================================================
 
-use crate::node::handlers::session::mark_ipv6_ecn_ce;
 use crate::node::TransportDropState;
+use crate::node::handlers::session::mark_ipv6_ecn_ce;
 use crate::transport::TransportId;
 
 /// Build a minimal IPv6 header (40 bytes) with specified ECN bits.
@@ -721,10 +739,13 @@ fn test_detect_congestion_with_transport_drops() {
 
     // Simulate transport kernel drops
     let tid = TransportId::new(1);
-    node.transport_drops.insert(tid, TransportDropState {
-        prev_drops: 100,
-        dropping: true,
-    });
+    node.transport_drops.insert(
+        tid,
+        TransportDropState {
+            prev_drops: 100,
+            dropping: true,
+        },
+    );
 
     // Now detect_congestion should return true (local transport congestion)
     assert!(node.detect_congestion(&fake_addr));
@@ -741,10 +762,13 @@ fn test_detect_congestion_disabled_ecn() {
 
     // Even with transport drops, disabled ECN should return false
     let tid = TransportId::new(1);
-    node.transport_drops.insert(tid, TransportDropState {
-        prev_drops: 50,
-        dropping: true,
-    });
+    node.transport_drops.insert(
+        tid,
+        TransportDropState {
+            prev_drops: 50,
+            dropping: true,
+        },
+    );
 
     let fake_addr = NodeAddr::from_bytes([1; 16]);
     assert!(!node.detect_congestion(&fake_addr));
@@ -756,10 +780,13 @@ fn test_sample_transport_congestion() {
 
     // Insert a transport drop state with a baseline
     let tid = TransportId::new(1);
-    node.transport_drops.insert(tid, TransportDropState {
-        prev_drops: 0,
-        dropping: false,
-    });
+    node.transport_drops.insert(
+        tid,
+        TransportDropState {
+            prev_drops: 0,
+            dropping: false,
+        },
+    );
 
     // No transports registered — sample_transport_congestion is a no-op
     // (transport_drops entry stays unchanged)

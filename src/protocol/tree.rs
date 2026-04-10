@@ -2,8 +2,8 @@
 
 use super::error::ProtocolError;
 use super::link::LinkMessageType;
-use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
 use crate::NodeAddr;
+use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
 use secp256k1::schnorr::Signature;
 
 /// Spanning tree announcement carrying parent declaration and ancestry.
@@ -166,8 +166,8 @@ impl TreeAnnounce {
         let sig_bytes: [u8; 64] = payload[pos..pos + 64]
             .try_into()
             .map_err(|_| ProtocolError::Malformed("bad signature".into()))?;
-        let signature = Signature::from_slice(&sig_bytes)
-            .map_err(|_| ProtocolError::InvalidSignature)?;
+        let signature =
+            Signature::from_slice(&sig_bytes).map_err(|_| ProtocolError::InvalidSignature)?;
 
         // The first entry's node_addr is the declaring node
         if entries.is_empty() {
@@ -324,7 +324,10 @@ mod tests {
         encoded[1] = 0xFF;
 
         let result = TreeAnnounce::decode(&encoded[1..]);
-        assert!(matches!(result, Err(ProtocolError::UnsupportedVersion(0xFF))));
+        assert!(matches!(
+            result,
+            Err(ProtocolError::UnsupportedVersion(0xFF))
+        ));
     }
 
     #[test]
@@ -365,10 +368,7 @@ mod tests {
         encoded[35] = 0;
 
         let result = TreeAnnounce::decode(&encoded[1..]);
-        assert!(matches!(
-            result,
-            Err(ProtocolError::MessageTooShort { .. })
-        ));
+        assert!(matches!(result, Err(ProtocolError::MessageTooShort { .. })));
     }
 
     #[test]

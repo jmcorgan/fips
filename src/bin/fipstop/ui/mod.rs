@@ -20,7 +20,7 @@ use crate::app::{App, ConnectionState, Tab};
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // tab bar
-        Constraint::Min(1),   // content
+        Constraint::Min(1),    // content
         Constraint::Length(1), // status bar
     ])
     .split(frame.area());
@@ -52,7 +52,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(" | ", divider));
             }
         }
-        let style = if *tab == app.active_tab { highlight } else { normal };
+        let style = if *tab == app.active_tab {
+            highlight
+        } else {
+            normal
+        };
         spans.push(Span::styled(tab.label(), style));
     }
 

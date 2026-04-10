@@ -80,12 +80,7 @@ impl TreeCoordinate {
         if addrs.is_empty() {
             return Err(TreeError::EmptyCoordinate);
         }
-        Ok(Self(
-            addrs
-                .into_iter()
-                .map(CoordEntry::addr_only)
-                .collect(),
-        ))
+        Ok(Self(addrs.into_iter().map(CoordEntry::addr_only).collect()))
     }
 
     /// Create a coordinate for a root node.

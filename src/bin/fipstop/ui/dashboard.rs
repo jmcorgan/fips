@@ -12,18 +12,18 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let data = match app.data.get(&crate::app::Tab::Node) {
         Some(d) => d,
         None => {
-            let msg = Paragraph::new("  Waiting for data...")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg =
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
             return;
         }
     };
 
     let chunks = Layout::vertical([
-        Constraint::Length(7),  // Runtime
-        Constraint::Length(7),  // Identity
-        Constraint::Length(5),  // State
-        Constraint::Length(9),  // Traffic
+        Constraint::Length(7), // Runtime
+        Constraint::Length(7), // Identity
+        Constraint::Length(5), // State
+        Constraint::Length(9), // Traffic
         Constraint::Min(0),    // remaining
     ])
     .split(area);
@@ -35,16 +35,17 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_runtime(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Runtime ");
+    let block = Block::default().borders(Borders::ALL).title(" Runtime ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let version = helpers::str_field(data, "version");
     let pid = helpers::u64_field(data, "pid");
     let exe = helpers::str_field(data, "exe_path");
-    let uptime_secs = data.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let uptime_secs = data
+        .get("uptime_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let uptime = format_uptime(uptime_secs);
     let socket = helpers::str_field(data, "control_socket");
     let tun_name = helpers::str_field(data, "tun_name");
@@ -78,9 +79,7 @@ fn draw_runtime(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
 }
 
 fn draw_identity(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Identity ");
+    let block = Block::default().borders(Borders::ALL).title(" Identity ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -109,9 +108,7 @@ fn draw_identity(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
 }
 
 fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" State ");
+    let block = Block::default().borders(Borders::ALL).title(" State ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -167,9 +164,7 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
 }
 
 fn draw_node_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Traffic ");
+    let block = Block::default().borders(Borders::ALL).title(" Traffic ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -197,7 +192,10 @@ fn fwd_line(data: &serde_json::Value, label: &str, pkt_key: &str, byte_key: &str
         .and_then(|f| f.get(byte_key))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    helpers::kv_line(label, &format!("{} pkts ({})", pkts, helpers::format_bytes(bytes)))
+    helpers::kv_line(
+        label,
+        &format!("{} pkts ({})", pkts, helpers::format_bytes(bytes)),
+    )
 }
 
 /// Format seconds as human-readable uptime (e.g., "3d 2h 15m 4s").

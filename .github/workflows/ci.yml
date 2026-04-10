@@ -26,6 +26,16 @@ env:
 # Builds on Linux x86_64, Linux aarch64, and macOS.
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

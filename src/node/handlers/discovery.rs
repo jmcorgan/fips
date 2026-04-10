@@ -20,11 +20,7 @@ impl Node {
     /// 4. Lazy purge expired entries
     /// 5. If we're the target, generate and send response
     /// 6. If TTL > 0, forward to tree peers whose bloom filter matches
-    pub(in crate::node) async fn handle_lookup_request(
-        &mut self,
-        from: &NodeAddr,
-        payload: &[u8],
-    ) {
+    pub(in crate::node) async fn handle_lookup_request(&mut self, from: &NodeAddr, payload: &[u8]) {
         self.stats_mut().discovery.req_received += 1;
 
         let request = match LookupRequest::decode(payload) {
@@ -52,10 +48,8 @@ impl Node {
         }
 
         // Record for reverse-path forwarding and dedup
-        self.recent_requests.insert(
-            request.request_id,
-            RecentRequest::new(*from, now_ms),
-        );
+        self.recent_requests
+            .insert(request.request_id, RecentRequest::new(*from, now_ms));
 
         // Lazy purge expired entries
         self.purge_expired_requests(now_ms);
@@ -76,7 +70,10 @@ impl Node {
         if request.can_forward() {
             // Transit-side rate limit: collapse rapid-fire lookups for the
             // same target from misbehaving nodes generating fresh request_ids.
-            if !self.discovery_forward_limiter.should_forward(&request.target) {
+            if !self
+                .discovery_forward_limiter
+                .should_forward(&request.target)
+            {
                 self.stats_mut().discovery.req_forward_rate_limited += 1;
                 debug!(
                     request_id = request.request_id,
@@ -192,11 +189,8 @@ impl Node {
             // Verify the proof signature
             let (xonly, _parity) = target_pubkey.x_only_public_key();
             let peer_id = PeerIdentity::from_pubkey(xonly);
-            let proof_data = LookupResponse::proof_bytes(
-                response.request_id,
-                &target,
-                &response.target_coords,
-            );
+            let proof_data =
+                LookupResponse::proof_bytes(response.request_id, &target, &response.target_coords);
             if !peer_id.verify(&proof_data, &response.proof) {
                 self.stats_mut().discovery.resp_proof_failed += 1;
                 warn!(
@@ -220,12 +214,8 @@ impl Node {
                 "Discovery succeeded, proof verified, route cached"
             );
 
-            self.coord_cache.insert_with_path_mtu(
-                target,
-                response.target_coords,
-                now_ms,
-                path_mtu,
-            );
+            self.coord_cache
+                .insert_with_path_mtu(target, response.target_coords, now_ms, path_mtu);
 
             // Clean up pending lookup tracking
             self.pending_lookups.remove(&target);
@@ -262,15 +252,11 @@ impl Node {
         let our_coords = self.tree_state().my_coords().clone();
 
         // Sign proof: Identity::sign hashes with SHA-256 internally
-        let proof_data = LookupResponse::proof_bytes(request.request_id, &request.target, &our_coords);
+        let proof_data =
+            LookupResponse::proof_bytes(request.request_id, &request.target, &our_coords);
         let proof = self.identity().sign(&proof_data);
 
-        let response = LookupResponse::new(
-            request.request_id,
-            request.target,
-            our_coords,
-            proof,
-        );
+        let response = LookupResponse::new(request.request_id, request.target, our_coords, proof);
 
         // Route toward origin via reverse path.
         let next_hop_addr = if let Some(recent) = self.recent_requests.get(&request.request_id) {
@@ -297,7 +283,10 @@ impl Node {
         );
 
         let encoded = response.encode();
-        if let Err(e) = self.send_encrypted_link_message(&next_hop_addr, &encoded).await {
+        if let Err(e) = self
+            .send_encrypted_link_message(&next_hop_addr, &encoded)
+            .await
+        {
             debug!(
                 next_hop = %self.peer_display_name(&next_hop_addr),
                 error = %e,
@@ -324,9 +313,7 @@ impl Node {
         let forward_to: Vec<NodeAddr> = self
             .peers
             .iter()
-            .filter(|(addr, peer)| {
-                self.is_tree_peer(addr) && peer.may_reach(&request.target)
-            })
+            .filter(|(addr, peer)| self.is_tree_peer(addr) && peer.may_reach(&request.target))
             .map(|(addr, _)| *addr)
             .collect();
 
@@ -335,9 +322,7 @@ impl Node {
             let fallback: Vec<NodeAddr> = self
                 .peers
                 .iter()
-                .filter(|(addr, peer)| {
-                    !self.is_tree_peer(addr) && peer.may_reach(&request.target)
-                })
+                .filter(|(addr, peer)| !self.is_tree_peer(addr) && peer.may_reach(&request.target))
                 .map(|(addr, _)| *addr)
                 .collect();
             if fallback.is_empty() {
@@ -402,9 +387,7 @@ impl Node {
         let peer_addrs: Vec<NodeAddr> = self
             .peers
             .iter()
-            .filter(|(addr, peer)| {
-                self.is_tree_peer(addr) && peer.may_reach(target)
-            })
+            .filter(|(addr, peer)| self.is_tree_peer(addr) && peer.may_reach(target))
             .map(|(addr, _)| *addr)
             .collect();
 
@@ -488,7 +471,8 @@ impl Node {
             return;
         }
 
-        self.pending_lookups.insert(*dest, PendingLookup::new(now_ms));
+        self.pending_lookups
+            .insert(*dest, PendingLookup::new(now_ms));
         let ttl = self.config.node.discovery.ttl;
         let sent = self.initiate_lookup(dest, ttl).await;
 

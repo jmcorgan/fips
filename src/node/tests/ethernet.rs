@@ -6,8 +6,8 @@
 use super::*;
 use crate::config::EthernetConfig;
 use crate::transport::ethernet::EthernetTransport;
-use crate::transport::{packet_channel, TransportAddr, TransportHandle, TransportId};
-use spanning_tree::{cleanup_nodes, drain_all_packets, initiate_handshake, TestNode};
+use crate::transport::{TransportAddr, TransportHandle, TransportId, packet_channel};
+use spanning_tree::{TestNode, cleanup_nodes, drain_all_packets, initiate_handshake};
 
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -40,7 +40,9 @@ impl VethPair {
 
         // Create veth pair
         let status = Command::new("ip")
-            .args(["link", "add", &name_a, "type", "veth", "peer", "name", &name_b])
+            .args([
+                "link", "add", &name_a, "type", "veth", "peer", "name", &name_b,
+            ])
             .status()
             .expect("failed to run 'ip link add'");
         assert!(status.success(), "failed to create veth pair");
@@ -91,7 +93,9 @@ async fn make_test_node_ethernet(interface: &str) -> TestNode {
     let mut transport = EthernetTransport::new(transport_id, None, config, packet_tx);
     transport.start_async().await.unwrap();
 
-    let mac = transport.local_mac().expect("transport should have MAC after start");
+    let mac = transport
+        .local_mac()
+        .expect("transport should have MAC after start");
     let addr = TransportAddr::from_bytes(&mac);
 
     node.transports

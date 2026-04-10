@@ -28,21 +28,21 @@ mod session;
 mod tree;
 
 // Re-export all public types at protocol:: level
-pub use error::ProtocolError;
-pub use link::{
-    Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType, SessionDatagram,
-    SESSION_DATAGRAM_HEADER_SIZE,
-};
-pub use tree::TreeAnnounce;
-pub use filter::FilterAnnounce;
 pub use discovery::{LookupRequest, LookupResponse};
+pub use error::ProtocolError;
+pub use filter::FilterAnnounce;
+pub use link::{
+    Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType,
+    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram,
+};
 pub use session::{
-    CoordsRequired, FspFlags, FspInnerFlags, MtuExceeded, PathBroken, PathMtuNotification,
-    SessionAck, SessionFlags, SessionMessageType, SessionMsg3, SessionReceiverReport,
-    SessionSenderReport, SessionSetup, COORDS_REQUIRED_SIZE, MTU_EXCEEDED_SIZE,
-    PATH_MTU_NOTIFICATION_SIZE, SESSION_RECEIVER_REPORT_SIZE, SESSION_SENDER_REPORT_SIZE,
+    COORDS_REQUIRED_SIZE, CoordsRequired, FspFlags, FspInnerFlags, MTU_EXCEEDED_SIZE, MtuExceeded,
+    PATH_MTU_NOTIFICATION_SIZE, PathBroken, PathMtuNotification, SESSION_RECEIVER_REPORT_SIZE,
+    SESSION_SENDER_REPORT_SIZE, SessionAck, SessionFlags, SessionMessageType, SessionMsg3,
+    SessionReceiverReport, SessionSenderReport, SessionSetup,
 };
 pub(crate) use session::{coords_wire_size, decode_optional_coords, encode_coords};
+pub use tree::TreeAnnounce;
 
 /// Protocol version for message compatibility.
 pub const PROTOCOL_VERSION: u8 = 1;

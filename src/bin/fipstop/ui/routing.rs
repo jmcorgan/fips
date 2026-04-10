@@ -12,16 +12,16 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let data = match app.data.get(&Tab::Routing) {
         Some(d) => d,
         None => {
-            let msg = Paragraph::new("  Waiting for data...")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg =
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, area);
             return;
         }
     };
 
     let chunks = Layout::vertical([
-        Constraint::Length(7),  // Routing State
-        Constraint::Length(8),  // Coordinate Cache
+        Constraint::Length(7), // Routing State
+        Constraint::Length(8), // Coordinate Cache
         Constraint::Min(3),    // Routing Statistics
     ])
     .split(area);
@@ -33,7 +33,10 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_routing_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let lines = vec![
-        helpers::kv_line("Coord Cache", &helpers::u64_field(data, "coord_cache_entries")),
+        helpers::kv_line(
+            "Coord Cache",
+            &helpers::u64_field(data, "coord_cache_entries"),
+        ),
         helpers::kv_line(
             "Identity Cache",
             &helpers::u64_field(data, "identity_cache_entries"),
@@ -68,7 +71,10 @@ fn fwd_line(data: &serde_json::Value, label: &str, pkt_key: &str, byte_key: &str
         .and_then(|f| f.get(byte_key))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    helpers::kv_line(label, &format!("{} pkts ({})", pkts, helpers::format_bytes(bytes)))
+    helpers::kv_line(
+        label,
+        &format!("{} pkts ({})", pkts, helpers::format_bytes(bytes)),
+    )
 }
 
 fn draw_routing_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
@@ -78,11 +84,8 @@ fn draw_routing_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let cols = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(inner);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
     // Left column: Forwarding + Discovery
     let mut left = vec![
@@ -91,47 +94,147 @@ fn draw_routing_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         fwd_line(data, "Delivered", "delivered_packets", "delivered_bytes"),
         fwd_line(data, "Forwarded", "forwarded_packets", "forwarded_bytes"),
         fwd_line(data, "Originated", "originated_packets", "originated_bytes"),
-        fwd_line(data, "Decode Error", "decode_error_packets", "decode_error_bytes"),
-        fwd_line(data, "TTL Exhausted", "ttl_exhausted_packets", "ttl_exhausted_bytes"),
-        fwd_line(data, "No Route", "drop_no_route_packets", "drop_no_route_bytes"),
-        fwd_line(data, "MTU Exceeded", "drop_mtu_exceeded_packets", "drop_mtu_exceeded_bytes"),
-        fwd_line(data, "Send Error", "drop_send_error_packets", "drop_send_error_bytes"),
+        fwd_line(
+            data,
+            "Decode Error",
+            "decode_error_packets",
+            "decode_error_bytes",
+        ),
+        fwd_line(
+            data,
+            "TTL Exhausted",
+            "ttl_exhausted_packets",
+            "ttl_exhausted_bytes",
+        ),
+        fwd_line(
+            data,
+            "No Route",
+            "drop_no_route_packets",
+            "drop_no_route_bytes",
+        ),
+        fwd_line(
+            data,
+            "MTU Exceeded",
+            "drop_mtu_exceeded_packets",
+            "drop_mtu_exceeded_bytes",
+        ),
+        fwd_line(
+            data,
+            "Send Error",
+            "drop_send_error_packets",
+            "drop_send_error_bytes",
+        ),
         Line::from(""),
         helpers::section_header("Discovery Requests"),
-        helpers::kv_line("Received", &helpers::nested_u64(data, "discovery", "req_received")),
-        helpers::kv_line("Forwarded", &helpers::nested_u64(data, "discovery", "req_forwarded")),
-        helpers::kv_line("Initiated", &helpers::nested_u64(data, "discovery", "req_initiated")),
-        helpers::kv_line("Deduplicated", &helpers::nested_u64(data, "discovery", "req_deduplicated")),
-        helpers::kv_line("Target Is Us", &helpers::nested_u64(data, "discovery", "req_target_is_us")),
-        helpers::kv_line("Duplicate", &helpers::nested_u64(data, "discovery", "req_duplicate")),
-        helpers::kv_line("Bloom Miss", &helpers::nested_u64(data, "discovery", "req_bloom_miss")),
-        helpers::kv_line("Backoff Suppressed", &helpers::nested_u64(data, "discovery", "req_backoff_suppressed")),
-        helpers::kv_line("Fwd Rate Limited", &helpers::nested_u64(data, "discovery", "req_forward_rate_limited")),
-        helpers::kv_line("TTL Exhausted", &helpers::nested_u64(data, "discovery", "req_ttl_exhausted")),
-        helpers::kv_line("Decode Error", &helpers::nested_u64(data, "discovery", "req_decode_error")),
+        helpers::kv_line(
+            "Received",
+            &helpers::nested_u64(data, "discovery", "req_received"),
+        ),
+        helpers::kv_line(
+            "Forwarded",
+            &helpers::nested_u64(data, "discovery", "req_forwarded"),
+        ),
+        helpers::kv_line(
+            "Initiated",
+            &helpers::nested_u64(data, "discovery", "req_initiated"),
+        ),
+        helpers::kv_line(
+            "Deduplicated",
+            &helpers::nested_u64(data, "discovery", "req_deduplicated"),
+        ),
+        helpers::kv_line(
+            "Target Is Us",
+            &helpers::nested_u64(data, "discovery", "req_target_is_us"),
+        ),
+        helpers::kv_line(
+            "Duplicate",
+            &helpers::nested_u64(data, "discovery", "req_duplicate"),
+        ),
+        helpers::kv_line(
+            "Bloom Miss",
+            &helpers::nested_u64(data, "discovery", "req_bloom_miss"),
+        ),
+        helpers::kv_line(
+            "Backoff Suppressed",
+            &helpers::nested_u64(data, "discovery", "req_backoff_suppressed"),
+        ),
+        helpers::kv_line(
+            "Fwd Rate Limited",
+            &helpers::nested_u64(data, "discovery", "req_forward_rate_limited"),
+        ),
+        helpers::kv_line(
+            "TTL Exhausted",
+            &helpers::nested_u64(data, "discovery", "req_ttl_exhausted"),
+        ),
+        helpers::kv_line(
+            "Decode Error",
+            &helpers::nested_u64(data, "discovery", "req_decode_error"),
+        ),
         Line::from(""),
         helpers::section_header("Discovery Responses"),
-        helpers::kv_line("Received", &helpers::nested_u64(data, "discovery", "resp_received")),
-        helpers::kv_line("Accepted", &helpers::nested_u64(data, "discovery", "resp_accepted")),
-        helpers::kv_line("Forwarded", &helpers::nested_u64(data, "discovery", "resp_forwarded")),
-        helpers::kv_line("Timed Out", &helpers::nested_u64(data, "discovery", "resp_timed_out")),
-        helpers::kv_line("Identity Miss", &helpers::nested_u64(data, "discovery", "resp_identity_miss")),
-        helpers::kv_line("Proof Failed", &helpers::nested_u64(data, "discovery", "resp_proof_failed")),
-        helpers::kv_line("Decode Error", &helpers::nested_u64(data, "discovery", "resp_decode_error")),
+        helpers::kv_line(
+            "Received",
+            &helpers::nested_u64(data, "discovery", "resp_received"),
+        ),
+        helpers::kv_line(
+            "Accepted",
+            &helpers::nested_u64(data, "discovery", "resp_accepted"),
+        ),
+        helpers::kv_line(
+            "Forwarded",
+            &helpers::nested_u64(data, "discovery", "resp_forwarded"),
+        ),
+        helpers::kv_line(
+            "Timed Out",
+            &helpers::nested_u64(data, "discovery", "resp_timed_out"),
+        ),
+        helpers::kv_line(
+            "Identity Miss",
+            &helpers::nested_u64(data, "discovery", "resp_identity_miss"),
+        ),
+        helpers::kv_line(
+            "Proof Failed",
+            &helpers::nested_u64(data, "discovery", "resp_proof_failed"),
+        ),
+        helpers::kv_line(
+            "Decode Error",
+            &helpers::nested_u64(data, "discovery", "resp_decode_error"),
+        ),
     ];
 
     // Right column: Error Signals + Congestion
     let mut right = vec![
         helpers::section_header("Error Signals"),
-        helpers::kv_line("Coords Required", &helpers::nested_u64(data, "error_signals", "coords_required")),
-        helpers::kv_line("Path Broken", &helpers::nested_u64(data, "error_signals", "path_broken")),
-        helpers::kv_line("MTU Exceeded", &helpers::nested_u64(data, "error_signals", "mtu_exceeded")),
+        helpers::kv_line(
+            "Coords Required",
+            &helpers::nested_u64(data, "error_signals", "coords_required"),
+        ),
+        helpers::kv_line(
+            "Path Broken",
+            &helpers::nested_u64(data, "error_signals", "path_broken"),
+        ),
+        helpers::kv_line(
+            "MTU Exceeded",
+            &helpers::nested_u64(data, "error_signals", "mtu_exceeded"),
+        ),
         Line::from(""),
         helpers::section_header("Congestion"),
-        helpers::kv_line("CE Forwarded", &helpers::nested_u64(data, "congestion", "ce_forwarded")),
-        helpers::kv_line("CE Received", &helpers::nested_u64(data, "congestion", "ce_received")),
-        helpers::kv_line("Congestion Detected", &helpers::nested_u64(data, "congestion", "congestion_detected")),
-        helpers::kv_line("Kernel Drops", &helpers::nested_u64(data, "congestion", "kernel_drop_events")),
+        helpers::kv_line(
+            "CE Forwarded",
+            &helpers::nested_u64(data, "congestion", "ce_forwarded"),
+        ),
+        helpers::kv_line(
+            "CE Received",
+            &helpers::nested_u64(data, "congestion", "ce_received"),
+        ),
+        helpers::kv_line(
+            "Congestion Detected",
+            &helpers::nested_u64(data, "congestion", "congestion_detected"),
+        ),
+        helpers::kv_line(
+            "Kernel Drops",
+            &helpers::nested_u64(data, "congestion", "kernel_drop_events"),
+        ),
     ];
 
     let max_lines = cols[0].height as usize;

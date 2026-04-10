@@ -1,8 +1,8 @@
 //! Session-layer message types: setup, ack, data, and error messages.
 
 use super::ProtocolError;
-use crate::tree::TreeCoordinate;
 use crate::NodeAddr;
+use crate::tree::TreeCoordinate;
 use std::fmt;
 
 // ============================================================================
@@ -141,15 +141,17 @@ pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), Prot
         bytes.copy_from_slice(&data[offset..offset + 16]);
         addrs.push(NodeAddr::from_bytes(bytes));
     }
-    let coord = TreeCoordinate::from_addrs(addrs)
-        .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    let coord =
+        TreeCoordinate::from_addrs(addrs).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
     Ok((coord, needed))
 }
 
 /// Decode an optional coordinate field (count may be 0).
 ///
 /// Returns None if count is 0, Some(coord) otherwise, plus bytes consumed.
-pub(crate) fn decode_optional_coords(data: &[u8]) -> Result<(Option<TreeCoordinate>, usize), ProtocolError> {
+pub(crate) fn decode_optional_coords(
+    data: &[u8],
+) -> Result<(Option<TreeCoordinate>, usize), ProtocolError> {
     if data.len() < 2 {
         return Err(ProtocolError::MessageTooShort {
             expected: 2,
@@ -174,8 +176,8 @@ pub(crate) fn decode_optional_coords(data: &[u8]) -> Result<(Option<TreeCoordina
         bytes.copy_from_slice(&data[offset..offset + 16]);
         addrs.push(NodeAddr::from_bytes(bytes));
     }
-    let coord = TreeCoordinate::from_addrs(addrs)
-        .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    let coord =
+        TreeCoordinate::from_addrs(addrs).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
     Ok((Some(coord), needed))
 }
 
@@ -909,7 +911,10 @@ pub const COORDS_REQUIRED_SIZE: usize = 34;
 impl CoordsRequired {
     /// Create a new CoordsRequired error.
     pub fn new(dest_addr: NodeAddr, reporter: NodeAddr) -> Self {
-        Self { dest_addr, reporter }
+        Self {
+            dest_addr,
+            reporter,
+        }
     }
 
     /// Encode as wire format (4-byte FSP prefix + msg_type + body).
@@ -1081,7 +1086,11 @@ pub const MTU_EXCEEDED_SIZE: usize = 36;
 impl MtuExceeded {
     /// Create a new MtuExceeded error.
     pub fn new(dest_addr: NodeAddr, reporter: NodeAddr, mtu: u16) -> Self {
-        Self { dest_addr, reporter, mtu }
+        Self {
+            dest_addr,
+            reporter,
+            mtu,
+        }
     }
 
     /// Encode as wire format (4-byte FSP prefix + msg_type + body).
@@ -1359,8 +1368,7 @@ mod tests {
         let addrs: Vec<u8> = (0..11).collect();
         let src = make_coords(&addrs);
         let dest = make_coords(&[20, 21, 22, 23, 24]);
-        let setup = SessionSetup::new(src.clone(), dest.clone())
-            .with_handshake(vec![0x55; 82]);
+        let setup = SessionSetup::new(src.clone(), dest.clone()).with_handshake(vec![0x55; 82]);
 
         let encoded = setup.encode();
         let decoded = SessionSetup::decode(&encoded[4..]).unwrap();
@@ -1459,9 +1467,18 @@ mod tests {
 
     #[test]
     fn test_session_message_type_display() {
-        assert_eq!(format!("{}", SessionMessageType::SenderReport), "SenderReport");
-        assert_eq!(format!("{}", SessionMessageType::ReceiverReport), "ReceiverReport");
-        assert_eq!(format!("{}", SessionMessageType::PathMtuNotification), "PathMtuNotification");
+        assert_eq!(
+            format!("{}", SessionMessageType::SenderReport),
+            "SenderReport"
+        );
+        assert_eq!(
+            format!("{}", SessionMessageType::ReceiverReport),
+            "ReceiverReport"
+        );
+        assert_eq!(
+            format!("{}", SessionMessageType::PathMtuNotification),
+            "PathMtuNotification"
+        );
     }
 
     // ===== SessionSenderReport Tests =====
@@ -1639,7 +1656,10 @@ mod tests {
 
     #[test]
     fn test_mtu_exceeded_display() {
-        assert_eq!(format!("{}", SessionMessageType::MtuExceeded), "MtuExceeded");
+        assert_eq!(
+            format!("{}", SessionMessageType::MtuExceeded),
+            "MtuExceeded"
+        );
     }
 
     // ===== SessionMsg3 Tests =====

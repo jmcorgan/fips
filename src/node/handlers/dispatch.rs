@@ -1,14 +1,19 @@
 //! Link message dispatch and peer removal.
 
-use crate::node::Node;
 use crate::NodeAddr;
+use crate::node::Node;
 use tracing::{debug, info, trace};
 
 impl Node {
     /// Dispatch a decrypted link message to the appropriate handler.
     ///
     /// Link messages are protocol messages exchanged between authenticated peers.
-    pub(in crate::node) async fn dispatch_link_message(&mut self, from: &NodeAddr, plaintext: &[u8], ce_flag: bool) {
+    pub(in crate::node) async fn dispatch_link_message(
+        &mut self,
+        from: &NodeAddr,
+        plaintext: &[u8],
+        ce_flag: bool,
+    ) {
         if plaintext.is_empty() {
             return;
         }
@@ -109,7 +114,9 @@ impl Node {
         }
 
         // MMP teardown log (before we drop the peer)
-        let peer_name = self.peer_aliases.get(node_addr)
+        let peer_name = self
+            .peer_aliases
+            .get(node_addr)
             .cloned()
             .unwrap_or_else(|| peer.identity().short_npub());
         if let Some(mmp) = peer.mmp() {

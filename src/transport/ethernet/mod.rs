@@ -14,10 +14,8 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
-use discovery::{
-    build_beacon, parse_beacon, DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA,
-};
-use socket::{AsyncPacketSocket, PacketSocket, ETHERNET_BROADCAST};
+use discovery::{DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA, build_beacon, parse_beacon};
+use socket::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
 use stats::EthernetStats;
 
 use secp256k1::XOnlyPublicKey;
@@ -410,8 +408,7 @@ async fn ethernet_receive_loop(
                             trace!("Data frame too short ({len} bytes), ignoring");
                             continue;
                         }
-                        let payload_len =
-                            u16::from_le_bytes([buf[1], buf[2]]) as usize;
+                        let payload_len = u16::from_le_bytes([buf[1], buf[2]]) as usize;
                         if payload_len > len - 3 {
                             trace!(
                                 "Data frame length field ({payload_len}) exceeds \
@@ -442,9 +439,7 @@ async fn ethernet_receive_loop(
                     FRAME_TYPE_BEACON => {
                         stats.record_beacon_recv();
 
-                        if discovery_enabled
-                            && let Some(pubkey) = parse_beacon(&buf[..len])
-                        {
+                        if discovery_enabled && let Some(pubkey) = parse_beacon(&buf[..len]) {
                             discovery_buffer.add_peer(src_mac, pubkey);
                             trace!(
                                 transport_id = %transport_id,

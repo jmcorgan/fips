@@ -533,8 +533,7 @@ mod tests {
         let src = make_node_addr(0xAA);
         let dest = make_node_addr(0xBB);
         let payload = vec![0x10, 0x00, 0x05, 0x00, 1, 2, 3, 4, 5]; // session payload
-        let dg = SessionDatagram::new(src, dest, payload.clone())
-            .with_ttl(32);
+        let dg = SessionDatagram::new(src, dest, payload.clone()).with_ttl(32);
 
         let encoded = dg.encode();
         assert_eq!(encoded[0], 0x00); // msg_type (SessionDatagram)

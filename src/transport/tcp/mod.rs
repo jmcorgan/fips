@@ -41,8 +41,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -362,7 +362,8 @@ impl TcpTransport {
         };
 
         // Configure socket options via socket2
-        let std_stream = stream.into_std()
+        let std_stream = stream
+            .into_std()
             .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
         configure_socket(&std_stream, &self.config)?;
 
@@ -385,7 +386,16 @@ impl TcpTransport {
         let mtu = mss_mtu;
 
         let recv_task = tokio::spawn(async move {
-            tcp_receive_loop(read_half, transport_id, remote_addr.clone(), packet_tx, pool, mtu, recv_stats).await;
+            tcp_receive_loop(
+                read_half,
+                transport_id,
+                remote_addr.clone(),
+                packet_tx,
+                pool,
+                mtu,
+                recv_stats,
+            )
+            .await;
         });
 
         let conn = TcpConnection {
@@ -521,7 +531,8 @@ impl TcpTransport {
             };
 
             // Configure socket options via socket2
-            let std_stream = stream.into_std()
+            let std_stream = stream
+                .into_std()
                 .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
             configure_socket(&std_stream, &config)?;
 
@@ -589,9 +600,7 @@ impl TcpTransport {
                 self.promote_connection(addr, stream, mss_mtu);
                 ConnectionState::Connected
             }
-            Some(Ok(Err(e))) => {
-                ConnectionState::Failed(format!("{}", e))
-            }
+            Some(Ok(Err(e))) => ConnectionState::Failed(format!("{}", e)),
             Some(Err(e)) => {
                 // JoinError (panic or cancel)
                 ConnectionState::Failed(format!("task failed: {}", e))
@@ -737,7 +746,14 @@ async fn accept_loop(
     cfg: AcceptConfig,
     stats: Arc<TcpStats>,
 ) {
-    let AcceptConfig { mtu, max_inbound, nodelay, keepalive_secs, recv_buf, send_buf } = cfg;
+    let AcceptConfig {
+        mtu,
+        max_inbound,
+        nodelay,
+        keepalive_secs,
+        recv_buf,
+        send_buf,
+    } = cfg;
     debug!(transport_id = %transport_id, "TCP accept loop starting");
 
     loop {
@@ -771,7 +787,13 @@ async fn accept_loop(
                     }
                 };
 
-                if let Err(e) = configure_accepted_socket(&std_stream, nodelay, keepalive_secs, recv_buf, send_buf) {
+                if let Err(e) = configure_accepted_socket(
+                    &std_stream,
+                    nodelay,
+                    keepalive_secs,
+                    recv_buf,
+                    send_buf,
+                ) {
                     warn!(
                         transport_id = %transport_id,
                         peer_addr = %peer_addr,
@@ -886,11 +908,7 @@ async fn tcp_receive_loop(
                     "TCP packet received"
                 );
 
-                let packet = ReceivedPacket::new(
-                    transport_id,
-                    remote_addr.clone(),
-                    data,
-                );
+                let packet = ReceivedPacket::new(transport_id, remote_addr.clone(), data);
 
                 if packet_tx.send(packet).await.is_err() {
                     debug!(
@@ -934,26 +952,30 @@ fn configure_socket(
     stream: &std::net::TcpStream,
     config: &TcpConfig,
 ) -> Result<(), TransportError> {
-    let socket = socket2::SockRef::from(stream).try_clone()
+    let socket = socket2::SockRef::from(stream)
+        .try_clone()
         .map_err(|e| TransportError::StartFailed(format!("clone socket: {}", e)))?;
 
     // TCP_NODELAY
-    socket.set_tcp_nodelay(config.nodelay())
+    socket
+        .set_tcp_nodelay(config.nodelay())
         .map_err(|e| TransportError::StartFailed(format!("set nodelay: {}", e)))?;
 
     // Keepalive
     let keepalive_secs = config.keepalive_secs();
     if keepalive_secs > 0 {
-        let keepalive = TcpKeepalive::new()
-            .with_time(Duration::from_secs(keepalive_secs));
-        socket.set_tcp_keepalive(&keepalive)
+        let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(keepalive_secs));
+        socket
+            .set_tcp_keepalive(&keepalive)
             .map_err(|e| TransportError::StartFailed(format!("set keepalive: {}", e)))?;
     }
 
     // Buffer sizes
-    socket.set_recv_buffer_size(config.recv_buf_size())
+    socket
+        .set_recv_buffer_size(config.recv_buf_size())
         .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
-    socket.set_send_buffer_size(config.send_buf_size())
+    socket
+        .set_send_buffer_size(config.send_buf_size())
         .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
 
     Ok(())
@@ -967,22 +989,26 @@ fn configure_accepted_socket(
     recv_buf: usize,
     send_buf: usize,
 ) -> Result<(), TransportError> {
-    let socket = socket2::SockRef::from(stream).try_clone()
+    let socket = socket2::SockRef::from(stream)
+        .try_clone()
         .map_err(|e| TransportError::StartFailed(format!("clone socket: {}", e)))?;
 
-    socket.set_tcp_nodelay(nodelay)
+    socket
+        .set_tcp_nodelay(nodelay)
         .map_err(|e| TransportError::StartFailed(format!("set nodelay: {}", e)))?;
 
     if keepalive_secs > 0 {
-        let keepalive = TcpKeepalive::new()
-            .with_time(Duration::from_secs(keepalive_secs));
-        socket.set_tcp_keepalive(&keepalive)
+        let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(keepalive_secs));
+        socket
+            .set_tcp_keepalive(&keepalive)
             .map_err(|e| TransportError::StartFailed(format!("set keepalive: {}", e)))?;
     }
 
-    socket.set_recv_buffer_size(recv_buf)
+    socket
+        .set_recv_buffer_size(recv_buf)
         .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
-    socket.set_send_buffer_size(send_buf)
+    socket
+        .set_send_buffer_size(send_buf)
         .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
 
     Ok(())
@@ -1028,7 +1054,7 @@ fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
 mod tests {
     use super::*;
     use crate::transport::packet_channel;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     fn make_config() -> TcpConfig {
         TcpConfig {
@@ -1064,7 +1090,8 @@ mod tests {
     #[tokio::test]
     async fn test_start_outbound_only() {
         let (tx, _rx) = packet_channel(100);
-        let mut transport = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx);
+        let mut transport =
+            TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx);
 
         transport.start_async().await.unwrap();
         assert_eq!(transport.state(), TransportState::Up);
@@ -1135,10 +1162,7 @@ mod tests {
         }
 
         let bytes_sent = t1
-            .send_async(
-                &TransportAddr::from_string(&addr2.to_string()),
-                &frame,
-            )
+            .send_async(&TransportAddr::from_string(&addr2.to_string()), &frame)
             .await
             .unwrap();
         assert_eq!(bytes_sent, frame.len());
@@ -1176,12 +1200,9 @@ mod tests {
         msg1_frame[2..4].copy_from_slice(&110u16.to_le_bytes()); // payload_len = 110
 
         // Send from t1 to t2
-        t1.send_async(
-            &TransportAddr::from_string(&addr2.to_string()),
-            &msg1_frame,
-        )
-        .await
-        .unwrap();
+        t1.send_async(&TransportAddr::from_string(&addr2.to_string()), &msg1_frame)
+            .await
+            .unwrap();
 
         let packet = timeout(Duration::from_secs(2), rx2.recv())
             .await
@@ -1196,12 +1217,9 @@ mod tests {
         msg2_frame[2..4].copy_from_slice(&65u16.to_le_bytes()); // payload_len = 65
 
         // Send from t2 to t1
-        t2.send_async(
-            &TransportAddr::from_string(&addr1.to_string()),
-            &msg2_frame,
-        )
-        .await
-        .unwrap();
+        t2.send_async(&TransportAddr::from_string(&addr1.to_string()), &msg2_frame)
+            .await
+            .unwrap();
 
         let packet = timeout(Duration::from_secs(2), rx1.recv())
             .await
@@ -1226,7 +1244,10 @@ mod tests {
 
         // Try to connect to a non-routable address (should timeout)
         let result = transport
-            .send_async(&TransportAddr::from_string("192.0.2.1:2121"), b"\x00\x00\x04\x00test1234567890123456789012345678")
+            .send_async(
+                &TransportAddr::from_string("192.0.2.1:2121"),
+                b"\x00\x00\x04\x00test1234567890123456789012345678",
+            )
             .await;
 
         assert!(result.is_err());
@@ -1410,8 +1431,7 @@ mod tests {
 
         t1.send_async(&remote, &msg1).await.unwrap();
 
-        let packet = timeout(Duration::from_secs(2), rx1.recv())
-            .await;
+        let packet = timeout(Duration::from_secs(2), rx1.recv()).await;
         // We receive on rx1 but that's the wrong receiver — t2's rx gets the packet
         // Just verify send didn't error
         drop(packet);
@@ -1472,7 +1492,10 @@ mod tests {
         // Connect first time
         t1.connect_async(&remote).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(t1.connection_state_sync(&remote), ConnectionState::Connected);
+        assert_eq!(
+            t1.connection_state_sync(&remote),
+            ConnectionState::Connected
+        );
 
         // Second connect should be a no-op (already connected)
         t1.connect_async(&remote).await.unwrap();
@@ -1498,7 +1521,10 @@ mod tests {
         // Connect first, then send
         t1.connect_async(&remote).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(t1.connection_state_sync(&remote), ConnectionState::Connected);
+        assert_eq!(
+            t1.connection_state_sync(&remote),
+            ConnectionState::Connected
+        );
 
         // Build valid FMP msg1 frame
         let mut msg1 = vec![0xAA; 114];
@@ -1524,9 +1550,7 @@ mod tests {
         let (tx, _rx) = packet_channel(100);
         let transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
 
-        let state = transport.connection_state_sync(
-            &TransportAddr::from_string("unknown:1234"),
-        );
+        let state = transport.connection_state_sync(&TransportAddr::from_string("unknown:1234"));
         assert_eq!(state, ConnectionState::None);
     }
 
@@ -1605,10 +1629,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        assert_eq!(
-            t1.connection_state_sync(&addr),
-            ConnectionState::Connected,
-        );
+        assert_eq!(t1.connection_state_sync(&addr), ConnectionState::Connected,);
 
         t1.stop_async().await.unwrap();
         t2.stop_async().await.unwrap();

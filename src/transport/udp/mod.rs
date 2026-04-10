@@ -8,10 +8,10 @@ use super::{
 };
 mod socket;
 mod stats;
-use socket::{AsyncUdpSocket, UdpRawSocket};
-use stats::UdpStats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
+use socket::{AsyncUdpSocket, UdpRawSocket};
+use stats::UdpStats;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -125,7 +125,11 @@ impl UdpTransport {
     /// Query transport-local congestion indicators.
     pub fn congestion(&self) -> super::TransportCongestion {
         super::TransportCongestion {
-            recv_drops: Some(self.stats.kernel_drops.load(std::sync::atomic::Ordering::Relaxed)),
+            recv_drops: Some(
+                self.stats
+                    .kernel_drops
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 
@@ -367,7 +371,7 @@ async fn udp_receive_loop(
 mod tests {
     use super::*;
     use crate::transport::packet_channel;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     fn make_config(port: u16) -> UdpConfig {
         UdpConfig {
@@ -444,7 +448,10 @@ mod tests {
             .expect("channel closed");
 
         assert_eq!(packet.data, data);
-        assert_eq!(packet.remote_addr.as_str(), Some(addr1.to_string().as_str()));
+        assert_eq!(
+            packet.remote_addr.as_str(),
+            Some(addr1.to_string().as_str())
+        );
 
         t1.stop_async().await.unwrap();
         t2.stop_async().await.unwrap();
@@ -615,7 +622,10 @@ mod tests {
         // Send using IP string address
         let data = b"hello via ip string";
         let bytes_sent = t1
-            .send_async(&TransportAddr::from_string(&format!("127.0.0.1:{}", port2)), data)
+            .send_async(
+                &TransportAddr::from_string(&format!("127.0.0.1:{}", port2)),
+                data,
+            )
             .await
             .unwrap();
         assert_eq!(bytes_sent, data.len());

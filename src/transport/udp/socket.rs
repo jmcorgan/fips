@@ -184,8 +184,7 @@ impl UdpRawSocket {
         unsafe {
             let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
             while !cmsg.is_null() {
-                if (*cmsg).cmsg_level == libc::SOL_SOCKET
-                    && (*cmsg).cmsg_type == libc::SO_RXQ_OVFL
+                if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SO_RXQ_OVFL
                 {
                     let data = libc::CMSG_DATA(cmsg);
                     drops = std::ptr::read_unaligned(data as *const u32);
@@ -224,11 +223,7 @@ pub struct AsyncUdpSocket {
 
 impl AsyncUdpSocket {
     /// Send a payload to a destination address.
-    pub async fn send_to(
-        &self,
-        data: &[u8],
-        dest: &SocketAddr,
-    ) -> Result<usize, TransportError> {
+    pub async fn send_to(&self, data: &[u8], dest: &SocketAddr) -> Result<usize, TransportError> {
         loop {
             let mut guard = self
                 .inner
@@ -268,9 +263,7 @@ impl AsyncUdpSocket {
 }
 
 /// Convert a `libc::sockaddr_storage` to `std::net::SocketAddr`.
-fn sockaddr_to_socket_addr(
-    storage: &libc::sockaddr_storage,
-) -> std::io::Result<SocketAddr> {
+fn sockaddr_to_socket_addr(storage: &libc::sockaddr_storage) -> std::io::Result<SocketAddr> {
     match storage.ss_family as libc::c_int {
         libc::AF_INET => {
             let addr: &libc::sockaddr_in =

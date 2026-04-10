@@ -42,8 +42,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -92,16 +92,15 @@ fn parse_tor_addr(addr: &TransportAddr) -> Result<TorAddr, TransportError> {
     } else {
         // Hostname:port — pass through SOCKS5 for Tor-side DNS resolution
         let (host, port_str) = s.rsplit_once(':').ok_or_else(|| {
-            TransportError::InvalidAddress(format!(
-                "invalid address (expected host:port): {}", s
-            ))
+            TransportError::InvalidAddress(format!("invalid address (expected host:port): {}", s))
         })?;
-        let port: u16 = port_str.parse().map_err(|_| {
-            TransportError::InvalidAddress(format!("invalid port: {}", s))
-        })?;
+        let port: u16 = port_str
+            .parse()
+            .map_err(|_| TransportError::InvalidAddress(format!("invalid port: {}", s)))?;
         if !host.contains('.') {
             return Err(TransportError::InvalidAddress(format!(
-                "hostname must be fully qualified (contain a dot): {}", host
+                "hostname must be fully qualified (contain a dot): {}",
+                host
             )));
         }
         Ok(TorAddr::ClearnetHostname(host.to_string(), port))
@@ -306,17 +305,16 @@ impl TorTransport {
         }
 
         // Connect to Tor control port
-        let mut client = TorControlClient::connect(&control_addr).await.map_err(|e| {
-            self.stats.record_control_error();
-            TransportError::StartFailed(format!("Tor control port: {}", e))
-        })?;
+        let mut client = TorControlClient::connect(&control_addr)
+            .await
+            .map_err(|e| {
+                self.stats.record_control_error();
+                TransportError::StartFailed(format!("Tor control port: {}", e))
+            })?;
 
         // Authenticate
-        let auth = ControlAuth::from_config(
-            self.config.control_auth(),
-            self.config.cookie_path(),
-        )
-        .map_err(|e| TransportError::StartFailed(format!("Tor auth config: {}", e)))?;
+        let auth = ControlAuth::from_config(self.config.control_auth(), self.config.cookie_path())
+            .map_err(|e| TransportError::StartFailed(format!("Tor auth config: {}", e)))?;
 
         client.authenticate(&auth).await.map_err(|e| {
             self.stats.record_control_error();
@@ -370,9 +368,9 @@ impl TorTransport {
                 bind_addr, e
             ))
         })?;
-        let local_addr = listener.local_addr().map_err(|e| {
-            TransportError::StartFailed(format!("failed to get local addr: {}", e))
-        })?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| TransportError::StartFailed(format!("failed to get local addr: {}", e)))?;
 
         info!(
             onion_address = %onion_addr,
@@ -417,7 +415,8 @@ impl TorTransport {
     /// Non-fatal: logs a warning on failure and continues without monitoring.
     async fn try_connect_control_port(&mut self) {
         let control_addr = self.config.control_addr().to_string();
-        if !control_addr.starts_with('/') && !control_addr.starts_with("./")
+        if !control_addr.starts_with('/')
+            && !control_addr.starts_with("./")
             && let Err(e) = validate_host_port(&control_addr, "control_addr")
         {
             warn!(
@@ -441,20 +440,18 @@ impl TorTransport {
             }
         };
 
-        let auth = match ControlAuth::from_config(
-            self.config.control_auth(),
-            self.config.cookie_path(),
-        ) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(
-                    transport_id = %self.transport_id,
-                    error = %e,
-                    "Tor control auth config error, monitoring disabled"
-                );
-                return;
-            }
-        };
+        let auth =
+            match ControlAuth::from_config(self.config.control_auth(), self.config.cookie_path()) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        transport_id = %self.transport_id,
+                        error = %e,
+                        "Tor control auth config error, monitoring disabled"
+                    );
+                    return;
+                }
+            };
 
         let mut client = client;
         if let Err(e) = client.authenticate(&auth).await {
@@ -567,9 +564,7 @@ impl TorTransport {
                     Ok(info) => {
                         // Log bootstrap milestones
                         for &milestone in &[25u8, 50, 75, 100] {
-                            if info.bootstrap >= milestone
-                                && last_bootstrap < milestone
-                            {
+                            if info.bootstrap >= milestone && last_bootstrap < milestone {
                                 info!(
                                     transport_id = %transport_id,
                                     bootstrap = info.bootstrap,
@@ -598,9 +593,7 @@ impl TorTransport {
                         last_bootstrap = info.bootstrap;
 
                         // Network liveness transitions
-                        if !last_liveness.is_empty()
-                            && info.network_liveness != last_liveness
-                        {
+                        if !last_liveness.is_empty() && info.network_liveness != last_liveness {
                             warn!(
                                 transport_id = %transport_id,
                                 from = %last_liveness,
@@ -732,16 +725,23 @@ impl TorTransport {
         let connect_start = Instant::now();
         let socks_result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
             match &tor_addr {
-                TorAddr::Onion(host, port)
-                | TorAddr::ClearnetHostname(host, port) => {
+                TorAddr::Onion(host, port) | TorAddr::ClearnetHostname(host, port) => {
                     Socks5Stream::connect_with_password(
-                        proxy_addr, (host.as_str(), *port), "fips", &isolation_key,
-                    ).await
+                        proxy_addr,
+                        (host.as_str(), *port),
+                        "fips",
+                        &isolation_key,
+                    )
+                    .await
                 }
                 TorAddr::Clearnet(socket_addr) => {
                     Socks5Stream::connect_with_password(
-                        proxy_addr, *socket_addr, "fips", &isolation_key,
-                    ).await
+                        proxy_addr,
+                        *socket_addr,
+                        "fips",
+                        &isolation_key,
+                    )
+                    .await
                 }
             }
         })
@@ -877,26 +877,28 @@ impl TorTransport {
         let task = tokio::spawn(async move {
             // SOCKS5 CONNECT through proxy with timeout.
             // Uses username/password auth for stream isolation (see connect()).
-            let socks_result = tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                async {
-                    match &tor_addr {
-                        TorAddr::Onion(host, port)
-                        | TorAddr::ClearnetHostname(host, port) => {
-                            Socks5Stream::connect_with_password(
-                                proxy_addr.as_str(), (host.as_str(), *port),
-                                "fips", &isolation_key,
-                            ).await
-                        }
-                        TorAddr::Clearnet(socket_addr) => {
-                            Socks5Stream::connect_with_password(
-                                proxy_addr.as_str(), *socket_addr,
-                                "fips", &isolation_key,
-                            ).await
-                        }
+            let socks_result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+                match &tor_addr {
+                    TorAddr::Onion(host, port) | TorAddr::ClearnetHostname(host, port) => {
+                        Socks5Stream::connect_with_password(
+                            proxy_addr.as_str(),
+                            (host.as_str(), *port),
+                            "fips",
+                            &isolation_key,
+                        )
+                        .await
                     }
-                },
-            )
+                    TorAddr::Clearnet(socket_addr) => {
+                        Socks5Stream::connect_with_password(
+                            proxy_addr.as_str(),
+                            *socket_addr,
+                            "fips",
+                            &isolation_key,
+                        )
+                        .await
+                    }
+                }
+            })
             .await;
 
             let stream = match socks_result {
@@ -1400,7 +1402,10 @@ mod tests {
         let tor_addr = parse_tor_addr(&addr).unwrap();
         match tor_addr {
             TorAddr::Clearnet(socket_addr) => {
-                assert_eq!(socket_addr, "192.168.1.1:8080".parse::<SocketAddr>().unwrap());
+                assert_eq!(
+                    socket_addr,
+                    "192.168.1.1:8080".parse::<SocketAddr>().unwrap()
+                );
             }
             _ => panic!("expected Clearnet variant"),
         }
@@ -1547,9 +1552,9 @@ mod tests {
     // Integration tests using MockSocks5Server
     // ========================================================================
 
-    use mock_socks5::MockSocks5Server;
-    use crate::transport::tcp::TcpTransport;
     use crate::config::TcpConfig;
+    use crate::transport::tcp::TcpTransport;
+    use mock_socks5::MockSocks5Server;
 
     /// msg1 wire size: 4 prefix + 4 sender_idx + 106 noise_msg1 = 114 bytes.
     const MSG1_WIRE_SIZE: usize = 114;
@@ -1597,13 +1602,10 @@ mod tests {
         tor.send_async(&target, &frame).await.unwrap();
 
         // Receive it on the destination
-        let received = tokio::time::timeout(
-            Duration::from_secs(5),
-            dest_rx.recv(),
-        )
-        .await
-        .expect("timeout waiting for packet")
-        .expect("channel closed");
+        let received = tokio::time::timeout(Duration::from_secs(5), dest_rx.recv())
+            .await
+            .expect("timeout waiting for packet")
+            .expect("channel closed");
 
         assert_eq!(received.data, frame);
 
@@ -1741,7 +1743,10 @@ mod tests {
     #[test]
     fn test_directory_service_config_defaults() {
         let config = DirectoryServiceConfig::default();
-        assert_eq!(config.hostname_file(), "/var/lib/tor/fips_onion_service/hostname");
+        assert_eq!(
+            config.hostname_file(),
+            "/var/lib/tor/fips_onion_service/hostname"
+        );
         assert_eq!(config.bind_addr(), "127.0.0.1:8443");
     }
 
@@ -1865,5 +1870,4 @@ mod tests {
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("directory"));
     }
-
 }

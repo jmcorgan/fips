@@ -3,9 +3,9 @@
 //! Handles building, sending, and receiving FilterAnnounce messages,
 //! including debounced propagation to peers.
 
+use crate::NodeAddr;
 use crate::bloom::BloomFilter;
 use crate::protocol::FilterAnnounce;
-use crate::NodeAddr;
 
 use super::{Node, NodeError};
 use std::collections::HashMap;

@@ -149,8 +149,7 @@ fn test_bloom_filter_from_bytes() {
     let original = BloomFilter::new();
     let bytes = original.as_bytes().to_vec();
 
-    let restored =
-        BloomFilter::from_bytes(bytes, original.hash_count()).unwrap();
+    let restored = BloomFilter::from_bytes(bytes, original.hash_count()).unwrap();
 
     assert_eq!(original, restored);
 }

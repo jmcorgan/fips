@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::Ipv6Addr;
 
-use super::{IdentityError, NodeAddr, FIPS_ADDRESS_PREFIX};
+use super::{FIPS_ADDRESS_PREFIX, IdentityError, NodeAddr};
 
 /// 128-bit FIPS address with IPv6-compatible format.
 ///

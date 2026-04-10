@@ -119,7 +119,13 @@ pub fn nested_f64(data: &Value, outer: &str, inner: &str, decimals: usize) -> St
 }
 
 /// Get a nested f64 field, preferring `preferred` key with fallback to `fallback` key.
-pub fn nested_f64_prefer(data: &Value, outer: &str, preferred: &str, fallback: &str, decimals: usize) -> String {
+pub fn nested_f64_prefer(
+    data: &Value,
+    outer: &str,
+    preferred: &str,
+    fallback: &str,
+    decimals: usize,
+) -> String {
     data.get(outer)
         .and_then(|o| o.get(preferred).or_else(|| o.get(fallback)))
         .and_then(|v| v.as_f64())
@@ -161,11 +167,7 @@ pub fn section_header(title: &str) -> Line<'static> {
 /// Key-value line for detail views.
 pub fn kv_line(key: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("    {key}: "),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("    {key}: "), Style::default().fg(Color::DarkGray)),
         Span::raw(value.to_string()),
     ])
 }
-

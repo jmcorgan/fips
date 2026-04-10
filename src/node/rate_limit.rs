@@ -237,7 +237,6 @@ impl HandshakeRateLimiter {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

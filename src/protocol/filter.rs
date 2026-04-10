@@ -42,11 +42,7 @@ impl FilterAnnounce {
     }
 
     /// Create with explicit size_class (for testing or future protocol versions).
-    pub fn with_size_class(
-        filter: BloomFilter,
-        sequence: u64,
-        size_class: u8,
-    ) -> Self {
+    pub fn with_size_class(filter: BloomFilter, sequence: u64, size_class: u8) -> Self {
         Self {
             hash_count: filter.hash_count(),
             size_class,
@@ -164,10 +160,8 @@ impl FilterAnnounce {
         }
 
         // Construct BloomFilter from bytes
-        let filter =
-            crate::bloom::BloomFilter::from_slice(&payload[pos..], hash_count).map_err(|e| {
-                ProtocolError::Malformed(format!("invalid bloom filter: {e}"))
-            })?;
+        let filter = crate::bloom::BloomFilter::from_slice(&payload[pos..], hash_count)
+            .map_err(|e| ProtocolError::Malformed(format!("invalid bloom filter: {e}")))?;
 
         let announce = Self {
             filter,
@@ -253,7 +247,12 @@ mod tests {
 
         let result = FilterAnnounce::decode(&encoded[1..]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid size_class"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid size_class")
+        );
     }
 
     #[test]
@@ -265,10 +264,12 @@ mod tests {
 
         let result = FilterAnnounce::decode(&encoded[1..]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported size_class"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported size_class")
+        );
     }
 
     #[test]

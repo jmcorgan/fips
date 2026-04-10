@@ -33,11 +33,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     update_selected_tree_item(app, &tree_rows);
 
     if app.detail_view.is_some() {
-        let chunks = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Percentage(60),
-        ])
-        .split(area);
+        let chunks = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(area);
 
         draw_table(frame, app, chunks[0], &transports, &links, &tree_rows);
         draw_detail(frame, app, chunks[1], &transports, &links, &tree_rows);
@@ -110,9 +107,7 @@ fn update_selected_tree_item(app: &mut App, tree_rows: &[TreeRow]) {
         .unwrap_or(0);
 
     app.selected_tree_item = match tree_rows.get(selected) {
-        Some(TreeRow::Transport { transport_id, .. }) => {
-            SelectedTreeItem::Transport(*transport_id)
-        }
+        Some(TreeRow::Transport { transport_id, .. }) => SelectedTreeItem::Transport(*transport_id),
         Some(TreeRow::Link { .. }) => SelectedTreeItem::Link,
         None => SelectedTreeItem::None,
     };
@@ -169,11 +164,7 @@ fn draw_table(
                         .get("onion_address")
                         .and_then(|v| v.as_str())
                         .map(|a| {
-                            let short = if a.len() > 16 {
-                                &a[..16]
-                            } else {
-                                a
-                            };
+                            let short = if a.len() > 16 { &a[..16] } else { a };
                             format!(" {short}..")
                         })
                         .unwrap_or_default();
@@ -209,7 +200,11 @@ fn draw_table(
             }
             TreeRow::Link { index, is_last } => {
                 let link = &links[*index];
-                let tree_char = if *is_last { "\u{2514}\u{2500}" } else { "\u{251C}\u{2500}" }; // └─ or ├─
+                let tree_char = if *is_last {
+                    "\u{2514}\u{2500}"
+                } else {
+                    "\u{251C}\u{2500}"
+                }; // └─ or ├─
                 let dir = helpers::str_field(link, "direction");
                 let dir_short = match dir {
                     "Outbound" => "Out",
@@ -303,13 +298,10 @@ fn draw_detail(
         .unwrap_or(0);
 
     let Some(tree_row) = tree_rows.get(selected) else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Detail ");
+        let block = Block::default().borders(Borders::ALL).title(" Detail ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let msg = Paragraph::new("  No item selected")
-            .style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("  No item selected").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(msg, inner);
         return;
     };
@@ -539,7 +531,10 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
                 "Network",
                 &helpers::nested_str(t, "tor_monitoring", "network_liveness"),
             ));
-            lines.push(helpers::kv_line("Dormant", helpers::bool_field(mon, "dormant")));
+            lines.push(helpers::kv_line(
+                "Dormant",
+                helpers::bool_field(mon, "dormant"),
+            ));
 
             let tor_read = mon
                 .get("traffic_read")

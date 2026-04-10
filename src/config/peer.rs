@@ -66,7 +66,11 @@ impl PeerAddress {
     }
 
     /// Create a new peer address with priority.
-    pub fn with_priority(transport: impl Into<String>, addr: impl Into<String>, priority: u8) -> Self {
+    pub fn with_priority(
+        transport: impl Into<String>,
+        addr: impl Into<String>,
+        priority: u8,
+    ) -> Self {
         Self {
             transport: transport.into(),
             addr: addr.into(),
@@ -118,7 +122,11 @@ impl Default for PeerConfig {
 
 impl PeerConfig {
     /// Create a new peer config with a single address.
-    pub fn new(npub: impl Into<String>, transport: impl Into<String>, addr: impl Into<String>) -> Self {
+    pub fn new(
+        npub: impl Into<String>,
+        transport: impl Into<String>,
+        addr: impl Into<String>,
+    ) -> Self {
         Self {
             npub: npub.into(),
             alias: None,

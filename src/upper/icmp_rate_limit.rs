@@ -68,9 +68,8 @@ impl IcmpRateLimiter {
 
     /// Remove entries older than max_age.
     fn cleanup(&mut self, now: Instant) {
-        self.last_sent.retain(|_, &mut last| {
-            now.duration_since(last) < self.max_age
-        });
+        self.last_sent
+            .retain(|_, &mut last| now.duration_since(last) < self.max_age);
     }
 
     /// Get the number of tracked sources.

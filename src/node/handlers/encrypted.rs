@@ -1,8 +1,8 @@
 //! Encrypted frame handling (hot path).
 
-use crate::noise::NoiseError;
 use crate::node::Node;
-use crate::node::wire::{EncryptedHeader, strip_inner_header, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP};
+use crate::node::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, strip_inner_header};
+use crate::noise::NoiseError;
 use crate::transport::ReceivedPacket;
 use std::time::Instant;
 use tracing::{debug, info, trace, warn};
@@ -53,8 +53,8 @@ impl Node {
         // Check and perform cutover in a scoped borrow.
         {
             let peer = self.peers.get(&node_addr).unwrap();
-            let k_bit_flipped = received_k_bit != peer.current_k_bit()
-                && peer.pending_new_session().is_some();
+            let k_bit_flipped =
+                received_k_bit != peer.current_k_bit() && peer.pending_new_session().is_some();
 
             if k_bit_flipped {
                 let display_name = self.peer_display_name(&node_addr);
@@ -70,9 +70,10 @@ impl Node {
                     debug_assert!(
                         peer.transport_id().is_some()
                             && peer.our_index().is_some()
-                            && self.peers_by_index.contains_key(
-                                &(peer.transport_id().unwrap(), peer.our_index().unwrap().as_u32())
-                            ),
+                            && self.peers_by_index.contains_key(&(
+                                peer.transport_id().unwrap(),
+                                peer.our_index().unwrap().as_u32()
+                            )),
                         "peers_by_index should contain pre-registered new index after K-bit flip"
                     );
                 }
@@ -162,12 +163,14 @@ impl Node {
                 let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, header.counter, now);
             }
             peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
-            peer.link_stats_mut().record_recv(packet.data.len(), packet.timestamp_ms);
+            peer.link_stats_mut()
+                .record_recv(packet.data.len(), packet.timestamp_ms);
             peer.touch(packet.timestamp_ms);
         }
 
         // Dispatch to link message handler
-        self.dispatch_link_message(&node_addr, link_message, ce_flag).await;
+        self.dispatch_link_message(&node_addr, link_message, ce_flag)
+            .await;
     }
 
     /// Log a decryption failure with replay suppression.

@@ -40,8 +40,8 @@ mod replay;
 mod session;
 
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit, Payload},
 };
 use std::fmt;
 use thiserror::Error;
@@ -327,7 +327,13 @@ impl CipherState {
 
         let nonce = self.next_nonce()?;
         let ciphertext = cipher
-            .encrypt(&nonce, Payload { msg: plaintext, aad })
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|_| NoiseError::EncryptionFailed)?;
 
         Ok(ciphertext)
@@ -360,7 +366,13 @@ impl CipherState {
 
         let nonce = Self::counter_to_nonce(counter);
         let plaintext = cipher
-            .decrypt(&nonce, Payload { msg: ciphertext, aad })
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|_| NoiseError::DecryptionFailed)?;
 
         Ok(plaintext)

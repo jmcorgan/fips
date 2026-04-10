@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use fips::config::{write_key_file, write_pub_file};
 use fips::upper::hosts::HostMap;
 use fips::version;
-use fips::{encode_nsec, Identity};
+use fips::{Identity, encode_nsec};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -223,12 +223,7 @@ fn main() {
     let cli = Cli::parse();
 
     // Commands that don't require a running daemon
-    if let Commands::Keygen {
-        dir,
-        force,
-        stdout,
-    } = &cli.command
-    {
+    if let Commands::Keygen { dir, force, stdout } = &cli.command {
         let identity = Identity::generate();
         let nsec = encode_nsec(&identity.keypair().secret_key());
         let npub = identity.npub();

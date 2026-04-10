@@ -25,9 +25,8 @@ static SHORT_VERSION: LazyLock<String> = LazyLock::new(|| {
 });
 
 /// Long version string for `--version` with build metadata.
-static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
-    format!("{}\ntarget: {TARGET}", *SHORT_VERSION)
-});
+static LONG_VERSION: LazyLock<String> =
+    LazyLock::new(|| format!("{}\ntarget: {TARGET}", *SHORT_VERSION));
 
 pub fn short_version() -> &'static str {
     &SHORT_VERSION

@@ -7,8 +7,8 @@ use super::*;
 use crate::bloom::BloomFilter;
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use spanning_tree::{
-    cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake, make_test_node,
-    run_tree_test, verify_tree_convergence, TestNode,
+    TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
+    make_test_node, run_tree_test, verify_tree_convergence,
 };
 use std::collections::HashSet;
 
@@ -83,8 +83,7 @@ fn test_routing_bloom_filter_hit() {
 
     // Destination not directly connected — placed under peer1 in the tree
     let dest = make_node_addr(99);
-    let dest_coords =
-        TreeCoordinate::from_addrs(vec![dest, peer1_addr, my_addr]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, peer1_addr, my_addr]).unwrap();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -126,17 +125,14 @@ fn test_routing_bloom_filter_multiple_hits_tiebreak() {
     // Set up tree: we are root, all peers are our children (equidistant)
     for &addr in &peer_addrs {
         let coords = TreeCoordinate::from_addrs(vec![addr, my_addr]).unwrap();
-        node.tree_state_mut().update_peer(
-            ParentDeclaration::new(addr, my_addr, 1, 1000),
-            coords,
-        );
+        node.tree_state_mut()
+            .update_peer(ParentDeclaration::new(addr, my_addr, 1, 1000), coords);
     }
 
     // Destination placed under the first peer (arbitrary — all peers are
     // equidistant from dest since dest is 2 hops from root via any child)
     let dest = make_node_addr(99);
-    let dest_coords =
-        TreeCoordinate::from_addrs(vec![dest, peer_addrs[0], my_addr]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, peer_addrs[0], my_addr]).unwrap();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -187,8 +183,7 @@ fn test_routing_tree_fallback() {
 
     // Destination: a node under our peer in the tree
     let dest = make_node_addr(99);
-    let dest_coords =
-        TreeCoordinate::from_addrs(vec![dest, peer_addr, my_addr]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, peer_addr, my_addr]).unwrap();
 
     // Put dest coords in the cache
     let now_ms = std::time::SystemTime::now()
@@ -239,8 +234,7 @@ fn test_routing_refreshes_coord_cache_ttl() {
 
     // Set up tree coordinates
     let dest = make_node_addr(99);
-    let dest_coords =
-        TreeCoordinate::from_addrs(vec![dest, peer_addr, my_addr]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, peer_addr, my_addr]).unwrap();
     node.tree_state_mut().update_peer(
         ParentDeclaration::new(peer_addr, my_addr, 1, 1000),
         TreeCoordinate::from_addrs(vec![peer_addr, my_addr]).unwrap(),
@@ -252,7 +246,8 @@ fn test_routing_refreshes_coord_cache_ttl() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let short_ttl = 10_000; // 10 seconds
-    node.coord_cache_mut().insert_with_ttl(dest, dest_coords, now_ms, short_ttl);
+    node.coord_cache_mut()
+        .insert_with_ttl(dest, dest_coords, now_ms, short_ttl);
     let original_expiry = node.coord_cache().get_entry(&dest).unwrap().expires_at();
 
     // find_next_hop should succeed and refresh TTL to now + default_ttl (300s)
@@ -263,7 +258,8 @@ fn test_routing_refreshes_coord_cache_ttl() {
     assert!(
         new_expiry > original_expiry,
         "find_next_hop should refresh the coord_cache TTL: original={}, new={}",
-        original_expiry, new_expiry,
+        original_expiry,
+        new_expiry,
     );
 }
 
@@ -384,11 +380,7 @@ async fn test_routing_chain_topology() {
     // Verify tree convergence
     let root = nodes.iter().map(|n| *n.node.node_addr()).min().unwrap();
     for tn in &nodes {
-        assert_eq!(
-            *tn.node.tree_state().root(),
-            root,
-            "Tree not converged"
-        );
+        assert_eq!(*tn.node.tree_state().root(), root, "Tree not converged");
     }
 
     // Populate coord caches: each node caches the far-end node's coords
@@ -453,8 +445,13 @@ async fn test_routing_bloom_preferred_over_tree() {
     // filter routing selects peer2 (strictly closer to dest than us).
     let dest = make_node_addr(99);
     let peer2_addr = *nodes[2].node.node_addr();
-    let mut dest_path: Vec<NodeAddr> =
-        nodes[2].node.tree_state().my_coords().node_addrs().copied().collect();
+    let mut dest_path: Vec<NodeAddr> = nodes[2]
+        .node
+        .tree_state()
+        .my_coords()
+        .node_addrs()
+        .copied()
+        .collect();
     dest_path.insert(0, dest);
     let dest_coords = TreeCoordinate::from_addrs(dest_path).unwrap();
     let now_ms = std::time::SystemTime::now()
@@ -602,13 +599,20 @@ async fn test_routing_reachability_100_nodes() {
     // Collect all (addr, coords) pairs first to avoid borrow issues
     let all_coords: Vec<(NodeAddr, TreeCoordinate)> = nodes
         .iter()
-        .map(|tn| (*tn.node.node_addr(), tn.node.tree_state().my_coords().clone()))
+        .map(|tn| {
+            (
+                *tn.node.node_addr(),
+                tn.node.tree_state().my_coords().clone(),
+            )
+        })
         .collect();
 
     for node in &mut nodes {
         for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
-                node.node.coord_cache_mut().insert(*addr, coords.clone(), now_ms);
+                node.node
+                    .coord_cache_mut()
+                    .insert(*addr, coords.clone(), now_ms);
             }
         }
     }
@@ -654,10 +658,7 @@ async fn test_routing_reachability_100_nodes() {
         0.0
     };
 
-    eprintln!(
-        "\n  === Routing Reachability ({} nodes) ===",
-        NUM_NODES
-    );
+    eprintln!("\n  === Routing Reachability ({} nodes) ===", NUM_NODES);
     eprintln!(
         "  Pairs tested: {} | Delivered: {} | Failed: {} | Loops: {}",
         total_pairs,
@@ -665,10 +666,7 @@ async fn test_routing_reachability_100_nodes() {
         failures.len(),
         loops.len()
     );
-    eprintln!(
-        "  Hops: avg={:.1} max={}",
-        avg_hops, max_hops
-    );
+    eprintln!("  Hops: avg={:.1} max={}", avg_hops, max_hops);
 
     if !failures.is_empty() {
         let show = failures.len().min(10);
@@ -736,13 +734,20 @@ async fn test_routing_stops_after_peer_removal() {
 
     let all_coords: Vec<(NodeAddr, crate::tree::TreeCoordinate)> = nodes
         .iter()
-        .map(|tn| (*tn.node.node_addr(), tn.node.tree_state().my_coords().clone()))
+        .map(|tn| {
+            (
+                *tn.node.node_addr(),
+                tn.node.tree_state().my_coords().clone(),
+            )
+        })
         .collect();
 
     for node in &mut nodes {
         for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
-                node.node.coord_cache_mut().insert(*addr, coords.clone(), now_ms);
+                node.node
+                    .coord_cache_mut()
+                    .insert(*addr, coords.clone(), now_ms);
             }
         }
     }
@@ -792,9 +797,12 @@ async fn test_routing_stops_after_peer_removal() {
     // matters is that delivery does NOT succeed.
     match simulate_forwarding(&mut nodes, &addr_index, 0, 3) {
         ForwardResult::NoRoute { .. } => {} // Expected: can't reach node 3
-        ForwardResult::Loop { .. } => {} // Also acceptable: stale coords cause loop detection
+        ForwardResult::Loop { .. } => {}    // Also acceptable: stale coords cause loop detection
         ForwardResult::Delivered(hops) => {
-            panic!("Should NOT deliver after partition, but got delivery in {} hops", hops);
+            panic!(
+                "Should NOT deliver after partition, but got delivery in {} hops",
+                hops
+            );
         }
     }
 
@@ -905,7 +913,12 @@ async fn test_routing_source_only_coords_100_nodes() {
     // Collect all coords for injection
     let all_coords: Vec<(NodeAddr, crate::tree::TreeCoordinate)> = nodes
         .iter()
-        .map(|tn| (*tn.node.node_addr(), tn.node.tree_state().my_coords().clone()))
+        .map(|tn| {
+            (
+                *tn.node.node_addr(),
+                tn.node.tree_state().my_coords().clone(),
+            )
+        })
         .collect();
 
     let addr_index = build_addr_index(&nodes);
@@ -946,7 +959,10 @@ async fn test_routing_source_only_coords_100_nodes() {
             ForwardResult::Delivered(_) => source_only_delivered += 1,
             ForwardResult::NoRoute { .. } => source_only_failed += 1,
             ForwardResult::Loop { .. } => {
-                panic!("Routing loop detected with source-only coords: {} -> {}", src, dst);
+                panic!(
+                    "Routing loop detected with source-only coords: {} -> {}",
+                    src, dst
+                );
             }
         }
     }
@@ -977,7 +993,9 @@ async fn test_routing_source_only_coords_100_nodes() {
     for node in &mut nodes {
         for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
-                node.node.coord_cache_mut().insert(*addr, coords.clone(), now_ms);
+                node.node
+                    .coord_cache_mut()
+                    .insert(*addr, coords.clone(), now_ms);
             }
         }
     }
@@ -996,4 +1014,3 @@ async fn test_routing_source_only_coords_100_nodes() {
 
     cleanup_nodes(&mut nodes).await;
 }
-

@@ -543,7 +543,8 @@ mod tests {
         let short_packet = vec![0u8; 20];
         let our_addr: Ipv6Addr = "fd00::ffff".parse().unwrap();
 
-        let response = build_dest_unreachable(&short_packet, DestUnreachableCode::NoRoute, our_addr);
+        let response =
+            build_dest_unreachable(&short_packet, DestUnreachableCode::NoRoute, our_addr);
         assert!(response.is_none());
     }
 

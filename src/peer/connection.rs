@@ -4,10 +4,10 @@
 //! PeerConnection tracks the Noise IK handshake state and transitions to
 //! ActivePeer upon successful authentication.
 
-use crate::utils::index::SessionIndex;
+use crate::PeerIdentity;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
-use crate::PeerIdentity;
+use crate::utils::index::SessionIndex;
 use secp256k1::Keypair;
 use std::fmt;
 
@@ -558,7 +558,6 @@ impl PeerConnection {
     pub fn is_timed_out(&self, current_time_ms: u64, timeout_ms: u64) -> bool {
         self.idle_time(current_time_ms) > timeout_ms
     }
-
 }
 
 impl fmt::Debug for PeerConnection {
@@ -651,12 +650,13 @@ mod tests {
         let responder_peer_id = PeerIdentity::from_pubkey_full(responder_identity.pubkey_full());
 
         // Create connections
-        let mut initiator_conn =
-            PeerConnection::outbound(LinkId::new(1), responder_peer_id, 1000);
+        let mut initiator_conn = PeerConnection::outbound(LinkId::new(1), responder_peer_id, 1000);
         let mut responder_conn = PeerConnection::inbound(LinkId::new(2), 1000);
 
         // Initiator starts handshake
-        let msg1 = initiator_conn.start_handshake(initiator_keypair, initiator_epoch, 1100).unwrap();
+        let msg1 = initiator_conn
+            .start_handshake(initiator_keypair, initiator_epoch, 1100)
+            .unwrap();
         assert_eq!(initiator_conn.handshake_state(), HandshakeState::SentMsg1);
 
         // Responder processes msg1 and sends msg2
@@ -723,12 +723,18 @@ mod tests {
 
         // Outbound can't receive_handshake_init
         let mut outbound = PeerConnection::outbound(LinkId::new(1), identity, 1000);
-        assert!(outbound
-            .receive_handshake_init(keypair, make_epoch(), &[0u8; 106], 1100)
-            .is_err());
+        assert!(
+            outbound
+                .receive_handshake_init(keypair, make_epoch(), &[0u8; 106], 1100)
+                .is_err()
+        );
 
         // Inbound can't start_handshake
         let mut inbound = PeerConnection::inbound(LinkId::new(2), 1000);
-        assert!(inbound.start_handshake(keypair, make_epoch(), 1100).is_err());
+        assert!(
+            inbound
+                .start_handshake(keypair, make_epoch(), 1100)
+                .is_err()
+        );
     }
 }

@@ -31,7 +31,10 @@ pub enum StreamError {
     /// Unknown FMP phase byte — protocol error, close connection.
     UnknownPhase(u8),
     /// Payload length exceeds the connection's MTU — corrupted or malicious.
-    PayloadTooLarge { payload_len: u16, max_payload_len: u16 },
+    PayloadTooLarge {
+        payload_len: u16,
+        max_payload_len: u16,
+    },
     /// Handshake packet has unexpected payload_len for its phase.
     HandshakeSizeMismatch { phase: u8, expected: u16, got: u16 },
     /// I/O error (including EOF).
@@ -43,11 +46,26 @@ impl std::fmt::Display for StreamError {
         match self {
             StreamError::UnknownVersion(v) => write!(f, "unknown FMP version: {}", v),
             StreamError::UnknownPhase(p) => write!(f, "unknown FMP phase: 0x{:02x}", p),
-            StreamError::PayloadTooLarge { payload_len, max_payload_len } => {
-                write!(f, "payload_len {} exceeds max {}", payload_len, max_payload_len)
+            StreamError::PayloadTooLarge {
+                payload_len,
+                max_payload_len,
+            } => {
+                write!(
+                    f,
+                    "payload_len {} exceeds max {}",
+                    payload_len, max_payload_len
+                )
             }
-            StreamError::HandshakeSizeMismatch { phase, expected, got } => {
-                write!(f, "handshake phase 0x{:x}: expected payload_len {}, got {}", phase, expected, got)
+            StreamError::HandshakeSizeMismatch {
+                phase,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "handshake phase 0x{:x}: expected payload_len {}, got {}",
+                    phase, expected, got
+                )
             }
             StreamError::Io(e) => write!(f, "io: {}", e),
         }
@@ -172,7 +190,8 @@ mod tests {
     /// Build a minimal established frame with the given payload_len.
     /// Layout: [ver+phase:1][flags:1][payload_len:2 LE][12 bytes header][payload_len bytes][16 bytes tag]
     fn build_established_frame(payload_len: u16) -> Vec<u8> {
-        let total = PREFIX_SIZE + ESTABLISHED_REMAINING_HEADER + payload_len as usize + AEAD_TAG_SIZE;
+        let total =
+            PREFIX_SIZE + ESTABLISHED_REMAINING_HEADER + payload_len as usize + AEAD_TAG_SIZE;
         let mut frame = vec![0u8; total];
         frame[0] = 0x00; // ver=0, phase=0 (established)
         frame[1] = 0x00; // flags
@@ -304,7 +323,10 @@ mod tests {
 
         let mut cursor = Cursor::new(frame);
         let err = read_fmp_packet(&mut cursor, 1400).await.unwrap_err();
-        assert!(matches!(err, StreamError::HandshakeSizeMismatch { phase: 0x1, .. }));
+        assert!(matches!(
+            err,
+            StreamError::HandshakeSizeMismatch { phase: 0x1, .. }
+        ));
     }
 
     #[tokio::test]
@@ -316,7 +338,10 @@ mod tests {
 
         let mut cursor = Cursor::new(frame);
         let err = read_fmp_packet(&mut cursor, 1400).await.unwrap_err();
-        assert!(matches!(err, StreamError::HandshakeSizeMismatch { phase: 0x2, .. }));
+        assert!(matches!(
+            err,
+            StreamError::HandshakeSizeMismatch { phase: 0x2, .. }
+        ));
     }
 
     #[tokio::test]

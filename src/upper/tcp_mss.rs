@@ -74,7 +74,7 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
     // Parse TCP options
     let options_start = tcp_start + TCP_HEADER_MIN_LEN;
     let options_end = tcp_start + tcp_header_len;
-    
+
     if options_end > ipv6_packet.len() {
         return false;
     }
@@ -114,10 +114,10 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
             // Clamp if needed
             if current_mss > max_mss {
                 ipv6_packet[i + 2..i + 4].copy_from_slice(&max_mss.to_be_bytes());
-                
+
                 // Recalculate TCP checksum
                 recalculate_tcp_checksum(ipv6_packet, tcp_start);
-                
+
                 modified = true;
             }
             break; // MSS option found, no need to continue
@@ -258,7 +258,7 @@ mod tests {
         let src = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         let dst = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
         let mut packet = make_tcp_syn_packet(src, dst, 1460);
-        
+
         // Clear SYN flag
         packet[40 + 13] = 0x10; // ACK only
 

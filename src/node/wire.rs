@@ -17,8 +17,8 @@
 //! | 0x1   | Noise IK msg1   | 114 bytes  | Handshake initiation           |
 //! | 0x2   | Noise IK msg2   | 69 bytes   | Handshake response             |
 
-use crate::utils::index::SessionIndex;
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, TAG_SIZE};
+use crate::utils::index::SessionIndex;
 
 // ============================================================================
 // Constants
@@ -164,8 +164,7 @@ impl EncryptedHeader {
         let payload_len = u16::from_le_bytes([data[2], data[3]]);
         let receiver_idx = SessionIndex::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let counter = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11],
-            data[12], data[13], data[14], data[15],
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
 
         let mut header_bytes = [0u8; ESTABLISHED_HEADER_SIZE];
@@ -328,7 +327,11 @@ pub fn build_msg1(sender_idx: SessionIndex, noise_msg1: &[u8]) -> Vec<u8> {
 /// Build a wire-format msg2 packet.
 ///
 /// Format: `[0x02][0x00][payload_len:2 LE][sender_idx:4 LE][receiver_idx:4 LE][noise_msg2:57]`
-pub fn build_msg2(sender_idx: SessionIndex, receiver_idx: SessionIndex, noise_msg2: &[u8]) -> Vec<u8> {
+pub fn build_msg2(
+    sender_idx: SessionIndex,
+    receiver_idx: SessionIndex,
+    noise_msg2: &[u8],
+) -> Vec<u8> {
     debug_assert_eq!(noise_msg2.len(), HANDSHAKE_MSG2_SIZE);
 
     let payload_len = (4 + 4 + noise_msg2.len()) as u16; // sender + receiver + noise
@@ -542,8 +545,8 @@ mod tests {
 
     #[test]
     fn test_wire_sizes() {
-        assert_eq!(MSG1_WIRE_SIZE, 114);  // 4 + 4 + 106
-        assert_eq!(MSG2_WIRE_SIZE, 69);   // 4 + 4 + 4 + 57
+        assert_eq!(MSG1_WIRE_SIZE, 114); // 4 + 4 + 106
+        assert_eq!(MSG2_WIRE_SIZE, 69); // 4 + 4 + 4 + 57
         assert_eq!(ENCRYPTED_MIN_SIZE, 32); // 16 + 16
         assert_eq!(COMMON_PREFIX_SIZE, 4);
         assert_eq!(ESTABLISHED_HEADER_SIZE, 16);
@@ -585,22 +588,17 @@ mod tests {
 
     #[test]
     fn test_flags_byte() {
-        let header = build_established_header(
-            SessionIndex::new(1),
-            0,
-            FLAG_KEY_EPOCH | FLAG_SP,
-            100,
-        );
+        let header =
+            build_established_header(SessionIndex::new(1), 0, FLAG_KEY_EPOCH | FLAG_SP, 100);
         assert_eq!(header[1], 0x05); // bits 0 and 2 set
 
         let parsed = EncryptedHeader::parse(&[
-            header[0], header[1], header[2], header[3],
-            header[4], header[5], header[6], header[7],
-            header[8], header[9], header[10], header[11],
-            header[12], header[13], header[14], header[15],
-            // minimum: TAG_SIZE bytes of ciphertext
+            header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
+            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+            header[15], // minimum: TAG_SIZE bytes of ciphertext
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(parsed.flags & FLAG_KEY_EPOCH, FLAG_KEY_EPOCH);
         assert_eq!(parsed.flags & FLAG_CE, 0);
         assert_eq!(parsed.flags & FLAG_SP, FLAG_SP);

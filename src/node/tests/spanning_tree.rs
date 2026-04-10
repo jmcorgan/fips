@@ -69,7 +69,9 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
 
     let our_index = initiator.node.index_allocator.allocate().unwrap();
     let our_keypair = initiator.node.identity().keypair();
-    let noise_msg1 = conn.start_handshake(our_keypair, initiator.node.startup_epoch, 1000).unwrap();
+    let noise_msg1 = conn
+        .start_handshake(our_keypair, initiator.node.startup_epoch, 1000)
+        .unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(responder_addr.clone());
@@ -184,7 +186,12 @@ pub(super) fn print_tree_snapshot(label: &str, nodes: &[TestNode]) {
                 .count();
             eprintln!(
                 "  node[{}] root=node[{}] depth={} parent=node[{}] peers={} pending={}",
-                i, root_idx, ts.my_coords().depth(), parent_idx, tn.node.peer_count(), pending,
+                i,
+                root_idx,
+                ts.my_coords().depth(),
+                parent_idx,
+                tn.node.peer_count(),
+                pending,
             );
         }
     } else if correct_root_count < nodes.len() {
@@ -209,7 +216,9 @@ pub(super) fn print_tree_snapshot(label: &str, nodes: &[TestNode]) {
 ///
 /// Returns the number of packets processed.
 pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
-    use crate::node::wire::{CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, COMMON_PREFIX_SIZE};
+    use crate::node::wire::{
+        COMMON_PREFIX_SIZE, CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2,
+    };
 
     let mut count = 0;
     for node in nodes.iter_mut() {
@@ -224,9 +233,7 @@ pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
                 match prefix.phase {
                     PHASE_MSG1 => node.node.handle_msg1(packet).await,
                     PHASE_MSG2 => node.node.handle_msg2(packet).await,
-                    PHASE_ESTABLISHED => {
-                        node.node.handle_encrypted_frame(packet).await
-                    }
+                    PHASE_ESTABLISHED => node.node.handle_encrypted_frame(packet).await,
                     _ => {}
                 }
                 count += 1;
@@ -319,7 +326,11 @@ pub(super) async fn drain_all_packets(nodes: &mut [TestNode], verbose: bool) -> 
 ///
 /// First builds a random spanning tree to ensure connectivity,
 /// then adds extra edges up to the target count.
-pub(super) fn generate_random_edges(n: usize, target_edges: usize, seed: u64) -> Vec<(usize, usize)> {
+pub(super) fn generate_random_edges(
+    n: usize,
+    target_edges: usize,
+    seed: u64,
+) -> Vec<(usize, usize)> {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
 
@@ -373,11 +384,7 @@ pub(super) fn verify_tree_convergence(nodes: &[TestNode]) {
     assert!(n > 0);
 
     // Find the expected root (smallest NodeAddr across all nodes)
-    let expected_root = nodes
-        .iter()
-        .map(|tn| *tn.node.node_addr())
-        .min()
-        .unwrap();
+    let expected_root = nodes.iter().map(|tn| *tn.node.node_addr()).min().unwrap();
 
     // All nodes should agree on the root
     for (i, tn) in nodes.iter().enumerate() {
@@ -627,12 +634,16 @@ pub(super) async fn run_tree_test_with_mtus(
         assert!(
             nodes[i].node.get_peer(&j_addr).is_some(),
             "Node {} should have peer {} (node {})",
-            i, j_addr, j
+            i,
+            j_addr,
+            j
         );
         assert!(
             nodes[j].node.get_peer(&i_addr).is_some(),
             "Node {} should have peer {} (node {})",
-            j, i_addr, i
+            j,
+            i_addr,
+            i
         );
     }
 

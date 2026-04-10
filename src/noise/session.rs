@@ -133,7 +133,9 @@ impl NoiseSession {
         }
 
         // Attempt decryption with AAD (expensive)
-        let plaintext = self.recv_cipher.decrypt_with_counter_and_aad(ciphertext, counter, aad)?;
+        let plaintext = self
+            .recv_cipher
+            .decrypt_with_counter_and_aad(ciphertext, counter, aad)?;
 
         // Only accept into window after successful decryption
         self.replay_window.accept(counter);

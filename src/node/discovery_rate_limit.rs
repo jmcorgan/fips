@@ -81,11 +81,7 @@ impl DiscoveryBackoff {
     /// window using exponential backoff.
     pub fn record_failure(&mut self, target: &NodeAddr) {
         let now = Instant::now();
-        let failures = self
-            .entries
-            .get(target)
-            .map_or(0, |e| e.failures)
-            + 1;
+        let failures = self.entries.get(target).map_or(0, |e| e.failures) + 1;
 
         let backoff_secs = self
             .base
@@ -345,8 +341,7 @@ mod tests {
 
     #[test]
     fn test_forward_allowed_after_interval() {
-        let mut limiter =
-            DiscoveryForwardRateLimiter::with_interval(Duration::from_millis(100));
+        let mut limiter = DiscoveryForwardRateLimiter::with_interval(Duration::from_millis(100));
         assert!(limiter.should_forward(&addr(1)));
 
         thread::sleep(Duration::from_millis(110));

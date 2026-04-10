@@ -149,10 +149,8 @@ async fn test_response_transit_needs_recent_request() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    node.recent_requests.insert(
-        444,
-        RecentRequest::new(make_node_addr(0xDD), now_ms),
-    );
+    node.recent_requests
+        .insert(444, RecentRequest::new(make_node_addr(0xDD), now_ms));
 
     // Handle response — should try to reverse-path forward to 0xDD
     // (will fail silently since 0xDD is not an actual peer)
@@ -282,11 +280,7 @@ async fn test_response_coord_substitution_detected() {
     let target = *target_identity.node_addr();
     let root = make_node_addr(0xF0);
     let real_coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
-    let fake_coords = TreeCoordinate::from_addrs(vec![
-        target,
-        make_node_addr(0xEE),
-        root,
-    ]).unwrap();
+    let fake_coords = TreeCoordinate::from_addrs(vec![target, make_node_addr(0xEE), root]).unwrap();
 
     // Register target in identity_cache
     node.register_identity(target, target_identity.pubkey_full());
@@ -325,16 +319,12 @@ async fn test_recent_request_expiry() {
         .as_millis() as u64;
 
     // Insert an old request (11 seconds ago)
-    node.recent_requests.insert(
-        123,
-        RecentRequest::new(make_node_addr(1), now_ms - 11_000),
-    );
+    node.recent_requests
+        .insert(123, RecentRequest::new(make_node_addr(1), now_ms - 11_000));
 
     // Insert a recent request
-    node.recent_requests.insert(
-        456,
-        RecentRequest::new(make_node_addr(2), now_ms),
-    );
+    node.recent_requests
+        .insert(456, RecentRequest::new(make_node_addr(2), now_ms));
 
     assert_eq!(node.recent_requests.len(), 2);
 
@@ -344,7 +334,8 @@ async fn test_recent_request_expiry() {
     let coords = TreeCoordinate::from_addrs(vec![origin, make_node_addr(0)]).unwrap();
     let request = LookupRequest::new(789, target, origin, coords, 3, 0);
     let payload = &request.encode()[1..];
-    node.handle_lookup_request(&make_node_addr(0xAA), payload).await;
+    node.handle_lookup_request(&make_node_addr(0xAA), payload)
+        .await;
 
     // Old entry (123) should be purged, recent entry (456) and new entry (789) kept
     assert!(!node.recent_requests.contains_key(&123));
@@ -381,7 +372,10 @@ async fn test_request_forwarding_two_node() {
     // Process packets — node1 should receive the forwarded request
     tokio::time::sleep(Duration::from_millis(50)).await;
     let count = process_available_packets(&mut nodes).await;
-    assert!(count > 0, "Expected forwarded LookupRequest to arrive at node 1");
+    assert!(
+        count > 0,
+        "Expected forwarded LookupRequest to arrive at node 1"
+    );
 
     // Node1 should have recorded the request
     assert!(
@@ -546,10 +540,7 @@ async fn test_discovery_100_nodes() {
     }
 
     // Collect all node addresses and public keys for lookup targets
-    let all_addrs: Vec<NodeAddr> = nodes
-        .iter()
-        .map(|tn| *tn.node.node_addr())
-        .collect();
+    let all_addrs: Vec<NodeAddr> = nodes.iter().map(|tn| *tn.node.node_addr()).collect();
     let all_pubkeys: Vec<secp256k1::PublicKey> = nodes
         .iter()
         .map(|tn| tn.node.identity().pubkey_full())
@@ -563,7 +554,8 @@ async fn test_discovery_100_nodes() {
             if src == dst {
                 continue;
             }
-            node.node.register_identity(all_addrs[dst], all_pubkeys[dst]);
+            node.node
+                .register_identity(all_addrs[dst], all_pubkeys[dst]);
         }
     }
 
@@ -588,10 +580,7 @@ async fn test_discovery_100_nodes() {
         let mut initiated = false;
         for &(s, dst) in &lookup_pairs {
             if s == src {
-                nodes[src]
-                    .node
-                    .initiate_lookup(&all_addrs[dst], TTL)
-                    .await;
+                nodes[src].node.initiate_lookup(&all_addrs[dst], TTL).await;
                 initiated = true;
             }
         }
@@ -628,7 +617,11 @@ async fn test_discovery_100_nodes() {
     let mut failed_pairs: Vec<(usize, usize)> = Vec::new();
 
     for &(src, dst) in &lookup_pairs {
-        if nodes[src].node.coord_cache().contains(&all_addrs[dst], now_ms) {
+        if nodes[src]
+            .node
+            .coord_cache()
+            .contains(&all_addrs[dst], now_ms)
+        {
             resolved += 1;
         } else {
             failed += 1;
@@ -638,9 +631,7 @@ async fn test_discovery_100_nodes() {
         }
     }
 
-    eprintln!(
-        "\n  === Discovery 100-Node Test ===",
-    );
+    eprintln!("\n  === Discovery 100-Node Test ===",);
     eprintln!(
         "  Lookups: {} | Resolved: {} | Failed: {} | Success rate: {:.1}%",
         total_lookups,
@@ -651,8 +642,16 @@ async fn test_discovery_100_nodes() {
 
     // Report coord_cache stats across all nodes
     let total_cached: usize = nodes.iter().map(|tn| tn.node.coord_cache().len()).sum();
-    let min_cached = nodes.iter().map(|tn| tn.node.coord_cache().len()).min().unwrap();
-    let max_cached = nodes.iter().map(|tn| tn.node.coord_cache().len()).max().unwrap();
+    let min_cached = nodes
+        .iter()
+        .map(|tn| tn.node.coord_cache().len())
+        .min()
+        .unwrap();
+    let max_cached = nodes
+        .iter()
+        .map(|tn| tn.node.coord_cache().len())
+        .max()
+        .unwrap();
     eprintln!(
         "  Coord cache entries: total={} min={} max={} avg={:.1}",
         total_cached,
@@ -663,21 +662,32 @@ async fn test_discovery_100_nodes() {
 
     // Detailed diagnostics for failures (to aid future debugging)
     if !failed_pairs.is_empty() {
-        eprintln!("  --- Failure Diagnostics ({} failures) ---", failed_pairs.len());
+        eprintln!(
+            "  --- Failure Diagnostics ({} failures) ---",
+            failed_pairs.len()
+        );
         for &(src, dst) in &failed_pairs {
             let src_coords = nodes[src].node.tree_state().my_coords().clone();
             let dst_coords = nodes[dst].node.tree_state().my_coords().clone();
             let tree_dist = src_coords.distance_to(&dst_coords);
-            let reverse_cached = nodes[dst].node.coord_cache().contains(&all_addrs[src], now_ms);
+            let reverse_cached = nodes[dst]
+                .node
+                .coord_cache()
+                .contains(&all_addrs[src], now_ms);
             let src_peers = nodes[src].node.peers.len();
             let dst_peers = nodes[dst].node.peers.len();
 
             eprintln!(
                 "    node {} -> node {}: tree_dist={} src_depth={} dst_depth={} \
                  src_peers={} dst_peers={} reverse_cached={}",
-                src, dst, tree_dist,
-                src_coords.depth(), dst_coords.depth(),
-                src_peers, dst_peers, reverse_cached
+                src,
+                dst,
+                tree_dist,
+                src_coords.depth(),
+                dst_coords.depth(),
+                src_peers,
+                dst_peers,
+                reverse_cached
             );
         }
     }
@@ -730,7 +740,9 @@ async fn test_response_path_mtu_two_node() {
 
     // Check that path_mtu was stored in the cache entry
     let entry = nodes[0].node.coord_cache().get_entry(&node1_addr).unwrap();
-    let path_mtu = entry.path_mtu().expect("path_mtu should be set from discovery");
+    let path_mtu = entry
+        .path_mtu()
+        .expect("path_mtu should be set from discovery");
     // In a 2-node setup, no transit node applies the min() so path_mtu stays u16::MAX
     assert_eq!(
         path_mtu,
@@ -774,7 +786,9 @@ async fn test_response_path_mtu_three_node_chain() {
 
     // Node1 is transit and applies min(u16::MAX, 1280) = 1280
     let entry = nodes[0].node.coord_cache().get_entry(&node2_addr).unwrap();
-    let path_mtu = entry.path_mtu().expect("path_mtu should be set from discovery");
+    let path_mtu = entry
+        .path_mtu()
+        .expect("path_mtu should be set from discovery");
     assert_eq!(
         path_mtu, 1280,
         "Three-node chain path_mtu should reflect transit node's transport MTU (1280)"
@@ -796,12 +810,8 @@ async fn test_cache_entry_path_mtu_stored() {
     let coords = TreeCoordinate::from_addrs(vec![target, make_node_addr(0)]).unwrap();
 
     let now_ms = 1000u64;
-    node.coord_cache_mut().insert_with_path_mtu(
-        target,
-        coords,
-        now_ms,
-        1280,
-    );
+    node.coord_cache_mut()
+        .insert_with_path_mtu(target, coords, now_ms, 1280);
 
     let entry = node.coord_cache().get_entry(&target).unwrap();
     assert_eq!(entry.path_mtu(), Some(1280));

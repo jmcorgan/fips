@@ -70,7 +70,6 @@ impl RoutingErrorRateLimiter {
     pub fn len(&self) -> usize {
         self.last_sent.len()
     }
-
 }
 
 impl Default for RoutingErrorRateLimiter {

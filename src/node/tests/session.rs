@@ -3,8 +3,8 @@
 use super::*;
 use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{
-    cleanup_nodes, generate_random_edges, process_available_packets, run_tree_test,
-    run_tree_test_with_mtus, verify_tree_convergence, TestNode,
+    TestNode, cleanup_nodes, generate_random_edges, process_available_packets, run_tree_test,
+    run_tree_test_with_mtus, verify_tree_convergence,
 };
 use crate::protocol::{SessionAck, SessionDatagram};
 
@@ -50,10 +50,7 @@ fn test_session_entry_new_initiating() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        identity_a.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
 
     let entry = crate::node::session::SessionEntry::new(
         *identity_b.node_addr(),
@@ -77,10 +74,7 @@ fn test_session_entry_touch() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        identity_a.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
 
     let mut entry = crate::node::session::SessionEntry::new(
         *identity_b.node_addr(),
@@ -102,10 +96,8 @@ fn test_session_table_operations() {
     let mut node = make_node();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        node.identity().keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake =
+        HandshakeState::new_initiator(node.identity().keypair(), identity_b.pubkey_full());
 
     let dest_addr = *identity_b.node_addr();
     let entry = crate::node::session::SessionEntry::new(
@@ -151,12 +143,14 @@ async fn test_session_direct_peer_handshake() {
 
     // Node 0 should have a session in Initiating state
     assert_eq!(nodes[0].node.session_count(), 1);
-    assert!(nodes[0]
-        .node
-        .get_session(&node1_addr)
-        .unwrap()
-        .state()
-        .is_initiating());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_initiating()
+    );
 
     // Process packets: SessionSetup arrives at Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -165,12 +159,14 @@ async fn test_session_direct_peer_handshake() {
 
     // Node 1 should now have a session in AwaitingMsg3 state (XK: identity not yet known)
     assert_eq!(nodes[1].node.session_count(), 1);
-    assert!(nodes[1]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_awaiting_msg3());
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .state()
+            .is_awaiting_msg3()
+    );
 
     // Process packets: SessionAck arrives at Node 0, Node 0 sends SessionMsg3
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -178,12 +174,14 @@ async fn test_session_direct_peer_handshake() {
     assert!(count > 0, "Expected SessionAck packet to arrive");
 
     // Node 0 should now be Established (transitions after sending msg3)
-    assert!(nodes[0]
-        .node
-        .get_session(&node1_addr)
-        .unwrap()
-        .state()
-        .is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Process packets: SessionMsg3 arrives at Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -191,12 +189,14 @@ async fn test_session_direct_peer_handshake() {
     assert!(count > 0, "Expected SessionMsg3 packet to arrive");
 
     // Node 1 should now be Established (transitions after processing msg3)
-    assert!(nodes[1]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_established());
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -226,18 +226,22 @@ async fn test_session_direct_peer_data_transfer() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await; // Msg3 → Node 1
 
-    assert!(nodes[0]
-        .node
-        .get_session(&node1_addr)
-        .unwrap()
-        .state()
-        .is_established());
-    assert!(nodes[1]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Send data from Node 0 to Node 1
     let test_data = b"Hello, FIPS session!";
@@ -291,12 +295,14 @@ async fn test_session_3node_forwarded_handshake() {
         nodes[2].node.get_session(&node0_addr).is_some(),
         "Node 2 should have a session entry for Node 0"
     );
-    assert!(nodes[2]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_awaiting_msg3());
+    assert!(
+        nodes[2]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .state()
+            .is_awaiting_msg3()
+    );
 
     // Process: SessionAck: 2→1 (forwarded by transit B)
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -307,12 +313,14 @@ async fn test_session_3node_forwarded_handshake() {
     process_available_packets(&mut nodes).await;
 
     // Node 0 should now be Established (transitions after sending msg3)
-    assert!(nodes[0]
-        .node
-        .get_session(&node2_addr)
-        .unwrap()
-        .state()
-        .is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Process: SessionMsg3: 0→1 (forwarded by transit B)
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -323,12 +331,14 @@ async fn test_session_3node_forwarded_handshake() {
     process_available_packets(&mut nodes).await;
 
     // Node 2 should now be Established (transitions after processing msg3)
-    assert!(nodes[2]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_established());
+    assert!(
+        nodes[2]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Transit node B should NOT have a session
     assert_eq!(
@@ -389,12 +399,14 @@ async fn test_session_3node_forwarded_data() {
     }
 
     // Node 2 should be Established (transitioned during XK handshake msg3)
-    assert!(nodes[2]
-        .node
-        .get_session(&node0_addr)
-        .unwrap()
-        .state()
-        .is_established());
+    assert!(
+        nodes[2]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -520,12 +532,7 @@ async fn test_session_100_nodes() {
     // Collect identities: (node_addr, pubkey) for all nodes
     let all_info: Vec<(NodeAddr, secp256k1::PublicKey)> = nodes
         .iter()
-        .map(|tn| {
-            (
-                *tn.node.node_addr(),
-                tn.node.identity().pubkey_full(),
-            )
-        })
+        .map(|tn| (*tn.node.node_addr(), tn.node.identity().pubkey_full()))
         .collect();
 
     // Each node picks one random target for its outbound session.
@@ -640,11 +647,7 @@ async fn test_session_100_nodes() {
         // (Responder should already be Established after XK msg3)
         let rev_payload = format!("rev-{}", pair_idx).into_bytes();
         let rev_ipv6 = build_ipv6_packet(&dst_fips, &src_fips, &rev_payload);
-        match nodes[dst]
-            .node
-            .send_ipv6_packet(&src_addr, &rev_ipv6)
-            .await
-        {
+        match nodes[dst].node.send_ipv6_packet(&src_addr, &rev_ipv6).await {
             Ok(()) => send_reverse_ok += 1,
             Err(_) => send_reverse_err += 1,
         }
@@ -723,10 +726,7 @@ async fn test_session_100_nodes() {
         }
     }
 
-    let session_counts: Vec<usize> = nodes
-        .iter()
-        .map(|tn| tn.node.session_count())
-        .collect();
+    let session_counts: Vec<usize> = nodes.iter().map(|tn| tn.node.session_count()).collect();
     let total_sessions: usize = session_counts.iter().sum();
     let min_sessions = *session_counts.iter().min().unwrap();
     let max_sessions = *session_counts.iter().max().unwrap();
@@ -770,10 +770,8 @@ async fn test_session_100_nodes() {
     };
 
     // Coord cache stats
-    let coord_cache_sizes: Vec<usize> = nodes
-        .iter()
-        .map(|tn| tn.node.coord_cache().len())
-        .collect();
+    let coord_cache_sizes: Vec<usize> =
+        nodes.iter().map(|tn| tn.node.coord_cache().len()).collect();
     let total_coord_entries: usize = coord_cache_sizes.iter().sum();
     let min_coord = *coord_cache_sizes.iter().min().unwrap();
     let max_coord = *coord_cache_sizes.iter().max().unwrap();
@@ -884,10 +882,7 @@ async fn test_session_100_nodes() {
 
     // === Assertions ===
 
-    assert_eq!(
-        send_forward_err, 0,
-        "All forward sends should succeed"
-    );
+    assert_eq!(send_forward_err, 0, "All forward sends should succeed");
     assert_eq!(
         send_reverse_err, 0,
         "All reverse sends should succeed (responder Established after XK msg3)"
@@ -915,7 +910,11 @@ async fn test_session_100_nodes() {
 // ============================================================================
 
 /// Build a minimal valid IPv6 packet with given source and destination addresses.
-fn build_ipv6_packet(src: &crate::FipsAddress, dst: &crate::FipsAddress, payload: &[u8]) -> Vec<u8> {
+fn build_ipv6_packet(
+    src: &crate::FipsAddress,
+    dst: &crate::FipsAddress,
+    payload: &[u8],
+) -> Vec<u8> {
     let payload_len = payload.len() as u16;
     let mut packet = vec![0u8; 40 + payload.len()];
     // Version (6) + traffic class high nibble
@@ -944,17 +943,14 @@ fn test_identity_cache_populated_on_promote() {
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
 
-    let (conn, peer_identity) = make_completed_connection(
-        &mut node,
-        link_id,
-        transport_id,
-        1000,
-    );
+    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
 
     node.add_connection(conn).unwrap();
 
     // Promote
-    let result = node.promote_connection(link_id, peer_identity, 2000).unwrap();
+    let result = node
+        .promote_connection(link_id, peer_identity, 2000)
+        .unwrap();
     assert!(matches!(result, PromotionResult::Promoted(_)));
 
     // Identity cache should contain the peer
@@ -962,7 +958,10 @@ fn test_identity_cache_populated_on_promote() {
     let mut prefix = [0u8; 15];
     prefix.copy_from_slice(&peer_addr.as_bytes()[0..15]);
     let cached = node.lookup_by_fips_prefix(&prefix);
-    assert!(cached.is_some(), "Identity cache should contain promoted peer");
+    assert!(
+        cached.is_some(),
+        "Identity cache should contain promoted peer"
+    );
     let (cached_addr, cached_pk) = cached.unwrap();
     assert_eq!(cached_addr, peer_addr);
     assert_eq!(cached_pk, peer_identity.pubkey_full());
@@ -986,7 +985,11 @@ async fn test_tun_outbound_established_session() {
     let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
 
     // Establish session (XK: 3 messages — Setup, Ack, Msg3)
-    nodes[0].node.initiate_session(node1_addr, node1_pubkey).await.unwrap();
+    nodes[0]
+        .node
+        .initiate_session(node1_addr, node1_pubkey)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await; // Setup → Node 1
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -994,7 +997,14 @@ async fn test_tun_outbound_established_session() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await; // Msg3 → Node 1
 
-    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Install TUN receiver on Node 1
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
@@ -1013,7 +1023,10 @@ async fn test_tun_outbound_established_session() {
     // Verify plaintext arrived at Node 1's TUN
     let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
     assert_eq!(delivered.len(), 1, "Exactly one packet should be delivered");
-    assert_eq!(delivered[0], ipv6_packet, "Delivered packet should match original");
+    assert_eq!(
+        delivered[0], ipv6_packet,
+        "Delivered packet should match original"
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -1049,17 +1062,35 @@ async fn test_tun_outbound_triggers_session_initiation() {
 
     // Session should now be initiating
     assert_eq!(nodes[0].node.session_count(), 1);
-    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_initiating());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_initiating()
+    );
 
     // Drain packets until session established and queued packet delivered
     drain_to_quiescence(&mut nodes).await;
 
     // Session should be established on Node 0
-    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Verify the queued packet was delivered to Node 1
     let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
-    assert_eq!(delivered.len(), 1, "Queued packet should be delivered after handshake");
+    assert_eq!(
+        delivered.len(),
+        1,
+        "Queued packet should be delivered after handshake"
+    );
     assert_eq!(delivered[0], ipv6_packet);
 
     cleanup_nodes(&mut nodes).await;
@@ -1087,12 +1118,19 @@ async fn test_tun_outbound_unknown_destination() {
 
     // Should receive ICMPv6 Destination Unreachable back on TUN
     let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
-    assert_eq!(delivered.len(), 1, "Should receive ICMPv6 Destination Unreachable");
+    assert_eq!(
+        delivered.len(),
+        1,
+        "Should receive ICMPv6 Destination Unreachable"
+    );
     // Verify it's an ICMPv6 Destination Unreachable (type 1, code 0)
     // ICMPv6 header starts at byte 40, type at byte 40, code at byte 41
     assert!(delivered[0].len() >= 48, "ICMPv6 response too short");
     assert_eq!(delivered[0][6], 58, "Next header should be ICMPv6 (58)");
-    assert_eq!(delivered[0][40], 1, "ICMPv6 type should be Destination Unreachable (1)");
+    assert_eq!(
+        delivered[0][40], 1,
+        "ICMPv6 type should be Destination Unreachable (1)"
+    );
     assert_eq!(delivered[0][41], 0, "ICMPv6 code should be No Route (0)");
 
     cleanup_nodes(&mut nodes).await;
@@ -1131,7 +1169,14 @@ async fn test_tun_outbound_3node_forwarded() {
     drain_to_quiescence(&mut nodes).await;
 
     // Session should be established
-    assert!(nodes[0].node.get_session(&node2_addr).unwrap().state().is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Verify packet delivered to Node 2
     let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
@@ -1170,16 +1215,34 @@ async fn test_tun_outbound_pending_queue_flush() {
 
     // First packet triggers session initiation, rest are queued
     assert_eq!(nodes[0].node.session_count(), 1);
-    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_initiating());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_initiating()
+    );
 
     // Drain until session established and queued packets flushed
     drain_to_quiescence(&mut nodes).await;
 
-    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // All 5 packets should have been delivered
     let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
-    assert_eq!(delivered.len(), 5, "All 5 queued packets should be delivered");
+    assert_eq!(
+        delivered.len(),
+        5,
+        "All 5 queued packets should be delivered"
+    );
     for (i, pkt) in delivered.iter().enumerate() {
         assert_eq!(*pkt, packets[i], "Packet {} should match", i);
     }
@@ -1198,10 +1261,8 @@ fn make_noise_session(
 ) -> crate::noise::NoiseSession {
     use crate::noise::HandshakeState;
 
-    let mut initiator = HandshakeState::new_initiator(
-        our_identity.keypair(),
-        remote_identity.pubkey_full(),
-    );
+    let mut initiator =
+        HandshakeState::new_initiator(our_identity.keypair(), remote_identity.pubkey_full());
     let mut responder = HandshakeState::new_responder(remote_identity.keypair());
 
     // Set epochs for both sides (required for handshake message encryption)
@@ -1270,7 +1331,11 @@ fn test_purge_idle_sessions_keeps_active() {
     let now_ms = 92_000;
     node.purge_idle_sessions(now_ms);
 
-    assert_eq!(node.session_count(), 1, "Active session should survive purge");
+    assert_eq!(
+        node.session_count(),
+        1,
+        "Active session should survive purge"
+    );
 }
 
 #[test]
@@ -1281,10 +1346,7 @@ fn test_purge_idle_sessions_ignores_initiating() {
     let remote = Identity::generate();
     let remote_addr = *remote.node_addr();
 
-    let handshake = HandshakeState::new_initiator(
-        node.identity().keypair(),
-        remote.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(node.identity().keypair(), remote.pubkey_full());
     let entry = crate::node::session::SessionEntry::new(
         remote_addr,
         remote.pubkey_full(),
@@ -1299,7 +1361,11 @@ fn test_purge_idle_sessions_ignores_initiating() {
     let now_ms = 1000 + 200_000;
     node.purge_idle_sessions(now_ms);
 
-    assert_eq!(node.session_count(), 1, "Initiating session should not be purged by idle timeout");
+    assert_eq!(
+        node.session_count(),
+        1,
+        "Initiating session should not be purged by idle timeout"
+    );
 }
 
 #[test]
@@ -1330,8 +1396,10 @@ fn test_purge_idle_sessions_cleans_pending_packets() {
     node.purge_idle_sessions(now_ms);
 
     assert_eq!(node.session_count(), 0);
-    assert!(!node.pending_tun_packets.contains_key(&remote_addr),
-        "Pending packets should be cleaned up with idle session");
+    assert!(
+        !node.pending_tun_packets.contains_key(&remote_addr),
+        "Pending packets should be cleaned up with idle session"
+    );
 }
 
 #[test]
@@ -1357,7 +1425,11 @@ fn test_purge_idle_sessions_disabled_when_zero() {
     let now_ms = 1000 + 1_000_000;
     node.purge_idle_sessions(now_ms);
 
-    assert_eq!(node.session_count(), 1, "Sessions should not be purged when idle timeout is disabled");
+    assert_eq!(
+        node.session_count(),
+        1,
+        "Sessions should not be purged when idle timeout is disabled"
+    );
 }
 
 #[test]
@@ -1386,8 +1458,11 @@ fn test_purge_idle_sessions_mmp_activity_does_not_prevent_purge() {
     let now_ms = 92_000;
     node.purge_idle_sessions(now_ms);
 
-    assert_eq!(node.session_count(), 0,
-        "Session with MMP-only activity should be purged");
+    assert_eq!(
+        node.session_count(),
+        0,
+        "Session with MMP-only activity should be purged"
+    );
 }
 
 // ============================================================================
@@ -1401,10 +1476,7 @@ fn test_coords_warmup_counter_default_zero_on_new() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        identity_a.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
 
     let entry = crate::node::session::SessionEntry::new(
         *identity_b.node_addr(),
@@ -1414,8 +1486,11 @@ fn test_coords_warmup_counter_default_zero_on_new() {
         true,
     );
 
-    assert_eq!(entry.coords_warmup_remaining(), 0,
-        "Counter should be 0 for non-Established sessions");
+    assert_eq!(
+        entry.coords_warmup_remaining(),
+        0,
+        "Counter should be 0 for non-Established sessions"
+    );
 }
 
 #[test]
@@ -1466,15 +1541,20 @@ fn test_coords_warmup_counter_decrement() {
         assert_eq!(entry.coords_warmup_remaining(), expected);
     }
 
-    assert_eq!(entry.coords_warmup_remaining(), 0,
-        "Counter should reach 0 after N decrements");
+    assert_eq!(
+        entry.coords_warmup_remaining(),
+        0,
+        "Counter should reach 0 after N decrements"
+    );
 }
 
 #[test]
 fn test_coords_warmup_config_default() {
     let config = crate::config::Config::new();
-    assert_eq!(config.node.session.coords_warmup_packets, 5,
-        "Default coords_warmup_packets should be 5");
+    assert_eq!(
+        config.node.session.coords_warmup_packets, 5,
+        "Default coords_warmup_packets should be 5"
+    );
 }
 
 // ============================================================================
@@ -1493,11 +1573,13 @@ fn test_identity_cache_lru_eviction() {
     // Insert first two with explicit timestamps to ensure deterministic ordering
     let mut prefix1 = [0u8; 15];
     prefix1.copy_from_slice(&id1.node_addr().as_bytes()[0..15]);
-    node.identity_cache.insert(prefix1, (*id1.node_addr(), id1.pubkey_full(), 1000));
+    node.identity_cache
+        .insert(prefix1, (*id1.node_addr(), id1.pubkey_full(), 1000));
 
     let mut prefix2 = [0u8; 15];
     prefix2.copy_from_slice(&id2.node_addr().as_bytes()[0..15]);
-    node.identity_cache.insert(prefix2, (*id2.node_addr(), id2.pubkey_full(), 2000));
+    node.identity_cache
+        .insert(prefix2, (*id2.node_addr(), id2.pubkey_full(), 2000));
 
     assert_eq!(node.identity_cache_len(), 2);
 
@@ -1505,13 +1587,17 @@ fn test_identity_cache_lru_eviction() {
     node.register_identity(*id3.node_addr(), id3.pubkey_full());
     assert_eq!(node.identity_cache_len(), 2);
 
-    assert!(node.lookup_by_fips_prefix(&prefix1).is_none(),
-        "Oldest entry should have been evicted");
+    assert!(
+        node.lookup_by_fips_prefix(&prefix1).is_none(),
+        "Oldest entry should have been evicted"
+    );
 
     let mut prefix3 = [0u8; 15];
     prefix3.copy_from_slice(&id3.node_addr().as_bytes()[0..15]);
-    assert!(node.lookup_by_fips_prefix(&prefix3).is_some(),
-        "Newest entry should be present");
+    assert!(
+        node.lookup_by_fips_prefix(&prefix3).is_some(),
+        "Newest entry should be present"
+    );
 }
 
 #[test]
@@ -1546,10 +1632,7 @@ fn test_session_entry_handshake_payload_storage() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        identity_a.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
 
     let mut entry = crate::node::session::SessionEntry::new(
         *identity_b.node_addr(),
@@ -1581,10 +1664,7 @@ fn test_session_entry_resend_tracking() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        identity_a.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
 
     let mut entry = crate::node::session::SessionEntry::new(
         *identity_b.node_addr(),
@@ -1615,10 +1695,7 @@ fn test_session_entry_clear_handshake_payload() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_initiator(
-        identity_a.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake = HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
 
     let mut entry = crate::node::session::SessionEntry::new(
         *identity_b.node_addr(),
@@ -1649,10 +1726,8 @@ async fn test_session_handshake_timeout() {
     let mut node = make_node();
 
     let identity_b = Identity::generate();
-    let handshake = HandshakeState::new_initiator(
-        node.identity.keypair(),
-        identity_b.pubkey_full(),
-    );
+    let handshake =
+        HandshakeState::new_initiator(node.identity.keypair(), identity_b.pubkey_full());
 
     let dest_addr = *identity_b.node_addr();
 
@@ -1672,12 +1747,18 @@ async fn test_session_handshake_timeout() {
     let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
     let before_timeout = 1000 + timeout_secs * 1000 - 1;
     node.resend_pending_session_handshakes(before_timeout).await;
-    assert!(node.sessions.contains_key(&dest_addr), "Session should survive before timeout");
+    assert!(
+        node.sessions.contains_key(&dest_addr),
+        "Session should survive before timeout"
+    );
 
     // After timeout: session should be removed
     let after_timeout = 1000 + timeout_secs * 1000 + 1;
     node.resend_pending_session_handshakes(after_timeout).await;
-    assert!(!node.sessions.contains_key(&dest_addr), "Timed-out session should be removed");
+    assert!(
+        !node.sessions.contains_key(&dest_addr),
+        "Timed-out session should be removed"
+    );
 }
 
 /// Test that session handshake timeout removes stale AwaitingMsg3 sessions.
@@ -1690,9 +1771,7 @@ async fn test_session_awaiting_msg3_timeout() {
     let identity_a = Identity::generate();
     let identity_b = Identity::generate();
 
-    let handshake = HandshakeState::new_xk_responder(
-        identity_b.keypair(),
-    );
+    let handshake = HandshakeState::new_xk_responder(identity_b.keypair());
 
     let src_addr = *identity_a.node_addr();
 
@@ -1712,7 +1791,10 @@ async fn test_session_awaiting_msg3_timeout() {
     let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
     let after_timeout = 1000 + timeout_secs * 1000 + 1;
     node.resend_pending_session_handshakes(after_timeout).await;
-    assert!(!node.sessions.contains_key(&src_addr), "Timed-out AwaitingMsg3 session should be removed");
+    assert!(
+        !node.sessions.contains_key(&src_addr),
+        "Timed-out AwaitingMsg3 session should be removed"
+    );
 }
 
 #[tokio::test]
@@ -1734,7 +1816,11 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
 
     // Establish session (XK: 3 messages — Setup, Ack, Msg3)
-    nodes[0].node.initiate_session(node1_addr, node1_pubkey).await.unwrap();
+    nodes[0]
+        .node
+        .initiate_session(node1_addr, node1_pubkey)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1742,7 +1828,14 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     process_available_packets(&mut nodes).await;
 
-    assert!(nodes[0].node.get_session(&node1_addr).unwrap().state().is_established());
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
 
     // Simulate receipt of MtuExceeded by reducing PathMtuState to a value
     // lower than the local transport MTU.
@@ -1751,7 +1844,8 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     {
         let entry = nodes[0].node.get_session_mut(&node1_addr).unwrap();
         let mmp = entry.mmp_mut().unwrap();
-        mmp.path_mtu.apply_notification(reduced_mtu, std::time::Instant::now());
+        mmp.path_mtu
+            .apply_notification(reduced_mtu, std::time::Instant::now());
         assert_eq!(mmp.path_mtu.current_mtu(), reduced_mtu);
     }
 
@@ -1764,14 +1858,24 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     let local_ipv6_mtu = nodes[0].node.effective_ipv6_mtu() as usize;
     let oversized_payload = vec![0u8; reduced_ipv6_mtu - 39]; // 40-byte hdr + payload > reduced MTU
     let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, &oversized_payload);
-    assert!(ipv6_packet.len() > reduced_ipv6_mtu, "packet must exceed path MTU");
-    assert!(ipv6_packet.len() <= local_ipv6_mtu, "packet must fit local MTU");
+    assert!(
+        ipv6_packet.len() > reduced_ipv6_mtu,
+        "packet must exceed path MTU"
+    );
+    assert!(
+        ipv6_packet.len() <= local_ipv6_mtu,
+        "packet must fit local MTU"
+    );
 
     nodes[0].node.handle_tun_outbound(ipv6_packet).await;
 
     // Verify ICMPv6 Packet Too Big was generated
     let ptb_messages: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
-    assert_eq!(ptb_messages.len(), 1, "Should generate exactly one ICMPv6 PTB");
+    assert_eq!(
+        ptb_messages.len(),
+        1,
+        "Should generate exactly one ICMPv6 PTB"
+    );
 
     let ptb = &ptb_messages[0];
     assert_eq!(ptb[0] >> 4, 6, "Should be IPv6");
@@ -1784,12 +1888,23 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     // address, causing a PMTUD blackhole.
     let ptb_src = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[8..24]).unwrap());
     let ptb_dst = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[24..40]).unwrap());
-    assert_eq!(ptb_src, dst_fips.to_ipv6(), "PTB source must be remote peer (original dst), not local node");
-    assert_eq!(ptb_dst, src_fips.to_ipv6(), "PTB destination must be local node (original src)");
+    assert_eq!(
+        ptb_src,
+        dst_fips.to_ipv6(),
+        "PTB source must be remote peer (original dst), not local node"
+    );
+    assert_eq!(
+        ptb_dst,
+        src_fips.to_ipv6(),
+        "PTB destination must be local node (original src)"
+    );
 
     // Verify reported MTU (32-bit field at ICMPv6 header bytes 4-7)
     let reported_mtu = u32::from_be_bytes([ptb[44], ptb[45], ptb[46], ptb[47]]);
-    assert_eq!(reported_mtu, reduced_ipv6_mtu as u32, "Reported MTU should match path IPv6 MTU");
+    assert_eq!(
+        reported_mtu, reduced_ipv6_mtu as u32,
+        "Reported MTU should match path IPv6 MTU"
+    );
 
     // Verify a packet that fits within path MTU passes through (no PTB)
     let (tun_tx2, tun_rx2) = std::sync::mpsc::channel();
@@ -1802,7 +1917,11 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
 
     // No PTB should be generated for a fitting packet
     let ptb_messages2: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx2.try_recv().ok()).collect();
-    assert_eq!(ptb_messages2.len(), 0, "Should not generate PTB for fitting packet");
+    assert_eq!(
+        ptb_messages2.len(),
+        0,
+        "Should not generate PTB for fitting packet"
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -1845,10 +1964,19 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     nodes[0].node.register_identity(node2_addr, node2_pubkey);
 
     // Establish session A→C via B (triggers routing through tree)
-    nodes[0].node.initiate_session(node2_addr, node2_pubkey).await.unwrap();
+    nodes[0]
+        .node
+        .initiate_session(node2_addr, node2_pubkey)
+        .await
+        .unwrap();
     drain_to_quiescence(&mut nodes).await;
     assert!(
-        nodes[0].node.get_session(&node2_addr).unwrap().state().is_established(),
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .unwrap()
+            .state()
+            .is_established(),
         "Session A→C should be established"
     );
 
@@ -1858,7 +1986,11 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     // With coords (~66 extra), the wire could exceed B's recv buffer.
     for _ in 0..5 {
         let small = build_ipv6_packet(&src_fips, &dst_fips, &[0u8; 10]);
-        nodes[0].node.send_ipv6_packet(&node2_addr, &small).await.unwrap();
+        nodes[0]
+            .node
+            .send_ipv6_packet(&node2_addr, &small)
+            .await
+            .unwrap();
     }
     drain_to_quiescence(&mut nodes).await;
 
@@ -1872,12 +2004,17 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     assert!(
         ipv6_packet.len() <= local_effective_mtu,
         "packet ({}) must fit A's local MTU ({})",
-        ipv6_packet.len(), local_effective_mtu
+        ipv6_packet.len(),
+        local_effective_mtu
     );
 
     // Send the oversized packet — B should fail to forward and send
     // MtuExceeded signal back.
-    nodes[0].node.send_ipv6_packet(&node2_addr, &ipv6_packet).await.unwrap();
+    nodes[0]
+        .node
+        .send_ipv6_packet(&node2_addr, &ipv6_packet)
+        .await
+        .unwrap();
     drain_to_quiescence(&mut nodes).await;
 
     // Verify PathMtuState was updated on A
@@ -1902,7 +2039,8 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
 
     let ptb_messages: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx2.try_recv().ok()).collect();
     assert_eq!(
-        ptb_messages.len(), 1,
+        ptb_messages.len(),
+        1,
         "Should generate ICMPv6 PTB for oversized packet after PathMtuState update"
     );
 
@@ -1917,8 +2055,16 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     // address, causing a PMTUD blackhole.
     let ptb_src = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[8..24]).unwrap());
     let ptb_dst = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&ptb[24..40]).unwrap());
-    assert_eq!(ptb_src, dst_fips.to_ipv6(), "PTB source must be remote peer (original dst), not local node");
-    assert_eq!(ptb_dst, src_fips.to_ipv6(), "PTB destination must be local node (original src)");
+    assert_eq!(
+        ptb_src,
+        dst_fips.to_ipv6(),
+        "PTB source must be remote peer (original dst), not local node"
+    );
+    assert_eq!(
+        ptb_dst,
+        src_fips.to_ipv6(),
+        "PTB destination must be local node (original src)"
+    );
 
     // Verify reported MTU is the path MTU (not local MTU)
     let reported_mtu = u32::from_be_bytes([ptb[44], ptb[45], ptb[46], ptb[47]]);
@@ -1941,7 +2087,8 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
 
     let ptb_messages3: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx3.try_recv().ok()).collect();
     assert_eq!(
-        ptb_messages3.len(), 0,
+        ptb_messages3.len(),
+        0,
         "Should not generate PTB for packet fitting within path MTU"
     );
 

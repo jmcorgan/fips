@@ -105,7 +105,10 @@ impl ControlSocket {
         let group_name = CString::new("fips").unwrap();
         let grp = unsafe { libc::getgrnam(group_name.as_ptr()) };
         if grp.is_null() {
-            debug!("'fips' group not found, skipping chown for {}", path.display());
+            debug!(
+                "'fips' group not found, skipping chown for {}",
+                path.display()
+            );
             return;
         }
         let gid = unsafe { (*grp).gr_gid };
@@ -184,9 +187,7 @@ impl ControlSocket {
         .await;
 
         let response = match read_result {
-            Ok(Ok(())) if line.is_empty() => {
-                Response::error("empty request")
-            }
+            Ok(Ok(())) if line.is_empty() => Response::error("empty request"),
             Ok(Ok(())) => {
                 // Parse the request
                 match serde_json::from_str::<Request>(line.trim()) {

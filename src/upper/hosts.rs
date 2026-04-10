@@ -80,7 +80,9 @@ impl HostMap {
 
     /// Look up the npub for a hostname (case-insensitive).
     pub fn lookup_npub(&self, hostname: &str) -> Option<&str> {
-        self.by_name.get(&hostname.to_ascii_lowercase()).map(|s| s.as_str())
+        self.by_name
+            .get(&hostname.to_ascii_lowercase())
+            .map(|s| s.as_str())
     }
 
     /// Look up the hostname for a NodeAddr (reverse lookup for display).
@@ -279,7 +281,9 @@ pub fn validate_hostname(hostname: &str) -> Result<(), HostMapError> {
     }
 
     if hostname.to_ascii_lowercase().starts_with("npub1") {
-        return Err(err("must not start with 'npub1' (ambiguous with npub resolution)"));
+        return Err(err(
+            "must not start with 'npub1' (ambiguous with npub resolution)",
+        ));
     }
 
     if hostname.starts_with('-') {
@@ -338,7 +342,10 @@ mod tests {
             ("NPUB1bar", "npub1 prefix case"),
         ];
         for (h, desc) in cases {
-            assert!(validate_hostname(h).is_err(), "should be invalid ({desc}): {h}");
+            assert!(
+                validate_hostname(h).is_err(),
+                "should be invalid ({desc}): {h}"
+            );
         }
     }
 
@@ -574,10 +581,7 @@ mod tests {
         let mut base = HostMap::new();
         base.insert("core", &id.npub()).unwrap();
 
-        let reloader = HostMapReloader::new(
-            base,
-            std::path::PathBuf::from("/nonexistent/hosts"),
-        );
+        let reloader = HostMapReloader::new(base, std::path::PathBuf::from("/nonexistent/hosts"));
         // Only base entries present
         assert_eq!(reloader.hosts().len(), 1);
         assert!(reloader.hosts().lookup_npub("core").is_some());
@@ -605,7 +609,11 @@ mod tests {
         // Modify the file — bump mtime by writing new content
         // Sleep briefly to ensure mtime changes (filesystem granularity)
         std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(&path, format!("gateway   {}\nnew-host   {}\n", id1.npub(), id2.npub())).unwrap();
+        std::fs::write(
+            &path,
+            format!("gateway   {}\nnew-host   {}\n", id1.npub(), id2.npub()),
+        )
+        .unwrap();
 
         assert!(reloader.check_reload());
         assert_eq!(reloader.hosts().len(), 2);

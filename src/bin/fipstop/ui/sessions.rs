@@ -15,11 +15,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let row_count = sessions.len();
 
     if app.detail_view.is_some() {
-        let chunks = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Percentage(60),
-        ])
-        .split(area);
+        let chunks = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(area);
 
         draw_table(frame, app, chunks[0], &sessions, row_count);
         draw_detail(frame, app, chunks[1], &sessions);
@@ -223,10 +220,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, sessions: &[serde_json:
         ));
         lines.push(helpers::kv_line(
             "SRTT",
-            &format!(
-                "{}ms",
-                helpers::nested_f64(session, "mmp", "srtt_ms", 1)
-            ),
+            &format!("{}ms", helpers::nested_f64(session, "mmp", "srtt_ms", 1)),
         ));
         lines.push(helpers::kv_line(
             "Loss Rate",
@@ -271,4 +265,3 @@ fn state_styled(state: &str) -> Span<'static> {
     };
     Span::styled(state.to_string(), Style::default().fg(color))
 }
-

@@ -12,8 +12,8 @@
 
 use crate::upper::hosts::{HostMap, HostMapReloader};
 use crate::{NodeAddr, PeerIdentity};
-use simple_dns::rdata::{RData, AAAA};
-use simple_dns::{Packet, Name, ResourceRecord, CLASS, RCODE, PacketFlag, QTYPE, TYPE};
+use simple_dns::rdata::{AAAA, RData};
+use simple_dns::{CLASS, Name, Packet, PacketFlag, QTYPE, RCODE, ResourceRecord, TYPE};
 use std::net::Ipv6Addr;
 use tracing::{debug, warn};
 
@@ -109,16 +109,10 @@ pub fn handle_dns_packet(
     let mut response = query.into_reply();
     response.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
 
-    if is_aaaa
-        && let Some((ipv6, node_addr, pubkey)) = resolve_fips_query_with_hosts(&qname, hosts)
+    if is_aaaa && let Some((ipv6, node_addr, pubkey)) = resolve_fips_query_with_hosts(&qname, hosts)
     {
         let name = Name::new_unchecked(&qname).into_owned();
-        let record = ResourceRecord::new(
-            name,
-            CLASS::IN,
-            ttl,
-            RData::AAAA(AAAA::from(ipv6)),
-        );
+        let record = ResourceRecord::new(name, CLASS::IN, ttl, RData::AAAA(AAAA::from(ipv6)));
         response.answers.push(record);
 
         let identity = DnsResolvedIdentity { node_addr, pubkey };
@@ -359,7 +353,10 @@ mod tests {
         assert!(result.is_some(), "should handle hostname AAAA query");
 
         let (response_bytes, identity_opt) = result.unwrap();
-        assert!(identity_opt.is_some(), "should produce identity for hostname");
+        assert!(
+            identity_opt.is_some(),
+            "should produce identity for hostname"
+        );
 
         let response = Packet::parse(&response_bytes).unwrap();
         assert_eq!(response.answers.len(), 1);
@@ -380,7 +377,10 @@ mod tests {
         assert!(result.is_some());
 
         let (response_bytes, identity_opt) = result.unwrap();
-        assert!(identity_opt.is_none(), "should not produce identity for unknown");
+        assert!(
+            identity_opt.is_none(),
+            "should not produce identity for unknown"
+        );
 
         let response = Packet::parse(&response_bytes).unwrap();
         assert_eq!(response.rcode(), RCODE::NameError);
@@ -426,12 +426,8 @@ mod tests {
         let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
 
         // Spawn the responder
-        let responder_handle = tokio::spawn(run_dns_responder(
-            server_socket,
-            identity_tx,
-            300,
-            reloader,
-        ));
+        let responder_handle =
+            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
 
         // Send a query
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -457,13 +453,10 @@ mod tests {
         }
 
         // Verify identity was sent through channel
-        let resolved = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            identity_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), identity_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.node_addr, *identity.node_addr());
 
         responder_handle.abort();
@@ -486,12 +479,8 @@ mod tests {
 
         let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
 
-        let responder_handle = tokio::spawn(run_dns_responder(
-            server_socket,
-            identity_tx,
-            300,
-            reloader,
-        ));
+        let responder_handle =
+            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
 
         // Query by hostname instead of npub
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -516,13 +505,10 @@ mod tests {
         }
 
         // Verify identity registration
-        let resolved = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            identity_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), identity_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.node_addr, *identity.node_addr());
 
         responder_handle.abort();
@@ -545,12 +531,8 @@ mod tests {
         let server_addr = server_socket.local_addr().unwrap();
         let (identity_tx, _identity_rx) = tokio::sync::mpsc::channel(16);
 
-        let responder_handle = tokio::spawn(run_dns_responder(
-            server_socket,
-            identity_tx,
-            300,
-            reloader,
-        ));
+        let responder_handle =
+            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
 
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
@@ -561,16 +543,23 @@ mod tests {
         let (len, _) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client_socket.recv_from(&mut buf),
-        ).await.unwrap().unwrap();
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let response = Packet::parse(&buf[..len]).unwrap();
-        assert!(response.answers.is_empty(), "server2 should not resolve before reload");
+        assert!(
+            response.answers.is_empty(),
+            "server2 should not resolve before reload"
+        );
 
         // Update the hosts file to add server2
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(
             &hosts_path,
             format!("gateway   {}\nserver2   {}\n", id1.npub(), id2.npub()),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Next query should trigger reload — query server2 again
         let query = build_test_query("server2.fips", TYPE::AAAA);
@@ -578,9 +567,16 @@ mod tests {
         let (len, _) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client_socket.recv_from(&mut buf),
-        ).await.unwrap().unwrap();
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let response = Packet::parse(&buf[..len]).unwrap();
-        assert_eq!(response.answers.len(), 1, "server2 should resolve after reload");
+        assert_eq!(
+            response.answers.len(),
+            1,
+            "server2 should resolve after reload"
+        );
         if let RData::AAAA(aaaa) = &response.answers[0].rdata {
             assert_eq!(Ipv6Addr::from(aaaa.address), expected_ipv6_2);
         } else {

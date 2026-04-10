@@ -110,7 +110,12 @@ impl MmpMetrics {
     ///
     /// Returns `true` if this report produced the first SRTT measurement
     /// (transition from uninitialized to initialized).
-    pub fn process_receiver_report(&mut self, rr: &ReceiverReport, our_timestamp_ms: u32, now: Instant) -> bool {
+    pub fn process_receiver_report(
+        &mut self,
+        rr: &ReceiverReport,
+        our_timestamp_ms: u32,
+        now: Instant,
+    ) -> bool {
         let had_srtt = self.srtt.initialized();
 
         // --- RTT from timestamp echo ---
@@ -138,8 +143,12 @@ impl MmpMetrics {
         // --- Loss rate from cumulative counters ---
         // Delta: frames the peer should have received vs. actually received
         if self.has_prev_rr {
-            let counter_span = rr.highest_counter.saturating_sub(self.prev_rr_highest_counter);
-            let packets_delta = rr.cumulative_packets_recv.saturating_sub(self.prev_rr_cum_packets);
+            let counter_span = rr
+                .highest_counter
+                .saturating_sub(self.prev_rr_highest_counter);
+            let packets_delta = rr
+                .cumulative_packets_recv
+                .saturating_sub(self.prev_rr_cum_packets);
 
             if counter_span > 0 {
                 let delivery = (packets_delta as f64) / (counter_span as f64);
@@ -153,7 +162,9 @@ impl MmpMetrics {
 
         // --- Goodput from cumulative bytes + time delta ---
         if self.has_prev_rr {
-            let bytes_delta = rr.cumulative_bytes_recv.saturating_sub(self.prev_rr_cum_bytes);
+            let bytes_delta = rr
+                .cumulative_bytes_recv
+                .saturating_sub(self.prev_rr_cum_bytes);
             self.goodput_trend.update(bytes_delta as f64);
 
             // Compute bytes/sec if we have a time reference
@@ -379,8 +390,16 @@ mod tests {
         // Second report 1s later: 150KB total (100KB delta in 1s = 100KB/s)
         let rr2 = make_rr(300, 290, 150_000, 0, 0, 0);
         m.process_receiver_report(&rr2, 0, t0 + Duration::from_secs(1));
-        assert!(m.goodput_bps() > 90_000.0, "goodput={}, expected ~100000", m.goodput_bps());
-        assert!(m.goodput_bps() < 110_000.0, "goodput={}, expected ~100000", m.goodput_bps());
+        assert!(
+            m.goodput_bps() > 90_000.0,
+            "goodput={}, expected ~100000",
+            m.goodput_bps()
+        );
+        assert!(
+            m.goodput_bps() < 110_000.0,
+            "goodput={}, expected ~100000",
+            m.goodput_bps()
+        );
     }
 
     #[test]
@@ -397,8 +416,11 @@ mod tests {
 
         // Third call: 50% loss (100 frames sent, 50 received)
         m.update_reverse_delivery(350, 400);
-        assert!((m.delivery_ratio_reverse - 0.5).abs() < 0.001,
-            "reverse={}, expected 0.5", m.delivery_ratio_reverse);
+        assert!(
+            (m.delivery_ratio_reverse - 0.5).abs() < 0.001,
+            "reverse={}, expected 0.5",
+            m.delivery_ratio_reverse
+        );
     }
 
     #[test]
@@ -422,7 +444,10 @@ mod tests {
 
         // Second call after rekey: 80% delivery
         m.update_reverse_delivery(90, 100);
-        assert!((m.delivery_ratio_reverse - 0.8).abs() < 0.001,
-            "reverse={}, expected 0.8", m.delivery_ratio_reverse);
+        assert!(
+            (m.delivery_ratio_reverse - 0.8).abs() < 0.001,
+            "reverse={}, expected 0.8",
+            m.delivery_ratio_reverse
+        );
     }
 }
