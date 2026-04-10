@@ -3,3 +3,6 @@
 
 # rustfmt master-only code
 e9da598f8ab13de5dea3a1496531d675af6a0b94
+
+# rustfmt noise-xx-only code
+fef3d011ab290743a13ae3f9b287ad4ebaa1713b
