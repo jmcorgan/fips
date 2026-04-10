@@ -168,9 +168,7 @@ impl NegotiationPayload {
         while offset < data.len() {
             // Need at least 4 bytes for field_num + length
             if offset + 4 > data.len() {
-                return Err(ProtocolError::Malformed(
-                    "truncated TLV header".to_string(),
-                ));
+                return Err(ProtocolError::Malformed("truncated TLV header".to_string()));
             }
 
             let field_num = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
@@ -273,10 +271,7 @@ impl NegotiationPayload {
     /// Validate that two profiles form a valid link pairing.
     ///
     /// At least one side must be `Full` or the link is rejected.
-    pub fn validate_profiles(
-        ours: NodeProfile,
-        theirs: NodeProfile,
-    ) -> Result<(), ProtocolError> {
+    pub fn validate_profiles(ours: NodeProfile, theirs: NodeProfile) -> Result<(), ProtocolError> {
         if ours != NodeProfile::Full && theirs != NodeProfile::Full {
             return Err(ProtocolError::Malformed(format!(
                 "invalid profile pairing: {:?} <-> {:?} (at least one must be Full)",
@@ -285,7 +280,6 @@ impl NegotiationPayload {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -364,8 +358,7 @@ mod tests {
     #[test]
     fn test_unknown_tlv_forward_compat() {
         // Unknown field_nums should be preserved through encode/decode
-        let payload = NegotiationPayload::new(0, 1, 0)
-            .with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
+        let payload = NegotiationPayload::new(0, 1, 0).with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
 
         let encoded = payload.encode();
         let decoded = NegotiationPayload::decode(&encoded).unwrap();
@@ -396,8 +389,7 @@ mod tests {
 
     #[test]
     fn test_truncated_tlv() {
-        let payload = NegotiationPayload::new(0, 1, 0)
-            .with_tlv(1, vec![0xAA, 0xBB, 0xCC]);
+        let payload = NegotiationPayload::new(0, 1, 0).with_tlv(1, vec![0xAA, 0xBB, 0xCC]);
         let mut encoded = payload.encode();
 
         // Truncate the TLV value (remove last byte)
@@ -456,7 +448,11 @@ mod tests {
 
     #[test]
     fn test_fmp_payload_roundtrip() {
-        for profile in [NodeProfile::Full, NodeProfile::NonRouting, NodeProfile::Leaf] {
+        for profile in [
+            NodeProfile::Full,
+            NodeProfile::NonRouting,
+            NodeProfile::Leaf,
+        ] {
             let original = NegotiationPayload::fmp(1, 1, profile);
             let encoded = original.encode();
             let decoded = NegotiationPayload::decode(&encoded).unwrap();
@@ -479,45 +475,49 @@ mod tests {
     #[test]
     fn test_validate_profiles_valid() {
         // F↔F
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::Full, NodeProfile::Full
-        ).is_ok());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::Full, NodeProfile::Full).is_ok()
+        );
         // F↔N
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::Full, NodeProfile::NonRouting
-        ).is_ok());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::Full, NodeProfile::NonRouting)
+                .is_ok()
+        );
         // N↔F
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::NonRouting, NodeProfile::Full
-        ).is_ok());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::NonRouting, NodeProfile::Full)
+                .is_ok()
+        );
         // F↔L
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::Full, NodeProfile::Leaf
-        ).is_ok());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::Full, NodeProfile::Leaf).is_ok()
+        );
         // L↔F
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::Leaf, NodeProfile::Full
-        ).is_ok());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::Leaf, NodeProfile::Full).is_ok()
+        );
     }
 
     #[test]
     fn test_validate_profiles_invalid() {
         // N↔N
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::NonRouting, NodeProfile::NonRouting
-        ).is_err());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::NonRouting, NodeProfile::NonRouting)
+                .is_err()
+        );
         // N↔L
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::NonRouting, NodeProfile::Leaf
-        ).is_err());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::NonRouting, NodeProfile::Leaf)
+                .is_err()
+        );
         // L↔N
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::Leaf, NodeProfile::NonRouting
-        ).is_err());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::Leaf, NodeProfile::NonRouting)
+                .is_err()
+        );
         // L↔L
-        assert!(NegotiationPayload::validate_profiles(
-            NodeProfile::Leaf, NodeProfile::Leaf
-        ).is_err());
+        assert!(
+            NegotiationPayload::validate_profiles(NodeProfile::Leaf, NodeProfile::Leaf).is_err()
+        );
     }
-
 }

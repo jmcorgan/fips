@@ -132,21 +132,42 @@ fn test_identity_timing() {
     // After msg1
     let msg1 = initiator.write_message_1().unwrap();
     responder.read_message_1(&msg1).unwrap();
-    assert!(initiator.remote_static().is_none(), "XX: initiator should NOT know identity after msg1");
-    assert!(responder.remote_static().is_none(), "XX: responder should NOT know identity after msg1");
+    assert!(
+        initiator.remote_static().is_none(),
+        "XX: initiator should NOT know identity after msg1"
+    );
+    assert!(
+        responder.remote_static().is_none(),
+        "XX: responder should NOT know identity after msg1"
+    );
 
     // After msg2: initiator learns responder
     let msg2 = responder.write_message_2().unwrap();
     initiator.read_message_2(&msg2).unwrap();
-    assert!(initiator.remote_static().is_some(), "XX: initiator should know responder after msg2");
-    assert_eq!(initiator.remote_static().unwrap(), &responder_keypair.public_key());
-    assert!(responder.remote_static().is_none(), "XX: responder should NOT know initiator after msg2");
+    assert!(
+        initiator.remote_static().is_some(),
+        "XX: initiator should know responder after msg2"
+    );
+    assert_eq!(
+        initiator.remote_static().unwrap(),
+        &responder_keypair.public_key()
+    );
+    assert!(
+        responder.remote_static().is_none(),
+        "XX: responder should NOT know initiator after msg2"
+    );
 
     // After msg3: responder learns initiator
     let msg3 = initiator.write_message_3().unwrap();
     responder.read_message_3(&msg3).unwrap();
-    assert!(responder.remote_static().is_some(), "XX: responder should know initiator after msg3");
-    assert_eq!(responder.remote_static().unwrap(), &initiator_keypair.public_key());
+    assert!(
+        responder.remote_static().is_some(),
+        "XX: responder should know initiator after msg3"
+    );
+    assert_eq!(
+        responder.remote_static().unwrap(),
+        &initiator_keypair.public_key()
+    );
 }
 
 #[test]
@@ -157,7 +178,11 @@ fn test_wrong_state_errors() {
     // Initiator can't read msg1
     let mut initiator = HandshakeState::new_initiator(keypair1);
     initiator.set_local_epoch(generate_epoch());
-    assert!(initiator.read_message_1(&[0u8; HANDSHAKE_MSG1_SIZE]).is_err());
+    assert!(
+        initiator
+            .read_message_1(&[0u8; HANDSHAKE_MSG1_SIZE])
+            .is_err()
+    );
 
     // Initiator can't write msg2
     assert!(initiator.write_message_2().is_err());
@@ -171,7 +196,11 @@ fn test_wrong_state_errors() {
     assert!(responder.write_message_1().is_err());
 
     // Responder can't read msg3 before msg2
-    assert!(responder.read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE]).is_err());
+    assert!(
+        responder
+            .read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE])
+            .is_err()
+    );
 }
 
 #[test]
@@ -214,21 +243,23 @@ fn test_with_odd_parity() {
 
     // Node A (initiator) - even parity key
     let sk_a = secp256k1::SecretKey::from_slice(
-        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
-            .unwrap(),
+        &hex::decode("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20").unwrap(),
     )
     .unwrap();
     let kp_a = secp256k1::Keypair::from_secret_key(&secp, &sk_a);
 
     // Node B (responder) - odd parity key
     let sk_b = secp256k1::SecretKey::from_slice(
-        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0")
-            .unwrap(),
+        &hex::decode("b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0").unwrap(),
     )
     .unwrap();
     let kp_b = secp256k1::Keypair::from_secret_key(&secp, &sk_b);
     let (_, parity_b) = kp_b.public_key().x_only_public_key();
-    assert_eq!(parity_b, Parity::Odd, "Test requires odd-parity responder key");
+    assert_eq!(
+        parity_b,
+        Parity::Odd,
+        "Test requires odd-parity responder key"
+    );
 
     let mut initiator = HandshakeState::new_initiator(kp_a);
     initiator.set_local_epoch(generate_epoch());
@@ -250,7 +281,9 @@ fn test_with_odd_parity() {
 
     let counter = sender.current_send_counter();
     let ciphertext = sender.encrypt(b"xx parity test").unwrap();
-    let plaintext = receiver.decrypt_with_replay_check(&ciphertext, counter).unwrap();
+    let plaintext = receiver
+        .decrypt_with_replay_check(&ciphertext, counter)
+        .unwrap();
     assert_eq!(plaintext, b"xx parity test");
 }
 
@@ -276,7 +309,11 @@ fn test_invalid_msg_sizes() {
 
     // Responder is now in Message2Done, try wrong-size msg3
     assert!(responder.read_message_3(&[0u8; 10]).is_err());
-    assert!(responder.read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE + 1]).is_err());
+    assert!(
+        responder
+            .read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE + 1])
+            .is_err()
+    );
 }
 
 #[test]
@@ -440,7 +477,11 @@ fn test_replay_window_sequential() {
 
     // All should be marked as seen
     for i in 0..1000 {
-        assert!(!window.check(i), "Counter {} should be rejected as replay", i);
+        assert!(
+            !window.check(i),
+            "Counter {} should be rejected as replay",
+            i
+        );
     }
 
     assert_eq!(window.highest(), 999);

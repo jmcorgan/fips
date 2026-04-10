@@ -5,14 +5,12 @@
 //! - msg2 (responder → initiator): responder identity + epoch + negotiation
 //! - msg3 (initiator → responder): initiator identity + epoch + negotiation
 
+use crate::PeerIdentity;
+use crate::node::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::node::{Node, NodeError};
-use crate::peer::{
-    cross_connection_winner, ActivePeer, PeerConnection, PromotionResult,
-};
+use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
 use crate::protocol::NegotiationPayload;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
-use crate::node::wire::{build_msg2, build_msg3, Msg1Header, Msg2Header, Msg3Header};
-use crate::PeerIdentity;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -66,8 +64,7 @@ impl Node {
         {
             if link.direction() == LinkDirection::Inbound {
                 // Check if this link belongs to an already-promoted active peer
-                let is_active_peer = self.peers.values()
-                    .any(|p| p.link_id() == existing_link_id);
+                let is_active_peer = self.peers.values().any(|p| p.link_id() == existing_link_id);
 
                 if !is_active_peer {
                     // Genuinely pending handshake — resend msg2
@@ -202,7 +199,8 @@ impl Node {
                     // Clean up on failure
                     self.connections.remove(&link_id);
                     self.links.remove(&link_id);
-                    self.addr_to_link.remove(&(packet.transport_id, packet.remote_addr));
+                    self.addr_to_link
+                        .remove(&(packet.transport_id, packet.remote_addr));
                     let _ = self.index_allocator.free(our_index);
                     self.msg1_rate_limiter.complete_handshake();
                     return;
@@ -212,10 +210,8 @@ impl Node {
 
         // XX: handshake NOT complete yet — need msg3.
         // Store in pending_inbound for msg3 dispatch.
-        self.pending_inbound.insert(
-            (packet.transport_id, our_index.as_u32()),
-            link_id,
-        );
+        self.pending_inbound
+            .insert((packet.transport_id, our_index.as_u32()), link_id);
 
         self.msg1_rate_limiter.complete_handshake();
     }
@@ -279,9 +275,7 @@ impl Node {
 
             // Find peer with rekey in progress for this index
             let peer_addr = self.peers.iter().find_map(|(addr, peer)| {
-                if peer.rekey_in_progress()
-                    && peer.rekey_our_index() == Some(header.receiver_idx)
-                {
+                if peer.rekey_in_progress() && peer.rekey_our_index() == Some(header.receiver_idx) {
                     Some(*addr)
                 } else {
                     None
@@ -293,20 +287,24 @@ impl Node {
 
                 // Complete the rekey handshake on the ActivePeer
                 // XX: complete_rekey_msg2 processes msg2 and generates msg3
-                let transport_id = self.peers.get(&peer_node_addr)
+                let transport_id = self
+                    .peers
+                    .get(&peer_node_addr)
                     .and_then(|p| p.transport_id());
-                let remote_addr = self.peers.get(&peer_node_addr)
+                let remote_addr = self
+                    .peers
+                    .get(&peer_node_addr)
                     .and_then(|p| p.current_addr().cloned());
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
                         Ok((msg3_bytes, session)) => {
-                            let our_index = peer.rekey_our_index()
-                                .unwrap_or(header.receiver_idx);
+                            let our_index = peer.rekey_our_index().unwrap_or(header.receiver_idx);
 
                             // Send msg3 before setting pending session
                             let wire_msg3 = build_msg3(our_index, header.sender_idx, &msg3_bytes);
-                            let msg3_sent = if let (Some(tid), Some(addr)) = (transport_id, &remote_addr)
+                            let msg3_sent = if let (Some(tid), Some(addr)) =
+                                (transport_id, &remote_addr)
                                 && let Some(transport) = self.transports.get(&tid)
                             {
                                 match transport.send(addr, &wire_msg3).await {
@@ -334,10 +332,8 @@ impl Node {
                                 peer.set_pending_session(session, our_index, header.sender_idx);
 
                                 if let Some(tid) = transport_id {
-                                    self.peers_by_index.insert(
-                                        (tid, our_index.as_u32()),
-                                        peer_node_addr,
-                                    );
+                                    self.peers_by_index
+                                        .insert((tid, our_index.as_u32()), peer_node_addr);
                                 }
 
                                 debug!(
@@ -388,18 +384,19 @@ impl Node {
 
         // Process Noise msg2 and generate msg3
         let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-        let (msg3_bytes, received_negotiation) = match conn.complete_handshake(noise_msg2, Some(&neg_payload), packet.timestamp_ms) {
-            Ok(result) => result,
-            Err(e) => {
-                warn!(
-                    link_id = %link_id,
-                    error = %e,
-                    "Handshake completion failed"
-                );
-                conn.mark_failed();
-                return;
-            }
-        };
+        let (msg3_bytes, received_negotiation) =
+            match conn.complete_handshake(noise_msg2, Some(&neg_payload), packet.timestamp_ms) {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(
+                        link_id = %link_id,
+                        error = %e,
+                        "Handshake completion failed"
+                    );
+                    conn.mark_failed();
+                    return;
+                }
+            };
 
         // Process peer's FMP negotiation payload from msg2
         if let Some(neg_bytes) = &received_negotiation {
@@ -506,15 +503,17 @@ impl Node {
                 let outbound_our_index = conn.our_index();
                 let outbound_session = conn.take_session();
 
-                let (outbound_session, outbound_our_index) =
-                    match (outbound_session, outbound_our_index) {
-                        (Some(s), Some(idx)) => (s, idx),
-                        _ => {
-                            warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
-                            self.pending_outbound.remove(&key);
-                            return;
-                        }
-                    };
+                let (outbound_session, outbound_our_index) = match (
+                    outbound_session,
+                    outbound_our_index,
+                ) {
+                    (Some(s), Some(idx)) => (s, idx),
+                    _ => {
+                        warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
+                        self.pending_outbound.remove(&key);
+                        return;
+                    }
+                };
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
@@ -527,13 +526,12 @@ impl Node {
                     // Update peers_by_index: remove old inbound index, add outbound
                     let transport_id = peer.transport_id().unwrap();
                     if let Some(old_idx) = old_our_index {
-                        self.peers_by_index.remove(&(transport_id, old_idx.as_u32()));
+                        self.peers_by_index
+                            .remove(&(transport_id, old_idx.as_u32()));
                         let _ = self.index_allocator.free(old_idx);
                     }
-                    self.peers_by_index.insert(
-                        (transport_id, outbound_our_index.as_u32()),
-                        peer_node_addr,
-                    );
+                    self.peers_by_index
+                        .insert((transport_id, outbound_our_index.as_u32()), peer_node_addr);
 
                     if suppressed > 0 {
                         debug!(
@@ -624,7 +622,10 @@ impl Node {
                         self.bloom_state.mark_update_needed(node_addr);
                         self.reset_discovery_backoff();
                     }
-                    PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
+                    PromotionResult::CrossConnectionWon {
+                        loser_link_id,
+                        node_addr,
+                    } => {
                         // Close the losing TCP connection (no-op for connectionless)
                         if let Some(loser_link) = self.links.get(&loser_link_id) {
                             let loser_tid = loser_link.transport_id();
@@ -636,10 +637,8 @@ impl Node {
                         // Clean up the losing connection's link
                         self.remove_link(&loser_link_id);
                         // Ensure addr_to_link points to the winning link
-                        self.addr_to_link.insert(
-                            (packet.transport_id, packet.remote_addr.clone()),
-                            link_id,
-                        );
+                        self.addr_to_link
+                            .insert((packet.transport_id, packet.remote_addr.clone()), link_id);
                         debug!(
                             peer = %self.peer_display_name(&node_addr),
                             loser_link_id = %loser_link_id,
@@ -723,23 +722,24 @@ impl Node {
 
         // Process msg3 — learns initiator's identity and epoch
         let noise_msg3 = &packet.data[header.noise_msg3_offset..];
-        let received_negotiation = match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
-            Ok(neg) => neg,
-            Err(e) => {
-                warn!(
-                    link_id = %link_id,
-                    error = %e,
-                    "Msg3 processing failed"
-                );
-                // Clean up
-                self.connections.remove(&link_id);
-                self.remove_link(&link_id);
-                if let Some(idx) = self.connections.get(&link_id).and_then(|c| c.our_index()) {
-                    let _ = self.index_allocator.free(idx);
+        let received_negotiation =
+            match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
+                Ok(neg) => neg,
+                Err(e) => {
+                    warn!(
+                        link_id = %link_id,
+                        error = %e,
+                        "Msg3 processing failed"
+                    );
+                    // Clean up
+                    self.connections.remove(&link_id);
+                    self.remove_link(&link_id);
+                    if let Some(idx) = self.connections.get(&link_id).and_then(|c| c.our_index()) {
+                        let _ = self.index_allocator.free(idx);
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
 
         // Process peer's FMP negotiation payload from msg3
         if let Some(neg_bytes) = &received_negotiation {
@@ -805,10 +805,8 @@ impl Node {
                 _ => {
                     // Same epoch (or no epoch stored).
                     // Check for rekey: session must be at least 30s old.
-                    let session_age_secs = existing_peer
-                        .session_established_at()
-                        .elapsed()
-                        .as_secs();
+                    let session_age_secs =
+                        existing_peer.session_established_at().elapsed().as_secs();
                     if self.config.node.rekey.enabled
                         && existing_peer.has_session()
                         && existing_peer.is_healthy()
@@ -929,7 +927,9 @@ impl Node {
         }
 
         // Promote the connection to active peer.
-        let wire_msg2 = self.connections.get(&link_id)
+        let wire_msg2 = self
+            .connections
+            .get(&link_id)
             .and_then(|c| c.handshake_msg2().map(|m| m.to_vec()));
 
         debug!(
@@ -944,7 +944,9 @@ impl Node {
                 match result {
                     PromotionResult::Promoted(node_addr) => {
                         // Store msg2 on peer for resend on duplicate msg1
-                        if let (Some(peer), Some(msg2)) = (self.peers.get_mut(&node_addr), wire_msg2) {
+                        if let (Some(peer), Some(msg2)) =
+                            (self.peers.get_mut(&node_addr), wire_msg2)
+                        {
                             peer.set_handshake_msg2(msg2);
                         }
                         debug!(
@@ -961,9 +963,14 @@ impl Node {
                         self.bloom_state.mark_update_needed(node_addr);
                         self.reset_discovery_backoff();
                     }
-                    PromotionResult::CrossConnectionWon { loser_link_id, node_addr } => {
+                    PromotionResult::CrossConnectionWon {
+                        loser_link_id,
+                        node_addr,
+                    } => {
                         // Store msg2 on peer for resend on duplicate msg1
-                        if let (Some(peer), Some(msg2)) = (self.peers.get_mut(&node_addr), wire_msg2) {
+                        if let (Some(peer), Some(msg2)) =
+                            (self.peers.get_mut(&node_addr), wire_msg2)
+                        {
                             peer.set_handshake_msg2(msg2);
                         }
                         // Close the losing TCP connection (no-op for connectionless)
@@ -1055,16 +1062,15 @@ impl Node {
         if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
             match peer.complete_rekey_msg3(noise_msg3) {
                 Ok(session) => {
-                    let our_index = peer.rekey_responder_our_index()
+                    let our_index = peer
+                        .rekey_responder_our_index()
                         .unwrap_or(header.receiver_idx);
                     peer.set_pending_session(session, our_index, header.sender_idx);
                     peer.record_peer_rekey();
 
                     if let Some(transport_id) = peer.transport_id() {
-                        self.peers_by_index.insert(
-                            (transport_id, our_index.as_u32()),
-                            peer_node_addr,
-                        );
+                        self.peers_by_index
+                            .insert((transport_id, our_index.as_u32()), peer_node_addr);
                     }
 
                     debug!(
@@ -1131,33 +1137,35 @@ impl Node {
             .take_session()
             .ok_or(NodeError::NoSession(link_id))?;
 
-        let our_index = connection.our_index().ok_or_else(|| {
-            NodeError::PromotionFailed {
+        let our_index = connection
+            .our_index()
+            .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing our_index".into(),
-            }
-        })?;
-        let their_index = connection.their_index().ok_or_else(|| {
-            NodeError::PromotionFailed {
+            })?;
+        let their_index = connection
+            .their_index()
+            .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing their_index".into(),
-            }
-        })?;
-        let transport_id = connection.transport_id().ok_or_else(|| {
-            NodeError::PromotionFailed {
+            })?;
+        let transport_id = connection
+            .transport_id()
+            .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing transport_id".into(),
-            }
-        })?;
-        let current_addr = connection.source_addr().ok_or_else(|| {
-            NodeError::PromotionFailed {
+            })?;
+        let current_addr = connection
+            .source_addr()
+            .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing source_addr".into(),
-            }
-        })?.clone();
+            })?
+            .clone();
         let link_stats = connection.link_stats().clone();
         let remote_epoch = connection.remote_epoch();
-        let peer_profile = connection.peer_profile()
+        let peer_profile = connection
+            .peer_profile()
             .unwrap_or(crate::protocol::NodeProfile::Full);
 
         let peer_node_addr = *verified_identity.node_addr();
@@ -1168,11 +1176,8 @@ impl Node {
             let existing_link_id = existing_peer.link_id();
 
             // Determine which connection wins
-            let this_wins = cross_connection_winner(
-                self.identity.node_addr(),
-                &peer_node_addr,
-                is_outbound,
-            );
+            let this_wins =
+                cross_connection_winner(self.identity.node_addr(), &peer_node_addr, is_outbound);
 
             if this_wins {
                 // This connection wins, replace the existing peer
@@ -1183,8 +1188,7 @@ impl Node {
                 if let (Some(old_tid), Some(old_idx)) =
                     (old_peer.transport_id(), old_peer.our_index())
                 {
-                    self.peers_by_index
-                        .remove(&(old_tid, old_idx.as_u32()));
+                    self.peers_by_index.remove(&(old_tid, old_idx.as_u32()));
                     let _ = self.index_allocator.free(old_idx);
                 }
 
@@ -1204,7 +1208,9 @@ impl Node {
                     self.node_profile,
                     peer_profile,
                 );
-                new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
+                new_peer.set_tree_announce_min_interval_ms(
+                    self.config.node.tree.announce_min_interval_ms,
+                );
 
                 self.peers.insert(peer_node_addr, new_peer);
                 self.peers_by_index
@@ -1276,13 +1282,17 @@ impl Node {
             // Normal promotion
             if self.max_peers > 0 && self.peers.len() >= self.max_peers {
                 let _ = self.index_allocator.free(our_index);
-                return Err(NodeError::MaxPeersExceeded { max: self.max_peers });
+                return Err(NodeError::MaxPeersExceeded {
+                    max: self.max_peers,
+                });
             }
 
             // Preserve tree announce rate-limit state from old peer (if reconnecting).
             // Without this, reconnection resets the rate limit window to zero,
             // allowing an immediate announce that can feed an announce loop.
-            let old_announce_ts = self.peers.get(&peer_node_addr)
+            let old_announce_ts = self
+                .peers
+                .get(&peer_node_addr)
                 .map(|p| p.last_tree_announce_sent_ms());
 
             let mut new_peer = ActivePeer::with_session(
@@ -1301,7 +1311,8 @@ impl Node {
                 self.node_profile,
                 peer_profile,
             );
-            new_peer.set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
+            new_peer
+                .set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
             if let Some(ts) = old_announce_ts {
                 new_peer.set_last_tree_announce_sent_ms(ts);
             }
@@ -1329,7 +1340,6 @@ impl Node {
             Ok(PromotionResult::Promoted(peer_node_addr))
         }
     }
-
 }
 
 /// Process an FMP negotiation payload received from a peer.

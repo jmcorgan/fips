@@ -59,10 +59,8 @@ pub fn rle_decode(data: &[u8], expected_words: usize) -> Result<Vec<u64>, RleErr
     let mut pos = 0;
 
     while pos + 10 <= data.len() {
-        let count =
-            u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
-        let value =
-            u64::from_le_bytes(data[pos + 2..pos + 10].try_into().unwrap());
+        let count = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        let value = u64::from_le_bytes(data[pos + 2..pos + 10].try_into().unwrap());
         pos += 10;
 
         if words.len() + count > expected_words {
@@ -180,10 +178,7 @@ mod tests {
 
         // Expect wrong number of words
         let result = rle_decode(&encoded, 20);
-        assert!(matches!(
-            result,
-            Err(RleError::DecodedSizeMismatch { .. })
-        ));
+        assert!(matches!(result, Err(RleError::DecodedSizeMismatch { .. })));
     }
 
     #[test]

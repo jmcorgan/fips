@@ -364,55 +364,70 @@ pub fn show_bloom(node: &Node) -> Value {
 /// `show_mmp` — MMP metrics summary.
 pub fn show_mmp(node: &Node) -> Value {
     // Link-layer MMP per peer
-    let peers: Vec<Value> = node.peers().filter_map(|peer| {
-        let mmp = peer.mmp()?;
-        let addr = *peer.node_addr();
-        let metrics = &mmp.metrics;
+    let peers: Vec<Value> = node
+        .peers()
+        .filter_map(|peer| {
+            let mmp = peer.mmp()?;
+            let addr = *peer.node_addr();
+            let metrics = &mmp.metrics;
 
-        let mut link_layer = json!({
-            "loss_rate": metrics.loss_rate(),
-            "etx": metrics.etx,
-            "goodput_bps": metrics.goodput_bps,
-        });
+            let mut link_layer = json!({
+                "loss_rate": metrics.loss_rate(),
+                "etx": metrics.etx,
+                "goodput_bps": metrics.goodput_bps,
+            });
 
-        if let Some(smoothed_loss) = metrics.smoothed_loss() {
-            link_layer["smoothed_loss"] = json!(smoothed_loss);
-        }
-        if let Some(smoothed_etx) = metrics.smoothed_etx() {
-            link_layer["smoothed_etx"] = json!(smoothed_etx);
-        }
-        if let Some(srtt) = metrics.srtt_ms() {
-            link_layer["srtt_ms"] = json!(srtt);
-            if let Some(setx) = metrics.smoothed_etx() {
-                link_layer["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+            if let Some(smoothed_loss) = metrics.smoothed_loss() {
+                link_layer["smoothed_loss"] = json!(smoothed_loss);
             }
-        }
+            if let Some(smoothed_etx) = metrics.smoothed_etx() {
+                link_layer["smoothed_etx"] = json!(smoothed_etx);
+            }
+            if let Some(srtt) = metrics.srtt_ms() {
+                link_layer["srtt_ms"] = json!(srtt);
+                if let Some(setx) = metrics.smoothed_etx() {
+                    link_layer["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+                }
+            }
 
-        // Trend indicators
-        if metrics.rtt_trend.initialized() {
-            link_layer["rtt_trend"] = json!(trend_label(metrics.rtt_trend.short(), metrics.rtt_trend.long()));
-        }
-        if metrics.loss_trend.initialized() {
-            link_layer["loss_trend"] = json!(trend_label(metrics.loss_trend.short(), metrics.loss_trend.long()));
-        }
-        if metrics.goodput_trend.initialized() {
-            link_layer["goodput_trend"] = json!(trend_label(metrics.goodput_trend.short(), metrics.goodput_trend.long()));
-        }
-        if metrics.jitter_trend.initialized() {
-            link_layer["jitter_trend"] = json!(trend_label(metrics.jitter_trend.short(), metrics.jitter_trend.long()));
-        }
+            // Trend indicators
+            if metrics.rtt_trend.initialized() {
+                link_layer["rtt_trend"] = json!(trend_label(
+                    metrics.rtt_trend.short(),
+                    metrics.rtt_trend.long()
+                ));
+            }
+            if metrics.loss_trend.initialized() {
+                link_layer["loss_trend"] = json!(trend_label(
+                    metrics.loss_trend.short(),
+                    metrics.loss_trend.long()
+                ));
+            }
+            if metrics.goodput_trend.initialized() {
+                link_layer["goodput_trend"] = json!(trend_label(
+                    metrics.goodput_trend.short(),
+                    metrics.goodput_trend.long()
+                ));
+            }
+            if metrics.jitter_trend.initialized() {
+                link_layer["jitter_trend"] = json!(trend_label(
+                    metrics.jitter_trend.short(),
+                    metrics.jitter_trend.long()
+                ));
+            }
 
-        link_layer["delivery_ratio_forward"] = json!(metrics.delivery_ratio_forward);
-        link_layer["delivery_ratio_reverse"] = json!(metrics.delivery_ratio_reverse);
-        link_layer["ecn_ce_count"] = json!(metrics.last_ecn_ce_count());
+            link_layer["delivery_ratio_forward"] = json!(metrics.delivery_ratio_forward);
+            link_layer["delivery_ratio_reverse"] = json!(metrics.delivery_ratio_reverse);
+            link_layer["ecn_ce_count"] = json!(metrics.last_ecn_ce_count());
 
-        Some(json!({
-            "peer": hex::encode(addr.as_bytes()),
-            "display_name": node.peer_display_name(&addr),
-            "mode": format!("{}", mmp.mode()),
-            "link_layer": link_layer,
-        }))
-    }).collect();
+            Some(json!({
+                "peer": hex::encode(addr.as_bytes()),
+                "display_name": node.peer_display_name(&addr),
+                "mode": format!("{}", mmp.mode()),
+                "link_layer": link_layer,
+            }))
+        })
+        .collect();
 
     // Session-layer MMP
     let sessions: Vec<Value> = node

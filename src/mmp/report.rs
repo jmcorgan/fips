@@ -177,9 +177,7 @@ impl ReceiverReport {
             });
         }
 
-        if format_version > 0
-            && total_length < RECEIVER_REPORT_PAYLOAD as usize
-        {
+        if format_version > 0 && total_length < RECEIVER_REPORT_PAYLOAD as usize {
             return Err(ProtocolError::MessageTooShort {
                 expected: RECEIVER_REPORT_PAYLOAD as usize,
                 got: total_length,

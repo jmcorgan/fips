@@ -511,7 +511,9 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let (msg3, _neg) = completing_conn
         .complete_handshake(&msg2, None, completing_time_ms)
         .unwrap();
-    resp_conn.complete_handshake_msg3(&msg3, completing_time_ms).unwrap();
+    resp_conn
+        .complete_handshake_msg3(&msg3, completing_time_ms)
+        .unwrap();
 
     let completing_index = node.index_allocator.allocate().unwrap();
     completing_conn.set_our_index(completing_index);

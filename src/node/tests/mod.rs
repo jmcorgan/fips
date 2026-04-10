@@ -68,10 +68,14 @@ pub(super) fn make_completed_connection(
         .unwrap();
 
     // Complete initiator handshake (XX: generates msg3)
-    let (msg3, _neg) = conn.complete_handshake(&msg2, None, current_time_ms).unwrap();
+    let (msg3, _neg) = conn
+        .complete_handshake(&msg2, None, current_time_ms)
+        .unwrap();
 
     // Complete responder handshake (XX: processes msg3)
-    resp_conn.complete_handshake_msg3(&msg3, current_time_ms).unwrap();
+    resp_conn
+        .complete_handshake_msg3(&msg3, current_time_ms)
+        .unwrap();
 
     // Set indices and transport info
     let our_index = node.index_allocator.allocate().unwrap();

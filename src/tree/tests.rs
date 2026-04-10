@@ -423,7 +423,10 @@ fn test_evaluate_parent_stays_root_when_smallest() {
         make_coords(&[1, 0]),
     );
 
-    assert_eq!(state.evaluate_parent(&HashMap::new(), &HashSet::new()), None);
+    assert_eq!(
+        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        None
+    );
 }
 
 #[test]
@@ -445,7 +448,10 @@ fn test_evaluate_parent_no_switch_when_already_best() {
     state.recompute_coords();
 
     // Now evaluate — should return None since peer1 is already our parent
-    assert_eq!(state.evaluate_parent(&HashMap::new(), &HashSet::new()), None);
+    assert_eq!(
+        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        None
+    );
 }
 
 #[test]
@@ -453,7 +459,10 @@ fn test_evaluate_parent_no_peers() {
     let my_node = make_node_addr(5);
     let state = TreeState::new(my_node);
 
-    assert_eq!(state.evaluate_parent(&HashMap::new(), &HashSet::new()), None);
+    assert_eq!(
+        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        None
+    );
 }
 
 #[test]
@@ -507,7 +516,10 @@ fn test_evaluate_parent_rejects_loop_candidate() {
     );
 
     // Should return None — the only candidate creates a loop
-    assert_eq!(state.evaluate_parent(&HashMap::new(), &HashSet::new()), None);
+    assert_eq!(
+        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        None
+    );
 }
 
 #[test]
@@ -628,7 +640,10 @@ fn test_find_next_hop_chain() {
     add_peer(&mut state, 2, &[2, 1, 5, 0]);
 
     let dest = make_coords(&[2, 1, 5, 0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), Some(make_node_addr(2)));
+    assert_eq!(
+        state.find_next_hop(&dest, &HashSet::new()),
+        Some(make_node_addr(2))
+    );
 }
 
 #[test]
@@ -640,7 +655,10 @@ fn test_find_next_hop_chain_indirect() {
     add_peer(&mut state, 1, &[1, 5, 0]);
 
     let dest = make_coords(&[2, 1, 5, 0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), Some(make_node_addr(1)));
+    assert_eq!(
+        state.find_next_hop(&dest, &HashSet::new()),
+        Some(make_node_addr(1))
+    );
 }
 
 #[test]
@@ -651,7 +669,10 @@ fn test_find_next_hop_toward_root() {
     add_peer(&mut state, 1, &[1, 0]);
 
     let dest = make_coords(&[0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), Some(make_node_addr(1)));
+    assert_eq!(
+        state.find_next_hop(&dest, &HashSet::new()),
+        Some(make_node_addr(1))
+    );
 }
 
 #[test]
@@ -666,7 +687,10 @@ fn test_find_next_hop_sibling() {
     add_peer(&mut state, 3, &[3, 0]);
 
     let dest = make_coords(&[3, 0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), Some(make_node_addr(3)));
+    assert_eq!(
+        state.find_next_hop(&dest, &HashSet::new()),
+        Some(make_node_addr(3))
+    );
 }
 
 #[test]
@@ -731,7 +755,10 @@ fn test_find_next_hop_best_of_multiple() {
     add_peer(&mut state, 3, &[3, 1, 0]);
 
     let dest = make_coords(&[7, 3, 1, 0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), Some(make_node_addr(3)));
+    assert_eq!(
+        state.find_next_hop(&dest, &HashSet::new()),
+        Some(make_node_addr(3))
+    );
 }
 
 // === Cost-based parent selection tests ===

@@ -284,8 +284,16 @@ async fn test_disconnect_clears_session() {
         nodes[1].node.sessions.insert(node0_addr, entry);
     }
 
-    assert_eq!(nodes[1].node.session_count(), 1, "Session should exist before disconnect");
-    assert_eq!(nodes[1].node.peer_count(), 1, "Peer should exist before disconnect");
+    assert_eq!(
+        nodes[1].node.session_count(),
+        1,
+        "Session should exist before disconnect"
+    );
+    assert_eq!(
+        nodes[1].node.peer_count(),
+        1,
+        "Peer should exist before disconnect"
+    );
 
     // Node 0 sends Disconnect to node 1.
     let disconnect = crate::protocol::Disconnect::new(DisconnectReason::Shutdown);
@@ -300,7 +308,8 @@ async fn test_disconnect_clears_session() {
 
     // Peer must be gone.
     assert_eq!(
-        nodes[1].node.peer_count(), 0,
+        nodes[1].node.peer_count(),
+        0,
         "Peer should be removed after disconnect"
     );
 
@@ -308,7 +317,8 @@ async fn test_disconnect_clears_session() {
     // Before the fix, session_count() would still be 1 here because
     // remove_active_peer didn't remove self.sessions[node0_addr].
     assert_eq!(
-        nodes[1].node.session_count(), 0,
+        nodes[1].node.session_count(),
+        0,
         "Session must be cleaned up when peer is removed (regression: issue #5)"
     );
 

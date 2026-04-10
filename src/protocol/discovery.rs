@@ -31,13 +31,7 @@ pub struct LookupRequest {
 
 impl LookupRequest {
     /// Create a new lookup request.
-    pub fn new(
-        request_id: u64,
-        target: NodeAddr,
-        origin: NodeAddr,
-        ttl: u8,
-        min_mtu: u16,
-    ) -> Self {
+    pub fn new(request_id: u64, target: NodeAddr, origin: NodeAddr, ttl: u8, min_mtu: u16) -> Self {
         Self {
             request_id,
             target,
@@ -49,12 +43,7 @@ impl LookupRequest {
     }
 
     /// Generate a new request with a random ID.
-    pub fn generate(
-        target: NodeAddr,
-        origin: NodeAddr,
-        ttl: u8,
-        min_mtu: u16,
-    ) -> Self {
+    pub fn generate(target: NodeAddr, origin: NodeAddr, ttl: u8, min_mtu: u16) -> Self {
         use rand::RngExt;
         let request_id = rand::rng().random();
         Self::new(request_id, target, origin, ttl, min_mtu)
@@ -152,11 +141,8 @@ impl LookupRequest {
                     "truncated TLV header in LookupRequest".to_string(),
                 ));
             }
-            let field_num =
-                u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
-            let length =
-                u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap())
-                    as usize;
+            let field_num = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
+            let length = u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + length > payload.len() {
                 return Err(ProtocolError::Malformed(format!(
@@ -322,11 +308,8 @@ impl LookupResponse {
                     "truncated TLV header in LookupResponse".to_string(),
                 ));
             }
-            let field_num =
-                u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
-            let length =
-                u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap())
-                    as usize;
+            let field_num = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
+            let length = u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + length > payload.len() {
                 return Err(ProtocolError::Malformed(format!(
@@ -498,8 +481,8 @@ mod tests {
         let target = make_node_addr(10);
         let origin = make_node_addr(20);
 
-        let request = LookupRequest::new(777, target, origin, 5, 0)
-            .with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
+        let request =
+            LookupRequest::new(777, target, origin, 5, 0).with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
 
         let encoded = request.encode();
         let mut decoded = LookupRequest::decode(&encoded[1..]).unwrap();
@@ -601,8 +584,8 @@ mod tests {
         let coords = make_coords(&[42, 1, 0]);
         let sig = make_test_sig();
 
-        let response = LookupResponse::new(999, target, coords, sig)
-            .with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
+        let response =
+            LookupResponse::new(999, target, coords, sig).with_tlv(9999, vec![0xFF, 0xFE, 0xFD]);
 
         let encoded = response.encode();
         let mut decoded = LookupResponse::decode(&encoded[1..]).unwrap();

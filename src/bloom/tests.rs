@@ -373,13 +373,20 @@ fn test_bloom_filter_fold() {
 
     // All inserted elements must still be found (no false negatives)
     for i in 0..50 {
-        assert!(folded.contains(&make_node_addr(i)), "Node {} not found after fold", i);
+        assert!(
+            folded.contains(&make_node_addr(i)),
+            "Node {} not found after fold",
+            i
+        );
     }
 
     // Fill ratio should roughly double
     let original_fill = filter.fill_ratio();
     let folded_fill = folded.fill_ratio();
-    assert!(folded_fill > original_fill * 1.5, "Fill ratio didn't increase enough");
+    assert!(
+        folded_fill > original_fill * 1.5,
+        "Fill ratio didn't increase enough"
+    );
 }
 
 #[test]
@@ -416,7 +423,11 @@ fn test_bloom_filter_duplicate() {
 
     // All elements still found at the larger size
     for i in 0..50 {
-        assert!(duped.contains(&make_node_addr(i)), "Node {} not found after duplicate", i);
+        assert!(
+            duped.contains(&make_node_addr(i)),
+            "Node {} not found after duplicate",
+            i
+        );
     }
 }
 
@@ -438,7 +449,10 @@ fn test_bloom_filter_duplicate_to() {
 #[test]
 fn test_bloom_filter_duplicate_at_maximum() {
     let filter = BloomFilter::with_params(32768 * 8, 5).unwrap();
-    assert!(matches!(filter.duplicate(), Err(BloomError::CannotDuplicate(_))));
+    assert!(matches!(
+        filter.duplicate(),
+        Err(BloomError::CannotDuplicate(_))
+    ));
 }
 
 #[test]

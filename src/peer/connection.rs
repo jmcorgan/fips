@@ -4,11 +4,11 @@
 //! PeerConnection tracks the Noise XX handshake state and transitions to
 //! ActivePeer upon successful authentication.
 
-use crate::protocol::NodeProfile;
-use crate::utils::index::SessionIndex;
-use crate::noise::{self, NoiseError, NoiseSession};
-use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::PeerIdentity;
+use crate::noise::{self, NoiseError, NoiseSession};
+use crate::protocol::NodeProfile;
+use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
+use crate::utils::index::SessionIndex;
 use secp256k1::Keypair;
 use std::fmt;
 
@@ -708,7 +708,6 @@ impl PeerConnection {
     pub fn is_timed_out(&self, current_time_ms: u64, timeout_ms: u64) -> bool {
         self.idle_time(current_time_ms) > timeout_ms
     }
-
 }
 
 impl fmt::Debug for PeerConnection {
@@ -801,24 +800,30 @@ mod tests {
         let responder_peer_id = PeerIdentity::from_pubkey_full(responder_identity.pubkey_full());
 
         // Create connections
-        let mut initiator_conn =
-            PeerConnection::outbound(LinkId::new(1), responder_peer_id, 1000);
+        let mut initiator_conn = PeerConnection::outbound(LinkId::new(1), responder_peer_id, 1000);
         let mut responder_conn = PeerConnection::inbound(LinkId::new(2), 1000);
 
         // Initiator starts XX handshake
-        let msg1 = initiator_conn.start_handshake(initiator_keypair, initiator_epoch, 1100).unwrap();
+        let msg1 = initiator_conn
+            .start_handshake(initiator_keypair, initiator_epoch, 1100)
+            .unwrap();
         assert_eq!(initiator_conn.handshake_state(), HandshakeState::SentMsg1);
 
         // Responder processes msg1 and sends msg2 (XX: does NOT complete yet)
         let msg2 = responder_conn
             .receive_handshake_init(responder_keypair, responder_epoch, &msg1, None, 1200)
             .unwrap();
-        assert_eq!(responder_conn.handshake_state(), HandshakeState::ReceivedMsg1);
+        assert_eq!(
+            responder_conn.handshake_state(),
+            HandshakeState::ReceivedMsg1
+        );
         // Responder does NOT know initiator's identity yet (XX property)
         assert!(responder_conn.expected_identity().is_none());
 
         // Initiator processes msg2 and generates msg3
-        let (msg3, _neg) = initiator_conn.complete_handshake(&msg2, None, 1300).unwrap();
+        let (msg3, _neg) = initiator_conn
+            .complete_handshake(&msg2, None, 1300)
+            .unwrap();
         assert_eq!(initiator_conn.handshake_state(), HandshakeState::Complete);
 
         // Initiator learned responder's identity from msg2
@@ -879,12 +884,18 @@ mod tests {
 
         // Outbound can't receive_handshake_init
         let mut outbound = PeerConnection::outbound(LinkId::new(1), identity, 1000);
-        assert!(outbound
-            .receive_handshake_init(keypair, make_epoch(), &[0u8; 33], None, 1100)
-            .is_err());
+        assert!(
+            outbound
+                .receive_handshake_init(keypair, make_epoch(), &[0u8; 33], None, 1100)
+                .is_err()
+        );
 
         // Inbound can't start_handshake
         let mut inbound = PeerConnection::inbound(LinkId::new(2), 1000);
-        assert!(inbound.start_handshake(keypair, make_epoch(), 1100).is_err());
+        assert!(
+            inbound
+                .start_handshake(keypair, make_epoch(), 1100)
+                .is_err()
+        );
     }
 }

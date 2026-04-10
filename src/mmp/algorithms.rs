@@ -402,5 +402,4 @@ mod tests {
         assert_eq!(compute_etx(0.0, 1.0), 100.0);
         assert_eq!(compute_etx(1.0, 0.0), 100.0);
     }
-
 }

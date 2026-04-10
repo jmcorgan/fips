@@ -56,7 +56,6 @@ pub type DefaultBleTransport = BleTransport<io::BluerIo>;
 #[cfg(any(not(feature = "ble"), test))]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
 
-
 // ============================================================================
 // BLE Transport
 // ============================================================================
@@ -892,16 +891,13 @@ mod tests {
 
     fn make_transport(
         io: MockBleIo,
-    ) -> (BleTransport<MockBleIo>, tokio::sync::mpsc::Receiver<ReceivedPacket>) {
+    ) -> (
+        BleTransport<MockBleIo>,
+        tokio::sync::mpsc::Receiver<ReceivedPacket>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let config = BleConfig::default();
-        let transport = BleTransport::new(
-            TransportId::new(1),
-            None,
-            config,
-            io,
-            tx,
-        );
+        let transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
         (transport, rx)
     }
 
@@ -945,8 +941,7 @@ mod tests {
         // Probe connect must succeed for peers to reach the discovery buffer
         let local = test_addr(1);
         io.set_connect_handler(move |addr, _psm| {
-            let (stream, _peer) =
-                io::MockBleStream::pair(local.clone(), addr.clone(), 2048);
+            let (stream, _peer) = io::MockBleStream::pair(local.clone(), addr.clone(), 2048);
             Ok(stream)
         });
         let (mut transport, _rx) = make_transport(io);
@@ -973,8 +968,7 @@ mod tests {
         let io = MockBleIo::new("hci0", test_addr(1));
         let local = test_addr(1);
         io.set_connect_handler(move |addr, _psm| {
-            let (stream, _peer) =
-                io::MockBleStream::pair(local.clone(), addr.clone(), 2048);
+            let (stream, _peer) = io::MockBleStream::pair(local.clone(), addr.clone(), 2048);
             Ok(stream)
         });
         let (mut transport, _rx) = make_transport(io);
@@ -1005,7 +999,9 @@ mod tests {
         let io = MockBleIo::new("hci0", test_addr(1));
         let (transport, _rx) = make_transport(io);
         let addr = test_addr(2).to_transport_addr();
-        assert_eq!(transport.connection_state_sync(&addr), ConnectionState::None);
+        assert_eq!(
+            transport.connection_state_sync(&addr),
+            ConnectionState::None
+        );
     }
-
 }

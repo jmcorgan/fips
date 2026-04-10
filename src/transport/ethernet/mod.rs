@@ -1,8 +1,9 @@
 //! Ethernet Transport Implementation
 //!
-//! Provides raw Ethernet transport for FIPS peer communication using
-//! AF_PACKET sockets with SOCK_DGRAM. Works on wired Ethernet and WiFi
-//! interfaces (kernel mac80211 abstracts 802.11 transparently).
+//! Provides raw Ethernet transport for FIPS peer communication. On Linux,
+//! uses AF_PACKET/SOCK_DGRAM sockets; on macOS, uses BPF devices (`/dev/bpf*`).
+//! Works on wired Ethernet and WiFi interfaces (kernel mac80211 abstracts
+//! 802.11 transparently on Linux).
 
 pub mod discovery;
 pub mod socket;
@@ -13,10 +14,8 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
-use discovery::{
-    build_beacon, parse_beacon, DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA,
-};
-use socket::{AsyncPacketSocket, PacketSocket, ETHERNET_BROADCAST};
+use discovery::{DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA, build_beacon, parse_beacon};
+use socket::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
 use stats::EthernetStats;
 
 use std::sync::Arc;
@@ -220,16 +219,30 @@ impl EthernetTransport {
             return Err(TransportError::NotStarted);
         }
 
-        // Abort beacon task
-        if let Some(task) = self.beacon_task.take() {
-            task.abort();
-            let _ = task.await;
+        // Signal the socket to shut down. On macOS this writes to the
+        // shutdown pipe, waking the reader thread's select() immediately.
+        // On Linux this is a no-op (AsyncFd cancellation handles it).
+        if let Some(ref socket) = self.socket {
+            socket.shutdown();
         }
 
-        // Abort receive task
+        // Abort tasks. On Linux, safe to await since all I/O is
+        // AsyncFd-based and cancellation-safe. On macOS, do NOT await —
+        // on a current_thread runtime the aborted task can't be polled
+        // while we're blocked on the JoinHandle, causing a deadlock.
+        if let Some(task) = self.beacon_task.take() {
+            task.abort();
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = task.await;
+            }
+        }
         if let Some(task) = self.recv_task.take() {
             task.abort();
-            let _ = task.await;
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = task.await;
+            }
         }
 
         // Drop socket
@@ -379,8 +392,7 @@ async fn ethernet_receive_loop(
                             continue;
                         }
                         // buf[1] is flags (reserved, ignored for now)
-                        let payload_len =
-                            u16::from_le_bytes([buf[2], buf[3]]) as usize;
+                        let payload_len = u16::from_le_bytes([buf[2], buf[3]]) as usize;
                         if payload_len > len - 4 {
                             trace!(
                                 "Data frame length field ({payload_len}) exceeds \

@@ -3,8 +3,8 @@
 use std::fmt;
 
 use super::{
-    BloomError, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT, MAX_SIZE_CLASS,
-    MIN_SIZE_CLASS, SIZE_CLASS_BYTES,
+    BloomError, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT, MAX_SIZE_CLASS, MIN_SIZE_CLASS,
+    SIZE_CLASS_BYTES,
 };
 use crate::NodeAddr;
 
@@ -175,7 +175,9 @@ impl BloomFilter {
         if target_bits >= self.num_bits {
             return Err(BloomError::InvalidTargetSize(target_bits));
         }
-        if !target_bits.is_power_of_two() || target_bits < SIZE_CLASS_BYTES[MIN_SIZE_CLASS as usize] * 8 {
+        if !target_bits.is_power_of_two()
+            || target_bits < SIZE_CLASS_BYTES[MIN_SIZE_CLASS as usize] * 8
+        {
             return Err(BloomError::InvalidTargetSize(target_bits));
         }
 
@@ -214,7 +216,9 @@ impl BloomFilter {
         if target_bits <= self.num_bits {
             return Err(BloomError::InvalidTargetSize(target_bits));
         }
-        if !target_bits.is_power_of_two() || target_bits > SIZE_CLASS_BYTES[MAX_SIZE_CLASS as usize] * 8 {
+        if !target_bits.is_power_of_two()
+            || target_bits > SIZE_CLASS_BYTES[MAX_SIZE_CLASS as usize] * 8
+        {
             return Err(BloomError::InvalidTargetSize(target_bits));
         }
 

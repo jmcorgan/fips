@@ -89,7 +89,6 @@ pub const FSP_FLAG_K: u8 = 0x02;
 /// Unencrypted — payload is plaintext (error signals).
 pub const FSP_FLAG_U: u8 = 0x04;
 
-
 // ============================================================================
 // Common Prefix
 // ============================================================================

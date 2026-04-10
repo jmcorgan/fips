@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{size_class_to_bits, BloomFilter, MAX_SIZE_CLASS, MIN_SIZE_CLASS, V1_SIZE_CLASS};
+use super::{BloomFilter, MAX_SIZE_CLASS, MIN_SIZE_CLASS, V1_SIZE_CLASS, size_class_to_bits};
 use crate::NodeAddr;
 
 /// State for managing Bloom filter announcements.

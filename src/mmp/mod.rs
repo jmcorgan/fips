@@ -22,9 +22,7 @@ pub mod report;
 pub mod sender;
 
 // Re-exports
-pub use algorithms::{
-    DualEwma, JitterEstimator, OwdTrendDetector, SrttEstimator, compute_etx,
-};
+pub use algorithms::{DualEwma, JitterEstimator, OwdTrendDetector, SrttEstimator, compute_etx};
 pub use metrics::MmpMetrics;
 pub use receiver::ReceiverState;
 pub use report::{ReceiverReport, SenderReport};

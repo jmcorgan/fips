@@ -403,7 +403,10 @@ mod tests {
 
         let mut cursor = Cursor::new(frame);
         let err = read_fmp_packet(&mut cursor, 1400).await.unwrap_err();
-        assert!(matches!(err, StreamError::HandshakeSizeMismatch { phase: 0x3, .. }));
+        assert!(matches!(
+            err,
+            StreamError::HandshakeSizeMismatch { phase: 0x3, .. }
+        ));
     }
 
     #[tokio::test]

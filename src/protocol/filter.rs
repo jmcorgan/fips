@@ -4,8 +4,8 @@
 
 use super::error::ProtocolError;
 use super::link::LinkMessageType;
-use crate::bloom::codec::{rle_decode, rle_encode, CompressionStats};
 use crate::bloom::BloomFilter;
+use crate::bloom::codec::{CompressionStats, rle_decode, rle_encode};
 
 /// Flag bit: this is a delta (XOR diff) update, not a full filter.
 const FLAG_DELTA: u8 = 0x01;
@@ -55,12 +55,7 @@ impl FilterAnnounce {
     }
 
     /// Create a delta (XOR diff) FilterAnnounce.
-    pub fn delta(
-        diff: BloomFilter,
-        sequence: u64,
-        base_seq: u64,
-        size_class: u8,
-    ) -> Self {
+    pub fn delta(diff: BloomFilter, sequence: u64, base_seq: u64, size_class: u8) -> Self {
         Self {
             filter: diff,
             sequence,
@@ -160,9 +155,8 @@ impl FilterAnnounce {
         let expected_words = expected_bytes / 8;
         let compressed_data = &payload[pos..];
 
-        let words = rle_decode(compressed_data, expected_words).map_err(|e| {
-            ProtocolError::Malformed(format!("RLE decode error: {e}"))
-        })?;
+        let words = rle_decode(compressed_data, expected_words)
+            .map_err(|e| ProtocolError::Malformed(format!("RLE decode error: {e}")))?;
 
         // Convert words to bytes for BloomFilter construction
         let mut bytes = Vec::with_capacity(expected_bytes);
@@ -171,9 +165,7 @@ impl FilterAnnounce {
         }
 
         let filter = BloomFilter::from_bytes(bytes, crate::bloom::DEFAULT_HASH_COUNT)
-            .map_err(|e| {
-                ProtocolError::Malformed(format!("invalid bloom filter: {e}"))
-            })?;
+            .map_err(|e| ProtocolError::Malformed(format!("invalid bloom filter: {e}")))?;
 
         Ok(Self {
             filter,

@@ -1,11 +1,11 @@
 use super::{
-    CipherState, HandshakeProgress, HandshakeRole, NoiseError, NoisePattern, NoiseSession,
-    EPOCH_ENCRYPTED_SIZE, EPOCH_SIZE, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE,
-    HANDSHAKE_MSG3_SIZE, PROTOCOL_NAME_XX, PUBKEY_SIZE,
+    CipherState, EPOCH_ENCRYPTED_SIZE, EPOCH_SIZE, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE,
+    HANDSHAKE_MSG3_SIZE, HandshakeProgress, HandshakeRole, NoiseError, NoisePattern, NoiseSession,
+    PROTOCOL_NAME_XX, PUBKEY_SIZE,
 };
 use hkdf::Hkdf;
 use rand::Rng;
-use secp256k1::{ecdh::shared_secret_point, Keypair, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, ecdh::shared_secret_point};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -333,7 +333,9 @@ impl HandshakeState {
         }
 
         let re = self.remote_ephemeral.expect("should have remote ephemeral");
-        let epoch = self.local_epoch.expect("local epoch must be set before write_message_2");
+        let epoch = self
+            .local_epoch
+            .expect("local epoch must be set before write_message_2");
 
         // Generate ephemeral keypair
         self.generate_ephemeral();
@@ -452,8 +454,12 @@ impl HandshakeState {
             });
         }
 
-        let re = self.remote_ephemeral.expect("should have remote ephemeral after msg2");
-        let epoch = self.local_epoch.expect("local epoch must be set before write_message_3");
+        let re = self
+            .remote_ephemeral
+            .expect("should have remote ephemeral after msg2");
+        let epoch = self
+            .local_epoch
+            .expect("local epoch must be set before write_message_3");
 
         let mut message = Vec::with_capacity(HANDSHAKE_MSG3_SIZE);
 
@@ -510,7 +516,10 @@ impl HandshakeState {
 
         // -> se: DH(e, rs), mix into key
         // (responder uses their ephemeral with initiator's now-known static)
-        let ephemeral = self.ephemeral_keypair.as_ref().expect("should have ephemeral after msg2");
+        let ephemeral = self
+            .ephemeral_keypair
+            .as_ref()
+            .expect("should have ephemeral after msg2");
         let se = self.ecdh(&ephemeral.secret_key(), &rs);
         self.symmetric.mix_key(&se);
 

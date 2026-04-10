@@ -5,11 +5,11 @@
 
 use crate::bloom::BloomFilter;
 use crate::mmp::{MmpConfig, MmpPeerState};
-use crate::protocol::{NegotiationPayload, NodeProfile};
-use crate::utils::index::SessionIndex;
 use crate::noise::{HandshakeState as NoiseHandshakeState, NoiseError, NoiseSession};
+use crate::protocol::{NegotiationPayload, NodeProfile};
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};
+use crate::utils::index::SessionIndex;
 use crate::{FipsAddress, NodeAddr, PeerIdentity};
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
@@ -33,7 +33,10 @@ pub enum ConnectivityState {
 impl ConnectivityState {
     /// Check if the peer is usable for sending traffic.
     pub fn can_send(&self) -> bool {
-        matches!(self, ConnectivityState::Connected | ConnectivityState::Stale)
+        matches!(
+            self,
+            ConnectivityState::Connected | ConnectivityState::Stale
+        )
     }
 
     /// Check if this is a terminal state requiring cleanup.
@@ -793,12 +796,7 @@ impl ActivePeer {
     // === Filter Updates ===
 
     /// Update peer's inbound filter.
-    pub fn update_filter(
-        &mut self,
-        filter: BloomFilter,
-        sequence: u64,
-        current_time_ms: u64,
-    ) {
+    pub fn update_filter(&mut self, filter: BloomFilter, sequence: u64, current_time_ms: u64) {
         self.inbound_filter = Some(filter);
         self.filter_sequence = sequence;
         self.filter_received_at = current_time_ms;
@@ -1013,12 +1011,11 @@ impl ActivePeer {
         self.rekey_msg1_next_resend = 0;
         self.rekey_in_progress = false;
         // Return whichever index needs freeing
-        self.rekey_our_index.take()
-            .or_else(|| {
-                self.pending_new_session = None;
-                self.pending_their_index = None;
-                self.pending_our_index.take()
-            })
+        self.rekey_our_index.take().or_else(|| {
+            self.pending_new_session = None;
+            self.pending_their_index = None;
+            self.pending_our_index.take()
+        })
     }
 
     // === Rekey Handshake State (Initiator) ===
@@ -1053,7 +1050,8 @@ impl ActivePeer {
         &mut self,
         msg2_bytes: &[u8],
     ) -> Result<(Vec<u8>, NoiseSession), NoiseError> {
-        let mut hs = self.rekey_handshake
+        let mut hs = self
+            .rekey_handshake
             .take()
             .ok_or_else(|| NoiseError::WrongState {
                 expected: "rekey handshake in progress".to_string(),
@@ -1090,16 +1088,14 @@ impl ActivePeer {
     ///
     /// Takes the stored responder handshake state, reads XX msg3, and returns
     /// the completed NoiseSession.
-    pub fn complete_rekey_msg3(
-        &mut self,
-        msg3_bytes: &[u8],
-    ) -> Result<NoiseSession, NoiseError> {
-        let mut hs = self.rekey_responder_handshake
-            .take()
-            .ok_or_else(|| NoiseError::WrongState {
-                expected: "rekey responder handshake awaiting msg3".to_string(),
-                got: "no responder handshake state".to_string(),
-            })?;
+    pub fn complete_rekey_msg3(&mut self, msg3_bytes: &[u8]) -> Result<NoiseSession, NoiseError> {
+        let mut hs =
+            self.rekey_responder_handshake
+                .take()
+                .ok_or_else(|| NoiseError::WrongState {
+                    expected: "rekey responder handshake awaiting msg3".to_string(),
+                    got: "no responder handshake state".to_string(),
+                })?;
 
         // Split msg3 into base XX part and any extra (negotiation payload)
         let base_size = crate::noise::HANDSHAKE_MSG3_SIZE;
@@ -1126,9 +1122,7 @@ impl ActivePeer {
 
     /// Check if msg1 needs resending.
     pub fn needs_msg1_resend(&self, now_ms: u64) -> bool {
-        self.rekey_in_progress
-            && self.rekey_msg1.is_some()
-            && now_ms >= self.rekey_msg1_next_resend
+        self.rekey_in_progress && self.rekey_msg1.is_some() && now_ms >= self.rekey_msg1_next_resend
     }
 
     /// Get msg1 bytes for resend (without consuming).

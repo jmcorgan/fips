@@ -5,42 +5,43 @@
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
 mod bloom;
+mod discovery_rate_limit;
 mod handlers;
 mod lifecycle;
-mod retry;
-mod discovery_rate_limit;
 mod rate_limit;
+mod retry;
 mod routing_error_rate_limit;
 pub(crate) mod session;
 pub(crate) mod session_wire;
-pub(crate) mod wire;
 pub(crate) mod stats;
-mod tree;
 #[cfg(test)]
 mod tests;
+mod tree;
+pub(crate) mod wire;
 
-use crate::bloom::BloomState;
-use crate::protocol::NodeProfile;
-use crate::cache::CoordCache;
-use crate::utils::index::IndexAllocator;
-use crate::node::session::SessionEntry;
-use crate::peer::{ActivePeer, PeerConnection};
 use self::discovery_rate_limit::{DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use self::rate_limit::HandshakeRateLimiter;
 use self::routing_error_rate_limit::RoutingErrorRateLimiter;
+use self::wire::{
+    FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header, prepend_inner_header,
+};
+use crate::bloom::BloomState;
+use crate::cache::CoordCache;
+use crate::node::session::SessionEntry;
+use crate::peer::{ActivePeer, PeerConnection};
+use crate::protocol::NodeProfile;
+use crate::transport::ethernet::EthernetTransport;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::tor::TorTransport;
+use crate::transport::udp::UdpTransport;
 use crate::transport::{
     Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError, TransportHandle, TransportId,
 };
-use crate::transport::udp::UdpTransport;
-use crate::transport::tcp::TcpTransport;
-use crate::transport::tor::TorTransport;
-#[cfg(target_os = "linux")]
-use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
 use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
-use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_CE, FLAG_KEY_EPOCH};
+use crate::utils::index::IndexAllocator;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
@@ -107,7 +108,11 @@ pub enum NodeError {
     SendFailed { node_addr: NodeAddr, reason: String },
 
     #[error("mtu exceeded forwarding to {node_addr}: packet {packet_size} > mtu {mtu}")]
-    MtuExceeded { node_addr: NodeAddr, packet_size: usize, mtu: u16 },
+    MtuExceeded {
+        node_addr: NodeAddr,
+        packet_size: usize,
+        mtu: u16,
+    },
 
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
@@ -370,6 +375,10 @@ pub struct Node {
     tun_reader_handle: Option<JoinHandle<()>>,
     /// TUN writer thread handle.
     tun_writer_handle: Option<JoinHandle<()>>,
+    /// Shutdown pipe: writing to this fd unblocks the TUN reader thread on macOS.
+    /// On Linux, deleting the interface via netlink serves the same purpose.
+    #[cfg(target_os = "macos")]
+    tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
 
     // === DNS Responder ===
     /// Receiver for resolved identities from the DNS responder.
@@ -542,6 +551,8 @@ impl Node {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            #[cfg(target_os = "macos")]
+            tun_shutdown_fd: None,
             dns_identity_rx: None,
             dns_task: None,
             index_allocator: IndexAllocator::new(),
@@ -554,10 +565,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
-            discovery_backoff: DiscoveryBackoff::with_params(
-                backoff_base_secs,
-                backoff_max_secs,
-            ),
+            discovery_backoff: DiscoveryBackoff::with_params(backoff_base_secs, backoff_max_secs),
             discovery_forward_limiter: DiscoveryForwardRateLimiter::with_interval(
                 std::time::Duration::from_secs(forward_min_interval_secs),
             ),
@@ -654,6 +662,8 @@ impl Node {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
+            #[cfg(target_os = "macos")]
+            tun_shutdown_fd: None,
             dns_identity_rx: None,
             dns_task: None,
             index_allocator: IndexAllocator::new(),
@@ -711,21 +721,18 @@ impl Node {
         }
 
         // Create Ethernet transport instances
-        #[cfg(target_os = "linux")]
-        {
-            let eth_instances: Vec<_> = self
-                .config
-                .transports
-                .ethernet
-                .iter()
-                .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
-                .collect();
+        let eth_instances: Vec<_> = self
+            .config
+            .transports
+            .ethernet
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
 
-            for (name, eth_config) in eth_instances {
-                let transport_id = self.allocate_transport_id();
-                let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
-                transports.push(TransportHandle::Ethernet(eth));
-            }
+        for (name, eth_config) in eth_instances {
+            let transport_id = self.allocate_transport_id();
+            let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
+            transports.push(TransportHandle::Ethernet(eth));
         }
 
         // Create TCP transport instances
@@ -794,7 +801,9 @@ impl Node {
             #[cfg(any(not(feature = "ble"), test))]
             if !ble_instances.is_empty() {
                 #[cfg(not(test))]
-                tracing::warn!("BLE transport configured but 'ble' feature not enabled at compile time");
+                tracing::warn!(
+                    "BLE transport configured but 'ble' feature not enabled at compile time"
+                );
             }
         }
 
@@ -844,18 +853,9 @@ impl Node {
                 ))
             })?;
 
-        // Parse the MAC address
-        #[cfg(target_os = "linux")]
         let mac = crate::transport::ethernet::parse_mac_string(mac_str).map_err(|e| {
             NodeError::NoTransportForType(format!("invalid MAC in '{}': {}", addr_str, e))
         })?;
-        #[cfg(not(target_os = "linux"))]
-        let mac: [u8; 6] = {
-            let _ = mac_str;
-            return Err(NodeError::NoTransportForType(
-                "Ethernet transport not available on this platform".into(),
-            ));
-        };
 
         Ok((transport_id, TransportAddr::from_bytes(&mac)))
     }
@@ -864,13 +864,9 @@ impl Node {
     /// (TransportId, TransportAddr) pair by finding the BLE transport
     /// instance matching the adapter name.
     #[cfg(target_os = "linux")]
-    fn resolve_ble_addr(
-        &self,
-        addr_str: &str,
-    ) -> Result<(TransportId, TransportAddr), NodeError> {
+    fn resolve_ble_addr(&self, addr_str: &str) -> Result<(TransportId, TransportAddr), NodeError> {
         let ta = TransportAddr::from_string(addr_str);
-        let adapter = crate::transport::ble::addr::adapter_from_addr(&ta)
-            .ok_or_else(|| {
+        let adapter = crate::transport::ble::addr::adapter_from_addr(&ta).ok_or_else(|| {
             NodeError::NoTransportForType(format!(
                 "invalid BLE address format '{}': expected 'adapter/mac'",
                 addr_str
@@ -881,9 +877,7 @@ impl Node {
         let transport_id = self
             .transports
             .iter()
-            .find(|(_, handle)| {
-                handle.transport_type().name == "ble" && handle.is_operational()
-            })
+            .find(|(_, handle)| handle.transport_type().name == "ble" && handle.is_operational())
             .map(|(id, _)| *id)
             .ok_or_else(|| {
                 NodeError::NoTransportForType(format!(
@@ -1095,9 +1089,10 @@ impl Node {
         let now = std::time::Instant::now();
         let should_log = match self.last_mesh_size_log {
             None => true,
-            Some(last) => now.duration_since(last) >= std::time::Duration::from_secs(
-                self.config.node.mmp.log_interval_secs,
-            ),
+            Some(last) => {
+                now.duration_since(last)
+                    >= std::time::Duration::from_secs(self.config.node.mmp.log_interval_secs)
+            }
         };
         if should_log {
             tracing::debug!(
@@ -1145,7 +1140,6 @@ impl Node {
     pub fn tun_name(&self) -> Option<&str> {
         self.tun_name.as_deref()
     }
-
 
     // === Resource Limits ===
 
@@ -1227,14 +1221,17 @@ impl Node {
     /// Add a link.
     pub fn add_link(&mut self, link: Link) -> Result<(), NodeError> {
         if self.max_links > 0 && self.links.len() >= self.max_links {
-            return Err(NodeError::MaxLinksExceeded { max: self.max_links });
+            return Err(NodeError::MaxLinksExceeded {
+                max: self.max_links,
+            });
         }
         let link_id = link.link_id();
         let transport_id = link.transport_id();
         let remote_addr = link.remote_addr().clone();
 
         self.links.insert(link_id, link);
-        self.addr_to_link.insert((transport_id, remote_addr), link_id);
+        self.addr_to_link
+            .insert((transport_id, remote_addr), link_id);
         Ok(())
     }
 
@@ -1249,8 +1246,14 @@ impl Node {
     }
 
     /// Find link ID by transport address.
-    pub fn find_link_by_addr(&self, transport_id: TransportId, addr: &TransportAddr) -> Option<LinkId> {
-        self.addr_to_link.get(&(transport_id, addr.clone())).copied()
+    pub fn find_link_by_addr(
+        &self,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+    ) -> Option<LinkId> {
+        self.addr_to_link
+            .get(&(transport_id, addr.clone()))
+            .copied()
     }
 
     /// Remove a link.
@@ -1396,11 +1399,14 @@ impl Node {
     pub(crate) fn register_identity(&mut self, node_addr: NodeAddr, pubkey: secp256k1::PublicKey) {
         let mut prefix = [0u8; 15];
         prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
-        self.identity_cache.insert(prefix, (node_addr, pubkey, Self::now_ms()));
+        self.identity_cache
+            .insert(prefix, (node_addr, pubkey, Self::now_ms()));
         // LRU eviction
         let max = self.config.node.cache.identity_size;
         if self.identity_cache.len() > max
-            && let Some(oldest_key) = self.identity_cache.iter()
+            && let Some(oldest_key) = self
+                .identity_cache
+                .iter()
                 .min_by_key(|(_, (_, _, ts))| *ts)
                 .map(|(k, _)| *k)
         {
@@ -1409,7 +1415,10 @@ impl Node {
     }
 
     /// Look up a destination by FipsAddress prefix (bytes 1-15 of the IPv6 address).
-    pub(crate) fn lookup_by_fips_prefix(&mut self, prefix: &[u8; 15]) -> Option<(NodeAddr, secp256k1::PublicKey)> {
+    pub(crate) fn lookup_by_fips_prefix(
+        &mut self,
+        prefix: &[u8; 15],
+    ) -> Option<(NodeAddr, secp256k1::PublicKey)> {
         if let Some(entry) = self.identity_cache.get_mut(prefix) {
             entry.2 = Self::now_ms(); // LRU touch
             Some((entry.0, entry.1))
@@ -1448,9 +1457,7 @@ impl Node {
     /// has declared us as their parent (making them our child).
     pub(crate) fn is_tree_peer(&self, peer_addr: &NodeAddr) -> bool {
         // Peer is our parent
-        if !self.tree_state.is_root()
-            && self.tree_state.my_declaration().parent_id() == peer_addr
-        {
+        if !self.tree_state.is_root() && self.tree_state.my_declaration().parent_id() == peer_addr {
             return true;
         }
         // Peer is our child (their declaration names us as parent)
@@ -1499,12 +1506,18 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_coords = self.coord_cache.get_and_touch(dest_node_addr, now_ms)?.clone();
+        let dest_coords = self
+            .coord_cache
+            .get_and_touch(dest_node_addr, now_ms)?
+            .clone();
 
-        // 3. Bloom filter candidates — requires dest_coords for loop-free selection
+        // 3. Bloom filter candidates — requires dest_coords for loop-free selection.
+        //    If no candidate is strictly closer, fall through to tree routing.
         let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);
-        if !candidates.is_empty() {
-            return self.select_best_candidate(&candidates, &dest_coords);
+        if !candidates.is_empty()
+            && let Some(peer) = self.select_best_candidate(&candidates, &dest_coords)
+        {
+            return Some(peer);
         }
 
         // 4. Greedy tree routing fallback (skip non-routing/leaf peers)
@@ -1605,7 +1618,8 @@ impl Node {
         node_addr: &NodeAddr,
         plaintext: &[u8],
     ) -> Result<(), NodeError> {
-        self.send_encrypted_link_message_with_ce(node_addr, plaintext, false).await
+        self.send_encrypted_link_message_with_ce(node_addr, plaintext, false)
+            .await
     }
 
     /// Like `send_encrypted_link_message` but allows setting the FMP CE flag.
@@ -1617,7 +1631,9 @@ impl Node {
         plaintext: &[u8],
         ce_flag: bool,
     ) -> Result<(), NodeError> {
-        let peer = self.peers.get_mut(node_addr)
+        let peer = self
+            .peers
+            .get_mut(node_addr)
             .ok_or(NodeError::PeerNotFound(*node_addr))?;
 
         let their_index = peer.their_index().ok_or_else(|| NodeError::SendFailed {
@@ -1628,10 +1644,13 @@ impl Node {
             node_addr: *node_addr,
             reason: "no transport_id".into(),
         })?;
-        let remote_addr = peer.current_addr().cloned().ok_or_else(|| NodeError::SendFailed {
-            node_addr: *node_addr,
-            reason: "no current_addr".into(),
-        })?;
+        let remote_addr = peer
+            .current_addr()
+            .cloned()
+            .ok_or_else(|| NodeError::SendFailed {
+                node_addr: *node_addr,
+                reason: "no current_addr".into(),
+            })?;
 
         // Prepend 4-byte session-relative timestamp (inner header)
         let timestamp_ms = peer.session_elapsed_ms();
@@ -1644,10 +1663,12 @@ impl Node {
             flags |= FLAG_KEY_EPOCH;
         }
 
-        let session = peer.noise_session_mut().ok_or_else(|| NodeError::SendFailed {
-            node_addr: *node_addr,
-            reason: "no noise session".into(),
-        })?;
+        let session = peer
+            .noise_session_mut()
+            .ok_or_else(|| NodeError::SendFailed {
+                node_addr: *node_addr,
+                reason: "no noise session".into(),
+            })?;
 
         // Inner plaintext: [timestamp:4 LE][msg_type][payload...]
         let inner_plaintext = prepend_inner_header(timestamp_ms, plaintext);
@@ -1658,18 +1679,24 @@ impl Node {
         let header = build_established_header(their_index, counter, flags, payload_len);
 
         // Encrypt with AAD binding to the outer header
-        let ciphertext = session.encrypt_with_aad(&inner_plaintext, &header).map_err(|e| NodeError::SendFailed {
-            node_addr: *node_addr,
-            reason: format!("encryption failed: {}", e),
-        })?;
+        let ciphertext = session
+            .encrypt_with_aad(&inner_plaintext, &header)
+            .map_err(|e| NodeError::SendFailed {
+                node_addr: *node_addr,
+                reason: format!("encryption failed: {}", e),
+            })?;
 
         let wire_packet = build_encrypted(&header, &ciphertext);
 
         // Re-borrow peer for stats update after sending
-        let transport = self.transports.get(&transport_id)
+        let transport = self
+            .transports
+            .get(&transport_id)
             .ok_or(NodeError::TransportNotFound(transport_id))?;
 
-        let bytes_sent = transport.send(&remote_addr, &wire_packet).await
+        let bytes_sent = transport
+            .send(&remote_addr, &wire_packet)
+            .await
             .map_err(|e| match e {
                 TransportError::MtuExceeded { packet_size, mtu } => NodeError::MtuExceeded {
                     node_addr: *node_addr,

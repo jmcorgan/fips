@@ -4,9 +4,9 @@
 //! including delta compression with NACK-based recovery and debounced
 //! propagation to peers.
 
+use crate::NodeAddr;
 use crate::bloom::BloomFilter;
 use crate::protocol::{FilterAnnounce, FilterNack};
-use crate::NodeAddr;
 
 use super::{Node, NodeError};
 use std::collections::HashMap;
@@ -96,11 +96,10 @@ impl Node {
             announce.filter.clone()
         };
 
-        let (encoded, stats) =
-            announce.encode().map_err(|e| NodeError::SendFailed {
-                node_addr: *peer_addr,
-                reason: format!("FilterAnnounce encode failed: {}", e),
-            })?;
+        let (encoded, stats) = announce.encode().map_err(|e| NodeError::SendFailed {
+            node_addr: *peer_addr,
+            reason: format!("FilterAnnounce encode failed: {}", e),
+        })?;
 
         // Send
         if let Err(e) = self.send_encrypted_link_message(peer_addr, &encoded).await {
@@ -127,8 +126,7 @@ impl Node {
             "Sent FilterAnnounce"
         );
         self.bloom_state.record_update_sent(*peer_addr, now_ms);
-        self.bloom_state
-            .record_sent_filter(*peer_addr, sent_filter);
+        self.bloom_state.record_sent_filter(*peer_addr, sent_filter);
         if let Some(peer) = self.peers.get_mut(peer_addr) {
             peer.clear_filter_update_needed();
         }
@@ -230,9 +228,7 @@ impl Node {
                     expected_seq: expected_base,
                 };
                 let nack_encoded = nack.encode();
-                let _ = self
-                    .send_encrypted_link_message(from, &nack_encoded)
-                    .await;
+                let _ = self.send_encrypted_link_message(from, &nack_encoded).await;
                 self.stats_mut().bloom.nacks_sent += 1;
                 return;
             }
@@ -251,9 +247,7 @@ impl Node {
                         let nack = FilterNack {
                             expected_seq: current_seq,
                         };
-                        let _ = self
-                            .send_encrypted_link_message(from, &nack.encode())
-                            .await;
+                        let _ = self.send_encrypted_link_message(from, &nack.encode()).await;
                         self.stats_mut().bloom.nacks_sent += 1;
                         return;
                     }
@@ -266,9 +260,7 @@ impl Node {
                         "Delta received but no stored filter, sending NACK"
                     );
                     let nack = FilterNack { expected_seq: 0 };
-                    let _ = self
-                        .send_encrypted_link_message(from, &nack.encode())
-                        .await;
+                    let _ = self.send_encrypted_link_message(from, &nack.encode()).await;
                     self.stats_mut().bloom.nacks_sent += 1;
                     return;
                 }
