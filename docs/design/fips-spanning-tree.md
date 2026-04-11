@@ -165,7 +165,7 @@ When a node receives a TreeAnnounce from peer P:
 
 1. **Validate version**: Reject if version ≠ 0x01
 2. **Verify signature**: Check P's declaration signature using P's known
-   public key (established during Noise IK handshake)
+   public key (established during Noise XX handshake)
 3. **Verify identity**: Confirm the declaration's node_addr matches the
    sender's known identity
 4. **Check freshness**: If `sequence ≤ stored sequence for P`, discard

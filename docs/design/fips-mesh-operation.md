@@ -347,8 +347,8 @@ The source creates a LookupRequest containing:
 - **request_id**: Unique identifier for deduplication
 - **target**: The node_addr being sought
 - **origin**: The requester's node_addr
-- **origin_coords**: The requester's current tree coordinates (so the
-  response can route back)
+- **min_mtu**: Minimum transport MTU the origin requires (transit nodes
+  skip peers whose link MTU is below this)
 - **TTL**: Bounds the forwarding radius
 
 ### Bloom-Guided Tree Routing
@@ -433,8 +433,8 @@ the primary mechanism: each transit node looks up the `request_id` in its
 `recent_requests` table to find the peer that forwarded the original request,
 and sends the response back through that peer. This ensures the response
 follows the same path as the request. Greedy tree routing toward the
-`origin_coords` is used only as a fallback if the reverse-path entry has
-expired.
+greedy tree routing toward the origin's coordinates is used only as a
+fallback if the reverse-path entry has expired.
 
 **Response-forwarded flag**: Each `recent_requests` entry tracks whether a
 response has already been forwarded for that `request_id`. If a second
@@ -663,16 +663,23 @@ When traffic resumes:
 3. Coordinates: discovery may be needed if cache has expired
 4. SessionSetup re-warms transit caches on the new path
 
-## Leaf-Only Operation *(under development)*
+## Node Profiles
 
-Leaf-only operation is an optimization for resource-constrained nodes
-(sensors, battery-powered devices). The core infrastructure exists (config
-flag, node constructor, bloom filter support) but is not yet enabled in
-normal operation.
+Nodes advertise a profile during FMP negotiation (bits 0-2 of the feature
+bitfield): **Full** (default), **NonRouting**, or **Leaf**. At least one
+side of a link must be Full. Config mapping: `disable_routing: true` →
+NonRouting, `leaf_only: true` → Leaf.
 
-### Concept
+### Non-Routing Nodes
 
-A leaf-only node connects to a single upstream peer that handles all routing
+A non-routing node participates in the spanning tree but does not forward
+transit traffic or send bloom filters. Its full peer inserts the
+non-routing node's identity as a leaf dependent. MMP report flow is gated
+by wants/provides bits negotiated during the handshake.
+
+### Leaf Nodes
+
+A leaf node connects to a single upstream peer that handles all routing
 on its behalf:
 
 - **No bloom filter storage or processing**: The upstream peer includes the
@@ -695,7 +702,7 @@ The upstream peer:
 
 Even as a leaf-only node, it still:
 
-- Maintains its own Noise IK link session with the upstream peer (FMP layer)
+- Maintains its own Noise XX link session with the upstream peer (FMP layer)
 - Can establish end-to-end FSP sessions with arbitrary destinations
 - Has its own identity (npub, node_addr)
 
@@ -707,8 +714,8 @@ routing decisions but retains its own end-to-end encryption and identity.
 | Message | Typical Size | When | Forwarded? |
 | ------- | ------------ | ---- | ---------- |
 | TreeAnnounce | Variable (depth-dependent) | Topology changes | No (peer-to-peer) |
-| FilterAnnounce | ~1 KB | Topology changes | No (peer-to-peer) |
-| LookupRequest | ~300 bytes | First contact, recovery | Yes (bloom-guided tree) |
+| FilterAnnounce | variable (RLE compressed) | Topology changes | No (peer-to-peer) |
+| LookupRequest | 44 bytes + TLV | First contact, recovery | Yes (bloom-guided tree) |
 | LookupResponse | ~400 bytes | Response to discovery | Yes (greedy routed) |
 | SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
 | SessionDatagram + SessionAck | ~170 bytes | Session confirmation | Yes (routed) |
@@ -766,7 +773,7 @@ recovery).
 | Discovery originator backoff | **Implemented** |
 | Discovery transit-side rate limiting | **Implemented** |
 | Discovery response-forwarded dedup | **Implemented** |
-| Leaf-only operation | Under development |
+| Node profiles (Full, NonRouting, Leaf) | **Implemented** |
 | Link cost in parent selection (ETX) | **Implemented** |
 | Link cost in candidate ranking | **Implemented** |
 

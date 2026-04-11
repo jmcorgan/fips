@@ -245,7 +245,7 @@ for i in 0..hash_count:
 return true             // Maybe present (possible false positive)
 ```
 
-Where `filter_bits = 8 × (512 << size_class)` — 8,192 for v1.
+Where `filter_bits = 8 × (512 << size_class)` — 8,192 for size_class 1 (default).
 
 ## Wire Format
 
@@ -254,27 +254,30 @@ FilterAnnounce messages are carried inside encrypted link-layer frames:
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
 | 0 | msg_type | 1 byte | 0x20 |
-| 1 | sequence | 8 bytes LE | Monotonic counter for freshness |
-| 9 | hash_count | 1 byte | Number of hash functions (5 in v1) |
-| 10 | size_class | 1 byte | Filter size: `512 << size_class` bytes |
-| 11 | filter_bits | 1,024 bytes | Bloom filter bit array (v1) |
+| 1 | flags | 1 byte | Bit 0: delta (XOR diff), bits 1-7 reserved |
+| 2 | sequence | 8 bytes LE | Monotonic counter, per-peer |
+| 10 | base_seq | 8 bytes LE | Reference filter sequence for delta (0 if full) |
+| 18 | size_class | 1 byte | Filter size: `512 << size_class` bytes |
+| 19 | compressed_payload | variable | RLE-encoded filter or XOR diff |
 
-**v1 total**: 1,035 bytes payload, 1,064 bytes with link encryption
-overhead.
+Payloads are RLE-compressed: each run = `[count:2 LE][word:8 LE]`
+(10 bytes per run). XOR diffs between consecutive filters are mostly
+zero words, compressing to very few runs. A FilterNack (msg_type 0x21)
+requests full retransmission when a sequence gap is detected.
 
 See [fips-wire-formats.md](fips-wire-formats.md) for the complete wire
 format reference.
 
 ## Scale and Size Classes
 
-### v1 Scale Limits
+### Scale Limits
 
 Coordinate-based tree distance checking ensures correct routing decisions
 at all network sizes — bloom filters are an optimization that narrows the
 set of peers considered, not a correctness requirement. As filters
 saturate, routing still works; it just evaluates more candidates per hop.
 
-With the v1 mandatory 1 KB filter (size_class 1):
+With the default 1 KB filter (size_class 1):
 
 - **Small networks (< 1,000 nodes)**: Both upward and downward filters
   are highly accurate (worst-case FPR < 1%). Filters effectively narrow
@@ -295,34 +298,29 @@ With the v1 mandatory 1 KB filter (size_class 1):
 
 ### Size Class Table
 
-| size_class | Bytes | Bits | Status |
-| ---------- | ----- | ---- | ------ |
-| 0 | 512 | 4,096 | Reserved |
-| 1 | 1,024 | 8,192 | **v1 (MUST use)** |
-| 2 | 2,048 | 16,384 | Reserved |
-| 3 | 4,096 | 32,768 | Reserved |
+| size_class | Bytes | Bits | Notes |
+| ---------- | ----- | ---- | ----- |
+| 0 | 512 | 4,096 | Minimum |
+| 1 | 1,024 | 8,192 | Default |
+| 2 | 2,048 | 16,384 | |
+| 3 | 4,096 | 32,768 | |
+| 4 | 8,192 | 65,536 | |
+| 5 | 16,384 | 131,072 | |
+| 6 | 32,768 | 262,144 | Maximum |
 
-FMP v1 mandates size_class = 1. Nodes MUST use size_class = 1 and MUST
-reject FilterAnnounce messages with any other size_class. The size_class
-field is reserved in the wire format to support future protocol versions
-with larger default filter sizes.
+### Adaptive Sizing
 
-### Scaling Strategy
+Filter size is a node property, not a link property. Each node selects
+its own size class based on outgoing filter fill ratio: step up above
+~20%, step down below ~5%, with hysteresis to prevent oscillation.
+Nodes near the root of the spanning tree — which carry larger combined
+filters — naturally upsize, while leaf and edge nodes stay small.
 
-The 1 KB filter becomes a practical limitation beyond ~2,000 nodes. The
-size class mechanism provides the path forward: future FMP versions may
-use larger default filters (size_class 2 or 3) to support larger networks
-while remaining compatible with constrained nodes through folding.
-Size_class 2 (2 KB, 16,384 bits) would roughly double the practical
-network size limit.
-
-The envisioned approach is that hub nodes near the root — which carry the
-largest downward filters — would use larger size classes, while leaf nodes
-and resource-constrained nodes continue with smaller filters. A node
-receiving a filter larger than its own size class folds it down locally.
-The mechanism by which heterogeneous filter sizes propagate through the
-tree is a future design direction not specified in v1. See
-[IDEA-0043](../../ideas/IDEA-0043-heterogeneous-filter-propagation.md).
+When a node receives a filter at a different size class than its own,
+it converts on receipt: larger filters are folded down, smaller filters
+are expanded via bit duplication. Routing queries use the peer's filter
+at its native (advertised) size for full resolution; conversion happens
+only when building the node's own outgoing filter.
 
 ### Folding
 
@@ -339,7 +337,7 @@ positions that folding produces.
 
 | Feature | Status |
 | ------- | ------ |
-| 1 KB bloom filter (size_class 1) | **Implemented** |
+| Variable-size bloom filters (512 B – 32 KB) | **Implemented** |
 | 5 hash functions | **Implemented** |
 | Split-horizon filter computation | **Implemented** |
 | Tree-only merge propagation | **Implemented** |
@@ -347,6 +345,10 @@ positions that folding produces.
 | Per-peer filter maintenance | **Implemented** |
 | Event-driven updates | **Implemented** |
 | 500ms rate limiting | **Implemented** |
+| Delta compression (XOR diff + RLE) | **Implemented** |
+| FilterNack sequence recovery | **Implemented** |
+| Adaptive sizing (fill-ratio heuristic) | **Implemented** |
+| Fold/duplicate size conversion | **Implemented** |
 | FilterAnnounce gossip (all peers) | **Implemented** |
 | Filter cardinality logging | **Implemented** |
 | Size class negotiation | Future direction |

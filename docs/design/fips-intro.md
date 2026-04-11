@@ -134,7 +134,7 @@ See [fips-transport-layer.md](fips-transport-layer.md) for the transport layer
 specification.
 
 **FIPS Mesh Protocol (FMP)**: Manages peer connections, authenticates peers
-via Noise IK handshakes, and encrypts all traffic on each link. FMP is where
+via Noise XX handshakes, and encrypts all traffic on each link. FMP is where
 the mesh organizes itself — nodes exchange spanning tree announcements and
 bloom filters with their direct peers, and FMP makes forwarding decisions
 for transit traffic. FMP provides authenticated, encrypted forwarding to FSP
@@ -203,7 +203,7 @@ same keypair.
 
 ![Identity Derivation](diagrams/fips-identity-derivation.svg)
 
-The pubkey is the node's cryptographic identity, used in Noise IK handshakes
+The pubkey is the node's cryptographic identity, used in Noise XX handshakes
 for both link and session encryption. It is never exposed beyond the
 endpoints of an encrypted channel. The node_addr, a one-way SHA-256 hash
 truncated to 16 bytes, serves as the routing identifier in packet headers
@@ -243,31 +243,27 @@ FIPS uses independent encryption at two protocol layers:
 
 | Layer | Scope | Pattern | Purpose |
 | ----- | ----- | ------- | ------- |
-| **FMP (Mesh)** | Hop-by-hop | Noise IK | Encrypt all traffic on each peer link |
-| **FSP (Session)** | End-to-end | Noise XK | Encrypt application payload between endpoints |
+| **FMP (Mesh)** | Hop-by-hop | Noise XX | Encrypt all traffic on each peer link |
+| **FSP (Session)** | End-to-end | Noise XX | Encrypt application payload between endpoints |
 
 ### Link Layer (Hop-by-Hop)
 
 When two nodes establish a direct connection, they perform a [Noise
-IK](https://noiseprotocol.org/) handshake. This authenticates both parties
+XX](https://noiseprotocol.org/) handshake. This authenticates both parties
 and establishes symmetric keys for encrypting all traffic on that link.
 Every packet between direct peers is encrypted — gossip messages, routing
-queries, and forwarded session datagrams alike.
-
-The IK pattern is used because outbound connections know the peer's npub
-from configuration, while inbound connections learn the initiator's identity
-from the first handshake message.
+queries, and forwarded session datagrams alike. Neither side requires prior
+knowledge of the other's static key — both identities are revealed during
+the three-message handshake, along with a protocol negotiation payload
+that enables rolling upgrades.
 
 ### Session Layer (End-to-End)
 
 FIPS establishes end-to-end encrypted sessions between any two communicating
-nodes using Noise XK, regardless of how many hops separate them. The
-initiator knows the destination's npub (required for XK's pre-message);
-the responder learns the initiator's identity from the third handshake
-message. Unlike the link-layer IK pattern where the initiator's identity
-is revealed in msg1, XK delays identity disclosure until msg3, providing
-stronger initiator identity protection for traffic traversing untrusted
-intermediate nodes.
+nodes using Noise XX, regardless of how many hops separate them. The same
+three-message XX pattern is used at both layers — neither side reveals its
+identity until msg2 (responder) or msg3 (initiator), providing mutual
+identity protection for traffic traversing untrusted intermediate nodes.
 
 A packet from A to D through intermediate nodes B and C:
 
@@ -455,7 +451,7 @@ MMP operates in three modes. **Full** mode exchanges both SenderReports and
 ReceiverReports to compute all metrics including RTT. **Lightweight** mode
 exchanges only ReceiverReports, providing loss and jitter but not RTT — useful
 for constrained links. **Minimal** mode disables reports entirely, relying
-only on spin bit and congestion echo flags in the frame header.
+only on congestion echo flags in the frame header.
 
 Reports are sent at RTT-adaptive intervals (clamped to 100 ms–2 s), so
 high-latency links don't generate excessive measurement traffic while
@@ -472,7 +468,7 @@ evaluates `effective_depth = depth + link_cost` using
 `find_next_hop()` candidate ranking for data forwarding.
 
 See [fips-mesh-layer.md](fips-mesh-layer.md) for MMP operating modes, report
-scheduling, and the spin bit design.
+scheduling, and RTT measurement.
 
 ---
 
@@ -488,7 +484,7 @@ A **transport** is a driver for a particular medium. A **link** is a peer
 connection established over a transport. Transport addresses (IP:port, MAC
 address, .onion) are opaque to all layers above FMP — they exist only to
 deliver datagrams and are discarded once FMP has authenticated the peer via
-the Noise IK handshake. From that point on, the peer is identified solely by
+the Noise XX handshake. From that point on, the peer is identified solely by
 its cryptographic identity.
 
 Transports fall into three categories based on their connectivity model:
@@ -543,7 +539,7 @@ different layer of the protocol.
 
 A passive observer on the underlying transport — someone monitoring a WiFi
 network, tapping an Ethernet segment, or inspecting UDP traffic — sees only
-encrypted packets. The FMP link-layer Noise IK session encrypts all traffic
+encrypted packets. The FMP link-layer Noise XX session encrypts all traffic
 between direct peers, including routing gossip and forwarded session
 datagrams. The observer can infer timing, packet sizes, and which transport
 endpoints are exchanging traffic, but cannot read content or determine
@@ -555,7 +551,7 @@ infer communication relationships — is not defended against (see
 ### Active Attackers on the Transport
 
 An adversary who can inject, modify, drop, or replay packets on the
-transport is also defeated by the FMP link-layer Noise IK session. Mutual
+transport is also defeated by the FMP link-layer Noise XX session. Mutual
 authentication prevents impersonation, AEAD encryption detects tampering,
 and counter-based nonces with a sliding replay window reject replayed
 packets.
@@ -565,7 +561,7 @@ packets.
 The most important adversary class is the operators of other nodes in the
 mesh — the peers that forward your traffic. FIPS treats every intermediate
 router as potentially adversarial. The FSP session layer establishes a
-completely independent Noise XK session between the communicating endpoints,
+completely independent Noise XX session between the communicating endpoints,
 so intermediate nodes cannot read application payloads even though they
 decrypt and re-encrypt the link-layer envelope at each hop.
 
@@ -678,20 +674,16 @@ confidentiality and integrity rather than hiding traffic patterns.
 ### Noise Protocol Framework
 
 FIPS uses the [Noise Protocol Framework](https://noiseprotocol.org/) at both
-protocol layers, with different handshake patterns chosen for each layer's
-threat model. FMP link encryption uses **Noise IK**, providing mutual
-authentication with a single round trip where the initiator knows the
-responder's static key in advance.
-[WireGuard](https://www.wireguard.com/) uses the same IK base pattern
-(extended with a pre-shared key as IKpsk2) for VPN tunnels. FSP session
-encryption uses **Noise XK**, the same pattern used by the
-[Lightning Network](https://github.com/lightning/bolts/blob/master/08-transport.md),
-where the initiator's static key is transmitted in a third message rather
-than the first. XK provides stronger initiator identity hiding at the cost
-of an additional round trip — a worthwhile tradeoff for session-layer traffic
-that traverses untrusted intermediate nodes. At the link layer, where both
-peers are configured and directly connected, IK's single round trip is
-preferred.
+protocol layers with the **Noise XX** handshake pattern. XX requires no
+prior knowledge of the peer's static key — both identities are revealed
+during a three-message handshake (responder in msg2, initiator in msg3).
+This enables anonymous peer discovery on shared-media transports and
+allows a protocol negotiation payload to be exchanged alongside the
+handshake, supporting rolling protocol upgrades without extra round trips.
+[WireGuard](https://www.wireguard.com/) uses the related IK pattern for
+VPN tunnels;
+[Lightning Network](https://github.com/lightning/bolts/blob/master/08-transport.md)
+uses XK for transport encryption.
 
 ### Index-Based Session Dispatch
 
@@ -727,13 +719,6 @@ The smoothed RTT estimator uses the Jacobson/Karels algorithm
 computation used in TCP for retransmission timeout calculation since 1988.
 MMP derives RTT from timestamp-echo in ReceiverReports with dwell-time
 compensation, rather than from packet round-trips.
-
-The spin bit in the FMP frame header follows the
-[QUIC](https://www.rfc-editor.org/rfc/rfc9000) spin bit
-([RFC 9312](https://www.rfc-editor.org/rfc/rfc9312)) — a single bit that
-alternates each round trip, enabling passive latency measurement. FIPS
-implements the spin bit state machine but relies on timestamp-echo for SRTT,
-as irregular mesh traffic makes spin bit RTT unreliable.
 
 The Expected Transmission Count (ETX) metric, computed from bidirectional
 delivery ratios, was introduced by
@@ -809,7 +794,6 @@ of self-sovereign identity systems. No novel cryptography is introduced.
 - [WireGuard Whitepaper](https://www.wireguard.com/papers/wireguard.pdf)
 - [Lightning Network BOLT #8 — Transport](https://github.com/lightning/bolts/blob/master/08-transport.md)
 - [QUIC (RFC 9000)](https://www.rfc-editor.org/rfc/rfc9000)
-- [QUIC Spin Bit (RFC 9312)](https://www.rfc-editor.org/rfc/rfc9312)
 - [RTCP (RFC 3550)](https://www.rfc-editor.org/rfc/rfc3550)
 - [TCP SRTT / RTO (RFC 6298)](https://www.rfc-editor.org/rfc/rfc6298)
 - [ECN (RFC 3168)](https://www.rfc-editor.org/rfc/rfc3168)

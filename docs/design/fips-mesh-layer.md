@@ -9,7 +9,7 @@ the mesh self-organizes, and where forwarding decisions are made.
 
 FMP manages direct peer connections over transports. When a transport delivers
 a datagram from an unknown address, FMP authenticates the sender through a
-Noise IK handshake, establishing a cryptographic link. Once authenticated, the
+Noise XX handshake, establishing a cryptographic link. Once authenticated, the
 link carries all inter-peer communication: spanning tree gossip, bloom filter
 updates, coordinate discovery, and forwarded session datagrams — all encrypted
 per-hop.
@@ -82,7 +82,7 @@ for the encrypted frame wrapper: 16-byte outer header + 5-byte inner header +
 ### Connection Lifecycle
 
 For connection-oriented transports, the transport must establish the underlying
-connection before FMP can begin the Noise IK handshake. For connectionless
+connection before FMP can begin the Noise XX handshake. For connectionless
 transports, datagrams can flow immediately.
 
 ### Endpoint Discovery (Optional)
@@ -94,46 +94,52 @@ through configuration.
 
 ## Peer Authentication
 
-### Noise IK Handshake
+### Noise XX Handshake
 
-Every peer connection begins with a Noise IK handshake that mutually
+Every peer connection begins with a Noise XX handshake that mutually
 authenticates both parties and establishes symmetric keys for link encryption.
 
-The IK pattern is chosen because:
+The XX pattern is chosen because:
 
-- The **initiator** knows the responder's static public key from configuration
-  or discovery, and sends their own static key encrypted in the first message
-- The **responder** learns the initiator's identity from the first message,
-  then responds with their own ephemeral key
+- **Neither side** requires prior knowledge of the other's static public key
+- The **responder** reveals its identity in msg2; the **initiator** reveals
+  its identity in msg3
+- A protocol negotiation payload (version range, feature bitfield, TLV
+  extensions) is appended to msg2 and msg3, enabling rolling protocol
+  upgrades without additional round-trips
 
-After the two-message handshake completes, both parties share symmetric
-session keys derived from four DH operations (es, ss, ee, se). The handshake
-provides mutual authentication, forward secrecy, and identity hiding for the
-initiator.
+After the three-message handshake completes, both parties share symmetric
+session keys derived from three DH operations (ee, es, se). The handshake
+provides mutual authentication, forward secrecy, and identity hiding for
+both parties until they choose to reveal.
 
 ### Epoch Exchange and Peer Restart Detection
 
-Both IK handshake messages carry an encrypted epoch payload — an 8-byte
-random value generated once at node startup:
+XX handshake messages msg2 and msg3 carry an encrypted epoch payload — an
+8-byte random value generated once at node startup:
 
-- **msg1**: Ephemeral key (33 bytes) + encrypted static key (49 bytes) +
-  encrypted epoch (24 bytes) = 106 bytes total
-- **msg2**: Ephemeral key (33 bytes) + encrypted epoch (24 bytes) = 57 bytes
-  total
+- **msg1**: Ephemeral key only (33 bytes) — no identity or epoch
+- **msg2**: Ephemeral key (33 bytes) + encrypted static key (49 bytes) +
+  encrypted epoch (24 bytes) = 106 bytes base, plus negotiation payload
+- **msg3**: Encrypted static key (49 bytes) + encrypted epoch (24 bytes)
+  = 73 bytes base, plus negotiation payload
 
 The encrypted epoch (EPOCH_ENCRYPTED_SIZE = 24 bytes) consists of the
 8-byte epoch value plus a 16-byte AEAD tag.
 
-On reconnection, each peer compares the received epoch with the previously
-stored epoch for that peer. An epoch mismatch indicates the peer has
-restarted (generated a new epoch), triggering full link re-establishment
-rather than treating the handshake as a simple reconnection. This prevents
-stale session state from persisting across restarts.
+Because msg1 carries no identity, restart detection is deferred: the
+initiator checks the responder's epoch after msg2, and the responder
+checks the initiator's epoch after msg3. An epoch mismatch indicates the
+peer has restarted, triggering full link re-establishment rather than
+treating the handshake as a simple reconnection. This prevents stale
+session state from persisting across restarts.
 
 ### Identity Binding
 
-The Noise handshake binds the link to the peer's cryptographic identity. After
-handshake completion:
+The Noise handshake binds the link to the peer's cryptographic identity.
+With XX, identity confirmation happens at different points: the initiator
+learns the responder's identity from msg2, and the responder learns the
+initiator's identity from msg3. After handshake completion:
 
 - The peer's public key (FIPS identity) is confirmed
 - The node_addr is computed from the public key (SHA-256, truncated to 128 bits)
@@ -143,8 +149,12 @@ handshake completion:
 
 ### Reconnection
 
-When a Noise IK msg1 arrives from a peer that already has an authenticated
-link, FMP accepts the new handshake alongside the existing session. If the new
+When a Noise XX msg1 arrives from an address that already has an
+authenticated link, FMP accepts the new handshake alongside the existing
+session. With XX, the peer's identity is not known at msg1 time — FMP can
+only detect the duplicate by transport address. Identity-based checks
+(restart detection, rekey recognition, cross-connection resolution) are
+deferred to msg3 when the initiator's identity is revealed. If the new
 handshake completes successfully, it replaces the old session. This handles
 legitimate reconnection (network change, process restart, NAT rebinding)
 without disrupting ongoing traffic until the new session is confirmed.
@@ -163,7 +173,7 @@ The auto-reconnect path:
 3. If eligible, the peer is fed into the retry system with unlimited retries
    and exponential backoff (same base interval and max backoff as startup
    retries, configured via `node.retry.*`)
-4. On each retry tick, a fresh Noise IK handshake is initiated toward the
+4. On each retry tick, a fresh Noise XX handshake is initiated toward the
    peer's configured transport addresses
 
 Auto-reconnect only applies to peers in the static peer list with
@@ -173,8 +183,8 @@ config) is responsible for re-establishing the link.
 
 ### Handshake Message Retry
 
-Both link-layer (Noise IK msg1/msg2) and session-layer (SessionSetup/
-SessionAck) handshakes use message-level retry with exponential backoff
+Both link-layer (Noise XX msg1/msg2/msg3) and session-layer (SessionSetup/
+SessionAck/SessionMsg3) handshakes use message-level retry with exponential backoff
 within the handshake timeout window. This handles packet loss on the
 underlying transport without waiting for the full handshake timeout to
 expire.
@@ -446,7 +456,7 @@ MMP supports three modes, configured via `node.mmp.mode`:
 | ---- | ----------------- | ----------------- |
 | **Full** (default) | SenderReport + ReceiverReport | All metrics including RTT, loss, jitter, goodput, OWD trend |
 | **Lightweight** | ReceiverReport only | Loss (from counter gaps), jitter, OWD trend. No RTT. |
-| **Minimal** | None | Spin bit and CE echo flags only. No computed metrics. |
+| **Minimal** | None | CE echo flags only. No computed metrics. |
 
 ### Report Scheduling
 
@@ -454,16 +464,10 @@ Reports are sent at RTT-adaptive intervals, clamped to [100ms, 2s]. A
 cold-start interval of 500ms is used before SRTT converges. The interval
 formula is `clamp(2 × SRTT, 100ms, 2000ms)`.
 
-### Spin Bit and RTT
+### RTT Measurement
 
-The SP (spin bit) flag in the FMP inner header follows the QUIC spin bit
-pattern: reflected on receive, toggled on send when the reflected value
-matches the last sent value. The spin bit state machine runs for TX
-reflection, but **RTT samples from the spin bit are discarded**. In a mesh
-protocol where frames are sent irregularly (tree announces, bloom filters,
-MMP reports on different timers), inter-frame processing delays inflate spin
-bit RTT measurements unpredictably. Timestamp-echo from ReceiverReports
-(with dwell-time compensation) is the sole SRTT source.
+RTT is measured exclusively via timestamp-echo in ReceiverReports with
+dwell-time compensation.
 
 ### ECN Congestion Signaling
 
@@ -555,7 +559,9 @@ an attacker sends invalid packets to elicit responses.
 
 | Feature | Status |
 | ------- | ------ |
-| Noise IK handshake (with epoch) | **Implemented** |
+| Noise XX handshake (with epoch and negotiation) | **Implemented** |
+| Protocol negotiation (version + features + TLV) | **Implemented** |
+| Node profiles (Full, NonRouting, Leaf) | **Implemented** |
 | Peer restart detection (epoch mismatch) | **Implemented** |
 | Link encryption (ChaCha20-Poly1305) | **Implemented** |
 | Index-based session dispatch | **Implemented** |

@@ -7,7 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Breaking
 
-_Wire-format and API breaking changes for the next major release._
+Wire-format breaking changes for v0.4.0. All nodes in a mesh must
+run the same major version — these changes are not backward compatible
+with v0.2.x peers.
+
+### Changed
+
+#### Noise XX Handshake (FMP and FSP)
+
+- FMP link handshake switched from Noise IK (2 messages) to Noise XX
+  (3 messages). Neither side requires prior knowledge of the peer's
+  static key. Responder identity revealed in msg2, initiator in msg3.
+  FMP wire version incremented to 1.
+- FSP session handshake switched from Noise XK to Noise XX. Same
+  3-message flow with post-handshake identity verification using
+  x-only key comparison (parity-independent for npub compatibility).
+- Protocol negotiation payload added to XX msg2/msg3 for both layers:
+  format byte, packed version min/max, 64-bit feature bitfield, and
+  forward-compatible TLV extensions. Enables rolling protocol upgrades
+  in future releases.
+- FMP msg1 reduced from 106 to 33 bytes (ephemeral key only, no
+  encrypted static key or DH products).
+
+#### FMP Node Profiles
+
+- Node profile enum (Full, NonRouting, Leaf) advertised in FMP feature
+  bitfield bits 0-2. At least one side of a link must be Full.
+- MMP report flow gated by wants/provides bits (bits 3-6): reports
+  only sent when the sender can provide and the receiver wants them.
+- Non-routing nodes receive bloom filters (one-way) but do not send
+  them; the full peer inserts their identity as a leaf dependent.
+- Leaf nodes enforce single-peer constraint with no tree, bloom, or
+  transit participation.
+
+#### MMP Report Format
+
+- Spin bit removed. Reclaims FMP flags bit 2 and FSP inner flags
+  bit 0. Superseded by MMP receiver report timestamp echo for RTT.
+- SenderReport reduced from 48 to 20 bytes (3 fields: interval
+  packets/bytes sent, cumulative packets sent).
+- ReceiverReport reduced from 68 to 54 bytes (10 fields retained;
+  removed max/mean burst loss and interval recv counters).
+- Both report types use extensibility header: `[format_version:1]
+  [total_length:2 LE]` replacing reserved bytes. Decoders skip
+  unknown trailing bytes for forward compatibility.
+
+#### Discovery Wire Format
+
+- Dropped `origin_coords` from LookupRequest (saves 2 + 16*depth
+  bytes per request). Reverse-path routing via `recent_requests` is
+  the primary response mechanism.
+- `min_mtu` field wired up in LookupRequest: transit nodes skip peers
+  whose link MTU is below the request's minimum.
+- TLV extension section added to LookupRequest and LookupResponse
+  after fixed fields. Transit nodes forward TLV bytes verbatim.
+
+#### Shared-Media Beacons
+
+- Ethernet frame header unified to 4 bytes `[type][flags][length:2
+  LE]` for all frame types. Beacons reduced from 34 to 5 bytes
+  (pubkey stripped — identity learned from XX handshake).
+- BLE pre-handshake pubkey exchange removed. Cross-probe tie-breaker
+  eliminated (unnecessary with XX).
+
+#### Bloom Filter Wire Format
+
+- FilterAnnounce gains flags byte (delta bit), `base_seq` field, and
+  RLE-compressed payload for XOR-diff delta compression.
+- New FilterNack message type (0x21) for out-of-sequence delta
+  recovery (triggers full retransmit).
+- Filter size decoupled from FMP negotiation: announced dynamically in
+  filter updates. Bit 7 and TLV field 1 removed from handshake.
+- Variable filter sizes (512 bytes to 32 KB) with adaptive sizing
+  based on outgoing fill ratio (step-up at 20%, step-down at 5%).
 
 ## [Unreleased]
 

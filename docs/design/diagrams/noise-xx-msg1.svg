@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 218" font-family="monospace" font-size="13">
+  <!-- Background -->
+  <rect width="580" height="218" fill="#1a1a2e" rx="4"/>
+
+  <!-- Title -->
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">Noise XX Message 1 &#8212; phase 0x1 (41 bytes)</text>
+
+  <!-- Row 0: Common prefix (bytes 0-3) -->
+  <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0&#8211;3</text>
+
+  <rect x="55" y="36" width="95" height="52" fill="#2d4a7a" stroke="#4a90d9" stroke-width="1.5" rx="3"/>
+  <text x="102" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">ver</text>
+  <text x="102" y="78" fill="#8ab4f8" text-anchor="middle" font-size="10">4 bits</text>
+
+  <rect x="150" y="36" width="95" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
+  <text x="197" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">phase</text>
+  <text x="197" y="78" fill="#8af8c8" text-anchor="middle" font-size="10">4 bits</text>
+
+  <rect x="245" y="36" width="130" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="310" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">flags</text>
+  <text x="310" y="78" fill="#f8c88a" text-anchor="middle" font-size="10">1 byte</text>
+
+  <rect x="375" y="36" width="200" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="475" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">payload_len</text>
+  <text x="475" y="78" fill="#d8a0f8" text-anchor="middle" font-size="10">2 bytes LE</text>
+
+  <!-- Row 1: sender_idx (bytes 4-7) -->
+  <text x="50" y="114" fill="#666" font-size="10" text-anchor="end">4&#8211;7</text>
+
+  <rect x="55" y="88" width="520" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="112" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">sender_idx</text>
+  <text x="315" y="130" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+
+  <!-- Row 2: ephemeral_pubkey (bytes 8-40, 33 bytes) -->
+  <text x="50" y="166" fill="#666" font-size="10" text-anchor="end">8&#8211;40</text>
+
+  <rect x="55" y="140" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="164" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">ephemeral_pubkey</text>
+  <text x="315" y="182" fill="#f8c88a" text-anchor="middle" font-size="10">33 bytes (compressed secp256k1)</text>
+
+  <!-- Total -->
+  <text x="310" y="210" fill="#777" font-size="10" text-anchor="middle">total: 41 bytes &#183; payload_len = 37 &#183; pattern: &#8594; e</text>
+</svg>

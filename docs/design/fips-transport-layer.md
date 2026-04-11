@@ -16,7 +16,7 @@ to the FIPS Mesh Protocol (FMP) above.
 The transport layer deals exclusively in **transport addresses** — IP:port
 or hostname:port addresses, MAC addresses, .onion identifiers, radio device addresses. These are
 opaque to every layer above FMP. The mapping from transport address to FIPS
-identity happens at the link layer after the Noise IK link handshake completes.
+identity happens at the link layer after the Noise XX link handshake completes.
 The word "peer" belongs to the link layer and above; the transport layer
 knows only about remote endpoints identified by transport addresses.
 
@@ -69,7 +69,7 @@ forwarding and LookupResponse transit annotation.
 
 For connection-oriented transports, manage the underlying connection: TCP
 handshake, Tor circuit establishment, Bluetooth pairing. FMP cannot begin
-the Noise IK link handshake until the transport-layer connection is
+the Noise XX link handshake until the transport-layer connection is
 established.
 
 Connection-oriented transports expose a non-blocking connect interface.
@@ -153,7 +153,7 @@ and duplication at the routing layer.
 
 **Connection model**: Connectionless transports (UDP, raw Ethernet) allow
 immediate datagram exchange. Connection-oriented transports (TCP, Tor, BLE)
-require connection setup before FMP can begin the Noise IK link handshake,
+require connection setup before FMP can begin the Noise XX link handshake,
 adding startup latency.
 
 **Stream vs. datagram**: Datagram transports have natural packet boundaries.
@@ -292,30 +292,28 @@ EtherType 0x2121. SOCK_DGRAM mode
 lets the kernel handle Ethernet header construction and parsing — the
 transport deals only with payloads and MAC addresses.
 
-Data frames use a 3-byte header: a 1-byte frame type (`0x00`) followed by
-a 2-byte little-endian payload length. The length field allows the receiver
-to trim Ethernet minimum-frame padding that would otherwise corrupt AEAD
-verification. Beacon frames (`0x01`) use only the 1-byte type prefix
-(fixed 34-byte payload). Beacons and data share the same EtherType and
-socket.
+All frames use a unified 4-byte header: `[type:1][flags:1][length:2 LE]`.
+The length field allows the receiver to trim Ethernet minimum-frame padding
+that would otherwise corrupt AEAD verification. Frame types: `0x00` (data),
+`0x01` (beacon). Beacons and data share the same EtherType and socket.
 
 | Property | Value |
 | -------- | ----- |
 | EtherType | 0x2121 |
 | Socket type | AF_PACKET SOCK_DGRAM |
-| Data frame header | `[type:1][length:2 LE][payload]` |
-| Beacon frame header | `[type:1][payload]` (fixed 34 bytes) |
-| Effective MTU | Interface MTU - 3 (typically 1497) |
+| Frame header | `[type:1][flags:1][length:2 LE][payload]` |
+| Effective MTU | Interface MTU - 4 (typically 1496) |
 | Addressing | 6-byte MAC address |
 | Platform | Linux only (`CAP_NET_RAW` required) |
 
 ### Beacon Discovery
 
 Ethernet nodes discover peers via broadcast beacons sent to
-ff:ff:ff:ff:ff:ff. Each beacon is a 34-byte frame containing the sender's
-x-only public key. Receiving nodes extract the MAC source address from the
-frame and the public key from the payload, then report the discovered peer
-to FMP.
+ff:ff:ff:ff:ff:ff. Beacons are minimal 5-byte frames (4-byte header +
+1-byte beacon type) — no public key is included. The peer's identity is
+learned from the Noise XX handshake after the connection is established.
+Receiving nodes extract the MAC source address from the frame and report
+the discovered address to FMP.
 
 Four configuration flags control discovery behavior:
 
@@ -400,7 +398,7 @@ every tick, `poll_pending_connects()` calls `connection_state(addr)` to
 check progress. When the transport reports `Connected`, the completed
 connection is promoted to the established pool (stream split into
 read/write halves, per-connection receive task spawned), and the node
-initiates the Noise IK link handshake. If the transport reports `Failed`,
+initiates the Noise XX link handshake. If the transport reports `Failed`,
 the node schedules a retry with exponential backoff.
 
 As a fallback, `send(addr, data)` still performs synchronous
@@ -447,7 +445,7 @@ socket is created).
 The Tor transport routes FIPS traffic through the Tor network, hiding
 a node's IP address from its peers. A node behind Tor connects outbound
 through a local Tor SOCKS5 proxy; the remote peer sees the Tor exit
-node's IP, not the initiator's. After the Noise IK handshake, the remote
+node's IP, not the initiator's. After the Noise XX handshake, the remote
 peer knows the initiator's FIPS identity (npub) but not its network
 location.
 
@@ -528,7 +526,7 @@ The inbound accept loop mirrors the TCP transport's pattern: accept
 connection, configure socket (TCP_NODELAY, keepalive), spawn a
 per-connection receive loop using the shared FMP stream reader. Inbound
 connections arrive from `127.0.0.1` (Tor daemon's local forwarding); peer
-identity is resolved during the Noise IK handshake, not from the transport
+identity is resolved during the Noise XX handshake, not from the transport
 address.
 
 Configuration requires coordinating `torrc` and `fips.yaml`:

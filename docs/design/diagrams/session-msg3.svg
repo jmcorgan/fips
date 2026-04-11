@@ -3,7 +3,7 @@
   <rect width="580" height="244" fill="#1a1a2e" rx="4"/>
 
   <!-- Title -->
-  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">SessionMsg3 (phase 0x3) — Noise XK msg3</text>
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">SessionMsg3 (phase 0x3) &#8212; Noise XX msg3</text>
 
   <!-- Row 0 (0–3): FSP prefix -->
   <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0–3</text>
@@ -28,7 +28,7 @@
 
   <rect x="55" y="140" width="520" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
   <text x="315" y="162" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">handshake_payload</text>
-  <text x="315" y="180" fill="#8af8c8" text-anchor="middle" font-size="10">Noise XK msg3 (73 bytes — encrypted static + encrypted epoch)</text>
+  <text x="315" y="180" fill="#8af8c8" text-anchor="middle" font-size="10">Noise XX msg3 (73+ bytes &#8212; encrypted static + epoch + optional negotiation)</text>
 
   <!-- Total -->
   <text x="310" y="218" fill="#777" font-size="10" text-anchor="middle">~80 bytes · no coordinates (both endpoints already have them)</text>

@@ -3,104 +3,95 @@
   <rect width="580" height="634" fill="#1a1a2e" rx="4"/>
 
   <!-- Title -->
-  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">ReceiverReport (0x02) — 68 bytes</text>
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">ReceiverReport (0x02) &#8212; 54 bytes</text>
 
-  <!-- Row 0 (0–3): msg_type + reserved -->
-  <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0–3</text>
+  <!-- Row 0 (0-3): msg_type + format_version + total_length -->
+  <text x="50" y="62" fill="#666" font-size="10" text-anchor="end">0&#8211;3</text>
 
   <rect x="55" y="36" width="130" height="52" fill="#2d4a7a" stroke="#4a90d9" stroke-width="1.5" rx="3"/>
-  <text x="120" y="60" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">msg_type</text>
-  <text x="120" y="78" fill="#8ab4f8" text-anchor="middle" font-size="10">0x02</text>
+  <text x="120" y="56" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">msg_type</text>
+  <text x="120" y="74" fill="#8ab4f8" text-anchor="middle" font-size="10">0x02</text>
 
-  <rect x="185" y="36" width="390" height="52" fill="#1f1f3a" stroke="#444" stroke-width="1" rx="3"/>
-  <text x="380" y="66" fill="#666" text-anchor="middle" font-size="12">reserved (3 bytes zero)</text>
+  <rect x="185" y="36" width="130" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
+  <text x="250" y="56" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">fmt_ver</text>
+  <text x="250" y="74" fill="#8af8c8" text-anchor="middle" font-size="10">1 byte</text>
 
-  <!-- Row 1 (4–11): highest_counter -->
-  <text x="50" y="114" fill="#666" font-size="10" text-anchor="end">4–11</text>
+  <rect x="315" y="36" width="260" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="445" y="56" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">total_length</text>
+  <text x="445" y="74" fill="#d8a0f8" text-anchor="middle" font-size="10">2 bytes LE (= 50)</text>
+
+  <!-- Row 1 (4-7): timestamp_echo -->
+  <text x="50" y="114" fill="#666" font-size="10" text-anchor="end">4&#8211;7</text>
 
   <rect x="55" y="88" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
-  <text x="315" y="110" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">highest_counter</text>
-  <text x="315" y="128" fill="#f8c88a" text-anchor="middle" font-size="10">8 bytes LE</text>
+  <text x="315" y="110" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">timestamp_echo</text>
+  <text x="315" y="128" fill="#f8c88a" text-anchor="middle" font-size="10">4 bytes LE (echoed sender timestamp for RTT)</text>
 
-  <!-- Row 2 (12–19): cumulative_packets_recv -->
-  <text x="50" y="166" fill="#666" font-size="10" text-anchor="end">12–19</text>
+  <!-- Row 2 (8-9): dwell_time -->
+  <text x="50" y="166" fill="#666" font-size="10" text-anchor="end">8&#8211;9</text>
 
-  <rect x="55" y="140" width="520" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
-  <text x="315" y="162" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_packets_recv</text>
-  <text x="315" y="180" fill="#8af8c8" text-anchor="middle" font-size="10">8 bytes LE</text>
+  <rect x="55" y="140" width="520" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="162" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">dwell_time</text>
+  <text x="315" y="180" fill="#8af8f8" text-anchor="middle" font-size="10">2 bytes LE (ms between receive and echo)</text>
 
-  <!-- Row 3 (20–27): cumulative_bytes_recv -->
-  <text x="50" y="218" fill="#666" font-size="10" text-anchor="end">20–27</text>
+  <!-- Row 3 (10-17): highest_counter -->
+  <text x="50" y="218" fill="#666" font-size="10" text-anchor="end">10&#8211;17</text>
 
   <rect x="55" y="192" width="520" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
-  <text x="315" y="214" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_bytes_recv</text>
+  <text x="315" y="214" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">highest_counter</text>
   <text x="315" y="232" fill="#8af8c8" text-anchor="middle" font-size="10">8 bytes LE</text>
 
-  <!-- Row 4 (28–33): timestamp_echo + dwell_time -->
-  <text x="50" y="270" fill="#666" font-size="10" text-anchor="end">28–33</text>
+  <!-- Row 4 (18-25): cumulative_packets_recv -->
+  <text x="50" y="270" fill="#666" font-size="10" text-anchor="end">18&#8211;25</text>
 
-  <rect x="55" y="244" width="260" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
-  <text x="185" y="266" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">timestamp_echo</text>
-  <text x="185" y="284" fill="#d8a0f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+  <rect x="55" y="244" width="520" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
+  <text x="315" y="266" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_packets_recv</text>
+  <text x="315" y="284" fill="#f8c88a" text-anchor="middle" font-size="10">8 bytes LE</text>
 
-  <rect x="315" y="244" width="260" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
-  <text x="445" y="266" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">dwell_time</text>
-  <text x="445" y="284" fill="#8af8f8" text-anchor="middle" font-size="10">2 bytes LE ms</text>
+  <!-- Row 5 (26-33): cumulative_bytes_recv -->
+  <text x="50" y="322" fill="#666" font-size="10" text-anchor="end">26&#8211;33</text>
 
-  <!-- Row 5 (34–39): max_burst_loss + mean_burst_loss + reserved -->
-  <text x="50" y="322" fill="#666" font-size="10" text-anchor="end">34–39</text>
+  <rect x="55" y="296" width="520" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="318" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_bytes_recv</text>
+  <text x="315" y="336" fill="#8af8f8" text-anchor="middle" font-size="10">8 bytes LE</text>
 
-  <rect x="55" y="296" width="173" height="52" fill="#5a2d3d" stroke="#d94a6a" stroke-width="1.5" rx="3"/>
-  <text x="141" y="318" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">max_burst</text>
-  <text x="141" y="336" fill="#f88aaa" text-anchor="middle" font-size="10">2 bytes LE</text>
+  <!-- Row 6 (34-41): jitter + ecn_ce_count -->
+  <text x="50" y="374" fill="#666" font-size="10" text-anchor="end">34&#8211;41</text>
 
-  <rect x="228" y="296" width="174" height="52" fill="#5a2d3d" stroke="#d94a6a" stroke-width="1.5" rx="3"/>
-  <text x="315" y="318" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">mean_burst</text>
-  <text x="315" y="336" fill="#f88aaa" text-anchor="middle" font-size="10">2 bytes u8.8</text>
-
-  <rect x="402" y="296" width="173" height="52" fill="#1f1f3a" stroke="#444" stroke-width="1" rx="3"/>
-  <text x="488" y="322" fill="#666" text-anchor="middle" font-size="10">reserved</text>
-
-  <!-- Row 6 (40–47): jitter + ecn_ce_count -->
-  <text x="50" y="374" fill="#666" font-size="10" text-anchor="end">40–47</text>
-
-  <rect x="55" y="348" width="260" height="52" fill="#4a3d2d" stroke="#d9b04a" stroke-width="1.5" rx="3"/>
+  <rect x="55" y="348" width="260" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
   <text x="185" y="370" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">jitter</text>
-  <text x="185" y="388" fill="#f8d88a" text-anchor="middle" font-size="10">4 bytes LE µs</text>
+  <text x="185" y="388" fill="#d8a0f8" text-anchor="middle" font-size="10">4 bytes LE (&#181;s)</text>
 
-  <rect x="315" y="348" width="260" height="52" fill="#4a3d2d" stroke="#d9b04a" stroke-width="1.5" rx="3"/>
+  <rect x="315" y="348" width="260" height="52" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1.5" rx="3"/>
   <text x="445" y="370" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">ecn_ce_count</text>
-  <text x="445" y="388" fill="#f8d88a" text-anchor="middle" font-size="10">4 bytes LE</text>
+  <text x="445" y="388" fill="#8af8c8" text-anchor="middle" font-size="10">4 bytes LE</text>
 
-  <!-- Row 7 (48–55): owd_trend + burst_loss_count -->
-  <text x="50" y="426" fill="#666" font-size="10" text-anchor="end">48–55</text>
+  <!-- Row 7 (42-49): owd_trend + burst_loss_count -->
+  <text x="50" y="426" fill="#666" font-size="10" text-anchor="end">42&#8211;49</text>
 
-  <rect x="55" y="400" width="260" height="52" fill="#3d4a2d" stroke="#8ad94a" stroke-width="1.5" rx="3"/>
+  <rect x="55" y="400" width="260" height="52" fill="#5a3d2d" stroke="#d9904a" stroke-width="1.5" rx="3"/>
   <text x="185" y="422" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">owd_trend</text>
-  <text x="185" y="440" fill="#c8f88a" text-anchor="middle" font-size="10">4 bytes i32 LE µs/s</text>
+  <text x="185" y="440" fill="#f8c88a" text-anchor="middle" font-size="10">i32 LE (&#181;s/s)</text>
 
-  <rect x="315" y="400" width="260" height="52" fill="#3d4a2d" stroke="#8ad94a" stroke-width="1.5" rx="3"/>
+  <rect x="315" y="400" width="260" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
   <text x="445" y="422" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">burst_loss_count</text>
-  <text x="445" y="440" fill="#c8f88a" text-anchor="middle" font-size="10">4 bytes LE</text>
+  <text x="445" y="440" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE</text>
 
-  <!-- Row 8 (56–63): cumulative_reorder_count + interval_packets_recv -->
-  <text x="50" y="478" fill="#666" font-size="10" text-anchor="end">56–63</text>
+  <!-- Row 8 (50-53): cumulative_reorder_count -->
+  <text x="50" y="478" fill="#666" font-size="10" text-anchor="end">50&#8211;53</text>
 
-  <rect x="55" y="452" width="260" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
-  <text x="185" y="474" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">reorder_count</text>
-  <text x="185" y="492" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE cumulative</text>
+  <rect x="55" y="452" width="520" height="52" fill="#4a2d5a" stroke="#b04ad9" stroke-width="1.5" rx="3"/>
+  <text x="315" y="474" fill="#e0e0e0" text-anchor="middle" font-size="12" font-weight="bold">cumulative_reorder_count</text>
+  <text x="315" y="492" fill="#d8a0f8" text-anchor="middle" font-size="10">4 bytes LE</text>
 
-  <rect x="315" y="452" width="260" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
-  <text x="445" y="474" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">interval_pkts_recv</text>
-  <text x="445" y="492" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+  <!-- Forward compat note -->
+  <rect x="55" y="518" width="520" height="32" fill="#1f1f3a" stroke="#444" stroke-width="1" rx="3"/>
+  <text x="315" y="538" fill="#888" text-anchor="middle" font-size="10">decoders skip trailing bytes beyond total_length (forward compatibility)</text>
 
-  <!-- Row 9 (64–67): interval_bytes_recv -->
-  <text x="50" y="530" fill="#666" font-size="10" text-anchor="end">64–67</text>
-
-  <rect x="55" y="504" width="260" height="52" fill="#2d5a5a" stroke="#4ad9d9" stroke-width="1.5" rx="3"/>
-  <text x="185" y="526" fill="#e0e0e0" text-anchor="middle" font-size="11" font-weight="bold">interval_bytes_recv</text>
-  <text x="185" y="544" fill="#8af8f8" text-anchor="middle" font-size="10">4 bytes LE</text>
+  <!-- Removed fields note -->
+  <rect x="55" y="558" width="520" height="32" fill="#1f1f3a" stroke="#444" stroke-width="1" rx="3"/>
+  <text x="315" y="578" fill="#666" text-anchor="middle" font-size="10">removed from v0.2: max_burst_loss, mean_burst_loss, interval_packets/bytes_recv</text>
 
   <!-- Total -->
-  <text x="310" y="586" fill="#777" font-size="10" text-anchor="middle">total: 68 bytes</text>
+  <text x="310" y="618" fill="#777" font-size="10" text-anchor="middle">total: 54 bytes &#183; format_version = 0 &#183; total_length = 50</text>
 </svg>

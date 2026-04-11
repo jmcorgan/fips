@@ -40,8 +40,9 @@ endpoints.
   filter guided discovery, no global routing tables
 - **Multi-transport** — UDP, TCP, Ethernet, Tor, and Bluetooth (BLE L2CAP)
   today; designed for serial and radio
-- **Noise encryption** — hop-by-hop link encryption (IK) plus independent
-  end-to-end session encryption (XK), with periodic rekey for forward secrecy
+- **Noise encryption** — hop-by-hop link encryption and independent
+  end-to-end session encryption (both Noise XX), with periodic rekey for
+  forward secrecy and protocol negotiation in the handshake
 - **Nostr-native identity** — secp256k1 keypairs as node addresses, no
   registration or central authority
 - **IPv6 adaptation** — TUN interface maps npubs to fd00::/8 addresses for
@@ -322,7 +323,7 @@ Ethernet, Tor, and Bluetooth (BLE) with a small live mesh of deployed nodes.
 
 - Spanning tree construction with greedy coordinate routing
 - Bloom filter guided discovery (no flooding, single-path with retry)
-- Noise IK (link layer) and Noise XK (session layer) encryption
+- Noise XX encryption at both layers with protocol negotiation
 - Periodic Noise rekey with hitless cutover for forward secrecy (FMP + FSP)
 - Persistent node identity with key file management
 - IPv6 TUN adapter with DNS resolution of `.fips` names

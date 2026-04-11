@@ -120,24 +120,29 @@ node, FMP delivers it to FSP for session-layer processing.
 Sessions are established on demand when the first datagram needs to be sent to
 a destination with no existing session.
 
-FSP uses Noise XK for session key agreement (Noise Protocol Framework;
-Perrin 2018). The initiator knows the destination's npub (required for
-XK's pre-message `s` token); the responder learns the initiator's
-identity from msg3 (not msg1, unlike IK at the link layer). This provides stronger initiator identity hiding
-— the initiator's static key is encrypted under the established shared
-secret rather than under only the responder's static key.
+FSP uses Noise XX for session key agreement (Noise Protocol Framework;
+Perrin 2018). Neither side requires prior knowledge of the other's
+static key — both identities are revealed during the handshake
+(responder in msg2, initiator in msg3). An optional protocol negotiation
+payload may be appended to msg2/msg3 (omitted for rekey handshakes).
 
 The handshake is a three-message flow carried in SessionSetup, SessionAck,
 and SessionMsg3:
 
-1. **Initiator** sends SessionSetup containing Noise XK msg1 (ephemeral key
+1. **Initiator** sends SessionSetup containing Noise XX msg1 (ephemeral key
    only) and both parties' tree coordinates
-2. **Responder** processes msg1, sends SessionAck containing Noise XK msg2
-   (ephemeral key + encrypted epoch) and both parties' tree coordinates.
-   The responder transitions to AwaitingMsg3 state.
-3. **Initiator** processes msg2, sends SessionMsg3 containing the encrypted
-   static key and encrypted epoch. Both parties derive identical symmetric
-   session keys and the session is established.
+2. **Responder** processes msg1, sends SessionAck containing Noise XX msg2
+   (ephemeral key + encrypted static key + encrypted epoch) and both
+   parties' tree coordinates. The responder transitions to AwaitingMsg3
+   state.
+3. **Initiator** processes msg2 (learning the responder's identity), sends
+   SessionMsg3 containing its encrypted static key and encrypted epoch.
+   The responder learns the initiator's identity from msg3. Both parties
+   derive identical symmetric session keys and the session is established.
+
+Post-handshake identity verification uses x-only key comparison
+(parity-independent) to confirm the revealed identity matches the
+expected npub.
 
 Each side's epoch (an 8-byte random value generated at startup) is
 exchanged encrypted in msg2 and msg3. On subsequent handshakes, an epoch
@@ -218,29 +223,30 @@ than network addresses. A session survives:
 
 ## End-to-End Encryption
 
-### Noise XK Pattern
+### Noise XX Pattern
 
-FSP uses Noise XK for session encryption, distinct from the Noise IK
-pattern used at the link layer. The full Noise descriptor is
-`Noise_XK_secp256k1_ChaChaPoly_SHA256`.
+FSP uses the same Noise XX pattern as the link layer (FMP). The full
+Noise descriptor is `Noise_XX_secp256k1_ChaChaPoly_SHA256`.
 
-The XK pattern (pre-message: `← s`):
+The XX pattern (no pre-message):
 
-- **msg1** (`→ e, es`): Initiator sends ephemeral key only. The initiator's
-  static identity is not revealed in this message.
-- **msg2** (`← e, ee`): Responder sends ephemeral key and encrypted epoch.
+- **msg1** (`→ e`): Initiator sends ephemeral key only. No identity
+  disclosed, no DH with static keys.
+- **msg2** (`← e, ee, s, es`): Responder sends ephemeral key, encrypted
+  static key, and encrypted epoch. The initiator learns the responder's
+  identity.
 - **msg3** (`→ s, se`): Initiator sends encrypted static key and encrypted
-  epoch. Both parties now share identical session keys.
+  epoch. The responder learns the initiator's identity. Both parties now
+  share identical session keys.
 
 After the handshake, Noise produces two directional symmetric keys
-(`send_key`, `recv_key`) used with ChaCha20-Poly1305 for all subsequent data.
+(`send_key`, `recv_key`) used with ChaCha20-Poly1305 for all subsequent
+data.
 
-The XK pattern requires the initiator to know the responder's static key
-in advance (the `← s` pre-message), which is satisfied by the discovery
-or DNS lookup that precedes session establishment. In exchange, XK
-provides stronger initiator identity protection than IK — the initiator's
-static key is encrypted under the full shared secret (after three DH
-operations) rather than under only the responder's static key.
+XX requires no prior knowledge of the peer's static key. The initiator
+still needs the destination's npub to address the SessionSetup, but the
+Noise handshake itself does not depend on it — identity is verified
+post-handshake by comparing the revealed key against the expected npub.
 
 ### Cryptographic Primitives
 
@@ -258,26 +264,27 @@ messaging standard.
 
 ### secp256k1 Parity Normalization
 
-Nostr npubs encode x-only public keys (32 bytes, no y-coordinate parity). The
-Noise XK pre-message mixes the responder's static key as a 33-byte compressed
-key, and the default secp256k1 ECDH hash includes a parity-dependent version
-byte.
+Nostr npubs encode x-only public keys (32 bytes, no y-coordinate parity).
+When the Noise XX handshake reveals a peer's static key via
+`public_key().serialize()`, the key has its actual parity (0x02 or 0x03
+prefix). The default secp256k1 ECDH hash also includes a parity-dependent
+version byte.
 
-Both operations are normalized to be parity-independent: the pre-message hash
-uses even parity (`0x02` prefix), and ECDH hashes only the x-coordinate of the
-result point. This ensures handshakes succeed regardless of the responder's
-actual key parity.
+Both operations are normalized to be parity-independent: ECDH hashes only
+the x-coordinate of the result point, and post-handshake identity
+verification uses `x_only_public_key()` to strip parity before comparing
+against the expected npub. This ensures handshakes and identity checks
+succeed regardless of key parity.
 
 ### Privacy Note
 
-Noise XK provides stronger initiator identity protection than IK. In XK, the
-initiator's static key is encrypted in msg3 under the full shared secret
-(derived from three DH operations), so an attacker who compromises only the
-responder's nsec cannot decrypt the initiator's identity from captured
-handshake messages (they would also need the responder's ephemeral key).
-This is the primary reason FSP uses XK rather than IK — session-layer
-traffic traverses untrusted intermediate nodes, making initiator identity
-protection more valuable than at the link layer.
+Noise XX provides mutual identity protection — both the initiator's and
+responder's static keys are encrypted under the evolving shared secret
+(derived from DH operations completed in earlier messages). An attacker
+who compromises only one side's nsec cannot decrypt the other side's
+identity from captured handshake messages without also obtaining the
+corresponding ephemeral key. Since session-layer traffic traverses
+untrusted intermediate nodes, this mutual identity hiding is valuable.
 
 ### Data Packet Authentication
 
@@ -534,7 +541,7 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
 
 | Feature | Status |
 | ------- | ------ |
-| Session establishment (Noise XK) | **Implemented** |
+| Session establishment (Noise XX) | **Implemented** |
 | Peer restart detection (epoch exchange) | **Implemented** |
 | MtuExceeded handling | **Implemented** |
 | End-to-end encryption (ChaCha20-Poly1305) | **Implemented** |
@@ -571,7 +578,7 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
 
 - Perrin, T. ["The Noise Protocol Framework"](https://noiseprotocol.org/noise.html).
   Revision 34, 2018. *Framework for building crypto protocols using Diffie-Hellman
-  key agreement and AEAD ciphers. FSP uses the XK handshake pattern.*
+  key agreement and AEAD ciphers. FSP uses the XX handshake pattern.*
 
 - Donenfeld, J.A. ["WireGuard: Next Generation Kernel Network Tunnel"](https://www.wireguard.com/papers/wireguard.pdf).
   NDSS 2017. *Transport-independent cryptographic sessions bound to identity keys

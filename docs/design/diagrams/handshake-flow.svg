@@ -1,26 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 500" font-family="monospace" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 620" font-family="monospace" font-size="13">
   <defs>
     <marker id="arrowR" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse">
       <polygon points="0,0 10,4 0,8" fill="#e0e0e0"/>
     </marker>
-    <marker id="arrowL" markerWidth="10" markerHeight="8" refX="1" refY="4" orient="auto" markerUnits="userSpaceOnUse">
-      <polygon points="10,0 0,4 10,8" fill="#e0e0e0"/>
-    </marker>
   </defs>
 
   <!-- Background -->
-  <rect width="620" height="500" fill="#1a1a2e" rx="4"/>
+  <rect width="620" height="620" fill="#1a1a2e" rx="4"/>
 
   <!-- Title -->
-  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">FMP Handshake Flow (Noise IK)</text>
+  <text x="310" y="26" fill="#e0e0e0" text-anchor="middle" font-size="14" font-weight="bold">FMP Handshake Flow (Noise XX)</text>
 
   <!-- Column headers -->
   <text x="100" y="54" fill="#8ab4f8" text-anchor="middle" font-size="12" font-weight="bold">Initiator</text>
   <text x="520" y="54" fill="#8ab4f8" text-anchor="middle" font-size="12" font-weight="bold">Responder</text>
 
   <!-- Lifelines -->
-  <line x1="100" y1="62" x2="100" y2="480" stroke="#333" stroke-width="1" stroke-dasharray="4,4"/>
-  <line x1="520" y1="62" x2="520" y2="480" stroke="#333" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="100" y1="62" x2="100" y2="600" stroke="#333" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="520" y1="62" x2="520" y2="600" stroke="#333" stroke-width="1" stroke-dasharray="4,4"/>
 
   <!-- Step 1: Initiator prepares -->
   <text x="20" y="88" fill="#8af8c8" font-size="10">generates sender_idx</text>
@@ -28,39 +25,51 @@
 
   <!-- Arrow 1: msg1 (initiator -> responder) -->
   <line x1="100" y1="120" x2="520" y2="120" stroke="#4a90d9" stroke-width="1.5" marker-end="url(#arrowR)"/>
-  <rect x="130" y="128" width="360" height="24" fill="#2d4a7a" stroke="#4a90d9" stroke-width="1" rx="3"/>
-  <text x="310" y="144" fill="#e0e0e0" text-anchor="middle" font-size="10">[0x01|flags=0|len] | sender_idx | noise_msg1</text>
-  <text x="310" y="166" fill="#666" text-anchor="middle" font-size="9">phase 0x1 — 114 bytes</text>
+  <rect x="145" y="128" width="330" height="24" fill="#2d4a7a" stroke="#4a90d9" stroke-width="1" rx="3"/>
+  <text x="310" y="144" fill="#e0e0e0" text-anchor="middle" font-size="10">[0x11|flags=0|len] | sender_idx | noise_msg1</text>
+  <text x="310" y="166" fill="#666" text-anchor="middle" font-size="9">phase 0x1 &#8212; 41 bytes &#8212; pattern: &#8594; e</text>
 
-  <!-- Step 2: Responder processes (right-aligned to stay in bounds) -->
-  <text x="600" y="192" fill="#8af8c8" font-size="10" text-anchor="end">validates msg1</text>
-  <text x="600" y="206" fill="#8af8c8" font-size="10" text-anchor="end">learns initiator's static key</text>
-  <text x="600" y="220" fill="#8af8c8" font-size="10" text-anchor="end">generates sender_idx</text>
-  <text x="600" y="234" fill="#8af8c8" font-size="10" text-anchor="end">generates ephemeral keypair</text>
+  <!-- Step 2: Responder processes msg1 -->
+  <text x="600" y="192" fill="#8af8c8" font-size="10" text-anchor="end">validates msg1 (ephemeral only)</text>
+  <text x="600" y="206" fill="#8af8c8" font-size="10" text-anchor="end">generates sender_idx</text>
+  <text x="600" y="220" fill="#8af8c8" font-size="10" text-anchor="end">generates ephemeral keypair</text>
 
   <!-- Arrow 2: msg2 (responder -> initiator) -->
-  <!-- Draw line right-to-left so orient="auto" points the arrowhead left -->
-  <line x1="520" y1="256" x2="100" y2="256" stroke="#4ad99a" stroke-width="1.5" marker-end="url(#arrowR)"/>
-  <rect x="130" y="264" width="360" height="24" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1" rx="3"/>
-  <text x="310" y="280" fill="#e0e0e0" text-anchor="middle" font-size="9">[0x02|flags=0|len] | sender_idx | receiver_idx | noise_msg2</text>
-  <text x="310" y="300" fill="#666" text-anchor="middle" font-size="9">phase 0x2 — 69 bytes</text>
+  <line x1="520" y1="244" x2="100" y2="244" stroke="#4ad99a" stroke-width="1.5" marker-end="url(#arrowR)"/>
+  <rect x="115" y="252" width="390" height="24" fill="#2d5a4a" stroke="#4ad99a" stroke-width="1" rx="3"/>
+  <text x="310" y="268" fill="#e0e0e0" text-anchor="middle" font-size="9">[0x12|flags=0|len] | sender_idx | receiver_idx | noise_msg2 + negotiation</text>
+  <text x="310" y="288" fill="#666" text-anchor="middle" font-size="9">phase 0x2 &#8212; 144 bytes &#8212; pattern: &#8592; e, ee, s, es</text>
+  <text x="600" y="300" fill="#d8a0f8" font-size="9" text-anchor="end">responder identity revealed</text>
 
-  <!-- Step 3: Initiator completes -->
-  <text x="20" y="324" fill="#8af8c8" font-size="10">validates msg2</text>
-  <text x="20" y="338" fill="#8af8c8" font-size="10">derives session keys</text>
+  <!-- Step 3: Initiator processes msg2, learns responder identity -->
+  <text x="20" y="322" fill="#8af8c8" font-size="10">validates msg2</text>
+  <text x="20" y="336" fill="#8af8c8" font-size="10">learns responder identity</text>
+  <text x="20" y="350" fill="#8af8c8" font-size="10">checks epoch (restart detection)</text>
+
+  <!-- Arrow 3: msg3 (initiator -> responder) -->
+  <line x1="100" y1="368" x2="520" y2="368" stroke="#d94a6a" stroke-width="1.5" marker-end="url(#arrowR)"/>
+  <rect x="115" y="376" width="390" height="24" fill="#5a2d3d" stroke="#d94a6a" stroke-width="1" rx="3"/>
+  <text x="310" y="392" fill="#e0e0e0" text-anchor="middle" font-size="9">[0x13|flags=0|len] | sender_idx | receiver_idx | noise_msg3 + neg</text>
+  <text x="310" y="412" fill="#666" text-anchor="middle" font-size="9">phase 0x3 &#8212; 111 bytes &#8212; pattern: &#8594; s, se</text>
+  <text x="20" y="424" fill="#d8a0f8" font-size="9">initiator identity revealed</text>
+
+  <!-- Step 4: Responder processes msg3, learns initiator identity -->
+  <text x="600" y="440" fill="#8af8c8" font-size="10" text-anchor="end">validates msg3</text>
+  <text x="600" y="454" fill="#8af8c8" font-size="10" text-anchor="end">learns initiator identity</text>
+  <text x="600" y="468" fill="#8af8c8" font-size="10" text-anchor="end">checks epoch, derives session keys</text>
 
   <!-- Handshake complete separator -->
-  <line x1="30" y1="360" x2="230" y2="360" stroke="#d9904a" stroke-width="1.5"/>
-  <text x="310" y="364" fill="#d9904a" text-anchor="middle" font-size="11" font-weight="bold">HANDSHAKE COMPLETE</text>
-  <line x1="390" y1="360" x2="590" y2="360" stroke="#d9904a" stroke-width="1.5"/>
+  <line x1="30" y1="488" x2="230" y2="488" stroke="#d9904a" stroke-width="1.5"/>
+  <text x="310" y="492" fill="#d9904a" text-anchor="middle" font-size="11" font-weight="bold">HANDSHAKE COMPLETE</text>
+  <line x1="390" y1="488" x2="590" y2="488" stroke="#d9904a" stroke-width="1.5"/>
 
-  <!-- Arrow 3: first encrypted frame -->
-  <text x="20" y="392" fill="#777" font-size="10">first encrypted frame:</text>
-  <line x1="100" y1="406" x2="520" y2="406" stroke="#d94a6a" stroke-width="1.5" marker-end="url(#arrowR)"/>
-  <rect x="115" y="414" width="390" height="24" fill="#5a2d3d" stroke="#d94a6a" stroke-width="1" rx="3"/>
-  <text x="310" y="430" fill="#e0e0e0" text-anchor="middle" font-size="9">[0x00|flags|len] | receiver_idx | counter=0 | ciphertext+tag</text>
-  <text x="310" y="450" fill="#666" text-anchor="middle" font-size="9">phase 0x0 — established frame</text>
+  <!-- Arrow 4: first encrypted frame -->
+  <text x="20" y="516" fill="#777" font-size="10">first encrypted frame:</text>
+  <line x1="100" y1="530" x2="520" y2="530" stroke="#d9b04a" stroke-width="1.5" marker-end="url(#arrowR)"/>
+  <rect x="115" y="538" width="390" height="24" fill="#4a3d2d" stroke="#d9b04a" stroke-width="1" rx="3"/>
+  <text x="310" y="554" fill="#e0e0e0" text-anchor="middle" font-size="9">[0x00|flags|len] | receiver_idx | counter=0 | ciphertext+tag</text>
+  <text x="310" y="574" fill="#666" text-anchor="middle" font-size="9">phase 0x0 &#8212; established frame</text>
 
   <!-- Legend -->
-  <text x="310" y="478" fill="#555" text-anchor="middle" font-size="9">Both parties hold identical symmetric keys. Epoch exchange enables restart detection.</text>
+  <text x="310" y="600" fill="#555" text-anchor="middle" font-size="9">Both parties hold identical symmetric keys. Epoch + negotiation exchanged in msg2/msg3.</text>
 </svg>
