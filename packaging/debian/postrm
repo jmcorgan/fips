@@ -13,6 +13,11 @@ case "$1" in
         # Remove runtime directory
         rm -rf /run/fips/
 
+        # Remove DNS config files that fips-dns-setup may have created
+        rm -f /etc/systemd/dns-delegate/fips.dns-delegate
+        rm -f /etc/dnsmasq.d/fips.conf
+        rm -f /etc/NetworkManager/dnsmasq.d/fips.conf
+
         # Remove fips system group
         if getent group fips >/dev/null 2>&1; then
             groupdel fips 2>/dev/null || true
