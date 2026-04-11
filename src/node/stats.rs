@@ -222,6 +222,9 @@ pub struct BloomStats {
     pub nacks_received: u64,
     // Adaptive sizing
     pub size_changes: u64,
+    // Compression tracking
+    pub total_compressed_bytes: u64,
+    pub total_raw_bytes: u64,
 }
 
 impl BloomStats {
@@ -241,6 +244,8 @@ impl BloomStats {
             nacks_sent: self.nacks_sent,
             nacks_received: self.nacks_received,
             size_changes: self.size_changes,
+            total_compressed_bytes: self.total_compressed_bytes,
+            total_raw_bytes: self.total_raw_bytes,
         }
     }
 }
@@ -415,6 +420,8 @@ pub struct BloomStatsSnapshot {
     pub nacks_sent: u64,
     pub nacks_received: u64,
     pub size_changes: u64,
+    pub total_compressed_bytes: u64,
+    pub total_raw_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

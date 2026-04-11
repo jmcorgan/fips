@@ -52,7 +52,9 @@ impl Node {
         // K-bit flip detection: peer has cut over to the new session.
         // Check and perform cutover in a scoped borrow.
         {
-            let peer = self.peers.get(&node_addr).unwrap();
+            let Some(peer) = self.peers.get(&node_addr) else {
+                return;
+            };
             let k_bit_flipped =
                 received_k_bit != peer.current_k_bit() && peer.pending_new_session().is_some();
 
@@ -63,7 +65,9 @@ impl Node {
                     "Peer K-bit flip detected, promoting new session"
                 );
 
-                let peer = self.peers.get_mut(&node_addr).unwrap();
+                let Some(peer) = self.peers.get_mut(&node_addr) else {
+                    return;
+                };
                 if let Some(_old_our_index) = peer.handle_peer_kbit_flip() {
                     // New index was pre-registered in peers_by_index during
                     // msg1 handling (handshake.rs). Verify, don't duplicate.
@@ -83,7 +87,9 @@ impl Node {
         // Decrypt: try current session first, then previous (drain fallback)
         let ciphertext = &packet.data[header.ciphertext_offset()..];
         let plaintext = {
-            let peer = self.peers.get_mut(&node_addr).unwrap();
+            let Some(peer) = self.peers.get_mut(&node_addr) else {
+                return;
+            };
             let session = match peer.noise_session_mut() {
                 Some(s) => s,
                 None => {

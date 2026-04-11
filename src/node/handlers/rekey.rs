@@ -232,8 +232,10 @@ impl Node {
             if !peer.rekey_in_progress() || peer.rekey_msg1().is_none() {
                 continue;
             }
-            if peer.needs_msg1_resend(now_ms) {
-                to_resend.push((*node_addr, peer.rekey_msg1().unwrap().to_vec()));
+            if peer.needs_msg1_resend(now_ms)
+                && let Some(msg1) = peer.rekey_msg1()
+            {
+                to_resend.push((*node_addr, msg1.to_vec()));
             }
         }
 

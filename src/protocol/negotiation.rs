@@ -13,6 +13,25 @@
 //! Bytes 10+:  TLV entries, each:
 //!               [field_num:2 LE][length:2 LE][value:N]
 //! ```
+//!
+//! ## Node Profile Decision Tree
+//!
+//! Profiles are self-declared (bits 0-2 of the feature bitfield):
+//!
+//! - **Full** (0): Full routing. Combines bloom filters from children,
+//!   forwards transit traffic, participates in spanning tree.
+//! - **NonRouting** (1): Tree participation but no transit forwarding.
+//!   Receives bloom filters (one-way: F→N) but does not send them.
+//!   The full peer inserts N's identity via `leaf_dependents`.
+//! - **Leaf** (2): Single upstream peer, no tree/bloom/transit.
+//!   Full peer inserts L's identity via `leaf_dependents`.
+//!
+//! **Link pairing rule**: at least one side must be Full. Invalid
+//! pairings (N↔N, N↔L, L↔L) are rejected during FMP negotiation.
+//!
+//! **Routing implications**: `forward_lookup_request()` only considers
+//! Full peers as transit. `peer_inbound_filters()` excludes non-Full
+//! peers from bloom filter merging.
 
 use super::ProtocolError;
 
@@ -56,6 +75,16 @@ pub enum NodeProfile {
     NonRouting = 1,
     /// Leaf node. Single upstream peer, no tree/bloom/transit.
     Leaf = 2,
+}
+
+impl std::fmt::Display for NodeProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => write!(f, "full"),
+            Self::NonRouting => write!(f, "non-routing"),
+            Self::Leaf => write!(f, "leaf"),
+        }
+    }
 }
 
 impl TryFrom<u8> for NodeProfile {
@@ -274,7 +303,7 @@ impl NegotiationPayload {
     pub fn validate_profiles(ours: NodeProfile, theirs: NodeProfile) -> Result<(), ProtocolError> {
         if ours != NodeProfile::Full && theirs != NodeProfile::Full {
             return Err(ProtocolError::Malformed(format!(
-                "invalid profile pairing: {:?} <-> {:?} (at least one must be Full)",
+                "invalid profile pairing: {} <-> {} (at least one must be full)",
                 ours, theirs
             )));
         }

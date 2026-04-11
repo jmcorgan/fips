@@ -179,7 +179,9 @@ impl Node {
         // K-bit flip detection: peer has cut over to the new session.
         let received_k_bit = header.flags & FSP_FLAG_K != 0;
         {
-            let entry = self.sessions.get(src_addr).unwrap();
+            let Some(entry) = self.sessions.get(src_addr) else {
+                return;
+            };
             let k_bit_flipped =
                 received_k_bit != entry.current_k_bit() && entry.pending_new_session().is_some();
 
@@ -190,7 +192,9 @@ impl Node {
                     "Peer FSP K-bit flip detected, promoting new session"
                 );
                 let now_ms = Self::now_ms();
-                let entry = self.sessions.get_mut(src_addr).unwrap();
+                let Some(entry) = self.sessions.get_mut(src_addr) else {
+                    return;
+                };
                 entry.handle_peer_kbit_flip(now_ms);
             }
         }
@@ -445,8 +449,9 @@ impl Node {
                             src = %self.peer_display_name(src_addr),
                             "Dual FSP rekey initiation: we lose (larger addr), abandoning ours"
                         );
-                        let entry = self.sessions.get_mut(src_addr).unwrap();
-                        entry.abandon_rekey();
+                        if let Some(entry) = self.sessions.get_mut(src_addr) {
+                            entry.abandon_rekey();
+                        }
                     } else if has_pending {
                         // Guard: already have a pending session waiting for K-bit cutover
                         debug!(
@@ -488,9 +493,10 @@ impl Node {
 
                     // Store rekey state on the existing entry
                     let now_ms = Self::now_ms();
-                    let entry = self.sessions.get_mut(src_addr).unwrap();
-                    entry.set_rekey_state(handshake, false);
-                    entry.record_peer_rekey(now_ms);
+                    if let Some(entry) = self.sessions.get_mut(src_addr) {
+                        entry.set_rekey_state(handshake, false);
+                        entry.record_peer_rekey(now_ms);
+                    }
 
                     debug!(
                         src = %self.peer_display_name(src_addr),
@@ -1809,6 +1815,7 @@ impl Node {
         if original_packet.len() < 40 {
             return;
         }
+        // SAFETY: slice is exactly 16 bytes; length validated above (>= 40)
         let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
 
         // Rate limit ICMP PTB messages per source
@@ -1824,6 +1831,7 @@ impl Node {
         // kernel sees the PTB coming from a remote router, not from itself.
         // Linux ignores PTBs whose source matches a local address, which
         // causes a PMTUD blackhole when both src and ICMP-src are local.
+        // SAFETY: slice is exactly 16 bytes; length validated above (>= 40)
         let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[24..40]).unwrap());
         if let Some(response) = build_packet_too_big(original_packet, mtu, dest_addr)
             && let Some(tun_tx) = &self.tun_tx

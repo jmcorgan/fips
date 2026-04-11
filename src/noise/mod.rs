@@ -16,6 +16,26 @@
 //! The XX pattern handles both **link-layer peer authentication** (securing the
 //! direct link between neighboring nodes) and **session-layer end-to-end
 //! encryption** between arbitrary network addresses.
+//!
+//! ## Identity Timing
+//!
+//! Unlike IK (where the initiator's identity was in msg1), XX defers all
+//! identity disclosure:
+//!
+//! - **msg1**: Ephemeral only. No identity, no DH with static keys.
+//! - **msg2**: Responder reveals its static key to the initiator.
+//! - **msg3**: Initiator reveals its static key to the responder.
+//!
+//! Consequence: all identity-based checks that previously ran during msg1
+//! processing (restart detection, rekey detection, allow/deny lists,
+//! cross-connection resolution) are now deferred:
+//!
+//! - **Initiator** performs identity checks in `handle_msg2` after
+//!   decrypting the responder's static key.
+//! - **Responder** performs identity checks in `handle_msg3` after
+//!   decrypting the initiator's static key.
+//! - **msg1 handler** can only do address-based duplicate detection (same
+//!   transport + address). Identity-dependent decisions happen later.
 
 mod handshake;
 mod replay;

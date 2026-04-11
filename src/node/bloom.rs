@@ -113,6 +113,8 @@ impl Node {
         } else {
             self.stats_mut().bloom.full_sends += 1;
         }
+        self.stats_mut().bloom.total_compressed_bytes += stats.compressed_bytes as u64;
+        self.stats_mut().bloom.total_raw_bytes += (stats.raw_words * 8) as u64;
 
         // Record send and store the filter for change detection
         debug!(

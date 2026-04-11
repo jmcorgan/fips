@@ -1,6 +1,7 @@
 //! Integration tests for end-to-end Noise XX handshake scenarios.
 
 use super::*;
+use super::spanning_tree::{cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node};
 
 #[tokio::test]
 async fn test_two_node_handshake_udp() {
@@ -988,4 +989,122 @@ async fn test_duplicate_msg2_dropped() {
     // No panic, no state change — that's the test
     assert_eq!(node.connection_count(), 0);
     assert_eq!(node.peer_count(), 0);
+}
+
+// ===== Profile Rejection Tests =====
+
+/// Helper: create two test nodes, set their profiles, attempt a handshake,
+/// and return whether they successfully peered.
+async fn attempt_profile_handshake(
+    profile_a: crate::protocol::NodeProfile,
+    profile_b: crate::protocol::NodeProfile,
+) -> (usize, usize) {
+    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    nodes[0].node.node_profile = profile_a;
+    nodes[1].node.node_profile = profile_b;
+
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+
+    let peers = (nodes[0].node.peer_count(), nodes[1].node.peer_count());
+    cleanup_nodes(&mut nodes).await;
+    peers
+}
+
+#[tokio::test]
+async fn test_nonrouting_nonrouting_rejected() {
+    use crate::protocol::NodeProfile;
+    let (a, b) = attempt_profile_handshake(NodeProfile::NonRouting, NodeProfile::NonRouting).await;
+    assert_eq!(a, 0, "NonRouting↔NonRouting should reject: node A");
+    assert_eq!(b, 0, "NonRouting↔NonRouting should reject: node B");
+}
+
+#[tokio::test]
+async fn test_leaf_leaf_rejected() {
+    use crate::protocol::NodeProfile;
+    let (a, b) = attempt_profile_handshake(NodeProfile::Leaf, NodeProfile::Leaf).await;
+    assert_eq!(a, 0, "Leaf↔Leaf should reject: node A");
+    assert_eq!(b, 0, "Leaf↔Leaf should reject: node B");
+}
+
+#[tokio::test]
+async fn test_nonrouting_leaf_rejected() {
+    use crate::protocol::NodeProfile;
+    let (a, b) = attempt_profile_handshake(NodeProfile::NonRouting, NodeProfile::Leaf).await;
+    assert_eq!(a, 0, "NonRouting↔Leaf should reject: node A");
+    assert_eq!(b, 0, "NonRouting↔Leaf should reject: node B");
+}
+
+#[tokio::test]
+async fn test_leaf_nonrouting_rejected() {
+    use crate::protocol::NodeProfile;
+    let (a, b) = attempt_profile_handshake(NodeProfile::Leaf, NodeProfile::NonRouting).await;
+    assert_eq!(a, 0, "Leaf↔NonRouting should reject: node A");
+    assert_eq!(b, 0, "Leaf↔NonRouting should reject: node B");
+}
+
+#[tokio::test]
+async fn test_full_nonrouting_accepted() {
+    use crate::protocol::NodeProfile;
+    let (a, b) = attempt_profile_handshake(NodeProfile::Full, NodeProfile::NonRouting).await;
+    assert_eq!(a, 1, "Full↔NonRouting should accept: node A");
+    assert_eq!(b, 1, "Full↔NonRouting should accept: node B");
+}
+
+#[tokio::test]
+async fn test_full_leaf_accepted() {
+    use crate::protocol::NodeProfile;
+    let (a, b) = attempt_profile_handshake(NodeProfile::Full, NodeProfile::Leaf).await;
+    assert_eq!(a, 1, "Full↔Leaf should accept: node A");
+    assert_eq!(b, 1, "Full↔Leaf should accept: node B");
+}
+
+// ===== XX Address-Based Dedup Tests =====
+
+#[tokio::test]
+async fn test_xx_duplicate_msg1_resends_msg2() {
+    use crate::node::wire::build_msg1;
+    use crate::transport::ReceivedPacket;
+
+    // Node B with NO transport — msg2 send silently skips (if let Some check),
+    // but the pending connection and link are created.
+    let mut node_b = make_node();
+    let transport_id = TransportId::new(1);
+
+    // Build a valid XX msg1 from an external initiator
+    let initiator = Identity::generate();
+    let mut hs = crate::noise::HandshakeState::new_initiator(initiator.keypair());
+    let noise_msg1 = hs.write_message_1().unwrap();
+    let sender_idx = SessionIndex::new(42);
+    let wire_msg1 = build_msg1(sender_idx, &noise_msg1);
+
+    let remote_addr = TransportAddr::from_string("10.0.0.1:2121");
+
+    // First msg1 → B creates pending inbound connection
+    let first_packet = ReceivedPacket {
+        transport_id,
+        remote_addr: remote_addr.clone(),
+        data: wire_msg1.clone(),
+        timestamp_ms: 1000,
+    };
+    node_b.handle_msg1(first_packet).await;
+
+    assert_eq!(node_b.connection_count(), 1, "B: 1 connection after first msg1");
+    assert_eq!(node_b.peer_count(), 0, "B: 0 peers (XX, no promotion at msg1)");
+
+    // Duplicate msg1 from same address → dedup triggers msg2 resend, not new handshake
+    let dup_packet = ReceivedPacket {
+        transport_id,
+        remote_addr: remote_addr.clone(),
+        data: wire_msg1.clone(),
+        timestamp_ms: 1100,
+    };
+    node_b.handle_msg1(dup_packet).await;
+
+    assert_eq!(
+        node_b.connection_count(),
+        1,
+        "B: still 1 connection after duplicate msg1 (dedup, not new handshake)"
+    );
+    assert_eq!(node_b.peer_count(), 0, "B: still 0 peers");
 }

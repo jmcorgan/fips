@@ -3,6 +3,23 @@
 //! Encodes a sequence of `u64` words using run-length encoding.
 //! Each run is encoded as `[count:2 LE][word:8 LE]` (10 bytes per run).
 //! Sparse data (XOR diffs with mostly zero words) compresses well.
+//!
+//! ## Delta vs Full Strategy
+//!
+//! The sender tracks `last_sent_filter` per peer. When a new filter is
+//! ready, the sender XORs it with the last-sent filter to produce a diff.
+//! The diff is mostly zero words (only changed bits set), which RLE
+//! compresses efficiently. If no previous filter exists (first send,
+//! size class change, or NACK recovery), a full filter is sent instead.
+//!
+//! The same RLE codec handles both cases — full filters at ~25% fill
+//! still benefit from zero-word runs between set regions.
+//!
+//! ## NACK Recovery
+//!
+//! If the receiver detects a sequence gap (missed delta), it sends a
+//! NACK. The sender responds with a full filter, resetting the delta
+//! baseline for that peer.
 
 /// Statistics from a compression operation.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,7 +10,7 @@ use crate::protocol::{LookupRequest, LookupResponse};
 use crate::tree::TreeCoordinate;
 use spanning_tree::{
     cleanup_nodes, generate_random_edges, process_available_packets, run_tree_test,
-    verify_tree_convergence,
+    run_tree_test_with_mtus, verify_tree_convergence,
 };
 
 // ============================================================================
@@ -881,4 +881,130 @@ async fn test_originator_stores_path_mtu_in_cache() {
         Some(1280),
         "Originator should store path_mtu from LookupResponse in cache"
     );
+}
+
+// ============================================================================
+// Integration Tests — min_mtu transit pruning
+// ============================================================================
+
+#[tokio::test]
+async fn test_transit_prunes_lookup_by_min_mtu() {
+    // Topology: node0(1280) — node1(800) — node2(1280)
+    // Node0 initiates lookup for node2 with min_mtu=1280 (default TUN MTU).
+    // Node1's transport MTU is 800 < 1280, so node1 should NOT forward
+    // the request to node2. The lookup should fail (no cache entry).
+    let mtus = [1280, 800, 1280];
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test_with_mtus(&mtus, &edges).await;
+
+    let node2_addr = *nodes[2].node.node_addr();
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(node2_addr, node2_pubkey);
+
+    nodes[0].node.initiate_lookup(&node2_addr, 8).await;
+
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    assert!(
+        !nodes[0].node.coord_cache().contains(&node2_addr, now_ms),
+        "Node0 should NOT have cached node2 route (transit pruned by min_mtu)"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_transit_forwards_when_mtu_sufficient() {
+    // Topology: node0(1280) — node1(1400) — node2(1280)
+    // Node0 initiates lookup for node2 with min_mtu=1280 (default TUN MTU).
+    // Node1's transport MTU is 1400 >= 1280, so the request passes through.
+    // Node1 annotates path_mtu = min(u16::MAX, 1400) = 1400 on response.
+    let mtus = [1280, 1400, 1280];
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test_with_mtus(&mtus, &edges).await;
+
+    let node2_addr = *nodes[2].node.node_addr();
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(node2_addr, node2_pubkey);
+
+    nodes[0].node.initiate_lookup(&node2_addr, 8).await;
+
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    assert!(
+        nodes[0].node.coord_cache().contains(&node2_addr, now_ms),
+        "Node0 should have cached node2 route (MTU sufficient)"
+    );
+
+    let entry = nodes[0].node.coord_cache().get_entry(&node2_addr).unwrap();
+    let path_mtu = entry.path_mtu().expect("path_mtu should be set");
+    assert_eq!(
+        path_mtu, 1400,
+        "path_mtu should reflect transit node's transport MTU (1400)"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_response_path_mtu_four_node_chain() {
+    // Topology: node0(1280) — node1(1400) — node2(900) — node3(1280)
+    // Node0 initiates lookup for node3. Response travels node3→node2→node1→node0.
+    // Transit nodes apply min(): node2 sees min(u16::MAX, 900) = 900,
+    // node1 sees min(900, 1400) = 900.
+    // Final path_mtu at node0 should be 900 (bottleneck at node2).
+    //
+    // Note: min_mtu=1280 from TUN config. Node2's MTU (900) < 1280 would prune
+    // the forward request at node2, so node3 would never be reached. To test
+    // path_mtu annotation we need all transit links to pass the min_mtu check.
+    // Use MTUs above 1280 to avoid pruning but with different values to verify min().
+    let mtus = [1280, 1500, 1350, 1280];
+    let edges = vec![(0, 1), (1, 2), (2, 3)];
+    let mut nodes = run_tree_test_with_mtus(&mtus, &edges).await;
+
+    let node3_addr = *nodes[3].node.node_addr();
+    let node3_pubkey = nodes[3].node.identity().pubkey_full();
+    nodes[0].node.register_identity(node3_addr, node3_pubkey);
+
+    nodes[0].node.initiate_lookup(&node3_addr, 8).await;
+
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    assert!(
+        nodes[0].node.coord_cache().contains(&node3_addr, now_ms),
+        "Node0 should have cached node3 route"
+    );
+
+    let entry = nodes[0].node.coord_cache().get_entry(&node3_addr).unwrap();
+    let path_mtu = entry.path_mtu().expect("path_mtu should be set");
+    assert_eq!(
+        path_mtu, 1350,
+        "Four-node chain path_mtu should be min of transit MTUs (1350)"
+    );
+
+    cleanup_nodes(&mut nodes).await;
 }

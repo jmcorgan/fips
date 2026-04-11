@@ -377,7 +377,11 @@ impl Node {
             return;
         }
 
-        let conn = self.connections.get_mut(&link_id).unwrap();
+        let Some(conn) = self.connections.get_mut(&link_id) else {
+            warn!(link_id = %link_id, "Connection removed during msg2 processing");
+            self.pending_outbound.remove(&key);
+            return;
+        };
 
         // Create FMP negotiation payload for msg3 (includes profile, MMP bits, bloom TLV)
         let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
@@ -403,7 +407,7 @@ impl Node {
             match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!(link_id = %link_id, error = %e, "FMP negotiation failed");
+                    warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
                     conn.mark_failed();
                     return;
                 }
@@ -524,7 +528,11 @@ impl Node {
                     );
 
                     // Update peers_by_index: remove old inbound index, add outbound
-                    let transport_id = peer.transport_id().unwrap();
+                    let Some(transport_id) = peer.transport_id() else {
+                        warn!(peer = %self.peer_display_name(&peer_node_addr), "Active peer missing transport_id during cross-connection");
+                        self.pending_outbound.remove(&key);
+                        return;
+                    };
                     if let Some(old_idx) = old_our_index {
                         self.peers_by_index
                             .remove(&(transport_id, old_idx.as_u32()));
@@ -746,7 +754,7 @@ impl Node {
             match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!(link_id = %link_id, error = %e, "FMP negotiation failed");
+                    warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
                     self.connections.remove(&link_id);
                     self.remove_link(&link_id);
                     return;
@@ -857,7 +865,11 @@ impl Node {
 
                         // Rekey: process as responder, store new session as pending
                         let noise_session = {
-                            let conn = self.connections.get_mut(&link_id).unwrap();
+                            let Some(conn) = self.connections.get_mut(&link_id) else {
+                                warn!(link_id = %link_id, "Connection removed during rekey msg3 processing");
+                                self.links.remove(&link_id);
+                                return;
+                            };
                             conn.take_session()
                         };
                         let our_new_index = our_index;
@@ -1181,7 +1193,9 @@ impl Node {
 
             if this_wins {
                 // This connection wins, replace the existing peer
-                let old_peer = self.peers.remove(&peer_node_addr).unwrap();
+                let Some(old_peer) = self.peers.remove(&peer_node_addr) else {
+                    return Err(NodeError::PeerNotFound(peer_node_addr));
+                };
                 let loser_link_id = old_peer.link_id();
 
                 // Clean up old peer's index from peers_by_index
@@ -1361,8 +1375,8 @@ fn process_fmp_negotiation(
 
     debug!(
         link_id = %conn.link_id(),
-        our_profile = ?our_profile,
-        peer_profile = ?their_profile,
+        our_profile = %our_profile,
+        peer_profile = %their_profile,
         "FMP negotiation complete"
     );
 

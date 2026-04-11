@@ -408,4 +408,56 @@ mod tests {
         let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
         assert_eq!(rr, decoded);
     }
+
+    #[test]
+    fn test_sender_report_v1_parsed_by_v0_decoder() {
+        let sr = sample_sender_report();
+        let mut encoded = sr.encode();
+        // Set format_version = 1
+        encoded[1] = 1;
+        // Extend with hypothetical v1 fields (8 extra bytes)
+        let new_total_len = SENDER_REPORT_PAYLOAD + 8;
+        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
+        encoded.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+        // v0 decoder parses known fields correctly
+        let decoded = SenderReport::decode(&encoded[1..]).unwrap();
+        assert_eq!(sr, decoded);
+    }
+
+    #[test]
+    fn test_receiver_report_v1_parsed_by_v0_decoder() {
+        let rr = sample_receiver_report();
+        let mut encoded = rr.encode();
+        // Set format_version = 1
+        encoded[1] = 1;
+        // Extend with hypothetical v1 fields (12 extra bytes)
+        let new_total_len = RECEIVER_REPORT_PAYLOAD + 12;
+        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
+        encoded.extend_from_slice(&[0xAB; 12]);
+        // v0 decoder parses known fields correctly
+        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
+        assert_eq!(rr, decoded);
+    }
+
+    #[test]
+    fn test_sender_report_v1_total_length_too_short() {
+        let sr = sample_sender_report();
+        let mut encoded = sr.encode();
+        // Set format_version = 1 but total_length < v0 payload size
+        encoded[1] = 1;
+        let short_len: u16 = SENDER_REPORT_PAYLOAD - 2;
+        encoded[2..4].copy_from_slice(&short_len.to_le_bytes());
+        assert!(SenderReport::decode(&encoded[1..]).is_err());
+    }
+
+    #[test]
+    fn test_receiver_report_v1_total_length_too_short() {
+        let rr = sample_receiver_report();
+        let mut encoded = rr.encode();
+        // Set format_version = 1 but total_length < v0 payload size
+        encoded[1] = 1;
+        let short_len: u16 = RECEIVER_REPORT_PAYLOAD - 4;
+        encoded[2..4].copy_from_slice(&short_len.to_le_bytes());
+        assert!(ReceiverReport::decode(&encoded[1..]).is_err());
+    }
 }
