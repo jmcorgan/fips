@@ -53,14 +53,28 @@ peers:       # Static peer list
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.control.enabled` | bool | `true` | Enable the Unix domain control socket |
-| `node.control.socket_path` | string | *(auto)* | Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock`, then `/run/fips/control.sock` (if root), then `/tmp/fips-control.sock` |
+| `node.control.enabled` | bool | `true` | Enable the control socket |
+| `node.control.socket_path` | string | *(auto)* | **Linux:** Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock`, then `/run/fips/control.sock` (if root), then `/tmp/fips-control.sock`. **Windows:** TCP port number (default: `21210`); the control socket listens on `localhost` at this port. |
 
 The control socket provides access to node state and runtime management
 via the `fipsctl` command-line tool. In addition to read-only status
 queries, `fipsctl connect` and `fipsctl disconnect` enable runtime peer
 management. See the project [README](../../README.md#inspect) for the
 command list.
+
+On Linux, the control socket is a Unix domain socket with filesystem
+permissions (mode 0770, group `fips`). On Windows, it is a TCP listener
+on localhost. TCP does not provide filesystem-level ACLs, so any local
+user can connect to the control port.
+
+> **Security note (Windows):** The TCP control socket on Windows is a
+> known limitation. Any process running on the local machine can connect
+> to the control port and issue commands, including `disconnect`,
+> `connect`, and `inject-config`. This is acceptable for single-user
+> workstations but may be inappropriate for shared machines. Future
+> improvements may include named pipe support (with Windows ACLs) or an
+> authentication token mechanism. On shared Windows systems, consider
+> using firewall rules to restrict access to the control port.
 
 All tunable protocol parameters live under `node.*`, organized as sysctl-style
 dotted paths. The top-level sections (`tun`, `dns`, `transports`, `peers`)

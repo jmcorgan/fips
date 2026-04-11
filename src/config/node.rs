@@ -488,13 +488,26 @@ impl ControlConfig {
         true
     }
 
+    /// Default control socket path.
+    ///
+    /// On Unix, returns a Unix domain socket path (XDG_RUNTIME_DIR, /run/fips,
+    /// or /tmp fallback). On Windows, returns a TCP port number as a string
+    /// since Windows does not support Unix domain sockets; the control socket
+    /// listens on localhost at this port.
     fn default_socket_path() -> String {
-        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            format!("{runtime_dir}/fips/control.sock")
-        } else if std::fs::create_dir_all("/run/fips").is_ok() {
-            "/run/fips/control.sock".to_string()
-        } else {
-            "/tmp/fips-control.sock".to_string()
+        #[cfg(unix)]
+        {
+            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                format!("{runtime_dir}/fips/control.sock")
+            } else if std::fs::create_dir_all("/run/fips").is_ok() {
+                "/run/fips/control.sock".to_string()
+            } else {
+                "/tmp/fips-control.sock".to_string()
+            }
+        }
+        #[cfg(windows)]
+        {
+            "21210".to_string()
         }
     }
 }
@@ -809,5 +822,17 @@ mod tests {
         assert!(c.enabled); // default
         assert!((c.loss_threshold - 0.02).abs() < 1e-9);
         assert!((c.etx_threshold - 3.0).abs() < 1e-9); // default
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_default_socket_path_windows() {
+        let config = ControlConfig::default();
+        // On Windows, socket_path is a TCP port number
+        let port: u16 = config
+            .socket_path
+            .parse()
+            .expect("should be a valid port number");
+        assert_eq!(port, 21210);
     }
 }

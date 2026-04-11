@@ -68,6 +68,49 @@ pub fn pub_file_path(config_path: &Path) -> PathBuf {
         .join(PUB_FILENAME)
 }
 
+/// Default control socket path for fipsctl / fipstop.
+///
+/// On Unix, checks the system-wide path first (used when the daemon runs as
+/// a systemd service), then falls back to the user's XDG runtime directory.
+/// On Windows, returns the default TCP port ("21210").
+pub fn default_control_path() -> PathBuf {
+    #[cfg(unix)]
+    {
+        if Path::new("/run/fips").exists() {
+            PathBuf::from("/run/fips/control.sock")
+        } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            PathBuf::from(format!("{runtime_dir}/fips/control.sock"))
+        } else {
+            PathBuf::from("/tmp/fips-control.sock")
+        }
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from("21210")
+    }
+}
+
+/// Default gateway control socket path.
+///
+/// On Unix, follows the same pattern as the main control socket.
+/// On Windows, returns a placeholder TCP port ("21211").
+pub fn default_gateway_path() -> PathBuf {
+    #[cfg(unix)]
+    {
+        if Path::new("/run/fips").exists() {
+            PathBuf::from("/run/fips/gateway.sock")
+        } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            PathBuf::from(format!("{runtime_dir}/fips/gateway.sock"))
+        } else {
+            PathBuf::from("/tmp/fips-gateway.sock")
+        }
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from("21211")
+    }
+}
+
 /// Read a bare bech32 nsec from a key file.
 pub fn read_key_file(path: &Path) -> Result<String, ConfigError> {
     let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFile {
@@ -83,21 +126,26 @@ pub fn read_key_file(path: &Path) -> Result<String, ConfigError> {
     Ok(nsec)
 }
 
-/// Write a bare bech32 nsec to a key file with restricted permissions (mode 0600).
+/// Write a bare bech32 nsec to a key file with restricted permissions.
+///
+/// On Unix, the file is created with mode 0600 (owner read/write only).
+/// On Windows, the file inherits default ACLs from the parent directory.
 pub fn write_key_file(path: &Path, nsec: &str) -> Result<(), ConfigError> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| ConfigError::WriteKeyFile {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    let mut file = opts.open(path).map_err(|e| ConfigError::WriteKeyFile {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
 
     file.write_all(nsec.as_bytes())
         .map_err(|e| ConfigError::WriteKeyFile {
@@ -112,21 +160,26 @@ pub fn write_key_file(path: &Path, nsec: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Write a bare bech32 npub to a public key file (mode 0644).
+/// Write a bare bech32 npub to a public key file.
+///
+/// On Unix, the file is created with mode 0644 (owner read/write, others read).
+/// On Windows, the file inherits default ACLs from the parent directory.
 pub fn write_pub_file(path: &Path, npub: &str) -> Result<(), ConfigError> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o644)
-        .open(path)
-        .map_err(|e| ConfigError::WriteKeyFile {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o644);
+    }
+
+    let mut file = opts.open(path).map_err(|e| ConfigError::WriteKeyFile {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
 
     file.write_all(npub.as_bytes())
         .map_err(|e| ConfigError::WriteKeyFile {
@@ -672,7 +725,8 @@ node:
         // Should include current directory
         assert!(paths.iter().any(|p| p.ends_with("fips.yaml")));
 
-        // Should include /etc/fips
+        // Should include /etc/fips on Unix
+        #[cfg(unix)]
         assert!(
             paths
                 .iter()
@@ -710,6 +764,7 @@ node:
         assert_eq!(loaded_identity.npub(), identity.npub());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_key_file_permissions() {
         use std::os::unix::fs::MetadataExt;
@@ -723,6 +778,7 @@ node:
         assert_eq!(metadata.mode() & 0o777, 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pub_file_permissions() {
         use std::os::unix::fs::MetadataExt;
@@ -770,6 +826,26 @@ node:
             pub_file_path(&config_path),
             PathBuf::from("/etc/fips/fips.pub")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_key_file_write_read_roundtrip_windows() {
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("fips.key");
+
+        let identity = crate::Identity::generate();
+        let nsec = crate::encode_nsec(&identity.keypair().secret_key());
+
+        write_key_file(&key_path, &nsec).unwrap();
+
+        // Verify file was created and can be read back
+        let loaded_nsec = read_key_file(&key_path).unwrap();
+        assert_eq!(loaded_nsec, nsec);
+
+        // Verify the loaded nsec produces the same identity
+        let loaded_identity = crate::Identity::from_secret_str(&loaded_nsec).unwrap();
+        assert_eq!(loaded_identity.npub(), identity.npub());
     }
 
     #[test]

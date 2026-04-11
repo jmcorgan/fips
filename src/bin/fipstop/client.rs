@@ -1,30 +1,26 @@
 use serde_json::Value;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct ControlClient {
-    socket_path: PathBuf,
+    /// On Unix, this is a socket path. On Windows, this is a TCP port string.
+    address: String,
 }
 
 impl ControlClient {
-    pub fn new(socket_path: &Path) -> Self {
+    pub fn new(socket_path: &std::path::Path) -> Self {
         Self {
-            socket_path: socket_path.to_path_buf(),
+            address: socket_path.to_string_lossy().into_owned(),
         }
     }
 
     pub async fn query(&self, command: &str) -> Result<Value, String> {
-        let stream = timeout(IO_TIMEOUT, UnixStream::connect(&self.socket_path))
-            .await
-            .map_err(|_| "connection timed out".to_string())?
-            .map_err(|e| format!("connect: {e}"))?;
+        let stream = self.connect().await?;
 
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
 
         let request = format!("{{\"command\":\"{command}\"}}\n");
         timeout(IO_TIMEOUT, writer.write_all(request.as_bytes()))
@@ -61,5 +57,32 @@ impl ControlClient {
         }
 
         Ok(response.get("data").cloned().unwrap_or(Value::Null))
+    }
+
+    #[cfg(unix)]
+    async fn connect(&self) -> Result<tokio::net::UnixStream, String> {
+        timeout(IO_TIMEOUT, tokio::net::UnixStream::connect(&self.address))
+            .await
+            .map_err(|_| "connection timed out".to_string())?
+            .map_err(|e| format!("connect: {e}"))
+    }
+
+    #[cfg(windows)]
+    async fn connect(&self) -> Result<tokio::net::TcpStream, String> {
+        let port: u16 = match self.address.parse() {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!(
+                    "warning: invalid port '{}', using default 21210",
+                    self.address
+                );
+                21210
+            }
+        };
+        let addr = format!("127.0.0.1:{port}");
+        timeout(IO_TIMEOUT, tokio::net::TcpStream::connect(&addr))
+            .await
+            .map_err(|_| "connection timed out".to_string())?
+            .map_err(|e| format!("connect: {e}"))
     }
 }

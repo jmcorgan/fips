@@ -31,9 +31,7 @@ hex = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tun = { version = "0.8.5", features = ["async"] }
-libc = "0.2"
-tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process", "io-util"] }
 futures = "0.3"
 simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
@@ -41,9 +39,17 @@ tokio-socks = "0.5"
 
 rustables = { version = "0.8.7", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+tun = { version = "0.8.5", features = ["async"] }
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.20.0"
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+wintun = "0.5"
+windows-service = "0.7"
 
 [package.metadata.deb]
 maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"

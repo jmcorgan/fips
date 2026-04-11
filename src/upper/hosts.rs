@@ -17,7 +17,10 @@ use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
 /// Default path for the FIPS hosts file.
+#[cfg(unix)]
 pub const DEFAULT_HOSTS_PATH: &str = "/etc/fips/hosts";
+#[cfg(windows)]
+pub const DEFAULT_HOSTS_PATH: &str = r"C:\ProgramData\fips\hosts";
 
 /// Bidirectional hostname ↔ npub mapping table.
 #[derive(Debug, Clone, Default)]

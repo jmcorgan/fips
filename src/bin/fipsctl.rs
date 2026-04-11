@@ -1,7 +1,10 @@
 //! fipsctl — FIPS control client
 //!
-//! Connects to the FIPS daemon's Unix domain control socket, sends
-//! commands, and pretty-prints the JSON response.
+//! Connects to the FIPS daemon's control socket, sends commands, and
+//! pretty-prints the JSON response.
+//!
+//! On Unix, uses a Unix domain socket for local IPC.
+//! On Windows, uses a TCP connection to localhost.
 
 use clap::{Parser, Subcommand};
 use fips::config::{write_key_file, write_pub_file};
@@ -9,7 +12,6 @@ use fips::upper::hosts::HostMap;
 use fips::version;
 use fips::{Identity, encode_nsec};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,7 +42,7 @@ enum Commands {
     /// Generate a new FIPS identity keypair
     Keygen {
         /// Output directory for fips.key and fips.pub
-        #[arg(short = 'd', long = "dir", default_value = "/etc/fips")]
+        #[arg(short = 'd', long = "dir", default_value_os_t = default_key_dir())]
         dir: PathBuf,
         /// Overwrite existing key files
         #[arg(short = 'f', long = "force")]
@@ -109,24 +111,18 @@ impl ShowCommands {
     }
 }
 
-/// Determine the default socket path.
-///
-/// Checks the system-wide path first (used when the daemon runs as a
-/// systemd service), then falls back to the user's XDG runtime directory.
-/// Uses directory existence rather than socket file existence so the check
-/// works even when the user lacks traverse permission on /run/fips/ (0750).
 fn default_socket_path() -> PathBuf {
-    if Path::new("/run/fips").exists() {
-        PathBuf::from("/run/fips/control.sock")
-    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(format!("{runtime_dir}/fips/control.sock"))
-    } else {
-        PathBuf::from("/tmp/fips-control.sock")
-    }
+    fips::config::default_control_path()
 }
 
 /// Send a JSON request to the control socket and return the response.
+///
+/// On Unix, connects via Unix domain socket.
+/// On Windows, connects via TCP to localhost.
+#[cfg(unix)]
 fn send_request(socket_path: &Path, request_json: &str) -> Result<serde_json::Value, String> {
+    use std::os::unix::net::UnixStream;
+
     let mut stream = UnixStream::connect(socket_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             format!(
@@ -143,6 +139,46 @@ fn send_request(socket_path: &Path, request_json: &str) -> Result<serde_json::Va
                 e
             )
         }
+    })?;
+
+    let timeout = Duration::from_secs(5);
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    stream
+        .write_all(request_json.as_bytes())
+        .map_err(|e| format!("failed to send request: {e}"))?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+
+    let reader = BufReader::new(&stream);
+    let line = reader
+        .lines()
+        .next()
+        .ok_or("no response from daemon")?
+        .map_err(|e| format!("failed to read response: {e}"))?;
+
+    serde_json::from_str(&line).map_err(|e| format!("invalid response JSON: {e}"))
+}
+
+#[cfg(windows)]
+fn send_request(socket_path: &Path, request_json: &str) -> Result<serde_json::Value, String> {
+    use std::net::TcpStream;
+
+    let port_str = socket_path.to_string_lossy();
+    let port: u16 = match port_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("warning: invalid port '{}', using default 21210", port_str);
+            21210
+        }
+    };
+    let addr = format!("127.0.0.1:{port}");
+
+    let mut stream = TcpStream::connect(&addr).map_err(|e| {
+        format!(
+            "cannot connect to {}: {}\nIs the FIPS daemon running?",
+            addr, e
+        )
     })?;
 
     let timeout = Duration::from_secs(5);
@@ -199,10 +235,24 @@ fn print_response(value: &serde_json::Value) {
     println!("{}", output.unwrap_or_else(|_| format!("{value}")));
 }
 
+/// Default directory for keygen output.
+fn default_key_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/etc/fips")
+    }
+    #[cfg(windows)]
+    {
+        dirs::config_dir()
+            .map(|d| d.join("fips"))
+            .unwrap_or_else(|| PathBuf::from("C:\\ProgramData\\fips"))
+    }
+}
+
 /// Resolve a peer identifier to an npub.
 ///
 /// If the identifier starts with "npub1", it's returned as-is.
-/// Otherwise, it's looked up as a hostname in /etc/fips/hosts.
+/// Otherwise, it's looked up as a hostname in the hosts file.
 fn resolve_peer(peer: &str) -> String {
     if peer.starts_with("npub1") {
         return peer.to_string();
@@ -213,7 +263,10 @@ fn resolve_peer(peer: &str) -> String {
         Some(npub) => npub.to_string(),
         None => {
             eprintln!("error: unknown host '{peer}'");
-            eprintln!("Not found in /etc/fips/hosts and not an npub.");
+            eprintln!(
+                "Not found in {} and not an npub.",
+                fips::upper::hosts::DEFAULT_HOSTS_PATH
+            );
             std::process::exit(1);
         }
     }

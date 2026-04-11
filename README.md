@@ -63,8 +63,8 @@ cd fips
 cargo build --release
 ```
 
-Requires Rust 1.85+ (edition 2024) and a Unix-like OS with TUN support
-(Linux or macOS).
+Requires Rust 1.85+ (edition 2024). Linux, macOS, and Windows are
+supported (see transport matrix below).
 
 ### Transport support by platform
 
@@ -158,6 +158,44 @@ sudo tail -f /usr/local/var/log/fips/fips.log
 
 > **Note:** On macOS, the TUN device is named `utun<N>` (kernel-assigned)
 > rather than `fips0`.
+
+### Windows
+
+Build without BLE (requires Linux-only libdbus):
+
+```powershell
+cargo build --release --no-default-features --features tui
+```
+
+The [wintun](https://www.wintun.net/) driver is required for TUN support.
+Download `wintun.dll` and place it in the same directory as `fips.exe`.
+Running the daemon requires Administrator privileges for TUN creation.
+
+**Foreground mode:**
+
+```powershell
+.\fips.exe -c fips.yaml
+```
+
+**Windows Service:**
+
+```powershell
+# Install (requires Administrator)
+.\fips.exe --install-service
+
+# Manage via standard service tools
+sc start fips
+sc stop fips
+
+# Uninstall
+.\fips.exe --uninstall-service
+```
+
+Place `fips.yaml` in the current directory or `%APPDATA%\fips\`, or set
+the `FIPS_CONFIG` environment variable.
+
+The control socket uses TCP on `localhost:21210` instead of a Unix domain
+socket. `fipsctl` and `fipstop` connect to this port automatically.
 
 ## Configuration
 
