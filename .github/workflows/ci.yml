@@ -47,12 +47,21 @@ jobs:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
           - os: macos-latest
+          - os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set SOURCE_DATE_EPOCH from git
+      - name: Set SOURCE_DATE_EPOCH from git (Unix)
+        if: runner.os != 'Windows'
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Set SOURCE_DATE_EPOCH from git (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $epoch = git log -1 --format=%ct
+          echo "SOURCE_DATE_EPOCH=$epoch" >> $env:GITHUB_ENV
 
       - name: Install system dependencies (Linux only)
         if: runner.os == 'Linux'
@@ -73,7 +82,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --release ${{ runner.os == 'macOS' && '--no-default-features --features tui' || '--features gateway' }}
+        run: cargo build --release ${{ (runner.os == 'macOS' || runner.os == 'Windows') && '--no-default-features --features tui' || '--features gateway' }}
 
       - name: SHA-256 hashes (Linux)
         if: runner.os == 'Linux'
@@ -82,6 +91,11 @@ jobs:
       - name: SHA-256 hashes (macOS)
         if: runner.os == 'macOS'
         run: shasum -a 256 target/release/fips target/release/fipsctl target/release/fipstop
+
+      - name: SHA-256 hashes (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Get-FileHash target\release\fips.exe, target\release\fipsctl.exe, target\release\fipstop.exe -Algorithm SHA256
 
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
@@ -164,6 +178,35 @@ jobs:
 
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run unit tests
+        run: cargo nextest run --all --profile ci --no-default-features --features tui
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2c – Unit tests (Windows)
+# ─────────────────────────────────────────────────────────────────────────────
+  test-windows:
+    name: Unit tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

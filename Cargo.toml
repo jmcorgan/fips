@@ -31,9 +31,7 @@ hex = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tun = { version = "0.8.5", features = ["async"] }
-libc = "0.2"
-tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process", "io-util"] }
 futures = "0.3"
 simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
@@ -41,9 +39,17 @@ tokio-socks = "0.5"
 
 rustables = { version = "0.8.7", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+tun = { version = "0.8.5", features = ["async"] }
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.20.0"
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+wintun = "0.5"
+windows-service = "0.7"
 
 [package.metadata.deb]
 maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"
@@ -68,6 +74,8 @@ assets = [
     ["packaging/common/hosts", "/etc/fips/hosts", "644"],
     ["packaging/debian/fips.service", "/lib/systemd/system/fips.service", "644"],
     ["packaging/debian/fips-dns.service", "/lib/systemd/system/fips-dns.service", "644"],
+    ["packaging/common/fips-dns-setup", "/usr/lib/fips/fips-dns-setup", "755"],
+    ["packaging/common/fips-dns-teardown", "/usr/lib/fips/fips-dns-teardown", "755"],
     ["packaging/debian/fips.tmpfiles", "/usr/lib/tmpfiles.d/fips.conf", "644"],
     ["target/release/fips-gateway", "/usr/bin/", "755"],
     ["packaging/debian/fips-gateway.service", "/lib/systemd/system/fips-gateway.service", "644"],

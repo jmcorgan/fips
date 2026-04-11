@@ -18,6 +18,7 @@ mod platform;
 #[path = "socket_macos.rs"]
 mod platform;
 
+#[cfg(unix)]
 pub use platform::PacketSocket;
 
 // =============================================================================
@@ -263,11 +264,23 @@ mod async_impl {
     }
 }
 
+#[cfg(unix)]
 pub use async_impl::AsyncPacketSocket;
 
+#[cfg(unix)]
 impl PacketSocket {
     /// Wrap this socket in an async wrapper for tokio integration.
     pub fn into_async(self) -> Result<AsyncPacketSocket, TransportError> {
         AsyncPacketSocket::new(self)
     }
 }
+
+// =============================================================================
+// Windows: stub types (Ethernet not supported on Windows)
+// =============================================================================
+
+#[cfg(windows)]
+pub struct PacketSocket;
+
+#[cfg(windows)]
+pub struct AsyncPacketSocket;

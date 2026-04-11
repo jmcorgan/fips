@@ -9,7 +9,7 @@ use client::ControlClient;
 use event::{Event, EventHandler};
 use fips::version;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// FIPS mesh monitoring TUI
@@ -34,31 +34,12 @@ struct Cli {
     refresh: u64,
 }
 
-/// Determine the default socket path.
-///
-/// Checks the system-wide path first (used when the daemon runs as a
-/// systemd service), then falls back to the user's XDG runtime directory.
-/// Uses directory existence rather than socket file existence so the check
-/// works even when the user lacks traverse permission on /run/fips/ (0750).
 fn default_socket_path() -> PathBuf {
-    if Path::new("/run/fips").exists() {
-        PathBuf::from("/run/fips/control.sock")
-    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(format!("{runtime_dir}/fips/control.sock"))
-    } else {
-        PathBuf::from("/tmp/fips-control.sock")
-    }
+    fips::config::default_control_path()
 }
 
-/// Determine the default gateway socket path.
 fn default_gateway_socket_path() -> PathBuf {
-    if Path::new("/run/fips").exists() {
-        PathBuf::from("/run/fips/gateway.sock")
-    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(format!("{runtime_dir}/fips/gateway.sock"))
-    } else {
-        PathBuf::from("/tmp/fips-gateway.sock")
-    }
+    fips::config::default_gateway_path()
 }
 
 fn restore_terminal() {

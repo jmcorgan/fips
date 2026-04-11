@@ -9,6 +9,7 @@ mod ble;
 mod bloom;
 mod disconnect;
 mod discovery;
+#[cfg(unix)]
 mod ethernet;
 mod forwarding;
 mod handshake;

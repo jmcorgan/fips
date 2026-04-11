@@ -30,6 +30,7 @@ use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::protocol::NodeProfile;
+#[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
@@ -720,19 +721,23 @@ impl Node {
             transports.push(TransportHandle::Udp(udp));
         }
 
-        // Create Ethernet transport instances
-        let eth_instances: Vec<_> = self
-            .config
-            .transports
-            .ethernet
-            .iter()
-            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
-            .collect();
+        // Create Ethernet transport instances (Unix only — requires raw sockets)
+        #[cfg(unix)]
+        {
+            let eth_instances: Vec<_> = self
+                .config
+                .transports
+                .ethernet
+                .iter()
+                .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+                .collect();
 
-        for (name, eth_config) in eth_instances {
-            let transport_id = self.allocate_transport_id();
-            let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
-            transports.push(TransportHandle::Ethernet(eth));
+            for (name, eth_config) in eth_instances {
+                let transport_id = self.allocate_transport_id();
+                let eth =
+                    EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
+                transports.push(TransportHandle::Ethernet(eth));
+            }
         }
 
         // Create TCP transport instances
@@ -825,39 +830,49 @@ impl Node {
     ///
     /// Finds the Ethernet transport instance bound to the named interface
     /// and parses the MAC portion into a 6-byte TransportAddr.
+    #[allow(unused_variables)]
     fn resolve_ethernet_addr(
         &self,
         addr_str: &str,
     ) -> Result<(TransportId, TransportAddr), NodeError> {
-        let (iface, mac_str) = addr_str.split_once('/').ok_or_else(|| {
-            NodeError::NoTransportForType(format!(
-                "invalid Ethernet address format '{}': expected 'interface/mac'",
-                addr_str
-            ))
-        })?;
-
-        // Find the Ethernet transport bound to this interface
-        let transport_id = self
-            .transports
-            .iter()
-            .find(|(_, handle)| {
-                handle.transport_type().name == "ethernet"
-                    && handle.is_operational()
-                    && handle.interface_name() == Some(iface)
-            })
-            .map(|(id, _)| *id)
-            .ok_or_else(|| {
+        #[cfg(unix)]
+        {
+            let (iface, mac_str) = addr_str.split_once('/').ok_or_else(|| {
                 NodeError::NoTransportForType(format!(
-                    "no operational Ethernet transport for interface '{}'",
-                    iface
+                    "invalid Ethernet address format '{}': expected 'interface/mac'",
+                    addr_str
                 ))
             })?;
 
-        let mac = crate::transport::ethernet::parse_mac_string(mac_str).map_err(|e| {
-            NodeError::NoTransportForType(format!("invalid MAC in '{}': {}", addr_str, e))
-        })?;
+            // Find the Ethernet transport bound to this interface
+            let transport_id = self
+                .transports
+                .iter()
+                .find(|(_, handle)| {
+                    handle.transport_type().name == "ethernet"
+                        && handle.is_operational()
+                        && handle.interface_name() == Some(iface)
+                })
+                .map(|(id, _)| *id)
+                .ok_or_else(|| {
+                    NodeError::NoTransportForType(format!(
+                        "no operational Ethernet transport for interface '{}'",
+                        iface
+                    ))
+                })?;
 
-        Ok((transport_id, TransportAddr::from_bytes(&mac)))
+            let mac = crate::transport::ethernet::parse_mac_string(mac_str).map_err(|e| {
+                NodeError::NoTransportForType(format!("invalid MAC in '{}': {}", addr_str, e))
+            })?;
+
+            Ok((transport_id, TransportAddr::from_bytes(&mac)))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(NodeError::NoTransportForType(
+                "Ethernet transport is not supported on this platform".to_string(),
+            ))
+        }
     }
 
     /// Resolve a BLE address string (`"adapter/AA:BB:CC:DD:EE:FF"`) to a

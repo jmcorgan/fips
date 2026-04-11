@@ -42,8 +42,14 @@ fi
 
 rm -f /etc/systemd/system/fips.service
 rm -f /etc/systemd/system/fips-dns.service
+rm -rf /usr/lib/fips/
 systemctl daemon-reload
-echo "systemd units removed."
+echo "systemd units and DNS scripts removed."
+
+# Clean up DNS config files that fips-dns-setup may have created
+rm -f /etc/systemd/dns-delegate/fips.dns-delegate
+rm -f /etc/dnsmasq.d/fips.conf
+rm -f /etc/NetworkManager/dnsmasq.d/fips.conf
 
 # --- Remove tmpfiles.d entry ---
 

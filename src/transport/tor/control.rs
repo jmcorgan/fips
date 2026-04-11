@@ -138,11 +138,11 @@ impl TorControlClient {
     /// permission-based access control and are not reachable from containers
     /// unless explicitly mounted. The Debian default is `/run/tor/control`.
     pub async fn connect(addr: &str) -> Result<Self, TorControlError> {
+        #[cfg(unix)]
         if is_unix_socket_path(addr) {
-            Self::connect_unix(addr).await
-        } else {
-            Self::connect_tcp(addr).await
+            return Self::connect_unix(addr).await;
         }
+        Self::connect_tcp(addr).await
     }
 
     /// Connect via TCP to a control port at `host:port`.
@@ -182,14 +182,6 @@ impl TorControlClient {
             reader: BufReader::new(Box::new(read_half)),
             writer: Box::new(write_half),
         })
-    }
-
-    #[cfg(not(unix))]
-    async fn connect_unix(path: &str) -> Result<Self, TorControlError> {
-        Err(TorControlError::ConnectionFailed(format!(
-            "Unix sockets not supported on this platform: {}",
-            path
-        )))
     }
 
     /// Authenticate with the Tor daemon.
@@ -483,6 +475,7 @@ fn read_cookie_file(path: &Path) -> Result<Vec<u8>, TorControlError> {
 ///
 /// Returns true if the string starts with `/` or `./`, indicating a
 /// filesystem path rather than a `host:port` TCP address.
+#[cfg(unix)]
 fn is_unix_socket_path(addr: &str) -> bool {
     addr.starts_with('/') || addr.starts_with("./")
 }
@@ -559,6 +552,7 @@ mod tests {
 
     // === Unix socket path detection ===
 
+    #[cfg(unix)]
     #[test]
     fn test_is_unix_socket_path() {
         assert!(is_unix_socket_path("/run/tor/control"));
@@ -569,6 +563,7 @@ mod tests {
         assert!(!is_unix_socket_path("localhost:9051"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_unix_socket_nonexistent() {
         let result = TorControlClient::connect("/tmp/nonexistent-tor-control.sock").await;
@@ -577,6 +572,7 @@ mod tests {
         assert!(err.contains("control socket"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_unix_socket_roundtrip() {
         // Create a Unix socket listener, accept a connection, respond to AUTHENTICATE

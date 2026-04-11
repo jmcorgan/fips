@@ -11,6 +11,7 @@ make tarball    # systemd install tarball
 make ipk        # OpenWrt .ipk
 make aur        # Arch Linux AUR package (fips-git, local build + namcap)
 make pkg        # macOS .pkg installer
+make zip        # Windows .zip package
 make all        # deb + tarball (default)
 ```
 
@@ -24,6 +25,7 @@ packaging/
   macos/          macOS .pkg installer via pkgbuild
   systemd/        Generic Linux systemd tarball packaging
   openwrt/        OpenWrt .ipk packaging via cargo-zigbuild
+  windows/        Windows .zip package with service scripts
 ```
 
 ## Formats
@@ -99,6 +101,31 @@ sudo installer -pkg deploy/fips-<version>-macos-<arch>.pkg -target /
 
 # Remove
 sudo packaging/macos/uninstall.sh
+```
+
+### Windows (`.zip`)
+
+A ZIP archive containing binaries, default config, and PowerShell
+service helper scripts. Requires the [wintun](https://www.wintun.net/)
+driver for TUN support.
+
+```powershell
+# Build
+make zip
+
+# Or directly
+powershell -File packaging/windows/build-zip.ps1
+
+# Extract and install as service (requires Administrator)
+Expand-Archive deploy\fips-<version>-windows-x86_64.zip -DestinationPath fips
+cd fips
+powershell -File install-service.ps1
+
+# Uninstall (preserves config)
+powershell -File uninstall-service.ps1
+
+# Uninstall and remove config
+powershell -File uninstall-service.ps1 -RemoveAll
 ```
 
 ### Arch Linux (AUR)
