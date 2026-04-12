@@ -734,8 +734,7 @@ impl Node {
 
             for (name, eth_config) in eth_instances {
                 let transport_id = self.allocate_transport_id();
-                let eth =
-                    EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
+                let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
                 transports.push(TransportHandle::Ethernet(eth));
             }
         }

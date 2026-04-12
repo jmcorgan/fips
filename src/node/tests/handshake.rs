@@ -1,7 +1,7 @@
 //! Integration tests for end-to-end Noise XX handshake scenarios.
 
-use super::*;
 use super::spanning_tree::{cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node};
+use super::*;
 
 #[tokio::test]
 async fn test_two_node_handshake_udp() {
@@ -1089,8 +1089,16 @@ async fn test_xx_duplicate_msg1_resends_msg2() {
     };
     node_b.handle_msg1(first_packet).await;
 
-    assert_eq!(node_b.connection_count(), 1, "B: 1 connection after first msg1");
-    assert_eq!(node_b.peer_count(), 0, "B: 0 peers (XX, no promotion at msg1)");
+    assert_eq!(
+        node_b.connection_count(),
+        1,
+        "B: 1 connection after first msg1"
+    );
+    assert_eq!(
+        node_b.peer_count(),
+        0,
+        "B: 0 peers (XX, no promotion at msg1)"
+    );
 
     // Duplicate msg1 from same address → dedup triggers msg2 resend, not new handshake
     let dup_packet = ReceivedPacket {
