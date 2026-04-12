@@ -1,6 +1,7 @@
 //! Node lifecycle management: start, stop, and peer connection initiation.
 
 use super::{Node, NodeError, NodeState};
+use crate::node::acl::PeerAclContext;
 use crate::node::wire::build_msg1;
 use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
@@ -168,6 +169,7 @@ impl Node {
                 .await
             {
                 Ok(()) => return Ok(()),
+                Err(e @ NodeError::AccessDenied(_)) => return Err(e),
                 Err(e) => {
                     debug!(
                         npub = %peer_config.npub,
@@ -204,6 +206,13 @@ impl Node {
         peer_identity: PeerIdentity,
     ) -> Result<(), NodeError> {
         let peer_node_addr = *peer_identity.node_addr();
+
+        self.authorize_peer(
+            &peer_identity,
+            PeerAclContext::OutboundConnect,
+            transport_id,
+            &remote_addr,
+        )?;
 
         let is_connection_oriented = self
             .transports

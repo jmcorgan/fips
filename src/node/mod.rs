@@ -4,6 +4,7 @@
 //! holds all state required for mesh routing: identity, tree state,
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
+mod acl;
 mod bloom;
 mod discovery_rate_limit;
 mod handlers;
@@ -86,6 +87,9 @@ pub enum NodeError {
 
     #[error("invalid peer npub '{npub}': {reason}")]
     InvalidPeerNpub { npub: String, reason: String },
+
+    #[error("access denied: {0}")]
+    AccessDenied(String),
 
     #[error("max connections exceeded: {max}")]
     MaxConnectionsExceeded { max: usize },
@@ -439,6 +443,9 @@ pub struct Node {
     /// Populated at startup from peer config.
     peer_aliases: HashMap<NodeAddr, String>,
 
+    /// Reloadable peer ACL state from standard allow/deny files.
+    peer_acl: acl::PeerAclReloader,
+
     // === Host Map ===
     /// Static hostname → npub mapping for DNS resolution.
     /// Built at construction from peer aliases and /etc/fips/hosts.
@@ -499,12 +506,20 @@ impl Node {
         let backoff_max_secs = config.node.discovery.backoff_max_secs;
         let forward_min_interval_secs = config.node.discovery.forward_min_interval_secs;
 
-        let mut host_map = HostMap::from_peer_configs(config.peers());
+        let base_host_map = HostMap::from_peer_configs(config.peers());
+        let mut host_map = base_host_map.clone();
+        let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
         let hosts_file = HostMap::load_hosts_file(std::path::Path::new(
             crate::upper::hosts::DEFAULT_HOSTS_PATH,
         ));
         host_map.merge(hosts_file);
         let host_map = Arc::new(host_map);
+        let peer_acl = acl::PeerAclReloader::with_alias_sources(
+            std::path::PathBuf::from(acl::DEFAULT_PEERS_ALLOW_PATH),
+            std::path::PathBuf::from(acl::DEFAULT_PEERS_DENY_PATH),
+            base_host_map,
+            hosts_path,
+        );
 
         Ok(Self {
             identity,
@@ -565,6 +580,7 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             peer_aliases: HashMap::new(),
+            peer_acl,
             host_map,
         })
     }
@@ -613,7 +629,18 @@ impl Node {
         let max_links = config.node.limits.max_links;
         let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
 
-        let host_map = Arc::new(HostMap::new());
+        let base_host_map = HostMap::from_peer_configs(config.peers());
+        let mut host_map = base_host_map.clone();
+        host_map.merge(HostMap::load_hosts_file(std::path::Path::new(
+            crate::upper::hosts::DEFAULT_HOSTS_PATH,
+        )));
+        let host_map = Arc::new(host_map);
+        let peer_acl = acl::PeerAclReloader::with_alias_sources(
+            std::path::PathBuf::from(acl::DEFAULT_PEERS_ALLOW_PATH),
+            std::path::PathBuf::from(acl::DEFAULT_PEERS_DENY_PATH),
+            base_host_map,
+            std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH),
+        );
 
         Self {
             identity,
@@ -672,6 +699,7 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             peer_aliases: HashMap::new(),
+            peer_acl,
             host_map,
         }
     }

@@ -9,8 +9,11 @@
 //! evaluated first, an allowlist match overrides a denylist match for the
 //! same peer.
 
-use crate::upper::hosts::{file_mtime, HostMap, HostMapReloader, DEFAULT_HOSTS_PATH};
+use crate::node::{Node, NodeError};
+use crate::transport::{TransportAddr, TransportId};
+use crate::upper::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader, file_mtime};
 use crate::{NodeAddr, PeerIdentity};
+use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -60,7 +63,7 @@ pub enum PeerAclContext {
 }
 
 /// Snapshot of the currently loaded ACL state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PeerAclStatus {
     pub allow_file: String,
     pub deny_file: String,
@@ -105,6 +108,7 @@ impl PeerAcl {
     }
 
     /// Load the allow/deny files into a new ACL.
+    #[cfg(test)]
     pub fn load_files(allow_path: &Path, deny_path: &Path) -> Self {
         let hosts = HostMap::new();
         Self::load_files_with_hosts(allow_path, deny_path, &hosts)
@@ -290,6 +294,7 @@ pub struct PeerAclReloader {
 
 impl PeerAclReloader {
     /// Create a reloader using the standard ACL file locations.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::with_alias_sources(
             PathBuf::from(DEFAULT_PEERS_ALLOW_PATH),
@@ -299,7 +304,7 @@ impl PeerAclReloader {
         )
     }
 
-    /// Create a reloader for explicit file paths.
+    /// Create a reloader for explicit ACL file paths.
     #[cfg(test)]
     pub(crate) fn with_paths(allow_path: PathBuf, deny_path: PathBuf) -> Self {
         Self::with_alias_sources(
@@ -354,7 +359,16 @@ impl PeerAclReloader {
         }
     }
 
-    /// Check whether either ACL file changed and reload if needed.
+    /// Reload ACL files immediately, regardless of mtime.
+    pub fn reload_now(&mut self) {
+        self.last_allow_mtime = file_mtime(&self.allow_path);
+        self.last_deny_mtime = file_mtime(&self.deny_path);
+        let _ = self.hosts.check_reload();
+        self.acl =
+            PeerAcl::load_files_with_hosts(&self.allow_path, &self.deny_path, self.hosts.hosts());
+    }
+
+    /// Check whether ACL or hosts alias sources changed and reload if needed.
     pub fn check_reload(&mut self) -> bool {
         let allow_mtime = file_mtime(&self.allow_path);
         let deny_mtime = file_mtime(&self.deny_path);
@@ -383,6 +397,55 @@ impl PeerAclReloader {
             "Reloaded peer ACL files"
         );
         true
+    }
+}
+
+impl Node {
+    /// Reload the peer ACL if the ACL or hosts files changed.
+    pub(crate) fn reload_peer_acl(&mut self) -> bool {
+        self.peer_acl.check_reload()
+    }
+
+    /// Return a control-plane snapshot of the current peer ACL.
+    pub(crate) fn peer_acl_status(&self) -> PeerAclStatus {
+        self.peer_acl.status()
+    }
+
+    /// Force an immediate ACL reload via the control socket.
+    pub(crate) fn api_reload_acl(&mut self) -> serde_json::Value {
+        self.peer_acl.reload_now();
+        serde_json::to_value(self.peer_acl.status()).unwrap_or_default()
+    }
+
+    /// Reject a peer if the current ACL denies it.
+    pub(crate) fn authorize_peer(
+        &self,
+        peer_identity: &PeerIdentity,
+        context: PeerAclContext,
+        transport_id: TransportId,
+        remote_addr: &TransportAddr,
+    ) -> Result<(), NodeError> {
+        let decision = self.peer_acl.acl().check(peer_identity);
+        if decision.allowed() {
+            return Ok(());
+        }
+
+        let peer_node_addr = *peer_identity.node_addr();
+        warn!(
+            peer = %self.peer_display_name(&peer_node_addr),
+            npub = %peer_identity.npub(),
+            transport_id = %transport_id,
+            remote_addr = %remote_addr,
+            context = %context,
+            decision = %decision,
+            "Rejected peer by ACL"
+        );
+
+        Err(NodeError::AccessDenied(format!(
+            "peer {} rejected by ACL: {}",
+            peer_identity.npub(),
+            decision
+        )))
     }
 }
 
