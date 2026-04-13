@@ -1,6 +1,6 @@
 //! BLE transport statistics.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
