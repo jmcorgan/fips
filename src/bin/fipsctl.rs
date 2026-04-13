@@ -12,6 +12,7 @@ use fips::upper::hosts::HostMap;
 use fips::version;
 use fips::{Identity, encode_nsec};
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv6Addr, SocketAddrV6};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -249,6 +250,50 @@ fn default_key_dir() -> PathBuf {
     }
 }
 
+/// Check if `address` is an IPv6 literal in `fd00::/8` (FIPS mesh ULA range).
+///
+/// Handles three common syntaxes:
+///   - bare IPv6:          `fd9d:...`
+///   - bracketed + port:   `[fd9d:...]:2121`
+///   - bare IPv6 + port:   `fd9d:...:2121` (ambiguous; accepted if tail is numeric)
+fn is_fips_mesh_address(address: &str) -> bool {
+    let is_ula = |a: &Ipv6Addr| a.octets()[0] == 0xfd;
+
+    if let Ok(a) = address.parse::<Ipv6Addr>() {
+        return is_ula(&a);
+    }
+    if let Ok(sa) = address.parse::<SocketAddrV6>() {
+        return is_ula(sa.ip());
+    }
+    if let Some((host, port)) = address.rsplit_once(':')
+        && port.chars().all(|c| c.is_ascii_digit())
+        && !port.is_empty()
+    {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(a) = host.parse::<Ipv6Addr>() {
+            return is_ula(&a);
+        }
+    }
+    false
+}
+
+/// Reject `fd00::/8` addresses for transports that expect a reachable network endpoint.
+///
+/// FIPS mesh ULAs are derived from npubs and only make sense as destinations
+/// inside an already-established mesh — they are not valid udp/tcp/ethernet
+/// transport endpoints. Without this check the CLI echoes success while the
+/// daemon rejects the bind with EAFNOSUPPORT (issue #61).
+fn validate_connect_address(address: &str, transport: &str) -> Result<(), String> {
+    let checked = matches!(transport, "udp" | "tcp" | "ethernet");
+    if checked && is_fips_mesh_address(address) {
+        return Err(format!(
+            "'{address}' is a FIPS mesh address (fd00::/8), not a reachable {transport} endpoint.\n\
+             Provide the peer's routable IP/hostname and port (e.g., '192.0.2.1:2121' or 'peer.example.com:2121')."
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve a peer identifier to an npub.
 ///
 /// If the identifier starts with "npub1", it's returned as-is.
@@ -328,6 +373,10 @@ fn main() {
             address,
             transport,
         } => {
+            if let Err(e) = validate_connect_address(address, transport) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
             let npub = resolve_peer(peer);
             build_command(
                 "connect",
@@ -351,5 +400,64 @@ fn main() {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_bare_ula_literal() {
+        assert!(is_fips_mesh_address("fd9d:abcd::1"));
+        assert!(is_fips_mesh_address("fd00::"));
+        assert!(is_fips_mesh_address(
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        ));
+    }
+
+    #[test]
+    fn detects_bracketed_ula_with_port() {
+        assert!(is_fips_mesh_address("[fd9d:abcd::1]:2121"));
+        assert!(is_fips_mesh_address("[fd00::1]:8443"));
+    }
+
+    #[test]
+    fn detects_bare_ula_with_port() {
+        assert!(is_fips_mesh_address("fd9d:abcd::1:2121"));
+    }
+
+    #[test]
+    fn rejects_non_ula_ipv6() {
+        // fc00::/7 other half (fcXX:) is also ULA but not fd00::/8 — we only
+        // block the fd-prefixed half that FIPS actually uses.
+        assert!(!is_fips_mesh_address("fc00::1"));
+        assert!(!is_fips_mesh_address("::1"));
+        assert!(!is_fips_mesh_address("2001:db8::1"));
+        assert!(!is_fips_mesh_address("[2001:db8::1]:2121"));
+    }
+
+    #[test]
+    fn ignores_ipv4_and_hostnames() {
+        assert!(!is_fips_mesh_address("192.0.2.1:2121"));
+        assert!(!is_fips_mesh_address("peer.example.com:2121"));
+        assert!(!is_fips_mesh_address("coinos.pro:2121"));
+    }
+
+    #[test]
+    fn validates_only_target_transports() {
+        assert!(validate_connect_address("fd9d::1:2121", "udp").is_err());
+        assert!(validate_connect_address("fd9d::1:2121", "tcp").is_err());
+        assert!(validate_connect_address("fd9d::1:2121", "ethernet").is_err());
+        // Other transports are not inspected — they may legitimately accept
+        // non-IP endpoints (tor onion, etc.).
+        assert!(validate_connect_address("fd9d::1:2121", "tor").is_ok());
+    }
+
+    #[test]
+    fn allows_valid_endpoints() {
+        assert!(validate_connect_address("192.0.2.1:2121", "udp").is_ok());
+        assert!(validate_connect_address("peer.example.com:2121", "tcp").is_ok());
+        assert!(validate_connect_address("[2001:db8::1]:2121", "udp").is_ok());
     }
 }

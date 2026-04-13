@@ -45,8 +45,12 @@ endpoints.
   forward secrecy and protocol negotiation in the handshake
 - **Nostr-native identity** — secp256k1 keypairs as node addresses, no
   registration or central authority
-- **IPv6 adaptation** — TUN interface maps npubs to fd00::/8 addresses for
-  unmodified IP applications; static hostname mapping (`/etc/fips/hosts`)
+- **IPv6 adaptation** — TUN interface maps npubs to fd00::/8 addresses
+  for unmodified IP applications; built-in `.fips` DNS resolver with
+  optional static hostname mapping (`/etc/fips/hosts`)
+- **Outbound LAN gateway** — optional `fips-gateway` daemon lets
+  unmodified LAN hosts reach `.fips` destinations via a
+  DNS-allocated virtual IP pool and kernel nftables NAT
 - **Metrics Measurement Protocol** — per-link RTT, loss, jitter, and goodput
   measurement with mesh size estimation
 - **ECN congestion signaling** — hop-by-hop CE flag relay with RFC 3168 IPv6
@@ -69,17 +73,20 @@ supported (see transport matrix below).
 
 ### Transport support by platform
 
-| Transport | Linux | macOS | Windows |
-|-----------|:-----:|:-----:|:-------:|
-| UDP       |  ✅   |  ✅   |   ❌    |
-| TCP       |  ✅   |  ✅   |   ❌    |
-| Ethernet  |  ✅   |  ✅   |   ❌    |
-| Tor       |  ✅   |  ✅   |   ❌    |
-| BLE       |  ✅   |  ❌   |   ❌    |
+| Transport | Linux | macOS | Windows | OpenWrt |
+|-----------|:-----:|:-----:|:-------:|:-------:|
+| UDP       |  ✅   |  ✅   |   ✅    |   ✅    |
+| TCP       |  ✅   |  ✅   |   ✅    |   ✅    |
+| Ethernet  |  ✅   |  ✅   |   ❌    |   ✅    |
+| Tor       |  ✅   |  ✅   |   ✅    |   ✅    |
+| BLE       |  ✅   |  ❌   |   ❌    |   ❌    |
 
 On **Linux**, the BLE transport requires BlueZ and libdbus. On
 Debian/Ubuntu: `sudo apt install bluez libdbus-1-dev`. Then build with
 BLE enabled: `cargo build --release --features ble`.
+
+On **OpenWrt**, BLE is disabled because libdbus is not available on
+the target. All other transports work and ship in the default ipk.
 
 ## Installation
 
@@ -262,7 +269,11 @@ for the full reference.
 FIPS includes a DNS resolver (enabled by default, port 5354) that maps
 `.fips` names to fd00::/8 IPv6 addresses.
 
-**Linux** (systemd-resolved):
+**Linux**: The `.deb` package auto-detects and configures whichever
+resolver is present (systemd dns-delegate, systemd-resolved, dnsmasq,
+or NetworkManager with dnsmasq); no manual setup is needed. For
+manual or tarball installs, point your resolver at `127.0.0.1:5354`
+for the `fips` domain — e.g., with systemd-resolved:
 
 ```bash
 sudo resolvectl dns fips0 127.0.0.1:5354
@@ -323,13 +334,20 @@ including static topology tests and stochastic chaos simulation.
 
 ## Examples
 
-- [examples/wireguard-sidecar-macos/](examples/wireguard-sidecar-macos/) -
-  Run a local WireGuard sidecar on macOS so `.fips` traffic can reach the mesh
-  through Docker.
-
-The macOS WireGuard sidecar only forwards FIPS IPv6 traffic destined for
-`fd00::/8` from `wg0` to `fips0`. Regular internet traffic does not transit the
-sidecar and continues to use the host network normally.
+- [examples/sidecar-nostr-relay/](examples/sidecar-nostr-relay/) —
+  Run a [strfry](https://github.com/hoytech/strfry) Nostr relay
+  reachable exclusively over the FIPS mesh. The relay container shares
+  the FIPS sidecar's network namespace and is isolated from the host
+  network.
+- [examples/k8s-sidecar/](examples/k8s-sidecar/) — Run FIPS as a
+  Kubernetes Pod sidecar. The sidecar creates `fips0` in the Pod's
+  shared network namespace so every other container in the Pod gets
+  mesh access without modification.
+- [examples/wireguard-sidecar-macos/](examples/wireguard-sidecar-macos/) —
+  Reach the FIPS mesh from a macOS host through a local Docker
+  container over a WireGuard tunnel. Only traffic destined for
+  `fd00::/8` transits the sidecar; regular internet traffic continues
+  to use the host network.
 
 ## Documentation
 
@@ -346,8 +364,9 @@ If you want to contribute, start with:
 ## Project Structure
 
 ```text
-src/          Rust source (library + fips/fipsctl/fipstop binaries)
-packaging/    Debian, systemd tarball, and shared packaging files
+src/          Rust source (library + fips/fipsctl/fipstop/fips-gateway binaries)
+packaging/    Debian, macOS .pkg, Windows ZIP, OpenWrt ipk, AUR, systemd tarball
+examples/     Deployment examples (Nostr relay, K8s sidecar, macOS WireGuard)
 docs/design/  Protocol design specifications
 testing/      Docker-based integration test harnesses
 ```
@@ -364,14 +383,17 @@ Ethernet, Tor, and Bluetooth (BLE) with a small live mesh of deployed nodes.
 - Noise XX encryption at both layers with protocol negotiation
 - Periodic Noise rekey with hitless cutover for forward secrecy (FMP + FSP)
 - Persistent node identity with key file management
-- IPv6 TUN adapter with DNS resolution of `.fips` names
+- IPv6 TUN adapter with built-in `.fips` DNS resolver and multi-backend
+  auto-configuration (systemd dns-delegate, systemd-resolved, dnsmasq,
+  NetworkManager)
 - Static hostname mapping (`/etc/fips/hosts`) with auto-reload
 - Per-link metrics (RTT, loss, jitter, goodput) and mesh size estimation
 - ECN congestion signaling (hop-by-hop CE relay, IPv6 CE marking, kernel drop detection)
 - UDP, TCP, Ethernet, Tor, and BLE transports (BLE via L2CAP CoC with per-link MTU negotiation)
+- Outbound LAN gateway for unmodified hosts via DNS-allocated virtual IPs and nftables NAT
 - Runtime inspection and peer management via `fipsctl` and `fipstop`
 - Reproducible builds with toolchain pinning and SOURCE_DATE_EPOCH
-- Linux (Debian, systemd tarball, OpenWrt, AUR) and macOS packaging
+- Linux (Debian, systemd tarball, OpenWrt, AUR), macOS (`.pkg`), and Windows (ZIP, service) packaging
 - Docker-based integration and chaos testing
 
 ### Near-term priorities

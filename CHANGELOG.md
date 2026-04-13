@@ -85,6 +85,46 @@ with v0.2.x peers.
 
 ### Added
 
+#### Platform Support
+
+- Windows platform support: wintun TUN device, TCP control socket on
+  `localhost:21210` (in place of the Unix domain socket), Windows
+  Service lifecycle (`--install-service`, `--uninstall-service`,
+  `--service`), ZIP packaging with PowerShell install/uninstall scripts,
+  and CI build/test matrix entry
+  ([#45](https://github.com/jmcorgan/fips/pull/45))
+- macOS platform support: native `utun` TUN interface management, raw
+  Ethernet transport via BPF, `.pkg` packaging with launchd plist and
+  uninstall script, x86_64 cross-compile from arm64, and CI build/unit
+  test jobs
+- `gateway` Cargo feature flag gates the optional Linux-only
+  `rustables` dependency so macOS and Windows builds never pull in
+  nftables bindings
+
+#### Outbound LAN Gateway
+
+- New `fips-gateway` binary that lets unmodified LAN hosts reach FIPS
+  mesh destinations via DNS-allocated virtual IPs and kernel nftables
+  NAT. Virtual-IP pool (`fd01::/112` by default) with state-machine
+  lifecycle and TTL-based reclamation; conntrack-backed session
+  tracking; proxy NDP on the LAN interface; control socket at
+  `/run/fips/gateway.sock` with `show_gateway` and `show_mappings`;
+  fipstop Gateway tab with pool gauge and mappings table; design doc
+  at `docs/design/fips-gateway.md`; integration test harness
+- Gateway packaging: systemd service unit with `After=fips.service`,
+  Debian and AUR package entries, OpenWrt procd init with dnsmasq
+  forwarding, proxy NDP, RA route advertisements, and IPv6 forwarding
+  sysctls. Gateway enabled by default on OpenWrt
+
+#### Examples
+
+- macOS WireGuard sidecar: run FIPS in a local Docker container and
+  route `.fips` traffic from the macOS host through a WireGuard tunnel
+  to the container's `fips0` interface. Only traffic destined for
+  `fd00::/8` transits the sidecar; regular internet traffic continues
+  to use the host network
+  ([#51](https://github.com/jmcorgan/fips/pull/51))
+
 #### Bluetooth Transport
 
 - Bluetooth Low Energy (BLE) L2CAP Connection-Oriented Channel transport
@@ -96,6 +136,31 @@ with v0.2.x peers.
 - Cross-probe tie-breaker using deterministic NodeAddr comparison
 - Connection pool with configurable capacity and eviction
 
+#### DNS
+
+- Multi-backend `.fips` DNS configuration: a detection script
+  configures whichever resolver is available, in priority order:
+  systemd dns-delegate (systemd >= 258), systemd-resolved via
+  `resolvectl`, standalone dnsmasq, NetworkManager with the dnsmasq
+  plugin. Teardown reads the recorded backend from
+  `/run/fips/dns-backend` and reverses only what was applied
+  ([#58](https://github.com/jmcorgan/fips/pull/58),
+  fixes [#52](https://github.com/jmcorgan/fips/issues/52))
+
+#### Operator Configuration
+
+- `node.log_level` config field (case-insensitive, default `info`)
+  replaces the hardcoded `RUST_LOG=info` previously baked into
+  systemd units and the OpenWrt procd init script. The daemon now
+  loads config before initializing tracing so the configured level
+  takes effect; `RUST_LOG` still overrides when set
+
+#### Documentation
+
+- Pre-implementation proposal for NAT traversal using Nostr relays
+  as the signaling channel and STUN for reflexive address discovery
+  (`docs/proposals/`)
+
 #### Packaging and Deployment
 
 - Linux release artifact workflow: builds x86_64 and aarch64 tarballs
@@ -105,6 +170,20 @@ with v0.2.x peers.
   (development) packages with sysusers.d/tmpfiles.d integration
   ([#21](https://github.com/jmcorgan/fips/pull/21),
   [@dskvr](https://github.com/dskvr))
+
+### Changed
+
+- MMP link-layer report intervals retuned for constrained transports:
+  steady-state floor raised from 100ms to 1000ms, ceiling from 2000ms
+  to 5000ms. Cold-start uses a 200ms floor for the first 5 SRTT samples
+  before switching to steady-state. Reduces BLE overhead ~10× while
+  keeping reports well above the EWMA convergence threshold.
+  Session-layer intervals unchanged
+- 35 info-level log messages demoted to debug (handshake
+  cross-connection mechanics, periodic MMP telemetry, TUN/transport
+  shutdown, retry scheduling). Info output now focuses on
+  operator-relevant state changes: lifecycle events, peer promotions,
+  session establishment, parent switches, transport start/stop
 
 ### Fixed
 
@@ -118,6 +197,37 @@ with v0.2.x peers.
   unavailable on OpenWrt targets
 - IPv6 routing policy rule added at TUN setup to protect `fd00::/8`
   from interception by Tailscale's table 52 default route
+- Bloom filter routing no longer swallows traffic when no bloom
+  candidate is strictly closer than the current node. `find_next_hop`
+  now falls through to greedy tree routing in that case instead of
+  returning `NoRoute`, which previously caused dropped packets in
+  topologies where the tree parent was closer but not a bloom
+  candidate
+- Auto-connect peers now reconnect after a graceful `Disconnect`
+  notification from the remote side. `handle_disconnect` previously
+  removed the peer without scheduling a reconnect, orphaning the
+  entry on a clean upstream shutdown; the other removal paths
+  (link-dead, decrypt failure, peer restart) already scheduled
+  reconnect ([#60](https://github.com/jmcorgan/fips/issues/60),
+  reported by [@SwapMarket](https://github.com/SwapMarket))
+- `fipsctl connect` now rejects FIPS mesh (`fd00::/8`) addresses for
+  `udp`, `tcp`, and `ethernet` transports with a clear error message
+  instead of echoing success while the daemon silently failed the
+  bind with `EAFNOSUPPORT`
+  ([#61](https://github.com/jmcorgan/fips/issues/61),
+  reported by [@SwapMarket](https://github.com/SwapMarket))
+- Rekey msg1 on non-accepting transports (e.g. UDP holepunch) was
+  rejected at the top of `handle_msg1()`, which broke rekey handshakes
+  on established links and produced repeated "dual rekey initiation"
+  log floods. The gate now only blocks truly new inbound handshakes
+  from unknown addresses; rekey and restart msg1s for established
+  peers are processed normally
+  ([#47](https://github.com/jmcorgan/fips/issues/47),
+  [#49](https://github.com/jmcorgan/fips/pull/49))
+- `fipstop` now uses `ratatui::try_init()` instead of `ratatui::init()`,
+  so terminal initialization failures (e.g. Docker on macOS Sequoia,
+  or environments without a usable tty) produce a clean error message
+  instead of a hard crash
 
 ## [0.2.0] - 2026-03-22
 
