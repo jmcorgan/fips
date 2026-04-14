@@ -22,7 +22,7 @@ jobs:
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/aur/PKGBUILD
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
         with:
           pkgname: fips
           pkgbuild: packaging/aur/PKGBUILD
