@@ -14,6 +14,7 @@ mod routing_error_rate_limit;
 pub(crate) mod session;
 pub(crate) mod session_wire;
 pub(crate) mod stats;
+pub(crate) mod stats_history;
 #[cfg(test)]
 mod tests;
 mod tree;
@@ -358,6 +359,9 @@ pub struct Node {
     /// Routing, forwarding, discovery, and error signal counters.
     stats: stats::NodeStats,
 
+    /// Time-series history of node-level metrics (1s/1m rings).
+    stats_history: stats_history::StatsHistory,
+
     // === TUN Interface ===
     /// TUN device state.
     tun_state: TunState,
@@ -535,6 +539,7 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
+            stats_history: stats_history::StatsHistory::new(),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -644,6 +649,7 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
+            stats_history: stats_history::StatsHistory::new(),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -1113,6 +1119,70 @@ impl Node {
     /// Get mutable node statistics.
     pub(crate) fn stats_mut(&mut self) -> &mut stats::NodeStats {
         &mut self.stats
+    }
+
+    /// Get the stats history collector.
+    pub fn stats_history(&self) -> &stats_history::StatsHistory {
+        &self.stats_history
+    }
+
+    /// Sample the current node state into the stats history ring.
+    /// Called once per tick from the RX loop.
+    pub(crate) fn record_stats_history(&mut self) {
+        let fwd = &self.stats.forwarding;
+        let peers_with_mmp: Vec<f64> = self
+            .peers
+            .values()
+            .filter_map(|p| p.mmp().map(|m| m.metrics.loss_rate()))
+            .collect();
+        let loss_rate = if peers_with_mmp.is_empty() {
+            0.0
+        } else {
+            peers_with_mmp.iter().sum::<f64>() / peers_with_mmp.len() as f64
+        };
+
+        let snap = stats_history::Snapshot {
+            mesh_size: self.estimated_mesh_size,
+            tree_depth: self.tree_state.my_coords().depth() as u32,
+            peer_count: self.peers.len() as u64,
+            parent_switches_total: self.stats.tree.parent_switches,
+            bytes_in_total: fwd.received_bytes,
+            bytes_out_total: fwd.forwarded_bytes + fwd.originated_bytes,
+            packets_in_total: fwd.received_packets,
+            packets_out_total: fwd.forwarded_packets + fwd.originated_packets,
+            loss_rate,
+            active_sessions: self.sessions.len() as u64,
+        };
+
+        let now = std::time::Instant::now();
+        let peer_snaps: Vec<stats_history::PeerSnapshot> = self
+            .peers
+            .values()
+            .map(|p| {
+                let stats = p.link_stats();
+                let (srtt_ms, loss_rate, ecn_ce) = match p.mmp() {
+                    Some(m) => (
+                        m.metrics.srtt_ms(),
+                        Some(m.metrics.loss_rate()),
+                        m.receiver.ecn_ce_count() as u64,
+                    ),
+                    None => (None, None, 0),
+                };
+                stats_history::PeerSnapshot {
+                    node_addr: *p.node_addr(),
+                    last_seen: now,
+                    srtt_ms,
+                    loss_rate,
+                    bytes_in_total: stats.bytes_recv,
+                    bytes_out_total: stats.bytes_sent,
+                    packets_in_total: stats.packets_recv,
+                    packets_out_total: stats.packets_sent,
+                    ecn_ce_total: ecn_ce,
+                }
+            })
+            .collect();
+
+        self.stats_history.tick(now, &snap, &peer_snaps);
     }
 
     // === TUN Interface ===

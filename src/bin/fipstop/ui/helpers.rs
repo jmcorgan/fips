@@ -171,3 +171,42 @@ pub fn kv_line(key: &str, value: &str) -> Line<'static> {
         Span::raw(value.to_string()),
     ])
 }
+
+/// Render a sequence of values as Unicode block characters.
+///
+/// Returns an empty string for empty input. Constant series render as a
+/// mid-level row. Used inline beside metric values in the dashboard and
+/// as the per-column renderer for the Graphs tab.
+pub fn sparkline(values: &[f64]) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if values.is_empty() {
+        return String::new();
+    }
+    let (min, max) = values
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    let range = max - min;
+    values
+        .iter()
+        .map(|&v| {
+            if !range.is_finite() || range <= 0.0 {
+                BLOCKS[3]
+            } else {
+                let norm = ((v - min) / range).clamp(0.0, 1.0);
+                let idx = (norm * (BLOCKS.len() as f64 - 1.0)).round() as usize;
+                BLOCKS[idx.min(BLOCKS.len() - 1)]
+            }
+        })
+        .collect()
+}
+
+/// Extract a `Vec<f64>` from a nested JSON array (e.g., `sparklines.mesh_size`).
+pub fn nested_f64_array(data: &Value, outer: &str, inner: &str) -> Vec<f64> {
+    data.get(outer)
+        .and_then(|o| o.get(inner))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
+        .unwrap_or_default()
+}

@@ -374,6 +374,7 @@ pub use windows_impl::ControlSocket;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::*;
 
     #[cfg(windows)]

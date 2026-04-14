@@ -15,10 +15,11 @@ pub enum Tab {
     Transports,
     Routing,
     Gateway,
+    Graphs,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] = [
+    pub const ALL: [Tab; 10] = [
         Tab::Node,
         Tab::Peers,
         Tab::Transports,
@@ -27,6 +28,7 @@ impl Tab {
         Tab::Bloom,
         Tab::Mmp,
         Tab::Routing,
+        Tab::Graphs,
         Tab::Gateway,
     ];
 
@@ -36,6 +38,7 @@ impl Tab {
             Tab::Node => 0,
             Tab::Peers | Tab::Transports => 1,
             Tab::Gateway => 3,
+            Tab::Graphs => 2,
             _ => 2,
         }
     }
@@ -53,6 +56,7 @@ impl Tab {
             Tab::Transports => "Transports",
             Tab::Routing => "Routing",
             Tab::Gateway => "Gateway",
+            Tab::Graphs => "Graphs",
         }
     }
 
@@ -69,6 +73,10 @@ impl Tab {
             Tab::Transports => "show_transports",
             Tab::Routing => "show_routing",
             Tab::Gateway => "show_gateway",
+            // Graphs uses show_stats_history with params; fetched via a
+            // dedicated path in main.rs rather than the generic command()
+            // dispatcher.
+            Tab::Graphs => "show_stats_history",
         }
     }
 
@@ -124,6 +132,67 @@ pub enum SelectedTreeItem {
     Link,
 }
 
+/// Options for the Graphs tab window selector.
+pub const GRAPHS_WINDOWS: &[(&str, &str)] =
+    &[("1m", "1s"), ("10m", "1s"), ("1h", "1s"), ("24h", "1m")];
+
+/// Node-level metric display order for Graphs tab Node mode. Must
+/// match names returned by `show_stats_all_history` (no `peer` param).
+pub const GRAPHS_METRICS: &[&str] = &[
+    "mesh_size",
+    "tree_depth",
+    "peer_count",
+    "parent_switches",
+    "bytes_in",
+    "bytes_out",
+    "packets_in",
+    "packets_out",
+    "loss_rate",
+    "active_sessions",
+];
+
+/// Per-peer metric display order for Graphs tab PeerByMetric mode and
+/// MetricByPeer selector. Must match names returned by
+/// `show_stats_all_history` with a `peer` param.
+pub const PEER_GRAPHS_METRICS: &[&str] = &[
+    "srtt_ms",
+    "loss_rate",
+    "bytes_in",
+    "bytes_out",
+    "packets_in",
+    "packets_out",
+    "ecn_ce",
+];
+
+/// Which variety of plot the Graphs tab shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphsMode {
+    /// Stacked node-level metrics (the original view).
+    Node,
+    /// Grid: one metric, small-multiples across peers.
+    MetricByPeer,
+    /// Stacked per-peer metrics for one selected peer.
+    PeerByMetric,
+}
+
+impl GraphsMode {
+    pub fn next(self) -> Self {
+        match self {
+            GraphsMode::Node => GraphsMode::MetricByPeer,
+            GraphsMode::MetricByPeer => GraphsMode::PeerByMetric,
+            GraphsMode::PeerByMetric => GraphsMode::Node,
+        }
+    }
+}
+
+/// Cached peer summary for Graphs-tab selector (peer-list population
+/// is independent of the per-tick metric data).
+#[derive(Clone, Debug)]
+pub struct GraphsPeer {
+    pub npub: String,
+    pub display_name: String,
+}
+
 pub struct App {
     pub active_tab: Tab,
     pub should_quit: bool,
@@ -141,6 +210,20 @@ pub struct App {
     pub gateway_running: bool,
     /// Mappings data fetched from the gateway (separate from summary).
     pub gateway_mappings: Option<serde_json::Value>,
+    /// Scroll offset (rows) for the stacked Graphs tab.
+    pub graphs_scroll: u16,
+    /// Selected (window, granularity) index for the Graphs tab.
+    pub graphs_window_idx: usize,
+    /// Current Graphs-tab view mode.
+    pub graphs_mode: GraphsMode,
+    /// Selected metric index for MetricByPeer mode (into
+    /// `PEER_GRAPHS_METRICS`).
+    pub graphs_peer_metric_idx: usize,
+    /// Selected peer index for PeerByMetric mode (into `graphs_peers`).
+    pub graphs_peer_idx: usize,
+    /// Cached peer list from `show_stats_peers`, populated when the
+    /// Graphs tab is active in a non-Node mode.
+    pub graphs_peers: Vec<GraphsPeer>,
 }
 
 impl App {
@@ -160,7 +243,89 @@ impl App {
             selected_tree_item: SelectedTreeItem::None,
             gateway_running: false,
             gateway_mappings: None,
+            graphs_scroll: 0,
+            graphs_window_idx: 1, // default 10m
+            graphs_mode: GraphsMode::Node,
+            graphs_peer_metric_idx: 0,
+            graphs_peer_idx: 0,
+            graphs_peers: Vec::new(),
         }
+    }
+
+    /// Cycle the Graphs-tab view mode.
+    pub fn graphs_next_mode(&mut self) {
+        self.graphs_mode = self.graphs_mode.next();
+        self.graphs_scroll = 0;
+    }
+
+    /// Advance the mode-specific selector (metric or peer).
+    pub fn graphs_next_selector(&mut self) {
+        match self.graphs_mode {
+            GraphsMode::Node => {}
+            GraphsMode::MetricByPeer => {
+                let n = PEER_GRAPHS_METRICS.len();
+                self.graphs_peer_metric_idx = (self.graphs_peer_metric_idx + 1) % n;
+            }
+            GraphsMode::PeerByMetric => {
+                let n = self.graphs_peers.len();
+                if n > 0 {
+                    self.graphs_peer_idx = (self.graphs_peer_idx + 1) % n;
+                }
+            }
+        }
+    }
+
+    /// Reverse the mode-specific selector.
+    pub fn graphs_prev_selector(&mut self) {
+        match self.graphs_mode {
+            GraphsMode::Node => {}
+            GraphsMode::MetricByPeer => {
+                let n = PEER_GRAPHS_METRICS.len();
+                self.graphs_peer_metric_idx = (self.graphs_peer_metric_idx + n - 1) % n;
+            }
+            GraphsMode::PeerByMetric => {
+                let n = self.graphs_peers.len();
+                if n > 0 {
+                    self.graphs_peer_idx = (self.graphs_peer_idx + n - 1) % n;
+                }
+            }
+        }
+    }
+
+    /// Current per-peer metric name for MetricByPeer mode.
+    pub fn graphs_selected_peer_metric(&self) -> &'static str {
+        PEER_GRAPHS_METRICS[self.graphs_peer_metric_idx % PEER_GRAPHS_METRICS.len()]
+    }
+
+    /// Current selected peer for PeerByMetric mode, if any.
+    pub fn graphs_selected_peer(&self) -> Option<&GraphsPeer> {
+        if self.graphs_peers.is_empty() {
+            return None;
+        }
+        let idx = self.graphs_peer_idx % self.graphs_peers.len();
+        Some(&self.graphs_peers[idx])
+    }
+
+    /// Current Graphs-tab (window, granularity) pair.
+    pub fn graphs_window(&self) -> (&'static str, &'static str) {
+        GRAPHS_WINDOWS[self.graphs_window_idx % GRAPHS_WINDOWS.len()]
+    }
+
+    pub fn graphs_scroll_up(&mut self) {
+        self.graphs_scroll = self.graphs_scroll.saturating_sub(1);
+    }
+
+    pub fn graphs_scroll_down(&mut self) {
+        self.graphs_scroll = self.graphs_scroll.saturating_add(1);
+    }
+
+    pub fn graphs_next_window(&mut self) {
+        self.graphs_window_idx = (self.graphs_window_idx + 1) % GRAPHS_WINDOWS.len();
+    }
+
+    pub fn graphs_prev_window(&mut self) {
+        self.graphs_window_idx =
+            (self.graphs_window_idx + GRAPHS_WINDOWS.len() - 1) % GRAPHS_WINDOWS.len();
     }
 
     /// Number of rows in the active tab's data array.
