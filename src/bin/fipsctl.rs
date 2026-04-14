@@ -619,6 +619,9 @@ mod tests {
                 what: AclCommands::Show
             }
         ));
+    }
+
+    #[test]
     fn detects_bare_ula_literal() {
         assert!(is_fips_mesh_address("fd9d:abcd::1"));
         assert!(is_fips_mesh_address("fd00::"));
