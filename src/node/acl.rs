@@ -72,8 +72,8 @@ pub struct PeerAclStatus {
     pub default_decision: String,
     pub allow_all: bool,
     pub deny_all: bool,
-    pub allow_raw_entries: Vec<String>,
-    pub deny_raw_entries: Vec<String>,
+    pub allow_file_entries: Vec<String>,
+    pub deny_file_entries: Vec<String>,
     pub allow_entries: Vec<String>,
     pub deny_entries: Vec<String>,
 }
@@ -93,8 +93,8 @@ impl fmt::Display for PeerAclContext {
 pub struct PeerAcl {
     allow: HashSet<NodeAddr>,
     deny: HashSet<NodeAddr>,
-    allow_raw_entries: BTreeSet<String>,
-    deny_raw_entries: BTreeSet<String>,
+    allow_file_entries: BTreeSet<String>,
+    deny_file_entries: BTreeSet<String>,
     allow_npubs: BTreeSet<String>,
     deny_npubs: BTreeSet<String>,
     allow_all: bool,
@@ -187,8 +187,8 @@ impl PeerAcl {
     }
 
     /// Return the loaded allowlist tokens exactly as written in the ACL file.
-    pub fn allow_raw_entries(&self) -> Vec<String> {
-        self.allow_raw_entries.iter().cloned().collect()
+    pub fn allow_file_entries(&self) -> Vec<String> {
+        self.allow_file_entries.iter().cloned().collect()
     }
 
     /// Return the loaded denylist entries as npubs.
@@ -197,8 +197,8 @@ impl PeerAcl {
     }
 
     /// Return the loaded denylist tokens exactly as written in the ACL file.
-    pub fn deny_raw_entries(&self) -> Vec<String> {
-        self.deny_raw_entries.iter().cloned().collect()
+    pub fn deny_file_entries(&self) -> Vec<String> {
+        self.deny_file_entries.iter().cloned().collect()
     }
 
     fn load_file(&mut self, path: &Path, is_allow: bool, hosts: &HostMap) {
@@ -258,11 +258,11 @@ impl PeerAcl {
 
             if is_allow {
                 self.allow.insert(*peer.node_addr());
-                self.allow_raw_entries.insert(entry.to_string());
+                self.allow_file_entries.insert(entry.to_string());
                 self.allow_npubs.insert(resolved_npub);
             } else {
                 self.deny.insert(*peer.node_addr());
-                self.deny_raw_entries.insert(entry.to_string());
+                self.deny_file_entries.insert(entry.to_string());
                 self.deny_npubs.insert(resolved_npub);
             }
         }
@@ -352,20 +352,11 @@ impl PeerAclReloader {
             default_decision: self.acl.default_decision().to_string(),
             allow_all: self.acl.allow_all,
             deny_all: self.acl.deny_all,
-            allow_raw_entries: self.acl.allow_raw_entries(),
-            deny_raw_entries: self.acl.deny_raw_entries(),
+            allow_file_entries: self.acl.allow_file_entries(),
+            deny_file_entries: self.acl.deny_file_entries(),
             allow_entries: self.acl.allow_entries(),
             deny_entries: self.acl.deny_entries(),
         }
-    }
-
-    /// Reload ACL files immediately, regardless of mtime.
-    pub fn reload_now(&mut self) {
-        self.last_allow_mtime = file_mtime(&self.allow_path);
-        self.last_deny_mtime = file_mtime(&self.deny_path);
-        let _ = self.hosts.check_reload();
-        self.acl =
-            PeerAcl::load_files_with_hosts(&self.allow_path, &self.deny_path, self.hosts.hosts());
     }
 
     /// Check whether ACL or hosts alias sources changed and reload if needed.
@@ -409,12 +400,6 @@ impl Node {
     /// Return a control-plane snapshot of the current peer ACL.
     pub(crate) fn peer_acl_status(&self) -> PeerAclStatus {
         self.peer_acl.status()
-    }
-
-    /// Force an immediate ACL reload via the control socket.
-    pub(crate) fn api_reload_acl(&mut self) -> serde_json::Value {
-        self.peer_acl.reload_now();
-        serde_json::to_value(self.peer_acl.status()).unwrap_or_default()
     }
 
     /// Reject a peer if the current ACL denies it.
@@ -554,8 +539,8 @@ mod tests {
         assert_eq!(acl.check(&peer), PeerAclDecision::AllowList);
         assert_eq!(acl.effective_mode(), "allow_all");
         assert_eq!(acl.default_decision(), "allow");
-        assert!(acl.allow_raw_entries().is_empty());
-        assert_eq!(acl.deny_raw_entries(), vec![npub.clone()]);
+        assert!(acl.allow_file_entries().is_empty());
+        assert_eq!(acl.deny_file_entries(), vec![npub.clone()]);
         assert!(acl.allow_entries().is_empty());
         assert_eq!(acl.deny_entries(), vec![npub]);
     }
@@ -703,7 +688,7 @@ mod tests {
         let acl = PeerAcl::load_files(&allow, &deny);
 
         assert!(acl.is_empty());
-        assert!(acl.allow_raw_entries().is_empty());
+        assert!(acl.allow_file_entries().is_empty());
         assert!(acl.allow_entries().is_empty());
     }
 
@@ -736,7 +721,7 @@ mod tests {
 
         let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
 
-        assert_eq!(acl.allow_raw_entries(), vec!["NODE-A".to_string()]);
+        assert_eq!(acl.allow_file_entries(), vec!["NODE-A".to_string()]);
         assert_eq!(acl.allow_entries(), vec![npub.clone()]);
         assert_eq!(acl.check(&test_peer(&npub)), PeerAclDecision::AllowList);
     }
@@ -755,7 +740,7 @@ mod tests {
         let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
 
         assert_eq!(
-            acl.allow_raw_entries(),
+            acl.allow_file_entries(),
             vec!["node-a".to_string(), npub.clone()]
         );
         assert_eq!(acl.allow_entries(), vec![npub.clone()]);
@@ -828,8 +813,8 @@ mod tests {
         assert!(status.enforcement_active);
         assert_eq!(status.effective_mode, "allow_then_deny");
         assert_eq!(status.default_decision, "allow");
-        assert_eq!(status.allow_raw_entries, vec![allowed.clone()]);
-        assert_eq!(status.deny_raw_entries, vec![denied.clone()]);
+        assert_eq!(status.allow_file_entries, vec![allowed.clone()]);
+        assert_eq!(status.deny_file_entries, vec![denied.clone()]);
         assert_eq!(status.allow_entries, vec![allowed]);
         assert_eq!(status.deny_entries, vec![denied]);
     }
@@ -848,8 +833,8 @@ mod tests {
         assert_eq!(status.default_decision, "allow");
         assert!(!status.allow_all);
         assert!(!status.deny_all);
-        assert!(status.allow_raw_entries.is_empty());
-        assert!(status.deny_raw_entries.is_empty());
+        assert!(status.allow_file_entries.is_empty());
+        assert!(status.deny_file_entries.is_empty());
         assert!(status.allow_entries.is_empty());
         assert!(status.deny_entries.is_empty());
     }
@@ -869,7 +854,7 @@ mod tests {
         assert_eq!(status.default_decision, "allow");
         assert!(status.allow_all);
         assert!(!status.deny_all);
-        assert!(status.allow_raw_entries.is_empty());
+        assert!(status.allow_file_entries.is_empty());
         assert!(status.allow_entries.is_empty());
     }
 
@@ -902,7 +887,7 @@ mod tests {
         let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
         let peer = PeerIdentity::from_npub(&npub).unwrap();
 
-        assert_eq!(acl.allow_raw_entries(), vec!["node-a".to_string()]);
+        assert_eq!(acl.allow_file_entries(), vec!["node-a".to_string()]);
         assert_eq!(acl.allow_entries(), vec![npub]);
         assert_eq!(acl.check(&peer), PeerAclDecision::AllowList);
     }
@@ -926,7 +911,7 @@ mod tests {
 
         assert!(reloader.check_reload());
         assert_eq!(
-            reloader.acl().allow_raw_entries(),
+            reloader.acl().allow_file_entries(),
             vec!["node-a".to_string()]
         );
         assert_eq!(reloader.acl().allow_entries(), vec![npub.clone()]);

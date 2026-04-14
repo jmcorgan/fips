@@ -119,7 +119,7 @@ docker exec fips-acl-container-a ping node-d.fips
 docker exec fips-acl-container-a ping npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl.fips
 ```
 
-The output shows both the raw alias tokens from the ACL files and the resolved
+The output shows both the original ACL file entries and the resolved
 effective npub entries.
 
 Expected:
