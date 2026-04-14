@@ -46,11 +46,13 @@ if [ "$UNAME_S" = "Darwin" ]; then
 
     echo "Building FIPS for Linux (release) using cargo-zigbuild..."
     cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml"
+    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" --features gateway --bin fips-gateway
 
     TARGET_DIR="$PROJECT_ROOT/target/$CARGO_TARGET/release"
 else
     echo "Building FIPS (release)..."
     cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml"
+    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml" --features gateway --bin fips-gateway
 
     TARGET_DIR="$PROJECT_ROOT/target/release"
 fi
@@ -58,11 +60,12 @@ fi
 echo "Copying binaries to $DOCKER_DIR/"
 cp "$TARGET_DIR/fips" "$DOCKER_DIR/fips"
 cp "$TARGET_DIR/fipsctl" "$DOCKER_DIR/fipsctl"
+cp "$TARGET_DIR/fips-gateway" "$DOCKER_DIR/fips-gateway"
 [ -f "$TARGET_DIR/fipstop" ] && cp "$TARGET_DIR/fipstop" "$DOCKER_DIR/fipstop" || true
-chmod +x "$DOCKER_DIR/fips" "$DOCKER_DIR/fipsctl"
+chmod +x "$DOCKER_DIR/fips" "$DOCKER_DIR/fipsctl" "$DOCKER_DIR/fips-gateway"
 [ -f "$DOCKER_DIR/fipstop" ] && chmod +x "$DOCKER_DIR/fipstop" || true
 
-echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl,fipstop}"
+echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl,fipstop,fips-gateway}"
 
 if [ "$BUILD_DOCKER" = true ]; then
     echo ""
