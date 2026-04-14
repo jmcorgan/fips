@@ -249,9 +249,27 @@ impl BleIo for BluestIo {
             };
 
             futures::pin_mut!(scan_stream);
+            // Dedup repeated advertisements from the same physical
+            // peripheral. Device derives Eq+Hash so we can key on it.
+            let mut seen: HashMap<Device, [u8; 6]> = HashMap::new();
             while let Some(discovered) = scan_stream.next().await {
                 let device = discovered.device;
+
+                if let Some(&existing) = seen.get(&device) {
+                    // Same device — report the stable address so the
+                    // probe cooldown handles it.
+                    let addr = BleAddr {
+                        adapter: MACOS_ADAPTER_NAME.to_string(),
+                        device: existing,
+                    };
+                    if tx.send(addr).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
                 let bytes = next_device_addr();
+                seen.insert(device.clone(), bytes);
 
                 let name = discovered
                     .adv_data
