@@ -1,12 +1,12 @@
 # Maintainer: Johnathan Corgan <jcorgan@corganlabs.com>
 pkgname=fips-git
-pkgver=0.1.0.r19.g8c349f5
+pkgver=0
 pkgrel=1
 pkgdesc="Distributed, decentralized network routing protocol for mesh nodes"
 url="https://github.com/jmcorgan/fips"
 license=('MIT')
 arch=('x86_64')
-depends=('gcc-libs' 'glibc')
+depends=('dbus' 'gcc-libs' 'glibc')
 makedepends=('cargo' 'git')
 optdepends=('systemd-resolved: .fips DNS resolution')
 provides=('fips')
@@ -19,7 +19,7 @@ source=("fips::git+https://github.com/jmcorgan/fips.git"
 b2sums=('SKIP'
         '25a0552f3d67d12f48dfd40fe4776ad7c46afeeab76bd2674b48e234db3c145810a24569a8c1a7f4c186eb546f0fae2ebe1550080c0e91d8eb72ba9934c752a6'
         '844257cb8e09cd935d0d6345922d0f3ec777411daca20e24175b346a7b3cb95ebce12631a9466c4d94f1588ed8d62d92514ff24025ccfd0efb358e542b454b00')
-options=('!lto')
+options=('!lto' '!debug')
 
 pkgver() {
     cd fips
