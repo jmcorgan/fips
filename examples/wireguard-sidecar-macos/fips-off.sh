@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stop the FIPS gateway and restore macOS network settings.
+# Stop the WireGuard sidecar and restore macOS network settings.
 #
 # Safe to run multiple times (idempotent).
 #
@@ -27,9 +27,9 @@ run_host_helper() {
 
 run_host_helper off
 
-echo "Stopping FIPS gateway container..."
+echo "Stopping WireGuard sidecar container..."
 run_as_real_user docker compose -f "$SCRIPT_DIR/docker-compose.yml" down 2>/dev/null || true
 echo "  Container stopped"
 
 echo ""
-echo "FIPS gateway is OFF. macOS network restored."
+echo "WireGuard sidecar is OFF. macOS network restored."

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the FIPS gateway and configure macOS to reach the mesh.
+# Start the WireGuard sidecar and configure macOS to reach the mesh.
 #
 # Sets up:
 #   1. WireGuard tunnel from macOS to the FIPS Docker container
@@ -39,9 +39,10 @@ mkdir -p "$IDENTITY_DIR" "$WG_DIR"
 if [ ! -f "$IDENTITY_DIR/fips.key" ]; then
     echo "Generating FIPS identity keypair..."
     run_as_real_user docker run --rm \
+        --entrypoint fipsctl \
         -v "$IDENTITY_DIR:/etc/fips" \
         fips-test:latest \
-        fipsctl keygen --dir /etc/fips
+        keygen --dir /etc/fips
 fi
 
 # ── 2. Generate WireGuard client keys ─────────────────────────
@@ -59,20 +60,20 @@ fi
 run_host_helper fix-key-perms "$REAL_USER" "$WG_DIR"
 
 # ── 3. Start Docker container ─────────────────────────────────
-echo "Starting FIPS gateway container..."
+echo "Starting WireGuard sidecar container..."
 run_as_real_user docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d --build --force-recreate
 
 echo "Waiting for container..."
 for i in $(seq 1 30); do
-    if run_as_real_user docker exec fips-gateway wg show wg0 >/dev/null 2>&1; then
+    if run_as_real_user docker exec wireguard-sidecar wg show wg0 >/dev/null 2>&1; then
         break
     fi
     sleep 1
 done
 
-if ! run_as_real_user docker exec fips-gateway wg show wg0 >/dev/null 2>&1; then
+if ! run_as_real_user docker exec wireguard-sidecar wg show wg0 >/dev/null 2>&1; then
     echo "Error: WireGuard not ready in container after 30s"
-    echo "Check: docker logs fips-gateway"
+    echo "Check: docker logs wireguard-sidecar"
     exit 1
 fi
 
@@ -85,7 +86,7 @@ run_host_helper on "$SCRIPT_DIR"
 
 # ── Done ──────────────────────────────────────────────────────
 echo ""
-echo "FIPS gateway is ON."
+echo "WireGuard sidecar is ON."
 echo ""
 echo "  WireGuard:  fips0 tunnel active (fd00::/8 routed)"
 echo "  DNS:        .fips names resolve via localhost:5354"
@@ -93,7 +94,7 @@ echo ""
 echo "Usage:"
 echo "  ping6 -c3 \$(dig +short AAAA your-bootstrap-peer.fips @127.0.0.1 -p 5354)"
 echo ""
-echo "  docker exec fips-gateway fipsctl show status"
-echo "  docker exec fips-gateway fipsctl show peers"
+echo "  docker exec wireguard-sidecar fipsctl show status"
+echo "  docker exec wireguard-sidecar fipsctl show peers"
 echo ""
 echo "To stop: ./fips-off.sh"

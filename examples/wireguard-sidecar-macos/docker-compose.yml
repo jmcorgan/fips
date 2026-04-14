@@ -1,9 +1,9 @@
 services:
-  fips-gateway:
+  wireguard-sidecar:
     build: .
-    image: fips-gateway:latest
-    container_name: fips-gateway
-    hostname: fips-gateway
+    image: wireguard-sidecar:latest
+    container_name: wireguard-sidecar
+    hostname: wireguard-sidecar
     privileged: true
     devices:
       - /dev/net/tun:/dev/net/tun

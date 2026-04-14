@@ -7,8 +7,8 @@ This example lets macOS reach the FIPS mesh through a local Docker container.
 - `fips-on.sh`: user-facing startup wrapper
 - `fips-host.sh`: small privileged helper for macOS networking
 - `fips-off.sh`: teardown wrapper
-- `entrypoint-gateway.sh`: container startup logic
-- `identity/fips.key` and `identity/fips.pub`: generated persistent gateway identity
+- `entrypoint-sidecar.sh`: container startup logic
+- `identity/fips.key` and `identity/fips.pub`: generated persistent sidecar identity
 - `fips.yaml`: FIPS node config used inside the container
 
 ## Configure Peers
@@ -18,7 +18,7 @@ Before first use, replace the placeholder bootstrap peer in `fips.yaml` with a r
 ## Startup Flow
 
 ```text
-macOS user        fips-on.sh         Docker / fips-gateway       fips-host.sh (sudo)
+macOS user        fips-on.sh      Docker / wireguard-sidecar     fips-host.sh (sudo)
     |                 |                        |                         |
     | ./fips-on.sh    |                        |                         |
     |---------------> |                        |                         |
@@ -45,10 +45,10 @@ macOS user        fips-on.sh         Docker / fips-gateway       fips-host.sh (s
 ## What `fips-on.sh` Does
 
 1. Creates `identity/` and `identity/wireguard/` if needed.
-2. Generates `identity/fips.key` and `identity/fips.pub` with `fipsctl keygen --dir /etc/fips` if the gateway does not already have a persistent identity.
+2. Generates `identity/fips.key` and `identity/fips.pub` with `fipsctl keygen --dir /etc/fips` if the sidecar does not already have a persistent identity.
 3. Generates the host WireGuard client keypair if missing.
 4. Fixes ownership on the generated client key files so the Docker bind mount stays readable on macOS.
-5. Starts `fips-gateway` with `docker compose up -d --build --force-recreate`.
+5. Starts `wireguard-sidecar` with `docker compose up -d --build --force-recreate`.
 6. Waits until the container has created and brought up `wg0`.
 7. Calls the privileged helper to configure host networking:
    - writes `/etc/wireguard/fips0.conf`
@@ -58,7 +58,7 @@ macOS user        fips-on.sh         Docker / fips-gateway       fips-host.sh (s
 
 ## What Happens In The Container
 
-`entrypoint-gateway.sh`:
+`entrypoint-sidecar.sh`:
 
 1. Generates the server WireGuard keypair on first run.
 2. Waits briefly for `identity/wireguard/client.pub` from the host.
@@ -72,23 +72,24 @@ Only FIPS traffic for `fd00::/8` is forwarded through the sidecar. Regular
 internet traffic still uses the macOS host network and does not route through
 `wg0` or `fips0`.
 
-## Gateway FIPS Identity
+## Sidecar FIPS Identity
 
 `fips-on.sh` generates `identity/fips.key` and `identity/fips.pub` on first run by calling:
 
 ```bash
 docker run --rm \
+  --entrypoint fipsctl \
   -v "$PWD/identity:/etc/fips" \
   fips-test:latest \
-  fipsctl keygen --dir /etc/fips
+  keygen --dir /etc/fips
 ```
 
-That key is then bind-mounted into `/etc/fips/fips.key`, so the gateway keeps
+That key is then bind-mounted into `/etc/fips/fips.key`, so the sidecar keeps
 the same FIPS identity even though `fips-on.sh` uses `docker compose up
 --force-recreate`.
 
 Delete `identity/fips.key` if you want the next `./fips-on.sh` run to create a
-fresh gateway identity.
+fresh sidecar identity.
 
 ## Why `sudo` Is Still Needed
 

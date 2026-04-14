@@ -1,5 +1,5 @@
 #!/bin/bash
-# Gateway entrypoint: WireGuard tunnel + FIPS daemon.
+# Sidecar entrypoint: WireGuard tunnel + FIPS daemon.
 set -e
 
 CONFIG="/etc/fips/fips.yaml"
