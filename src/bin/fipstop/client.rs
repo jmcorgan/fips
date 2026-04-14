@@ -18,11 +18,20 @@ impl ControlClient {
     }
 
     pub async fn query(&self, command: &str) -> Result<Value, String> {
+        self.send(&format!("{{\"command\":\"{command}\"}}\n")).await
+    }
+
+    pub async fn query_with_params(&self, command: &str, params: Value) -> Result<Value, String> {
+        let req = serde_json::json!({"command": command, "params": params});
+        let line = format!("{}\n", serde_json::to_string(&req).unwrap());
+        self.send(&line).await
+    }
+
+    async fn send(&self, request: &str) -> Result<Value, String> {
         let stream = self.connect().await?;
 
         let (reader, mut writer) = tokio::io::split(stream);
 
-        let request = format!("{{\"command\":\"{command}\"}}\n");
         timeout(IO_TIMEOUT, writer.write_all(request.as_bytes()))
             .await
             .map_err(|_| "write timed out".to_string())?

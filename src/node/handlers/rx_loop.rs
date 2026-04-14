@@ -100,7 +100,7 @@ impl Node {
                 }
                 Some((request, response_tx)) = control_rx.recv() => {
                     let response = if request.command.starts_with("show_") {
-                        queries::dispatch(self, &request.command)
+                        queries::dispatch(self, &request.command, request.params.as_ref())
                     } else {
                         commands::dispatch(
                             self,
@@ -126,6 +126,7 @@ impl Node {
                     self.check_tree_state().await;
                     self.check_bloom_state().await;
                     self.compute_mesh_size();
+                    self.record_stats_history();
                     self.check_mmp_reports().await;
                     self.check_session_mmp_reports().await;
                     self.check_link_heartbeats().await;

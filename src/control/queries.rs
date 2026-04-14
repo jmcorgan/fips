@@ -3,9 +3,19 @@
 //! Each function takes `&Node` and returns a `serde_json::Value`.
 //! Query logic is kept separate from socket handling.
 
-use crate::identity::encode_npub;
+use crate::identity::{NodeAddr, PeerIdentity, encode_npub};
 use crate::node::Node;
+use crate::node::stats_history::{ALL_METRICS, ALL_PEER_METRICS, Granularity, Metric, PeerMetric};
 use serde_json::{Value, json};
+use std::str::FromStr;
+use std::time::Duration;
+
+/// Resolve an `npub1...` string to the corresponding `NodeAddr`.
+fn parse_peer_npub(s: &str) -> Result<NodeAddr, String> {
+    PeerIdentity::from_npub(s)
+        .map(|p| *p.node_addr())
+        .map_err(|e| format!("invalid peer npub: {e}"))
+}
 
 /// Helper: get current Unix time in milliseconds.
 fn now_ms() -> u64 {
@@ -39,6 +49,20 @@ pub fn show_status(node: &Node) -> Value {
     let uptime_secs = node.uptime().as_secs();
     let fwd = node.stats().snapshot().forwarding;
 
+    // Inline last-N-second sparklines for dashboard rendering. Kept
+    // short so the status payload stays compact; longer windows use
+    // `show_stats_history`.
+    const SPARK_N: usize = 30;
+    let hist = node.stats_history();
+    let sparklines = json!({
+        "mesh_size": hist.recent(Metric::MeshSize, SPARK_N),
+        "tree_depth": hist.recent(Metric::TreeDepth, SPARK_N),
+        "peer_count": hist.recent(Metric::PeerCount, SPARK_N),
+        "bytes_in": hist.recent(Metric::BytesIn, SPARK_N),
+        "bytes_out": hist.recent(Metric::BytesOut, SPARK_N),
+        "loss_rate": hist.recent(Metric::LossRate, SPARK_N),
+    });
+
     json!({
         "version": crate::version::short_version(),
         "npub": node.npub(),
@@ -60,6 +84,7 @@ pub fn show_status(node: &Node) -> Value {
         "uptime_secs": uptime_secs,
         "estimated_mesh_size": node.estimated_mesh_size(),
         "forwarding": serde_json::to_value(&fwd).unwrap_or_default(),
+        "sparklines": sparklines,
     })
 }
 
@@ -145,6 +170,32 @@ pub fn show_peers(node: &Node) -> Value {
                 "bytes_sent": stats.bytes_sent,
                 "bytes_recv": stats.bytes_recv,
             });
+
+            // Security signals
+            peer_json["replay_suppressed"] = json!(peer.replay_suppressed_count());
+            peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures());
+
+            // Noise session counters (rekey urgency, replay window state)
+            if let Some(session) = peer.noise_session() {
+                peer_json["noise"] = json!({
+                    "send_counter": session.current_send_counter(),
+                    "highest_recv_counter": session.highest_received_counter(),
+                });
+            }
+
+            // Session indices (hijack detection)
+            if let Some(idx) = peer.our_index() {
+                peer_json["our_session_index"] = json!(format!("{:08x}", idx.as_u32()));
+            }
+
+            // Rekey state
+            if peer.rekey_in_progress() {
+                peer_json["rekey_in_progress"] = json!(true);
+            }
+            if peer.is_draining() {
+                peer_json["rekey_draining"] = json!(true);
+            }
+            peer_json["current_k_bit"] = json!(peer.current_k_bit());
 
             // Add MMP metrics if available
             if let Some(mmp) = peer.mmp() {
@@ -301,6 +352,19 @@ pub fn show_sessions(node: &Node) -> Value {
                 "bytes_sent": bytes_tx,
                 "bytes_recv": bytes_rx,
             });
+
+            // Handshake health (visible during initiating/awaiting_msg3)
+            if !entry.is_established() {
+                session_json["resend_count"] = json!(entry.resend_count());
+            }
+
+            // Rekey and session health (visible when established)
+            if entry.is_established() {
+                session_json["session_start_ms"] = json!(entry.session_start_ms());
+                session_json["current_k_bit"] = json!(entry.current_k_bit());
+                session_json["coords_warmup_remaining"] = json!(entry.coords_warmup_remaining());
+                session_json["is_draining"] = json!(entry.is_draining());
+            }
 
             // Add session MMP if available
             if let Some(mmp) = entry.mmp() {
@@ -475,18 +539,47 @@ pub fn show_mmp(node: &Node) -> Value {
     })
 }
 
-/// `show_cache` — Coordinate cache stats.
+/// `show_cache` — Coordinate cache stats and entries.
 pub fn show_cache(node: &Node) -> Value {
     let cache = node.coord_cache();
-    let stats = cache.stats(now_ms());
+    let now = now_ms();
+    let stats = cache.stats(now);
+
+    // Include individual entries for route debugging
+    let entries: Vec<Value> = cache
+        .iter(now)
+        .map(|(addr, entry)| {
+            let fips_addr = crate::identity::FipsAddress::from_node_addr(addr);
+            let coord_path: Vec<String> = entry
+                .coords()
+                .entries()
+                .iter()
+                .map(|e| hex::encode(e.node_addr.as_bytes()))
+                .collect();
+            let mut entry_json = json!({
+                "node_addr": hex::encode(addr.as_bytes()),
+                "display_name": node.peer_display_name(addr),
+                "ipv6_addr": format!("{}", fips_addr),
+                "depth": entry.coords().depth(),
+                "coords": coord_path,
+                "age_ms": now.saturating_sub(entry.created_at()),
+                "last_used_ms": entry.last_used(),
+            });
+            if let Some(mtu) = entry.path_mtu() {
+                entry_json["path_mtu"] = json!(mtu);
+            }
+            entry_json
+        })
+        .collect();
 
     json!({
-        "entries": stats.entries,
+        "count": stats.entries,
         "max_entries": stats.max_entries,
         "fill_ratio": stats.fill_ratio(),
         "default_ttl_ms": cache.default_ttl_ms(),
         "expired": stats.expired,
         "avg_age_ms": stats.avg_age_ms,
+        "entries": entries,
     })
 }
 
@@ -559,14 +652,47 @@ pub fn show_transports(node: &Node) -> Value {
 /// `show_routing` — Routing table summary and node statistics.
 pub fn show_routing(node: &Node) -> Value {
     let cache = node.coord_cache();
-    let cache_stats = cache.stats(now_ms());
+    let now = now_ms();
+    let cache_stats = cache.stats(now);
     let node_stats = node.stats().snapshot();
+
+    // Pending discovery lookups (individual targets)
+    let lookups: Vec<Value> = node
+        .pending_lookups_iter()
+        .map(|(addr, lookup)| {
+            json!({
+                "target": hex::encode(addr.as_bytes()),
+                "display_name": node.peer_display_name(addr),
+                "initiated_ms": lookup.initiated_ms,
+                "last_sent_ms": lookup.last_sent_ms,
+                "attempt": lookup.attempt,
+                "age_ms": now.saturating_sub(lookup.initiated_ms),
+            })
+        })
+        .collect();
+
+    // Connection retry state
+    let retries: Vec<Value> = node
+        .retry_state_iter()
+        .map(|(addr, state)| {
+            json!({
+                "node_addr": hex::encode(addr.as_bytes()),
+                "display_name": node.peer_display_name(addr),
+                "retry_count": state.retry_count,
+                "retry_after_ms": state.retry_after_ms,
+                "auto_reconnect": state.reconnect,
+            })
+        })
+        .collect();
 
     json!({
         "coord_cache_entries": cache_stats.entries,
         "identity_cache_entries": node.identity_cache_len(),
-        "pending_lookups": node.pending_lookup_count(),
+        "pending_lookups": lookups,
+        "pending_tun_destinations": node.pending_tun_destinations(),
+        "pending_tun_packets": node.pending_tun_total_packets(),
         "recent_requests": node.recent_request_count(),
+        "retries": retries,
         "forwarding": serde_json::to_value(&node_stats.forwarding).unwrap_or_default(),
         "discovery": serde_json::to_value(&node_stats.discovery).unwrap_or_default(),
         "error_signals": serde_json::to_value(&node_stats.errors).unwrap_or_default(),
@@ -574,8 +700,374 @@ pub fn show_routing(node: &Node) -> Value {
     })
 }
 
+/// `show_identity_cache` — Known node identities.
+///
+/// Lists every node whose public key has been cached by this daemon.
+/// Identities are learned from DNS resolution, peer handshakes, session
+/// establishment, and configured peer npubs.  The cache uses LRU eviction
+/// bounded by `node.cache.identity_size`.
+pub fn show_identity_cache(node: &Node) -> Value {
+    let now = now_ms();
+    let entries: Vec<Value> = node
+        .identity_cache_iter()
+        .map(|(node_addr, pubkey, last_seen_ms)| {
+            let (xonly, _parity) = pubkey.x_only_public_key();
+            let fips_addr = crate::identity::FipsAddress::from_node_addr(node_addr);
+            json!({
+                "node_addr": hex::encode(node_addr.as_bytes()),
+                "npub": encode_npub(&xonly),
+                "display_name": node.peer_display_name(node_addr),
+                "ipv6_addr": format!("{}", fips_addr),
+                "last_seen_ms": last_seen_ms,
+                "age_ms": now.saturating_sub(last_seen_ms),
+            })
+        })
+        .collect();
+    let count = entries.len();
+
+    json!({
+        "entries": entries,
+        "count": count,
+        "max_entries": node.identity_cache_max(),
+    })
+}
+
+/// `show_stats_list` — Enumerate available history metrics and their units.
+pub fn show_stats_list() -> Value {
+    let metrics: Vec<Value> = ALL_METRICS
+        .iter()
+        .map(|m| {
+            json!({
+                "name": m.name(),
+                "unit": m.unit(),
+                "scope": "node",
+            })
+        })
+        .chain(ALL_PEER_METRICS.iter().map(|m| {
+            json!({
+                "name": m.name(),
+                "unit": m.unit(),
+                "scope": "peer",
+            })
+        }))
+        .collect();
+    json!({
+        "metrics": metrics,
+        "fast_ring_seconds": crate::node::stats_history::FAST_RING_CAPACITY,
+        "slow_ring_minutes": crate::node::stats_history::SLOW_RING_CAPACITY,
+        "peer_retention_seconds": crate::node::stats_history::PEER_EVICTION_SECS,
+    })
+}
+
+/// `show_stats_history` — Time-series samples for one metric.
+///
+/// Params:
+/// - `metric` (required): metric name. Node-level metrics (e.g.
+///   `mesh_size`) are resolved against `Metric`; per-peer metrics (e.g.
+///   `srtt_ms`, `ecn_ce`) require the `peer` param and resolve against
+///   `PeerMetric`.
+/// - `peer` (optional): `npub1...` of the peer; required for per-peer
+///   metrics.
+/// - `window` (default `10m`): duration `<N>s`, `<N>m`, or `<N>h`.
+/// - `granularity` (default `1s`): `1s` or `1m`.
+pub fn show_stats_history(node: &Node, params: Option<&Value>) -> super::protocol::Response {
+    use super::protocol::Response;
+    let Some(params) = params else {
+        return Response::error("missing params for show_stats_history");
+    };
+
+    let metric_name = match params.get("metric").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return Response::error("missing 'metric' parameter"),
+    };
+
+    let window_str = params
+        .get("window")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10m");
+    let window = match parse_duration(window_str) {
+        Ok(d) => d,
+        Err(e) => return Response::error(e),
+    };
+
+    let granularity_str = params
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1s");
+    let granularity = match Granularity::from_str(granularity_str) {
+        Ok(g) => g,
+        Err(e) => return Response::error(e),
+    };
+
+    let peer_npub = params.get("peer").and_then(|v| v.as_str());
+    let hist = node.stats_history();
+
+    if let Some(npub) = peer_npub {
+        let addr = match parse_peer_npub(npub) {
+            Ok(a) => a,
+            Err(e) => return Response::error(e),
+        };
+        let peer_metric = match PeerMetric::from_str(metric_name) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
+        match hist.peer_query(&addr, peer_metric, window, granularity) {
+            Some(series) => Response::ok(serde_json::to_value(&series).unwrap_or(Value::Null)),
+            None => Response::error(format!(
+                "peer not tracked in stats history: {}",
+                node.peer_display_name(&addr)
+            )),
+        }
+    } else {
+        let metric = match Metric::from_str(metric_name) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
+        let series = hist.query(metric, window, granularity);
+        Response::ok(serde_json::to_value(&series).unwrap_or(Value::Null))
+    }
+}
+
+/// Parse a duration of the form `<N>s`, `<N>m`, or `<N>h` into a `Duration`.
+fn parse_duration(s: &str) -> Result<Duration, String> {
+    if s.is_empty() {
+        return Err("empty duration".to_string());
+    }
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    let n: u64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid duration: {s}"))?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        _ => return Err(format!("unknown duration unit: {unit} (expected s, m, h)")),
+    };
+    Ok(Duration::from_secs(secs))
+}
+
+/// `show_stats_all_history` — Return a series for every tracked metric
+/// in one round trip. Intended for the fipstop Graphs tab.
+///
+/// Without `peer`: returns the 10 node-level metrics.
+/// With `peer` (npub): returns the 7 per-peer metrics for that peer.
+///
+/// Params: `{"peer": "<npub>"?, "window": "<dur>", "granularity": "<1s|1m>"}`.
+pub fn show_stats_all_history(node: &Node, params: Option<&Value>) -> super::protocol::Response {
+    use super::protocol::Response;
+    let params = params.cloned().unwrap_or_else(|| json!({}));
+
+    let window_str = params
+        .get("window")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10m");
+    let window = match parse_duration(window_str) {
+        Ok(d) => d,
+        Err(e) => return Response::error(e),
+    };
+
+    let granularity_str = params
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1s");
+    let granularity = match Granularity::from_str(granularity_str) {
+        Ok(g) => g,
+        Err(e) => return Response::error(e),
+    };
+
+    let peer_npub = params.get("peer").and_then(|v| v.as_str());
+    let hist = node.stats_history();
+
+    let series: Vec<Value> = if let Some(npub) = peer_npub {
+        let addr = match parse_peer_npub(npub) {
+            Ok(a) => a,
+            Err(e) => return Response::error(e),
+        };
+        if !hist.has_peer(&addr) {
+            return Response::error(format!(
+                "peer not tracked in stats history: {}",
+                node.peer_display_name(&addr)
+            ));
+        }
+        ALL_PEER_METRICS
+            .iter()
+            .map(|m| {
+                let s = hist
+                    .peer_query(&addr, *m, window, granularity)
+                    .unwrap_or_else(|| {
+                        // Unreachable: has_peer checked above, but degrade
+                        // gracefully rather than panic.
+                        crate::node::stats_history::Series {
+                            metric: m.name(),
+                            unit: m.unit(),
+                            granularity_seconds: granularity.seconds(),
+                            values: Vec::new(),
+                        }
+                    });
+                serde_json::to_value(&s).unwrap_or(Value::Null)
+            })
+            .collect()
+    } else {
+        ALL_METRICS
+            .iter()
+            .map(|m| {
+                let s = hist.query(*m, window, granularity);
+                serde_json::to_value(&s).unwrap_or(Value::Null)
+            })
+            .collect()
+    };
+
+    Response::ok(json!({
+        "granularity_seconds": granularity.seconds(),
+        "window_seconds": window.as_secs(),
+        "peer": peer_npub,
+        "series": series,
+    }))
+}
+
+/// `show_stats_peers` — Enumerate peers tracked in the stats history
+/// with their lifecycle metadata. Used by operator tools to populate
+/// peer selectors and to confirm a peer is in the retention window.
+pub fn show_stats_peers(node: &Node) -> Value {
+    let hist = node.stats_history();
+    let now = std::time::Instant::now();
+
+    let mut peers: Vec<Value> = hist
+        .peers()
+        .map(|(addr, rings)| {
+            let last_contact_secs = now.duration_since(rings.last_contact()).as_secs();
+            let first_seen_secs = now.duration_since(rings.first_seen()).as_secs();
+            let is_active = node.peers().any(|p| p.node_addr() == addr);
+            let npub = node
+                .peers()
+                .find(|p| p.node_addr() == addr)
+                .map(|p| p.npub())
+                .unwrap_or_else(|| hex::encode(addr.as_bytes()));
+            json!({
+                "npub": npub,
+                "node_addr": hex::encode(addr.as_bytes()),
+                "display_name": node.peer_display_name(addr),
+                "is_active": is_active,
+                "first_seen_secs_ago": first_seen_secs,
+                "last_contact_secs_ago": last_contact_secs,
+            })
+        })
+        .collect();
+
+    // Stable display order: active peers first, then by display name.
+    peers.sort_by(|a, b| {
+        let a_active = a
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let b_active = b
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match (b_active, a_active) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => a
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("display_name").and_then(|v| v.as_str()).unwrap_or("")),
+        }
+    });
+
+    json!({ "peers": peers, "count": peers.len() })
+}
+
+/// `show_stats_history_all_peers` — One metric across every tracked
+/// peer in one round trip. Backs the fipstop MetricByPeer grid view.
+///
+/// Params: `{"metric": "<name>", "window": "<dur>", "granularity": "<1s|1m>"}`.
+/// `metric` must be a per-peer metric name (see `PeerMetric`).
+pub fn show_stats_history_all_peers(
+    node: &Node,
+    params: Option<&Value>,
+) -> super::protocol::Response {
+    use super::protocol::Response;
+    let Some(params) = params else {
+        return Response::error("missing params for show_stats_history_all_peers");
+    };
+
+    let metric_name = match params.get("metric").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return Response::error("missing 'metric' parameter"),
+    };
+    let metric = match PeerMetric::from_str(metric_name) {
+        Ok(m) => m,
+        Err(e) => return Response::error(e),
+    };
+
+    let window_str = params
+        .get("window")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10m");
+    let window = match parse_duration(window_str) {
+        Ok(d) => d,
+        Err(e) => return Response::error(e),
+    };
+
+    let granularity_str = params
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1s");
+    let granularity = match Granularity::from_str(granularity_str) {
+        Ok(g) => g,
+        Err(e) => return Response::error(e),
+    };
+
+    let hist = node.stats_history();
+    let peer_addrs: Vec<NodeAddr> = hist.peer_addrs().copied().collect();
+
+    let mut peers: Vec<Value> = peer_addrs
+        .iter()
+        .filter_map(|addr| {
+            let s = hist.peer_query(addr, metric, window, granularity)?;
+            let is_active = node.peers().any(|p| p.node_addr() == addr);
+            Some(json!({
+                "node_addr": hex::encode(addr.as_bytes()),
+                "display_name": node.peer_display_name(addr),
+                "is_active": is_active,
+                "values": serde_json::to_value(&s.values).unwrap_or(Value::Null),
+            }))
+        })
+        .collect();
+
+    // Active peers first, then by display name.
+    peers.sort_by(|a, b| {
+        let a_active = a
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let b_active = b
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match (b_active, a_active) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => a
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("display_name").and_then(|v| v.as_str()).unwrap_or("")),
+        }
+    });
+
+    Response::ok(json!({
+        "metric": metric.name(),
+        "unit": metric.unit(),
+        "granularity_seconds": granularity.seconds(),
+        "window_seconds": window.as_secs(),
+        "peers": peers,
+    }))
+}
+
 /// Dispatch a command string to the appropriate query function.
-pub fn dispatch(node: &Node, command: &str) -> super::protocol::Response {
+pub fn dispatch(node: &Node, command: &str, params: Option<&Value>) -> super::protocol::Response {
     match command {
         "show_acl" => super::protocol::Response::ok(show_acl(node)),
         "show_status" => super::protocol::Response::ok(show_status(node)),
@@ -589,6 +1081,12 @@ pub fn dispatch(node: &Node, command: &str) -> super::protocol::Response {
         "show_connections" => super::protocol::Response::ok(show_connections(node)),
         "show_transports" => super::protocol::Response::ok(show_transports(node)),
         "show_routing" => super::protocol::Response::ok(show_routing(node)),
+        "show_identity_cache" => super::protocol::Response::ok(show_identity_cache(node)),
+        "show_stats_list" => super::protocol::Response::ok(show_stats_list()),
+        "show_stats_history" => show_stats_history(node, params),
+        "show_stats_all_history" => show_stats_all_history(node, params),
+        "show_stats_peers" => super::protocol::Response::ok(show_stats_peers(node)),
+        "show_stats_history_all_peers" => show_stats_history_all_peers(node, params),
         _ => super::protocol::Response::error(format!("unknown command: {}", command)),
     }
 }

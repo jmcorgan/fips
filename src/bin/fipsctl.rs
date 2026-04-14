@@ -12,6 +12,7 @@ use fips::upper::hosts::HostMap;
 use fips::version;
 use fips::{Identity, encode_nsec};
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv6Addr, SocketAddrV6};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -70,6 +71,38 @@ enum Commands {
         /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
         peer: String,
     },
+    /// Query historical node statistics
+    Stats {
+        #[command(subcommand)]
+        what: StatsCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StatsCommands {
+    /// List available history metrics
+    List,
+    /// List peers tracked in the stats history
+    Peers,
+    /// Fetch a time-series window for a metric
+    History {
+        /// Metric name (see `fipsctl stats list`). Node-level metrics
+        /// need no `--peer`; per-peer metrics require it.
+        metric: String,
+        /// Peer npub (bech32) or hostname from /etc/fips/hosts for
+        /// per-peer metrics
+        #[arg(long)]
+        peer: Option<String>,
+        /// Window duration — `<N>s`, `<N>m`, `<N>h`
+        #[arg(long, default_value = "10m")]
+        window: String,
+        /// Sample resolution — `1s` (fast ring) or `1m` (slow ring)
+        #[arg(long, default_value = "1s")]
+        granularity: String,
+        /// Render a Unicode block sparkline instead of JSON
+        #[arg(long)]
+        plot: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -96,6 +129,8 @@ enum ShowCommands {
     Transports,
     /// Routing table summary
     Routing,
+    /// Identity cache entries (known node pubkeys)
+    IdentityCache,
 }
 
 #[derive(Subcommand, Debug)]
@@ -118,6 +153,7 @@ impl ShowCommands {
             ShowCommands::Connections => "show_connections",
             ShowCommands::Transports => "show_transports",
             ShowCommands::Routing => "show_routing",
+            ShowCommands::IdentityCache => "show_identity_cache",
         }
     }
 }
@@ -268,6 +304,50 @@ fn default_key_dir() -> PathBuf {
     }
 }
 
+/// Check if `address` is an IPv6 literal in `fd00::/8` (FIPS mesh ULA range).
+///
+/// Handles three common syntaxes:
+///   - bare IPv6:          `fd9d:...`
+///   - bracketed + port:   `[fd9d:...]:2121`
+///   - bare IPv6 + port:   `fd9d:...:2121` (ambiguous; accepted if tail is numeric)
+fn is_fips_mesh_address(address: &str) -> bool {
+    let is_ula = |a: &Ipv6Addr| a.octets()[0] == 0xfd;
+
+    if let Ok(a) = address.parse::<Ipv6Addr>() {
+        return is_ula(&a);
+    }
+    if let Ok(sa) = address.parse::<SocketAddrV6>() {
+        return is_ula(sa.ip());
+    }
+    if let Some((host, port)) = address.rsplit_once(':')
+        && port.chars().all(|c| c.is_ascii_digit())
+        && !port.is_empty()
+    {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(a) = host.parse::<Ipv6Addr>() {
+            return is_ula(&a);
+        }
+    }
+    false
+}
+
+/// Reject `fd00::/8` addresses for transports that expect a reachable network endpoint.
+///
+/// FIPS mesh ULAs are derived from npubs and only make sense as destinations
+/// inside an already-established mesh — they are not valid udp/tcp/ethernet
+/// transport endpoints. Without this check the CLI echoes success while the
+/// daemon rejects the bind with EAFNOSUPPORT (issue #61).
+fn validate_connect_address(address: &str, transport: &str) -> Result<(), String> {
+    let checked = matches!(transport, "udp" | "tcp" | "ethernet");
+    if checked && is_fips_mesh_address(address) {
+        return Err(format!(
+            "'{address}' is a FIPS mesh address (fd00::/8), not a reachable {transport} endpoint.\n\
+             Provide the peer's routable IP/hostname and port (e.g., '192.0.2.1:2121' or 'peer.example.com:2121')."
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve a peer identifier to an npub.
 ///
 /// If the identifier starts with "npub1", it's returned as-is.
@@ -348,6 +428,10 @@ fn main() {
             address,
             transport,
         } => {
+            if let Err(e) = validate_connect_address(address, transport) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
             let npub = resolve_peer(peer);
             build_command(
                 "connect",
@@ -362,8 +446,48 @@ fn main() {
             let npub = resolve_peer(peer);
             build_command("disconnect", serde_json::json!({"npub": npub}))
         }
+        Commands::Stats { what } => match what {
+            StatsCommands::List => build_query("show_stats_list"),
+            StatsCommands::Peers => build_query("show_stats_peers"),
+            StatsCommands::History {
+                metric,
+                peer,
+                window,
+                granularity,
+                ..
+            } => {
+                let mut params = serde_json::json!({
+                    "metric": metric,
+                    "window": window,
+                    "granularity": granularity,
+                });
+                if let Some(p) = peer {
+                    let resolved = resolve_peer(p);
+                    params["peer"] = serde_json::json!(resolved);
+                }
+                build_command("show_stats_history", params)
+            }
+        },
         Commands::Keygen { .. } => unreachable!(),
     };
+
+    // For plot output we need to post-process the JSON response rather
+    // than pretty-print it.
+    if let Commands::Stats {
+        what: StatsCommands::History {
+            plot: true, metric, ..
+        },
+    } = &cli.command
+    {
+        match send_request(&socket_path, &request) {
+            Ok(value) => print_plot(&value, metric),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     match send_request(&socket_path, &request) {
         Ok(value) => print_response(&value),
@@ -372,6 +496,108 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Render the response as a Unicode block sparkline plot.
+fn print_plot(value: &serde_json::Value, metric: &str) {
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    if status == "error" {
+        let msg = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        eprintln!("error: {msg}");
+        std::process::exit(1);
+    }
+
+    let data = match value.get("data") {
+        Some(d) => d,
+        None => {
+            eprintln!("error: no data in response");
+            std::process::exit(1);
+        }
+    };
+
+    let values: Vec<f64> = data
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect())
+        .unwrap_or_default();
+    let unit = data.get("unit").and_then(|v| v.as_str()).unwrap_or("");
+    let granularity_seconds = data
+        .get("granularity_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1);
+
+    if values.is_empty() {
+        println!("{metric}: no data yet");
+        return;
+    }
+
+    let (min, max) = values
+        .iter()
+        .filter(|v| !v.is_nan())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    let (min, max) = if min.is_finite() {
+        (min, max)
+    } else {
+        (0.0, 0.0)
+    };
+    let last = values
+        .iter()
+        .rev()
+        .find(|v| !v.is_nan())
+        .copied()
+        .unwrap_or(f64::NAN);
+    let width_secs = (values.len() as u64) * granularity_seconds;
+    let gap_count = values.iter().filter(|v| v.is_nan()).count();
+
+    println!(
+        "{metric} ({unit}) — {n} samples @ {g}s = {w}s window{gap}",
+        n = values.len(),
+        g = granularity_seconds,
+        w = width_secs,
+        gap = if gap_count > 0 {
+            format!(" ({gap_count} gaps)")
+        } else {
+            String::new()
+        },
+    );
+    let last_str = if last.is_nan() {
+        "-".to_string()
+    } else {
+        format!("{last:.3}")
+    };
+    println!("  min={min:.3} max={max:.3} last={last_str}");
+    println!("  {}", sparkline(&values, min, max));
+}
+
+/// Render a slice of values as Unicode block characters.
+///
+/// Uses eight discrete levels: `▁▂▃▄▅▆▇█`. Constant series and empty
+/// inputs render as a single-level line (`▄`).
+fn sparkline(values: &[f64], min: f64, max: f64) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let range = max - min;
+    values
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                ' '
+            } else if !range.is_finite() || range <= 0.0 {
+                BLOCKS[3]
+            } else {
+                let norm = ((v - min) / range).clamp(0.0, 1.0);
+                let idx = (norm * (BLOCKS.len() as f64 - 1.0)).round() as usize;
+                BLOCKS[idx.min(BLOCKS.len() - 1)]
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -393,5 +619,56 @@ mod tests {
                 what: AclCommands::Show
             }
         ));
+    fn detects_bare_ula_literal() {
+        assert!(is_fips_mesh_address("fd9d:abcd::1"));
+        assert!(is_fips_mesh_address("fd00::"));
+        assert!(is_fips_mesh_address(
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        ));
+    }
+
+    #[test]
+    fn detects_bracketed_ula_with_port() {
+        assert!(is_fips_mesh_address("[fd9d:abcd::1]:2121"));
+        assert!(is_fips_mesh_address("[fd00::1]:8443"));
+    }
+
+    #[test]
+    fn detects_bare_ula_with_port() {
+        assert!(is_fips_mesh_address("fd9d:abcd::1:2121"));
+    }
+
+    #[test]
+    fn rejects_non_ula_ipv6() {
+        // fc00::/7 other half (fcXX:) is also ULA but not fd00::/8 — we only
+        // block the fd-prefixed half that FIPS actually uses.
+        assert!(!is_fips_mesh_address("fc00::1"));
+        assert!(!is_fips_mesh_address("::1"));
+        assert!(!is_fips_mesh_address("2001:db8::1"));
+        assert!(!is_fips_mesh_address("[2001:db8::1]:2121"));
+    }
+
+    #[test]
+    fn ignores_ipv4_and_hostnames() {
+        assert!(!is_fips_mesh_address("192.0.2.1:2121"));
+        assert!(!is_fips_mesh_address("peer.example.com:2121"));
+        assert!(!is_fips_mesh_address("coinos.pro:2121"));
+    }
+
+    #[test]
+    fn validates_only_target_transports() {
+        assert!(validate_connect_address("fd9d::1:2121", "udp").is_err());
+        assert!(validate_connect_address("fd9d::1:2121", "tcp").is_err());
+        assert!(validate_connect_address("fd9d::1:2121", "ethernet").is_err());
+        // Other transports are not inspected — they may legitimately accept
+        // non-IP endpoints (tor onion, etc.).
+        assert!(validate_connect_address("fd9d::1:2121", "tor").is_ok());
+    }
+
+    #[test]
+    fn allows_valid_endpoints() {
+        assert!(validate_connect_address("192.0.2.1:2121", "udp").is_ok());
+        assert!(validate_connect_address("peer.example.com:2121", "tcp").is_ok());
+        assert!(validate_connect_address("[2001:db8::1]:2121", "udp").is_ok());
     }
 }

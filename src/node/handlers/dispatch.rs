@@ -67,8 +67,12 @@ impl Node {
     /// Handle a Disconnect notification from a peer.
     ///
     /// The peer is signaling an orderly departure. We immediately remove
-    /// them from all state rather than waiting for timeout detection.
-    fn handle_disconnect(&mut self, from: &NodeAddr, payload: &[u8]) {
+    /// them from all state rather than waiting for timeout detection, and
+    /// schedule a reconnect if the peer is configured as auto-connect.
+    /// Without this, a graceful upstream shutdown orphans auto-connect
+    /// entries — other removal paths (link-dead, decrypt failure, peer
+    /// restart) all schedule reconnect.
+    pub(in crate::node) fn handle_disconnect(&mut self, from: &NodeAddr, payload: &[u8]) {
         let disconnect = match crate::protocol::Disconnect::decode(payload) {
             Ok(msg) => msg,
             Err(e) => {
@@ -83,7 +87,13 @@ impl Node {
             "Peer sent disconnect notification"
         );
 
+        let addr = *from;
         self.remove_active_peer(from);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.schedule_reconnect(addr, now_ms);
     }
 
     /// Remove an active peer and clean up all associated state.

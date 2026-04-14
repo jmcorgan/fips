@@ -801,6 +801,43 @@ fn test_schedule_reconnect_fresh_state() {
     assert_eq!(state.retry_after_ms, 1_000 + expected_delay);
 }
 
+/// Test that a graceful Disconnect from an auto-connect peer schedules reconnect.
+///
+/// Regression test for issue #60: `handle_disconnect` previously called
+/// `remove_active_peer` without `schedule_reconnect`, orphaning auto-connect
+/// entries on a clean upstream shutdown. Other peer-removal paths (link-dead,
+/// decrypt failure, peer restart) all schedule reconnect.
+#[test]
+fn test_disconnect_schedules_reconnect() {
+    use crate::protocol::{Disconnect, DisconnectReason};
+
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:2121",
+    ));
+
+    let mut node = Node::new(config).unwrap();
+
+    let payload = Disconnect::new(DisconnectReason::Shutdown).encode();
+    node.handle_disconnect(&peer_node_addr, &payload);
+
+    let state = node
+        .retry_pending
+        .get(&peer_node_addr)
+        .expect("handle_disconnect should schedule reconnect for auto-connect peer");
+    assert!(state.reconnect, "Entry should be marked as reconnect");
+    assert_eq!(
+        state.retry_count, 0,
+        "Fresh reconnect after disconnect should start at count=0"
+    );
+}
+
 /// Test that promote_connection clears retry_pending.
 #[test]
 fn test_promote_clears_retry_pending() {

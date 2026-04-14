@@ -575,7 +575,7 @@ impl Node {
 }
 
 /// Tracks a pending discovery lookup with retry state.
-pub(crate) struct PendingLookup {
+pub struct PendingLookup {
     /// When the lookup was first initiated.
     pub initiated_ms: u64,
     /// When the last attempt was sent.

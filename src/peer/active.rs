@@ -495,6 +495,11 @@ impl ActivePeer {
         self.consecutive_decrypt_failures = 0;
     }
 
+    /// Current consecutive decryption failure count.
+    pub fn consecutive_decrypt_failures(&self) -> u32 {
+        self.consecutive_decrypt_failures
+    }
+
     // === Epoch Accessors ===
 
     /// Get the remote peer's startup epoch (from handshake).
