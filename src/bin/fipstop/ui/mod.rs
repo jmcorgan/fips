@@ -1,6 +1,7 @@
 mod bloom;
 mod dashboard;
 mod gateway;
+mod graphs;
 mod helpers;
 mod mmp;
 mod peers;
@@ -77,6 +78,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
         Tab::Routing => routing::draw(frame, app, area),
         Tab::Links => {} // not a navigable tab; data stored for cross-references
         Tab::Gateway => gateway::draw(frame, app, area),
+        Tab::Graphs => graphs::draw(frame, app, area),
     }
 }
 

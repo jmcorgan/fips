@@ -185,6 +185,13 @@ impl CoordCache {
         self.entries.is_empty()
     }
 
+    /// Iterate over non-expired entries.
+    pub fn iter(&self, current_time_ms: u64) -> impl Iterator<Item = (&NodeAddr, &CacheEntry)> {
+        self.entries
+            .iter()
+            .filter(move |(_, entry)| !entry.is_expired(current_time_ms))
+    }
+
     /// Remove all expired entries.
     pub fn purge_expired(&mut self, current_time_ms: u64) -> usize {
         let before = self.entries.len();

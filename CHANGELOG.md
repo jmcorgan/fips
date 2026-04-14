@@ -155,6 +155,27 @@ with v0.2.x peers.
   loads config before initializing tracing so the configured level
   takes effect; `RUST_LOG` still overrides when set
 
+#### Operator Tooling
+
+- `fipsctl show identity-cache` lists every cached node identity
+  (npub, IPv6 address, display name, LRU age) alongside the
+  configured cache capacity
+- `fipsctl show peers` extended with per-peer security signals
+  (replay suppression count, consecutive decrypt failures), Noise
+  session counters, session indices, and rekey lifecycle state
+- `fipsctl show sessions` extended with handshake resend count
+  during establishment and rekey/session health fields when
+  established (session start, K-bit epoch, coords warmup remaining,
+  drain state)
+- `fipsctl show cache` now includes individual coordinate cache
+  entries (tree coordinates, depth, path MTU, age). The top-level
+  count field was renamed from `entries` to `count` for clarity
+- `fipsctl show routing` expands `pending_lookups` from a count to
+  per-target detail (attempt, age, last sent), adds pending TUN
+  packet queue depth, and adds per-peer connection retry state
+  ([#42](https://github.com/jmcorgan/fips/pull/42),
+  [@osh](https://github.com/osh))
+
 #### Documentation
 
 - Pre-implementation proposal for NAT traversal using Nostr relays
@@ -184,6 +205,15 @@ with v0.2.x peers.
   shutdown, retry scheduling). Info output now focuses on
   operator-relevant state changes: lifecycle events, peer promotions,
   session establishment, parent switches, transport start/stop
+- **Breaking (control socket JSON):** `show_cache` response field
+  `entries` has changed type from a `u64` count to an array of entry
+  objects; a new `count` field carries the previous scalar value.
+  `show_routing` response field `pending_lookups` has changed type
+  from a `u64` count to an array of per-target lookup objects.
+  External consumers parsing these fields as numbers must be
+  updated. In-tree `fipstop` is adjusted to the new schema. The
+  control socket interface is still pre-1.0 and not covered by
+  stability guarantees
 
 ### Fixed
 

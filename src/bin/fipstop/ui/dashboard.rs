@@ -22,7 +22,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(7), // Runtime
         Constraint::Length(7), // Identity
-        Constraint::Length(5), // State
+        Constraint::Length(6), // State (sparkline row adds one line)
         Constraint::Length(9), // Traffic
         Constraint::Min(0),    // remaining
     ])
@@ -133,6 +133,12 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         .map(|n| format!("~{n}"))
         .unwrap_or_else(|| "-".into());
 
+    let mesh_spark =
+        helpers::sparkline(&helpers::nested_f64_array(data, "sparklines", "mesh_size"));
+    let peer_spark =
+        helpers::sparkline(&helpers::nested_f64_array(data, "sparklines", "peer_count"));
+    let spark_style = Style::default().fg(Color::DarkGray);
+
     let lines = vec![
         Line::from(vec![
             Span::styled(" state: ", label),
@@ -158,6 +164,12 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
             Span::styled("  mesh: ", label),
             Span::styled(mesh_size, count),
         ]),
+        Line::from(vec![
+            Span::styled(" peers:  ", label),
+            Span::styled(peer_spark, spark_style),
+            Span::styled("   mesh: ", label),
+            Span::styled(mesh_spark, spark_style),
+        ]),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -168,6 +180,13 @@ fn draw_node_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let spark_style = Style::default().fg(Color::DarkGray);
+    let label = Style::default().fg(Color::DarkGray);
+    let bytes_in_spark =
+        helpers::sparkline(&helpers::nested_f64_array(data, "sparklines", "bytes_in"));
+    let bytes_out_spark =
+        helpers::sparkline(&helpers::nested_f64_array(data, "sparklines", "bytes_out"));
+
     let lines = vec![
         helpers::section_header("TUN (IPv6)"),
         fwd_line(data, "Tx", "delivered_packets", "delivered_bytes"),
@@ -175,6 +194,12 @@ fn draw_node_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         Line::from(""),
         helpers::section_header("Forwarded (transit)"),
         fwd_line(data, "Packets", "forwarded_packets", "forwarded_bytes"),
+        Line::from(vec![
+            Span::styled("    rate in:  ", label),
+            Span::styled(bytes_in_spark, spark_style),
+            Span::styled("   rate out: ", label),
+            Span::styled(bytes_out_spark, spark_style),
+        ]),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);

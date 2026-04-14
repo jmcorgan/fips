@@ -43,7 +43,11 @@ fn draw_routing_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         ),
         helpers::kv_line(
             "Pending Lookups",
-            &helpers::u64_field(data, "pending_lookups"),
+            &data
+                .get("pending_lookups")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len().to_string())
+                .unwrap_or_else(|| "0".into()),
         ),
         helpers::kv_line(
             "Recent Requests",
@@ -261,7 +265,7 @@ fn draw_coord_cache(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let entries = helpers::u64_field(data, "entries");
+    let entries = helpers::u64_field(data, "count");
     let max_entries = helpers::u64_field(data, "max_entries");
     let fill_pct = data
         .get("fill_ratio")

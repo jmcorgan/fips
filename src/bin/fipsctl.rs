@@ -66,6 +66,38 @@ enum Commands {
         /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
         peer: String,
     },
+    /// Query historical node statistics
+    Stats {
+        #[command(subcommand)]
+        what: StatsCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StatsCommands {
+    /// List available history metrics
+    List,
+    /// List peers tracked in the stats history
+    Peers,
+    /// Fetch a time-series window for a metric
+    History {
+        /// Metric name (see `fipsctl stats list`). Node-level metrics
+        /// need no `--peer`; per-peer metrics require it.
+        metric: String,
+        /// Peer npub (bech32) or hostname from /etc/fips/hosts for
+        /// per-peer metrics
+        #[arg(long)]
+        peer: Option<String>,
+        /// Window duration — `<N>s`, `<N>m`, `<N>h`
+        #[arg(long, default_value = "10m")]
+        window: String,
+        /// Sample resolution — `1s` (fast ring) or `1m` (slow ring)
+        #[arg(long, default_value = "1s")]
+        granularity: String,
+        /// Render a Unicode block sparkline instead of JSON
+        #[arg(long)]
+        plot: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -92,6 +124,8 @@ enum ShowCommands {
     Transports,
     /// Routing table summary
     Routing,
+    /// Identity cache entries (known node pubkeys)
+    IdentityCache,
 }
 
 impl ShowCommands {
@@ -108,6 +142,7 @@ impl ShowCommands {
             ShowCommands::Connections => "show_connections",
             ShowCommands::Transports => "show_transports",
             ShowCommands::Routing => "show_routing",
+            ShowCommands::IdentityCache => "show_identity_cache",
         }
     }
 }
@@ -391,8 +426,48 @@ fn main() {
             let npub = resolve_peer(peer);
             build_command("disconnect", serde_json::json!({"npub": npub}))
         }
+        Commands::Stats { what } => match what {
+            StatsCommands::List => build_query("show_stats_list"),
+            StatsCommands::Peers => build_query("show_stats_peers"),
+            StatsCommands::History {
+                metric,
+                peer,
+                window,
+                granularity,
+                ..
+            } => {
+                let mut params = serde_json::json!({
+                    "metric": metric,
+                    "window": window,
+                    "granularity": granularity,
+                });
+                if let Some(p) = peer {
+                    let resolved = resolve_peer(p);
+                    params["peer"] = serde_json::json!(resolved);
+                }
+                build_command("show_stats_history", params)
+            }
+        },
         Commands::Keygen { .. } => unreachable!(),
     };
+
+    // For plot output we need to post-process the JSON response rather
+    // than pretty-print it.
+    if let Commands::Stats {
+        what: StatsCommands::History {
+            plot: true, metric, ..
+        },
+    } = &cli.command
+    {
+        match send_request(&socket_path, &request) {
+            Ok(value) => print_plot(&value, metric),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     match send_request(&socket_path, &request) {
         Ok(value) => print_response(&value),
@@ -401,6 +476,108 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Render the response as a Unicode block sparkline plot.
+fn print_plot(value: &serde_json::Value, metric: &str) {
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    if status == "error" {
+        let msg = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        eprintln!("error: {msg}");
+        std::process::exit(1);
+    }
+
+    let data = match value.get("data") {
+        Some(d) => d,
+        None => {
+            eprintln!("error: no data in response");
+            std::process::exit(1);
+        }
+    };
+
+    let values: Vec<f64> = data
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect())
+        .unwrap_or_default();
+    let unit = data.get("unit").and_then(|v| v.as_str()).unwrap_or("");
+    let granularity_seconds = data
+        .get("granularity_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1);
+
+    if values.is_empty() {
+        println!("{metric}: no data yet");
+        return;
+    }
+
+    let (min, max) = values
+        .iter()
+        .filter(|v| !v.is_nan())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    let (min, max) = if min.is_finite() {
+        (min, max)
+    } else {
+        (0.0, 0.0)
+    };
+    let last = values
+        .iter()
+        .rev()
+        .find(|v| !v.is_nan())
+        .copied()
+        .unwrap_or(f64::NAN);
+    let width_secs = (values.len() as u64) * granularity_seconds;
+    let gap_count = values.iter().filter(|v| v.is_nan()).count();
+
+    println!(
+        "{metric} ({unit}) — {n} samples @ {g}s = {w}s window{gap}",
+        n = values.len(),
+        g = granularity_seconds,
+        w = width_secs,
+        gap = if gap_count > 0 {
+            format!(" ({gap_count} gaps)")
+        } else {
+            String::new()
+        },
+    );
+    let last_str = if last.is_nan() {
+        "-".to_string()
+    } else {
+        format!("{last:.3}")
+    };
+    println!("  min={min:.3} max={max:.3} last={last_str}");
+    println!("  {}", sparkline(&values, min, max));
+}
+
+/// Render a slice of values as Unicode block characters.
+///
+/// Uses eight discrete levels: `▁▂▃▄▅▆▇█`. Constant series and empty
+/// inputs render as a single-level line (`▄`).
+fn sparkline(values: &[f64], min: f64, max: f64) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let range = max - min;
+    values
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                ' '
+            } else if !range.is_finite() || range <= 0.0 {
+                BLOCKS[3]
+            } else {
+                let norm = ((v - min) / range).clamp(0.0, 1.0);
+                let idx = (norm * (BLOCKS.len() as f64 - 1.0)).round() as usize;
+                BLOCKS[idx.min(BLOCKS.len() - 1)]
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
