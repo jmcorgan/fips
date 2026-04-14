@@ -1,6 +1,6 @@
 # Maintainer: Johnathan Corgan <jcorgan@corganlabs.com>
 pkgname=fips-git
-pkgver=0.2.0.rel.r41.g1e4f375
+pkgver=0
 pkgrel=1
 pkgdesc="Distributed, decentralized network routing protocol for mesh nodes"
 url="https://github.com/jmcorgan/fips"
@@ -58,7 +58,7 @@ package() {
     install -Dm0644 packaging/debian/fips-dns.service "$pkgdir/usr/lib/systemd/system/fips-dns.service"
 
     # Config files (from packaging/common/)
-    install -Dm0644 packaging/common/fips.yaml "$pkgdir/etc/fips/fips.yaml"
+    install -Dm0600 packaging/common/fips.yaml "$pkgdir/etc/fips/fips.yaml"
     install -Dm0644 packaging/common/hosts "$pkgdir/etc/fips/hosts"
 
     # System integration (from local source files in $srcdir)
