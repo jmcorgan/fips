@@ -44,12 +44,21 @@ with open('$config_file') as f:
 cfg['gateway'] = {
     'enabled': True,
     'pool': 'fd01::/112',
-    'lan_interface': 'eth0',
+    # Docker assigns gateway-lan to eth1 (fips-net is eth0). The
+    # LAN-side masquerade for inbound port forwards gates on this.
+    'lan_interface': 'eth1',
     'dns': {
         'listen': '[::]:53',
         'ttl': 5,
     },
     'pool_grace_period': 5,
+    'port_forwards': [
+        {
+            'listen_port': 18080,
+            'proto': 'tcp',
+            'target': '[fd02::20]:8080',
+        },
+    ],
 }
 
 with open('$config_file', 'w') as f:
@@ -163,9 +172,62 @@ else
     check "nftables DNAT rules" 1
 fi
 
-# Phase 7: TTL expiration and pool reclamation
+# Phase 7: Inbound port forwarding (TASK-2026-0061)
+#
+# Mesh peer (gw-server) → gw-gateway fips0:18080 → DNAT → [fd02::20]:8080
+# (gw-client LAN HTTP server). Exercises the DNAT rule + LAN-side
+# masquerade installed by set_port_forwards().
 echo ""
-echo "Phase 7: TTL expiration and pool reclamation"
+echo "Phase 7: Inbound port forward"
+
+# Confirm the port-forward DNAT rule is present on the gateway. The
+# distinctive listen port (18080) identifies our rule regardless of how
+# nft renders the l4proto/dport predicates.
+if echo "$NFT_RULES" | grep -q "18080"; then
+    check "nftables port-forward DNAT rule (tcp 18080)" 0
+else
+    check "nftables port-forward DNAT rule (tcp 18080)" 1
+fi
+
+# Start a marker HTTP server on the LAN-side client (fd02::20:8080).
+# `docker exec -d` is required; `docker exec bash -c 'cmd &'` doesn't
+# keep the child alive past the exec session, even with nohup.
+docker exec "$CLIENT" sh -c \
+    'mkdir -p /tmp/inbound && echo "inbound-forward-ok" > /tmp/inbound/index.html && pkill -f "http.server 8080" 2>/dev/null || true' \
+    >/dev/null 2>&1 || true
+docker exec -d "$CLIENT" python3 -m http.server 8080 --bind :: --directory /tmp/inbound \
+    >/dev/null 2>&1 || true
+# Give the server a moment to bind.
+for _ in 1 2 3 4 5; do
+    if docker exec "$CLIENT" ss -6lnt 2>/dev/null | grep -q ':8080'; then
+        break
+    fi
+    sleep 1
+done
+
+# Derive the gateway's mesh IPv6 (fd00::/8 address assigned to fips0).
+GW_MESH_IP=$(docker exec "$GATEWAY" bash -c \
+    "ip -6 -o addr show fips0 | awk '/inet6 fd/ {print \$4}' | cut -d/ -f1 | head -1" \
+    2>/dev/null || echo "")
+
+if [ -z "$GW_MESH_IP" ]; then
+    check "Gateway fips0 IPv6 address" 1
+else
+    echo "  Gateway mesh IPv6: $GW_MESH_IP"
+
+    # From the mesh side (gw-server), fetch through the forward rule.
+    FWD_RESPONSE=$(docker exec "$SERVER" curl -6 -s --max-time 10 \
+        "http://[${GW_MESH_IP}]:18080/" 2>&1) || true
+    if echo "$FWD_RESPONSE" | grep -q "inbound-forward-ok"; then
+        check "Inbound HTTP via port forward 18080 → [fd02::20]:8080" 0
+    else
+        check "Inbound HTTP via port forward (response: '${FWD_RESPONSE:0:80}')" 1
+    fi
+fi
+
+# Phase 8: TTL expiration and pool reclamation
+echo ""
+echo "Phase 8: TTL expiration and pool reclamation"
 # Flush conntrack so stale sessions from Phase 5 don't keep the mapping alive.
 docker exec "$GATEWAY" conntrack -F 2>/dev/null || true
 # Config uses ttl=5, pool_grace_period=5. Pool tick interval is 10s, so:
@@ -185,9 +247,9 @@ else
     check "Mapping reclaimed (count: $MAPPING_COUNT)" 1
 fi
 
-# Phase 8: SERVFAIL when daemon DNS is down
+# Phase 9: SERVFAIL when daemon DNS is down
 echo ""
-echo "Phase 8: SERVFAIL when daemon DNS is down"
+echo "Phase 9: SERVFAIL when daemon DNS is down"
 # Kill the fips daemon inside the gateway container (gateway stays running)
 docker exec "$GATEWAY" pkill -f "^fips --config" 2>/dev/null || true
 sleep 2
@@ -201,9 +263,9 @@ else
     check "SERVFAIL when daemon DNS down (got: '${SERVFAIL_RESULT:0:80}')" 1
 fi
 
-# Phase 9: Cleanup verification (nftables removed on shutdown)
+# Phase 10: Cleanup verification (nftables removed on shutdown)
 echo ""
-echo "Phase 9: Cleanup on shutdown"
+echo "Phase 10: Cleanup on shutdown"
 # fips-gateway is PID 1 (exec in entrypoint), so SIGTERM stops the container.
 # Verify cleanup by checking container logs for the shutdown sequence.
 docker stop --time=10 "$GATEWAY" >/dev/null 2>&1 || true

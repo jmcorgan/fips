@@ -2,6 +2,9 @@
 //!
 //! Configuration for the outbound LAN gateway (`gateway.*`).
 
+use std::collections::HashSet;
+use std::net::SocketAddrV6;
+
 use serde::{Deserialize, Serialize};
 
 /// Default gateway DNS listen address.
@@ -52,6 +55,10 @@ pub struct GatewayConfig {
     /// Conntrack timeout overrides.
     #[serde(default)]
     pub conntrack: ConntrackConfig,
+
+    /// Inbound mesh port forwarding rules. See TASK-2026-0061.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<PortForward>,
 }
 
 impl GatewayConfig {
@@ -59,6 +66,46 @@ impl GatewayConfig {
     pub fn grace_period(&self) -> u64 {
         self.pool_grace_period.unwrap_or(DEFAULT_GRACE_PERIOD)
     }
+
+    /// Validate inbound port-forward rules: non-zero listen ports and
+    /// uniqueness of `(listen_port, proto)` pairs across the list.
+    /// IPv6-only targets are enforced by `SocketAddrV6` at deserialize
+    /// time.
+    pub fn validate_port_forwards(&self) -> Result<(), String> {
+        let mut seen = HashSet::new();
+        for pf in &self.port_forwards {
+            if pf.listen_port == 0 {
+                return Err("port_forward listen_port must be non-zero".to_string());
+            }
+            if !seen.insert((pf.listen_port, pf.proto)) {
+                return Err(format!(
+                    "duplicate port_forward ({:?} {}) — each (listen_port, proto) must be unique",
+                    pf.proto, pf.listen_port
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Transport protocol for an inbound port forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Proto {
+    Tcp,
+    Udp,
+}
+
+/// An inbound port-forward rule: `fips0:listen_port/proto` → `target`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForward {
+    /// Port on `fips0` that mesh peers connect to.
+    pub listen_port: u16,
+    /// Transport protocol to match.
+    pub proto: Proto,
+    /// IPv6 LAN destination (`[addr]:port`). IPv4 targets are rejected
+    /// at parse time by `SocketAddrV6`.
+    pub target: SocketAddrV6,
 }
 
 /// Gateway DNS resolver configuration (`gateway.dns.*`).
@@ -205,5 +252,110 @@ gateway:
         let yaml = "node: {}";
         let config: crate::Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.gateway.is_none());
+    }
+
+    #[test]
+    fn test_port_forwards_default_empty() {
+        let yaml = r#"
+pool: "fd01::/112"
+lan_interface: "eth0"
+"#;
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.port_forwards.is_empty());
+        config.validate_port_forwards().unwrap();
+    }
+
+    #[test]
+    fn test_port_forwards_parse() {
+        let yaml = r#"
+pool: "fd01::/112"
+lan_interface: "eth0"
+port_forwards:
+  - listen_port: 8080
+    proto: tcp
+    target: "[fd12:3456::10]:80"
+  - listen_port: 2222
+    proto: tcp
+    target: "[fd12:3456::20]:22"
+  - listen_port: 5353
+    proto: udp
+    target: "[fd12:3456::10]:53"
+"#;
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.port_forwards.len(), 3);
+        assert_eq!(config.port_forwards[0].listen_port, 8080);
+        assert_eq!(config.port_forwards[0].proto, Proto::Tcp);
+        assert_eq!(
+            config.port_forwards[0].target,
+            "[fd12:3456::10]:80".parse::<SocketAddrV6>().unwrap()
+        );
+        assert_eq!(config.port_forwards[2].proto, Proto::Udp);
+        config.validate_port_forwards().unwrap();
+    }
+
+    #[test]
+    fn test_port_forwards_reject_ipv4_target() {
+        let yaml = r#"
+pool: "fd01::/112"
+lan_interface: "eth0"
+port_forwards:
+  - listen_port: 8080
+    proto: tcp
+    target: "192.168.1.10:80"
+"#;
+        let result: Result<GatewayConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "IPv4 target must fail to deserialize as SocketAddrV6"
+        );
+    }
+
+    #[test]
+    fn test_port_forwards_reject_zero_listen_port() {
+        let yaml = r#"
+pool: "fd01::/112"
+lan_interface: "eth0"
+port_forwards:
+  - listen_port: 0
+    proto: tcp
+    target: "[fd12:3456::10]:80"
+"#;
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate_port_forwards().is_err());
+    }
+
+    #[test]
+    fn test_port_forwards_reject_duplicate() {
+        let yaml = r#"
+pool: "fd01::/112"
+lan_interface: "eth0"
+port_forwards:
+  - listen_port: 8080
+    proto: tcp
+    target: "[fd12:3456::10]:80"
+  - listen_port: 8080
+    proto: tcp
+    target: "[fd12:3456::20]:80"
+"#;
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate_port_forwards().unwrap_err();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn test_port_forwards_same_port_different_proto_ok() {
+        let yaml = r#"
+pool: "fd01::/112"
+lan_interface: "eth0"
+port_forwards:
+  - listen_port: 53
+    proto: tcp
+    target: "[fd12:3456::10]:53"
+  - listen_port: 53
+    proto: udp
+    target: "[fd12:3456::10]:53"
+"#;
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate_port_forwards().unwrap();
     }
 }

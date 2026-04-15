@@ -100,7 +100,17 @@ async fn main() {
         }
     };
 
-    info!(pool = %gw_config.pool, lan_interface = %gw_config.lan_interface, "Gateway config loaded");
+    if let Err(e) = gw_config.validate_port_forwards() {
+        error!("Invalid gateway.port_forwards: {e}");
+        std::process::exit(1);
+    }
+
+    info!(
+        pool = %gw_config.pool,
+        lan_interface = %gw_config.lan_interface,
+        port_forwards = gw_config.port_forwards.len(),
+        "Gateway config loaded"
+    );
 
     // --- Prerequisites ---
 
@@ -221,13 +231,20 @@ async fn main() {
     };
 
     // NAT manager
-    let mut nat_mgr = match nat::NatManager::new() {
+    let mut nat_mgr = match nat::NatManager::new(gw_config.lan_interface.clone()) {
         Ok(n) => n,
         Err(e) => {
             error!(error = %e, "Failed to create nftables table — do you have CAP_NET_ADMIN?");
             std::process::exit(1);
         }
     };
+
+    // Install inbound port-forward rules (TASK-2026-0061).
+    if let Err(e) = nat_mgr.set_port_forwards(&gw_config.port_forwards) {
+        error!(error = %e, "Failed to install port-forward rules");
+        let _ = nat_mgr.cleanup();
+        std::process::exit(1);
+    }
 
     // Network setup
     let mut net_setup = net::NetSetup::new(gw_config.lan_interface.clone(), gw_config.pool.clone());

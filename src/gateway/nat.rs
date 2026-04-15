@@ -9,9 +9,11 @@ use tracing::{debug, info};
 
 use rustables::expr::{
     Cmp, CmpOp, HighLevelPayload, IPv6HeaderField, Immediate, Masquerade, Meta, MetaType, Nat,
-    NatType, NetworkHeaderField, Register,
+    NatType, NetworkHeaderField, Register, TCPHeaderField, TransportHeaderField, UDPHeaderField,
 };
 use rustables::{Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Table};
+
+use crate::config::{PortForward, Proto};
 
 const TABLE_NAME: &str = "fips_gateway";
 const PREROUTING_CHAIN: &str = "prerouting";
@@ -59,8 +61,13 @@ pub struct NatManager {
     table: Table,
     pre_chain: Chain,
     post_chain: Chain,
+    /// LAN interface name, used to gate the port-forward LAN-side
+    /// masquerade rule (distinct from the fips0 egress masquerade).
+    lan_interface: String,
     /// Active mappings keyed by virtual IP.
     mappings: HashMap<Ipv6Addr, NatMapping>,
+    /// Inbound port-forward rules (TASK-2026-0061).
+    port_forwards: Vec<PortForward>,
 }
 
 impl NatManager {
@@ -69,7 +76,10 @@ impl NatManager {
     /// Installs a masquerade rule for traffic exiting via `fips0` so that
     /// LAN client source addresses are rewritten to the gateway's mesh
     /// address, allowing return traffic to route back through the mesh.
-    pub fn new() -> Result<Self, NatError> {
+    ///
+    /// `lan_interface` is the gateway's LAN-facing interface name,
+    /// needed by the port-forward LAN-side masquerade rule.
+    pub fn new(lan_interface: String) -> Result<Self, NatError> {
         let table = Table::new(ProtocolFamily::Inet).with_name(TABLE_NAME);
         let pre_chain = Chain::new(&table)
             .with_name(PREROUTING_CHAIN)
@@ -84,12 +94,26 @@ impl NatManager {
             table,
             pre_chain,
             post_chain,
+            lan_interface,
             mappings: HashMap::new(),
+            port_forwards: Vec::new(),
         };
         mgr.rebuild()?;
 
         info!("Created nftables table '{TABLE_NAME}' with NAT chains and fips0 masquerade");
         Ok(mgr)
+    }
+
+    /// Replace the current inbound port-forward rule set and rebuild
+    /// the nftables table atomically. Pass an empty slice to clear.
+    pub fn set_port_forwards(&mut self, forwards: &[PortForward]) -> Result<(), NatError> {
+        self.port_forwards = forwards.to_vec();
+        self.rebuild()?;
+        info!(
+            count = self.port_forwards.len(),
+            "Applied inbound port forwards"
+        );
+        Ok(())
     }
 
     /// Add DNAT and SNAT rules for a virtual IP ↔ mesh address mapping.
@@ -209,6 +233,62 @@ impl NatManager {
                         .with_ip_register(Register::Reg1),
                 );
             batch.add(&snat_rule, MsgType::Add);
+        }
+
+        // Inbound port-forward rules (TASK-2026-0061). Each forward is
+        // one DNAT rule in prerouting keyed on (iif fips0, nfproto ipv6,
+        // l4proto, th dport). When any forwards are configured, emit a
+        // single LAN-side masquerade in postrouting so the LAN target
+        // host sees the gateway's LAN address as source and replies
+        // flow back through conntrack.
+        for pf in &self.port_forwards {
+            let l4proto: u8 = match pf.proto {
+                Proto::Tcp => libc::IPPROTO_TCP as u8,
+                Proto::Udp => libc::IPPROTO_UDP as u8,
+            };
+            let dport_field = match pf.proto {
+                Proto::Tcp => TransportHeaderField::Tcp(TCPHeaderField::Dport),
+                Proto::Udp => TransportHeaderField::Udp(UDPHeaderField::Dport),
+            };
+            let target_ip = *pf.target.ip();
+            let target_port_be = pf.target.port().to_be_bytes();
+
+            let dnat_rule = Rule::new(&self.pre_chain)?
+                .with_expr(Meta::new(MetaType::IifName))
+                .with_expr(Cmp::new(CmpOp::Eq, b"fips0\0".to_vec()))
+                .with_expr(Meta::new(MetaType::NfProto))
+                .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                .with_expr(Meta::new(MetaType::L4Proto))
+                .with_expr(Cmp::new(CmpOp::Eq, [l4proto]))
+                .with_expr(HighLevelPayload::Transport(dport_field).build())
+                .with_expr(Cmp::new(CmpOp::Eq, pf.listen_port.to_be_bytes().to_vec()))
+                .with_expr(Immediate::new_data(
+                    target_ip.octets().to_vec(),
+                    Register::Reg1,
+                ))
+                .with_expr(Immediate::new_data(target_port_be.to_vec(), Register::Reg2))
+                .with_expr(
+                    Nat::default()
+                        .with_nat_type(NatType::DNat)
+                        .with_family(ProtocolFamily::Ipv6)
+                        .with_ip_register(Register::Reg1)
+                        .with_port_register(Register::Reg2),
+                );
+            batch.add(&dnat_rule, MsgType::Add);
+        }
+
+        if !self.port_forwards.is_empty() {
+            let mut lan_iface = self.lan_interface.clone().into_bytes();
+            lan_iface.push(0);
+            let lan_masq = Rule::new(&self.post_chain)?
+                .with_expr(Meta::new(MetaType::IifName))
+                .with_expr(Cmp::new(CmpOp::Eq, b"fips0\0".to_vec()))
+                .with_expr(Meta::new(MetaType::OifName))
+                .with_expr(Cmp::new(CmpOp::Eq, lan_iface))
+                .with_expr(Meta::new(MetaType::NfProto))
+                .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                .with_expr(Masquerade::default());
+            batch.add(&lan_masq, MsgType::Add);
         }
 
         batch

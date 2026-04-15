@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[cfg(feature = "gateway")]
-pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig};
+pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, DiscoveryConfig, LimitsConfig,
     NodeConfig, RateLimitConfig, RekeyConfig, RetryConfig, SessionConfig, SessionMmpConfig,
