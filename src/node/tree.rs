@@ -172,6 +172,15 @@ impl Node {
             return;
         }
 
+        if let Err(e) = announce.validate_semantics() {
+            warn!(
+                from = %self.peer_display_name(from),
+                error = %e,
+                "Rejected TreeAnnounce with invalid ancestry"
+            );
+            return;
+        }
+
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
