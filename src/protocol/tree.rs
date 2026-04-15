@@ -3,7 +3,7 @@
 use super::error::ProtocolError;
 use super::link::LinkMessageType;
 use crate::NodeAddr;
-use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
+use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
 use secp256k1::schnorr::Signature;
 
 /// Spanning tree announcement carrying parent declaration and ancestry.
@@ -33,6 +33,58 @@ impl TreeAnnounce {
             declaration,
             ancestry,
         }
+    }
+
+    /// Validate that the ancestry is structurally consistent with the signed
+    /// declaration.
+    ///
+    /// Expected properties:
+    /// - the first ancestry entry is the declaring node's `node_addr`
+    /// - a root declaration has exactly one ancestry entry
+    /// - a non-root declaration has at least two ancestry entries
+    /// - for a non-root declaration, the second ancestry entry matches `parent_id`
+    /// - the final ancestry entry is the advertised root
+    /// - the advertised root is the smallest `node_addr` in the ancestry
+    pub fn validate_semantics(&self) -> Result<(), TreeError> {
+        let entries = self.ancestry.entries();
+        let declared_node = *self.declaration.node_addr();
+        let declared_parent = *self.declaration.parent_id();
+
+        if entries[0].node_addr != declared_node {
+            return Err(TreeError::AncestryNodeMismatch {
+                declared: declared_node,
+                ancestry: entries[0].node_addr,
+            });
+        }
+
+        if self.declaration.is_root() {
+            if entries.len() != 1 {
+                return Err(TreeError::RootDeclarationMismatch);
+            }
+        } else {
+            let ancestry_parent = entries.get(1).ok_or(TreeError::AncestryTooShort)?.node_addr;
+            if ancestry_parent != declared_parent {
+                return Err(TreeError::AncestryParentMismatch {
+                    declared: declared_parent,
+                    ancestry: ancestry_parent,
+                });
+            }
+        }
+
+        let advertised_root = *self.ancestry.root_id();
+        let minimum = entries
+            .iter()
+            .map(|entry| entry.node_addr)
+            .min()
+            .expect("TreeCoordinate is never empty");
+        if advertised_root != minimum {
+            return Err(TreeError::AncestryRootNotMinimum {
+                advertised: advertised_root,
+                minimum,
+            });
+        }
+
+        Ok(())
     }
 
     /// Encode as link-layer plaintext (includes msg_type byte).
@@ -380,5 +432,143 @@ mod tests {
         let announce = TreeAnnounce::new(decl, ancestry);
         let result = announce.encode();
         assert!(matches!(result, Err(ProtocolError::InvalidSignature)));
+    }
+
+    /// Tests that a well-formed non-root ancestry is accepted.
+    #[test]
+    fn test_tree_announce_validate_semantics_accepts_valid_non_root() {
+        use crate::identity::Identity;
+
+        let identity = Identity::generate();
+        let node_addr = *identity.node_addr();
+        let parent = make_node_addr(2);
+        let root = make_node_addr(1);
+
+        let mut decl = ParentDeclaration::new(node_addr, parent, 5, 1000);
+        decl.sign(&identity).unwrap();
+
+        let ancestry = TreeCoordinate::new(vec![
+            CoordEntry::new(node_addr, 5, 1000),
+            CoordEntry::new(parent, 4, 900),
+            CoordEntry::new(root, 3, 800),
+        ])
+        .unwrap();
+
+        let announce = TreeAnnounce::new(decl, ancestry);
+        assert!(announce.validate_semantics().is_ok());
+    }
+
+    /// Tests that an ancestry is rejected if the final node_addr is not the smallest entry in the path.
+    #[test]
+    fn test_tree_announce_validate_semantics_rejects_non_minimal_root() {
+        use crate::identity::Identity;
+
+        let identity = Identity::generate();
+        let node_addr = *identity.node_addr();
+        let smaller = make_node_addr(0);
+        let advertised_root = make_node_addr(1);
+
+        let mut decl = ParentDeclaration::new(node_addr, smaller, 5, 1000);
+        decl.sign(&identity).unwrap();
+
+        let ancestry = TreeCoordinate::new(vec![
+            CoordEntry::new(node_addr, 5, 1000),
+            CoordEntry::new(smaller, 4, 900),
+            CoordEntry::new(advertised_root, 3, 800),
+        ])
+        .unwrap();
+
+        let announce = TreeAnnounce::new(decl, ancestry);
+        assert!(matches!(
+            announce.validate_semantics(),
+            Err(TreeError::AncestryRootNotMinimum {
+                advertised,
+                minimum,
+            }) if advertised == advertised_root && minimum == smaller
+        ));
+    }
+
+    /// Tests that an ancestry is rejected if the first ancestry hop does not match the signed parent_id.
+    #[test]
+    fn test_tree_announce_validate_semantics_rejects_parent_mismatch() {
+        use crate::identity::Identity;
+
+        let identity = Identity::generate();
+        let node_addr = *identity.node_addr();
+        let declared_parent = make_node_addr(2);
+        let ancestry_parent = make_node_addr(3);
+
+        let mut decl = ParentDeclaration::new(node_addr, declared_parent, 5, 1000);
+        decl.sign(&identity).unwrap();
+
+        let ancestry = TreeCoordinate::new(vec![
+            CoordEntry::new(node_addr, 5, 1000),
+            CoordEntry::new(ancestry_parent, 4, 900),
+            CoordEntry::new(make_node_addr(1), 3, 800),
+        ])
+        .unwrap();
+
+        let announce = TreeAnnounce::new(decl, ancestry);
+        assert!(matches!(
+            announce.validate_semantics(),
+            Err(TreeError::AncestryParentMismatch {
+                declared,
+                ancestry,
+            }) if declared == declared_parent && ancestry == ancestry_parent
+        ));
+    }
+
+    /// Tests that an ancestry is rejected if the first path entry does not match the signed sender node_addr.
+    #[test]
+    fn test_tree_announce_validate_semantics_rejects_sender_mismatch() {
+        use crate::identity::Identity;
+
+        let identity = Identity::generate();
+        let node_addr = *identity.node_addr();
+        let ancestry_sender = make_node_addr(9);
+        let parent = make_node_addr(2);
+
+        let mut decl = ParentDeclaration::new(node_addr, parent, 5, 1000);
+        decl.sign(&identity).unwrap();
+
+        let ancestry = TreeCoordinate::new(vec![
+            CoordEntry::new(ancestry_sender, 5, 1000),
+            CoordEntry::new(parent, 4, 900),
+            CoordEntry::new(make_node_addr(1), 3, 800),
+        ])
+        .unwrap();
+
+        let announce = TreeAnnounce::new(decl, ancestry);
+        assert!(matches!(
+            announce.validate_semantics(),
+            Err(TreeError::AncestryNodeMismatch {
+                declared,
+                ancestry,
+            }) if declared == node_addr && ancestry == ancestry_sender
+        ));
+    }
+
+    /// Tests that a self-root declaration is rejected if its ancestry contains extra ancestors.
+    #[test]
+    fn test_tree_announce_validate_semantics_rejects_root_with_ancestors() {
+        use crate::identity::Identity;
+
+        let identity = Identity::generate();
+        let node_addr = *identity.node_addr();
+
+        let mut decl = ParentDeclaration::self_root(node_addr, 5, 1000);
+        decl.sign(&identity).unwrap();
+
+        let ancestry = TreeCoordinate::new(vec![
+            CoordEntry::new(node_addr, 5, 1000),
+            CoordEntry::new(make_node_addr(0), 4, 900),
+        ])
+        .unwrap();
+
+        let announce = TreeAnnounce::new(decl, ancestry);
+        assert!(matches!(
+            announce.validate_semantics(),
+            Err(TreeError::RootDeclarationMismatch)
+        ));
     }
 }

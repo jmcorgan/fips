@@ -5,6 +5,8 @@
 //! reused by bloom filter tests.
 
 use super::*;
+use crate::protocol::TreeAnnounce;
+use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
 
 /// A test node bundling a Node with its transport and packet channel.
 pub(super) struct TestNode {
@@ -715,5 +717,76 @@ async fn test_spanning_tree_disconnected() {
     ];
     let mut nodes = run_tree_test(6, &edges, false).await;
     verify_tree_convergence_components(&nodes, &[vec![0, 1, 2], vec![3, 4, 5]]);
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Tests that a node ignores a signed TreeAnnounce whose advertised root is not the smallest node_addr in the ancestry.
+#[tokio::test]
+async fn test_rejects_tree_announce_with_inconsistent_root() {
+    // Start from a healthy 2-node tree so node B already has a normal, trusted
+    // view of node A's coordinates.
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+
+    let a_addr = *nodes[0].node.node_addr();
+    let current_root = *nodes[1].node.tree_state().root();
+    let current_depth = nodes[1].node.tree_state().my_coords().depth();
+    let peer_coords_before = nodes[1]
+        .node
+        .get_peer(&a_addr)
+        .unwrap()
+        .coords()
+        .unwrap()
+        .clone();
+    let accepted_before = nodes[1].node.stats().tree.accepted;
+
+    // Use two fixed synthetic ancestors so the forged path is explicit:
+    // - fake_parent = 00000000000000000000000000000000
+    // - fake_root   = 00000000000000000000000000000001
+    //
+    // The forged ancestry is therefore:
+    //   [A, 000...000, 000...001]
+    //
+    // That makes 000...001 the advertised root because it is the final entry,
+    // even though 000...000 is smaller and appears earlier in the path.
+    let fake_parent = NodeAddr::from_bytes([0u8; 16]);
+    let mut fake_root_bytes = [0u8; 16];
+    fake_root_bytes[15] = 1;
+    let fake_root = NodeAddr::from_bytes(fake_root_bytes);
+
+    // Sign a fresh declaration from A. The 99/12345 values are just a newer
+    // sequence/timestamp so the announce would be acceptable on freshness
+    // grounds if its ancestry semantics were valid.
+    let mut declaration = ParentDeclaration::new(a_addr, fake_parent, 99, 12345);
+    declaration.sign(nodes[0].node.identity()).unwrap();
+
+    let announce = TreeAnnounce::new(
+        declaration,
+        TreeCoordinate::new(vec![
+            CoordEntry::new(a_addr, 99, 12345),
+            CoordEntry::new(fake_parent, 98, 12344),
+            CoordEntry::new(fake_root, 97, 12343),
+        ])
+        .unwrap(),
+    );
+    let encoded = announce.encode().unwrap();
+
+    nodes[1]
+        .node
+        .handle_tree_announce(&a_addr, &encoded[1..])
+        .await;
+
+    // B should reject the malformed ancestry before mutating either its local
+    // tree state or its cached view of peer A.
+    assert_eq!(*nodes[1].node.tree_state().root(), current_root);
+    assert_eq!(
+        nodes[1].node.tree_state().my_coords().depth(),
+        current_depth
+    );
+    assert_eq!(nodes[1].node.stats().tree.accepted, accepted_before);
+    assert_eq!(
+        nodes[1].node.get_peer(&a_addr).unwrap().coords().unwrap(),
+        &peer_coords_before
+    );
+
     cleanup_nodes(&mut nodes).await;
 }

@@ -182,6 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so terminal initialization failures (e.g. Docker on macOS Sequoia,
   or environments without a usable tty) produce a clean error message
   instead of a hard crash
+- Tighten TreeAnnounce ancestry validation to match the spanning
+  tree specification. The receive path now verifies that the
+  ancestry is structurally consistent with the signed parent
+  declaration before mutating tree state.
 
 ## [0.2.0] - 2026-03-22
 
