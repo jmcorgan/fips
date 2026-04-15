@@ -25,6 +25,34 @@ pub enum TreeError {
     #[error("invalid ancestry: does not reach claimed root")]
     AncestryNotToRoot,
 
+    #[error("invalid ancestry: root declaration must contain only the sender")]
+    RootDeclarationMismatch,
+
+    #[error("invalid ancestry: non-root declaration must include a parent hop")]
+    AncestryTooShort,
+
+    #[error("invalid ancestry: sender {declared} does not match first path entry {ancestry}")]
+    AncestryNodeMismatch {
+        declared: NodeAddr,
+        ancestry: NodeAddr,
+    },
+
+    #[error(
+        "invalid ancestry: signed parent {declared} does not match first ancestry hop {ancestry}"
+    )]
+    AncestryParentMismatch {
+        declared: NodeAddr,
+        ancestry: NodeAddr,
+    },
+
+    #[error(
+        "invalid ancestry: advertised root {advertised} is not the minimum path entry {minimum}"
+    )]
+    AncestryRootNotMinimum {
+        advertised: NodeAddr,
+        minimum: NodeAddr,
+    },
+
     #[error("signature verification failed for node {0:?}")]
     InvalidSignature(NodeAddr),
 
