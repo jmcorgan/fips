@@ -35,10 +35,8 @@ save_backend() {
 }
 
 get_fips_interface_dns_addr() {
-    ip -6 -o addr show dev "$FIPS_INTERFACE" scope global 2>/dev/null | while read -r _ _ _ addr _; do
-        echo "${addr%%/*}"
-        return 0
-    done
+    ip -6 -o addr show dev "$FIPS_INTERFACE" scope global 2>/dev/null \
+        | awk 'NR==1 {split($4, a, "/"); print a[1]; exit}'
 }
 
 # Wait for fips0 interface (up to 30s).

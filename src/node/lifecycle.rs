@@ -706,26 +706,35 @@ impl Node {
             let hosts = base_hosts.len();
 
             for bind in binds {
-                match (
-                    tokio::net::UdpSocket::bind(&bind).await,
-                    tokio::net::TcpListener::bind(&bind).await,
-                ) {
-                    (Ok(udp_socket), Ok(tcp_listener)) => {
+                let udp_result = tokio::net::UdpSocket::bind(&bind).await;
+                let tcp_result = tokio::net::TcpListener::bind(&bind).await;
+
+                match udp_result {
+                    Ok(udp_socket) => {
                         let udp_reloader = crate::upper::hosts::HostMapReloader::new(
                             base_hosts.clone(),
                             hosts_path.clone(),
                         );
-                        let tcp_reloader = crate::upper::hosts::HostMapReloader::new(
-                            base_hosts.clone(),
-                            hosts_path.clone(),
-                        );
-                        info!(bind = %bind, hosts, "DNS responder started for .fips domain (auto-reload enabled)");
+                        info!(bind = %bind, hosts, "DNS UDP responder started for .fips domain (auto-reload enabled)");
                         self.dns_tasks.push(tokio::spawn(crate::upper::dns::run_dns_responder_udp(
                             udp_socket,
                             identity_tx.clone(),
                             dns_ttl,
                             udp_reloader,
                         )));
+                    }
+                    Err(e) => {
+                        warn!(bind = %bind, error = %e, "Failed to start UDP DNS responder");
+                    }
+                }
+
+                match tcp_result {
+                    Ok(tcp_listener) => {
+                        let tcp_reloader = crate::upper::hosts::HostMapReloader::new(
+                            base_hosts.clone(),
+                            hosts_path.clone(),
+                        );
+                        info!(bind = %bind, hosts, "DNS TCP responder started for .fips domain (auto-reload enabled)");
                         self.dns_tasks.push(tokio::spawn(crate::upper::dns::run_dns_responder_tcp(
                             tcp_listener,
                             identity_tx.clone(),
@@ -733,10 +742,7 @@ impl Node {
                             tcp_reloader,
                         )));
                     }
-                    (Err(e), _) => {
-                        warn!(bind = %bind, error = %e, "Failed to start UDP DNS responder");
-                    }
-                    (_, Err(e)) => {
+                    Err(e) => {
                         warn!(bind = %bind, error = %e, "Failed to start TCP DNS responder");
                     }
                 }
