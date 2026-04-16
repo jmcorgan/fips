@@ -2,7 +2,8 @@
 # fips-dns-setup — Configure DNS routing for the .fips domain.
 #
 # Detects the system's DNS resolver and configures it to forward .fips
-# queries to the FIPS DNS responder on 127.0.0.1:5354.
+# queries to the FIPS DNS responder. systemd-resolved uses the fips0
+# interface address, while local forwarding resolvers use 127.0.0.1:5354.
 #
 # Backends (tried in order):
 #   1. systemd dns-delegate (systemd >= 258, declarative drop-in)
@@ -33,6 +34,13 @@ save_backend() {
     echo "$1" > "$STATE_FILE"
 }
 
+get_fips_interface_dns_addr() {
+    ip -6 -o addr show dev "$FIPS_INTERFACE" scope global 2>/dev/null | while read -r _ _ _ addr _; do
+        echo "${addr%%/*}"
+        return 0
+    done
+}
+
 # Wait for fips0 interface (up to 30s).
 wait_for_interface() {
     for i in $(seq 1 30); do
@@ -56,16 +64,19 @@ is_active() {
 # Backend 1: systemd dns-delegate (>= 258)
 try_dns_delegate() {
     local ver
+    local delegate_addr
     ver=$(systemd_version)
     [ -z "$ver" ] && return 1
     [ "$ver" -lt 258 ] && return 1
     is_active systemd-resolved.service || return 1
+    delegate_addr=$(get_fips_interface_dns_addr)
+    [ -n "$delegate_addr" ] || return 1
 
     log "Configuring via dns-delegate (systemd $ver)"
     mkdir -p "$DNS_DELEGATE_DIR"
     cat > "$DNS_DELEGATE_FILE" <<EOF
 [Delegate]
-DNS=${FIPS_DNS_ADDR}:${FIPS_DNS_PORT}
+DNS=[${delegate_addr}]:${FIPS_DNS_PORT}
 Domains=fips
 EOF
     systemctl restart systemd-resolved
@@ -75,11 +86,14 @@ EOF
 
 # Backend 2: resolvectl
 try_resolvectl() {
+    local delegate_addr
     command -v resolvectl >/dev/null 2>&1 || return 1
     is_active systemd-resolved.service || return 1
+    delegate_addr=$(get_fips_interface_dns_addr)
+    [ -n "$delegate_addr" ] || return 1
 
     log "Configuring via resolvectl"
-    resolvectl dns "$FIPS_INTERFACE" "${FIPS_DNS_ADDR}:${FIPS_DNS_PORT}"
+    resolvectl dns "$FIPS_INTERFACE" "[${delegate_addr}]:${FIPS_DNS_PORT}"
     resolvectl domain "$FIPS_INTERFACE" "~fips"
     save_backend "resolvectl"
     return 0

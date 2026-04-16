@@ -383,8 +383,8 @@ pub struct Node {
     // === DNS Responder ===
     /// Receiver for resolved identities from the DNS responder.
     dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
-    /// DNS responder task handle.
-    dns_task: Option<tokio::task::JoinHandle<()>>,
+    /// DNS responder task handles.
+    dns_tasks: Vec<tokio::task::JoinHandle<()>>,
 
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
@@ -549,7 +549,7 @@ impl Node {
             #[cfg(target_os = "macos")]
             tun_shutdown_fd: None,
             dns_identity_rx: None,
-            dns_task: None,
+            dns_tasks: Vec::new(),
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -659,7 +659,7 @@ impl Node {
             #[cfg(target_os = "macos")]
             tun_shutdown_fd: None,
             dns_identity_rx: None,
-            dns_task: None,
+            dns_tasks: Vec::new(),
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),

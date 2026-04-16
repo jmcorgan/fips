@@ -12,10 +12,17 @@
 
 use crate::upper::hosts::{HostMap, HostMapReloader};
 use crate::{NodeAddr, PeerIdentity};
-use simple_dns::rdata::{AAAA, RData};
+use simple_dns::rdata::{A, AAAA, NS, OPT, RData, SOA};
 use simple_dns::{CLASS, Name, Packet, PacketFlag, QTYPE, RCODE, ResourceRecord, TYPE};
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
+
+const DNS_MAX_PACKET_SIZE: usize = 4096;
+const DNS_ZONE: &str = "fips";
+const DNS_ZONE_FQDN: &str = "fips.";
+const DNS_ZONE_NS: &str = "ns.fips.";
+const DNS_ZONE_RNAME: &str = "hostmaster.fips.";
 
 /// Identity resolved by the DNS responder, sent to Node for cache population.
 pub struct DnsResolvedIdentity {
@@ -104,10 +111,30 @@ pub fn handle_dns_packet(
     let question = query.questions.first()?;
 
     let qname = question.qname.to_string();
+    let is_a = matches!(question.qtype, QTYPE::TYPE(TYPE::A));
     let is_aaaa = matches!(question.qtype, QTYPE::TYPE(TYPE::AAAA));
+    let is_soa = matches!(question.qtype, QTYPE::TYPE(TYPE::SOA));
+    let is_ns = matches!(question.qtype, QTYPE::TYPE(TYPE::NS));
+    let is_any = matches!(question.qtype, QTYPE::ANY);
+    let wants_recursion = query.has_flags(PacketFlag::RECURSION_DESIRED);
+    let checking_disabled = query.has_flags(PacketFlag::CHECKING_DISABLED);
+    let query_opt = query.opt().cloned();
 
     let mut response = query.into_reply();
     response.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
+    if wants_recursion {
+        response.set_flags(PacketFlag::RECURSION_DESIRED);
+    }
+    if checking_disabled {
+        response.set_flags(PacketFlag::CHECKING_DISABLED);
+    }
+    if let Some(opt) = query_opt {
+        *response.opt_mut() = Some(OPT {
+            udp_packet_size: opt.udp_packet_size.min(DNS_MAX_PACKET_SIZE as u16),
+            version: 0,
+            opt_codes: Vec::new(),
+        });
+    }
 
     if is_aaaa && let Some((ipv6, node_addr, pubkey)) = resolve_fips_query_with_hosts(&qname, hosts)
     {
@@ -118,6 +145,28 @@ pub fn handle_dns_packet(
         let identity = DnsResolvedIdentity { node_addr, pubkey };
         let bytes = response.build_bytes_vec_compressed().ok()?;
         return Some((bytes, Some(identity)));
+    }
+
+    if is_zone_apex(&qname) {
+        if is_soa || is_any {
+            response.answers.push(zone_soa_record(ttl));
+        }
+        if is_ns || is_any {
+            response.answers.push(zone_ns_record(ttl));
+        }
+        let bytes = response.build_bytes_vec_compressed().ok()?;
+        return Some((bytes, None));
+    }
+
+    if is_zone_nameserver(&qname) {
+        if is_a || is_any {
+            response.answers.push(zone_ns_a_record(ttl));
+        }
+        if is_aaaa || is_any {
+            response.answers.push(zone_ns_aaaa_record(ttl));
+        }
+        let bytes = response.build_bytes_vec_compressed().ok()?;
+        return Some((bytes, None));
     }
 
     // Non-AAAA query (e.g. A) for a resolvable .fips name: return NOERROR
@@ -134,19 +183,97 @@ pub fn handle_dns_packet(
     Some((bytes, None))
 }
 
+fn is_zone_apex(name: &str) -> bool {
+    let name = name.strip_suffix('.').unwrap_or(name);
+    name.eq_ignore_ascii_case(DNS_ZONE)
+}
+
+fn is_zone_nameserver(name: &str) -> bool {
+    let name = name.strip_suffix('.').unwrap_or(name);
+    name.eq_ignore_ascii_case(DNS_ZONE_NS.trim_end_matches('.'))
+}
+
+fn zone_ns_record(ttl: u32) -> ResourceRecord<'static> {
+    ResourceRecord::new(
+        Name::new_unchecked(DNS_ZONE_FQDN).into_owned(),
+        CLASS::IN,
+        ttl,
+        RData::NS(NS(Name::new_unchecked(DNS_ZONE_NS).into_owned())),
+    )
+}
+
+fn zone_soa_record(ttl: u32) -> ResourceRecord<'static> {
+    ResourceRecord::new(
+        Name::new_unchecked(DNS_ZONE_FQDN).into_owned(),
+        CLASS::IN,
+        ttl,
+        RData::SOA(SOA {
+            mname: Name::new_unchecked(DNS_ZONE_NS).into_owned(),
+            rname: Name::new_unchecked(DNS_ZONE_RNAME).into_owned(),
+            serial: 1,
+            refresh: 300,
+            retry: 60,
+            expire: 3600,
+            minimum: ttl,
+        }),
+    )
+}
+
+fn zone_ns_a_record(ttl: u32) -> ResourceRecord<'static> {
+    ResourceRecord::new(
+        Name::new_unchecked(DNS_ZONE_NS).into_owned(),
+        CLASS::IN,
+        ttl,
+        RData::A(A::from(Ipv4Addr::LOCALHOST)),
+    )
+}
+
+fn zone_ns_aaaa_record(ttl: u32) -> ResourceRecord<'static> {
+    ResourceRecord::new(
+        Name::new_unchecked(DNS_ZONE_NS).into_owned(),
+        CLASS::IN,
+        ttl,
+        RData::AAAA(AAAA::from(Ipv6Addr::LOCALHOST)),
+    )
+}
+
+async fn handle_dns_request(
+    query_bytes: &[u8],
+    identity_tx: &DnsIdentityTx,
+    ttl: u32,
+    reloader: &mut HostMapReloader,
+) -> Option<Vec<u8>> {
+    // Check for hosts file changes on each request (cheap stat call)
+    reloader.check_reload();
+
+    match handle_dns_packet(query_bytes, ttl, reloader.hosts()) {
+        Some((response_bytes, identity)) => {
+            if let Some(id) = identity {
+                debug!(
+                    node_addr = %id.node_addr,
+                    "DNS resolved .fips name, registering identity"
+                );
+                let _ = identity_tx.send(id).await;
+            }
+            Some(response_bytes)
+        }
+        None => None,
+    }
+}
+
 /// Run the DNS responder UDP server loop.
 ///
 /// Listens for DNS queries, resolves `.fips` names, and sends resolved
 /// identities to the Node via the identity channel. The host map reloader
 /// checks the hosts file modification time on each request and reloads
 /// automatically when changes are detected.
-pub async fn run_dns_responder(
+pub async fn run_dns_responder_udp(
     socket: tokio::net::UdpSocket,
     identity_tx: DnsIdentityTx,
     ttl: u32,
     mut reloader: HostMapReloader,
 ) {
-    let mut buf = [0u8; 512]; // Standard DNS UDP max
+    let mut buf = [0u8; DNS_MAX_PACKET_SIZE];
 
     loop {
         let (len, src) = match socket.recv_from(&mut buf).await {
@@ -159,25 +286,73 @@ pub async fn run_dns_responder(
 
         let query_bytes = &buf[..len];
 
-        // Check for hosts file changes on each request (cheap stat call)
-        reloader.check_reload();
-
-        match handle_dns_packet(query_bytes, ttl, reloader.hosts()) {
-            Some((response_bytes, identity)) => {
-                if let Some(id) = identity {
-                    debug!(
-                        node_addr = %id.node_addr,
-                        "DNS resolved .fips name, registering identity"
-                    );
-                    let _ = identity_tx.send(id).await;
-                }
-
+        match handle_dns_request(query_bytes, &identity_tx, ttl, &mut reloader).await {
+            Some(response_bytes) => {
                 if let Err(e) = socket.send_to(&response_bytes, src).await {
                     debug!(error = %e, "DNS send error");
                 }
             }
             None => {
                 debug!(len, "Failed to parse DNS query, dropping");
+            }
+        }
+    }
+}
+
+/// Run the DNS responder TCP server loop.
+pub async fn run_dns_responder_tcp(
+    listener: tokio::net::TcpListener,
+    identity_tx: DnsIdentityTx,
+    ttl: u32,
+    mut reloader: HostMapReloader,
+) {
+    loop {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(error = %e, "DNS TCP accept error");
+                continue;
+            }
+        };
+
+        let mut len_buf = [0u8; 2];
+        if let Err(e) = stream.read_exact(&mut len_buf).await {
+            debug!(error = %e, "DNS TCP read length error");
+            continue;
+        }
+
+        let query_len = u16::from_be_bytes(len_buf) as usize;
+        if query_len == 0 || query_len > DNS_MAX_PACKET_SIZE {
+            debug!(query_len, "Dropping oversized DNS TCP query");
+            continue;
+        }
+
+        let mut query_bytes = vec![0u8; query_len];
+        if let Err(e) = stream.read_exact(&mut query_bytes).await {
+            debug!(error = %e, "DNS TCP read query error");
+            continue;
+        }
+
+        match handle_dns_request(&query_bytes, &identity_tx, ttl, &mut reloader).await {
+            Some(response_bytes) => {
+                let response_len = match u16::try_from(response_bytes.len()) {
+                    Ok(len) => len,
+                    Err(_) => {
+                        debug!(len = response_bytes.len(), "Dropping oversized DNS TCP response");
+                        continue;
+                    }
+                };
+
+                if let Err(e) = stream.write_all(&response_len.to_be_bytes()).await {
+                    debug!(error = %e, "DNS TCP write length error");
+                    continue;
+                }
+                if let Err(e) = stream.write_all(&response_bytes).await {
+                    debug!(error = %e, "DNS TCP write response error");
+                }
+            }
+            None => {
+                debug!(len = query_len, "Failed to parse DNS TCP query, dropping");
             }
         }
     }
@@ -407,6 +582,114 @@ mod tests {
         assert!(response.answers.is_empty());
     }
 
+    #[test]
+    fn test_handle_zone_soa_query() {
+        let hosts = HostMap::new();
+        let query_packet = build_test_query("fips.", TYPE::SOA);
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert_eq!(response.answers.len(), 1);
+        match &response.answers[0].rdata {
+            RData::SOA(soa) => {
+                assert_eq!(soa.mname.to_string(), DNS_ZONE_NS.trim_end_matches('.'));
+                assert_eq!(soa.rname.to_string(), DNS_ZONE_RNAME.trim_end_matches('.'));
+            }
+            _ => panic!("expected SOA record"),
+        }
+    }
+
+    #[test]
+    fn test_handle_zone_ns_query() {
+        let hosts = HostMap::new();
+        let query_packet = build_test_query("fips.", TYPE::NS);
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert_eq!(response.answers.len(), 1);
+        match &response.answers[0].rdata {
+            RData::NS(ns) => assert_eq!(ns.to_string(), DNS_ZONE_NS.trim_end_matches('.')),
+            _ => panic!("expected NS record"),
+        }
+    }
+
+    #[test]
+    fn test_handle_edns_query_preserves_rd_and_opt() {
+        let identity = Identity::generate();
+        let hosts = HostMap::new();
+        let query_name = format!("{}.fips", identity.npub());
+        let query_packet = build_test_query_with_opt(&query_name, TYPE::AAAA);
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert!(response.has_flags(PacketFlag::RECURSION_DESIRED));
+        let opt = response.opt().expect("expected OPT in response");
+        assert_eq!(opt.version, 0);
+        assert_eq!(opt.udp_packet_size, 1232);
+        assert!(opt.opt_codes.is_empty());
+    }
+
+    #[test]
+    fn test_handle_zone_apex_unsupported_type_is_noerror() {
+        let hosts = HostMap::new();
+        let query_packet = build_test_query("fips.", TYPE::TXT);
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert!(response.answers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_zone_ns_host_a_query() {
+        let hosts = HostMap::new();
+        let query_packet = build_test_query("ns.fips.", TYPE::A);
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert_eq!(response.answers.len(), 1);
+        match &response.answers[0].rdata {
+            RData::A(a) => assert_eq!(Ipv4Addr::from(a.address), Ipv4Addr::LOCALHOST),
+            _ => panic!("expected A record"),
+        }
+    }
+
+    #[test]
+    fn test_handle_zone_ns_host_aaaa_query() {
+        let hosts = HostMap::new();
+        let query_packet = build_test_query("ns.fips.", TYPE::AAAA);
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert_eq!(response.answers.len(), 1);
+        match &response.answers[0].rdata {
+            RData::AAAA(aaaa) => assert_eq!(Ipv6Addr::from(aaaa.address), Ipv6Addr::LOCALHOST),
+            _ => panic!("expected AAAA record"),
+        }
+    }
+
+    #[test]
+    fn test_handle_zone_any_query() {
+        let hosts = HostMap::new();
+        let query_packet = build_any_query("fips.");
+
+        let result = handle_dns_packet(&query_packet, 300, &hosts).unwrap();
+        let response = Packet::parse(&result.0).unwrap();
+
+        assert_eq!(response.rcode(), RCODE::NoError);
+        assert_eq!(response.answers.len(), 2);
+    }
+
     #[tokio::test]
     async fn test_dns_responder_udp() {
         let identity = Identity::generate();
@@ -427,7 +710,7 @@ mod tests {
 
         // Spawn the responder
         let responder_handle =
-            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
+            tokio::spawn(run_dns_responder_udp(server_socket, identity_tx, 300, reloader));
 
         // Send a query
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -480,7 +763,7 @@ mod tests {
         let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
 
         let responder_handle =
-            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
+            tokio::spawn(run_dns_responder_udp(server_socket, identity_tx, 300, reloader));
 
         // Query by hostname instead of npub
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -532,7 +815,7 @@ mod tests {
         let (identity_tx, _identity_rx) = tokio::sync::mpsc::channel(16);
 
         let responder_handle =
-            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
+            tokio::spawn(run_dns_responder_udp(server_socket, identity_tx, 300, reloader));
 
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
@@ -586,6 +869,101 @@ mod tests {
         responder_handle.abort();
     }
 
+    #[tokio::test]
+    async fn test_dns_responder_tcp() {
+        let identity = Identity::generate();
+        let npub = identity.npub();
+        let expected_ipv6 = identity.address().to_ipv6();
+
+        let reloader = HostMapReloader::new(
+            HostMap::new(),
+            std::path::PathBuf::from("/nonexistent/hosts"),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
+
+        let responder_handle =
+            tokio::spawn(run_dns_responder_tcp(listener, identity_tx, 300, reloader));
+
+        let mut client = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let query = build_test_query(&format!("{}.fips", npub), TYPE::AAAA);
+        client
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        client.write_all(&query).await.unwrap();
+
+        let mut len_buf = [0u8; 2];
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.read_exact(&mut len_buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let response_len = u16::from_be_bytes(len_buf) as usize;
+        let mut response_buf = vec![0u8; response_len];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut response_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let response = Packet::parse(&response_buf).unwrap();
+        assert_eq!(response.answers.len(), 1);
+        if let RData::AAAA(aaaa) = &response.answers[0].rdata {
+            assert_eq!(Ipv6Addr::from(aaaa.address), expected_ipv6);
+        } else {
+            panic!("expected AAAA record");
+        }
+
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), identity_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.node_addr, *identity.node_addr());
+
+        responder_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_dns_responder_udp_accepts_large_query() {
+        let identity = Identity::generate();
+        let npub = identity.npub();
+
+        let reloader = HostMapReloader::new(
+            HostMap::new(),
+            std::path::PathBuf::from("/nonexistent/hosts"),
+        );
+
+        let server_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let (identity_tx, _identity_rx) = tokio::sync::mpsc::channel(16);
+
+        let responder_handle =
+            tokio::spawn(run_dns_responder_udp(server_socket, identity_tx, 300, reloader));
+
+        let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let query = build_large_test_query(&format!("{}.fips", npub), TYPE::AAAA);
+        assert!(query.len() > 512, "test query should exceed classic DNS size");
+        client_socket.send_to(&query, server_addr).await.unwrap();
+
+        let mut buf = [0u8; DNS_MAX_PACKET_SIZE];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_socket.recv_from(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let response = Packet::parse(&buf[..len]).unwrap();
+        assert_eq!(response.answers.len(), 1);
+
+        responder_handle.abort();
+    }
+
     /// Build a test DNS query packet for a given name and record type.
     fn build_test_query(name: &str, rtype: TYPE) -> Vec<u8> {
         use simple_dns::Question;
@@ -598,6 +976,59 @@ mod tests {
             false,
         );
         packet.questions.push(question);
+        packet.build_bytes_vec().unwrap()
+    }
+
+    fn build_large_test_query(name: &str, rtype: TYPE) -> Vec<u8> {
+        use simple_dns::Question;
+
+        let mut packet = Packet::new_query(0x1234);
+        for _ in 0..24 {
+            let question = Question::new(
+                Name::new_unchecked(name).into_owned(),
+                QTYPE::TYPE(rtype),
+                simple_dns::QCLASS::CLASS(CLASS::IN),
+                false,
+            );
+            packet.questions.push(question);
+        }
+        packet.build_bytes_vec().unwrap()
+    }
+
+    fn build_any_query(name: &str) -> Vec<u8> {
+        use simple_dns::Question;
+
+        let mut packet = Packet::new_query(0x1234);
+        let question = Question::new(
+            Name::new_unchecked(name).into_owned(),
+            QTYPE::ANY,
+            simple_dns::QCLASS::CLASS(CLASS::IN),
+            false,
+        );
+        packet.questions.push(question);
+        packet.build_bytes_vec().unwrap()
+    }
+
+    fn build_test_query_with_opt(name: &str, rtype: TYPE) -> Vec<u8> {
+        use simple_dns::Question;
+
+        let mut packet = Packet::new_query(0x1234);
+        packet.set_flags(PacketFlag::RECURSION_DESIRED);
+        let question = Question::new(
+            Name::new_unchecked(name).into_owned(),
+            QTYPE::TYPE(rtype),
+            simple_dns::QCLASS::CLASS(CLASS::IN),
+            false,
+        );
+        packet.questions.push(question);
+        *packet.opt_mut() = Some(OPT {
+            udp_packet_size: 1232,
+            version: 0,
+            opt_codes: vec![simple_dns::rdata::OPTCode {
+                code: 10,
+                data: vec![1, 2, 3, 4].into(),
+            }],
+        });
         packet.build_bytes_vec().unwrap()
     }
 }

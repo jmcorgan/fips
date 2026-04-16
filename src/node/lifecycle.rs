@@ -681,32 +681,59 @@ impl Node {
 
         // Initialize DNS responder (independent of TUN)
         if self.config.dns.enabled {
-            let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
-            match tokio::net::UdpSocket::bind(&bind).await {
-                Ok(socket) => {
-                    let dns_channel_size = self.config.node.buffers.dns_channel;
-                    let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
-                    let dns_ttl = self.config.dns.ttl();
-                    let base_hosts =
-                        crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
-                    let hosts_path =
-                        std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
-                    let reloader =
-                        crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
-                    info!(bind = %bind, hosts = reloader.hosts().len(), "DNS responder started for .fips domain (auto-reload enabled)");
-                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(
-                        socket,
-                        identity_tx,
-                        dns_ttl,
-                        reloader,
-                    ));
-                    self.dns_identity_rx = Some(identity_rx);
-                    self.dns_task = Some(handle);
-                }
-                Err(e) => {
-                    warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+            let mut binds = vec![format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port())];
+            if self.tun_state == TunState::Active {
+                let tun_bind = format!("[{}]:{}", self.identity.address().to_ipv6(), self.config.dns.port());
+                if !binds.contains(&tun_bind) {
+                    binds.push(tun_bind);
                 }
             }
+
+            let dns_channel_size = self.config.node.buffers.dns_channel;
+            let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
+            let dns_ttl = self.config.dns.ttl();
+            let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
+            let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
+            let hosts = base_hosts.len();
+
+            for bind in binds {
+                match (
+                    tokio::net::UdpSocket::bind(&bind).await,
+                    tokio::net::TcpListener::bind(&bind).await,
+                ) {
+                    (Ok(udp_socket), Ok(tcp_listener)) => {
+                        let udp_reloader = crate::upper::hosts::HostMapReloader::new(
+                            base_hosts.clone(),
+                            hosts_path.clone(),
+                        );
+                        let tcp_reloader = crate::upper::hosts::HostMapReloader::new(
+                            base_hosts.clone(),
+                            hosts_path.clone(),
+                        );
+                        info!(bind = %bind, hosts, "DNS responder started for .fips domain (auto-reload enabled)");
+                        self.dns_tasks.push(tokio::spawn(crate::upper::dns::run_dns_responder_udp(
+                            udp_socket,
+                            identity_tx.clone(),
+                            dns_ttl,
+                            udp_reloader,
+                        )));
+                        self.dns_tasks.push(tokio::spawn(crate::upper::dns::run_dns_responder_tcp(
+                            tcp_listener,
+                            identity_tx.clone(),
+                            dns_ttl,
+                            tcp_reloader,
+                        )));
+                    }
+                    (Err(e), _) => {
+                        warn!(bind = %bind, error = %e, "Failed to start UDP DNS responder");
+                    }
+                    (_, Err(e)) => {
+                        warn!(bind = %bind, error = %e, "Failed to start TCP DNS responder");
+                    }
+                }
+            }
+
+            self.dns_identity_rx = Some(identity_rx);
         }
 
         self.state = NodeState::Running;
@@ -729,8 +756,10 @@ impl Node {
         info!(state = %self.state, "Node stopping");
 
         // Stop DNS responder
-        if let Some(handle) = self.dns_task.take() {
-            handle.abort();
+        if !self.dns_tasks.is_empty() {
+            for handle in self.dns_tasks.drain(..) {
+                handle.abort();
+            }
             debug!("DNS responder stopped");
         }
 
