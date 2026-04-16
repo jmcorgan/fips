@@ -258,6 +258,8 @@ jobs:
           - suite: rekey
             type: rekey
             topology: rekey
+          - suite: acl-allowlist
+            type: acl-allowlist
           # ── Chaos / stochastic scenarios ───────────────────────────────────
           - suite: chaos-smoke-10
             type: chaos
@@ -378,6 +380,21 @@ jobs:
         run: |
           docker compose -f testing/static/docker-compose.yml \
             --profile rekey down --volumes --remove-orphans
+
+      # ── ACL allowlist integration test ─────────────────────────────────────
+      - name: Run ACL allowlist integration test
+        if: matrix.type == 'acl-allowlist'
+        run: bash testing/acl-allowlist/test.sh --skip-build --keep-up
+
+      - name: Collect logs on failure (acl-allowlist)
+        if: matrix.type == 'acl-allowlist' && failure()
+        run: |
+          docker compose -f testing/acl-allowlist/docker-compose.yml logs --no-color
+
+      - name: Stop containers (acl-allowlist)
+        if: matrix.type == 'acl-allowlist' && always()
+        run: |
+          docker compose -f testing/acl-allowlist/docker-compose.yml down --volumes --remove-orphans
 
       # ── Chaos simulation ───────────────────────────────────────────────────
       - name: Install Python deps (chaos)

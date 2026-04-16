@@ -9,8 +9,8 @@ use crate::node::RecentRequest;
 use crate::protocol::{LookupRequest, LookupResponse};
 use crate::tree::TreeCoordinate;
 use spanning_tree::{
-    cleanup_nodes, generate_random_edges, process_available_packets, run_tree_test,
-    verify_tree_convergence,
+    cleanup_nodes, generate_random_edges, lock_large_network_test, process_available_packets,
+    run_tree_test, verify_tree_convergence,
 };
 
 // ============================================================================
@@ -521,6 +521,8 @@ async fn test_request_dedup_convergent_paths() {
 #[tokio::test]
 #[ignore] // Long-running (~2 min): run explicitly with --ignored
 async fn test_discovery_100_nodes() {
+    let _guard = lock_large_network_test().await;
+
     // Set up a 100-node random topology (same seed as other 100-node tests).
     // Each node initiates lookups to a sample of other nodes in batches,
     // processing packets between batches to avoid flooding the network.

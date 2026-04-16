@@ -8,7 +8,7 @@ use crate::bloom::BloomFilter;
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
-    make_test_node, run_tree_test, verify_tree_convergence,
+    lock_large_network_test, make_test_node, run_tree_test, verify_tree_convergence,
 };
 use std::collections::HashSet;
 
@@ -579,6 +579,8 @@ fn simulate_forwarding(
 /// without loops.
 #[tokio::test]
 async fn test_routing_reachability_100_nodes() {
+    let _guard = lock_large_network_test().await;
+
     const NUM_NODES: usize = 100;
     const TARGET_EDGES: usize = 250;
     const SEED: u64 = 42;
@@ -897,6 +899,8 @@ async fn test_routing_bloom_only_transit() {
 /// non-adjacent nodes. Direct peer adjacency handles the last hop.
 #[tokio::test]
 async fn test_routing_source_only_coords_100_nodes() {
+    let _guard = lock_large_network_test().await;
+
     const NUM_NODES: usize = 100;
     const TARGET_EDGES: usize = 250;
     const SEED: u64 = 42;
