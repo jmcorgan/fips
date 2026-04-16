@@ -40,6 +40,11 @@ enum Commands {
         #[command(subcommand)]
         what: ShowCommands,
     },
+    /// Show peer ACL information
+    Acl {
+        #[command(subcommand)]
+        what: AclCommands,
+    },
     /// Generate a new FIPS identity keypair
     Keygen {
         /// Output directory for fips.key and fips.pub
@@ -128,6 +133,12 @@ enum ShowCommands {
     IdentityCache,
 }
 
+#[derive(Subcommand, Debug)]
+enum AclCommands {
+    /// Loaded peer ACL state
+    Show,
+}
+
 impl ShowCommands {
     fn command_name(&self) -> &'static str {
         match self {
@@ -143,6 +154,14 @@ impl ShowCommands {
             ShowCommands::Transports => "show_transports",
             ShowCommands::Routing => "show_routing",
             ShowCommands::IdentityCache => "show_identity_cache",
+        }
+    }
+}
+
+impl AclCommands {
+    fn command_name(&self) -> &'static str {
+        match self {
+            AclCommands::Show => "show_acl",
         }
     }
 }
@@ -403,6 +422,7 @@ fn main() {
 
     let request = match &cli.command {
         Commands::Show { what } => build_query(what.command_name()),
+        Commands::Acl { what } => build_query(what.command_name()),
         Commands::Connect {
             peer,
             address,
@@ -583,6 +603,23 @@ fn sparkline(values: &[f64], min: f64, max: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_acl_show_command_name() {
+        assert_eq!(AclCommands::Show.command_name(), "show_acl");
+    }
+
+    #[test]
+    fn test_cli_parses_acl_show() {
+        let cli = Cli::try_parse_from(["fipsctl", "acl", "show"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Acl {
+                what: AclCommands::Show
+            }
+        ));
+    }
 
     #[test]
     fn detects_bare_ula_literal() {

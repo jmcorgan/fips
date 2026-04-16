@@ -8,6 +8,13 @@ use super::*;
 use crate::protocol::TreeAnnounce;
 use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
 
+static LARGE_NETWORK_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+pub(super) async fn lock_large_network_test() -> tokio::sync::MutexGuard<'static, ()> {
+    LARGE_NETWORK_TEST_LOCK.lock().await
+}
+
 /// A test node bundling a Node with its transport and packet channel.
 pub(super) struct TestNode {
     pub(super) node: Node,
@@ -669,6 +676,8 @@ pub(super) async fn cleanup_nodes(nodes: &mut [TestNode]) {
 /// consistent spanning tree with the correct root.
 #[tokio::test]
 async fn test_spanning_tree_convergence_100_nodes() {
+    let _guard = lock_large_network_test().await;
+
     const NUM_NODES: usize = 100;
     const TARGET_EDGES: usize = 250;
     const SEED: u64 = 42;

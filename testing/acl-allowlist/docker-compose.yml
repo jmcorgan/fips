@@ -1,0 +1,111 @@
+networks:
+  acl-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+
+x-fips-common: &fips-common
+  build:
+    context: ../docker
+  image: fips-test:latest
+  entrypoint: ["/usr/local/bin/entrypoint.sh"]
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+  restart: "no"
+  environment:
+    - FIPS_TEST_MODE=default
+    - RUST_LOG=info,fips::node=debug
+  volumes:
+    - ../docker/resolv.conf:/etc/resolv.conf:ro
+
+services:
+  service-a:
+    <<: *fips-common
+    container_name: fips-acl-container-a
+    hostname: host-a
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-a/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-a/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-a/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-a/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-a/fips.key:/etc/fips/fips.key:ro
+    networks:
+      acl-net:
+        ipv4_address: 172.31.0.10
+
+  service-b:
+    <<: *fips-common
+    container_name: fips-acl-container-b
+    hostname: host-b
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-b/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-b/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-b/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-b/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-b/fips.key:/etc/fips/fips.key:ro
+    networks:
+      acl-net:
+        ipv4_address: 172.31.0.11
+
+  service-c:
+    <<: *fips-common
+    container_name: fips-acl-container-c
+    hostname: host-c
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-c/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-c/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-c/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-c/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-c/fips.key:/etc/fips/fips.key:ro
+    networks:
+      acl-net:
+        ipv4_address: 172.31.0.12
+
+  service-d:
+    <<: *fips-common
+    container_name: fips-acl-container-d
+    hostname: host-d
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-d/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-d/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs/node-d/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs/node-d/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-d/fips.key:/etc/fips/fips.key:ro
+    networks:
+      acl-net:
+        ipv4_address: 172.31.0.13
+
+  service-e:
+    <<: *fips-common
+    container_name: fips-acl-container-e
+    hostname: host-e
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-e/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-e/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-e/fips.key:/etc/fips/fips.key:ro
+    networks:
+      acl-net:
+        ipv4_address: 172.31.0.14
+
+  service-f:
+    <<: *fips-common
+    container_name: fips-acl-container-f
+    hostname: host-f
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-f/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-f/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-f/fips.key:/etc/fips/fips.key:ro
+    networks:
+      acl-net:
+        ipv4_address: 172.31.0.15

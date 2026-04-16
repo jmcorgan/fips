@@ -439,6 +439,8 @@ async fn test_bloom_filter_split_horizon() {
 /// 100-node random graph: bloom filter exchange at scale.
 #[tokio::test]
 async fn test_bloom_filter_convergence_100_nodes() {
+    let _guard = lock_large_network_test().await;
+
     const NUM_NODES: usize = 100;
     const TARGET_EDGES: usize = 250;
     const SEED: u64 = 42;

@@ -3,8 +3,8 @@
 use super::*;
 use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{
-    TestNode, cleanup_nodes, generate_random_edges, process_available_packets, run_tree_test,
-    run_tree_test_with_mtus, verify_tree_convergence,
+    TestNode, cleanup_nodes, generate_random_edges, lock_large_network_test,
+    process_available_packets, run_tree_test, run_tree_test_with_mtus, verify_tree_convergence,
 };
 use crate::protocol::{SessionAck, SessionDatagram};
 
@@ -509,6 +509,8 @@ async fn drain_to_quiescence(nodes: &mut [TestNode]) {
 
 #[tokio::test]
 async fn test_session_100_nodes() {
+    let _guard = lock_large_network_test().await;
+
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
     use std::sync::mpsc;

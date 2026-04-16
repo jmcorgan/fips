@@ -6,6 +6,7 @@
 //! - msg3 (initiator → responder): initiator identity + epoch + negotiation
 
 use crate::PeerIdentity;
+use crate::node::acl::PeerAclContext;
 use crate::node::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::node::{Node, NodeError};
 use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
@@ -377,19 +378,23 @@ impl Node {
             return;
         }
 
-        let Some(conn) = self.connections.get_mut(&link_id) else {
-            warn!(link_id = %link_id, "Connection removed during msg2 processing");
-            self.pending_outbound.remove(&key);
-            return;
-        };
+        let (peer_identity, msg3_bytes, our_index) = {
+            let Some(conn) = self.connections.get_mut(&link_id) else {
+                warn!(link_id = %link_id, "Connection removed during msg2 processing");
+                self.pending_outbound.remove(&key);
+                return;
+            };
 
-        // Create FMP negotiation payload for msg3 (includes profile, MMP bits, bloom TLV)
-        let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
+            // Create FMP negotiation payload for msg3 (includes profile, MMP bits, bloom TLV)
+            let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
 
-        // Process Noise msg2 and generate msg3
-        let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-        let (msg3_bytes, received_negotiation) =
-            match conn.complete_handshake(noise_msg2, Some(&neg_payload), packet.timestamp_ms) {
+            // Process Noise msg2 and generate msg3
+            let noise_msg2 = &packet.data[header.noise_msg2_offset..];
+            let (msg3_bytes, received_negotiation) = match conn.complete_handshake(
+                noise_msg2,
+                Some(&neg_payload),
+                packet.timestamp_ms,
+            ) {
                 Ok(result) => result,
                 Err(e) => {
                     warn!(
@@ -402,37 +407,55 @@ impl Node {
                 }
             };
 
-        // Process peer's FMP negotiation payload from msg2
-        if let Some(neg_bytes) = &received_negotiation {
-            match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
-                    conn.mark_failed();
-                    return;
+            // Process peer's FMP negotiation payload from msg2
+            if let Some(neg_bytes) = &received_negotiation {
+                match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
+                        conn.mark_failed();
+                        return;
+                    }
                 }
             }
-        }
 
-        // Store their index
-        conn.set_their_index(header.sender_idx);
-        conn.set_source_addr(packet.remote_addr.clone());
+            // Store their index
+            conn.set_their_index(header.sender_idx);
+            conn.set_source_addr(packet.remote_addr.clone());
 
-        // Get peer identity for promotion (learned from msg2 in XX)
-        let peer_identity = match conn.expected_identity() {
-            Some(id) => *id,
-            None => {
-                warn!(link_id = %link_id, "No identity after handshake");
-                return;
-            }
+            // Get peer identity for promotion (learned from msg2 in XX)
+            let peer_identity = match conn.expected_identity() {
+                Some(id) => *id,
+                None => {
+                    warn!(link_id = %link_id, "No identity after handshake");
+                    return;
+                }
+            };
+
+            let our_index = conn.our_index();
+
+            (peer_identity, msg3_bytes, our_index)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
 
-        // Post-handshake identity filtering hook (IDEA-0047).
-        // With XX, shared-media transports discover peers without identity;
-        // this is the first point where the initiator knows the responder.
-        // Future: check allow/deny list here, abort if denied.
+        // ACL check: with XX, this is the first point where the initiator
+        // knows the responder's identity.
+        if self
+            .authorize_peer(
+                &peer_identity,
+                PeerAclContext::OutboundHandshake,
+                packet.transport_id,
+                &packet.remote_addr,
+            )
+            .is_err()
+        {
+            self.pending_outbound.remove(&key);
+            self.connections.remove(&link_id);
+            self.remove_link(&link_id);
+            return;
+        }
+
         if peer_node_addr == *self.identity.node_addr() {
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
             self.connections.remove(&link_id);
@@ -440,7 +463,7 @@ impl Node {
         }
 
         // Build and send msg3
-        let our_index = conn.our_index().unwrap_or(header.receiver_idx);
+        let our_index = our_index.unwrap_or(header.receiver_idx);
         let wire_msg3 = build_msg3(our_index, header.sender_idx, &msg3_bytes);
 
         if let Some(transport) = self.transports.get(&packet.transport_id) {
@@ -716,22 +739,24 @@ impl Node {
             }
         };
 
-        // Get the pending connection
-        let conn = match self.connections.get_mut(&link_id) {
-            Some(c) => c,
-            None => {
-                debug!(
-                    link_id = %link_id,
-                    "No pending connection for msg3"
-                );
-                return;
-            }
-        };
+        let (peer_identity, our_index, remote_epoch) = {
+            // Get the pending connection
+            let conn = match self.connections.get_mut(&link_id) {
+                Some(c) => c,
+                None => {
+                    debug!(
+                        link_id = %link_id,
+                        "No pending connection for msg3"
+                    );
+                    return;
+                }
+            };
 
-        // Process msg3 — learns initiator's identity and epoch
-        let noise_msg3 = &packet.data[header.noise_msg3_offset..];
-        let received_negotiation =
-            match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
+            // Process msg3 — learns initiator's identity and epoch
+            let noise_msg3 = &packet.data[header.noise_msg3_offset..];
+            let received_negotiation = match conn
+                .complete_handshake_msg3(noise_msg3, packet.timestamp_ms)
+            {
                 Ok(neg) => neg,
                 Err(e) => {
                     warn!(
@@ -749,35 +774,54 @@ impl Node {
                 }
             };
 
-        // Process peer's FMP negotiation payload from msg3
-        if let Some(neg_bytes) = &received_negotiation {
-            match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
+            // Process peer's FMP negotiation payload from msg3
+            if let Some(neg_bytes) = &received_negotiation {
+                match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
+                        self.connections.remove(&link_id);
+                        self.remove_link(&link_id);
+                        return;
+                    }
+                }
+            }
+
+            // Learn peer identity from msg3
+            let peer_identity = match conn.expected_identity() {
+                Some(id) => *id,
+                None => {
+                    warn!("Identity not learned from msg3");
                     self.connections.remove(&link_id);
                     self.remove_link(&link_id);
                     return;
                 }
-            }
-        }
+            };
 
-        // Learn peer identity from msg3
-        let peer_identity = match conn.expected_identity() {
-            Some(id) => *id,
-            None => {
-                warn!("Identity not learned from msg3");
-                self.connections.remove(&link_id);
-                self.remove_link(&link_id);
-                return;
-            }
+            let our_index = conn.our_index();
+            let remote_epoch = conn.remote_epoch();
+
+            (peer_identity, our_index, remote_epoch)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
 
-        // Post-handshake identity filtering hook (IDEA-0047).
-        // With XX, this is the first point where the responder knows
-        // the initiator's identity. Future: check allow/deny list here.
+        // ACL check: with XX, this is the first point where the responder
+        // knows the initiator's identity.
+        if self
+            .authorize_peer(
+                &peer_identity,
+                PeerAclContext::InboundHandshake,
+                packet.transport_id,
+                &packet.remote_addr,
+            )
+            .is_err()
+        {
+            self.connections.remove(&link_id);
+            self.remove_link(&link_id);
+            return;
+        }
+
         if peer_node_addr == *self.identity.node_addr() {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
             self.connections.remove(&link_id);
@@ -785,14 +829,14 @@ impl Node {
             return;
         }
 
-        let our_index = conn.our_index().unwrap_or(header.receiver_idx);
+        let our_index = our_index.unwrap_or(header.receiver_idx);
 
         // Identity-based restart/rekey detection.
         //
         // Now that we know the initiator's identity from msg3, perform the
         // same checks that the old handle_msg1 used to do after decrypting msg1.
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
-            let new_epoch = conn.remote_epoch();
+            let new_epoch = remote_epoch;
             let existing_epoch = existing_peer.remote_epoch();
 
             match (existing_epoch, new_epoch) {
