@@ -1,6 +1,6 @@
 //! Ethernet transport statistics.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU64, Ordering};
 
 /// Statistics for an Ethernet transport instance.
 ///

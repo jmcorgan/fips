@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use tracing::trace;
+
 use super::{
     BloomError, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT, MAX_SIZE_CLASS, MIN_SIZE_CLASS,
     SIZE_CLASS_BYTES,
@@ -308,16 +310,30 @@ impl BloomFilter {
     ///
     /// Uses the formula: n = -(m/k) * ln(1 - X/m)
     /// where m = num_bits, k = hash_count, X = count_ones
-    pub fn estimated_count(&self) -> f64 {
+    ///
+    /// Returns `None` when the filter's FPR exceeds `max_fpr` (antipoison
+    /// cap) or the filter is saturated (`count_ones() >= num_bits`). Pass
+    /// `f64::INFINITY` for `max_fpr` to disable the cap — useful in
+    /// Debug/log contexts where no policy is in scope. The saturated
+    /// branch is always honored regardless of `max_fpr`, preventing the
+    /// `f64::INFINITY` return that the previous signature produced.
+    pub fn estimated_count(&self, max_fpr: f64) -> Option<f64> {
         let m = self.num_bits as f64;
         let k = self.hash_count as f64;
         let x = self.count_ones() as f64;
 
         if x >= m {
-            return f64::INFINITY;
+            return None;
         }
 
-        -(m / k) * (1.0 - x / m).ln()
+        let fill = x / m;
+        let fpr = fill.powi(self.hash_count as i32);
+        if fpr > max_fpr {
+            trace!(fill, fpr, max_fpr, "estimated_count: filter above cap");
+            return None;
+        }
+
+        Some(-(m / k) * (1.0 - fill).ln())
     }
 
     /// Check if the filter is empty.
@@ -413,7 +429,13 @@ impl fmt::Debug for BloomFilter {
             .field("bits", &self.num_bits)
             .field("hash_count", &self.hash_count)
             .field("fill_ratio", &format!("{:.2}%", self.fill_ratio() * 100.0))
-            .field("est_count", &format!("{:.0}", self.estimated_count()))
+            .field(
+                "est_count",
+                &match self.estimated_count(f64::INFINITY) {
+                    Some(n) => format!("{:.0}", n),
+                    None => "saturated".to_string(),
+                },
+            )
             .finish()
     }
 }

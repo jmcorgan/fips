@@ -270,10 +270,13 @@ fn print_filter_cardinality(nodes: &[TestNode]) {
             {
                 let is_tree = tn.node.is_tree_peer(&addr);
                 println!(
-                    "  n{} <- n{}: est={:.1} set_bits={} fill={:.1}% tree={}",
+                    "  n{} <- n{}: est={} set_bits={} fill={:.1}% tree={}",
                     i,
                     j,
-                    filter.estimated_count(),
+                    match filter.estimated_count(f64::INFINITY) {
+                        Some(n) => format!("{:.1}", n),
+                        None => "saturated".to_string(),
+                    },
                     filter.count_ones(),
                     filter.fill_ratio() * 100.0,
                     is_tree,
@@ -369,7 +372,9 @@ async fn test_bloom_filter_split_horizon() {
         }
 
         // Cardinality should match subtree size
-        let up_est = filter_up.estimated_count();
+        let up_est = filter_up
+            .estimated_count(f64::INFINITY)
+            .expect("upward filter should not be saturated in tree convergence test");
         assert!(
             (up_est - child_subtree.len() as f64).abs() < 1.5,
             "Upward filter (n{}→n{}): expected ~{} entries, got {:.1}",
@@ -414,7 +419,9 @@ async fn test_bloom_filter_split_horizon() {
         }
 
         // Cardinality should match complement size
-        let down_est = filter_down.estimated_count();
+        let down_est = filter_down
+            .estimated_count(f64::INFINITY)
+            .expect("downward filter should not be saturated in tree convergence test");
         assert!(
             (down_est - complement.len() as f64).abs() < 1.5,
             "Downward filter (n{}→n{}): expected ~{} entries, got {:.1}",

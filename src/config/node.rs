@@ -344,12 +344,20 @@ pub struct BloomConfig {
     /// Debounce interval for filter updates in ms (`node.bloom.update_debounce_ms`).
     #[serde(default = "BloomConfig::default_update_debounce_ms")]
     pub update_debounce_ms: u64,
+    /// Antipoison cap: reject inbound FilterAnnounce whose FPR exceeds
+    /// this value (`node.bloom.max_inbound_fpr`). Valid range `(0.0, 1.0)`.
+    /// Default `0.05` ≈ fill 0.549 at k=5 ≈ ~3,200 entries on the 1KB
+    /// filter. Conceptually distinct from future autoscaling hysteresis
+    /// setpoints — same unit, different knobs.
+    #[serde(default = "BloomConfig::default_max_inbound_fpr")]
+    pub max_inbound_fpr: f64,
 }
 
 impl Default for BloomConfig {
     fn default() -> Self {
         Self {
             update_debounce_ms: 500,
+            max_inbound_fpr: 0.05,
         }
     }
 }
@@ -357,6 +365,9 @@ impl Default for BloomConfig {
 impl BloomConfig {
     fn default_update_debounce_ms() -> u64 {
         500
+    }
+    fn default_max_inbound_fpr() -> f64 {
+        0.05
     }
 }
 

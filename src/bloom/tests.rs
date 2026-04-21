@@ -202,7 +202,7 @@ fn test_bloom_filter_estimated_count() {
     let mut filter = BloomFilter::new();
 
     // Empty filter
-    assert_eq!(filter.estimated_count(), 0.0);
+    assert_eq!(filter.estimated_count(f64::INFINITY), Some(0.0));
 
     // Insert some items
     for i in 0..50 {
@@ -210,7 +210,7 @@ fn test_bloom_filter_estimated_count() {
     }
 
     // Estimate should be reasonably close to 50
-    let estimate = filter.estimated_count();
+    let estimate = filter.estimated_count(f64::INFINITY).unwrap();
     assert!(
         estimate > 30.0 && estimate < 100.0,
         "Unexpected estimate: {}",
@@ -514,7 +514,42 @@ fn test_bloom_filter_estimated_count_saturated() {
     let bytes = vec![0xFF; 8]; // all bits set
     let filter = BloomFilter::from_bytes(bytes, 3).unwrap();
 
-    assert!(filter.estimated_count().is_infinite());
+    // Saturated filter returns None regardless of cap (defense in depth).
+    // Previously returned f64::INFINITY.
+    assert_eq!(filter.estimated_count(f64::INFINITY), None);
+    assert_eq!(filter.estimated_count(0.05), None);
+}
+
+#[test]
+fn test_bloom_filter_estimated_count_fpr_cap_boundary() {
+    // Cap boundary: FPR = fill^k = 0.05 at k=5 ⇒ fill ≈ 0.5493
+    // 1KB filter (8192 bits). 560 bytes of 0xFF = 4480 bits set =
+    // fill 0.5469, FPR ≈ 0.04877 — just below cap.
+    // 564 bytes of 0xFF = 4512 bits set = fill 0.5508, FPR ≈ 0.05060 —
+    // just above cap.
+
+    let mut below = vec![0x00u8; 1024];
+    below[..560].fill(0xFF);
+    let below_filter = BloomFilter::from_bytes(below, DEFAULT_HASH_COUNT).unwrap();
+    assert!(
+        below_filter.estimated_count(0.05).is_some(),
+        "fill 0.5469 (FPR ≈ 0.049) must be accepted by cap 0.05"
+    );
+
+    let mut above = vec![0x00u8; 1024];
+    above[..564].fill(0xFF);
+    let above_filter = BloomFilter::from_bytes(above, DEFAULT_HASH_COUNT).unwrap();
+    assert_eq!(
+        above_filter.estimated_count(0.05),
+        None,
+        "fill 0.5508 (FPR ≈ 0.051) must be rejected by cap 0.05"
+    );
+
+    // Same above-cap filter with a looser cap is accepted.
+    assert!(
+        above_filter.estimated_count(0.10).is_some(),
+        "fill 0.5508 (FPR ≈ 0.051) must be accepted by cap 0.10"
+    );
 }
 
 #[test]
@@ -547,7 +582,7 @@ fn test_bloom_filter_debug_format() {
 fn test_mixed_size_outgoing_filter_construction() {
     // Node at 1KB (size_class 1) with peers at different sizes
     let my_node = make_node_addr(0);
-    let mut state = BloomState::new(my_node);
+    let state = BloomState::new(my_node);
     // state defaults to size_class 1 (1KB)
 
     let peer_a = make_node_addr(10);

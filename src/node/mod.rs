@@ -451,6 +451,13 @@ pub struct Node {
     /// Timestamp of last mesh size log emission.
     last_mesh_size_log: Option<std::time::Instant>,
 
+    // === Bloom Self-Plausibility ===
+    /// Rate-limit state for the self-plausibility WARN. Fires at most
+    /// once per 60s globally when our own outgoing FilterAnnounce has
+    /// an FPR above `node.bloom.max_inbound_fpr`, signalling either
+    /// aggregation drift or an ingress bypass.
+    last_self_warn: Option<std::time::Instant>,
+
     // === Display Names ===
     /// Human-readable names for configured peers (alias or short npub).
     /// Populated at startup from peer config.
@@ -596,6 +603,7 @@ impl Node {
             last_congestion_log: None,
             estimated_mesh_size: None,
             last_mesh_size_log: None,
+            last_self_warn: None,
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
@@ -718,6 +726,7 @@ impl Node {
             last_congestion_log: None,
             estimated_mesh_size: None,
             last_mesh_size_log: None,
+            last_self_warn: None,
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
@@ -1099,17 +1108,30 @@ impl Node {
         let parent_id = *self.tree_state.my_declaration().parent_id();
         let is_root = self.tree_state.is_root();
 
+        let max_fpr = self.config.node.bloom.max_inbound_fpr;
         let mut total: f64 = 1.0; // count self
         let mut child_count: u32 = 0;
         let mut has_data = false;
 
-        // Parent's filter: nodes reachable upward through the tree
+        // Parent's filter: nodes reachable upward through the tree.
+        // If any contributing filter is above the FPR cap, we refuse to
+        // estimate rather than substitute a partial/biased aggregate —
+        // Node.estimated_mesh_size is already Option<u64> and consumers
+        // (control socket, fipstop, periodic debug log) handle None.
         if !is_root
             && let Some(parent) = self.peers.get(&parent_id)
             && let Some(filter) = parent.inbound_filter()
         {
-            total += filter.estimated_count();
-            has_data = true;
+            match filter.estimated_count(max_fpr) {
+                Some(n) => {
+                    total += n;
+                    has_data = true;
+                }
+                None => {
+                    self.estimated_mesh_size = None;
+                    return;
+                }
+            }
         }
 
         // Children's filters: each child's subtree is disjoint
@@ -1119,8 +1141,16 @@ impl Node {
             {
                 child_count += 1;
                 if let Some(filter) = peer.inbound_filter() {
-                    total += filter.estimated_count();
-                    has_data = true;
+                    match filter.estimated_count(max_fpr) {
+                        Some(n) => {
+                            total += n;
+                            has_data = true;
+                        }
+                        None => {
+                            self.estimated_mesh_size = None;
+                            return;
+                        }
+                    }
                 }
             }
         }

@@ -210,6 +210,7 @@ pub struct BloomStats {
     pub invalid: u64,
     pub unknown_peer: u64,
     pub stale: u64,
+    pub fill_exceeded: u64,
     pub accepted: u64,
     // Outbound announce sending
     pub sent: u64,
@@ -235,6 +236,7 @@ impl BloomStats {
             invalid: self.invalid,
             unknown_peer: self.unknown_peer,
             stale: self.stale,
+            fill_exceeded: self.fill_exceeded,
             accepted: self.accepted,
             sent: self.sent,
             debounce_suppressed: self.debounce_suppressed,
@@ -411,6 +413,7 @@ pub struct BloomStatsSnapshot {
     pub invalid: u64,
     pub unknown_peer: u64,
     pub stale: u64,
+    pub fill_exceeded: u64,
     pub accepted: u64,
     pub sent: u64,
     pub debounce_suppressed: u64,

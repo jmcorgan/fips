@@ -7,6 +7,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 mod ble;
 mod bloom;
+mod bloom_poison;
 mod disconnect;
 mod discovery;
 #[cfg(unix)]

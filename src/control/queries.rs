@@ -423,7 +423,8 @@ pub fn show_bloom(node: &Node) -> Value {
                 "filter_sequence": peer.filter_sequence(),
             });
             if let Some(filter) = peer.inbound_filter() {
-                pf["estimated_count"] = json!(filter.estimated_count());
+                let max_fpr = node.config().node.bloom.max_inbound_fpr;
+                pf["estimated_count"] = json!(filter.estimated_count(max_fpr));
                 pf["set_bits"] = json!(filter.count_ones());
                 pf["fill_ratio"] = json!(filter.fill_ratio());
             }

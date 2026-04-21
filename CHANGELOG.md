@@ -215,6 +215,29 @@ with v0.2.x peers.
   control socket interface is still pre-1.0 and not covered by
   stability guarantees
 
+### Security
+
+- Bloom filter poisoning defense. Reject inbound FilterAnnounce
+  messages whose false-positive rate exceeds a configurable cap
+  (`node.bloom.max_inbound_fpr`, default 0.05). Previously a peer
+  running a modified build could send an all-ones filter, causing
+  (1) lookup attraction / black-hole routing for unknown targets,
+  (2) aggregation contamination as the poisoned bits propagated one
+  hop per announce tick via strict-OR merging, and (3) mesh-size
+  estimate blowup to `f64::INFINITY`. Rejection is silent on the
+  wire; rejected announces log at WARN and increment a new
+  `bloom.fill_exceeded` counter. The peer's prior accepted filter
+  and sequence number are preserved on rejection so a single bad
+  announce cannot wipe a peer's contribution to aggregation.
+  An independent self-plausibility WARN fires (rate-limited to once
+  per 60s) if our own outgoing filter ever exceeds the cap,
+  surfacing aggregation drift or ingress-check bypasses.
+  `BloomFilter::estimated_count` now returns `Option<f64>` and
+  returns `None` for saturated filters, preventing `f64::INFINITY`
+  from propagating into mesh-size estimates. The node-level
+  `estimated_mesh_size` field (already `Option<u64>`) propagates
+  `None` when any contributing filter is above cap.
+
 ### Fixed
 
 - Control socket path detection in fipsctl and fipstop now checks for

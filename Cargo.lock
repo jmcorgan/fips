@@ -985,6 +985,7 @@ dependencies = [
  "hex",
  "hkdf",
  "libc",
+ "portable-atomic",
  "rand 0.10.0",
  "ratatui",
  "rtnetlink",
