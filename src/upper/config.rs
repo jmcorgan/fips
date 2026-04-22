@@ -12,7 +12,11 @@ const DEFAULT_TUN_NAME: &str = "fips0";
 const DEFAULT_TUN_MTU: u16 = 1280;
 
 /// Default DNS responder bind address.
-const DEFAULT_DNS_BIND_ADDR: &str = "127.0.0.1";
+///
+/// Binds to all interfaces so systemd-resolved (configured per-interface
+/// on fips0) can reach the responder regardless of interface scoping.
+/// See `packaging/common/fips-dns-setup` for how resolvectl is configured.
+const DEFAULT_DNS_BIND_ADDR: &str = "::";
 
 /// Default DNS responder port.
 const DEFAULT_DNS_PORT: u16 = 5354;
@@ -56,7 +60,7 @@ impl Default for DnsConfig {
 }
 
 impl DnsConfig {
-    /// Get the bind address (default: 127.0.0.1).
+    /// Get the bind address (default: `::`, all interfaces).
     pub fn bind_addr(&self) -> &str {
         self.bind_addr.as_deref().unwrap_or(DEFAULT_DNS_BIND_ADDR)
     }

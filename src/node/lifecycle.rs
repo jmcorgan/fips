@@ -730,32 +730,65 @@ impl Node {
             }
         }
 
-        // Initialize DNS responder (independent of TUN)
+        // Initialize DNS responder (independent of TUN).
+        //
+        // The default bind_addr is "::" (all interfaces, dual-stack). This
+        // matters on Ubuntu 22 (systemd 249): systemd-resolved applies
+        // interface-scoped routing to per-link DNS servers — when resolvectl
+        // points fips0 at an address, resolved tries to reach it through
+        // fips0. Binding to "::" ensures the responder is reachable via fips0
+        // as well as loopback (v4 and v6). `IPV6_V6ONLY=0` is set explicitly
+        // so IPv4 clients on 127.0.0.1 still reach us regardless of kernel
+        // sysctl defaults.
         if self.config.dns.enabled {
-            let bind = format!("{}:{}", self.config.dns.bind_addr(), self.config.dns.port());
-            match tokio::net::UdpSocket::bind(&bind).await {
-                Ok(socket) => {
-                    let dns_channel_size = self.config.node.buffers.dns_channel;
-                    let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
-                    let dns_ttl = self.config.dns.ttl();
-                    let base_hosts =
-                        crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
-                    let hosts_path =
-                        std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
-                    let reloader =
-                        crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
-                    info!(bind = %bind, hosts = reloader.hosts().len(), "DNS responder started for .fips domain (auto-reload enabled)");
-                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(
-                        socket,
-                        identity_tx,
-                        dns_ttl,
-                        reloader,
-                    ));
-                    self.dns_identity_rx = Some(identity_rx);
-                    self.dns_task = Some(handle);
+            let addr_str = self.config.dns.bind_addr();
+            match addr_str.parse::<std::net::IpAddr>() {
+                Ok(ip) => {
+                    let bind = std::net::SocketAddr::new(ip, self.config.dns.port());
+                    match Self::bind_dns_socket(bind) {
+                        Ok(socket) => {
+                            let dns_channel_size = self.config.node.buffers.dns_channel;
+                            let (identity_tx, identity_rx) =
+                                tokio::sync::mpsc::channel(dns_channel_size);
+                            let dns_ttl = self.config.dns.ttl();
+                            let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(
+                                self.config.peers(),
+                            );
+                            let hosts_path =
+                                std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
+                            let reloader =
+                                crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
+                            // Resolve the TUN ifindex so the responder can
+                            // drop queries arriving on the mesh interface
+                            // (fips0). Without this, the `::` bind exposes
+                            // /etc/fips/hosts alias probing to any mesh peer.
+                            // When TUN isn't enabled or the name can't be
+                            // resolved, `None` disables the filter (there
+                            // is no mesh surface to defend anyway).
+                            let mesh_ifindex = Self::lookup_mesh_ifindex(self.config.tun.name());
+                            info!(
+                                bind = %bind,
+                                hosts = reloader.hosts().len(),
+                                mesh_ifindex = ?mesh_ifindex,
+                                "DNS responder started for .fips domain (auto-reload enabled)"
+                            );
+                            let handle = tokio::spawn(crate::upper::dns::run_dns_responder(
+                                socket,
+                                identity_tx,
+                                dns_ttl,
+                                reloader,
+                                mesh_ifindex,
+                            ));
+                            self.dns_identity_rx = Some(identity_rx);
+                            self.dns_task = Some(handle);
+                        }
+                        Err(e) => {
+                            warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+                        }
+                    }
                 }
                 Err(e) => {
-                    warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+                    warn!(addr = %addr_str, error = %e, "Invalid dns.bind_addr; DNS responder not started");
                 }
             }
         }
@@ -766,6 +799,82 @@ impl Node {
         info!("  transports: {}", self.transports.len());
         info!(" connections: {}", self.connections.len());
         Ok(())
+    }
+
+    /// Bind a UDP socket for the DNS responder.
+    ///
+    /// For IPv6 binds (including `::`), sets `IPV6_V6ONLY=0` so the socket
+    /// also accepts IPv4-mapped addresses. This guarantees dual-stack
+    /// delivery regardless of `net.ipv6.bindv6only` sysctl on the host —
+    /// v4 clients on 127.0.0.1 and v6 clients on the fips0 address both
+    /// land on the same socket.
+    ///
+    /// Also enables `IPV6_RECVPKTINFO` on IPv6 sockets so the responder
+    /// can learn the arrival interface per packet. The responder uses that
+    /// to drop queries arriving on the mesh TUN, closing the hosts-file
+    /// probing side-channel created by the `::` bind.
+    fn bind_dns_socket(
+        addr: std::net::SocketAddr,
+    ) -> Result<tokio::net::UdpSocket, std::io::Error> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        if addr.is_ipv6() {
+            sock.set_only_v6(false)?;
+            #[cfg(unix)]
+            Self::set_recv_pktinfo_v6(&sock)?;
+        }
+        sock.set_nonblocking(true)?;
+        sock.bind(&addr.into())?;
+        tokio::net::UdpSocket::from_std(sock.into())
+    }
+
+    /// Enable `IPV6_RECVPKTINFO` on an IPv6 UDP socket.
+    ///
+    /// After this setsockopt, each `recvmsg()` call on the socket receives
+    /// an `IPV6_PKTINFO` control message containing the arrival interface
+    /// index, which the DNS responder uses for its mesh-interface filter.
+    #[cfg(unix)]
+    fn set_recv_pktinfo_v6(sock: &socket2::Socket) -> Result<(), std::io::Error> {
+        use std::os::fd::AsRawFd;
+        let enable: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVPKTINFO,
+                &enable as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Resolve the mesh TUN interface index by name.
+    ///
+    /// Returns `None` if the interface does not exist (e.g. TUN disabled
+    /// or not yet created). A `None` result disables the DNS responder's
+    /// mesh-interface filter — safe, because if there is no fips0 there
+    /// is no mesh exposure to defend against.
+    fn lookup_mesh_ifindex(name: &str) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            let c_name = std::ffi::CString::new(name).ok()?;
+            let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+            if idx == 0 { None } else { Some(idx) }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            None
+        }
     }
 
     /// Stop the node.

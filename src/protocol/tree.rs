@@ -439,7 +439,15 @@ mod tests {
     fn test_tree_announce_validate_semantics_accepts_valid_non_root() {
         use crate::identity::Identity;
 
-        let identity = Identity::generate();
+        // Regenerate until the random identity's node_addr is numerically
+        // larger than both fixed parent (02:..) and root (01:..), so the
+        // root-minimum invariant holds deterministically.
+        let identity = loop {
+            let id = Identity::generate();
+            if id.node_addr().as_bytes()[0] > 1 {
+                break id;
+            }
+        };
         let node_addr = *identity.node_addr();
         let parent = make_node_addr(2);
         let root = make_node_addr(1);

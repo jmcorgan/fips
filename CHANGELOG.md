@@ -214,29 +214,16 @@ with v0.2.x peers.
   updated. In-tree `fipstop` is adjusted to the new schema. The
   control socket interface is still pre-1.0 and not covered by
   stability guarantees
-
-### Security
-
-- Bloom filter poisoning defense. Reject inbound FilterAnnounce
-  messages whose false-positive rate exceeds a configurable cap
-  (`node.bloom.max_inbound_fpr`, default 0.05). Previously a peer
-  running a modified build could send an all-ones filter, causing
-  (1) lookup attraction / black-hole routing for unknown targets,
-  (2) aggregation contamination as the poisoned bits propagated one
-  hop per announce tick via strict-OR merging, and (3) mesh-size
-  estimate blowup to `f64::INFINITY`. Rejection is silent on the
-  wire; rejected announces log at WARN and increment a new
-  `bloom.fill_exceeded` counter. The peer's prior accepted filter
-  and sequence number are preserved on rejection so a single bad
-  announce cannot wipe a peer's contribution to aggregation.
-  An independent self-plausibility WARN fires (rate-limited to once
-  per 60s) if our own outgoing filter ever exceeds the cap,
-  surfacing aggregation drift or ingress-check bypasses.
-  `BloomFilter::estimated_count` now returns `Option<f64>` and
-  returns `None` for saturated filters, preventing `f64::INFINITY`
-  from propagating into mesh-size estimates. The node-level
-  `estimated_mesh_size` field (already `Option<u64>`) propagates
-  `None` when any contributing filter is above cap.
+- Validate bloom filter fill ratio on FilterAnnounce ingress.
+  Inbound FilterAnnounce messages whose derived false-positive
+  rate exceeds `node.bloom.max_inbound_fpr` (new config field,
+  default 0.05) are rejected silently on the wire, logged at WARN,
+  and counted in a new `bloom.fill_exceeded` counter. A
+  rate-limited WARN also fires if our own outgoing filter's FPR
+  exceeds the cap. `BloomFilter::estimated_count` now takes
+  `max_fpr` and returns `Option<f64>`, returning `None` for
+  saturated filters; this propagates through `compute_mesh_size`
+  into `estimated_mesh_size` (already `Option<u64>`)
 
 ### Fixed
 
@@ -285,6 +272,18 @@ with v0.2.x peers.
   tree specification. The receive path now verifies that the
   ancestry is structurally consistent with the signed parent
   declaration before mutating tree state.
+- Fix DNS resolution on Ubuntu 22 with systemd-resolved. The DNS
+  responder now binds `::` (dual-stack) instead of `127.0.0.1` so
+  systemd-resolved's interface-scoped routing via fips0 reaches
+  it. DNS queries are accepted only from the localhost.
+- Make the tree ancestry acceptance unit test deterministic.
+  `test_tree_announce_validate_semantics_accepts_valid_non_root`
+  generated a random signing identity while pinning the fixed root
+  to `node_addr[0] = 0x01`; about 2 in 256 random identities were
+  numerically smaller than the claimed root, triggering
+  `AncestryRootNotMinimum`. The test now regenerates the identity
+  until its `node_addr` is strictly larger than both the fixed
+  parent and root.
 
 ## [0.2.0] - 2026-03-22
 
