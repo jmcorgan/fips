@@ -1901,6 +1901,63 @@ impl Node {
 
         Ok(())
     }
+
+    /// Encrypt and send a link-layer message using a raw Noise session.
+    ///
+    /// Unlike `send_encrypted_link_message`, this does not look the peer up
+    /// in `self.peers`. It takes the session and wire parameters directly,
+    /// so it can be used during handshake teardown (before promotion) where
+    /// the peer state lives in `self.connections` rather than `self.peers`.
+    ///
+    /// The inner-header timestamp is set to 0 — the session has just been
+    /// established and no session-elapsed reference is available yet; this
+    /// is acceptable because the frame is a one-shot sent before teardown.
+    /// No MMP stats or K-bit flag are recorded.
+    pub(super) async fn send_encrypted_link_message_raw(
+        &self,
+        node_addr: NodeAddr,
+        transport_id: crate::transport::TransportId,
+        remote_addr: &crate::transport::TransportAddr,
+        session: &mut crate::noise::NoiseSession,
+        their_index: crate::utils::index::SessionIndex,
+        plaintext: &[u8],
+    ) -> Result<(), NodeError> {
+        let inner_plaintext = prepend_inner_header(0, plaintext);
+
+        let counter = session.current_send_counter();
+        let payload_len = inner_plaintext.len() as u16;
+        let header = build_established_header(their_index, counter, 0u8, payload_len);
+
+        let ciphertext = session
+            .encrypt_with_aad(&inner_plaintext, &header)
+            .map_err(|e| NodeError::SendFailed {
+                node_addr,
+                reason: format!("encryption failed: {}", e),
+            })?;
+
+        let wire_packet = build_encrypted(&header, &ciphertext);
+
+        let transport = self
+            .transports
+            .get(&transport_id)
+            .ok_or(NodeError::TransportNotFound(transport_id))?;
+
+        transport
+            .send(remote_addr, &wire_packet)
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                TransportError::MtuExceeded { packet_size, mtu } => NodeError::MtuExceeded {
+                    node_addr,
+                    packet_size,
+                    mtu,
+                },
+                other => NodeError::SendFailed {
+                    node_addr,
+                    reason: format!("transport send: {}", other),
+                },
+            })
+    }
 }
 
 impl fmt::Debug for Node {

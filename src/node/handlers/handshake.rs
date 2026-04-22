@@ -10,7 +10,7 @@ use crate::node::acl::PeerAclContext;
 use crate::node::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::node::{Node, NodeError};
 use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
-use crate::protocol::NegotiationPayload;
+use crate::protocol::{Disconnect, DisconnectReason, NegotiationPayload};
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -817,6 +817,32 @@ impl Node {
             )
             .is_err()
         {
+            // Notify the initiator via encrypted Disconnect so they clean
+            // up without waiting for link-dead timeout. The Noise session
+            // is fully established at this point (msg3 just succeeded),
+            // and the initiator has a matching session from processing
+            // msg2. Reason `Other` is used instead of `SecurityViolation`
+            // to avoid naming the ACL mechanism on the wire.
+            let reject_info = match self.connections.get_mut(&link_id) {
+                Some(conn) => match (conn.their_index(), conn.take_session()) {
+                    (Some(idx), Some(session)) => Some((idx, session)),
+                    _ => None,
+                },
+                None => None,
+            };
+            if let Some((their_idx, mut session)) = reject_info {
+                let payload = Disconnect::new(DisconnectReason::Other).encode();
+                let _ = self
+                    .send_encrypted_link_message_raw(
+                        peer_node_addr,
+                        packet.transport_id,
+                        &packet.remote_addr,
+                        &mut session,
+                        their_idx,
+                        &payload,
+                    )
+                    .await;
+            }
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
             return;

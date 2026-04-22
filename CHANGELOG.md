@@ -284,6 +284,17 @@ with v0.2.x peers.
   `AncestryRootNotMinimum`. The test now regenerates the identity
   until its `node_addr` is strictly larger than both the fixed
   parent and root.
+- Responder now sends an encrypted `Disconnect` frame on the
+  newly-established Noise session when rejecting a peer in
+  `handle_msg3`, before tearing down. Under Noise XX the responder
+  only learns the initiator's identity from msg3, so by the time an
+  inbound-handshake policy check can reject, the initiator has
+  already received msg2 and promoted its side of the peering. Without
+  an explicit notification the initiator would keep the "connected"
+  state until link-dead timeout fired, producing the
+  `acl-allowlist` CI failure on the `next` branch. The notification
+  allows the initiator's existing `handle_disconnect` path to clean
+  up within one RTT.
 
 ## [0.2.0] - 2026-03-22
 
