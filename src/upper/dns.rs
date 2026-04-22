@@ -15,7 +15,7 @@ use crate::{NodeAddr, PeerIdentity};
 use simple_dns::rdata::{AAAA, RData};
 use simple_dns::{CLASS, Name, Packet, PacketFlag, QTYPE, RCODE, ResourceRecord, TYPE};
 use std::net::Ipv6Addr;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 /// Identity resolved by the DNS responder, sent to Node for cache population.
 pub struct DnsResolvedIdentity {
@@ -134,28 +134,64 @@ pub fn handle_dns_packet(
     Some((bytes, None))
 }
 
+/// Decide whether a received DNS query should be dropped as mesh-originated.
+///
+/// A query is dropped iff we have a configured mesh interface index
+/// (`mesh_ifindex`) and the packet arrived on that interface
+/// (`arrival_ifindex`). Queries arriving on any other interface — loopback,
+/// LAN, or unknown (no PKTINFO cmsg) — are not dropped.
+///
+/// The arrival-interface check is robust regardless of source address. LAN
+/// segments using RFC 4193 ULA prefixes (`fd00::/8`, common with OpenWrt
+/// `odhcpd` and NetworkManager ULA auto-generation) would collide with the
+/// FIPS mesh prefix under a source-prefix filter; this filter is immune.
+fn is_mesh_interface_query(arrival_ifindex: Option<u32>, mesh_ifindex: Option<u32>) -> bool {
+    match (arrival_ifindex, mesh_ifindex) {
+        (Some(arrival), Some(mesh)) => arrival == mesh,
+        _ => false,
+    }
+}
+
 /// Run the DNS responder UDP server loop.
 ///
 /// Listens for DNS queries, resolves `.fips` names, and sends resolved
 /// identities to the Node via the identity channel. The host map reloader
 /// checks the hosts file modification time on each request and reloads
 /// automatically when changes are detected.
+///
+/// When `mesh_ifindex` is `Some`, queries arriving on that interface are
+/// dropped silently. This closes the fips0-exposure side-channel created
+/// by the `::` bind: mesh peers can reach the listener over fips0 and
+/// probe `/etc/fips/hosts` aliases via dictionary attack. The check
+/// requires `IPV6_RECVPKTINFO` to be enabled on the socket (done in
+/// `Node::bind_dns_socket`); if it is not, arrival ifindex is unknown
+/// and no filter is applied.
 pub async fn run_dns_responder(
     socket: tokio::net::UdpSocket,
     identity_tx: DnsIdentityTx,
     ttl: u32,
     mut reloader: HostMapReloader,
+    mesh_ifindex: Option<u32>,
 ) {
     let mut buf = [0u8; 512]; // Standard DNS UDP max
 
     loop {
-        let (len, src) = match socket.recv_from(&mut buf).await {
+        let (len, src, arrival_ifindex) = match recv_with_pktinfo(&socket, &mut buf).await {
             Ok(result) => result,
             Err(e) => {
                 warn!(error = %e, "DNS socket recv error");
                 continue;
             }
         };
+
+        if is_mesh_interface_query(arrival_ifindex, mesh_ifindex) {
+            trace!(
+                src = %src,
+                ifindex = ?arrival_ifindex,
+                "DNS query arrived on mesh interface, dropping"
+            );
+            continue;
+        }
 
         let query_bytes = &buf[..len];
 
@@ -180,6 +216,140 @@ pub async fn run_dns_responder(
                 debug!(len, "Failed to parse DNS query, dropping");
             }
         }
+    }
+}
+
+/// Receive a UDP datagram with arrival-interface info via `IPV6_PKTINFO`.
+///
+/// Returns `(len, src, arrival_ifindex)`. The ifindex is `Some` when the
+/// kernel delivered an `IPV6_PKTINFO` control message; `None` otherwise
+/// (IPv4 arrival on a dual-stack socket without `IP_PKTINFO` set, or
+/// `IPV6_RECVPKTINFO` not enabled). A `None` ifindex disables filtering
+/// for that packet — fail-open on unknown arrival.
+#[cfg(unix)]
+async fn recv_with_pktinfo(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, std::net::SocketAddr, Option<u32>)> {
+    use std::os::fd::AsRawFd;
+    loop {
+        socket.readable().await?;
+        let fd = socket.as_raw_fd();
+        match socket.try_io(tokio::io::Interest::READABLE, || {
+            recvmsg_with_pktinfo(fd, buf)
+        }) {
+            Ok(result) => return Ok(result),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn recv_with_pktinfo(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, std::net::SocketAddr, Option<u32>)> {
+    let (len, src) = socket.recv_from(buf).await?;
+    Ok((len, src, None))
+}
+
+/// Blocking `recvmsg` wrapper that extracts `IPV6_PKTINFO` ifindex.
+///
+/// Returns `Err(WouldBlock)` when the socket has no data (caller should
+/// await readability again).
+#[cfg(unix)]
+fn recvmsg_with_pktinfo(
+    fd: std::os::fd::RawFd,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, std::net::SocketAddr, Option<u32>)> {
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr() as *mut _,
+        iov_len: buf.len(),
+    };
+
+    let mut src_store: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    // 128 bytes is ample: IPV6_PKTINFO cmsg is ~36 bytes aligned.
+    let mut cmsg_buf = [0u8; 128];
+
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = &mut src_store as *mut _ as *mut _;
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as u32;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut _;
+    msg.msg_controllen = cmsg_buf.len() as _;
+
+    let n = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let n = n as usize;
+
+    let src = sockaddr_storage_to_socket_addr(&src_store, msg.msg_namelen)?;
+    let ifindex = extract_pktinfo_ifindex(&msg);
+
+    Ok((n, src, ifindex))
+}
+
+/// Walk the cmsg chain and return the `IPV6_PKTINFO` ifindex, if present.
+#[cfg(unix)]
+fn extract_pktinfo_ifindex(msg: &libc::msghdr) -> Option<u32> {
+    let mut cmsg_ptr = unsafe { libc::CMSG_FIRSTHDR(msg) };
+    while !cmsg_ptr.is_null() {
+        let cmsg = unsafe { &*cmsg_ptr };
+        if cmsg.cmsg_level == libc::IPPROTO_IPV6 && cmsg.cmsg_type == libc::IPV6_PKTINFO {
+            let data_ptr = unsafe { libc::CMSG_DATA(cmsg_ptr) } as *const libc::in6_pktinfo;
+            let pktinfo: libc::in6_pktinfo = unsafe { std::ptr::read_unaligned(data_ptr) };
+            return Some(pktinfo.ipi6_ifindex);
+        }
+        cmsg_ptr = unsafe { libc::CMSG_NXTHDR(msg, cmsg_ptr) };
+    }
+    None
+}
+
+/// Convert a populated `sockaddr_storage` to `SocketAddr`.
+#[cfg(unix)]
+fn sockaddr_storage_to_socket_addr(
+    storage: &libc::sockaddr_storage,
+    len: libc::socklen_t,
+) -> std::io::Result<std::net::SocketAddr> {
+    match storage.ss_family as i32 {
+        libc::AF_INET => {
+            if (len as usize) < std::mem::size_of::<libc::sockaddr_in>() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "sockaddr_in too small",
+                ));
+            }
+            let sin = unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            let port = u16::from_be(sin.sin_port);
+            Ok(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                ip, port,
+            )))
+        }
+        libc::AF_INET6 => {
+            if (len as usize) < std::mem::size_of::<libc::sockaddr_in6>() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "sockaddr_in6 too small",
+                ));
+            }
+            let sin6 = unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
+            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            let port = u16::from_be(sin6.sin6_port);
+            Ok(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                ip,
+                port,
+                sin6.sin6_flowinfo,
+                sin6.sin6_scope_id,
+            )))
+        }
+        af => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected address family: {}", af),
+        )),
     }
 }
 
@@ -426,8 +596,13 @@ mod tests {
         let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
 
         // Spawn the responder
-        let responder_handle =
-            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
+        let responder_handle = tokio::spawn(run_dns_responder(
+            server_socket,
+            identity_tx,
+            300,
+            reloader,
+            None,
+        ));
 
         // Send a query
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -479,8 +654,13 @@ mod tests {
 
         let (identity_tx, mut identity_rx) = tokio::sync::mpsc::channel(16);
 
-        let responder_handle =
-            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
+        let responder_handle = tokio::spawn(run_dns_responder(
+            server_socket,
+            identity_tx,
+            300,
+            reloader,
+            None,
+        ));
 
         // Query by hostname instead of npub
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -531,8 +711,13 @@ mod tests {
         let server_addr = server_socket.local_addr().unwrap();
         let (identity_tx, _identity_rx) = tokio::sync::mpsc::channel(16);
 
-        let responder_handle =
-            tokio::spawn(run_dns_responder(server_socket, identity_tx, 300, reloader));
+        let responder_handle = tokio::spawn(run_dns_responder(
+            server_socket,
+            identity_tx,
+            300,
+            reloader,
+            None,
+        ));
 
         let client_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
@@ -582,6 +767,161 @@ mod tests {
         } else {
             panic!("expected AAAA record");
         }
+
+        responder_handle.abort();
+    }
+
+    // --- mesh-interface filter tests ---
+
+    #[test]
+    fn test_is_mesh_interface_query_matching() {
+        assert!(
+            is_mesh_interface_query(Some(7), Some(7)),
+            "arrival == mesh ifindex should drop"
+        );
+    }
+
+    #[test]
+    fn test_is_mesh_interface_query_non_matching() {
+        assert!(
+            !is_mesh_interface_query(Some(1), Some(7)),
+            "lo arrival should pass when mesh is fips0"
+        );
+    }
+
+    #[test]
+    fn test_is_mesh_interface_query_no_arrival() {
+        assert!(
+            !is_mesh_interface_query(None, Some(7)),
+            "unknown arrival (no PKTINFO cmsg) should fail-open"
+        );
+    }
+
+    #[test]
+    fn test_is_mesh_interface_query_no_filter() {
+        assert!(
+            !is_mesh_interface_query(Some(7), None),
+            "unconfigured mesh ifindex disables the filter"
+        );
+    }
+
+    /// Look up loopback ifindex for tests. Returns 0 if lookup fails,
+    /// which causes the calling test to skip.
+    #[cfg(unix)]
+    fn loopback_ifindex_for_test() -> u32 {
+        let name = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let c = std::ffi::CString::new(name).unwrap();
+        unsafe { libc::if_nametoindex(c.as_ptr()) }
+    }
+
+    /// Build a socket bound to `[::1]:0` with `IPV6_RECVPKTINFO` enabled,
+    /// mirroring the setup done in `Node::bind_dns_socket`.
+    #[cfg(unix)]
+    fn bind_loopback_v6_with_pktinfo() -> tokio::net::UdpSocket {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::os::fd::AsRawFd;
+        let sock = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        sock.set_only_v6(false).unwrap();
+        let enable: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVPKTINFO,
+                &enable as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(ret, 0, "setsockopt IPV6_RECVPKTINFO failed");
+        sock.set_nonblocking(true).unwrap();
+        let addr: std::net::SocketAddr = "[::1]:0".parse().unwrap();
+        sock.bind(&addr.into()).unwrap();
+        tokio::net::UdpSocket::from_std(sock.into()).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_recv_with_pktinfo_returns_loopback_ifindex() {
+        let lo = loopback_ifindex_for_test();
+        if lo == 0 {
+            // Lookup failed — skip rather than misreport a problem with the
+            // filter for an environment issue.
+            return;
+        }
+
+        let server = bind_loopback_v6_with_pktinfo();
+        let server_addr = server.local_addr().unwrap();
+
+        let client = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        client.send_to(b"hello", server_addr).await.unwrap();
+
+        let mut buf = [0u8; 32];
+        let (len, src, ifindex) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            recv_with_pktinfo(&server, &mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(&buf[..len], b"hello");
+        assert!(src.ip().is_loopback(), "source should be loopback");
+        assert_eq!(
+            ifindex,
+            Some(lo),
+            "IPV6_PKTINFO should report loopback ifindex"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_dns_responder_drops_mesh_interface_query() {
+        let lo = loopback_ifindex_for_test();
+        if lo == 0 {
+            return;
+        }
+
+        let server_socket = bind_loopback_v6_with_pktinfo();
+        let server_addr = server_socket.local_addr().unwrap();
+
+        let reloader = HostMapReloader::new(
+            HostMap::new(),
+            std::path::PathBuf::from("/nonexistent/hosts"),
+        );
+        let (identity_tx, _identity_rx) = tokio::sync::mpsc::channel(16);
+
+        // Treat loopback as the "mesh" interface so queries from ::1 are
+        // dropped. This exercises the real filter path end-to-end without
+        // needing a TUN.
+        let responder_handle = tokio::spawn(run_dns_responder(
+            server_socket,
+            identity_tx,
+            300,
+            reloader,
+            Some(lo),
+        ));
+
+        let identity = Identity::generate();
+        let query = build_test_query(&format!("{}.fips", identity.npub()), TYPE::AAAA);
+        let client = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        client.send_to(&query, server_addr).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            client.recv_from(&mut buf),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "response arrived from server ({:?}) — filter did not drop mesh-interface query",
+            result
+        );
 
         responder_handle.abort();
     }

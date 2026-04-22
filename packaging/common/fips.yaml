@@ -18,7 +18,10 @@ tun:
 
 dns:
   enabled: true
-  bind_addr: "127.0.0.1"
+  # bind_addr defaults to "::" (all interfaces, dual-stack). Required so
+  # systemd-resolved can reach the responder via fips0 when resolvectl
+  # configures per-interface DNS forwarding.
+  # bind_addr: "::"
   port: 5354
 
 transports:

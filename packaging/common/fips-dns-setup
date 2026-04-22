@@ -43,6 +43,22 @@ wait_for_interface() {
     return 1
 }
 
+# Wait for fips0 to have a global IPv6 address assigned (up to 30s).
+# Returns the address on stdout, or empty string if timeout.
+wait_for_fips_addr() {
+    for i in $(seq 1 30); do
+        local addr
+        addr=$(ip -6 -o addr show dev "$FIPS_INTERFACE" scope global 2>/dev/null \
+               | awk '{print $4}' | cut -d/ -f1 | head -1)
+        if [ -n "$addr" ]; then
+            echo "$addr"
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # Get systemd version number.
 systemd_version() {
     systemctl --version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1
@@ -74,12 +90,26 @@ EOF
 }
 
 # Backend 2: resolvectl
+#
+# systemd-resolved applies interface-scoped routing to per-link DNS servers.
+# On Ubuntu 22 (systemd 249), configuring `resolvectl dns fips0 127.0.0.1:5354`
+# causes resolved to route the DNS query through fips0 and fail (127.0.0.1 is
+# not reachable via a TUN with only fd00::/8 routes). We must use fips0's own
+# global IPv6 address, which is locally delivered by the kernel regardless of
+# which interface resolved tries to route through.
 try_resolvectl() {
     command -v resolvectl >/dev/null 2>&1 || return 1
     is_active systemd-resolved.service || return 1
 
-    log "Configuring via resolvectl"
-    resolvectl dns "$FIPS_INTERFACE" "${FIPS_DNS_ADDR}:${FIPS_DNS_PORT}"
+    local fips_addr
+    fips_addr=$(wait_for_fips_addr)
+    if [ -z "$fips_addr" ]; then
+        log "ERROR: $FIPS_INTERFACE has no global IPv6 address after 30s"
+        return 1
+    fi
+
+    log "Configuring via resolvectl (DNS=[${fips_addr}]:${FIPS_DNS_PORT})"
+    resolvectl dns "$FIPS_INTERFACE" "[${fips_addr}]:${FIPS_DNS_PORT}"
     resolvectl domain "$FIPS_INTERFACE" "~fips"
     save_backend "resolvectl"
     return 0
