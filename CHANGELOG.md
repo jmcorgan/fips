@@ -200,6 +200,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   responder now binds `::` (dual-stack) instead of `127.0.0.1` so
   systemd-resolved's interface-scoped routing via fips0 reaches
   it. DNS queries are accepted only from the localhost.
+- Make the tree ancestry acceptance unit test deterministic.
+  `test_tree_announce_validate_semantics_accepts_valid_non_root`
+  generated a random signing identity while pinning the fixed root
+  to `node_addr[0] = 0x01`; about 2 in 256 random identities were
+  numerically smaller than the claimed root, triggering
+  `AncestryRootNotMinimum`. The test now regenerates the identity
+  until its `node_addr` is strictly larger than both the fixed
+  parent and root.
 
 ## [0.2.0] - 2026-03-22
 
