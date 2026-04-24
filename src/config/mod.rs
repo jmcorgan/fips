@@ -18,7 +18,7 @@
 //!     nsec: "nsec1..."
 //! ```
 
-#[cfg(feature = "gateway")]
+#[cfg(target_os = "linux")]
 mod gateway;
 mod node;
 mod peer;
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-#[cfg(feature = "gateway")]
+#[cfg(target_os = "linux")]
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, DiscoveryConfig, LimitsConfig,
@@ -378,7 +378,7 @@ pub struct Config {
     pub peers: Vec<PeerConfig>,
 
     /// Gateway configuration (`gateway`).
-    #[cfg(feature = "gateway")]
+    #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayConfig>,
 }
@@ -500,7 +500,7 @@ impl Config {
             self.peers = other.peers;
         }
         // Merge gateway section — higher-priority config replaces entirely
-        #[cfg(feature = "gateway")]
+        #[cfg(target_os = "linux")]
         if other.gateway.is_some() {
             self.gateway = other.gateway;
         }

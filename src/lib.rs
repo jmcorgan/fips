@@ -7,7 +7,7 @@ pub mod bloom;
 pub mod cache;
 pub mod config;
 pub mod control;
-#[cfg(feature = "gateway")]
+#[cfg(target_os = "linux")]
 pub mod gateway;
 pub mod identity;
 pub mod mmp;

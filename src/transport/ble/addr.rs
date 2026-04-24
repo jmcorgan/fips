@@ -55,10 +55,10 @@ impl BleAddr {
 }
 
 // ============================================================================
-// bluer type conversions (behind ble feature)
+// bluer type conversions (glibc-linux only; see build.rs bluer_available)
 // ============================================================================
 
-#[cfg(feature = "ble")]
+#[cfg(bluer_available)]
 impl BleAddr {
     /// Construct from a bluer `Address` and adapter name.
     pub fn from_bluer(addr: bluer::Address, adapter: &str) -> Self {

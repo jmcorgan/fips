@@ -38,7 +38,7 @@ Write-Host "Building FIPS v$Version for Windows $Arch..."
 # Build release binaries
 if (-not $NoBuild) {
     Push-Location $ProjectRoot
-    cargo build --release --no-default-features --features tui
+    cargo build --release
     if ($LASTEXITCODE -ne 0) {
         Write-Error "cargo build failed"
         exit 1

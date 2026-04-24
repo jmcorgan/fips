@@ -9,7 +9,7 @@
 //!
 //! Transport logic (pool, discovery, lifecycle) is separated from the
 //! BlueZ/bluer stack via the `BleIo` trait. `BluerIo` provides the real
-//! implementation (behind `cfg(feature = "ble")`); `MockBleIo` provides
+//! implementation (behind `cfg(bluer_available)`); `MockBleIo` provides
 //! an in-memory test double for CI without hardware.
 //!
 //! ## Connection Pool
@@ -50,12 +50,12 @@ pub const DEFAULT_PSM: u16 = 0x0085;
 
 /// Concrete BLE transport type for use in TransportHandle.
 ///
-/// Production builds with the `ble` feature use `BluerIo` (real BlueZ stack).
-/// Test builds and builds without `ble` use `MockBleIo`.
-#[cfg(all(feature = "ble", not(test)))]
+/// Production builds on glibc-linux use `BluerIo` (real BlueZ stack).
+/// Test builds, musl-linux, and non-Linux platforms use `MockBleIo`.
+#[cfg(all(bluer_available, not(test)))]
 pub type DefaultBleTransport = BleTransport<io::BluerIo>;
 
-#[cfg(any(not(feature = "ble"), test))]
+#[cfg(any(not(bluer_available), test))]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
 
 // ============================================================================

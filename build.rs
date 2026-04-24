@@ -36,4 +36,14 @@ fn main() {
 
     // Support reproducible builds (Debian packaging)
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+
+    // bluer/BlueZ is glibc-linux only: musl cross-compiles (OpenWrt) can't
+    // satisfy libdbus-sys's pkg-config cross-compile requirement, and musl
+    // router targets don't run BlueZ by default anyway.
+    println!("cargo:rustc-check-cfg=cfg(bluer_available)");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "linux" && target_env != "musl" {
+        println!("cargo:rustc-cfg=bluer_available");
+    }
 }

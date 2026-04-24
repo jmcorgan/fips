@@ -90,7 +90,7 @@ jobs:
         run: cargo install cargo-deb --version 3.6.3 --locked
 
       - name: Build release binaries
-        run: cargo build --release --features gateway
+        run: cargo build --release
 
       - name: Build systemd tarball
         env:
