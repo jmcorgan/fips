@@ -125,7 +125,7 @@ impl Node {
                     }
                 }
             } else if addr.transport == "ble" {
-                #[cfg(target_os = "linux")]
+                #[cfg(bluer_available)]
                 {
                     match self.resolve_ble_addr(&addr.addr) {
                         Ok(result) => result,
@@ -140,11 +140,11 @@ impl Node {
                         }
                     }
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(bluer_available))]
                 {
                     debug!(
                         transport = %addr.transport,
-                        "BLE transport not available on this platform"
+                        "BLE transport not available on this build"
                     );
                     continue;
                 }

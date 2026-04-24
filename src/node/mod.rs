@@ -800,7 +800,7 @@ impl Node {
         }
 
         // Create BLE transport instances
-        #[cfg(target_os = "linux")]
+        #[cfg(bluer_available)]
         {
             let ble_instances: Vec<_> = self
                 .config
@@ -810,7 +810,7 @@ impl Node {
                 .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
                 .collect();
 
-            #[cfg(all(feature = "ble", not(test)))]
+            #[cfg(all(bluer_available, not(test)))]
             for (name, ble_config) in ble_instances {
                 let transport_id = self.allocate_transport_id();
                 let adapter = ble_config.adapter().to_string();
@@ -833,12 +833,10 @@ impl Node {
                 }
             }
 
-            #[cfg(any(not(feature = "ble"), test))]
+            #[cfg(any(not(bluer_available), test))]
             if !ble_instances.is_empty() {
                 #[cfg(not(test))]
-                tracing::warn!(
-                    "BLE transport configured but 'ble' feature not enabled at compile time"
-                );
+                tracing::warn!("BLE transport configured but this build lacks BlueZ support");
             }
         }
 
@@ -908,7 +906,7 @@ impl Node {
     /// Resolve a BLE address string (`"adapter/AA:BB:CC:DD:EE:FF"`) to a
     /// (TransportId, TransportAddr) pair by finding the BLE transport
     /// instance matching the adapter name.
-    #[cfg(target_os = "linux")]
+    #[cfg(bluer_available)]
     fn resolve_ble_addr(&self, addr_str: &str) -> Result<(TransportId, TransportAddr), NodeError> {
         let ta = TransportAddr::from_string(addr_str);
         let adapter = crate::transport::ble::addr::adapter_from_addr(&ta).ok_or_else(|| {

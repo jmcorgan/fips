@@ -71,7 +71,7 @@ echo "Building .deb package..."
 OUTPUT_DIR="$(mktemp -d)"
 trap 'rm -rf "${OUTPUT_DIR}"' EXIT
 
-cargo_args=(deb --output "${OUTPUT_DIR}" --features gateway)
+cargo_args=(deb --output "${OUTPUT_DIR}")
 if [[ -n "${TARGET_TRIPLE}" ]]; then
     cargo_args+=(--target "${TARGET_TRIPLE}")
 fi
