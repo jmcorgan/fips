@@ -46,13 +46,11 @@ if [ "$UNAME_S" = "Darwin" ]; then
 
     echo "Building FIPS for Linux (release) using cargo-zigbuild..."
     cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml"
-    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" --features gateway --bin fips-gateway
 
     TARGET_DIR="$PROJECT_ROOT/target/$CARGO_TARGET/release"
 else
     echo "Building FIPS (release)..."
     cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml"
-    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml" --features gateway --bin fips-gateway
 
     TARGET_DIR="$PROJECT_ROOT/target/release"
 fi
