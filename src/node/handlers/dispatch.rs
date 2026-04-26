@@ -175,6 +175,9 @@ impl Node {
 
         // Remove link and address mapping
         self.remove_link(&link_id);
+        if let Some(transport_id) = transport_id {
+            self.cleanup_bootstrap_transport_if_unused(transport_id);
+        }
 
         // Tree state cleanup
         let tree_changed = self.handle_peer_removal_tree_cleanup(node_addr);

@@ -247,7 +247,7 @@ jobs:
         id: publish
         shell: bash
         env:
-          RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://relay.primal.net"
+          RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://offchain.pub"
           NSEC: ${{ steps.keys.outputs.nsec }}
         run: |
           : ${GITHUB_OUTPUT:=/tmp/github_output}
@@ -295,7 +295,7 @@ jobs:
         if: ${{ steps.publish.outputs.eventId != '' }}
         env:
           EVENT_ID: ${{ steps.publish.outputs.eventId }}
-          RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://relay.primal.net"
+          RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://offchain.pub"
         run: |
           echo "Verifying event $EVENT_ID on relays..."
           FOUND=0

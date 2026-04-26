@@ -30,6 +30,18 @@ Tor daemons. Requires internet access for Tor bootstrapping.
 | socks5-outbound | Outbound SOCKS5 connections through Tor to clearnet peer |
 | directory-mode  | Inbound via HiddenServiceDir onion service (co-located)  |
 
+### [nat/](nat/) -- NAT Traversal Lab
+
+Real Docker NAT traversal tests for the Nostr/STUN bootstrap path,
+using router containers with `iptables`-based NAT, a local Nostr relay,
+and a local STUN responder.
+
+| Scenario  | Description                                                  |
+| --------- | ------------------------------------------------------------ |
+| cone      | Two NATed peers establish a UDP traversal path               |
+| symmetric | UDP traversal fails under symmetric NAT, TCP fallback wins   |
+| lan       | Peers on the same LAN prefer local addresses over reflexive  |
+
 ### [chaos/](chaos/) -- Stochastic Simulation
 
 Automated network testing with configurable node counts, topology

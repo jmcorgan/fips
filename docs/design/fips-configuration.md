@@ -171,6 +171,60 @@ Controls bloom-guided node discovery (LookupRequest/LookupResponse).
 | `node.discovery.backoff_max_secs` | u64 | `0` | Cap on optional post-failure backoff |
 | `node.discovery.forward_min_interval_secs` | u64 | `2` | Transit-side rate limiting: minimum interval between forwarded lookups for the same target |
 
+#### Nostr Overlay Discovery (`node.discovery.nostr.*`)
+
+Optional Nostr-mediated overlay discovery. This layer publishes replaceable
+endpoint adverts (`fips-overlay-v1`), consumes advert-derived endpoint
+fallbacks for configured peers, and can optionally discover non-configured
+peers (`policy: open`). `udp:nat` remains the trigger for NAT traversal
+offer/answer + punch-through, after which the established UDP socket is handed
+into the normal FIPS transport/session stack.
+Inbox-relay discovery falls back to the local DM relay list if remote relay
+metadata cannot be fetched.
+This support is compiled behind the crate feature `nostr-discovery`; builds
+without that feature ignore `udp:nat` bootstrap configuration.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.discovery.nostr.enabled` | bool | `false` | Enable Nostr-mediated overlay discovery |
+| `node.discovery.nostr.policy` | string | `"configured_only"` | Advert discovery policy: `disabled`, `configured_only`, `open` |
+| `node.discovery.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
+| `node.discovery.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
+| `node.discovery.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic |
+| `node.discovery.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
+| `node.discovery.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
+| `node.discovery.nostr.advert_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for service adverts |
+| `node.discovery.nostr.dm_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for encrypted signaling events |
+| `node.discovery.nostr.stun_servers` | list[string] | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used for local reflexive address discovery |
+| `node.discovery.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace and advert identifier suffix |
+| `node.discovery.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds |
+| `node.discovery.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds |
+| `node.discovery.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds |
+| `node.discovery.nostr.punch_start_delay_ms` | u64 | `2000` | Delay before punch traffic starts |
+| `node.discovery.nostr.punch_interval_ms` | u64 | `200` | Interval between punch packets |
+| `node.discovery.nostr.punch_duration_ms` | u64 | `10000` | How long to keep punching before failure |
+| `node.discovery.nostr.advert_ttl_secs` | u64 | `3600` | Advert TTL in seconds |
+| `node.discovery.nostr.advert_refresh_secs` | u64 | `1800` | How often adverts are refreshed in seconds |
+
+If `stun_servers` is omitted, the built-in default list above is used. If it is
+specified in YAML, the configured list fully overrides the defaults.
+Initiators use only this local list for outbound STUN queries; peer-advertised
+STUN values are published for diagnostics/interoperability but are not used as
+arbitrary egress targets.
+The built-in advert and DM relay defaults point at widely-operated public
+relays (Damus, nos.lol, Primal) as best-effort endpoints; operators are
+encouraged to override them with their own relay preferences for production
+deployments.
+Advert freshness is enforced semantically: events with expired NIP-40
+`expiration` tags are dropped, and adverts are also bounded by a created-at
+staleness window derived from `advert_ttl_secs` (with a grace multiplier).
+The current in-tree STUN parser handles IPv4 and IPv6 mapped-address
+attributes. Local traversal candidates include active non-loopback private
+interface addresses (RFC1918 IPv4 and IPv6 ULA) plus probed local egress
+addresses for the punch socket port.
+During punching, compatible private-subnet candidates and reflexive candidates
+are attempted in parallel; the first successful path wins.
+
 ### Spanning Tree (`node.tree.*`)
 
 Controls tree construction and parent selection.
@@ -324,6 +378,8 @@ restarting the daemon. Hostnames are case-insensitive.
 | `transports.udp.mtu` | u16 | `1280` | Transport MTU |
 | `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
 | `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
+| `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts |
+| `transports.udp.public` | bool | `false` | If advertised: `true` publishes direct `host:port`; `false` publishes `udp:nat` rendezvous |
 
 ### Ethernet (`transports.ethernet.*`)
 
@@ -582,6 +638,7 @@ Static peer list. Each entry defines a peer to connect to.
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
+| `peers[].via_nostr` | bool | `false` | Append Nostr advert-derived endpoints after static addresses for this peer |
 
 ## Minimal Example
 

@@ -16,10 +16,7 @@ impl Node {
             return;
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = Self::now_ms();
         let timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
 
         let stale: Vec<LinkId> = self
@@ -70,6 +67,7 @@ impl Node {
             Some(c) => c,
             None => return,
         };
+        let transport_id = conn.transport_id();
 
         // Free session index and pending_outbound if allocated
         if let Some(idx) = conn.our_index() {
@@ -81,6 +79,9 @@ impl Node {
 
         // Remove link and addr_to_link
         self.remove_link(&link_id);
+        if let Some(transport_id) = transport_id {
+            self.cleanup_bootstrap_transport_if_unused(transport_id);
+        }
     }
 
     /// Resend handshake messages for pending connections.

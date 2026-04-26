@@ -9,7 +9,8 @@ repository = "https://github.com/jmcorgan/fips"
 readme = "README.md"
 
 [features]
-default = []
+default = ["nostr-discovery"]
+nostr-discovery = ["dep:nostr", "dep:nostr-sdk"]
 
 [dependencies]
 ratatui = "0.30"
@@ -34,6 +35,9 @@ simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 portable-atomic = { version = "1", features = ["std"] }
+
+nostr = { version = "0.44", features = ["std", "nip59"], optional = true }
+nostr-sdk = { version = "0.44", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 tun = { version = "0.8.5", features = ["async"] }

@@ -198,6 +198,65 @@ impl UdpTransport {
         Ok(())
     }
 
+    /// Start the transport using an already-bound UDP socket.
+    ///
+    /// This preserves an existing NAT mapping established by another
+    /// subsystem, such as STUN or UDP hole punching.
+    pub async fn adopt_socket_async(
+        &mut self,
+        socket: std::net::UdpSocket,
+    ) -> Result<(), TransportError> {
+        if !self.state.can_start() {
+            return Err(TransportError::AlreadyStarted);
+        }
+
+        self.state = TransportState::Starting;
+
+        let raw_socket = UdpRawSocket::adopt(
+            socket,
+            self.config.recv_buf_size(),
+            self.config.send_buf_size(),
+        )?;
+
+        let actual_recv = raw_socket.recv_buffer_size()?;
+        let actual_send = raw_socket.send_buffer_size()?;
+        self.local_addr = Some(raw_socket.local_addr());
+
+        let async_socket = raw_socket.into_async()?;
+        self.socket = Some(async_socket.clone());
+
+        let transport_id = self.transport_id;
+        let packet_tx = self.packet_tx.clone();
+        let mtu = self.config.mtu();
+        let stats = self.stats.clone();
+
+        let recv_task = tokio::spawn(async move {
+            udp_receive_loop(async_socket, transport_id, packet_tx, mtu, stats).await;
+        });
+
+        self.recv_task = Some(recv_task);
+        self.state = TransportState::Up;
+
+        if let Some(ref name) = self.name {
+            info!(
+                name = %name,
+                local_addr = %self.local_addr.unwrap(),
+                recv_buf = actual_recv,
+                send_buf = actual_send,
+                "UDP transport adopted existing socket"
+            );
+        } else {
+            info!(
+                local_addr = %self.local_addr.unwrap(),
+                recv_buf = actual_recv,
+                send_buf = actual_send,
+                "UDP transport adopted existing socket"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Stop the transport asynchronously.
     pub async fn stop_async(&mut self) -> Result<(), TransportError> {
         if !self.state.is_operational() {
@@ -309,6 +368,27 @@ impl Transport for UdpTransport {
     }
 }
 
+impl Drop for UdpTransport {
+    fn drop(&mut self) {
+        let had_task = self.recv_task.is_some();
+        let had_socket = self.socket.is_some();
+        if had_task || had_socket {
+            debug!(
+                transport_id = %self.transport_id,
+                state = ?self.state,
+                had_recv_task = had_task,
+                had_socket = had_socket,
+                "UdpTransport dropped without stop_async(); cleaning up",
+            );
+        }
+        if let Some(task) = self.recv_task.take() {
+            task.abort();
+        }
+        self.socket.take();
+        self.local_addr = None;
+    }
+}
+
 /// UDP receive loop - runs as a spawned task.
 async fn udp_receive_loop(
     socket: AsyncUdpSocket,
@@ -379,6 +459,8 @@ mod tests {
             mtu: Some(1280),
             recv_buf_size: None,
             send_buf_size: None,
+            advertise_on_nostr: None,
+            public: None,
         }
     }
 

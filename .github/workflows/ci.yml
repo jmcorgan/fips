@@ -301,6 +301,16 @@ jobs:
           # ── Sidecar deployment ──────────────────────────────────────────
           - suite: sidecar
             type: sidecar
+          # ── NAT traversal lab (Nostr/STUN UDP hole punch) ───────────────
+          - suite: nat-cone
+            type: nat
+            scenario: cone
+          - suite: nat-symmetric
+            type: nat
+            scenario: symmetric
+          - suite: nat-lan
+            type: nat
+            scenario: lan
 
     steps:
       - uses: actions/checkout@v4
@@ -426,3 +436,21 @@ jobs:
             docker logs "sidecar-${node}-fips-1" 2>&1 || true
             echo ""
           done
+
+      # ── NAT traversal lab ───────────────────────────────────────────────
+      - name: Run NAT lab scenario
+        if: matrix.type == 'nat'
+        run: bash testing/nat/scripts/nat-test.sh ${{ matrix.scenario }}
+
+      - name: Collect logs on failure (nat)
+        if: matrix.type == 'nat' && failure()
+        run: |
+          docker compose -f testing/nat/docker-compose.yml \
+            --profile ${{ matrix.scenario }} logs --no-color
+
+      - name: Stop containers (nat)
+        if: matrix.type == 'nat' && always()
+        run: |
+          docker compose -f testing/nat/docker-compose.yml \
+            --profile cone --profile symmetric --profile lan \
+            down --volumes --remove-orphans

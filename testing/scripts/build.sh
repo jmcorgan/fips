@@ -19,6 +19,15 @@ if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
 fi
 
 BUILD_DOCKER=true
+# NAT harness binaries need Nostr bootstrap support; everything else is
+# governed by platform cfg gates after PR #79's feature-matrix collapse.
+DEFAULT_CARGO_BUILD_ARGS=(--features nostr-discovery)
+if [ -n "${FIPS_CARGO_BUILD_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    CARGO_BUILD_ARGS=($FIPS_CARGO_BUILD_ARGS)
+else
+    CARGO_BUILD_ARGS=("${DEFAULT_CARGO_BUILD_ARGS[@]}")
+fi
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-docker) BUILD_DOCKER=false; shift ;;
@@ -45,12 +54,12 @@ if [ "$UNAME_S" = "Darwin" ]; then
     fi
 
     echo "Building FIPS for Linux (release) using cargo-zigbuild..."
-    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml"
+    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
     TARGET_DIR="$PROJECT_ROOT/target/$CARGO_TARGET/release"
 else
     echo "Building FIPS (release)..."
-    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml"
+    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
     TARGET_DIR="$PROJECT_ROOT/target/release"
 fi

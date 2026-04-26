@@ -25,6 +25,12 @@ pub struct RetryState {
 
     /// Whether this is an auto-reconnect (unlimited retries, ignores max_retries).
     pub reconnect: bool,
+
+    /// Optional absolute expiry for this retry entry (Unix ms).
+    ///
+    /// When set, retries are dropped after this point even if reconnect logic
+    /// would otherwise continue.
+    pub expires_at_ms: Option<u64>,
 }
 
 impl RetryState {
@@ -35,6 +41,7 @@ impl RetryState {
             retry_count: 0,
             retry_after_ms: 0,
             reconnect: false,
+            expires_at_ms: None,
         }
     }
 
@@ -203,6 +210,27 @@ impl Node {
             return;
         }
 
+        let expired: Vec<NodeAddr> = self
+            .retry_pending
+            .iter()
+            .filter_map(|(addr, state)| {
+                state
+                    .expires_at_ms
+                    .filter(|expires_at_ms| now_ms >= *expires_at_ms)
+                    .map(|_| *addr)
+            })
+            .collect();
+        for node_addr in expired {
+            self.retry_pending.remove(&node_addr);
+            info!(
+                peer = %self.peer_display_name(&node_addr),
+                "Retry window expired, dropping pending retry state"
+            );
+        }
+        if self.retry_pending.is_empty() {
+            return;
+        }
+
         // Collect retries that are due
         let due: Vec<NodeAddr> = self
             .retry_pending
@@ -277,6 +305,7 @@ mod tests {
             retry_count: 0,
             retry_after_ms: 0,
             reconnect: false,
+            expires_at_ms: None,
         };
         // base = 5000ms
         assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 5000); // 5s * 2^0
@@ -313,6 +342,7 @@ mod tests {
             retry_count: 20, // 2^20 * 5000 would be huge
             retry_after_ms: 0,
             reconnect: false,
+            expires_at_ms: None,
         };
         assert_eq!(
             state.backoff_ms(5000, TEST_MAX_BACKOFF_MS),
@@ -327,6 +357,7 @@ mod tests {
             retry_count: 3,
             retry_after_ms: 0,
             reconnect: false,
+            expires_at_ms: None,
         };
         assert_eq!(state.backoff_ms(0, TEST_MAX_BACKOFF_MS), 0);
     }

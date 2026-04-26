@@ -1,5 +1,9 @@
 # Nostr-Signaled UDP Hole Punching Protocol
 
+> **Status**: Implemented behind the `nostr-discovery` cargo feature.
+> This proposal is retained as a protocol reference and will be
+> superseded by a dedicated design document.
+
 ## Abstract
 
 This document describes a protocol for establishing direct UDP connectivity between two peers behind NAT, using Nostr relays as the signaling channel and public STUN servers for reflexive address discovery. The protocol assumes a **responder** that advertises a UDP service via a Nostr replaceable event, and an **initiator** that discovers the responder and negotiates a direct UDP connection.
@@ -13,7 +17,19 @@ No WebRTC, DTLS, or ICE stack is required. The protocol operates at the raw UDP 
 - **Initiator**: The peer that discovers the responder's service advertisement and begins the connection process.
 - **Responder**: The peer running a UDP service, which has published a replaceable event advertising its availability.
 - **Reflexive address**: The public `IP:port` tuple as observed by a STUN server (i.e., the NAT's external mapping).
-- **Punch socket**: The single UDP socket a peer uses for both STUN queries and subsequent hole-punching traffic. This socket **must not** change between phases.
+- **Punch socket**: The single UDP socket a peer uses for both STUN queries and subsequent hole-punching traffic within one connection attempt. This socket **must not** change between phases of that attempt.
+
+### Socket lifecycle
+
+This protocol assumes **per-peer, per-attempt punch sockets**:
+
+- Each outbound traversal attempt creates a fresh UDP socket bound to `0.0.0.0:0`.
+- That socket is owned by exactly one remote peer and exactly one traversal session.
+- STUN, offer/answer metadata, punch packets, and the eventual adopted UDP transport all use that same socket for the lifetime of the attempt.
+- If the attempt fails, the socket is discarded. A retry allocates a new socket and obtains a fresh reflexive address.
+- The long-lived application UDP listener (for example, a fixed port such as `2121`) is **not** reused as the punch socket.
+
+This choice avoids cross-peer state coupling and keeps NAT mappings, retry state, and adopted traversal transports isolated per peer.
 
 ---
 
@@ -21,10 +37,10 @@ No WebRTC, DTLS, or ICE stack is required. The protocol operates at the raw UDP 
 
 | Purpose | Kind | Persistence |
 |---|---|---|
-| Service advertisement | `30078` (parameterized replaceable) | Persistent, updated by responder |
+| Service advertisement | `37195` (parameterized replaceable) | Persistent, updated by responder |
 | Signaling messages | `21059` (ephemeral gift-wrap) | Ephemeral, not stored by relays |
 
-The service advertisement uses kind `30078` (an application-specific parameterized replaceable event per NIP-78), allowing the responder to update it in place. Signaling messages use ephemeral gift-wrapped events (kind `21059`, combining NIP-59 gift wrap with the ephemeral kind range `20000–29999`) to avoid relay storage.
+The service advertisement uses kind `37195`, an application-specific parameterized replaceable event in the NIP-01 replaceable range `30000–39999`. The digits visually spell `FIPS` (7=F, 1=I, 9=P, 5=S). The replaceable semantics let the responder update the advert in place under the same `d` tag. Signaling messages use ephemeral gift-wrapped events (kind `21059`, combining NIP-59 gift wrap with the ephemeral kind range `20000–29999`) to avoid relay storage.
 
 ---
 
@@ -34,11 +50,11 @@ The responder publishes a parameterized replaceable event advertising its UDP se
 
 ```json
 {
-  "kind": 30078,
+  "kind": 37195,
   "pubkey": "<responder_pubkey>",
   "created_at": <timestamp>,
   "tags": [
-    ["d", "udp-service-v1/<application_id>"],
+    ["d", "fips-overlay-v1"],
     ["protocol", "<application_protocol_name>"],
     ["version", "<protocol_version>"],
     ["relays", "wss://relay1.example.com", "wss://relay2.example.com"],
@@ -52,7 +68,7 @@ The responder publishes a parameterized replaceable event advertising its UDP se
 
 ### Tag semantics
 
-- **`d`**: Namespaced identifier. The prefix `udp-service-v1/` scopes this to the protocol; `<application_id>` is an application-defined string (e.g., `myapp-sync`).
+- **`d`**: Namespaced identifier. `fips-overlay-v1` scopes this to FIPS overlay endpoint adverts.
 - **`protocol`**: Application protocol name for filtering (e.g., `myapp-file-sync`).
 - **`version`**: Protocol version string for compatibility checking.
 - **`relays`**: One or more relay URLs where the responder subscribes for incoming signaling messages. The initiator **must** send signaling events to at least one of these relays.
@@ -62,6 +78,11 @@ The responder publishes a parameterized replaceable event advertising its UDP se
 
 The responder should update this event (same `d` tag, new `created_at`) whenever its parameters change, and publish a kind `5` deletion event (NIP-09) when it goes offline permanently.
 
+Current in-tree defaults:
+
+- `node.discovery.nostr.advert_ttl_secs = 3600` (1 hour)
+- `node.discovery.nostr.advert_refresh_secs = 1800` (30 minutes)
+
 ---
 
 ## Phase 1: Discovery (Initiator)
@@ -70,9 +91,9 @@ The initiator queries one or more relays for the responder's service advertiseme
 
 ```json
 ["REQ", "<sub_id>", {
-  "kinds": [30078],
+  "kinds": [37195],
   "authors": ["<responder_pubkey>"],
-  "#d": ["udp-service-v1/<application_id>"]
+  "#d": ["fips-overlay-v1"]
 }]
 ```
 
@@ -80,12 +101,19 @@ If the responder's pubkey is not known in advance, the initiator can discover pe
 
 ```json
 ["REQ", "<sub_id>", {
-  "kinds": [30078],
+  "kinds": [37195],
   "#protocol": ["<application_protocol_name>"]
 }]
 ```
 
-Upon receiving the advertisement, the initiator extracts the relay list and STUN server preferences.
+Upon receiving the advertisement, the initiator extracts the relay list and any
+advertised STUN metadata. In the current in-tree implementation, advertised
+STUN entries are informational only; outbound STUN is driven by the initiator's
+own configured allowlist.
+The current in-tree STUN parser handles IPv4 and IPv6 mapped-address
+responses. Offer/answer local-address candidates include active private
+non-loopback interface addresses (RFC1918 IPv4 and IPv6 ULA) plus probed local
+egress addresses.
 
 ---
 
@@ -93,12 +121,13 @@ Upon receiving the advertisement, the initiator extracts the relay list and STUN
 
 Before sending any signaling message, the initiator binds a UDP socket and performs a STUN Binding Request:
 
-1. Bind a UDP socket to `0.0.0.0:0` (OS-assigned port). This becomes the **punch socket**.
-2. Send a STUN Binding Request (RFC 8489) to one of the STUN servers listed in the responder's advertisement.
+1. Bind a fresh UDP socket to `0.0.0.0:0` (OS-assigned port). This becomes the **punch socket** for this peer and this traversal attempt.
+2. Send a STUN Binding Request (RFC 8489) to one of the initiator's locally configured STUN servers.
 3. Parse the Binding Response and extract the `XOR-MAPPED-ADDRESS` attribute — this is the initiator's reflexive address.
-4. Record the local socket address and the reflexive address.
+4. Record the reflexive address and local interface candidates for the same
+   punch-socket port.
 
-**Critical**: The punch socket must remain open and must be reused for all subsequent protocol phases. Closing or rebinding it invalidates the NAT mapping.
+**Critical**: The punch socket must remain open and must be reused for all subsequent protocol phases of the same attempt. Closing or rebinding it invalidates the NAT mapping.
 
 ---
 
@@ -110,21 +139,29 @@ The initiator constructs a signaling message containing its reflexive address an
 
 ```json
 {
+  "app": "<app-namespace>",
+  "eventKind": 21059,
   "type": "offer",
-  "session_id": "<random_hex_32>",
-  "reflexive_addr": "<ip>:<port>",
-  "local_addr": "<ip>:<port>",
-  "stun_server": "<host>:<port>",
-  "timestamp": <unix_seconds>,
+  "sessionId": "<random_hex_32>",
+  "issuedAt": <unix_millis>,
+  "expiresAt": <unix_millis>,
+  "nonce": "<random_nonce>",
+  "senderNpub": "<initiator_npub>",
+  "recipientNpub": "<responder_npub>",
+  "reflexiveAddress": {"protocol":"udp","ip":"<ip>","port":<port>},
+  "localAddresses": [{"protocol":"udp","ip":"<ip1>","port":<port>}],
+  "stunServer": "<host>:<port>",
   "app_params": { ... }
 }
 ```
 
-- **`session_id`**: A random 32-character hex string identifying this connection attempt. Both peers use this to correlate signaling messages belonging to the same session.
-- **`reflexive_addr`**: The initiator's reflexive address as reported by STUN.
-- **`local_addr`**: The initiator's local socket address. Useful if both peers happen to be on the same LAN (the responder can attempt a direct local connection in parallel).
-- **`stun_server`**: Which STUN server the initiator used, so the responder can use the same one if desired.
-- **`timestamp`**: Unix timestamp. The responder should reject offers older than a threshold (e.g., 60 seconds) since the NAT mapping may have expired.
+- **`sessionId`**: A random 32-character hex string identifying this connection attempt. Both peers use this to correlate signaling messages belonging to the same session.
+- **`reflexiveAddress`**: The initiator's reflexive address as reported by STUN.
+- **`localAddresses`**: Candidate local interface addresses for the same socket
+  port. Useful if both peers happen to share a private subnet (the responder
+  can attempt direct local paths in parallel).
+- **`stunServer`**: Which STUN server the initiator used, so the responder can use the same one if desired.
+- **`issuedAt`/`expiresAt`**: Freshness window. The responder should reject stale offers since the NAT mapping may have expired.
 - **`app_params`**: Optional application-specific handshake parameters.
 
 ### Wrapping and delivery
@@ -176,8 +213,8 @@ Upon receiving and decrypting an offer, the responder:
 
 1. Validates the timestamp (rejects if older than 60 seconds).
 2. Validates the `session_id` is not a replay of a previously seen session.
-3. Binds its own **punch socket** to `0.0.0.0:0`.
-4. Performs a STUN Binding Request (preferably using the same STUN server the initiator used).
+3. Binds its own fresh **punch socket** to `0.0.0.0:0`.
+4. Performs a STUN Binding Request using one of the responder's locally configured STUN servers.
 5. Extracts its own reflexive address.
 6. Constructs and sends an answer:
 
@@ -185,17 +222,29 @@ Upon receiving and decrypting an offer, the responder:
 
 ```json
 {
+  "app": "<app-namespace>",
+  "eventKind": 21059,
   "type": "answer",
-  "session_id": "<same session_id from offer>",
-  "reflexive_addr": "<ip>:<port>",
-  "local_addr": "<ip>:<port>",
-  "stun_server": "<host>:<port>",
-  "timestamp": <unix_seconds>,
+  "sessionId": "<same sessionId from offer>",
+  "issuedAt": <unix_millis>,
+  "expiresAt": <unix_millis>,
+  "nonce": "<random_nonce>",
+  "senderNpub": "<responder_npub>",
+  "recipientNpub": "<initiator_npub>",
+  "inReplyTo": "<offer_nonce>",
+  "accepted": true,
+  "reflexiveAddress": {"protocol":"udp","ip":"<ip>","port":<port>},
+  "localAddresses": [{"protocol":"udp","ip":"<ip1>","port":<port>}],
+  "stunServer": "<host>:<port>",
   "app_params": { ... }
 }
 ```
 
 This is encrypted and gift-wrapped identically to the offer, but addressed to the initiator's pubkey and published to the same relay(s).
+
+Implementations should also bind the JSON sender/recipient identity fields to
+the actual Nostr pubkeys that delivered the gift-wrapped events, rather than
+treating those JSON fields as independently trustworthy.
 
 **Immediately after publishing the answer**, the responder begins Phase 5 (punching) without waiting for confirmation that the initiator received it. Time is critical — the NAT mappings are decaying.
 
@@ -203,11 +252,15 @@ This is encrypted and gift-wrapped identically to the offer, but addressed to th
 
 ## Phase 5: Hole Punching
 
-Both peers now know each other's reflexive address. Both begin sending UDP packets to the other's reflexive address from their punch socket.
+Both peers now know each other's reflexive address and local-address
+candidates. Both begin sending UDP packets from their punch socket.
 
 ### Procedure
 
-1. Both peers send a punch packet to the other's reflexive address once every **200ms**.
+1. Both peers send punch packets every **200ms** across planned target paths:
+   - reflexive-to-reflexive
+   - private-subnet local-address paths (when subnet-compatible)
+   - mixed local/reflexive fallbacks
 2. Each punch packet contains a fixed magic header to distinguish it from stray traffic:
 
 ```
@@ -228,17 +281,19 @@ Bytes 8–23:  first 16 bytes of SHA-256(session_id)
 
 ### Timeout
 
-If no valid punch packet is received within **10 seconds**, the attempt has failed. Possible causes include symmetric NAT on one or both sides, firewall interference, or stale reflexive addresses. The initiator may retry with a fresh STUN query and new offer, or fall back to an application-level relay.
+If no valid punch packet is received within **10 seconds**, the attempt has failed. Possible causes include symmetric NAT on one or both sides, firewall interference, or stale reflexive addresses. The initiator may retry with a fresh STUN query, a fresh punch socket, and a new offer, or fall back to an application-level relay.
 
 ### LAN optimization
 
-If both peers' `local_addr` values are in the same private subnet (e.g., both `192.168.1.x`), the peers should simultaneously attempt punching via both the reflexive address and the local address. The first path to complete wins.
+If both peers advertise compatible private-subnet candidates (e.g.,
+`192.168.1.x`), they should simultaneously attempt punching via both reflexive
+and local-address paths. The first path to complete wins.
 
 ---
 
 ## Phase 6: Application Protocol Handoff
 
-Once both peers have exchanged acknowledgments, the connection is established. The punch socket is now a live UDP channel between the two peers. From this point:
+Once both peers have exchanged acknowledgments, the connection is established. The punch socket for that attempt is now a live UDP channel between the two peers. From this point:
 
 - The application protocol takes over the socket.
 - The Nostr signaling channel is no longer needed for this session.
@@ -265,7 +320,7 @@ After the hole punch succeeds (or fails), both peers perform cleanup:
 
 3. Because the signaling events used an ephemeral kind (`21059`) with an `expiration` tag, well-behaved relays will discard them automatically even without explicit deletion.
 
-If the responder is going offline permanently, it should also delete its kind `30078` service advertisement.
+If the responder is going offline permanently, it should also delete its kind `37195` service advertisement.
 
 ---
 
@@ -283,7 +338,7 @@ The `session_id` and `timestamp` fields protect against replay attacks on the si
 
 ### Metadata exposure
 
-Even though signaling content is encrypted, the gift-wrap metadata reveals that the initiator's ephemeral pubkey contacted the responder's pubkey at a particular time, through a particular relay. The service advertisement (kind `30078`) is public and reveals the responder's pubkey and that it is running a particular service.
+Even though signaling content is encrypted, the gift-wrap metadata reveals that the initiator's ephemeral pubkey contacted the responder's pubkey at a particular time, through a particular relay. The service advertisement (kind `37195`) is public and reveals the responder's pubkey and that it is running a particular service.
 
 If metadata privacy is required, the `content` of the service advertisement can be encrypted (requiring the initiator to already know the responder's pubkey), and both peers can use ephemeral Nostr identities rather than their long-term keys.
 

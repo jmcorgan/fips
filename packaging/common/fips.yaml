@@ -10,6 +10,30 @@ node:
     #
     # Or set an explicit key (overrides persistent):
     # nsec: "nsec1..."
+  discovery:
+    # Optional Nostr-mediated overlay endpoint discovery.
+    # Requires a build of fips compiled with the 'nostr-discovery' feature.
+    # nostr:
+    #   enabled: true
+    #   policy: configured_only  # disabled | configured_only | open
+    #   open_discovery_max_pending: 64 # caps queued open-discovery retries
+    #   app: "fips-overlay-v1"
+    #   advertise: true
+    #   advert_relays:
+    #     - "wss://relay.damus.io"
+    #     - "wss://nos.lol"
+    #     - "wss://offchain.pub"
+    #   dm_relays:
+    #     - "wss://relay.damus.io"
+    #     - "wss://nos.lol"
+    #     - "wss://offchain.pub"
+    #   # Optional override. If omitted, FIPS uses the built-in STUN list.
+    #   # Built-in relay/STUN defaults are best-effort and should be
+    #   # overridden by operators for production use.
+    #   stun_servers:
+    #     - "stun:stun.l.google.com:19302"
+    #     - "stun:stun.cloudflare.com:3478"
+    #     - "stun:global.stun.twilio.com:3478"
 
 tun:
   enabled: true
@@ -27,10 +51,13 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:2121"
+    # advertise_on_nostr: true
+    # public: false # false => advertise udp:nat; true => advertise bound host:port
 
   tcp:
     # Accepts inbound connections. No static outbound peers.
     bind_addr: "0.0.0.0:8443"
+    # advertise_on_nostr: true
 
   # Ethernet transport — uncomment and set your interface name.
   # ethernet:
@@ -71,7 +98,10 @@ peers: []
   # Static peers for bootstrapping (UDP or TCP):
   # - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
   #   alias: "gateway"
+  #   via_nostr: true
   #   addresses:
   #     - transport: udp
   #       addr: "217.77.8.91:2121"  # IP or hostname (e.g., "peer.example.com:2121")
+  #     - transport: udp
+  #       addr: "nat"  # Use node.discovery.nostr for Nostr/STUN hole punching
   #   connect_policy: auto_connect

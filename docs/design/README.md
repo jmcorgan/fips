@@ -26,6 +26,7 @@ specific topics.
 | -------- | ----------- |
 | [fips-mesh-operation.md](fips-mesh-operation.md) | How the mesh operates: routing, discovery, error recovery |
 | [fips-wire-formats.md](fips-wire-formats.md) | Wire format reference for all message types |
+| [fips-nostr-discovery.md](fips-nostr-discovery.md) | Optional Nostr-mediated peer discovery and UDP NAT hole-punch (behind `nostr-discovery` feature) |
 
 ### Supporting References
 

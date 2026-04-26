@@ -40,6 +40,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forwarding, proxy NDP, RA route advertisements, and IPv6 forwarding
   sysctls. Gateway enabled by default on OpenWrt
 
+#### Nostr-Mediated Discovery and NAT Traversal
+
+- Optional overlay-discovery and NAT-hole-punching path behind the
+  `nostr-discovery` cargo feature. Nodes publish signed overlay adverts
+  as Nostr kind `37195` parameterized replaceable events listing
+  reachable transport endpoints to a configurable set of public relays,
+  and consume peer adverts to populate fallback addresses for
+  `via_nostr` peers or, under `policy: open`, for non-configured peers
+  within a budget cap. The kind value is FIPS-specific: `37195` sits in
+  the application-defined replaceable range `30000–39999`, and the
+  digits visually spell `FIPS` (7=F, 1=I, 9=P, 5=S)
+- STUN-assisted UDP hole punching for `addr: "nat"` UDP endpoints. STUN
+  reflexive observation, gift-wrap (NIP-59) offer/answer signaling, and
+  candidate-pair punch planner (LAN-private + reflexive paths attempted in
+  parallel). Successful punches hand the live socket into the standard
+  FIPS UDP transport via a bootstrap-handoff API
+- New `node.discovery.nostr.*` configuration tree with operator-tunable
+  resource caps, replay tracking, and punch timing; new `peers[].via_nostr`
+  and per-transport `advertise_on_nostr` / `public` flags. Cross-field
+  validation at startup catches mis-configured combinations
+- Docker NAT lab covering cone, symmetric (TCP-fallback), and LAN
+  scenarios, wired into the integration CI matrix
+
 #### Examples
 
 - macOS WireGuard sidecar: run FIPS in a local Docker container and
