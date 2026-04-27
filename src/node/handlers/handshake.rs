@@ -882,9 +882,86 @@ impl Node {
                 }
                 _ => {
                     // Same epoch (or no epoch stored).
-                    // Check for rekey: session must be at least 30s old.
                     let session_age_secs =
                         existing_peer.session_established_at().elapsed().as_secs();
+
+                    // Simultaneous-init cross-connection (msg2-then-msg3 ordering).
+                    //
+                    // When both sides initiate XX in parallel (typical in
+                    // bootstrap-handoff after Nostr UDP punch), each side runs
+                    // two handshakes concurrently — its own outbound paired with
+                    // the peer's inbound, and the peer's outbound paired with our
+                    // inbound. If our outbound's msg2 arrives before the peer's
+                    // outbound's msg3, handle_msg2 promoted our outbound under
+                    // the "Normal path" (peers_contains_key was false). Now
+                    // msg3 arrives for the unrelated inbound link with the peer
+                    // already promoted at the same epoch — apply the same
+                    // tie-breaker handle_msg2 uses for the inverse ordering, so
+                    // both sides converge on a single Noise session pair.
+                    if existing_peer.link_id() != link_id && session_age_secs < 30 {
+                        let our_inbound_wins = cross_connection_winner(
+                            self.identity.node_addr(),
+                            &peer_node_addr,
+                            false, // this connection is inbound
+                        );
+
+                        if our_inbound_wins {
+                            // Larger node side: swap to the inbound session so
+                            // it pairs with the peer's kept outbound session.
+                            let inbound_session = match self
+                                .connections
+                                .get_mut(&link_id)
+                                .and_then(|c| c.take_session())
+                            {
+                                Some(s) => s,
+                                None => {
+                                    self.connections.remove(&link_id);
+                                    self.remove_link(&link_id);
+                                    return;
+                                }
+                            };
+                            if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                                let old_our_index = peer.replace_session(
+                                    inbound_session,
+                                    our_index,
+                                    header.sender_idx,
+                                );
+                                let Some(transport_id) = peer.transport_id() else {
+                                    self.connections.remove(&link_id);
+                                    self.remove_link(&link_id);
+                                    return;
+                                };
+                                if let Some(old_idx) = old_our_index {
+                                    self.peers_by_index
+                                        .remove(&(transport_id, old_idx.as_u32()));
+                                    let _ = self.index_allocator.free(old_idx);
+                                }
+                                self.peers_by_index
+                                    .insert((transport_id, our_index.as_u32()), peer_node_addr);
+
+                                debug!(
+                                    peer = %self.peer_display_name(&peer_node_addr),
+                                    new_our_index = %our_index,
+                                    new_their_index = %header.sender_idx,
+                                    "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
+                                );
+                            }
+                        } else {
+                            // Smaller node side: keep the existing outbound
+                            // session, drop the inbound's allocated index.
+                            let _ = self.index_allocator.free(our_index);
+                            debug!(
+                                peer = %self.peer_display_name(&peer_node_addr),
+                                "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
+                            );
+                        }
+
+                        self.connections.remove(&link_id);
+                        self.remove_link(&link_id);
+                        return;
+                    }
+
+                    // Check for rekey: session must be at least 30s old.
                     if self.config.node.rekey.enabled
                         && existing_peer.has_session()
                         && existing_peer.is_healthy()
