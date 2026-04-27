@@ -38,6 +38,19 @@ pub struct UdpConfig {
     /// UDP send buffer size in bytes (`send_buf_size`). Defaults to 2 MB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_buf_size: Option<usize>,
+
+    /// Whether this transport should be advertised on Nostr overlay discovery.
+    /// Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_on_nostr: Option<bool>,
+
+    /// Whether UDP should be advertised as directly reachable (`host:port`) on
+    /// Nostr. When false and advertised, UDP is emitted as `addr: "nat"` to
+    /// trigger rendezvous traversal.
+    ///
+    /// Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
 }
 
 impl UdpConfig {
@@ -59,6 +72,16 @@ impl UdpConfig {
     /// Get the send buffer size, using default if not configured.
     pub fn send_buf_size(&self) -> usize {
         self.send_buf_size.unwrap_or(DEFAULT_UDP_SEND_BUF)
+    }
+
+    /// Whether this UDP transport should be advertised on Nostr discovery.
+    pub fn advertise_on_nostr(&self) -> bool {
+        self.advertise_on_nostr.unwrap_or(false)
+    }
+
+    /// Whether this UDP transport should be advertised as directly reachable.
+    pub fn is_public(&self) -> bool {
+        self.public.unwrap_or(false)
     }
 }
 
@@ -293,6 +316,11 @@ pub struct TcpConfig {
     /// Maximum simultaneous inbound connections. Defaults to 256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_inbound_connections: Option<usize>,
+
+    /// Whether this transport should be advertised on Nostr overlay discovery.
+    /// Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_on_nostr: Option<bool>,
 }
 
 impl TcpConfig {
@@ -331,6 +359,11 @@ impl TcpConfig {
     pub fn max_inbound_connections(&self) -> usize {
         self.max_inbound_connections
             .unwrap_or(DEFAULT_TCP_MAX_INBOUND)
+    }
+
+    /// Whether this TCP transport should be advertised on Nostr discovery.
+    pub fn advertise_on_nostr(&self) -> bool {
+        self.advertise_on_nostr.unwrap_or(false)
     }
 }
 
@@ -420,6 +453,11 @@ pub struct TorConfig {
     /// in torrc; fips reads the .onion hostname from a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_service: Option<DirectoryServiceConfig>,
+
+    /// Whether this transport should be advertised on Nostr overlay discovery.
+    /// Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_on_nostr: Option<bool>,
 }
 
 /// Directory-mode onion service configuration.
@@ -506,6 +544,11 @@ impl TorConfig {
     pub fn max_inbound_connections(&self) -> usize {
         self.max_inbound_connections
             .unwrap_or(DEFAULT_TOR_MAX_INBOUND)
+    }
+
+    /// Whether this Tor transport should be advertised on Nostr discovery.
+    pub fn advertise_on_nostr(&self) -> bool {
+        self.advertise_on_nostr.unwrap_or(false)
     }
 }
 

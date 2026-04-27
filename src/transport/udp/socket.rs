@@ -125,6 +125,81 @@ mod platform {
             })
         }
 
+        /// Adopt an existing bound UDP socket.
+        ///
+        /// This preserves socket identity/NAT mapping created by bootstrap code.
+        pub fn adopt(
+            socket: std::net::UdpSocket,
+            recv_buf_size: usize,
+            send_buf_size: usize,
+        ) -> Result<Self, TransportError> {
+            let sock = Socket::from(socket);
+
+            sock.set_nonblocking(true).map_err(|e| {
+                TransportError::StartFailed(format!("set nonblocking failed: {}", e))
+            })?;
+
+            sock.set_recv_buffer_size(recv_buf_size)
+                .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
+            sock.set_send_buffer_size(send_buf_size)
+                .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
+
+            let actual_recv = sock
+                .recv_buffer_size()
+                .map_err(|e| TransportError::StartFailed(format!("get recv buffer: {}", e)))?;
+            let actual_send = sock
+                .send_buffer_size()
+                .map_err(|e| TransportError::StartFailed(format!("get send buffer: {}", e)))?;
+
+            if actual_recv < recv_buf_size {
+                warn!(
+                    requested = recv_buf_size,
+                    actual = actual_recv,
+                    "UDP recv buffer clamped by kernel (increase net.core.rmem_max)"
+                );
+            }
+            if actual_send < send_buf_size {
+                warn!(
+                    requested = send_buf_size,
+                    actual = actual_send,
+                    "UDP send buffer clamped by kernel (increase net.core.wmem_max)"
+                );
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let enable: libc::c_int = 1;
+                let ret = unsafe {
+                    libc::setsockopt(
+                        sock.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_RXQ_OVFL,
+                        &enable as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if ret < 0 {
+                    warn!(
+                        "setsockopt(SO_RXQ_OVFL) failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+
+            let local_addr = sock
+                .local_addr()
+                .map_err(|e| TransportError::StartFailed(format!("get local addr: {}", e)))?
+                .as_socket()
+                .ok_or_else(|| {
+                    TransportError::StartFailed("local address is not an IP socket".into())
+                })?;
+
+            Ok(Self {
+                inner: sock,
+                local_addr,
+            })
+        }
+
         /// Get the local bound address.
         pub fn local_addr(&self) -> SocketAddr {
             self.local_addr
@@ -352,6 +427,37 @@ mod platform {
                 .map_err(|e| TransportError::StartFailed(format!("bind failed: {}", e)))?;
 
             // Set socket buffer sizes
+            sock.set_recv_buffer_size(recv_buf_size)
+                .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
+            sock.set_send_buffer_size(send_buf_size)
+                .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
+
+            let local_addr = sock
+                .local_addr()
+                .map_err(|e| TransportError::StartFailed(format!("get local addr: {}", e)))?
+                .as_socket()
+                .ok_or_else(|| {
+                    TransportError::StartFailed("local address is not an IP socket".into())
+                })?;
+
+            Ok(Self {
+                inner: sock,
+                local_addr,
+            })
+        }
+
+        /// Adopt an existing bound UDP socket.
+        pub fn adopt(
+            socket: std::net::UdpSocket,
+            recv_buf_size: usize,
+            send_buf_size: usize,
+        ) -> Result<Self, TransportError> {
+            let sock = Socket::from(socket);
+
+            sock.set_nonblocking(true).map_err(|e| {
+                TransportError::StartFailed(format!("set nonblocking failed: {}", e))
+            })?;
+
             sock.set_recv_buffer_size(recv_buf_size)
                 .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
             sock.set_send_buffer_size(send_buf_size)

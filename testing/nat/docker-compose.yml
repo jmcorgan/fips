@@ -1,0 +1,234 @@
+networks:
+  wan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.254.0/24
+  shared-lan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.10.0/24
+
+volumes:
+  relay-data:
+
+x-fips-common: &fips-common
+  image: fips-test:latest
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+  restart: "no"
+  environment:
+    - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: examples/sidecar-nostr-relay/Dockerfile.app
+    container_name: fips-nat-relay
+    restart: "no"
+    volumes:
+      - relay-data:/usr/src/app/strfry-db
+      - ./relay/strfry.conf:/usr/src/app/strfry.conf:ro
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+    networks:
+      wan:
+        ipv4_address: 172.31.254.30
+      shared-lan:
+        ipv4_address: 172.31.10.30
+
+  stun:
+    build:
+      context: ./stun
+    container_name: fips-nat-stun
+    restart: "no"
+    networks:
+      wan:
+        ipv4_address: 172.31.254.40
+      shared-lan:
+        ipv4_address: 172.31.10.40
+
+  nat-a:
+    build:
+      context: ./router
+    profiles: ["cone", "symmetric"]
+    container_name: fips-nat-router-a
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    restart: "no"
+    environment:
+      - NAT_MODE=${NAT_MODE_A:-cone}
+      - TCP_FORWARD_PORTS=8443
+      - LAN_IF=eth1
+      - WAN_IF=eth0
+      - LAN_HOST=172.31.1.10
+      - LAN_SUBNET=172.31.1.0/24
+      - WAN_SUBNET=172.31.254.0/24
+      - WAN_GATEWAY=172.31.254.1
+    networks:
+      wan:
+        ipv4_address: 172.31.254.10
+
+  nat-b:
+    build:
+      context: ./router
+    profiles: ["cone", "symmetric"]
+    container_name: fips-nat-router-b
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    restart: "no"
+    environment:
+      - NAT_MODE=${NAT_MODE_B:-cone}
+      - TCP_FORWARD_PORTS=8443
+      - LAN_IF=eth1
+      - WAN_IF=eth0
+      - LAN_HOST=172.31.2.10
+      - LAN_SUBNET=172.31.2.0/24
+      - WAN_SUBNET=172.31.254.0/24
+      - WAN_GATEWAY=172.31.254.1
+    networks:
+      wan:
+        ipv4_address: 172.31.254.11
+
+  cone-a:
+    <<: *fips-common
+    profiles: ["cone"]
+    container_name: fips-nat-cone-a
+    hostname: fips-nat-cone-a
+    depends_on:
+      - nat-a
+      - relay
+      - stun
+    entrypoint:
+      - /usr/local/bin/nat-node-entrypoint.sh
+    environment:
+      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - DATA_IF=eth0
+      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_VIA=172.31.1.254
+      - RELAY_HOST=172.31.254.30
+      - RELAY_PORT=7777
+      - STUN_HOST=172.31.254.40
+      - STUN_PORT=3478
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
+      - ./generated-configs/cone/node-a.yaml:/etc/fips/fips.yaml:ro
+    network_mode: none
+
+  cone-b:
+    <<: *fips-common
+    profiles: ["cone"]
+    container_name: fips-nat-cone-b
+    hostname: fips-nat-cone-b
+    depends_on:
+      - nat-b
+      - relay
+      - stun
+    entrypoint:
+      - /usr/local/bin/nat-node-entrypoint.sh
+    environment:
+      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - DATA_IF=eth0
+      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_VIA=172.31.2.254
+      - RELAY_HOST=172.31.254.30
+      - RELAY_PORT=7777
+      - STUN_HOST=172.31.254.40
+      - STUN_PORT=3478
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
+      - ./generated-configs/cone/node-b.yaml:/etc/fips/fips.yaml:ro
+    network_mode: none
+
+  symmetric-a:
+    <<: *fips-common
+    profiles: ["symmetric"]
+    container_name: fips-nat-symmetric-a
+    hostname: fips-nat-symmetric-a
+    depends_on:
+      - nat-a
+      - relay
+      - stun
+    entrypoint:
+      - /usr/local/bin/nat-node-entrypoint.sh
+    environment:
+      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - DATA_IF=eth0
+      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_VIA=172.31.1.254
+      - RELAY_HOST=172.31.254.30
+      - RELAY_PORT=7777
+      - STUN_HOST=172.31.254.40
+      - STUN_PORT=3478
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
+      - ./generated-configs/symmetric/node-a.yaml:/etc/fips/fips.yaml:ro
+    network_mode: none
+
+  symmetric-b:
+    <<: *fips-common
+    profiles: ["symmetric"]
+    container_name: fips-nat-symmetric-b
+    hostname: fips-nat-symmetric-b
+    depends_on:
+      - nat-b
+      - relay
+      - stun
+    entrypoint:
+      - /usr/local/bin/nat-node-entrypoint.sh
+    environment:
+      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - DATA_IF=eth0
+      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_VIA=172.31.2.254
+      - RELAY_HOST=172.31.254.30
+      - RELAY_PORT=7777
+      - STUN_HOST=172.31.254.40
+      - STUN_PORT=3478
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
+      - ./generated-configs/symmetric/node-b.yaml:/etc/fips/fips.yaml:ro
+    network_mode: none
+
+  lan-a:
+    <<: *fips-common
+    profiles: ["lan"]
+    container_name: fips-nat-lan-a
+    hostname: fips-nat-lan-a
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/lan/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: 172.31.10.10
+
+  lan-b:
+    <<: *fips-common
+    profiles: ["lan"]
+    container_name: fips-nat-lan-b
+    hostname: fips-nat-lan-b
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/lan/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: 172.31.10.11

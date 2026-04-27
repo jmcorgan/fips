@@ -9,13 +9,11 @@ repository = "https://github.com/jmcorgan/fips"
 readme = "README.md"
 
 [features]
-default = ["tui", "ble"]
-tui = ["dep:ratatui"]
-ble = ["dep:bluer"]
-gateway = ["dep:rustables"]
+default = ["nostr-discovery"]
+nostr-discovery = ["dep:nostr", "dep:nostr-sdk"]
 
 [dependencies]
-ratatui = { version = "0.30", optional = true }
+ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
 sha2 = "0.10"
 hkdf = "0.12"
@@ -38,7 +36,8 @@ socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 portable-atomic = { version = "1", features = ["std"] }
 
-rustables = { version = "0.8.7", optional = true }
+nostr = { version = "0.44", features = ["std", "nip59"], optional = true }
+nostr-sdk = { version = "0.44", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 tun = { version = "0.8.5", features = ["async"] }
@@ -46,7 +45,11 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.20.0"
-bluer = { version = "0.17", features = ["bluetoothd", "l2cap"], optional = true }
+rustables = "0.8.7"
+
+# bluer/BlueZ needs glibc — see build.rs `bluer_available` cfg gate.
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"
@@ -95,9 +98,7 @@ path = "src/bin/fipsctl.rs"
 [[bin]]
 name = "fips-gateway"
 path = "src/bin/fips-gateway.rs"
-required-features = ["gateway"]
 
 [[bin]]
 name = "fipstop"
 path = "src/bin/fipstop/main.rs"
-required-features = ["tui"]

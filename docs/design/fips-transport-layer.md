@@ -693,7 +693,7 @@ X." FMP does not need to distinguish beacons from query responses.
 | Radio | Beacon | Shared RF channel, natural fit |
 | BLE | Advertising | GATT service UUID |
 
-### Nostr Relay Discovery *(future direction)*
+### Nostr Relay Discovery
 
 For internet-reachable transports, a node publishes a signed Nostr event
 containing its FIPS discovery information — public key and reachable
@@ -704,6 +704,12 @@ Nostr relay discovery is not a transport — it is a discovery service that
 feeds addresses to other transports. A node discovers via Nostr that a peer
 is reachable at UDP 1.2.3.4:9735, then establishes the link over the UDP
 transport.
+
+For NAT'd UDP endpoints, a node may advertise `addr: "nat"` instead of a
+concrete address, signaling that peers should initiate STUN-assisted UDP
+hole punching. Offer/answer exchange uses Nostr gift-wrap (NIP-59) events
+on the configured DM relays; the resulting punched socket is adopted into
+the standard UDP transport via the bootstrap handoff path.
 
 Key properties:
 
@@ -721,8 +727,11 @@ Key properties:
 > broadcast — the `discover()` trait method returns newly seen endpoints,
 > and per-transport `auto_connect()` / `accept_connections()` policies
 > control whether discovered peers are connected automatically or require
-> explicit configuration. TCP and Tor have no discovery mechanism.
-> Nostr relay discovery is not yet implemented.
+> explicit configuration. TCP and Tor have no built-in discovery mechanism.
+> Nostr relay discovery and STUN-assisted UDP hole punching are
+> implemented behind the `nostr-discovery` cargo feature; see
+> [fips-configuration.md](fips-configuration.md) for the
+> `node.discovery.nostr.*` configuration tree.
 
 ## Transport Interface
 

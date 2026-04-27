@@ -3,21 +3,33 @@
 //! Allows unmodified LAN hosts to reach FIPS mesh destinations via
 //! DNS-allocated virtual IPs and kernel nftables NAT.
 
+#[cfg(target_os = "linux")]
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use fips::Config;
 #[cfg(target_os = "linux")]
 use fips::gateway::{control, dns, nat, net, pool};
+#[cfg(target_os = "linux")]
 use fips::version;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "linux")]
 use std::time::Instant;
+#[cfg(target_os = "linux")]
 use tokio::signal::unix::{SignalKind, signal};
+#[cfg(target_os = "linux")]
 use tokio::sync::{Mutex, mpsc, watch};
+#[cfg(target_os = "linux")]
 use tracing::{error, info, warn};
+#[cfg(target_os = "linux")]
 use tracing_subscriber::{EnvFilter, fmt};
 
 /// FIPS outbound LAN gateway
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 #[command(
     name = "fips-gateway",
@@ -35,6 +47,13 @@ struct Args {
     log_level: String,
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("fips-gateway requires Linux (nftables unavailable on this platform)");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();

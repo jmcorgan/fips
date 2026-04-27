@@ -145,8 +145,8 @@ record() {
 run_build() {
     stage "Stage 1: Build"
 
-    info "cargo build --release --features gateway"
-    if cargo build --release --features gateway 2>&1; then
+    info "cargo build --release"
+    if cargo build --release 2>&1; then
         record "build" 0
     else
         record "build" 1
@@ -161,8 +161,8 @@ run_build() {
         return 1
     fi
 
-    info "cargo clippy --all --features gateway -- -D warnings"
-    if cargo clippy --all --features gateway -- -D warnings 2>&1; then
+    info "cargo clippy --all -- -D warnings"
+    if cargo clippy --all -- -D warnings 2>&1; then
         record "clippy" 0
     else
         record "clippy" 1
@@ -177,7 +177,7 @@ run_tests() {
 
     local cmd
     if command -v cargo-nextest &>/dev/null; then
-        cmd="cargo nextest run --all --features gateway"
+        cmd="cargo nextest run --all"
         info "$cmd"
         if $cmd 2>&1; then
             record "unit-tests" 0
@@ -185,7 +185,7 @@ run_tests() {
             record "unit-tests" 1
         fi
     else
-        cmd="cargo test --all --features gateway"
+        cmd="cargo test --all"
         info "$cmd (nextest not found, using cargo test)"
         if $cmd 2>&1; then
             record "unit-tests" 0

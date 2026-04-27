@@ -192,14 +192,20 @@ pub struct DiscoveryConfig {
     /// Hop limit for LookupRequest flood (`node.discovery.ttl`).
     #[serde(default = "DiscoveryConfig::default_ttl")]
     pub ttl: u8,
-    /// Lookup completion timeout in seconds (`node.discovery.timeout_secs`).
-    #[serde(default = "DiscoveryConfig::default_timeout_secs")]
-    pub timeout_secs: u64,
+    /// Per-attempt timeouts in seconds (`node.discovery.attempt_timeouts_secs`).
+    /// Each entry is the time to wait for a response before sending the next
+    /// LookupRequest (with a fresh request_id). Sequence length determines the
+    /// total number of attempts before declaring the destination unreachable.
+    /// Default `[1, 2, 4, 8]` gives 4 attempts and a 15s total budget.
+    #[serde(default = "DiscoveryConfig::default_attempt_timeouts_secs")]
+    pub attempt_timeouts_secs: Vec<u64>,
     /// Dedup cache expiry in seconds (`node.discovery.recent_expiry_secs`).
     #[serde(default = "DiscoveryConfig::default_recent_expiry_secs")]
     pub recent_expiry_secs: u64,
-    /// Base backoff after first lookup failure in seconds (`node.discovery.backoff_base_secs`).
-    /// Doubles per consecutive failure up to `backoff_max_secs`.
+    /// Base backoff after lookup failure in seconds (`node.discovery.backoff_base_secs`).
+    /// Doubles per consecutive failure up to `backoff_max_secs`. Defaults to 0
+    /// (no post-failure suppression); the per-attempt sequence in
+    /// `attempt_timeouts_secs` provides the only retry pacing.
     #[serde(default = "DiscoveryConfig::default_backoff_base_secs")]
     pub backoff_base_secs: u64,
     /// Maximum backoff cap in seconds (`node.discovery.backoff_max_secs`).
@@ -210,28 +216,21 @@ pub struct DiscoveryConfig {
     /// Defense-in-depth against misbehaving nodes.
     #[serde(default = "DiscoveryConfig::default_forward_min_interval_secs")]
     pub forward_min_interval_secs: u64,
-    /// Retry interval within the timeout window in seconds
-    /// (`node.discovery.retry_interval_secs`).
-    /// After this interval without a response, resend the lookup.
-    #[serde(default = "DiscoveryConfig::default_retry_interval_secs")]
-    pub retry_interval_secs: u64,
-    /// Maximum attempts per lookup (`node.discovery.max_attempts`).
-    /// 1 = no retry, 2 = one retry, etc.
-    #[serde(default = "DiscoveryConfig::default_max_attempts")]
-    pub max_attempts: u8,
+    /// Nostr-mediated overlay endpoint discovery.
+    #[serde(default = "DiscoveryConfig::default_nostr")]
+    pub nostr: NostrDiscoveryConfig,
 }
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
             ttl: 64,
-            timeout_secs: 10,
+            attempt_timeouts_secs: vec![1, 2, 4, 8],
             recent_expiry_secs: 10,
-            backoff_base_secs: 30,
-            backoff_max_secs: 300,
+            backoff_base_secs: 0,
+            backoff_max_secs: 0,
             forward_min_interval_secs: 2,
-            retry_interval_secs: 5,
-            max_attempts: 2,
+            nostr: NostrDiscoveryConfig::default(),
         }
     }
 }
@@ -240,26 +239,228 @@ impl DiscoveryConfig {
     fn default_ttl() -> u8 {
         64
     }
-    fn default_timeout_secs() -> u64 {
-        10
+    fn default_attempt_timeouts_secs() -> Vec<u64> {
+        vec![1, 2, 4, 8]
     }
     fn default_recent_expiry_secs() -> u64 {
         10
     }
     fn default_backoff_base_secs() -> u64 {
-        30
+        0
     }
     fn default_backoff_max_secs() -> u64 {
-        300
+        0
     }
     fn default_forward_min_interval_secs() -> u64 {
         2
     }
-    fn default_retry_interval_secs() -> u64 {
-        5
+    fn default_nostr() -> NostrDiscoveryConfig {
+        NostrDiscoveryConfig::default()
     }
-    fn default_max_attempts() -> u8 {
-        2
+}
+
+/// Nostr advert discovery policy.
+///
+/// Controls how overlay endpoint adverts are consumed:
+/// - `disabled`: ignore advert-derived endpoints for all peers
+/// - `configured_only`: allow advert fallback only for configured peers with
+///   `peers[].via_nostr = true`
+/// - `open`: also consider adverts for non-configured peers
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NostrDiscoveryPolicy {
+    Disabled,
+    #[default]
+    ConfiguredOnly,
+    Open,
+}
+
+/// Nostr-mediated overlay endpoint discovery (`node.discovery.nostr.*`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NostrDiscoveryConfig {
+    /// Enable Nostr-signaled traversal bootstrap.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Publish service advertisements so remote peers can bootstrap inbound.
+    #[serde(default = "NostrDiscoveryConfig::default_advertise")]
+    pub advertise: bool,
+    /// Relay URLs used for service advertisements.
+    #[serde(default = "NostrDiscoveryConfig::default_advert_relays")]
+    pub advert_relays: Vec<String>,
+    /// Relay URLs used for encrypted signaling events.
+    #[serde(default = "NostrDiscoveryConfig::default_dm_relays")]
+    pub dm_relays: Vec<String>,
+    /// STUN servers used for local reflexive address discovery.
+    /// Outbound observation uses only this local list; peer-advertised STUN
+    /// values are informational and are not treated as egress targets.
+    #[serde(default = "NostrDiscoveryConfig::default_stun_servers")]
+    pub stun_servers: Vec<String>,
+    /// Whether to advertise local (RFC 1918 / ULA) interface addresses as
+    /// host candidates in the traversal offer.
+    ///
+    /// Off by default: in most deployments the relevant peers are not on the
+    /// same broadcast domain, and sharing private host candidates causes
+    /// misleading punch successes when an asymmetric L3 path (corporate VPN,
+    /// Tailscale subnet route, overlapping address space, etc.) makes a
+    /// peer's private IP one-way reachable from this node. Enable only when
+    /// peers are on the same physical LAN and same-LAN punching is wanted.
+    #[serde(default)]
+    pub share_local_candidates: bool,
+    /// Traversal application namespace and advert identifier suffix.
+    #[serde(default = "NostrDiscoveryConfig::default_app")]
+    pub app: String,
+    /// Signaling TTL in seconds.
+    #[serde(default = "NostrDiscoveryConfig::default_signal_ttl_secs")]
+    pub signal_ttl_secs: u64,
+    /// Policy for advert-derived endpoint discovery.
+    #[serde(default)]
+    pub policy: NostrDiscoveryPolicy,
+    /// Max number of open-discovery peers queued for outbound retry/connection
+    /// at once. Prevents unbounded queue growth from ambient advert traffic.
+    #[serde(default = "NostrDiscoveryConfig::default_open_discovery_max_pending")]
+    pub open_discovery_max_pending: usize,
+    /// Max concurrent inbound traversal offers processed at once.
+    /// Acts as a rate limit against offer spam from relays.
+    #[serde(default = "NostrDiscoveryConfig::default_max_concurrent_incoming_offers")]
+    pub max_concurrent_incoming_offers: usize,
+    /// Max cached overlay adverts retained from relay traffic.
+    /// Bounds memory under ambient advert volume.
+    #[serde(default = "NostrDiscoveryConfig::default_advert_cache_max_entries")]
+    pub advert_cache_max_entries: usize,
+    /// Max seen-session IDs retained for replay detection.
+    /// Oldest entries are evicted when the cap is exceeded.
+    #[serde(default = "NostrDiscoveryConfig::default_seen_sessions_max_entries")]
+    pub seen_sessions_max_entries: usize,
+    /// Overall punch attempt timeout in seconds.
+    #[serde(default = "NostrDiscoveryConfig::default_attempt_timeout_secs")]
+    pub attempt_timeout_secs: u64,
+    /// Replay tracking retention window in seconds.
+    #[serde(default = "NostrDiscoveryConfig::default_replay_window_secs")]
+    pub replay_window_secs: u64,
+    /// Delay before punch traffic starts.
+    #[serde(default = "NostrDiscoveryConfig::default_punch_start_delay_ms")]
+    pub punch_start_delay_ms: u64,
+    /// Interval between punch packets.
+    #[serde(default = "NostrDiscoveryConfig::default_punch_interval_ms")]
+    pub punch_interval_ms: u64,
+    /// How long to keep punching before failure.
+    #[serde(default = "NostrDiscoveryConfig::default_punch_duration_ms")]
+    pub punch_duration_ms: u64,
+    /// Advert TTL in seconds.
+    #[serde(default = "NostrDiscoveryConfig::default_advert_ttl_secs")]
+    pub advert_ttl_secs: u64,
+    /// How often adverts are refreshed in seconds.
+    #[serde(default = "NostrDiscoveryConfig::default_advert_refresh_secs")]
+    pub advert_refresh_secs: u64,
+}
+
+impl Default for NostrDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            advertise: Self::default_advertise(),
+            advert_relays: Self::default_advert_relays(),
+            dm_relays: Self::default_dm_relays(),
+            stun_servers: Self::default_stun_servers(),
+            share_local_candidates: false,
+            app: Self::default_app(),
+            signal_ttl_secs: Self::default_signal_ttl_secs(),
+            policy: NostrDiscoveryPolicy::default(),
+            open_discovery_max_pending: Self::default_open_discovery_max_pending(),
+            max_concurrent_incoming_offers: Self::default_max_concurrent_incoming_offers(),
+            advert_cache_max_entries: Self::default_advert_cache_max_entries(),
+            seen_sessions_max_entries: Self::default_seen_sessions_max_entries(),
+            attempt_timeout_secs: Self::default_attempt_timeout_secs(),
+            replay_window_secs: Self::default_replay_window_secs(),
+            punch_start_delay_ms: Self::default_punch_start_delay_ms(),
+            punch_interval_ms: Self::default_punch_interval_ms(),
+            punch_duration_ms: Self::default_punch_duration_ms(),
+            advert_ttl_secs: Self::default_advert_ttl_secs(),
+            advert_refresh_secs: Self::default_advert_refresh_secs(),
+        }
+    }
+}
+
+impl NostrDiscoveryConfig {
+    fn default_advertise() -> bool {
+        true
+    }
+
+    fn default_advert_relays() -> Vec<String> {
+        vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://nos.lol".to_string(),
+            "wss://offchain.pub".to_string(),
+        ]
+    }
+
+    fn default_dm_relays() -> Vec<String> {
+        vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://nos.lol".to_string(),
+            "wss://offchain.pub".to_string(),
+        ]
+    }
+
+    fn default_stun_servers() -> Vec<String> {
+        vec![
+            "stun:stun.l.google.com:19302".to_string(),
+            "stun:stun.cloudflare.com:3478".to_string(),
+            "stun:global.stun.twilio.com:3478".to_string(),
+        ]
+    }
+
+    fn default_app() -> String {
+        "fips-overlay-v1".to_string()
+    }
+
+    fn default_signal_ttl_secs() -> u64 {
+        120
+    }
+
+    fn default_open_discovery_max_pending() -> usize {
+        64
+    }
+
+    fn default_max_concurrent_incoming_offers() -> usize {
+        16
+    }
+
+    fn default_advert_cache_max_entries() -> usize {
+        2048
+    }
+
+    fn default_seen_sessions_max_entries() -> usize {
+        2048
+    }
+
+    fn default_attempt_timeout_secs() -> u64 {
+        10
+    }
+
+    fn default_replay_window_secs() -> u64 {
+        300
+    }
+
+    fn default_punch_start_delay_ms() -> u64 {
+        2_000
+    }
+
+    fn default_punch_interval_ms() -> u64 {
+        200
+    }
+
+    fn default_punch_duration_ms() -> u64 {
+        10_000
+    }
+
+    fn default_advert_ttl_secs() -> u64 {
+        3_600
+    }
+
+    fn default_advert_refresh_secs() -> u64 {
+        1_800
     }
 }
 

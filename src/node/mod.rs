@@ -47,7 +47,7 @@ use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use crate::utils::index::IndexAllocator;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use rand::Rng;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -137,6 +137,9 @@ pub enum NodeError {
 
     #[error("transport error: {0}")]
     TransportError(String),
+
+    #[error("bootstrap handoff failed: {0}")]
+    BootstrapHandoff(String),
 }
 
 /// Node operational state.
@@ -262,7 +265,7 @@ struct PendingConnect {
 ///
 /// The `addr_to_link` map enables dispatching incoming packets to the right
 /// connection before authentication completes.
-// Discovery lookup constants moved to config: node.discovery.timeout_secs, node.discovery.ttl
+// Discovery lookup constants moved to config: node.discovery.attempt_timeouts_secs, node.discovery.ttl
 pub struct Node {
     // === Identity ===
     /// This node's cryptographic identity.
@@ -344,7 +347,6 @@ pub struct Node {
     /// Packets queued while waiting for session establishment.
     /// Keyed by destination NodeAddr, bounded per-dest and total.
     pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
-
     // === Pending Discovery Lookups ===
     /// Tracks in-flight discovery lookups. Maps target NodeAddr to the
     /// initiation timestamp (Unix ms). Prevents duplicate flood queries.
@@ -437,6 +439,12 @@ pub struct Node {
     /// are exhausted.
     retry_pending: HashMap<NodeAddr, retry::RetryState>,
 
+    /// Optional Nostr/STUN overlay discovery coordinator for `udp:nat` peers.
+    #[cfg(feature = "nostr-discovery")]
+    nostr_discovery: Option<Arc<crate::discovery::nostr::NostrDiscovery>>,
+    /// Per-peer UDP transports adopted from NAT traversal handoff.
+    bootstrap_transports: HashSet<TransportId>,
+
     // === Periodic Parent Re-evaluation ===
     /// Timestamp of last periodic parent re-evaluation (for pacing).
     last_parent_reeval: Option<std::time::Instant>,
@@ -475,6 +483,7 @@ pub struct Node {
 impl Node {
     /// Create a new node from configuration.
     pub fn new(config: Config) -> Result<Self, NodeError> {
+        config.validate()?;
         let identity = config.create_identity()?;
         let node_addr = *identity.node_addr();
         let is_leaf_only = config.is_leaf_only();
@@ -599,6 +608,9 @@ impl Node {
             ),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
+            #[cfg(feature = "nostr-discovery")]
+            nostr_discovery: None,
+            bootstrap_transports: HashSet::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
             estimated_mesh_size: None,
@@ -611,7 +623,11 @@ impl Node {
     }
 
     /// Create a node with a specific identity.
-    pub fn with_identity(identity: Identity, config: Config) -> Self {
+    ///
+    /// This constructor validates cross-field config invariants before
+    /// constructing the node, same as [`Node::new`].
+    pub fn with_identity(identity: Identity, config: Config) -> Result<Self, NodeError> {
+        config.validate()?;
         let node_addr = *identity.node_addr();
 
         let mut startup_epoch = [0u8; 8];
@@ -667,7 +683,7 @@ impl Node {
             std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH),
         );
 
-        Self {
+        Ok(Self {
             identity,
             startup_epoch,
             started_at: std::time::Instant::now(),
@@ -722,6 +738,9 @@ impl Node {
             discovery_forward_limiter: DiscoveryForwardRateLimiter::new(),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
+            #[cfg(feature = "nostr-discovery")]
+            nostr_discovery: None,
+            bootstrap_transports: HashSet::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
             estimated_mesh_size: None,
@@ -730,7 +749,7 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-        }
+        })
     }
 
     /// Create a leaf-only node (simplified state).
@@ -813,7 +832,7 @@ impl Node {
         }
 
         // Create BLE transport instances
-        #[cfg(target_os = "linux")]
+        #[cfg(bluer_available)]
         {
             let ble_instances: Vec<_> = self
                 .config
@@ -823,7 +842,7 @@ impl Node {
                 .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
                 .collect();
 
-            #[cfg(all(feature = "ble", not(test)))]
+            #[cfg(all(bluer_available, not(test)))]
             for (name, ble_config) in ble_instances {
                 let transport_id = self.allocate_transport_id();
                 let adapter = ble_config.adapter().to_string();
@@ -845,12 +864,10 @@ impl Node {
                 }
             }
 
-            #[cfg(any(not(feature = "ble"), test))]
+            #[cfg(any(not(bluer_available), test))]
             if !ble_instances.is_empty() {
                 #[cfg(not(test))]
-                tracing::warn!(
-                    "BLE transport configured but 'ble' feature not enabled at compile time"
-                );
+                tracing::warn!("BLE transport configured but this build lacks BlueZ support");
             }
         }
 
@@ -920,7 +937,7 @@ impl Node {
     /// Resolve a BLE address string (`"adapter/AA:BB:CC:DD:EE:FF"`) to a
     /// (TransportId, TransportAddr) pair by finding the BLE transport
     /// instance matching the adapter name.
-    #[cfg(target_os = "linux")]
+    #[cfg(bluer_available)]
     fn resolve_ble_addr(&self, addr_str: &str) -> Result<(TransportId, TransportAddr), NodeError> {
         let ta = TransportAddr::from_string(addr_str);
         let adapter = crate::transport::ble::addr::adapter_from_addr(&ta).ok_or_else(|| {
@@ -1414,6 +1431,42 @@ impl Node {
         } else {
             None
         }
+    }
+
+    pub(crate) fn cleanup_bootstrap_transport_if_unused(&mut self, transport_id: TransportId) {
+        if !self.bootstrap_transports.contains(&transport_id) {
+            return;
+        }
+
+        let transport_in_use = self
+            .links
+            .values()
+            .any(|link| link.transport_id() == transport_id)
+            || self
+                .connections
+                .values()
+                .any(|conn| conn.transport_id() == Some(transport_id))
+            || self
+                .peers
+                .values()
+                .any(|peer| peer.transport_id() == Some(transport_id))
+            || self
+                .pending_connects
+                .iter()
+                .any(|pending| pending.transport_id == transport_id);
+
+        if transport_in_use {
+            return;
+        }
+
+        tracing::debug!(
+            transport_id = %transport_id,
+            "bootstrap transport has no remaining references; dropping"
+        );
+
+        self.bootstrap_transports.remove(&transport_id);
+        self.transport_drops.remove(&transport_id);
+        self.transports.remove(&transport_id);
     }
 
     /// Iterate over all links.

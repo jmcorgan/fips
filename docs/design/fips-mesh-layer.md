@@ -302,6 +302,12 @@ Roaming is most useful for UDP, where source addresses can change due to NAT
 rebinding or network changes. For connection-oriented transports, "roaming"
 manifests as reconnection rather than mid-session address change.
 
+Roaming addresses *mid-session* NAT rebinding. Establishing the initial UDP
+path through NAT is a separate concern, addressed by the optional
+Nostr-mediated overlay discovery and STUN-assisted hole punching feature
+(see [fips-transport-layer.md](fips-transport-layer.md) and
+[fips-configuration.md](fips-configuration.md)).
+
 ## Replay Protection
 
 Each link session maintains per-direction counters:

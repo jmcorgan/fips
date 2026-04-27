@@ -9,9 +9,10 @@ mod acl;
 mod ble;
 mod bloom;
 mod bloom_poison;
+mod bootstrap;
 mod disconnect;
 mod discovery;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod ethernet;
 mod forwarding;
 mod handshake;

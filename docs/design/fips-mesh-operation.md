@@ -385,19 +385,31 @@ The default `max_attempts` is 2 (initial + one retry). Each retry generates
 a fresh `request_id` and re-evaluates bloom filter matches, so it can take
 a different path if the tree has restructured.
 
-### Originator Backoff
+### Per-Attempt Timeouts
 
-After a lookup times out or no peer's bloom filter contains the target, the
-originator enters **exponential backoff** before re-attempting discovery for
-the same target:
+Each discovery is a sequence of attempts with growing per-attempt timeouts.
+Default sequence is `[1s, 2s, 4s, 8s]` (configurable via
+`node.discovery.attempt_timeouts_secs`). When the current attempt's deadline
+elapses without a `LookupResponse`, the originator sends another
+`LookupRequest` with a **fresh `request_id`** and the next entry in the
+sequence as its deadline. Fresh request_ids let each attempt take a
+different forwarding path as the bloom and tree state evolve, which is
+particularly useful during cold-start convergence. The destination is
+declared unreachable only after the full sequence is exhausted (15s total
+with the default).
 
-- **Base delay**: 30s (configurable via `backoff_base_secs`)
-- **Multiplier**: 2x per consecutive failure
-- **Cap**: 300s (configurable via `backoff_max_secs`)
+### Originator Backoff (optional, off by default)
 
-Backoff is **reset on topology changes** that might make previously
-unreachable targets reachable: parent switch, new peer connection, first
-RTT measurement from MMP, or peer reconnection.
+After the per-attempt sequence is exhausted, the originator can additionally
+suppress further fresh lookups for the same target with exponential
+post-failure backoff. This is **disabled by default** (`backoff_base_secs:
+0`); the per-attempt sequence is the only retry pacing in the standard
+configuration. Operators may opt in via `node.discovery.backoff_base_secs`
+and `node.discovery.backoff_max_secs` if their deployment has chatty apps
+generating repeated lookups for genuinely unreachable destinations. When
+enabled, backoff is **reset on topology changes** that might make
+previously unreachable targets reachable: parent switch, new peer
+connection, first RTT measurement from MMP, or peer reconnection.
 
 ### Bloom Filter Pre-Check
 

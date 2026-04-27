@@ -109,8 +109,6 @@ cd "$PROJECT_ROOT"
 cargo zigbuild \
     --release \
     --target "$RUST_TARGET" \
-    --no-default-features \
-    --features tui,gateway \
     --bin fips \
     --bin fipsctl \
     --bin fipstop \

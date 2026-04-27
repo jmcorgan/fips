@@ -1,7 +1,7 @@
 //! BLE I/O abstraction layer.
 //!
 //! Defines the `BleIo` trait that separates transport logic from the
-//! BlueZ/bluer stack. `BluerIo` (behind `cfg(feature = "ble")`) provides
+//! BlueZ/bluer stack. `BluerIo` (behind `cfg(bluer_available)`) provides
 //! the real implementation; `MockBleIo` provides an in-memory test double.
 
 use crate::transport::TransportError;
@@ -109,7 +109,7 @@ pub trait BleIo: Send + Sync + 'static {
 // BluerIo — Production BLE I/O via BlueZ D-Bus
 // ============================================================================
 
-#[cfg(feature = "ble")]
+#[cfg(bluer_available)]
 mod bluer_impl {
     use super::*;
     use crate::transport::TransportError;
@@ -486,7 +486,7 @@ mod bluer_impl {
     }
 }
 
-#[cfg(feature = "ble")]
+#[cfg(bluer_available)]
 pub use bluer_impl::{BluerAcceptor, BluerIo, BluerScanner, BluerStream, FIPS_SERVICE_UUID};
 
 // ============================================================================

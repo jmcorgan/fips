@@ -510,15 +510,19 @@ and radio are natural fits for this, as they can reach nearby devices without
 prior configuration. When discovery is available, nodes can automatically
 find and peer with other FIPS nodes on the same medium. Transports that
 lack discovery (such as configured UDP endpoints) simply skip this step and
-connect directly to configured addresses. Additionally, endpoint discovery
-using Nostr relays and signed events is planned, allowing internet-reachable
-nodes to publish their transport addresses for other FIPS nodes to find.
+connect directly to configured addresses. For internet-reachable nodes,
+endpoint discovery via signed Nostr events allows nodes to publish and
+consume transport addresses through public relays — available behind the
+`nostr-discovery` cargo feature.
 
-NAT traversal is not currently addressed by the protocol.
-Internet-connected nodes behind NAT must be reachable through port
-forwarding, a publicly addressed peer, or relay through other mesh nodes.
-UDP hole punching and relay-assisted NAT traversal are potential future
-mechanisms but are not part of the current design.
+NAT traversal for internet-connected nodes is supported via STUN-assisted
+UDP hole punching, with offer/answer signaling carried over Nostr gift-wrap
+events. Once a direct UDP path is established, the punched socket is handed
+into the standard FIPS transport/session stack. Nodes that cannot establish
+a direct path remain reachable through port forwarding, a publicly addressed
+peer, or relay through other mesh nodes. The Nostr-mediated discovery and
+NAT traversal paths are gated by the `nostr-discovery` cargo feature and
+configured under `node.discovery.nostr.*`.
 
 > **Implementation status**: UDP/IP, TCP/IP, Ethernet, Tor
 > (SOCKS5 outbound + directory-mode inbound via onion service),

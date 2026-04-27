@@ -84,9 +84,9 @@ fi
 
 echo "Building FIPS v${VERSION} for ${ARCH}..."
 
-# Build release binaries (tui is a default feature, includes fipstop)
+# Build release binaries
 if [[ "${NO_BUILD}" -eq 0 ]]; then
-    cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml" --features gateway)
+    cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml")
     if [[ -n "${TARGET_TRIPLE}" ]]; then
         cargo_args+=(--target "${TARGET_TRIPLE}")
     fi

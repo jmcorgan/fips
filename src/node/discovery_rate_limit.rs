@@ -2,10 +2,12 @@
 //!
 //! Two complementary mechanisms:
 //!
-//! - **`DiscoveryBackoff`** (originator-side): Exponential backoff for failed
-//!   lookups. After a lookup times out, suppresses re-initiation with
-//!   increasing delays (30s → 60s → 300s cap). Reset on topology changes
-//!   (parent change, new peer, first RTT, reconnection).
+//! - **`DiscoveryBackoff`** (originator-side, optional): Exponential
+//!   suppression of fresh lookups after the per-attempt sequence in
+//!   `node.discovery.attempt_timeouts_secs` has been exhausted.
+//!   **Disabled by default** (base/cap = 0); the per-attempt sequence
+//!   is the only retry pacing in the standard configuration. Reset on
+//!   topology changes (parent change, new peer, first RTT, reconnection).
 //!
 //! - **`DiscoveryForwardRateLimiter`** (transit-side): Per-target minimum
 //!   interval for forwarded requests. Defense-in-depth against misbehaving
@@ -19,11 +21,11 @@ use std::time::{Duration, Instant};
 // Originator-side: Discovery Backoff
 // ============================================================================
 
-/// Default base backoff after first lookup failure.
-const DEFAULT_BACKOFF_BASE_SECS: u64 = 30;
+/// Default base backoff after first lookup failure. `0` = disabled.
+const DEFAULT_BACKOFF_BASE_SECS: u64 = 0;
 
-/// Default maximum backoff cap.
-const DEFAULT_BACKOFF_MAX_SECS: u64 = 300;
+/// Default maximum backoff cap. `0` = disabled.
+const DEFAULT_BACKOFF_MAX_SECS: u64 = 0;
 
 /// Backoff multiplier per consecutive failure.
 const BACKOFF_MULTIPLIER: u64 = 2;
@@ -49,7 +51,7 @@ struct BackoffEntry {
 }
 
 impl DiscoveryBackoff {
-    /// Create with default parameters (30s base, 300s cap).
+    /// Create with default parameters (disabled — base/cap = 0).
     pub fn new() -> Self {
         Self::with_params(DEFAULT_BACKOFF_BASE_SECS, DEFAULT_BACKOFF_MAX_SECS)
     }
@@ -245,7 +247,8 @@ mod tests {
 
     #[test]
     fn test_backoff_suppressed_after_failure() {
-        let mut backoff = DiscoveryBackoff::new();
+        // Backoff is opt-in; exercise the suppression path with explicit params.
+        let mut backoff = DiscoveryBackoff::with_params(30, 300);
         backoff.record_failure(&addr(1));
         assert!(backoff.is_suppressed(&addr(1)));
         // Different target not affected
@@ -254,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_backoff_cleared_on_success() {
-        let mut backoff = DiscoveryBackoff::new();
+        let mut backoff = DiscoveryBackoff::with_params(30, 300);
         backoff.record_failure(&addr(1));
         assert!(backoff.is_suppressed(&addr(1)));
 

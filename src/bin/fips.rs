@@ -73,11 +73,31 @@ async fn run_daemon(
         }
     };
 
-    // Initialize logging: RUST_LOG env var overrides config if set
+    // Initialize logging: RUST_LOG env var overrides config if set.
+    //
+    // The nostr-sdk relay pool emits the full JSON of every event it
+    // sends and receives at DEBUG level. At our DEBUG level that drowns
+    // out everything else, so suppress it unless the operator has
+    // explicitly asked for TRACE — at which point the raw frames come
+    // back.
     let log_level = config.node.log_level();
+    let nostr_directive = if log_level == tracing::Level::TRACE {
+        "trace"
+    } else {
+        "info"
+    };
+    let default_directive = format!(
+        "{log_level},nostr_relay_pool={nostr_directive},nostr_sdk={nostr_directive},nostr={nostr_directive}"
+    );
     let filter = EnvFilter::builder()
         .with_default_directive(log_level.into())
-        .from_env_lossy();
+        .parse_lossy(default_directive);
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(env) if !env.is_empty() => EnvFilter::builder()
+            .with_default_directive(log_level.into())
+            .parse_lossy(env),
+        _ => filter,
+    };
 
     fmt().with_env_filter(filter).with_target(true).init();
 

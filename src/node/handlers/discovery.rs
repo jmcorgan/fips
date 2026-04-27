@@ -444,31 +444,26 @@ impl Node {
 
     /// Initiate a discovery lookup if one is not already pending for this target.
     ///
-    /// Checks: pending dedup, backoff, bloom filter pre-check. If all pass,
-    /// initiates the lookup. If no tree peers have the target in their bloom
-    /// filter, the lookup is skipped (bloom miss) and recorded as a failure
-    /// for backoff purposes.
+    /// Checks: pending dedup, post-failure backoff (off by default), bloom
+    /// filter pre-check. If all pass, sends the first attempt's LookupRequest.
+    /// Subsequent attempts (with fresh request_ids) are scheduled by
+    /// [`Self::check_pending_lookups`] when each attempt's per-attempt timeout
+    /// expires, using the sequence in `node.discovery.attempt_timeouts_secs`.
     pub(in crate::node) async fn maybe_initiate_lookup(&mut self, dest: &NodeAddr) {
         let now_ms = Self::now_ms();
-        let lookup_timeout_ms = self.config.node.discovery.timeout_secs * 1000;
 
-        // Check pending lookup dedup (in-flight)
-        if let Some(entry) = self.pending_lookups.get(dest) {
-            let age_ms = now_ms.saturating_sub(entry.initiated_ms);
-            let attempt = entry.attempt;
-            if age_ms < lookup_timeout_ms {
-                self.stats_mut().discovery.req_deduplicated += 1;
-                debug!(
-                    target_node = %self.peer_display_name(dest),
-                    age_ms = age_ms,
-                    attempt = attempt,
-                    "Discovery lookup deduplicated, already pending"
-                );
-                return;
-            }
+        // Dedup: any pending lookup means we are already trying.
+        if self.pending_lookups.contains_key(dest) {
+            self.stats_mut().discovery.req_deduplicated += 1;
+            debug!(
+                target_node = %self.peer_display_name(dest),
+                "Discovery lookup deduplicated, already pending"
+            );
+            return;
         }
 
-        // Check backoff from previous failures
+        // Optional post-failure suppression. Defaults are 0/0 (inert);
+        // operators can opt in by setting `node.discovery.backoff_*_secs`.
         if self.discovery_backoff.is_suppressed(dest) {
             self.stats_mut().discovery.req_backoff_suppressed += 1;
             debug!(
@@ -508,27 +503,33 @@ impl Node {
         }
     }
 
-    /// Check pending lookups for retry or timeout.
+    /// Check pending lookups for next-attempt or final timeout.
     ///
-    /// Called periodically from the tick handler. For each pending lookup:
-    /// - If retry interval elapsed and attempts remain: resend
-    /// - If total timeout elapsed: fail, record backoff, send ICMP unreachable
+    /// Called periodically from the tick handler. The lookup state machine
+    /// runs through `node.discovery.attempt_timeouts_secs` (default
+    /// `[1, 2, 4, 8]`): each entry is the deadline for one attempt. When the
+    /// current attempt's deadline elapses:
+    /// - If more entries remain: send the next attempt with a fresh
+    ///   `request_id`.
+    /// - Otherwise: declare the destination unreachable, drop queued packets,
+    ///   and emit ICMPv6 destination-unreachable for each.
     pub(in crate::node) async fn check_pending_lookups(&mut self, now_ms: u64) {
-        let timeout_ms = self.config.node.discovery.timeout_secs * 1000;
-        let retry_ms = self.config.node.discovery.retry_interval_secs * 1000;
+        let timeouts = self.config.node.discovery.attempt_timeouts_secs.clone();
+        let max_attempts = timeouts.len() as u8;
 
         // Collect targets needing action
         let mut to_retry: Vec<NodeAddr> = Vec::new();
         let mut to_timeout: Vec<NodeAddr> = Vec::new();
 
         for (&target, entry) in &self.pending_lookups {
-            let age = now_ms.saturating_sub(entry.initiated_ms);
-            if age >= timeout_ms {
-                to_timeout.push(target);
-            } else if entry.attempt < self.config.node.discovery.max_attempts
-                && now_ms.saturating_sub(entry.last_sent_ms) >= retry_ms
-            {
-                to_retry.push(target);
+            let attempt_idx = (entry.attempt as usize).saturating_sub(1);
+            let attempt_timeout_ms = timeouts.get(attempt_idx).copied().unwrap_or(0) * 1000;
+            if now_ms.saturating_sub(entry.last_sent_ms) >= attempt_timeout_ms {
+                if entry.attempt >= max_attempts {
+                    to_timeout.push(target);
+                } else {
+                    to_retry.push(target);
+                }
             }
         }
 
@@ -556,7 +557,7 @@ impl Node {
             self.stats_mut().discovery.resp_timed_out += 1;
             self.pending_lookups.remove(&addr);
 
-            // Record failure for backoff
+            // Record failure for optional backoff
             self.discovery_backoff.record_failure(&addr);
             let failures = self.discovery_backoff.failure_count(&addr);
 

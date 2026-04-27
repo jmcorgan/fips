@@ -400,10 +400,14 @@ Ethernet, Tor, and Bluetooth (BLE) with a small live mesh of deployed nodes.
 - Reproducible builds with toolchain pinning and SOURCE_DATE_EPOCH
 - Linux (Debian, systemd tarball, OpenWrt, AUR), macOS (`.pkg`), and Windows (ZIP, service) packaging
 - Docker-based integration and chaos testing
+- Nostr-mediated overlay endpoint discovery and UDP hole punching for
+  NAT traversal — peers publish endpoint adverts on public Nostr
+  relays, exchange candidates via NIP-59 gift-wrapped offers/answers,
+  and establish direct paths through NATs using STUN-assisted
+  punching (behind the `nostr-discovery` cargo feature)
 
 ### Near-term priorities
 
-- Peer discovery via Nostr relays (bootstrap without static peer lists)
 - Native API for FIPS-aware applications (npub:port addressing)
 - Security audit of cryptographic protocols
 

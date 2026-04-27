@@ -7,7 +7,8 @@ pub mod bloom;
 pub mod cache;
 pub mod config;
 pub mod control;
-#[cfg(feature = "gateway")]
+pub mod discovery;
+#[cfg(target_os = "linux")]
 pub mod gateway;
 pub mod identity;
 pub mod mmp;
@@ -30,6 +31,9 @@ pub use identity::{
 // Re-export config types
 pub use config::{Config, ConfigError, IdentityConfig, TorConfig, UdpConfig};
 pub use upper::config::{DnsConfig, TunConfig};
+
+// Re-export discovery types
+pub use discovery::{BootstrapHandoffResult, EstablishedTraversal};
 
 // Re-export tree types
 pub use tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};

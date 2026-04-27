@@ -116,6 +116,29 @@ with v0.2.x peers.
   forwarding, proxy NDP, RA route advertisements, and IPv6 forwarding
   sysctls. Gateway enabled by default on OpenWrt
 
+#### Nostr-Mediated Discovery and NAT Traversal
+
+- Optional overlay-discovery and NAT-hole-punching path behind the
+  `nostr-discovery` cargo feature. Nodes publish signed overlay adverts
+  as Nostr kind `37195` parameterized replaceable events listing
+  reachable transport endpoints to a configurable set of public relays,
+  and consume peer adverts to populate fallback addresses for
+  `via_nostr` peers or, under `policy: open`, for non-configured peers
+  within a budget cap. The kind value is FIPS-specific: `37195` sits in
+  the application-defined replaceable range `30000–39999`, and the
+  digits visually spell `FIPS` (7=F, 1=I, 9=P, 5=S)
+- STUN-assisted UDP hole punching for `addr: "nat"` UDP endpoints. STUN
+  reflexive observation, gift-wrap (NIP-59) offer/answer signaling, and
+  candidate-pair punch planner (LAN-private + reflexive paths attempted in
+  parallel). Successful punches hand the live socket into the standard
+  FIPS UDP transport via a bootstrap-handoff API
+- New `node.discovery.nostr.*` configuration tree with operator-tunable
+  resource caps, replay tracking, and punch timing; new `peers[].via_nostr`
+  and per-transport `advertise_on_nostr` / `public` flags. Cross-field
+  validation at startup catches mis-configured combinations
+- Docker NAT lab covering cone, symmetric (TCP-fallback), and LAN
+  scenarios, wired into the integration CI matrix
+
 #### Examples
 
 - macOS WireGuard sidecar: run FIPS in a local Docker container and
@@ -214,6 +237,26 @@ with v0.2.x peers.
   updated. In-tree `fipstop` is adjusted to the new schema. The
   control socket interface is still pre-1.0 and not covered by
   stability guarantees
+- Discovery rate limiting retuned to be less aggressive at cold start.
+  The previous defaults (30s base post-failure suppression, doubling
+  to a 300s cap, with reset only on parent change / new peer / first
+  RTT / reconnection) reliably outlasted initial mesh convergence: a
+  single timed-out lookup during bloom-filter propagation suppressed
+  any retry for 30s while none of the reset triggers fired on a
+  stable post-handshake topology. The suppression window dictated
+  effective time-to-converge instead of bounding repeat traffic.
+  Replaces the single-lookup-with-internal-retry model
+  (`timeout_secs`/`retry_interval_secs`/`max_attempts`) with a
+  per-attempt timeout sequence in
+  `node.discovery.attempt_timeouts_secs` (default `[1, 2, 4, 8]`).
+  Each attempt sends a fresh `LookupRequest` with a new `request_id`,
+  which lets successive attempts take different forwarding paths as
+  the bloom and tree state evolve. The destination is declared
+  unreachable only after the full sequence is exhausted (15s total
+  at the default). Disables post-failure suppression by default
+  (`backoff_base_secs`/`backoff_max_secs` now both `0`); operators
+  with chatty apps generating repeat lookups against unreachable
+  destinations can opt back in
 - Validate bloom filter fill ratio on FilterAnnounce ingress.
   Inbound FilterAnnounce messages whose derived false-positive
   rate exceeds `node.bloom.max_inbound_fpr` (new config field,
