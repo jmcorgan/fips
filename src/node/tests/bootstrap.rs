@@ -3,12 +3,11 @@
 use super::*;
 use crate::EstablishedTraversal;
 use crate::config::UdpConfig;
-use crate::node::wire::{PHASE_MSG1, PHASE_MSG2};
+use crate::node::wire::{PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
 use crate::transport::udp::UdpTransport;
 use crate::utils::index::IndexAllocator;
 use tokio::time::{Duration, timeout, timeout_at};
 
-#[ignore = "needs XX-handshake adaptation: peer promotion now happens at msg3, not msg1; test runs only two rx_loop iterations"]
 #[tokio::test]
 async fn test_adopted_udp_traversal_completes_handshake() {
     let mut node_a = make_node();
@@ -47,19 +46,35 @@ async fn test_adopted_udp_traversal_completes_handshake() {
     assert_eq!(result.remote_addr, addr_b);
     assert!(node_a.get_transport(&result.transport_id).is_some());
 
-    tokio::select! {
-        result = node_b.run_rx_loop() => {
-            panic!("node_b rx loop exited unexpectedly: {:?}", result);
-        }
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
+    // XX three-way handshake (drive directly so the cancellation pattern
+    // doesn't strand `packet_rx` after one rx_loop iteration).
+    //   1. node_a (initiator) sent msg1 in adopt_established_traversal
+    //   2. node_b receives msg1, generates msg2 (reveals node_b identity)
+    //   3. node_a receives msg2, generates msg3 (reveals node_a identity)
+    //   4. node_b receives msg3, promotes node_a as peer
+    let mut rx_a = node_a.packet_rx.take().expect("node_a packet_rx");
+    let mut rx_b = node_b.packet_rx.take().expect("node_b packet_rx");
 
-    tokio::select! {
-        result = node_a.run_rx_loop() => {
-            panic!("node_a rx loop exited unexpectedly: {:?}", result);
-        }
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
+    let pkt_at_b = timeout(Duration::from_secs(1), rx_b.recv())
+        .await
+        .expect("timeout waiting for node_a -> node_b msg1")
+        .expect("node_b channel closed");
+    assert_eq!(pkt_at_b.data[0] & 0x0f, PHASE_MSG1);
+    node_b.handle_msg1(pkt_at_b).await;
+
+    let pkt_at_a = timeout(Duration::from_secs(1), rx_a.recv())
+        .await
+        .expect("timeout waiting for node_b -> node_a msg2")
+        .expect("node_a channel closed");
+    assert_eq!(pkt_at_a.data[0] & 0x0f, PHASE_MSG2);
+    node_a.handle_msg2(pkt_at_a).await;
+
+    let pkt_at_b = timeout(Duration::from_secs(1), rx_b.recv())
+        .await
+        .expect("timeout waiting for node_a -> node_b msg3")
+        .expect("node_b channel closed");
+    assert_eq!(pkt_at_b.data[0] & 0x0f, PHASE_MSG3);
+    node_b.handle_msg3(pkt_at_b).await;
 
     let peer_a_node_addr =
         *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full()).node_addr();
@@ -69,12 +84,12 @@ async fn test_adopted_udp_traversal_completes_handshake() {
     assert_eq!(
         node_a.peer_count(),
         1,
-        "node_a should promote node_b after handoff"
+        "node_a should promote node_b after receiving msg2"
     );
     assert_eq!(
         node_b.peer_count(),
         1,
-        "node_b should promote node_a after receiving msg1"
+        "node_b should promote node_a after receiving msg3"
     );
     assert!(node_a.get_peer(&peer_b_node_addr).unwrap().has_session());
     assert!(node_b.get_peer(&peer_a_node_addr).unwrap().has_session());
@@ -117,7 +132,6 @@ async fn test_failed_adopted_traversal_cleans_up_transport() {
     );
 }
 
-#[ignore = "needs XX-handshake adaptation: peer promotion now happens at msg3, not msg1; test runs only two rx_loop iterations"]
 #[tokio::test]
 async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
     let mut node_a = make_node(); // Existing traversal peer (Alice)
@@ -179,6 +193,15 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
     assert_eq!(pkt_at_b.data[0] & 0x0f, PHASE_MSG2);
     node_b.handle_msg2(pkt_at_b).await;
 
+    // XX msg3: Bob (initiator of Alice/Bob sub-handshake) sent msg3 in
+    // response to msg2; Alice receives it and promotes Bob.
+    let pkt_at_a = timeout(Duration::from_secs(1), rx_a.recv())
+        .await
+        .expect("timeout waiting for Bob->Alice msg3")
+        .expect("node_a channel closed");
+    assert_eq!(pkt_at_a.data[0] & 0x0f, PHASE_MSG3);
+    node_a.handle_msg3(pkt_at_a).await;
+
     let node_a_addr = *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full()).node_addr();
     assert!(
         node_b.get_peer(&node_a_addr).is_some(),
@@ -228,6 +251,22 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
         }
     };
     node_c.handle_msg2(pkt_at_c).await;
+
+    // XX msg3: node_c (initiator) sent msg3 in response to msg2.
+    // node_b receives msg3 and promotes node_c.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let pkt_at_b = loop {
+        let pkt = timeout_at(deadline, rx_b.recv())
+            .await
+            .expect("timeout waiting for Colin->Bob msg3")
+            .expect("node_b channel closed");
+        if pkt.remote_addr.as_str() == Some(&addr_c.to_string())
+            && pkt.data.first().map(|b| b & 0x0f) == Some(PHASE_MSG3)
+        {
+            break pkt;
+        }
+    };
+    node_b.handle_msg3(pkt_at_b).await;
 
     let node_c_addr = *PeerIdentity::from_pubkey_full(node_c.identity.pubkey_full()).node_addr();
     assert!(
