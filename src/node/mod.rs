@@ -982,6 +982,26 @@ impl Node {
             transports.push(TransportHandle::Tor(tor));
         }
 
+        // Create Nym transport instances
+        let nym_instances: Vec<_> = self
+            .config()
+            .transports
+            .nym
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+
+        for (name, nym_config) in nym_instances {
+            let transport_id = self.allocate_transport_id();
+            let nym = crate::transport::nym::NymTransport::new(
+                transport_id,
+                name,
+                nym_config,
+                packet_tx.clone(),
+            );
+            transports.push(TransportHandle::Nym(nym));
+        }
+
         // Create BLE transport instances
         #[cfg(bluer_available)]
         {

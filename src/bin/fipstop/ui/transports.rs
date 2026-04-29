@@ -478,6 +478,30 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
                     &helpers::nested_u64(t, "stats", "connect_refused"),
                 ));
             }
+            "nym" => {
+                lines.push(helpers::kv_line(
+                    "MTU Exceeded",
+                    &helpers::nested_u64(t, "stats", "mtu_exceeded"),
+                ));
+                lines.push(helpers::kv_line(
+                    "SOCKS5 Errors",
+                    &helpers::nested_u64(t, "stats", "socks5_errors"),
+                ));
+                lines.push(Line::from(""));
+                lines.push(helpers::section_header("Connections"));
+                lines.push(helpers::kv_line(
+                    "Established",
+                    &helpers::nested_u64(t, "stats", "connections_established"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Timeouts",
+                    &helpers::nested_u64(t, "stats", "connect_timeouts"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Refused",
+                    &helpers::nested_u64(t, "stats", "connect_refused"),
+                ));
+            }
             "ethernet" => {
                 lines.push(Line::from(""));
                 lines.push(helpers::section_header("Beacons"));
