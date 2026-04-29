@@ -10,6 +10,7 @@ mod socket;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
+use crate::discovery::is_punch_packet;
 use socket::{AsyncUdpSocket, UdpRawSocket};
 use stats::UdpStats;
 use std::collections::HashMap;
@@ -408,6 +409,22 @@ async fn udp_receive_loop(
                 stats.record_recv(len);
                 stats.set_kernel_drops(kernel_drops as u64);
 
+                // Drop stray punch probes / acks. After bootstrap-handoff
+                // adopts a socket, the remote side may keep retrying its
+                // own punch attempt for several seconds; those probes
+                // arrive here and would otherwise be parsed as FMP frames
+                // (their first byte 0x4E has high-nibble 0x4 → bogus
+                // "FMP version 4" warnings).
+                if is_punch_packet(&buf[..len]) {
+                    trace!(
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        bytes = len,
+                        "Dropping stray punch probe/ack on UDP transport"
+                    );
+                    continue;
+                }
+
                 let data = buf[..len].to_vec();
                 let addr = TransportAddr::from_string(&remote_addr.to_string());
                 let packet = ReceivedPacket::new(transport_id, addr, data);
@@ -686,6 +703,64 @@ mod tests {
         // Before start, congestion should still report (from stats)
         let cong = transport.congestion();
         assert_eq!(cong.recv_drops, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_punch_probe_dropped() {
+        let (tx_recv, mut rx_recv) = packet_channel(100);
+        let (tx_send, _rx_send) = packet_channel(100);
+
+        let mut t_recv = UdpTransport::new(TransportId::new(1), None, make_config(0), tx_recv);
+        let mut t_send = UdpTransport::new(TransportId::new(2), None, make_config(0), tx_send);
+
+        t_recv.start_async().await.unwrap();
+        t_send.start_async().await.unwrap();
+
+        let recv_addr = t_recv.local_addr().unwrap();
+        let recv_addr_str = TransportAddr::from_string(&recv_addr.to_string());
+
+        // Probe (PUNCH_MAGIC = "NPTC", be) followed by sequence + payload.
+        let mut probe = vec![0u8; 16];
+        probe[..4].copy_from_slice(&0x4E505443u32.to_be_bytes());
+        t_send.send_async(&recv_addr_str, &probe).await.unwrap();
+
+        // Ack (PUNCH_ACK_MAGIC = "NPTA", be).
+        let mut ack = vec![0u8; 16];
+        ack[..4].copy_from_slice(&0x4E505441u32.to_be_bytes());
+        t_send.send_async(&recv_addr_str, &ack).await.unwrap();
+
+        // A real (non-punch) packet must still arrive.
+        let real = b"valid-fmp-frame";
+        t_send.send_async(&recv_addr_str, real).await.unwrap();
+
+        // First message read should be the real one — punch probe + ack
+        // both filtered silently.
+        let packet = timeout(Duration::from_secs(1), rx_recv.recv())
+            .await
+            .expect("timeout waiting for real packet")
+            .expect("channel closed");
+        assert_eq!(packet.data, real);
+
+        // No further packets should be queued (probe + ack dropped).
+        let no_more = timeout(Duration::from_millis(200), rx_recv.recv()).await;
+        assert!(no_more.is_err(), "punch probe/ack leaked through filter");
+
+        t_recv.stop_async().await.unwrap();
+        t_send.stop_async().await.unwrap();
+    }
+
+    #[test]
+    fn test_is_punch_packet_helper() {
+        use crate::discovery::is_punch_packet;
+        // PUNCH_MAGIC ("NPTC", be)
+        assert!(is_punch_packet(&[0x4E, 0x50, 0x54, 0x43, 0xAA, 0xBB]));
+        // PUNCH_ACK_MAGIC ("NPTA", be)
+        assert!(is_punch_packet(&[0x4E, 0x50, 0x54, 0x41]));
+        // Non-magic packet
+        assert!(!is_punch_packet(&[0x01, 0x02, 0x03, 0x04]));
+        // Too short
+        assert!(!is_punch_packet(&[0x4E, 0x50, 0x54]));
+        assert!(!is_punch_packet(&[]));
     }
 
     #[tokio::test]

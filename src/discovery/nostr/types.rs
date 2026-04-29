@@ -6,8 +6,9 @@ pub const ADVERT_KIND: u16 = 37195;
 pub const ADVERT_IDENTIFIER: &str = "fips-overlay-v1";
 pub const ADVERT_VERSION: u32 = 1;
 pub const SIGNAL_KIND: u16 = 21059;
-pub const PUNCH_MAGIC: u32 = 0x4E505443;
-pub const PUNCH_ACK_MAGIC: u32 = 0x4E505441;
+// Re-exported from `crate::discovery` so the UDP transport's stray-probe
+// filter compiles regardless of the `nostr-discovery` cargo feature.
+pub use crate::discovery::{PUNCH_ACK_MAGIC, PUNCH_MAGIC};
 pub const PROTOCOL_VERSION: &str = "1";
 
 #[derive(Debug, thiserror::Error)]

@@ -13,6 +13,30 @@ use crate::config::UdpConfig;
 use crate::{NodeAddr, TransportId};
 use std::net::{SocketAddr, UdpSocket};
 
+/// Punch-probe magic ("NPTC", network byte order). First byte `0x4E`
+/// collides with FMP's prefix-version high-nibble check, so the UDP
+/// transport silently filters packets carrying this magic to keep
+/// post-adoption handshake logs clean. Defined here (unconditionally
+/// compiled) rather than inside the `nostr-discovery`-gated submodule so
+/// the filter applies regardless of feature configuration.
+pub const PUNCH_MAGIC: u32 = 0x4E505443;
+
+/// Punch-probe-ack magic ("NPTA", network byte order). Same filter as
+/// [`PUNCH_MAGIC`].
+pub const PUNCH_ACK_MAGIC: u32 = 0x4E505441;
+
+/// Returns `true` if the first four bytes of `data` match a punch-probe or
+/// punch-ack magic. Used by the UDP transport's receive loop to silently
+/// drop stray probes that arrive on an adopted socket after the remote
+/// peer's punch attempt has already timed out.
+pub fn is_punch_packet(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    magic == PUNCH_MAGIC || magic == PUNCH_ACK_MAGIC
+}
+
 /// Result of handing an established traversal session into FIPS.
 #[derive(Debug, Clone)]
 pub struct BootstrapHandoffResult {
