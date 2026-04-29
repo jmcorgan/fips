@@ -11,7 +11,14 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_DNS_LISTEN: &str = "[::]:53";
 
 /// Default upstream DNS resolver (FIPS daemon).
-const DEFAULT_DNS_UPSTREAM: &str = "127.0.0.1:5354";
+///
+/// Must match the daemon's `dns.bind_addr` default (`::1`). Linux
+/// IPv6 sockets bound to explicit `::1` do not accept v4-mapped
+/// traffic — so a v4 upstream like `127.0.0.1:5354` cannot reach a
+/// daemon bound on `[::1]:5354`. Operators who set a non-default
+/// `dns.bind_addr` on the daemon must also set this field
+/// accordingly.
+const DEFAULT_DNS_UPSTREAM: &str = "[::1]:5354";
 
 /// Default DNS TTL in seconds.
 const DEFAULT_DNS_TTL: u32 = 60;
@@ -115,7 +122,8 @@ pub struct GatewayDnsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
 
-    /// Upstream FIPS daemon DNS resolver (default: `127.0.0.1:5354`).
+    /// Upstream FIPS daemon DNS resolver (default: `[::1]:5354`,
+    /// matching the daemon's `dns.bind_addr` default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<String>,
 
@@ -130,7 +138,7 @@ impl GatewayDnsConfig {
         self.listen.as_deref().unwrap_or(DEFAULT_DNS_LISTEN)
     }
 
-    /// Get the upstream resolver address (default: `127.0.0.1:5354`).
+    /// Get the upstream resolver address (default: `[::1]:5354`).
     pub fn upstream(&self) -> &str {
         self.upstream.as_deref().unwrap_or(DEFAULT_DNS_UPSTREAM)
     }
@@ -198,7 +206,7 @@ lan_interface: "eth0"
         assert_eq!(config.pool, "fd01::/112");
         assert_eq!(config.lan_interface, "eth0");
         assert_eq!(config.dns.listen(), "[::]:53");
-        assert_eq!(config.dns.upstream(), "127.0.0.1:5354");
+        assert_eq!(config.dns.upstream(), "[::1]:5354");
         assert_eq!(config.dns.ttl(), 60);
         assert_eq!(config.grace_period(), 60);
         assert_eq!(config.conntrack.tcp_established(), 432_000);

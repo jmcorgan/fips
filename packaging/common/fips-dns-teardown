@@ -7,7 +7,8 @@
 set -e
 
 FIPS_INTERFACE="fips0"
-DNS_DELEGATE_FILE="/etc/systemd/dns-delegate/fips.dns-delegate"
+DNS_DELEGATE_FILE="/etc/systemd/dns-delegate.d/fips.dns-delegate"
+RESOLVED_DROPIN_FILE="/etc/systemd/resolved.conf.d/fips.conf"
 DNSMASQ_CONF="/etc/dnsmasq.d/fips.conf"
 NM_DNSMASQ_CONF="/etc/NetworkManager/dnsmasq.d/fips.conf"
 STATE_FILE="/run/fips/dns-backend"
@@ -35,6 +36,14 @@ teardown_resolvectl() {
     return 0
 }
 
+teardown_global_drop_in() {
+    [ -f "$RESOLVED_DROPIN_FILE" ] || return 0
+    log "Removing global resolved.conf.d drop-in"
+    rm -f "$RESOLVED_DROPIN_FILE"
+    is_active systemd-resolved.service && systemctl restart systemd-resolved || true
+    return 0
+}
+
 teardown_dnsmasq() {
     [ -f "$DNSMASQ_CONF" ] || return 0
     log "Removing dnsmasq config"
@@ -59,14 +68,16 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 case "$backend" in
-    dns-delegate)  teardown_dns_delegate ;;
-    resolvectl)    teardown_resolvectl ;;
-    dnsmasq)       teardown_dnsmasq ;;
-    nm-dnsmasq)    teardown_nm_dnsmasq ;;
-    none)          ;; # Nothing was configured
+    dns-delegate)    teardown_dns_delegate ;;
+    global-drop-in)  teardown_global_drop_in ;;
+    resolvectl)      teardown_resolvectl ;;
+    dnsmasq)         teardown_dnsmasq ;;
+    nm-dnsmasq)      teardown_nm_dnsmasq ;;
+    none)            ;; # Nothing was configured
     *)
         # State unknown — clean up everything
         teardown_dns_delegate
+        teardown_global_drop_in
         teardown_resolvectl
         teardown_dnsmasq
         teardown_nm_dnsmasq

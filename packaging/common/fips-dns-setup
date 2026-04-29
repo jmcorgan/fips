@@ -2,23 +2,34 @@
 # fips-dns-setup — Configure DNS routing for the .fips domain.
 #
 # Detects the system's DNS resolver and configures it to forward .fips
-# queries to the FIPS DNS responder on 127.0.0.1:5354.
+# queries to the FIPS DNS responder on 127.0.0.1:5354 (or [::1]:5354
+# for the global drop-in backend).
 #
 # Backends (tried in order):
 #   1. systemd dns-delegate (systemd >= 258, declarative drop-in)
-#   2. systemd-resolved via resolvectl (most systemd distros)
-#   3. dnsmasq (standalone)
-#   4. NetworkManager with dnsmasq plugin
-#   5. Warning with manual instructions
+#   2. systemd-resolved global drop-in via /etc/systemd/resolved.conf.d/
+#      (preferred for systemd-resolved hosts — DNS=[::1]:5354 routes
+#      via standard loopback with no interface scoping, sidestepping
+#      the IPV6_PKTINFO ifindex behaviour that causes self-destined
+#      traffic to fips0's address to be silently dropped by the
+#      mesh-interface filter)
+#   3. systemd-resolved via per-link resolvectl (legacy fallback —
+#      historically failed silently due to the issue described above;
+#      kept for hosts where the global drop-in is unsuitable)
+#   4. dnsmasq (standalone)
+#   5. NetworkManager with dnsmasq plugin
+#   6. Warning with manual instructions
 
 set -e
 
-FIPS_DNS_ADDR="127.0.0.1"
 FIPS_DNS_PORT="5354"
+FIPS_DNS_LOOPBACK_V6="::1"
 FIPS_INTERFACE="fips0"
 
-DNS_DELEGATE_DIR="/etc/systemd/dns-delegate"
+DNS_DELEGATE_DIR="/etc/systemd/dns-delegate.d"
 DNS_DELEGATE_FILE="${DNS_DELEGATE_DIR}/fips.dns-delegate"
+RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
+RESOLVED_DROPIN_FILE="${RESOLVED_DROPIN_DIR}/fips.conf"
 DNSMASQ_CONF="/etc/dnsmasq.d/fips.conf"
 NM_DNSMASQ_CONF="/etc/NetworkManager/dnsmasq.d/fips.conf"
 
@@ -70,6 +81,11 @@ is_active() {
 }
 
 # Backend 1: systemd dns-delegate (>= 258)
+#
+# Targets [::1]:5354 to match the daemon's default IPv6 loopback
+# bind. v4-targeted DNS= lines do not reach a daemon bound on
+# explicit `::1` (Linux v6 sockets bound to ::1 don't accept
+# v4-mapped traffic).
 try_dns_delegate() {
     local ver
     ver=$(systemd_version)
@@ -81,7 +97,7 @@ try_dns_delegate() {
     mkdir -p "$DNS_DELEGATE_DIR"
     cat > "$DNS_DELEGATE_FILE" <<EOF
 [Delegate]
-DNS=${FIPS_DNS_ADDR}:${FIPS_DNS_PORT}
+DNS=[${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT}
 Domains=fips
 EOF
     systemctl restart systemd-resolved
@@ -89,14 +105,53 @@ EOF
     return 0
 }
 
-# Backend 2: resolvectl
+# Backend 2: systemd-resolved global drop-in (preferred for systemd-resolved hosts)
+#
+# Writes /etc/systemd/resolved.conf.d/fips.conf with DNS=[::1]:5354 and
+# Domains=~fips. systemd-resolved routes the .fips zone via standard
+# loopback (no per-link interface scoping), which sidesteps two issues:
+#
+#   - Ubuntu 22 (systemd 249) interface-scoped routing of per-link DNS
+#     servers, which would otherwise cause `resolvectl dns fips0
+#     127.0.0.1:5354` to route through fips0 and fail.
+#   - The IPV6_PKTINFO ifindex attribution behaviour where Linux reports
+#     a packet to fips0's own IPv6 address as arriving on fips0 (despite
+#     loopback delivery), which would otherwise be silently dropped by
+#     the daemon's mesh-interface filter — see ISSUE-2026-0002 in the
+#     project tracker.
+#
+# This backend is the recommended path on every systemd-resolved host
+# that doesn't have native dns-delegate support (systemd >= 258).
+try_global_drop_in() {
+    is_active systemd-resolved.service || return 1
+
+    log "Configuring via global resolved.conf.d drop-in (DNS=[${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT})"
+    mkdir -p "$RESOLVED_DROPIN_DIR"
+    cat > "$RESOLVED_DROPIN_FILE" <<EOF
+# Managed by fips-dns.service (fips-dns-setup, global-drop-in backend).
+# Routes .fips queries to the fips daemon's local DNS responder.
+[Resolve]
+DNS=[${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT}
+Domains=~fips
+EOF
+    systemctl restart systemd-resolved \
+        || log "WARNING: systemd-resolved restart failed (config written, may need manual reload)"
+    save_backend "global-drop-in"
+    return 0
+}
+
+# Backend 3: resolvectl (legacy fallback)
 #
 # systemd-resolved applies interface-scoped routing to per-link DNS servers.
 # On Ubuntu 22 (systemd 249), configuring `resolvectl dns fips0 127.0.0.1:5354`
 # causes resolved to route the DNS query through fips0 and fail (127.0.0.1 is
-# not reachable via a TUN with only fd00::/8 routes). We must use fips0's own
-# global IPv6 address, which is locally delivered by the kernel regardless of
-# which interface resolved tries to route through.
+# not reachable via a TUN with only fd00::/8 routes). Using fips0's own global
+# IPv6 address (locally delivered by the kernel) sidesteps that — but on hosts
+# where the daemon binds wildcard `::`, IPV6_PKTINFO reports `ipi6_ifindex ==
+# fips0` for those packets and the daemon's mesh-interface filter drops every
+# query silently. The global-drop-in backend above avoids both issues; this
+# resolvectl path is retained only as a fallback for environments where the
+# global drop-in is unsuitable.
 try_resolvectl() {
     command -v resolvectl >/dev/null 2>&1 || return 1
     is_active systemd-resolved.service || return 1
@@ -115,7 +170,11 @@ try_resolvectl() {
     return 0
 }
 
-# Backend 3: standalone dnsmasq
+# Backend 4: standalone dnsmasq
+#
+# dnsmasq's `server=/<domain>/<addr>#<port>` syntax accepts an IPv6
+# literal directly (no brackets). Targets ::1#5354 to match the
+# daemon's default IPv6 loopback bind.
 try_dnsmasq() {
     is_active dnsmasq.service || return 1
     [ -d /etc/dnsmasq.d ] || return 1
@@ -123,14 +182,14 @@ try_dnsmasq() {
     log "Configuring via dnsmasq"
     cat > "$DNSMASQ_CONF" <<EOF
 # FIPS .fips domain forwarding (managed by fips-dns.service)
-server=/fips/${FIPS_DNS_ADDR}#${FIPS_DNS_PORT}
+server=/fips/${FIPS_DNS_LOOPBACK_V6}#${FIPS_DNS_PORT}
 EOF
     systemctl reload dnsmasq || log "WARNING: dnsmasq reload failed (config written, may need manual reload)"
     save_backend "dnsmasq"
     return 0
 }
 
-# Backend 4: NetworkManager with dnsmasq plugin
+# Backend 5: NetworkManager with dnsmasq plugin
 try_nm_dnsmasq() {
     is_active NetworkManager.service || return 1
 
@@ -144,7 +203,7 @@ try_nm_dnsmasq() {
     log "Configuring via NetworkManager dnsmasq plugin"
     cat > "$NM_DNSMASQ_CONF" <<EOF
 # FIPS .fips domain forwarding (managed by fips-dns.service)
-server=/fips/${FIPS_DNS_ADDR}#${FIPS_DNS_PORT}
+server=/fips/${FIPS_DNS_LOOPBACK_V6}#${FIPS_DNS_PORT}
 EOF
     nmcli general reload || log "WARNING: NetworkManager reload failed (config written, may need manual reload)"
     save_backend "nm-dnsmasq"
@@ -156,16 +215,17 @@ EOF
 wait_for_interface || exit 1
 
 try_dns_delegate && exit 0
+try_global_drop_in && exit 0
 try_resolvectl && exit 0
 try_dnsmasq && exit 0
 try_nm_dnsmasq && exit 0
 
 log "WARNING: No supported DNS resolver detected."
 log "To resolve .fips domains, configure your DNS resolver to forward"
-log "the .fips domain to ${FIPS_DNS_ADDR} port ${FIPS_DNS_PORT}."
+log "the .fips domain to [${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT} (matches the daemon's default bind)."
 log ""
 log "Examples:"
 log "  systemd-resolved: sudo apt install systemd-resolved"
-log "  dnsmasq:          echo 'server=/fips/${FIPS_DNS_ADDR}#${FIPS_DNS_PORT}' | sudo tee /etc/dnsmasq.d/fips.conf"
+log "  dnsmasq:          echo 'server=/fips/${FIPS_DNS_LOOPBACK_V6}#${FIPS_DNS_PORT}' | sudo tee /etc/dnsmasq.d/fips.conf"
 save_backend "none"
 exit 0

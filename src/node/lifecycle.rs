@@ -694,14 +694,20 @@ impl Node {
 
         // Initialize DNS responder (independent of TUN).
         //
-        // The default bind_addr is "::" (all interfaces, dual-stack). This
-        // matters on Ubuntu 22 (systemd 249): systemd-resolved applies
-        // interface-scoped routing to per-link DNS servers — when resolvectl
-        // points fips0 at an address, resolved tries to reach it through
-        // fips0. Binding to "::" ensures the responder is reachable via fips0
-        // as well as loopback (v4 and v6). `IPV6_V6ONLY=0` is set explicitly
-        // so IPv4 clients on 127.0.0.1 still reach us regardless of kernel
-        // sysctl defaults.
+        // Default bind_addr is "::1" (IPv6 loopback). The shipped
+        // fips-dns-setup configures systemd-resolved via a global
+        // /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
+        // [::1]:5354, which sidesteps a Linux IPV6_PKTINFO behaviour
+        // where self-destined traffic to fips0's address is attributed
+        // to fips0 in PKTINFO and gets silently dropped by the
+        // mesh-interface filter in src/upper/dns.rs.
+        //
+        // For mesh-reachable resolution (rare), set bind_addr: "::"
+        // in fips.yaml. The mesh-interface filter remains active to
+        // prevent hosts-file alias enumeration in that mode.
+        // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
+        // 127.0.0.1 still reach us regardless of kernel sysctl
+        // defaults — but only when bind is on a wildcard / IPv6 path.
         if self.config.dns.enabled {
             let addr_str = self.config.dns.bind_addr();
             match addr_str.parse::<std::net::IpAddr>() {

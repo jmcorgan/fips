@@ -13,10 +13,18 @@ const DEFAULT_TUN_MTU: u16 = 1280;
 
 /// Default DNS responder bind address.
 ///
-/// Binds to all interfaces so systemd-resolved (configured per-interface
-/// on fips0) can reach the responder regardless of interface scoping.
-/// See `packaging/common/fips-dns-setup` for how resolvectl is configured.
-const DEFAULT_DNS_BIND_ADDR: &str = "::";
+/// Loopback by default. The shipped `fips-dns-setup` configures
+/// systemd-resolved with a global drop-in pointing at `[::1]:5354`
+/// (instead of a per-link `resolvectl dns fips0 [<fips0_addr>]:5354`),
+/// which avoids a Linux IPV6_PKTINFO behaviour where self-destined
+/// traffic to a TUN address is attributed to the TUN's ifindex —
+/// causing the mesh-interface filter to silently drop every query.
+///
+/// To expose the responder to mesh peers, set `bind_addr: "::"` in
+/// fips.yaml. The `is_mesh_interface_query` filter in `src/upper/dns.rs`
+/// is still in place to prevent hosts-file alias enumeration in that
+/// mode. See `packaging/common/fips-dns-setup` for backend selection.
+const DEFAULT_DNS_BIND_ADDR: &str = "::1";
 
 /// Default DNS responder port.
 const DEFAULT_DNS_PORT: u16 = 5354;
@@ -60,7 +68,7 @@ impl Default for DnsConfig {
 }
 
 impl DnsConfig {
-    /// Get the bind address (default: `::`, all interfaces).
+    /// Get the bind address (default: `::1`, IPv6 loopback only).
     pub fn bind_addr(&self) -> &str {
         self.bind_addr.as_deref().unwrap_or(DEFAULT_DNS_BIND_ADDR)
     }

@@ -23,8 +23,15 @@ tun:
 
 dns:
   enabled: true
-  # bind_addr defaults to "::" (all interfaces, dual-stack).
-  # bind_addr: "::"
+  # bind_addr defaults to "::1" (IPv6 loopback). On OpenWrt, dnsmasq
+  # owns port 53; fips-dns-setup adds a forwarder rule pointing at
+  # 127.0.0.1#5354. Loopback bind is sufficient for that path.
+  #
+  # Set "::" to expose the responder to LAN clients directly (rare —
+  # most installs let dnsmasq forward instead). The mesh-interface
+  # filter in src/upper/dns.rs defends /etc/fips/hosts aliases from
+  # cross-mesh enumeration when bound to a wildcard.
+  # bind_addr: "::1"
   port: 5354
 
 transports:
@@ -79,6 +86,6 @@ gateway:
   lan_interface: "br-lan"       # LAN-facing interface for proxy NDP
   dns:
     listen: "[::1]:5353"        # gateway DNS listener (dnsmasq forwards here)
-    upstream: "127.0.0.1:5354"  # FIPS daemon DNS resolver
+    upstream: "[::1]:5354"      # FIPS daemon DNS resolver (matches daemon default)
     ttl: 60                     # DNS TTL and mapping lifetime (seconds)
   pool_grace_period: 60         # seconds after last session before reclaiming

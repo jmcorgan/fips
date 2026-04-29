@@ -42,10 +42,16 @@ tun:
 
 dns:
   enabled: true
-  # bind_addr defaults to "::" (all interfaces, dual-stack). Required so
-  # systemd-resolved can reach the responder via fips0 when resolvectl
-  # configures per-interface DNS forwarding.
-  # bind_addr: "::"
+  # bind_addr defaults to "::1" (IPv6 loopback). The shipped
+  # fips-dns-setup script configures systemd-resolved with a global
+  # /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
+  # [::1]:5354.
+  #
+  # Set "::" to expose the responder to mesh peers as well (e.g. for
+  # gateway hosts that resolve .fips on behalf of LAN clients). The
+  # mesh-interface filter in src/upper/dns.rs will still defend
+  # /etc/fips/hosts aliases from cross-mesh enumeration.
+  # bind_addr: "::1"
   port: 5354
 
 transports:
@@ -85,7 +91,12 @@ transports:
 #   lan_interface: "eth0"
 #   dns:
 #     listen: "[::]:53"
-#     upstream: "127.0.0.1:5354"
+#     # upstream must match the daemon's dns.bind_addr above. The
+#     # default "[::1]:5354" matches the daemon's default. If you set
+#     # the daemon to bind on a wildcard ("::") or specific address,
+#     # update upstream to match — explicit ::1 sockets do not accept
+#     # v4 traffic.
+#     upstream: "[::1]:5354"
 #     ttl: 60
 #   pool_grace_period: 60
 #   conntrack:
