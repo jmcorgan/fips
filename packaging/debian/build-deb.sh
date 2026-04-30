@@ -66,6 +66,30 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 fi
 
+# Auto-derive a per-commit Debian Version for dev builds so apt-based
+# upgrade detection (`ansible.builtin.apt: deb:`, `apt install ./*.deb`)
+# does not silently no-op when one dev .deb is installed on top of another.
+# Tagged release builds (Cargo.toml version without "-dev") keep the
+# clean upstream version. Operator override via --version still wins.
+if [[ -z "${VERSION_OVERRIDE}" ]]; then
+    CRATE_VERSION=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+    if [[ "${CRATE_VERSION}" == *-dev ]]; then
+        BASE_VERSION="${CRATE_VERSION%-dev}"
+        GIT_DATE=$(git log -1 --format=%cs | tr -d '-')
+        GIT_SHA=$(git rev-parse --short HEAD)
+        DIRTY_SUFFIX=""
+        if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+            DIRTY_SUFFIX=".dirty"
+        fi
+        # Debian Version: <upstream>~dev+git<YYYYMMDD>.<sha>[.dirty]-1
+        # The "~" makes every dev build sort BEFORE the eventual tagged
+        # release; the date+sha makes consecutive dev builds compare as
+        # different versions; the trailing "-1" is the Debian revision.
+        VERSION_OVERRIDE="${BASE_VERSION}~dev+git${GIT_DATE}.${GIT_SHA}${DIRTY_SUFFIX}-1"
+        echo "Auto-derived dev Version: ${VERSION_OVERRIDE}"
+    fi
+fi
+
 # Build the .deb package
 echo "Building .deb package..."
 OUTPUT_DIR="$(mktemp -d)"

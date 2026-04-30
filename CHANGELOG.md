@@ -85,6 +85,15 @@ with v0.2.x peers.
 
 ### Added
 
+#### Security
+
+- Mesh-interface nftables baseline (Linux). Ships `/etc/fips/fips.nft`
+  as a documented operator conffile and `fips-firewall.service`
+  (disabled by default) for default-deny inbound on the `fips0` mesh
+  interface. Operators enable explicitly with
+  `systemctl enable --now fips-firewall.service`. Drop-ins in
+  `/etc/fips/fips.d/*.nft`. See `docs/fips-security.md`.
+
 #### Platform Support
 
 - Windows platform support: wintun TUN device, TCP control socket on
@@ -214,9 +223,65 @@ with v0.2.x peers.
   (development) packages with sysusers.d/tmpfiles.d integration
   ([#21](https://github.com/jmcorgan/fips/pull/21),
   [@dskvr](https://github.com/dskvr))
+- `transports.udp.outbound_only` (default `false`). When true, the UDP
+  transport binds a kernel-assigned ephemeral port (`0.0.0.0:0`) instead
+  of the configured `bind_addr`, refuses inbound handshakes, and is
+  never advertised on Nostr regardless of `advertise_on_nostr`. Use
+  this to participate in the mesh as a pure client — initiate outbound
+  links without exposing an inbound listener on a known port.
+  Implements the long-form fix for `udp.bind_addr: "127.0.0.1:..."`
+  not actually working as a workaround (Linux pins the loopback source
+  IP, dropping outbound flows to external peers at the routing layer)
+- `transports.udp.accept_connections` (default `true`). Mirrors the
+  Ethernet/BLE knob; setting to `false` produces a "client" posture
+  (initiate outbound, refuse inbound msg1 from new addresses). The
+  Node-level handshake gate carves out msg1 from peers already
+  established on this transport so rekey continues to work
+  (ISSUE-2026-0004). Affects every transport via the `Transport` trait
+- Startup validation now rejects `transports.udp[*].bind_addr` set to a
+  loopback address when at least one peer has a non-loopback UDP
+  address. Replaces the silent "peer link won't establish" failure
+  mode where Linux's source-address routing check dropped outbound
+  flows from the loopback-bound socket. `outbound_only: true` is
+  exempt from the check (it overrides `bind_addr` to `0.0.0.0:0`)
+- `fips-gateway` DNS upstream probe now retries up to 5 times with a
+  1-second per-attempt timeout and a 1-second delay between attempts
+  (~10 second worst-case wait), instead of a single 3-second hard-fail.
+  Covers the cold-boot race where the daemon's TUN is up (the systemd
+  ExecStartPre wait gates on that) but the DNS responder is still
+  binding `[::1]:5354`. Without retry the gateway exited and relied on
+  `Restart=on-failure` for recovery (5-second blip + spurious error
+  log line per cycle); with retry the gateway recovers gracefully
+  without a unit restart
+- `packaging/debian/fips-gateway.service` now waits up to 30 seconds
+  for the daemon's `fips0` TUN to appear before exec'ing the gateway
+  binary (`ExecStartPre` poll loop). Eliminates the cold-boot race
+  where `fips-gateway` exits with `fips0 interface not found` and
+  recovers via `Restart=on-failure`, producing a 5-second blip and a
+  spurious error log line per restart cycle. If `fips0` never appears
+  within 30 seconds, the existing error path runs as before
+- `packaging/debian/build-deb.sh` now auto-derives a per-commit Debian
+  Version field for dev builds (Cargo.toml version ending in `-dev`)
+  using the form `<base>~dev+git<YYYYMMDD>.<sha>[.dirty]-1`, e.g.
+  `0.3.0~dev+git20260429.6def31b-1`. Each commit produces a uniquely-
+  comparable Version string so `apt install ./*.deb` and
+  `ansible.builtin.apt: deb:` no longer silently no-op when one dev
+  build is installed on top of another. The `~dev` marker sorts
+  pre-`0.3.0` so a tagged release supersedes any prior dev .deb.
+  Tagged release builds (no `-dev` in Cargo.toml) keep the clean
+  `<version>-1` form. Operator override via `--version` still wins
 
 ### Changed
 
+- Nostr-mediated overlay discovery is now always-on. The
+  `nostr-discovery` cargo feature flag has been dropped along with the
+  `optional = true` markers on `nostr` / `nostr-sdk` dependencies and
+  every `#[cfg(feature = "nostr-discovery")]` source-level gate. Plain
+  `cargo build` produces a binary with overlay discovery available
+  whether or not the operator enables it via
+  `node.discovery.nostr.enabled`. Mirrors PR #79's collapse of the
+  `tui` / `ble` / `gateway` features in favor of platform cfg gates.
+  No runtime behavior change — the feature was in `default` already
 - MMP link-layer report intervals retuned for constrained transports:
   steady-state floor raised from 100ms to 1000ms, ceiling from 2000ms
   to 5000ms. Cold-start uses a 200ms floor for the first 5 SRTT samples

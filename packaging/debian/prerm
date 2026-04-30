@@ -9,6 +9,8 @@ case "$1" in
             systemctl disable fips-dns.service 2>/dev/null || true
             systemctl stop fips.service 2>/dev/null || true
             systemctl disable fips.service 2>/dev/null || true
+            systemctl stop fips-firewall.service 2>/dev/null || true
+            systemctl disable fips-firewall.service 2>/dev/null || true
             systemctl daemon-reload
         fi
         ;;

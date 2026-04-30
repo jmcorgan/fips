@@ -20,8 +20,27 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../lib/wait-converge.sh"
-TOPOLOGY="rekey"
+# Selectable topology — defaults to "rekey" but the rekey-accept-off
+# variant exercises the auto_connect-initiator-with-accept-off
+# regression class (udp.accept_connections=false on a peer that
+# also auto-connects).
+TOPOLOGY="${REKEY_TOPOLOGY:-rekey}"
 NODES="a b c d e"
+# Comma-separated list of node IDs to set udp.accept_connections=false
+# on during inject-config. Empty (default) leaves all nodes accepting.
+# When set, also asserted by the test that no sustained "Dual rekey
+# initiation" log lines appear on the affected node.
+REKEY_ACCEPT_OFF_NODES="${REKEY_ACCEPT_OFF_NODES:-}"
+
+# Comma-separated list of node IDs to set udp.outbound_only=true on
+# during inject-config. For each such node, peer addresses are also
+# rewritten from numeric docker IPs to docker hostnames (e.g.
+# 172.20.0.12:2121 → node-c:2121). This reproduces the production
+# scenario where peer configs carry hostnames so the `addr_to_link`
+# key is hostname-form while inbound packet source addrs are numeric,
+# making the should_admit_msg1 carve-out's `addr_to_link.contains_key`
+# check miss.
+REKEY_OUTBOUND_ONLY_NODES="${REKEY_OUTBOUND_ONLY_NODES:-}"
 
 # Rekey timing configuration
 REKEY_AFTER_SECS=35
@@ -30,12 +49,34 @@ REKEY_AFTER_SECS=35
 # Inject rekey config into generated node configs. Called separately
 # by CI before building Docker images.
 if [ "${1:-}" = "inject-config" ]; then
-    echo "Injecting rekey config (after_secs=$REKEY_AFTER_SECS) into node configs..."
+    echo "Injecting rekey config (after_secs=$REKEY_AFTER_SECS) into node configs (topology=$TOPOLOGY)..."
+    if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
+        echo "  Setting udp.accept_connections=false on nodes: $REKEY_ACCEPT_OFF_NODES"
+    fi
+    if [ -n "$REKEY_OUTBOUND_ONLY_NODES" ]; then
+        echo "  Setting udp.outbound_only=true + rewriting peer addrs to docker hostnames on nodes: $REKEY_OUTBOUND_ONLY_NODES"
+    fi
     for node in $NODES; do
         cfg="$SCRIPT_DIR/../generated-configs/$TOPOLOGY/node-$node.yaml"
         if [ ! -f "$cfg" ]; then
             echo "  Error: $cfg not found" >&2
             exit 1
+        fi
+        accept_off="false"
+        if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
+            for off_node in ${REKEY_ACCEPT_OFF_NODES//,/ }; do
+                if [ "$off_node" = "$node" ]; then
+                    accept_off="true"
+                fi
+            done
+        fi
+        outbound_only="false"
+        if [ -n "$REKEY_OUTBOUND_ONLY_NODES" ]; then
+            for oo_node in ${REKEY_OUTBOUND_ONLY_NODES//,/ }; do
+                if [ "$oo_node" = "$node" ]; then
+                    outbound_only="true"
+                fi
+            done
         fi
         python3 -c "
 import yaml
@@ -46,10 +87,56 @@ cfg.setdefault('node', {})['rekey'] = {
     'after_secs': $REKEY_AFTER_SECS,
     'after_messages': 65536,
 }
+if '$accept_off' == 'true':
+    transports = cfg.setdefault('transports', {})
+    udp = transports.get('udp')
+    if udp is None:
+        udp = {'bind_addr': '0.0.0.0:2121'}
+        transports['udp'] = udp
+    if isinstance(udp, dict):
+        udp['accept_connections'] = False
+if '$outbound_only' == 'true':
+    transports = cfg.setdefault('transports', {})
+    udp = transports.get('udp')
+    if udp is None:
+        udp = {}
+        transports['udp'] = udp
+    if isinstance(udp, dict):
+        udp['outbound_only'] = True
+    # Rewrite peer addrs to docker hostnames so the addr_to_link key
+    # is hostname-form (mirroring production peer configs that carry
+    # hostnames). Without this, peer addrs are numeric and the
+    # carve-out's addr_to_link lookup matches inbound numeric source
+    # addrs, masking the bug.
+    ip_to_host = {
+        '172.20.0.10': 'node-a',
+        '172.20.0.11': 'node-b',
+        '172.20.0.12': 'node-c',
+        '172.20.0.13': 'node-d',
+        '172.20.0.14': 'node-e',
+    }
+    for peer in cfg.get('peers', []) or []:
+        for addr in peer.get('addresses', []) or []:
+            t = addr.get('transport')
+            if t is not None and t != 'udp':
+                continue
+            a = addr.get('addr', '')
+            for ip, host in ip_to_host.items():
+                if a.startswith(ip + ':'):
+                    port = a.split(':', 1)[1]
+                    addr['addr'] = f'{host}:{port}'
+                    break
 with open('$cfg', 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 "
-        echo "  ✓ node-$node"
+        suffix=""
+        if [ "$accept_off" = "true" ]; then
+            suffix=" (accept_connections=false)"
+        fi
+        if [ "$outbound_only" = "true" ]; then
+            suffix=" (outbound_only=true, hostname peer addrs)"
+        fi
+        echo "  ✓ node-$node$suffix"
     done
     echo "✓ Config injection complete"
     exit 0
@@ -315,6 +402,49 @@ assert_zero_count "Excessive decrypt failures" \
 assert_zero_count "Rekey msg2 processing failed" "Rekey msg2 failures"
 assert_zero_count "Session AEAD decryption failed" \
     "FSP decryption failures during rekey"
+
+# Variant-specific: when one or more nodes have udp.accept_connections=false,
+# verify the dual-init carve-out keeps the "we win, dropping their msg1"
+# log line below the bug threshold. Pre-fix, a 1Hz dual-init loop produced
+# ~120 occurrences over the 2-minute test; with the carve-out, the line
+# fires at most a handful of times from genuine simultaneous rekeys.
+if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
+    DUAL_INIT_THRESHOLD=10
+    for off_node in ${REKEY_ACCEPT_OFF_NODES//,/ }; do
+        count=$(docker logs "fips-node-$off_node" 2>&1 \
+            | grep -cE "Dual rekey initiation: we win" || true)
+        if [ "${count:-0}" -le "$DUAL_INIT_THRESHOLD" ]; then
+            echo "  PASS: node-$off_node dual-init drops below threshold ($count <= $DUAL_INIT_THRESHOLD)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  FAIL: node-$off_node sustained dual-init drops ($count > $DUAL_INIT_THRESHOLD)"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+fi
+
+# Variant-specific: udp.outbound_only=true. The pre-fix bug fired the
+# dual-init loop on the OTHER side (the peer of the outbound-only node)
+# because the outbound-only side rejects the inbound rekey msg1 due to
+# the addr_to_link hostname-vs-numeric mismatch, leaving the peer's
+# rekey state in a 1Hz retry loop that the outbound-only side keeps
+# dropping. The exact node that emits "we win" depends on which side
+# has the smaller NodeAddr, so check all five nodes for the sustained-
+# loop signature.
+if [ -n "$REKEY_OUTBOUND_ONLY_NODES" ]; then
+    DUAL_INIT_THRESHOLD=10
+    for n in $NODES; do
+        count=$(docker logs "fips-node-$n" 2>&1 \
+            | grep -cE "Dual rekey initiation: we win" || true)
+        if [ "${count:-0}" -le "$DUAL_INIT_THRESHOLD" ]; then
+            echo "  PASS: node-$n dual-init drops below threshold ($count <= $DUAL_INIT_THRESHOLD)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  FAIL: node-$n sustained dual-init drops ($count > $DUAL_INIT_THRESHOLD)"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+fi
 
 phase_result "Log analysis"
 echo ""

@@ -117,7 +117,6 @@ impl Node {
                     let now_ms = Self::now_ms();
                     self.reload_peer_acl();
                     self.poll_pending_connects().await;
-                    #[cfg(feature = "nostr-discovery")]
                     self.poll_nostr_discovery().await;
                     self.resend_pending_handshakes(now_ms).await;
                     self.resend_pending_rekeys(now_ms).await;

@@ -10,6 +10,7 @@ mod socket;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
+use crate::discovery::is_punch_packet;
 use socket::{AsyncUdpSocket, UdpRawSocket};
 use stats::UdpStats;
 use std::collections::HashMap;
@@ -142,6 +143,13 @@ impl UdpTransport {
         }
 
         self.state = TransportState::Starting;
+
+        if self.config.outbound_only() && self.config.bind_addr.is_some() {
+            warn!(
+                configured_bind_addr = ?self.config.bind_addr,
+                "udp.outbound_only = true; configured bind_addr is ignored, binding to 0.0.0.0:0"
+            );
+        }
 
         // Parse bind address
         let bind_addr: SocketAddr = self
@@ -366,6 +374,20 @@ impl Transport for UdpTransport {
         // Peer configuration is handled at the node level, not transport level
         Ok(Vec::new())
     }
+
+    /// Whether the transport accepts inbound handshake initiations.
+    /// `outbound_only` mode forces this to false; otherwise reflects the
+    /// `accept_connections` config field (default: true). Note that the
+    /// hard gate is at the Node level (see ISSUE-2026-0004 fix in
+    /// `src/node/handlers/handshake.rs`); this method is what that gate
+    /// consults for transports that lack runtime-state-based filtering.
+    fn accept_connections(&self) -> bool {
+        if self.config.outbound_only() {
+            false
+        } else {
+            self.config.accept_connections()
+        }
+    }
 }
 
 impl Drop for UdpTransport {
@@ -407,6 +429,22 @@ async fn udp_receive_loop(
             Ok((len, remote_addr, kernel_drops)) => {
                 stats.record_recv(len);
                 stats.set_kernel_drops(kernel_drops as u64);
+
+                // Drop stray punch probes / acks. After bootstrap-handoff
+                // adopts a socket, the remote side may keep retrying its
+                // own punch attempt for several seconds; those probes
+                // arrive here and would otherwise be parsed as FMP frames
+                // (their first byte 0x4E has high-nibble 0x4 → bogus
+                // "FMP version 4" warnings).
+                if is_punch_packet(&buf[..len]) {
+                    trace!(
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        bytes = len,
+                        "Dropping stray punch probe/ack on UDP transport"
+                    );
+                    continue;
+                }
 
                 let data = buf[..len].to_vec();
                 let addr = TransportAddr::from_string(&remote_addr.to_string());
@@ -457,10 +495,7 @@ mod tests {
         UdpConfig {
             bind_addr: Some(format!("127.0.0.1:{}", port)),
             mtu: Some(1280),
-            recv_buf_size: None,
-            send_buf_size: None,
-            advertise_on_nostr: None,
-            public: None,
+            ..Default::default()
         }
     }
 
@@ -686,6 +721,135 @@ mod tests {
         // Before start, congestion should still report (from stats)
         let cong = transport.congestion();
         assert_eq!(cong.recv_drops, Some(0));
+    }
+
+    #[test]
+    fn test_accept_connections_default_true() {
+        let (tx, _rx) = packet_channel(100);
+        let transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
+        // Default UdpConfig has accept_connections unset → true.
+        assert!(transport.accept_connections());
+    }
+
+    #[test]
+    fn test_accept_connections_false_when_configured() {
+        let (tx, _rx) = packet_channel(100);
+        let transport = UdpTransport::new(
+            TransportId::new(1),
+            None,
+            UdpConfig {
+                bind_addr: Some("127.0.0.1:0".to_string()),
+                accept_connections: Some(false),
+                ..Default::default()
+            },
+            tx,
+        );
+        assert!(!transport.accept_connections());
+    }
+
+    #[test]
+    fn test_accept_connections_forced_false_in_outbound_only() {
+        let (tx, _rx) = packet_channel(100);
+        let transport = UdpTransport::new(
+            TransportId::new(1),
+            None,
+            UdpConfig {
+                outbound_only: Some(true),
+                accept_connections: Some(true), // explicit true; outbound_only wins
+                ..Default::default()
+            },
+            tx,
+        );
+        assert!(!transport.accept_connections());
+    }
+
+    #[tokio::test]
+    async fn test_outbound_only_binds_ephemeral() {
+        // outbound_only=true must override bind_addr to 0.0.0.0:0 so the
+        // kernel picks a source port and there is no listener on a known
+        // port. The runtime should bind successfully even if `bind_addr`
+        // is explicitly set in the config (a warn fires; not asserted
+        // here).
+        let (tx, _rx) = packet_channel(100);
+        let mut transport = UdpTransport::new(
+            TransportId::new(1),
+            None,
+            UdpConfig {
+                bind_addr: Some("127.0.0.1:65535".to_string()),
+                outbound_only: Some(true),
+                ..Default::default()
+            },
+            tx,
+        );
+
+        transport.start_async().await.unwrap();
+        let local = transport.local_addr().unwrap();
+        // Ephemeral port: kernel-assigned, non-zero, never matches the
+        // configured 65535 (since outbound_only ignored bind_addr).
+        assert_ne!(local.port(), 65535);
+        assert!(local.port() > 0);
+        // Source IP picked by the kernel; v4 INADDR_ANY before binding,
+        // resolves to 0.0.0.0 on the local end.
+        assert!(local.ip().is_unspecified());
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_punch_probe_dropped() {
+        let (tx_recv, mut rx_recv) = packet_channel(100);
+        let (tx_send, _rx_send) = packet_channel(100);
+
+        let mut t_recv = UdpTransport::new(TransportId::new(1), None, make_config(0), tx_recv);
+        let mut t_send = UdpTransport::new(TransportId::new(2), None, make_config(0), tx_send);
+
+        t_recv.start_async().await.unwrap();
+        t_send.start_async().await.unwrap();
+
+        let recv_addr = t_recv.local_addr().unwrap();
+        let recv_addr_str = TransportAddr::from_string(&recv_addr.to_string());
+
+        // Probe (PUNCH_MAGIC = "NPTC", be) followed by sequence + payload.
+        let mut probe = vec![0u8; 16];
+        probe[..4].copy_from_slice(&0x4E505443u32.to_be_bytes());
+        t_send.send_async(&recv_addr_str, &probe).await.unwrap();
+
+        // Ack (PUNCH_ACK_MAGIC = "NPTA", be).
+        let mut ack = vec![0u8; 16];
+        ack[..4].copy_from_slice(&0x4E505441u32.to_be_bytes());
+        t_send.send_async(&recv_addr_str, &ack).await.unwrap();
+
+        // A real (non-punch) packet must still arrive.
+        let real = b"valid-fmp-frame";
+        t_send.send_async(&recv_addr_str, real).await.unwrap();
+
+        // First message read should be the real one — punch probe + ack
+        // both filtered silently.
+        let packet = timeout(Duration::from_secs(1), rx_recv.recv())
+            .await
+            .expect("timeout waiting for real packet")
+            .expect("channel closed");
+        assert_eq!(packet.data, real);
+
+        // No further packets should be queued (probe + ack dropped).
+        let no_more = timeout(Duration::from_millis(200), rx_recv.recv()).await;
+        assert!(no_more.is_err(), "punch probe/ack leaked through filter");
+
+        t_recv.stop_async().await.unwrap();
+        t_send.stop_async().await.unwrap();
+    }
+
+    #[test]
+    fn test_is_punch_packet_helper() {
+        use crate::discovery::is_punch_packet;
+        // PUNCH_MAGIC ("NPTC", be)
+        assert!(is_punch_packet(&[0x4E, 0x50, 0x54, 0x43, 0xAA, 0xBB]));
+        // PUNCH_ACK_MAGIC ("NPTA", be)
+        assert!(is_punch_packet(&[0x4E, 0x50, 0x54, 0x41]));
+        // Non-magic packet
+        assert!(!is_punch_packet(&[0x01, 0x02, 0x03, 0x04]));
+        // Too short
+        assert!(!is_punch_packet(&[0x4E, 0x50, 0x54]));
+        assert!(!is_punch_packet(&[]));
     }
 
     #[tokio::test]

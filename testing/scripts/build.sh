@@ -19,9 +19,10 @@ if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
 fi
 
 BUILD_DOCKER=true
-# NAT harness binaries need Nostr bootstrap support; everything else is
-# governed by platform cfg gates after PR #79's feature-matrix collapse.
-DEFAULT_CARGO_BUILD_ARGS=(--features nostr-discovery)
+# Default flags for the container-image cargo build. Empty by default;
+# every subsystem is governed by platform cfg gates with no feature
+# flags required.
+DEFAULT_CARGO_BUILD_ARGS=()
 if [ -n "${FIPS_CARGO_BUILD_ARGS:-}" ]; then
     # shellcheck disable=SC2206
     CARGO_BUILD_ARGS=($FIPS_CARGO_BUILD_ARGS)

@@ -8,10 +8,6 @@ authors = ["Johnathan Corgan <jcorgan@corganlabs.com>"]
 repository = "https://github.com/jmcorgan/fips"
 readme = "README.md"
 
-[features]
-default = ["nostr-discovery"]
-nostr-discovery = ["dep:nostr", "dep:nostr-sdk"]
-
 [dependencies]
 ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
@@ -36,8 +32,8 @@ socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 portable-atomic = { version = "1", features = ["std"] }
 
-nostr = { version = "0.44", features = ["std", "nip59"], optional = true }
-nostr-sdk = { version = "0.44", optional = true }
+nostr = { version = "0.44", features = ["std", "nip59"] }
+nostr-sdk = "0.44"
 
 [target.'cfg(unix)'.dependencies]
 tun = { version = "0.8.5", features = ["async"] }
@@ -76,15 +72,18 @@ assets = [
     ["target/release/fipstop", "/usr/bin/", "755"],
     ["packaging/common/fips.yaml", "/etc/fips/fips.yaml", "600"],
     ["packaging/common/hosts", "/etc/fips/hosts", "644"],
+    ["packaging/common/fips.nft", "/etc/fips/fips.nft", "644"],
     ["packaging/debian/fips.service", "/lib/systemd/system/fips.service", "644"],
     ["packaging/debian/fips-dns.service", "/lib/systemd/system/fips-dns.service", "644"],
+    ["packaging/debian/fips-firewall.service", "/lib/systemd/system/fips-firewall.service", "644"],
     ["packaging/common/fips-dns-setup", "/usr/lib/fips/fips-dns-setup", "755"],
     ["packaging/common/fips-dns-teardown", "/usr/lib/fips/fips-dns-teardown", "755"],
     ["packaging/debian/fips.tmpfiles", "/usr/lib/tmpfiles.d/fips.conf", "644"],
     ["target/release/fips-gateway", "/usr/bin/", "755"],
     ["packaging/debian/fips-gateway.service", "/lib/systemd/system/fips-gateway.service", "644"],
+    ["docs/fips-security.md", "/usr/share/doc/fips/fips-security.md", "644"],
 ]
-conf-files = ["/etc/fips/fips.yaml", "/etc/fips/hosts"]
+conf-files = ["/etc/fips/fips.yaml", "/etc/fips/hosts", "/etc/fips/fips.nft"]
 
 [dev-dependencies]
 tempfile = "3.15"

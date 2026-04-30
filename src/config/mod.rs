@@ -52,6 +52,28 @@ const KEY_FILENAME: &str = "fips.key";
 /// Default public key filename, placed alongside the key file.
 const PUB_FILENAME: &str = "fips.pub";
 
+/// Returns true if the textual `host:port` form refers to a loopback host.
+/// Recognizes IPv4 `127.x.x.x`, IPv6 `::1` (with or without brackets), and
+/// the literal string `localhost`. Hostnames are conservatively assumed to
+/// be non-loopback. Used by `Config::validate()` to reject misconfigured
+/// loopback UDP binds combined with non-loopback peer addresses (see
+/// ISSUE-2026-0005).
+fn is_loopback_addr_str(addr: &str) -> bool {
+    // Bracketed IPv6: `[::1]:port`
+    if let Some(rest) = addr.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        let host = &rest[..end];
+        return host == "::1";
+    }
+    // Plain `host:port` — split on the rightmost ':'.
+    let host = match addr.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => addr,
+    };
+    host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" || host.starts_with("127.")
+}
+
 /// Derive the key file path from a config file path.
 pub fn key_file_path(config_path: &Path) -> PathBuf {
     config_path
@@ -612,6 +634,34 @@ impl Config {
                 return Err(ConfigError::Validation(
                     "NAT UDP advert publishing requires `node.discovery.nostr.stun_servers` to be non-empty".to_string(),
                 ));
+            }
+        }
+
+        // Reject loopback UDP bind combined with non-loopback peer addresses.
+        // Linux pins the source IP to a loopback-bound socket, so packets
+        // sent from such a socket to external peers are dropped at the
+        // routing layer with no clear error in the daemon log. See
+        // ISSUE-2026-0005. Outbound-only mode is exempt because it
+        // overrides bind_addr to 0.0.0.0:0 (kernel-picked source).
+        for (name, cfg) in self.transports.udp.iter() {
+            if cfg.outbound_only() {
+                continue;
+            }
+            if is_loopback_addr_str(cfg.bind_addr()) {
+                let any_external_peer = self.peers.iter().any(|peer| {
+                    peer.addresses
+                        .iter()
+                        .any(|a| a.transport == "udp" && !is_loopback_addr_str(&a.addr))
+                });
+                if any_external_peer {
+                    let label = name.unwrap_or("(unnamed)");
+                    return Err(ConfigError::Validation(format!(
+                        "transports.udp[{label}].bind_addr is loopback ({}) but at least one peer has a non-loopback UDP address; \
+                         fips cannot reach external peers from a loopback-bound socket. \
+                         Use bind_addr: \"0.0.0.0:2121\" (with kernel-firewall hardening if exposure is a concern), or set outbound_only: true.",
+                        cfg.bind_addr()
+                    )));
+                }
             }
         }
 
@@ -1309,5 +1359,107 @@ peers:
         config.node.discovery.nostr.stun_servers.clear();
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("stun_servers"));
+    }
+
+    #[test]
+    fn test_is_loopback_addr_str() {
+        assert!(is_loopback_addr_str("127.0.0.1:2121"));
+        assert!(is_loopback_addr_str("127.0.0.5:9999"));
+        assert!(is_loopback_addr_str("[::1]:2121"));
+        assert!(is_loopback_addr_str("::1:2121"));
+        assert!(is_loopback_addr_str("localhost:80"));
+        assert!(!is_loopback_addr_str("0.0.0.0:2121"));
+        assert!(!is_loopback_addr_str("192.168.1.1:2121"));
+        assert!(!is_loopback_addr_str("[fd00::1]:2121"));
+        assert!(!is_loopback_addr_str("core-vm.tail65015.ts.net:2121"));
+        assert!(!is_loopback_addr_str("example.com:443"));
+    }
+
+    #[test]
+    fn test_validate_loopback_bind_with_external_peer_rejected() {
+        use crate::config::PeerAddress;
+        let mut config = Config::default();
+        config.transports.udp = TransportInstances::Single(UdpConfig {
+            bind_addr: Some("127.0.0.1:2121".to_string()),
+            ..Default::default()
+        });
+        config.peers = vec![PeerConfig {
+            npub: "npub1peer".to_string(),
+            addresses: vec![PeerAddress::new("udp", "core-vm.tail65015.ts.net:2121")],
+            ..Default::default()
+        }];
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("loopback"), "got: {msg}");
+        assert!(msg.contains("non-loopback"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_loopback_bind_with_loopback_peer_ok() {
+        use crate::config::PeerAddress;
+        let mut config = Config::default();
+        config.transports.udp = TransportInstances::Single(UdpConfig {
+            bind_addr: Some("127.0.0.1:2121".to_string()),
+            ..Default::default()
+        });
+        config.peers = vec![PeerConfig {
+            npub: "npub1peer".to_string(),
+            addresses: vec![PeerAddress::new("udp", "127.0.0.2:2121")],
+            ..Default::default()
+        }];
+
+        config
+            .validate()
+            .expect("loopback peer with loopback bind should validate");
+    }
+
+    #[test]
+    fn test_validate_outbound_only_exempt_from_loopback_check() {
+        use crate::config::PeerAddress;
+        let mut config = Config::default();
+        // outbound_only overrides bind_addr → 0.0.0.0:0; the loopback
+        // check must skip this transport entirely.
+        config.transports.udp = TransportInstances::Single(UdpConfig {
+            bind_addr: Some("127.0.0.1:2121".to_string()),
+            outbound_only: Some(true),
+            ..Default::default()
+        });
+        config.peers = vec![PeerConfig {
+            npub: "npub1peer".to_string(),
+            addresses: vec![PeerAddress::new("udp", "core-vm.tail65015.ts.net:2121")],
+            ..Default::default()
+        }];
+
+        config
+            .validate()
+            .expect("outbound_only should be exempt from the loopback check");
+    }
+
+    #[test]
+    fn test_outbound_only_forces_ephemeral_bind() {
+        let cfg = UdpConfig {
+            bind_addr: Some("127.0.0.1:2121".to_string()),
+            outbound_only: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(cfg.bind_addr(), "0.0.0.0:0");
+        assert!(cfg.outbound_only());
+    }
+
+    #[test]
+    fn test_outbound_only_forces_advertise_off() {
+        let cfg = UdpConfig {
+            advertise_on_nostr: Some(true),
+            outbound_only: Some(true),
+            ..Default::default()
+        };
+        assert!(!cfg.advertise_on_nostr());
+    }
+
+    #[test]
+    fn test_udp_accept_connections_default_true() {
+        let cfg = UdpConfig::default();
+        assert!(cfg.accept_connections());
     }
 }

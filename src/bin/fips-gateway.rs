@@ -202,35 +202,67 @@ async fn main() {
             }
         };
 
-        if let Err(e) = sock.send_to(&query, upstream_addr).await {
-            error!(
-                upstream = %upstream, error = %e,
-                "Failed to send DNS probe — is the FIPS daemon running?"
-            );
-            std::process::exit(1);
-        }
+        // Retry the upstream probe up to MAX_PROBE_ATTEMPTS times with a
+        // 1-second per-attempt timeout and a 1-second sleep between
+        // attempts. Total worst-case wait: ~10 seconds.
+        //
+        // Bounded retry covers the cold-boot race where this gateway and
+        // the fips daemon start at approximately the same time: the
+        // daemon's TUN may be up (the systemd ExecStartPre wait already
+        // gates on that) while its DNS responder is still binding
+        // [::1]:5354. Without this retry, the gateway hard-failed after
+        // a single 3-second probe and relied on Restart=on-failure for
+        // recovery.
+        const MAX_PROBE_ATTEMPTS: u32 = 5;
+        const PROBE_TIMEOUT_SECS: u64 = 1;
+        const PROBE_RETRY_DELAY_SECS: u64 = 1;
 
         let mut buf = [0u8; 512];
-        match tokio::time::timeout(std::time::Duration::from_secs(3), sock.recv_from(&mut buf))
-            .await
-        {
-            Ok(Ok(_)) => {
-                info!(upstream = %upstream, "DNS upstream is reachable");
+        let mut last_failure: Option<String> = None;
+        let mut succeeded = false;
+        for attempt in 1..=MAX_PROBE_ATTEMPTS {
+            if let Err(e) = sock.send_to(&query, upstream_addr).await {
+                last_failure = Some(format!("send_to failed: {}", e));
+            } else {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
+                    sock.recv_from(&mut buf),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        info!(
+                            upstream = %upstream, attempt = attempt,
+                            "DNS upstream is reachable"
+                        );
+                        succeeded = true;
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        last_failure = Some(format!("recv_from failed: {}", e));
+                    }
+                    Err(_) => {
+                        last_failure = Some(format!("no response within {}s", PROBE_TIMEOUT_SECS));
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                error!(
-                    upstream = %upstream, error = %e,
-                    "DNS upstream recv failed — is the FIPS daemon running?"
+            if attempt < MAX_PROBE_ATTEMPTS {
+                info!(
+                    upstream = %upstream, attempt = attempt,
+                    last = ?last_failure,
+                    "DNS upstream probe attempt failed; retrying"
                 );
-                std::process::exit(1);
+                tokio::time::sleep(std::time::Duration::from_secs(PROBE_RETRY_DELAY_SECS)).await;
             }
-            Err(_) => {
-                error!(
-                    upstream = %upstream,
-                    "DNS upstream did not respond within 3s — is the FIPS daemon running?"
-                );
-                std::process::exit(1);
-            }
+        }
+        if !succeeded {
+            error!(
+                upstream = %upstream,
+                attempts = MAX_PROBE_ATTEMPTS,
+                last = ?last_failure,
+                "DNS upstream did not become reachable after exhausting retries — is the FIPS daemon running?"
+            );
+            std::process::exit(1);
         }
     }
 

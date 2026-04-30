@@ -1,0 +1,128 @@
+#!/usr/sbin/nft -f
+#
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║              fips0 nftables policy — security baseline             ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+#
+# Polices ONLY the fips0 mesh interface — every packet not arriving
+# on fips0 returns immediately, leaving Docker, Tor, OPNsense, the
+# host's main /etc/nftables.conf, and any other firewall undisturbed.
+#
+# ─── DEFAULT POLICY ─────────────────────────────────────────────────
+#
+#   INBOUND on fips0:   DROP everything except —
+#                         • replies to outbound flows we initiated
+#                           (conntrack established/related)
+#                         • ICMPv6 echo-request (ping6 reachability)
+#                         • rules in /etc/fips/fips.d/*.nft drop-ins
+#
+#   OUTBOUND from fips0: unrestricted
+#
+# Why default-deny: services binding to 0.0.0.0 or [::] accept
+# connections on fips0 by default. This baseline ensures that
+# accidental exposure of HTTP, SSH, databases, etc. through the
+# mesh is impossible without explicit operator action.
+#
+# ─── LOADING / RELOADING ────────────────────────────────────────────
+#
+# Apply this file:
+#
+#   sudo nft -f /etc/fips/fips.nft
+#
+# To make it persist across reboots, load it from your preferred
+# mechanism: a systemd unit that runs `nft -f` on start, an include
+# from /etc/nftables.conf, etc.
+#
+# Verify the loaded ruleset:
+#
+#   sudo nft list table inet fips
+#
+# ─── ADDING INBOUND ALLOWANCES ──────────────────────────────────────
+#
+# Drop a file into /etc/fips/fips.d/ ending in .nft. Each file is
+# included inline into the `inbound` chain at the marked point below.
+# Format: chain-context rule lines, one per line. For example:
+#
+#   /etc/fips/fips.d/services.nft
+#   ────────────────────────────
+#   tcp dport 22 accept
+#   tcp dport 80 accept
+#   udp dport 53 accept
+#   ip6 saddr fd97:467a::/64 tcp dport 22 accept   # SSH from one /64
+#   ip6 saddr fd97:.../128 tcp dport 8443 accept   # one specific peer
+#
+# After editing, reload:
+#
+#   sudo nft -f /etc/fips/fips.nft
+#
+# (or trigger your loading mechanism's reload).
+#
+# Source-based filtering uses the peer's mesh address (npub-derived
+# fd97:... format). To find a peer's mesh address, look in their
+# fips.pub or query the daemon.
+#
+# Note: an empty /etc/fips/fips.d/ is fine — the include glob simply
+# matches nothing and the baseline policy applies as-is.
+#
+# ─── DEBUGGING / DROP VISIBILITY ────────────────────────────────────
+#
+# To see drops in the systemd journal:
+#   1. Uncomment the `log` rule near the bottom of the inbound chain.
+#   2. Reload:  sudo nft -f /etc/fips/fips.nft
+#   3. Tail:    sudo journalctl -k -f -g "fips drop:"
+#
+# Drop counter (always on, no log):
+#   sudo nft list table inet fips
+#
+# ─── COEXISTENCE WITH OTHER NFTABLES TABLES ─────────────────────────
+#
+# This table lives in the `inet` family. Other tables you may see:
+#
+#   inet fips_gateway   — created by the fips-gateway binary when
+#                          running (separate concern from this file).
+#                          See the fips-gateway design doc for details.
+#
+#   ip / ip6 family     — Docker, /etc/nftables.conf, etc.
+#                          Independent of this table.
+#
+# All hook at standard filter priority (0). Order between same-family
+# same-priority tables is determined by load order, but the early-
+# return for non-fips0 traffic makes this chain a no-op for anything
+# not on fips0, so coexistence is safe.
+
+# ━━━ Idempotent table replacement ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+add table inet fips
+flush table inet fips
+
+table inet fips {
+
+    chain inbound {
+        type filter hook input priority 0; policy accept;
+
+        # Non-fips0 traffic returns immediately — chain is a no-op
+        # for anything not arriving on the fips0 mesh interface.
+        iifname != "fips0" return
+
+        # Replies to outbound flows + related ICMPv6 errors
+        # (Packet Too Big for PMTU, Destination Unreachable, etc.)
+        ct state established,related accept
+
+        # ICMPv6 echo-request — ping6 reachability tests.
+        meta nfproto ipv6 icmpv6 type echo-request accept
+
+        # Operator-supplied allow rules from drop-in files.
+        # See "ADDING INBOUND ALLOWANCES" in the header.
+        include "/etc/fips/fips.d/*.nft"
+
+        # Optional: log drops to journal (rate-limited).
+        # Uncomment to enable, then reload via `nft -f`.
+        #
+        #log prefix "fips drop: " level info limit rate 10/minute
+
+        # Default deny on fips0 inbound. Counter visible via
+        # `nft list table inet fips`.
+        counter drop
+    }
+}
+
+# ━━━ END OF FILE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

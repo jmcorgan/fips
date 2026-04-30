@@ -1,5 +1,3 @@
-#![cfg(feature = "nostr-discovery")]
-
 mod runtime;
 mod signal;
 mod stun;

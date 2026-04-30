@@ -24,6 +24,9 @@ const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct UdpConfig {
     /// Bind address (`bind_addr`). Defaults to "0.0.0.0:2121".
+    ///
+    /// When `outbound_only = true`, this field is ignored and the transport
+    /// binds to `0.0.0.0:0` (kernel-assigned ephemeral port) regardless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_addr: Option<String>,
 
@@ -40,7 +43,7 @@ pub struct UdpConfig {
     pub send_buf_size: Option<usize>,
 
     /// Whether this transport should be advertised on Nostr overlay discovery.
-    /// Default: false.
+    /// Default: false. Implicitly forced false when `outbound_only = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise_on_nostr: Option<bool>,
 
@@ -51,12 +54,39 @@ pub struct UdpConfig {
     /// Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<bool>,
+    /// Outbound-only mode. When true, the transport binds to a kernel-
+    /// assigned ephemeral port (`0.0.0.0:0`) instead of the configured
+    /// `bind_addr`, refuses inbound handshake msg1, and is never
+    /// advertised on Nostr regardless of `advertise_on_nostr`. Use this
+    /// to participate in the mesh as a pure client — initiate outbound
+    /// links without exposing an inbound listener on a known port.
+    /// Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound_only: Option<bool>,
+
+    /// Accept inbound handshake msg1 from new peers. Default: true.
+    /// Setting this to false combined with `auto_connect: true` on
+    /// peer-side configurations gives a "client" posture: this node
+    /// initiates outbound links but refuses inbound handshakes from
+    /// unfamiliar addresses. The Node-level gate at
+    /// `src/node/handlers/handshake.rs` carves out msg1 from peers
+    /// already established on this transport (so rekey continues to
+    /// work) — see ISSUE-2026-0004.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_connections: Option<bool>,
 }
 
 impl UdpConfig {
     /// Get the bind address, using default if not configured.
+    ///
+    /// When `outbound_only = true`, returns `0.0.0.0:0` so the kernel picks
+    /// an ephemeral source port and no listener is exposed on a known port.
     pub fn bind_addr(&self) -> &str {
-        self.bind_addr.as_deref().unwrap_or(DEFAULT_UDP_BIND_ADDR)
+        if self.outbound_only() {
+            "0.0.0.0:0"
+        } else {
+            self.bind_addr.as_deref().unwrap_or(DEFAULT_UDP_BIND_ADDR)
+        }
     }
 
     /// Get the UDP MTU, using default if not configured.
@@ -75,13 +105,28 @@ impl UdpConfig {
     }
 
     /// Whether this UDP transport should be advertised on Nostr discovery.
+    /// Always false when `outbound_only = true`.
     pub fn advertise_on_nostr(&self) -> bool {
-        self.advertise_on_nostr.unwrap_or(false)
+        if self.outbound_only() {
+            false
+        } else {
+            self.advertise_on_nostr.unwrap_or(false)
+        }
     }
 
     /// Whether this UDP transport should be advertised as directly reachable.
     pub fn is_public(&self) -> bool {
         self.public.unwrap_or(false)
+    }
+
+    /// Whether this transport runs in outbound-only mode. Default: false.
+    pub fn outbound_only(&self) -> bool {
+        self.outbound_only.unwrap_or(false)
+    }
+
+    /// Whether this transport accepts inbound handshakes. Default: true.
+    pub fn accept_connections(&self) -> bool {
+        self.accept_connections.unwrap_or(true)
     }
 }
 

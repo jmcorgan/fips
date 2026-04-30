@@ -9,12 +9,23 @@ case "$1" in
             groupadd --system fips
         fi
 
+        # Drop-in directory for operator nftables rules included by
+        # /etc/fips/fips.nft. Empty by default; the include glob matches
+        # nothing cleanly out of the box.
+        if [ ! -d /etc/fips/fips.d ]; then
+            mkdir -p /etc/fips/fips.d
+            chmod 755 /etc/fips/fips.d
+        fi
+
         # Ensure runtime directory exists with correct ownership
         if [ -d /run/systemd/system ]; then
             systemd-tmpfiles --create /usr/lib/tmpfiles.d/fips.conf 2>/dev/null || true
         fi
 
-        # Reload systemd and enable services
+        # Reload systemd and enable services. fips-firewall.service is
+        # intentionally NOT enabled here — operators opt in explicitly
+        # with `systemctl enable --now fips-firewall.service`. See
+        # /usr/share/doc/fips/fips-security.md for the rationale.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload
             systemctl enable fips.service 2>/dev/null || true
