@@ -168,6 +168,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode where Linux's source-address routing check dropped outbound
   flows from the loopback-bound socket. `outbound_only: true` is
   exempt from the check (it overrides `bind_addr` to `0.0.0.0:0`)
+- `fips-gateway` DNS upstream probe now retries up to 5 times with a
+  1-second per-attempt timeout and a 1-second delay between attempts
+  (~10 second worst-case wait), instead of a single 3-second hard-fail.
+  Covers the cold-boot race where the daemon's TUN is up (the systemd
+  ExecStartPre wait gates on that) but the DNS responder is still
+  binding `[::1]:5354`. Without retry the gateway exited and relied on
+  `Restart=on-failure` for recovery (5-second blip + spurious error
+  log line per cycle); with retry the gateway recovers gracefully
+  without a unit restart
+- `packaging/debian/fips-gateway.service` now waits up to 30 seconds
+  for the daemon's `fips0` TUN to appear before exec'ing the gateway
+  binary (`ExecStartPre` poll loop). Eliminates the cold-boot race
+  where `fips-gateway` exits with `fips0 interface not found` and
+  recovers via `Restart=on-failure`, producing a 5-second blip and a
+  spurious error log line per restart cycle. If `fips0` never appears
+  within 30 seconds, the existing error path runs as before
 - `packaging/debian/build-deb.sh` now auto-derives a per-commit Debian
   Version field for dev builds (Cargo.toml version ending in `-dev`)
   using the form `<base>~dev+git<YYYYMMDD>.<sha>[.dirty]-1`, e.g.

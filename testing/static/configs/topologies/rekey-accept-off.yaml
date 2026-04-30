@@ -1,0 +1,44 @@
+# Rekey Integration Test Topology — accept_connections: false variant.
+#
+# Same sparse mesh as rekey.yaml. Configs are post-processed to use
+# aggressive rekey timers (35s, same as the parent) AND to set
+# `transports.udp.accept_connections: false` on node b — the single-peer
+# node, auto-connected to c. That auto_connect-initiator-with-accept-
+# off shape is what produced the pre-fix master deadlock: msg1 from c
+# during a rekey arrived at b's Node-level gate, and the gate dropped
+# it because its transport returned accept_connections() == false.
+# The carve-out (msg1 admitted unconditionally when addr_to_link has
+# the source) restores rekey. This topology pins that regression; the
+# unit test `test_should_admit_msg1_admits_rekey_when_udp_accept_off`
+# is the fast-feedback complement.
+
+nodes:
+  a:
+    nsec: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    npub: "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
+    docker_ip: "172.20.0.10"
+    peers: [d, e]
+
+  b:
+    nsec: "b102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fb0"
+    npub: "npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
+    docker_ip: "172.20.0.11"
+    peers: [c]
+
+  c:
+    nsec: "c102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fc0"
+    npub: "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
+    docker_ip: "172.20.0.12"
+    peers: [b, d, e]
+
+  d:
+    nsec: "d102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fd0"
+    npub: "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
+    docker_ip: "172.20.0.13"
+    peers: [a, c, e]
+
+  e:
+    nsec: "e102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1fe0"
+    npub: "npub1wf8akf8lu2zdkjkmwhl75pqvven654mpv4sz2x2tprl5265mgrzq8nhak4"
+    docker_ip: "172.20.0.14"
+    peers: [a, c, d]

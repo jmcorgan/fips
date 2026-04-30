@@ -100,7 +100,6 @@ tun:
 
 dns:
   enabled: true
-  bind_addr: "127.0.0.1"
 
 transports:
   udp:
@@ -236,6 +235,25 @@ case "$MODE" in
             echo "FATAL: fips0 did not appear within 30s"
             exit 1
         fi
+
+        # Wait for the daemon's DNS responder to bind [::1]:5354 before
+        # exec'ing fips-gateway. The gateway binary's startup probe is
+        # bounded (5 attempts × 1s with retry); this harness wait is the
+        # belt to that suspenders so we get deterministic CI behaviour
+        # on slow runners. Bounded to ~30 seconds; if the daemon
+        # really never binds DNS, the gateway's own probe will report
+        # the definitive error after this wait expires.
+        for i in $(seq 1 30); do
+            if dig @::1 -p 5354 +tries=1 +time=1 test.fips >/dev/null 2>&1; then
+                echo "Daemon DNS ready (waited ~${i}s)"
+                break
+            fi
+            if [ "$i" -eq 30 ]; then
+                echo "WARNING: daemon DNS did not respond within ~30s; proceeding with gateway startup"
+            fi
+            sleep 1
+        done
+
         echo "fips0 ready, starting gateway"
         exec fips-gateway --config "$CONFIG" --log-level debug
         ;;

@@ -258,8 +258,15 @@ jobs:
           - suite: rekey
             type: rekey
             topology: rekey
+          - suite: rekey-accept-off
+            type: rekey-accept-off
+            topology: rekey-accept-off
           - suite: acl-allowlist
             type: acl-allowlist
+          # ── Outbound LAN gateway integration test ──────────────────────
+          - suite: gateway
+            type: gateway
+            topology: gateway
           # ── Chaos / stochastic scenarios ───────────────────────────────────
           - suite: chaos-smoke-10
             type: chaos
@@ -311,6 +318,33 @@ jobs:
           - suite: nat-lan
             type: nat
             scenario: lan
+          # ── Real-deb install across target distros ─────────────────────
+          # Boots a privileged systemd container per distro, runs
+          # `apt install ./fips_*.deb` with the locally-built package,
+          # then asserts end-to-end `.fips` resolution + the
+          # gateway/daemon default-pairing. The most thorough single
+          # test surface — exercises packaging, maintainer scripts,
+          # systemd unit ordering, real TUN, and the DNS responder
+          # filter on a per-distro resolver backend.
+          - suite: deb-install-debian12
+            type: deb-install
+            scenario: debian12
+          - suite: deb-install-ubuntu24
+            type: deb-install
+            scenario: ubuntu24
+          - suite: deb-install-ubuntu26
+            type: deb-install
+            scenario: ubuntu26
+          # ── DNS resolver multi-backend coverage ────────────────────────
+          # Exercises every fips-dns-setup backend (resolved, dnsmasq,
+          # NM+dnsmasq, dns-delegate, no-resolver) across five distros,
+          # plus end-to-end scenarios that boot a real fips daemon with a
+          # real TUN and assert `dig @127.0.0.53 AAAA <npub>.fips`
+          # returns AAAA. Pins the production DNS bind path that
+          # ISSUE-2026-0002 lived in. Single matrix entry runs all 13
+          # scenarios sequentially; ~7-12 min warm, ~12-15 min cold.
+          - suite: dns-resolver
+            type: dns-resolver
 
     steps:
       - uses: actions/checkout@v4
@@ -391,6 +425,41 @@ jobs:
           docker compose -f testing/static/docker-compose.yml \
             --profile rekey down --volumes --remove-orphans
 
+      # ── Rekey + accept_connections=false variant ──────────────────────────
+      - name: Generate and inject configs (rekey-accept-off)
+        if: matrix.type == 'rekey-accept-off'
+        env:
+          REKEY_TOPOLOGY: rekey-accept-off
+          REKEY_ACCEPT_OFF_NODES: b
+        run: |
+          bash testing/static/scripts/generate-configs.sh rekey-accept-off
+          bash testing/static/scripts/rekey-test.sh inject-config
+
+      - name: Start containers (rekey-accept-off)
+        if: matrix.type == 'rekey-accept-off'
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile rekey-accept-off up -d
+
+      - name: Run rekey test (accept-off variant)
+        if: matrix.type == 'rekey-accept-off'
+        env:
+          REKEY_TOPOLOGY: rekey-accept-off
+          REKEY_ACCEPT_OFF_NODES: b
+        run: bash testing/static/scripts/rekey-test.sh
+
+      - name: Collect logs on failure (rekey-accept-off)
+        if: matrix.type == 'rekey-accept-off' && failure()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile rekey-accept-off logs --no-color | tail -300
+
+      - name: Stop containers (rekey-accept-off)
+        if: matrix.type == 'rekey-accept-off' && always()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile rekey-accept-off down --volumes --remove-orphans
+
       # ── ACL allowlist integration test ─────────────────────────────────────
       - name: Run ACL allowlist integration test
         if: matrix.type == 'acl-allowlist'
@@ -454,3 +523,92 @@ jobs:
           docker compose -f testing/nat/docker-compose.yml \
             --profile cone --profile symmetric --profile lan \
             down --volumes --remove-orphans
+
+      # ── Outbound LAN gateway integration test ──────────────────────────
+      - name: Generate configs (gateway)
+        if: matrix.type == 'gateway'
+        run: bash testing/static/scripts/generate-configs.sh gateway gateway-test
+
+      - name: Inject gateway config (gateway)
+        if: matrix.type == 'gateway'
+        run: bash testing/static/scripts/gateway-test.sh inject-config
+
+      - name: Start containers (gateway)
+        if: matrix.type == 'gateway'
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile gateway up -d
+
+      - name: Run gateway test
+        if: matrix.type == 'gateway'
+        run: bash testing/static/scripts/gateway-test.sh
+
+      - name: Collect logs on failure (gateway)
+        if: matrix.type == 'gateway' && failure()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile gateway logs --no-color | tail -300
+
+      - name: Stop containers (gateway)
+        if: matrix.type == 'gateway' && always()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile gateway down --volumes --remove-orphans
+
+      # ── Real-deb install integration ────────────────────────────────────
+      # The deb-install harness builds its own .deb from source in a
+      # cargo-deb builder image; the pre-built Linux binary from the
+      # build job is intentionally not used here so the test exercises
+      # the full packaging pipeline. ~5-7 min cold-cache on a fresh
+      # runner (.deb build dominates), ~1-2 min warm-cache.
+      - name: Run deb-install scenario
+        if: matrix.type == 'deb-install'
+        timeout-minutes: 25
+        run: bash testing/deb-install/test.sh ${{ matrix.scenario }}
+
+      - name: Collect logs on failure (deb-install)
+        if: matrix.type == 'deb-install' && failure()
+        run: |
+          docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
+            echo "--- ${c} fips.service ---"
+            docker exec "$c" journalctl -u fips.service --no-pager 2>&1 | tail -100 || true
+            echo "--- ${c} fips-dns.service ---"
+            docker exec "$c" journalctl -u fips-dns.service --no-pager 2>&1 | tail -100 || true
+            echo "--- ${c} fips-gateway.service ---"
+            docker exec "$c" journalctl -u fips-gateway.service --no-pager 2>&1 | tail -100 || true
+          done
+
+      - name: Stop containers (deb-install)
+        if: matrix.type == 'deb-install' && always()
+        run: |
+          docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done
+
+      # ── DNS resolver multi-backend integration ──────────────────────────
+      # The dns-resolver harness builds its own fips binary from source in a
+      # Debian 12 builder image (shared cache layout with deb-install). Runs
+      # all 13 scenarios in a single job: dummy-TUN backend-detection tests
+      # plus real-fips end-to-end queries through systemd-resolved across
+      # five distros. ~7-12 min warm, ~12-15 min cold.
+      - name: Run dns-resolver test
+        if: matrix.type == 'dns-resolver'
+        timeout-minutes: 30
+        run: bash testing/dns-resolver/test.sh
+
+      - name: Collect logs on failure (dns-resolver)
+        if: matrix.type == 'dns-resolver' && failure()
+        run: |
+          docker ps -a --filter "name=fips-dns-test-" --format '{{.Names}}' | while read -r c; do
+            echo "--- ${c} fips.service ---"
+            docker exec "$c" journalctl -u fips.service --no-pager 2>&1 | tail -100 || true
+            echo "--- ${c} fips-dns.service ---"
+            docker exec "$c" journalctl -u fips-dns.service --no-pager 2>&1 | tail -100 || true
+          done
+
+      - name: Stop containers (dns-resolver)
+        if: matrix.type == 'dns-resolver' && always()
+        run: |
+          docker ps -a --filter "name=fips-dns-test-" --format '{{.Names}}' | while read -r c; do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done

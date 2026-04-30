@@ -1017,3 +1017,42 @@ async fn test_should_admit_msg1_admits_rekey_when_accept_off() {
 
     assert!(node.should_admit_msg1(transport_id, &addr));
 }
+
+/// Same regression coverage as the TCP test above, but exercising the
+/// UDP transport's new `accept_connections` config field (introduced
+/// alongside the `outbound_only` mode). Proves the Node-level gate's
+/// addr_to_link carve-out is transport-agnostic and that the new UDP
+/// config knob is wired correctly through the Transport trait.
+#[tokio::test]
+async fn test_should_admit_msg1_admits_rekey_when_udp_accept_off() {
+    use crate::config::UdpConfig;
+    use crate::transport::udp::UdpTransport;
+
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    let cfg = UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        accept_connections: Some(false),
+        ..Default::default()
+    };
+    let (tx, _rx) = packet_channel(64);
+    let udp = UdpTransport::new(transport_id, None, cfg, tx);
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(udp));
+
+    let addr = TransportAddr::from_string("10.0.0.2:2121");
+
+    // Fresh msg1 (no addr_to_link entry) is rejected by the gate when
+    // the transport refuses inbound.
+    assert!(!node.should_admit_msg1(transport_id, &addr));
+
+    // Pre-populate addr_to_link as if a session were established. The
+    // rekey carve-out admits the msg1 even though the transport still
+    // says accept_connections() == false.
+    let link_id = node.allocate_link_id();
+    node.addr_to_link
+        .insert((transport_id, addr.clone()), link_id);
+
+    assert!(node.should_admit_msg1(transport_id, &addr));
+}

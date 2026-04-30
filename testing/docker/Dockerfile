@@ -31,7 +31,7 @@ RUN printf '%s\n' \
     'port=53' \
     'listen-address=127.0.0.1' \
     'bind-interfaces' \
-    'server=/fips/127.0.0.1#5354' \
+    'server=/fips/::1#5354' \
     'server=127.0.0.11' \
     'no-resolv' \
     >> /etc/dnsmasq.conf

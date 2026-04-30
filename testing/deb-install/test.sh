@@ -148,6 +148,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs LICENSE README.md ./
 COPY src ./src
 COPY packaging ./packaging
+COPY docs ./docs
 RUN cargo build --release && cargo deb --no-build
 DOCKERFILE
 

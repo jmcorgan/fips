@@ -20,8 +20,17 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../lib/wait-converge.sh"
-TOPOLOGY="rekey"
+# Selectable topology — defaults to "rekey" but the rekey-accept-off
+# variant exercises the auto_connect-initiator-with-accept-off
+# regression class (udp.accept_connections=false on a peer that
+# also auto-connects).
+TOPOLOGY="${REKEY_TOPOLOGY:-rekey}"
 NODES="a b c d e"
+# Comma-separated list of node IDs to set udp.accept_connections=false
+# on during inject-config. Empty (default) leaves all nodes accepting.
+# When set, also asserted by the test that no sustained "Dual rekey
+# initiation" log lines appear on the affected node.
+REKEY_ACCEPT_OFF_NODES="${REKEY_ACCEPT_OFF_NODES:-}"
 
 # Rekey timing configuration
 REKEY_AFTER_SECS=35
@@ -30,12 +39,23 @@ REKEY_AFTER_SECS=35
 # Inject rekey config into generated node configs. Called separately
 # by CI before building Docker images.
 if [ "${1:-}" = "inject-config" ]; then
-    echo "Injecting rekey config (after_secs=$REKEY_AFTER_SECS) into node configs..."
+    echo "Injecting rekey config (after_secs=$REKEY_AFTER_SECS) into node configs (topology=$TOPOLOGY)..."
+    if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
+        echo "  Setting udp.accept_connections=false on nodes: $REKEY_ACCEPT_OFF_NODES"
+    fi
     for node in $NODES; do
         cfg="$SCRIPT_DIR/../generated-configs/$TOPOLOGY/node-$node.yaml"
         if [ ! -f "$cfg" ]; then
             echo "  Error: $cfg not found" >&2
             exit 1
+        fi
+        accept_off="false"
+        if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
+            for off_node in ${REKEY_ACCEPT_OFF_NODES//,/ }; do
+                if [ "$off_node" = "$node" ]; then
+                    accept_off="true"
+                fi
+            done
         fi
         python3 -c "
 import yaml
@@ -46,10 +66,22 @@ cfg.setdefault('node', {})['rekey'] = {
     'after_secs': $REKEY_AFTER_SECS,
     'after_messages': 65536,
 }
+if '$accept_off' == 'true':
+    transports = cfg.setdefault('transports', {})
+    udp = transports.get('udp')
+    if udp is None:
+        udp = {'bind_addr': '0.0.0.0:2121'}
+        transports['udp'] = udp
+    if isinstance(udp, dict):
+        udp['accept_connections'] = False
 with open('$cfg', 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 "
-        echo "  ✓ node-$node"
+        if [ "$accept_off" = "true" ]; then
+            echo "  ✓ node-$node (accept_connections=false)"
+        else
+            echo "  ✓ node-$node"
+        fi
     done
     echo "✓ Config injection complete"
     exit 0
@@ -315,6 +347,26 @@ assert_zero_count "Excessive decrypt failures" \
 assert_zero_count "Rekey msg2 processing failed" "Rekey msg2 failures"
 assert_zero_count "Session AEAD decryption failed" \
     "FSP decryption failures during rekey"
+
+# Variant-specific: when one or more nodes have udp.accept_connections=false,
+# verify the dual-init carve-out keeps the "we win, dropping their msg1"
+# log line below the bug threshold. Pre-fix, a 1Hz dual-init loop produced
+# ~120 occurrences over the 2-minute test; with the carve-out, the line
+# fires at most a handful of times from genuine simultaneous rekeys.
+if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
+    DUAL_INIT_THRESHOLD=10
+    for off_node in ${REKEY_ACCEPT_OFF_NODES//,/ }; do
+        count=$(docker logs "fips-node-$off_node" 2>&1 \
+            | grep -cE "Dual rekey initiation: we win" || true)
+        if [ "${count:-0}" -le "$DUAL_INIT_THRESHOLD" ]; then
+            echo "  PASS: node-$off_node dual-init drops below threshold ($count <= $DUAL_INIT_THRESHOLD)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "  FAIL: node-$off_node sustained dual-init drops ($count > $DUAL_INIT_THRESHOLD)"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+fi
 
 phase_result "Log analysis"
 echo ""

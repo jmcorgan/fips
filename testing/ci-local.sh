@@ -7,19 +7,24 @@
 #   --build-only         Only run build + clippy
 #   --test-only          Only run unit tests (skip build, skip integration)
 #   --skip-integration   Skip integration tests
-#   --skip-chaos         Skip chaos scenarios (run static + rekey + sidecar only)
+#   --skip-chaos         Skip chaos scenarios
+#   --with-tor           Include Tor harnesses (off by default — needs live Tor)
 #   --only <suite>       Run a single integration suite
 #   -j, --jobs <N>       Max parallel chaos scenarios (default: 4)
 #   --list               List available integration suites
 #   -h, --help           Show this help
 #
-# Integration suites:
-#   static-mesh, static-chain, rekey, gateway,
+# Integration suites (default coverage):
+#   static-mesh, static-chain, rekey, rekey-accept-off, gateway,
+#   acl-allowlist, nat-cone, nat-symmetric, nat-lan,
 #   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
 #   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
 #   chaos-depth-vs-cost, chaos-mixed-technology, chaos-congestion-stress,
-#   sidecar
+#   sidecar, dns-resolver, deb-install
+#
+# Opt-in (require --with-tor; depend on live Tor network):
+#   tor-socks5, tor-directory
 #
 # Exit codes:
 #   0 — all stages passed
@@ -43,11 +48,12 @@ BUILD_ONLY=false
 TEST_ONLY=false
 SKIP_INTEGRATION=false
 SKIP_CHAOS=false
+WITH_TOR=false
 ONLY_SUITE=""
 
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
-REKEY_SUITES=(rekey)
+REKEY_SUITES=(rekey rekey-accept-off)
 # Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
     "smoke-10 smoke-10"
@@ -65,6 +71,11 @@ CHAOS_SUITES=(
 )
 GATEWAY_SUITES=(gateway)
 SIDECAR_SUITES=(sidecar)
+ACL_SUITES=(acl-allowlist)
+NAT_SUITES=(cone symmetric lan)
+DNS_RESOLVER_SUITES=(dns-resolver)
+DEB_INSTALL_SUITES=(deb-install)
+TOR_SUITES=(tor-socks5 tor-directory)
 
 # ── Colors ─────────────────────────────────────────────────────────────────
 
@@ -93,17 +104,32 @@ list_suites() {
     echo "  Rekey:"
     for s in "${REKEY_SUITES[@]}"; do echo "    $s"; done
     echo ""
+    echo "  Gateway:"
+    for s in "${GATEWAY_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  ACL allowlist:"
+    for s in "${ACL_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  NAT scenarios:"
+    for s in "${NAT_SUITES[@]}"; do echo "    nat-$s"; done
+    echo ""
     echo "  Chaos scenarios:"
     for entry in "${CHAOS_SUITES[@]}"; do
         read -ra parts <<< "$entry"
         echo "    chaos-${parts[0]}  (${parts[*]:1})"
     done
     echo ""
-    echo "  Gateway:"
-    for s in "${GATEWAY_SUITES[@]}"; do echo "    $s"; done
-    echo ""
     echo "  Sidecar:"
     for s in "${SIDECAR_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  DNS resolver:"
+    for s in "${DNS_RESOLVER_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Deb-install:"
+    for s in "${DEB_INSTALL_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Tor (opt-in via --with-tor):"
+    for s in "${TOR_SUITES[@]}"; do echo "    $s"; done
     exit 0
 }
 
@@ -120,6 +146,7 @@ while [[ $# -gt 0 ]]; do
         --test-only)        TEST_ONLY=true; shift ;;
         --skip-integration) SKIP_INTEGRATION=true; shift ;;
         --skip-chaos)       SKIP_CHAOS=true; shift ;;
+        --with-tor)         WITH_TOR=true; shift ;;
         --only)             ONLY_SUITE="$2"; shift 2 ;;
         -j|--jobs)          PARALLEL_JOBS="$2"; shift 2 ;;
         --list)             list_suites ;;
@@ -318,6 +345,98 @@ run_sidecar() {
     record "sidecar" $rc
 }
 
+# Run the rekey-accept-off integration variant. Same harness as run_rekey
+# but on a 2-node topology with udp.accept_connections=false on node-b.
+run_rekey_accept_off() {
+    local compose="testing/static/docker-compose.yml"
+    local rc=0
+
+    info "[rekey-accept-off] Generating configs"
+    bash testing/static/scripts/generate-configs.sh rekey-accept-off || \
+        { record "rekey-accept-off" 1; return; }
+    REKEY_TOPOLOGY=rekey-accept-off REKEY_ACCEPT_OFF_NODES=b \
+        bash testing/static/scripts/rekey-test.sh inject-config || \
+        { record "rekey-accept-off" 1; return; }
+
+    info "[rekey-accept-off] Starting containers"
+    docker compose -f "$compose" --profile rekey-accept-off up -d || \
+        { record "rekey-accept-off" 1; return; }
+
+    info "[rekey-accept-off] Running rekey test"
+    if REKEY_TOPOLOGY=rekey-accept-off REKEY_ACCEPT_OFF_NODES=b \
+        bash testing/static/scripts/rekey-test.sh; then
+        rc=0
+    else
+        rc=1
+        info "[rekey-accept-off] Collecting failure logs"
+        docker compose -f "$compose" --profile rekey-accept-off logs --no-color 2>&1 | tail -100
+    fi
+
+    docker compose -f "$compose" --profile rekey-accept-off down --volumes --remove-orphans 2>/dev/null
+    record "rekey-accept-off" $rc
+}
+
+# Run ACL allowlist integration test
+run_acl_allowlist() {
+    info "[acl-allowlist] Running integration test"
+    if bash testing/acl-allowlist/test.sh --skip-build 2>&1; then
+        record "acl-allowlist" 0
+    else
+        record "acl-allowlist" 1
+    fi
+}
+
+# Run a NAT scenario (cone, symmetric, lan)
+run_nat() {
+    local scenario="$1"
+    info "[nat-$scenario] Running NAT lab"
+    if bash testing/nat/scripts/nat-test.sh "$scenario" 2>&1; then
+        record "nat-$scenario" 0
+    else
+        record "nat-$scenario" 1
+    fi
+}
+
+# Run dns-resolver harness (multi-distro + e2e scenarios)
+run_dns_resolver() {
+    info "[dns-resolver] Running multi-distro test (slow — builds per-distro images)"
+    if bash testing/dns-resolver/test.sh 2>&1; then
+        record "dns-resolver" 0
+    else
+        record "dns-resolver" 1
+    fi
+}
+
+# Run deb-install harness (multi-distro real-package install)
+run_deb_install() {
+    info "[deb-install] Running multi-distro test (slow — builds .deb + per-distro install)"
+    if bash testing/deb-install/test.sh 2>&1; then
+        record "deb-install" 0
+    else
+        record "deb-install" 1
+    fi
+}
+
+# Run Tor SOCKS5 outbound test (live Tor network)
+run_tor_socks5() {
+    info "[tor-socks5] Running Tor SOCKS5 outbound test (live Tor)"
+    if bash testing/tor/socks5-outbound/scripts/tor-test.sh 2>&1; then
+        record "tor-socks5" 0
+    else
+        record "tor-socks5" 1
+    fi
+}
+
+# Run Tor directory-mode test (live Tor network)
+run_tor_directory() {
+    info "[tor-directory] Running Tor directory-mode test (live Tor)"
+    if bash testing/tor/directory-mode/scripts/directory-test.sh 2>&1; then
+        record "tor-directory" 0
+    else
+        record "tor-directory" 1
+    fi
+}
+
 # Determine which suites to run and execute them
 run_integration() {
     stage "Stage 3: Integration Tests"
@@ -343,11 +462,20 @@ run_integration() {
         run_static "$topology"
     done
 
-    # Rekey
+    # Rekey + rekey-accept-off variant
     run_rekey
+    run_rekey_accept_off
 
     # Gateway
     run_gateway
+
+    # ACL allowlist
+    run_acl_allowlist
+
+    # NAT scenarios (sequential — each owns its compose project)
+    for scenario in "${NAT_SUITES[@]}"; do
+        run_nat "$scenario"
+    done
 
     # Chaos scenarios (parallel, throttled)
     if [[ "$SKIP_CHAOS" != true ]]; then
@@ -401,6 +529,18 @@ run_integration() {
 
     # Sidecar
     run_sidecar
+
+    # DNS resolver multi-distro suite (heavy — per-distro systemd images)
+    run_dns_resolver
+
+    # Deb-install multi-distro suite (heavy — builds .deb + per-distro install)
+    run_deb_install
+
+    # Tor (opt-in via --with-tor; depends on live Tor network)
+    if [[ "$WITH_TOR" == true ]]; then
+        run_tor_socks5
+        run_tor_directory
+    fi
 }
 
 # Run a single named suite
@@ -411,8 +551,14 @@ run_suite() {
             run_static "${suite#static-}" ;;
         rekey)
             run_rekey ;;
+        rekey-accept-off)
+            run_rekey_accept_off ;;
         gateway)
             run_gateway ;;
+        acl-allowlist)
+            run_acl_allowlist ;;
+        nat-cone|nat-symmetric|nat-lan)
+            run_nat "${suite#nat-}" ;;
         chaos-*)
             local chaos_name="${suite#chaos-}"
             local found=false
@@ -431,6 +577,14 @@ run_suite() {
             ;;
         sidecar)
             run_sidecar ;;
+        dns-resolver)
+            run_dns_resolver ;;
+        deb-install)
+            run_deb_install ;;
+        tor-socks5)
+            run_tor_socks5 ;;
+        tor-directory)
+            run_tor_directory ;;
         *)
             fail "Unknown suite: $suite"
             record "$suite" 1 ;;
