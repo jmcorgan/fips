@@ -1446,6 +1446,41 @@ mod tests {
         assert_eq!(config.socks5_addr(), "127.0.0.1:9050");
         assert_eq!(config.connect_timeout_ms(), 120000);
         assert_eq!(config.mtu(), 1400);
+        assert_eq!(config.advertised_port(), 443);
+    }
+
+    #[test]
+    fn test_advertised_port_override() {
+        let config = TorConfig {
+            advertised_port: Some(9001),
+            ..Default::default()
+        };
+        assert_eq!(config.advertised_port(), 9001);
+    }
+
+    /// Pins the publisher/parser contract for Tor overlay adverts.
+    /// `build_overlay_advert` formats Tor endpoints as `<onion>:<port>`;
+    /// `parse_tor_addr` must accept that exact form back. A bare onion
+    /// (no port) was the production bug — assert it does not parse.
+    #[test]
+    fn test_advert_address_round_trips_through_parser() {
+        let onion = "mwvj6q3pnsiaky7i6wg5s42xlfurt5uqr3qzckrlw2graa2ugcgwhiqd.onion";
+        let cfg = TorConfig::default();
+        let advertised = format!("{}:{}", onion, cfg.advertised_port());
+
+        let parsed = parse_tor_addr(&TransportAddr::from_string(&advertised)).unwrap();
+        match parsed {
+            TorAddr::Onion(host, port) => {
+                assert_eq!(host, onion);
+                assert_eq!(port, 443);
+            }
+            other => panic!("expected Onion variant, got {:?}", other),
+        }
+
+        // Sanity-check the inverse: the bare-onion form (the bug) must
+        // not parse, so any future regression in the publisher will be
+        // caught by the round-trip test above.
+        assert!(parse_tor_addr(&TransportAddr::from_string(onion)).is_err());
     }
 
     #[tokio::test]

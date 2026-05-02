@@ -954,3 +954,82 @@ fn test_promote_clears_retry_pending() {
         "retry_pending should be cleared on successful promotion"
     );
 }
+
+// ============================================================================
+// transport_mtu() — ISSUE-2026-0011 regression coverage
+// ============================================================================
+
+/// Helper: spawn a UdpTransport with the given mtu, started and operational.
+async fn make_udp_transport_with_mtu(id: u32, mtu: u16) -> TransportHandle {
+    let (packet_tx, _packet_rx) = packet_channel(64);
+    let transport_id = TransportId::new(id);
+    let mut udp = UdpTransport::new(
+        transport_id,
+        Some(format!("udp{}", id)),
+        crate::config::UdpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            mtu: Some(mtu),
+            ..Default::default()
+        },
+        packet_tx,
+    );
+    udp.start_async().await.unwrap();
+    TransportHandle::Udp(udp)
+}
+
+#[tokio::test]
+async fn test_transport_mtu_returns_min_across_operational() {
+    // Multiple operational transports with varied MTUs. The picker must
+    // return the smallest, deterministically, regardless of HashMap
+    // iteration order. This is the core ISSUE-2026-0011 regression test.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp1 = make_udp_transport_with_mtu(1, 1497).await;
+    let udp2 = make_udp_transport_with_mtu(2, 1280).await;
+    let udp3 = make_udp_transport_with_mtu(3, 1400).await;
+
+    node.transports.insert(TransportId::new(1), udp1);
+    node.transports.insert(TransportId::new(2), udp2);
+    node.transports.insert(TransportId::new(3), udp3);
+
+    // Expect the smallest (UDP-1280), not whichever HashMap iterates first.
+    assert_eq!(node.transport_mtu(), 1280);
+
+    // effective_ipv6_mtu = 1280 - 77 = 1203, max_mss = 1203 - 60 = 1143
+    // (verifies the downstream clamp value).
+    assert_eq!(node.effective_ipv6_mtu(), 1203);
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_transport_mtu_fallback_when_no_operational_transports() {
+    // No transports configured at all → falls back to 1280 (IPv6 minimum).
+    let node = make_node();
+    assert_eq!(node.transport_mtu(), 1280);
+}
+
+#[tokio::test]
+async fn test_transport_mtu_min_with_single_operational() {
+    // Single transport: trivially returns its MTU. Pins the picker doesn't
+    // accidentally drop down to a smaller fallback when one transport is
+    // operational.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    assert_eq!(node.transport_mtu(), 1452);
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}

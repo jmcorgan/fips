@@ -193,8 +193,8 @@ run_build() {
         return 1
     fi
 
-    info "cargo clippy --all -- -D warnings"
-    if cargo clippy --all -- -D warnings 2>&1; then
+    info "cargo clippy --all-targets --all-features -- -D warnings"
+    if cargo clippy --all-targets --all-features -- -D warnings 2>&1; then
         record "clippy" 0
     else
         record "clippy" 1
@@ -235,8 +235,10 @@ install_binaries() {
     cp target/release/fips "$dest/fips"
     cp target/release/fipsctl "$dest/fipsctl"
     [[ -f target/release/fipstop ]] && cp target/release/fipstop "$dest/fipstop" || true
+    [[ -f target/release/fips-gateway ]] && cp target/release/fips-gateway "$dest/fips-gateway" || true
     chmod +x "$dest/fips" "$dest/fipsctl"
     [[ -f "$dest/fipstop" ]] && chmod +x "$dest/fipstop" || true
+    [[ -f "$dest/fips-gateway" ]] && chmod +x "$dest/fips-gateway" || true
 }
 
 # Run a static topology test (mesh, chain)

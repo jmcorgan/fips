@@ -1309,12 +1309,14 @@ peers:
     #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn test_validate_peer_via_nostr_requires_nostr_enabled() {
-        let mut config = Config::default();
-        config.peers = vec![PeerConfig {
-            npub: "npub1peer".to_string(),
-            via_nostr: true,
+        let mut config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                via_nostr: true,
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
+        };
         config.node.discovery.nostr.enabled = false;
 
         let err = config.validate().expect_err("validation should fail");
@@ -1325,11 +1327,13 @@ peers:
     #[allow(clippy::field_reassign_with_default)]
     fn test_validate_peer_addresses_required_unless_via_nostr() {
         // Empty addresses + via_nostr=false → error.
-        let mut config = Config::default();
-        config.peers = vec![PeerConfig {
-            npub: "npub1peer".to_string(),
+        let mut config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
+        };
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("at least one address"));
 

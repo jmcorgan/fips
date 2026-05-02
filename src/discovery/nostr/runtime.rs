@@ -198,7 +198,7 @@ impl NostrDiscovery {
     pub async fn cached_open_discovery_candidates(
         &self,
         max: usize,
-    ) -> Vec<(String, Vec<OverlayEndpointAdvert>)> {
+    ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
         self.prune_advert_cache().await;
         let now = now_ms();
         let cache = self.advert_cache.read().await;
@@ -206,7 +206,13 @@ impl NostrDiscovery {
             .values()
             .filter(|entry| entry.author_npub != self.npub)
             .filter(|entry| entry.valid_until_ms > now)
-            .map(|entry| (entry.author_npub.clone(), entry.advert.endpoints.clone()))
+            .map(|entry| {
+                (
+                    entry.author_npub.clone(),
+                    entry.advert.endpoints.clone(),
+                    entry.created_at,
+                )
+            })
             .take(max)
             .collect()
     }

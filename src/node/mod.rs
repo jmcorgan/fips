@@ -441,6 +441,15 @@ pub struct Node {
 
     /// Optional Nostr/STUN overlay discovery coordinator for `udp:nat` peers.
     nostr_discovery: Option<Arc<crate::discovery::nostr::NostrDiscovery>>,
+    /// Wall-clock ms when Nostr discovery successfully started, used to
+    /// schedule the one-shot startup advert sweep after a settle delay.
+    /// `None` until discovery comes up; remains `None` if discovery is
+    /// disabled or failed to start.
+    nostr_discovery_started_at_ms: Option<u64>,
+    /// Whether the one-shot startup advert sweep has run. Set to true
+    /// after the first sweep fires (under `policy: open`); thereafter
+    /// only the per-tick `queue_open_discovery_retries` continues.
+    startup_open_discovery_sweep_done: bool,
     /// Per-peer UDP transports adopted from NAT traversal handoff.
     bootstrap_transports: HashSet<TransportId>,
 
@@ -608,6 +617,8 @@ impl Node {
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             nostr_discovery: None,
+            nostr_discovery_started_at_ms: None,
+            startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
@@ -737,6 +748,8 @@ impl Node {
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             nostr_discovery: None,
+            nostr_discovery_started_at_ms: None,
+            startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
@@ -1023,18 +1036,31 @@ impl Node {
         crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
     }
 
-    /// Get the transport MTU for a specific transport.
+    /// Get the transport MTU governing the global TUN-boundary MSS clamp.
     ///
-    /// When called without a specific transport context, returns the MTU
-    /// of the first operational transport, or 1280 (IPv6 minimum) as
-    /// fallback. This is used for initial TUN configuration where a
-    /// specific transport isn't yet known.
+    /// Returns the **minimum** MTU across all operational transports, or
+    /// 1280 (IPv6 minimum) as fallback. Used for initial TUN configuration
+    /// where a specific egress transport isn't yet known: the resulting
+    /// `effective_ipv6_mtu` (transport_mtu - 77) and `max_mss`
+    /// (effective_mtu - 60) form a conservative ceiling that fits ANY
+    /// configured-transport's egress, eliminating PMTU-D black holes that
+    /// would otherwise occur when a flow's actual egress is smaller than
+    /// the clamp ceiling assumed at TUN init.
+    ///
+    /// Returning the smallest (rather than the first-iterated, which used
+    /// to vary across HashMap iteration order + async-startup race) makes
+    /// the clamp deterministic across daemon restarts.
+    ///
+    /// See `ISSUE-2026-0011` for the empirical investigation.
     pub fn transport_mtu(&self) -> u16 {
-        // Prefer the MTU from the first operational transport
-        for handle in self.transports.values() {
-            if handle.is_operational() {
-                return handle.mtu();
-            }
+        let min_operational = self
+            .transports
+            .values()
+            .filter(|h| h.is_operational())
+            .map(|h| h.mtu())
+            .min();
+        if let Some(mtu) = min_operational {
+            return mtu;
         }
         // Fallback to config: try UDP first, then Ethernet
         if let Some((_, cfg)) = self.config.transports.udp.iter().next() {

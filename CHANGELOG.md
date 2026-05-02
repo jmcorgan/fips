@@ -270,6 +270,21 @@ with v0.2.x peers.
   pre-`0.3.0` so a tagged release supersedes any prior dev .deb.
   Tagged release builds (no `-dev` in Cargo.toml) keep the clean
   `<version>-1` form. Operator override via `--version` still wins
+- One-shot startup advert sweep for Nostr open-discovery. On daemon
+  startup under `node.discovery.nostr.policy: open`, after a short
+  settle delay (`startup_sweep_delay_secs`, default 5s) the cached
+  overlay-advert table is iterated once and recent adverts (newer
+  than `startup_sweep_max_age_secs`, default 3600s) are queued for
+  outbound retry, modulo the same skip-filters as the per-tick sweep
+  (configured peer, already connected, retry-pending, connecting).
+  Closes the gap where peers learned only through relay backlog at
+  startup were not dialed until they republished.
+- Diagnostic logging on the open-discovery sweep. Each `queued retry`
+  now logs at info-level with the peer short-npub and advert age,
+  and a one-line summary (cached count, queued count, per-reason
+  skip counts) is emitted on every startup sweep and on any per-tick
+  sweep that queues at least one retry. Operator-facing visibility
+  into what the auto-dial path is doing.
 
 ### Changed
 
@@ -335,6 +350,16 @@ with v0.2.x peers.
 
 ### Fixed
 
+- Tor onion adverts published over Nostr overlay discovery now
+  include the public-facing port (`<onion>.onion:<port>`) instead of
+  just the bare onion hostname. The publisher previously emitted a
+  bare onion that the parser refused (`expected host:port`),
+  producing a persistent retry-fail loop on any peer whose Tor
+  advert was the only entry in the discovery cache. New
+  `transports.tor.advertised_port` config field (default `443`,
+  matching the Tor `HiddenServicePort` convention) controls the
+  advertised port; operators with non-default virtual ports can
+  override.
 - Control socket path detection in fipsctl and fipstop now checks for
   the `/run/fips/` directory instead of the socket file inside it, so
   users not yet in the `fips` group get a clear "Permission denied"

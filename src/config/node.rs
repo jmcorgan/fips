@@ -353,6 +353,18 @@ pub struct NostrDiscoveryConfig {
     /// How often adverts are refreshed in seconds.
     #[serde(default = "NostrDiscoveryConfig::default_advert_refresh_secs")]
     pub advert_refresh_secs: u64,
+    /// Settle delay in seconds after Nostr discovery starts before the
+    /// one-shot startup sweep of cached adverts runs. Allows the relay
+    /// subscription backlog to populate the in-memory advert cache.
+    /// Only used under `policy: open`. Default: 5.
+    #[serde(default = "NostrDiscoveryConfig::default_startup_sweep_delay_secs")]
+    pub startup_sweep_delay_secs: u64,
+    /// Maximum age in seconds for cached adverts considered by the
+    /// one-shot startup sweep. Adverts whose `created_at` is older than
+    /// `now - startup_sweep_max_age_secs` are skipped. Only used under
+    /// `policy: open`. Default: 3600 (1 hour).
+    #[serde(default = "NostrDiscoveryConfig::default_startup_sweep_max_age_secs")]
+    pub startup_sweep_max_age_secs: u64,
 }
 
 impl Default for NostrDiscoveryConfig {
@@ -378,6 +390,8 @@ impl Default for NostrDiscoveryConfig {
             punch_duration_ms: Self::default_punch_duration_ms(),
             advert_ttl_secs: Self::default_advert_ttl_secs(),
             advert_refresh_secs: Self::default_advert_refresh_secs(),
+            startup_sweep_delay_secs: Self::default_startup_sweep_delay_secs(),
+            startup_sweep_max_age_secs: Self::default_startup_sweep_max_age_secs(),
         }
     }
 }
@@ -461,6 +475,14 @@ impl NostrDiscoveryConfig {
 
     fn default_advert_refresh_secs() -> u64 {
         1_800
+    }
+
+    fn default_startup_sweep_delay_secs() -> u64 {
+        5
+    }
+
+    fn default_startup_sweep_max_age_secs() -> u64 {
+        3_600
     }
 }
 
@@ -1046,6 +1068,32 @@ mod tests {
         assert!(c.enabled); // default
         assert!((c.loss_threshold - 0.02).abs() < 1e-9);
         assert!((c.etx_threshold - 3.0).abs() < 1e-9); // default
+    }
+
+    #[test]
+    fn test_nostr_discovery_startup_sweep_defaults() {
+        let c = NostrDiscoveryConfig::default();
+        assert_eq!(c.startup_sweep_delay_secs, 5);
+        assert_eq!(c.startup_sweep_max_age_secs, 3_600);
+    }
+
+    #[test]
+    fn test_nostr_discovery_startup_sweep_yaml_override() {
+        let yaml = "enabled: true\npolicy: open\nstartup_sweep_delay_secs: 10\nstartup_sweep_max_age_secs: 1800\n";
+        let c: NostrDiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.policy, NostrDiscoveryPolicy::Open);
+        assert_eq!(c.startup_sweep_delay_secs, 10);
+        assert_eq!(c.startup_sweep_max_age_secs, 1_800);
+    }
+
+    #[test]
+    fn test_nostr_discovery_startup_sweep_partial_yaml_uses_defaults() {
+        // Only override delay; max_age should fall back to default.
+        let yaml = "enabled: true\nstartup_sweep_delay_secs: 30\n";
+        let c: NostrDiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.startup_sweep_delay_secs, 30);
+        assert_eq!(c.startup_sweep_max_age_secs, 3_600);
     }
 
     #[cfg(windows)]

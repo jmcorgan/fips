@@ -441,6 +441,10 @@ const DEFAULT_HOSTNAME_FILE: &str = "/var/lib/tor/fips_onion_service/hostname";
 /// Default directory mode bind address.
 const DEFAULT_DIRECTORY_BIND_ADDR: &str = "127.0.0.1:8443";
 
+/// Default advertised onion port for Nostr overlay discovery. Matches the
+/// Tor convention of `HiddenServicePort 443 127.0.0.1:<bind_port>` in torrc.
+const DEFAULT_TOR_ADVERTISED_PORT: u16 = 443;
+
 /// Tor transport instance configuration.
 ///
 /// Supports three modes:
@@ -503,6 +507,13 @@ pub struct TorConfig {
     /// Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise_on_nostr: Option<bool>,
+
+    /// Public-facing onion port published in Nostr overlay adverts. Must
+    /// match the virtual port in torrc's `HiddenServicePort <port>
+    /// 127.0.0.1:<bind_port>` directive — that is the port other peers
+    /// will use to reach this onion. Default: 443.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_port: Option<u16>,
 }
 
 /// Directory-mode onion service configuration.
@@ -594,6 +605,12 @@ impl TorConfig {
     /// Whether this Tor transport should be advertised on Nostr discovery.
     pub fn advertise_on_nostr(&self) -> bool {
         self.advertise_on_nostr.unwrap_or(false)
+    }
+
+    /// Public-facing onion port published in Nostr overlay adverts.
+    /// Default: 443.
+    pub fn advertised_port(&self) -> u16 {
+        self.advertised_port.unwrap_or(DEFAULT_TOR_ADVERTISED_PORT)
     }
 }
 
