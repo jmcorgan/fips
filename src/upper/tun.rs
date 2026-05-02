@@ -1010,6 +1010,7 @@ mod windows_tun {
         tun_tx: TunTx,
         outbound_tx: TunOutboundTx,
         transport_mtu: u16,
+        path_mtu_lookup: PathMtuLookup,
     ) {
         let (name, mut buf, max_mss) = super::tun_reader_setup(device.name(), mtu, transport_mtu);
 
@@ -1023,6 +1024,7 @@ mod windows_tun {
                         our_addr,
                         &tun_tx,
                         &outbound_tx,
+                        &path_mtu_lookup,
                     ) {
                         break;
                     }
