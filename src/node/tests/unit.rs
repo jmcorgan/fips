@@ -1033,3 +1033,138 @@ async fn test_transport_mtu_min_with_single_operational() {
         transport.stop().await.ok();
     }
 }
+
+// path_mtu_lookup seeding for direct-link (configured) peers — closes the
+// B3 coverage gap where configured/auto-connect peers never go through the
+// discovery Lookup flow and so their FipsAddress was missing from
+// path_mtu_lookup, causing the SYN-time TCP MSS clamp to fall back to the
+// global ceiling.
+
+#[tokio::test]
+async fn test_seed_path_mtu_inserts_when_empty() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let peer_addr = make_node_addr(0xAA);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.2:2121");
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+
+    let stored = node
+        .path_mtu_lookup
+        .read()
+        .unwrap()
+        .get(&fips_addr)
+        .copied();
+    assert_eq!(
+        stored,
+        Some(1452),
+        "Empty lookup should be seeded with the link MTU"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_seed_path_mtu_keeps_tighter_existing_value() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let peer_addr = make_node_addr(0xBB);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.3:2121");
+
+    // Pre-populate with a tighter value, e.g. learned from discovery's
+    // reverse-path bottleneck.
+    node.path_mtu_lookup
+        .write()
+        .unwrap()
+        .insert(fips_addr, 1280);
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+
+    let stored = node
+        .path_mtu_lookup
+        .read()
+        .unwrap()
+        .get(&fips_addr)
+        .copied();
+    assert_eq!(
+        stored,
+        Some(1280),
+        "Existing tighter value (1280) must not be loosened by direct-link seed (1452)"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_seed_path_mtu_tightens_looser_existing_value() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1280).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let peer_addr = make_node_addr(0xCC);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.4:2121");
+
+    // Pre-populate with a looser stale value.
+    node.path_mtu_lookup
+        .write()
+        .unwrap()
+        .insert(fips_addr, 1452);
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+
+    let stored = node
+        .path_mtu_lookup
+        .read()
+        .unwrap()
+        .get(&fips_addr)
+        .copied();
+    assert_eq!(
+        stored,
+        Some(1280),
+        "Direct-link seed (1280) must overwrite looser existing value (1452)"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_seed_path_mtu_noop_for_unknown_transport() {
+    let node = make_node();
+    let peer_addr = make_node_addr(0xDD);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.5:2121");
+
+    // No transport registered — call must be a no-op, not panic.
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(99), &transport_addr);
+
+    let map = node.path_mtu_lookup.read().unwrap();
+    assert!(
+        map.get(&fips_addr).is_none(),
+        "Seed must be a no-op when transport_id is not registered"
+    );
+}

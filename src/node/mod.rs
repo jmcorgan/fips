@@ -306,6 +306,12 @@ pub struct Node {
     /// Recent discovery requests (dedup + reverse-path forwarding).
     /// Maps request_id → RecentRequest.
     recent_requests: HashMap<u64, RecentRequest>,
+    /// Per-destination path MTU lookup, keyed by FipsAddress (mirrors
+    /// `coord_cache.entries[*].path_mtu`). Sync read-only access from
+    /// the TUN reader/writer threads at TCP MSS clamp time so the
+    /// SYN/SYN-ACK clamp can use the smaller of the local-egress floor
+    /// and the learned per-destination path MTU.
+    path_mtu_lookup: Arc<std::sync::RwLock<HashMap<crate::FipsAddress, u16>>>,
 
     // === Transports & Links ===
     /// Active transports (owned by Node).
@@ -628,6 +634,7 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
+            path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
         })
     }
 
@@ -759,6 +766,7 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
+            path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
         })
     }
 

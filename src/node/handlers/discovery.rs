@@ -7,6 +7,7 @@
 
 use crate::node::{Node, RecentRequest};
 use crate::protocol::{LookupRequest, LookupResponse};
+use crate::transport::{TransportAddr, TransportId};
 use crate::{NodeAddr, PeerIdentity};
 use tracing::{debug, info, trace, warn};
 
@@ -138,16 +139,7 @@ impl Node {
             self.stats_mut().discovery.resp_forwarded += 1;
 
             // Apply path_mtu min() from the outgoing link's transport MTU
-            if let Some(peer) = self.peers.get(&from_peer)
-                && let Some(tid) = peer.transport_id()
-                && let Some(transport) = self.transports.get(&tid)
-            {
-                if let Some(addr) = peer.current_addr() {
-                    response.path_mtu = response.path_mtu.min(transport.link_mtu(addr));
-                } else {
-                    response.path_mtu = response.path_mtu.min(transport.mtu());
-                }
-            }
+            self.apply_outgoing_link_mtu_to_response(&mut response, &from_peer);
 
             debug!(
                 request_id = response.request_id,
@@ -217,6 +209,32 @@ impl Node {
             self.coord_cache
                 .insert_with_path_mtu(target, response.target_coords, now_ms, path_mtu);
 
+            // Mirror path_mtu into the FipsAddress-keyed read-only lookup
+            // map used by the TUN reader/writer at TCP MSS clamp time.
+            let fips_addr = crate::FipsAddress::from_node_addr(&target);
+            match self.path_mtu_lookup.write() {
+                Ok(mut map) => {
+                    let prior = map.insert(fips_addr, path_mtu);
+                    debug!(
+                        target = %self.peer_display_name(&target),
+                        fips_addr = %fips_addr,
+                        path_mtu = path_mtu,
+                        prior = ?prior,
+                        map_len = map.len(),
+                        "Wrote path_mtu_lookup from discovery LookupResponse"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        target = %self.peer_display_name(&target),
+                        fips_addr = %fips_addr,
+                        path_mtu = path_mtu,
+                        error = %e,
+                        "path_mtu_lookup write lock poisoned; clamp will not see this update"
+                    );
+                }
+            }
+
             // Clean up pending lookup tracking
             self.pending_lookups.remove(&target);
 
@@ -256,7 +274,8 @@ impl Node {
             LookupResponse::proof_bytes(request.request_id, &request.target, &our_coords);
         let proof = self.identity().sign(&proof_data);
 
-        let response = LookupResponse::new(request.request_id, request.target, our_coords, proof);
+        let mut response =
+            LookupResponse::new(request.request_id, request.target, our_coords, proof);
 
         // Route toward origin via reverse path.
         let next_hop_addr = if let Some(recent) = self.recent_requests.get(&request.request_id) {
@@ -275,10 +294,17 @@ impl Node {
             }
         };
 
+        // Fold our outgoing-link MTU into path_mtu so the target-edge link
+        // appears in the bottleneck calculation. Without this, the response
+        // leaves the target with path_mtu = u16::MAX and only intermediate
+        // transits min-fold; the target's first reverse-path hop is missed.
+        self.apply_outgoing_link_mtu_to_response(&mut response, &next_hop_addr);
+
         debug!(
             request_id = request.request_id,
             origin = %self.peer_display_name(&request.origin),
             next_hop = %self.peer_display_name(&next_hop_addr),
+            path_mtu = response.path_mtu,
             "Sending LookupResponse"
         );
 
@@ -615,6 +641,92 @@ impl Node {
         let expiry_ms = self.config.node.discovery.recent_expiry_secs * 1000;
         self.recent_requests
             .retain(|_, entry| !entry.is_expired(current_time_ms, expiry_ms));
+    }
+
+    /// Min-fold our outgoing-link MTU into a LookupResponse's `path_mtu`.
+    ///
+    /// Used at both transit-side reverse-path forward and at the target's
+    /// own send_lookup_response. The link MTU we apply is the MTU of the
+    /// transport+addr we'll use to deliver the response toward `next_hop`.
+    /// No-op when `next_hop` is not a directly-connected peer or its
+    /// transport is not registered.
+    pub(in crate::node) fn apply_outgoing_link_mtu_to_response(
+        &self,
+        response: &mut LookupResponse,
+        next_hop: &NodeAddr,
+    ) {
+        if let Some(peer) = self.peers.get(next_hop)
+            && let Some(tid) = peer.transport_id()
+            && let Some(transport) = self.transports.get(&tid)
+        {
+            let link_mtu = if let Some(addr) = peer.current_addr() {
+                transport.link_mtu(addr)
+            } else {
+                transport.mtu()
+            };
+            response.path_mtu = response.path_mtu.min(link_mtu);
+        }
+    }
+
+    /// Seed `path_mtu_lookup` for a directly-connected peer.
+    ///
+    /// Called when an FMP link-layer peer is promoted to active. The seed
+    /// value is the local outgoing-link MTU on the peer's transport, which
+    /// is the actual link constraint for direct-link traffic. Stored only
+    /// when no tighter value exists: discovery's reverse-path bottleneck
+    /// or MMP `MtuExceeded` reactive learning take precedence when smaller.
+    ///
+    /// Without this seed, configured/auto-connect peers (which establish
+    /// sessions without going through the discovery Lookup flow) leave
+    /// `path_mtu_lookup` empty for their FipsAddress, causing
+    /// `per_flow_max_mss` to fall back to the global ceiling and the
+    /// SYN-time TCP MSS clamp to over-estimate the effective path.
+    pub(in crate::node) fn seed_path_mtu_for_link_peer(
+        &self,
+        peer_addr: &NodeAddr,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+    ) {
+        let Some(transport) = self.transports.get(&transport_id) else {
+            debug!(
+                peer = %self.peer_display_name(peer_addr),
+                transport_id = %transport_id,
+                "seed_path_mtu_for_link_peer: transport not registered, skipping seed"
+            );
+            return;
+        };
+        let link_mtu = transport.link_mtu(addr);
+        let fips_addr = crate::FipsAddress::from_node_addr(peer_addr);
+        let Ok(mut map) = self.path_mtu_lookup.write() else {
+            warn!(
+                peer = %self.peer_display_name(peer_addr),
+                "seed_path_mtu_for_link_peer: path_mtu_lookup write lock poisoned"
+            );
+            return;
+        };
+        match map.get(&fips_addr).copied() {
+            Some(existing) if existing <= link_mtu => {
+                // Keep the tighter learned value; never loosen the clamp.
+                debug!(
+                    peer = %self.peer_display_name(peer_addr),
+                    fips_addr = %fips_addr,
+                    link_mtu = link_mtu,
+                    existing = existing,
+                    "seed_path_mtu_for_link_peer: keeping tighter existing value"
+                );
+            }
+            other => {
+                map.insert(fips_addr, link_mtu);
+                debug!(
+                    peer = %self.peer_display_name(peer_addr),
+                    fips_addr = %fips_addr,
+                    link_mtu = link_mtu,
+                    prior = ?other,
+                    map_len = map.len(),
+                    "seed_path_mtu_for_link_peer: wrote link MTU"
+                );
+            }
+        }
     }
 }
 

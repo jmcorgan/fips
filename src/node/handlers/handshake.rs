@@ -1401,6 +1401,8 @@ impl Node {
                     let _ = self.index_allocator.free(old_idx);
                 }
 
+                self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);
+
                 let mut new_peer = ActivePeer::with_session(
                     verified_identity,
                     link_id,
@@ -1503,6 +1505,8 @@ impl Node {
                 .peers
                 .get(&peer_node_addr)
                 .map(|p| p.last_tree_announce_sent_ms());
+
+            self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);
 
             let mut new_peer = ActivePeer::with_session(
                 verified_identity,

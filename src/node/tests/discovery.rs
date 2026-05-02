@@ -702,14 +702,13 @@ async fn test_discovery_100_nodes() {
 #[tokio::test]
 async fn test_response_path_mtu_two_node() {
     // Two-node topology: node0 — node1
-    // Node0 initiates lookup for node1. The response should carry path_mtu
-    // reflecting the transport MTU (1280 in tests) clamped by transit.
-    // In a two-node setup: node1 (target) initializes path_mtu=u16::MAX,
-    // then the response is sent directly to node0. Since node1 is the
-    // target and sends directly, the transit logic does not apply for the
-    // first hop (the target sends directly). But node0 is the originator
-    // and doesn't apply transit MTU. So path_mtu should be u16::MAX in
-    // this simple case (no transit nodes to clamp it).
+    // Node0 initiates lookup for node1. node1 is the target and generates
+    // the response: send_lookup_response folds in node1's own outgoing-link
+    // MTU before sending, so path_mtu reflects the target-edge link
+    // constraint (the test transport MTU, 1280) even with no transit hops.
+    // Without that target-edge fold, a 2-node lookup would leave path_mtu
+    // at u16::MAX since no transit min-fold runs — that's the gap closed
+    // alongside the configured-peer seed in the B3 follow-up.
     let edges = vec![(0, 1)];
     let mut nodes = run_tree_test(2, &edges, false).await;
 
@@ -732,19 +731,38 @@ async fn test_response_path_mtu_two_node() {
         "Node 0 should have cached node 1's route"
     );
 
-    // Check that path_mtu was stored in the cache entry
     let entry = nodes[0].node.coord_cache().get_entry(&node1_addr).unwrap();
     let path_mtu = entry
         .path_mtu()
         .expect("path_mtu should be set from discovery");
-    // In a 2-node setup, no transit node applies the min() so path_mtu stays u16::MAX
     assert_eq!(
-        path_mtu,
-        u16::MAX,
-        "Two-node path_mtu should be u16::MAX (no transit nodes to clamp)"
+        path_mtu, 1280,
+        "Two-node path_mtu should be the target-edge link MTU (1280 in tests)"
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_apply_outgoing_link_mtu_to_response_unknown_peer_noop() {
+    // When next_hop is not a directly-connected peer (no entry in
+    // self.peers), apply_outgoing_link_mtu_to_response is a no-op and the
+    // response's path_mtu is left unchanged. Pins the early-return path.
+    let node = make_node();
+    let unknown = make_node_addr(0x99);
+
+    let coords = TreeCoordinate::from_addrs(vec![unknown, make_node_addr(0)]).unwrap();
+    let identity = Identity::generate();
+    let proof_data = LookupResponse::proof_bytes(1, &unknown, &coords);
+    let proof = identity.sign(&proof_data);
+    let mut response = LookupResponse::new(1, unknown, coords, proof);
+    response.path_mtu = 1500;
+
+    node.apply_outgoing_link_mtu_to_response(&mut response, &unknown);
+    assert_eq!(
+        response.path_mtu, 1500,
+        "Unknown next_hop must leave path_mtu untouched"
+    );
 }
 
 #[tokio::test]
@@ -928,7 +946,11 @@ async fn test_transit_forwards_when_mtu_sufficient() {
     // Topology: node0(1280) — node1(1400) — node2(1280)
     // Node0 initiates lookup for node2 with min_mtu=1280 (default TUN MTU).
     // Node1's transport MTU is 1400 >= 1280, so the request passes through.
-    // Node1 annotates path_mtu = min(u16::MAX, 1400) = 1400 on response.
+    // Bottleneck min-fold accumulates contributions from BOTH the target's
+    // own outgoing-link MTU (the target-edge fold added with the
+    // direct-link/target-edge gap fix) and each transit node's outgoing-
+    // link MTU. With node2 (target) at 1280 and node1 (transit) at 1400,
+    // the bottleneck is min(1280, 1400) = 1280.
     let mtus = [1280, 1400, 1280];
     let edges = vec![(0, 1), (1, 2)];
     let mut nodes = run_tree_test_with_mtus(&mtus, &edges).await;
@@ -957,8 +979,8 @@ async fn test_transit_forwards_when_mtu_sufficient() {
     let entry = nodes[0].node.coord_cache().get_entry(&node2_addr).unwrap();
     let path_mtu = entry.path_mtu().expect("path_mtu should be set");
     assert_eq!(
-        path_mtu, 1400,
-        "path_mtu should reflect transit node's transport MTU (1400)"
+        path_mtu, 1280,
+        "path_mtu should be min(target-edge 1280, transit 1400) = 1280"
     );
 
     cleanup_nodes(&mut nodes).await;
@@ -966,16 +988,17 @@ async fn test_transit_forwards_when_mtu_sufficient() {
 
 #[tokio::test]
 async fn test_response_path_mtu_four_node_chain() {
-    // Topology: node0(1280) — node1(1400) — node2(900) — node3(1280)
+    // Topology: node0(1280) — node1(1500) — node2(1350) — node3(1280)
     // Node0 initiates lookup for node3. Response travels node3→node2→node1→node0.
-    // Transit nodes apply min(): node2 sees min(u16::MAX, 900) = 900,
-    // node1 sees min(900, 1400) = 900.
-    // Final path_mtu at node0 should be 900 (bottleneck at node2).
+    // The bottleneck min-fold now accumulates contributions from the target's
+    // own outgoing link MTU (target-edge fold added with the direct-link gap
+    // fix) AND each transit node's outgoing link MTU on the reverse path.
+    // node3 (target, 1280) → 1280; node2 (transit, 1350) → min(1280, 1350) =
+    // 1280; node1 (transit, 1500) → min(1280, 1500) = 1280. Result: 1280.
     //
-    // Note: min_mtu=1280 from TUN config. Node2's MTU (900) < 1280 would prune
-    // the forward request at node2, so node3 would never be reached. To test
-    // path_mtu annotation we need all transit links to pass the min_mtu check.
-    // Use MTUs above 1280 to avoid pruning but with different values to verify min().
+    // Note: min_mtu=1280 from TUN config. All transit MTUs ≥ 1280 so the
+    // forward request is not pruned; the test exercises the response-side
+    // min-fold accumulation explicitly.
     let mtus = [1280, 1500, 1350, 1280];
     let edges = vec![(0, 1), (1, 2), (2, 3)];
     let mut nodes = run_tree_test_with_mtus(&mtus, &edges).await;
@@ -1004,8 +1027,8 @@ async fn test_response_path_mtu_four_node_chain() {
     let entry = nodes[0].node.coord_cache().get_entry(&node3_addr).unwrap();
     let path_mtu = entry.path_mtu().expect("path_mtu should be set");
     assert_eq!(
-        path_mtu, 1350,
-        "Four-node chain path_mtu should be min of transit MTUs (1350)"
+        path_mtu, 1280,
+        "Four-node chain path_mtu = min(target-edge 1280, transits 1350+1500) = 1280"
     );
 
     cleanup_nodes(&mut nodes).await;
