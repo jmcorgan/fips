@@ -27,7 +27,7 @@ use crate::protocol::{
 use crate::protocol::{coords_wire_size, encode_coords};
 use crate::upper::icmp::FIPS_OVERHEAD;
 use secp256k1::PublicKey;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 impl Node {
     /// Handle a locally-delivered session datagram payload.
@@ -1119,7 +1119,7 @@ impl Node {
     /// A transit router couldn't forward our packet because it exceeded the
     /// next-hop transport MTU. Apply the reported bottleneck MTU to our
     /// PathMtuState for the affected session, causing an immediate decrease.
-    async fn handle_mtu_exceeded(&mut self, inner: &[u8]) {
+    pub(in crate::node) async fn handle_mtu_exceeded(&mut self, inner: &[u8]) {
         self.stats_mut().errors.mtu_exceeded += 1;
 
         let msg = match MtuExceeded::decode(inner) {
@@ -1152,6 +1152,47 @@ impl Node {
                     new_mtu,
                     reporter = %msg.reporter,
                     "Path MTU decreased via reactive MtuExceeded signal"
+                );
+            }
+        }
+
+        // Mirror the bottleneck into the FipsAddress-keyed lookup used by
+        // the TUN reader/writer at TCP MSS clamp time. Discovery's reverse-
+        // path response can carry a value too generous for the actual
+        // forward path; the reactive signal from a forwarder that actually
+        // dropped a packet is authoritative for "what fits". Keep the
+        // tighter of existing-or-new — never loosen the clamp.
+        let fips_addr = crate::FipsAddress::from_node_addr(&msg.dest_addr);
+        match self.path_mtu_lookup.write() {
+            Ok(mut map) => match map.get(&fips_addr).copied() {
+                Some(existing) if existing <= msg.mtu => {
+                    debug!(
+                        dest = %peer_name,
+                        fips_addr = %fips_addr,
+                        bottleneck_mtu = msg.mtu,
+                        existing,
+                        "Reactive MtuExceeded: keeping tighter existing path_mtu_lookup value"
+                    );
+                }
+                other => {
+                    map.insert(fips_addr, msg.mtu);
+                    debug!(
+                        dest = %peer_name,
+                        fips_addr = %fips_addr,
+                        bottleneck_mtu = msg.mtu,
+                        prior = ?other,
+                        map_len = map.len(),
+                        "Reactive MtuExceeded: tightened path_mtu_lookup"
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    dest = %peer_name,
+                    fips_addr = %fips_addr,
+                    bottleneck_mtu = msg.mtu,
+                    error = %e,
+                    "path_mtu_lookup write lock poisoned; reactive MtuExceeded not reflected"
                 );
             }
         }
