@@ -1689,6 +1689,13 @@ impl Node {
         self.register_identity(peer_node_addr, peer_identity.pubkey_full());
 
         let transport_id = self.allocate_transport_id();
+        // Adopted ephemeral UDP transports use UdpConfig::default() when the
+        // bootstrap runtime doesn't pass an override. Default MTU resolves to
+        // 1280 (IPv6 minimum), which is the only value guaranteed to survive
+        // arbitrary NAT-traversal middlebox paths. Inheriting from the named
+        // [transports.udp] config (Option 3 in ISSUE-2026-0013) would track
+        // operator config more closely but risks regressions on hostile paths;
+        // accepted as-is until a concrete use case justifies the change.
         let mut transport = crate::transport::udp::UdpTransport::new(
             transport_id,
             traversal.transport_name.clone(),
