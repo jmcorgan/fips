@@ -109,6 +109,82 @@ jobs:
 
           echo "pkg=$PKG_FILE" >> "$GITHUB_OUTPUT"
 
+      - name: Verify .pkg structural correctness
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="${{ steps.macos-assets.outputs.pkg }}"
+          EXPAND_DIR="$(mktemp -d)/expanded"
+          PAYLOAD_DIR="$(mktemp -d)/payload"
+          fail=0
+
+          echo "==> Verifying $PKG"
+
+          # 1) Flat-package expansion
+          if pkgutil --expand "$PKG" "$EXPAND_DIR"; then
+            echo "PASS: pkgutil --expand"
+          else
+            echo "FAIL: pkgutil --expand"
+            fail=1
+          fi
+
+          # Extract the cpio.gz Payload so we can inspect installed file layout
+          PAYLOAD_FILE="$(find "$EXPAND_DIR" -name Payload -type f | head -n 1)"
+          if [[ -z "$PAYLOAD_FILE" ]]; then
+            echo "FAIL: no Payload file inside expanded pkg"
+            fail=1
+          else
+            mkdir -p "$PAYLOAD_DIR"
+            (cd "$PAYLOAD_DIR" && gzip -dc "$PAYLOAD_FILE" | cpio -i --quiet)
+            echo "PASS: extracted Payload to $PAYLOAD_DIR"
+          fi
+
+          # 2) Binary at canonical install path (./usr/local/bin/fips inside payload)
+          BIN_PATH="$PAYLOAD_DIR/usr/local/bin/fips"
+          if [[ -f "$BIN_PATH" ]]; then
+            echo "PASS: binary present at usr/local/bin/fips"
+          else
+            echo "FAIL: binary missing at usr/local/bin/fips"
+            echo "  fallback search:"
+            find "$PAYLOAD_DIR" -name fips -type f -print || true
+            fail=1
+          fi
+          for extra in fipsctl fipstop; do
+            if [[ -f "$PAYLOAD_DIR/usr/local/bin/$extra" ]]; then
+              echo "PASS: binary present at usr/local/bin/$extra"
+            else
+              echo "FAIL: binary missing at usr/local/bin/$extra"
+              fail=1
+            fi
+          done
+
+          # 3) LaunchDaemon plist at canonical location
+          PLIST_PATH="$PAYLOAD_DIR/Library/LaunchDaemons/com.fips.daemon.plist"
+          if [[ -f "$PLIST_PATH" ]]; then
+            echo "PASS: plist present at Library/LaunchDaemons/com.fips.daemon.plist"
+          else
+            echo "FAIL: plist missing at Library/LaunchDaemons/com.fips.daemon.plist"
+            echo "  fallback search:"
+            find "$PAYLOAD_DIR" -name '*.plist' -print || true
+            fail=1
+          fi
+
+          # 4) plutil -lint on the plist
+          if [[ -f "$PLIST_PATH" ]]; then
+            if plutil -lint "$PLIST_PATH"; then
+              echo "PASS: plutil -lint"
+            else
+              echo "FAIL: plutil -lint"
+              fail=1
+            fi
+          fi
+
+          if [[ "$fail" -ne 0 ]]; then
+            echo "==> .pkg verification FAILED"
+            exit 1
+          fi
+          echo "==> .pkg verification PASSED"
+
       - name: SHA-256 hash
         run: |
           echo "==> macOS release asset:"

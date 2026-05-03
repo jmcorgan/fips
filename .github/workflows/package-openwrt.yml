@@ -200,6 +200,188 @@ jobs:
           LLVM_STRIP: llvm-strip
         run: ./packaging/openwrt-ipk/build-ipk.sh --arch ${{ matrix.build_arch }}
 
+      - name: Install shellcheck (if missing)
+        shell: bash
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+          fi
+          shellcheck --version
+
+      - name: Lint shipped shell scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES_DIR=packaging/openwrt-ipk/files
+          # Scripts shipped inside the .ipk. The init scripts use the OpenWrt
+          # `#!/bin/sh /etc/rc.common` shebang; tell shellcheck to treat them
+          # as POSIX sh and silence the unrecognized-shebang warning (SC1008).
+          # SC2317 (unreachable command) fires on rc.common's externally-invoked
+          # start_service/stop_service/reload_service hooks.
+          TARGETS=(
+            "$FILES_DIR/etc/init.d/fips"
+            "$FILES_DIR/etc/init.d/fips-gateway"
+            "$FILES_DIR/etc/fips/firewall.sh"
+            "$FILES_DIR/etc/hotplug.d/net/99-fips"
+            "$FILES_DIR/etc/uci-defaults/90-fips-setup"
+          )
+          fail=0
+          for f in "${TARGETS[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "FAIL: missing $f"
+              fail=1
+              continue
+            fi
+            echo "==> shellcheck $f"
+            if shellcheck --shell=sh --exclude=SC1008,SC2317 "$f"; then
+              echo "    PASS"
+            else
+              echo "    FAIL"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "shellcheck FAILED"
+            exit 1
+          fi
+          echo "shellcheck PASS (${#TARGETS[@]} scripts)"
+
+      - name: Sysctl drop-in syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES_DIR=packaging/openwrt-ipk/files
+          TARGETS=(
+            "$FILES_DIR/etc/sysctl.d/fips-gateway.conf"
+            "$FILES_DIR/etc/sysctl.d/fips-bridge.conf"
+          )
+          fail=0
+          for conf in "${TARGETS[@]}"; do
+            if [ ! -f "$conf" ]; then
+              echo "FAIL: missing $conf"
+              fail=1
+              continue
+            fi
+            echo "==> validating $conf"
+            lineno=0
+            file_ok=1
+            while IFS= read -r line || [ -n "$line" ]; do
+              lineno=$((lineno + 1))
+              # Skip comments and blank lines.
+              case "$line" in
+                ''|\#*) continue ;;
+              esac
+              # Match: <key> = <value> where key is dotted lower-id and value is
+              # an integer (sysctl drop-ins shipped here are all numeric toggles).
+              if ! [[ "$line" =~ ^[a-z0-9_.-]+[[:space:]]*=[[:space:]]*-?[0-9]+[[:space:]]*$ ]]; then
+                echo "    FAIL line $lineno: $line"
+                file_ok=0
+              fi
+            done < "$conf"
+            if [ "$file_ok" -eq 1 ]; then
+              echo "    PASS"
+            else
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "sysctl drop-in syntax check FAILED"
+            exit 1
+          fi
+          echo "sysctl drop-in syntax check PASS"
+
+      - name: Verify ipk structural integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPK="dist/${{ env.PACKAGE_FILENAME }}"
+          if [ ! -f "$IPK" ]; then
+            echo "FAIL: produced ipk not found at $IPK"
+            exit 1
+          fi
+          echo "==> file type:"
+          file "$IPK"
+
+          # OpenWrt .ipk = tar.gz containing debian-binary + control.tar.gz +
+          # data.tar.gz (NOT an ar archive like Debian's .deb).
+          WORK=$(mktemp -d)
+          trap 'rm -rf "$WORK"' EXIT
+
+          tar -xzf "$IPK" -C "$WORK"
+          echo "==> top-level entries:"
+          ls -la "$WORK"
+
+          # Top-level structural assertions.
+          fail=0
+          for entry in debian-binary control.tar.gz data.tar.gz; do
+            if [ ! -f "$WORK/$entry" ]; then
+              echo "FAIL: missing top-level $entry"
+              fail=1
+            else
+              echo "    PASS top-level: $entry"
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+
+          # debian-binary content sanity.
+          dbin_content=$(cat "$WORK/debian-binary" | tr -d '[:space:]')
+          if [ "$dbin_content" != "2.0" ]; then
+            echo "FAIL: debian-binary content is '$dbin_content' (expected 2.0)"
+            exit 1
+          fi
+          echo "    PASS debian-binary content: 2.0"
+
+          # Inspect data.tar.gz contents.
+          DATA_LIST="$WORK/data.list"
+          tar -tzf "$WORK/data.tar.gz" > "$DATA_LIST"
+          echo "==> data.tar.gz entry count: $(wc -l < "$DATA_LIST")"
+
+          # Required filesystem entries inside data.tar.gz. Entries are
+          # produced with a leading "./" by build-ipk.sh.
+          REQUIRED=(
+            ./usr/bin/fips
+            ./usr/bin/fipsctl
+            ./usr/bin/fipstop
+            ./usr/bin/fips-gateway
+            ./etc/init.d/fips
+            ./etc/init.d/fips-gateway
+            ./etc/fips/fips.yaml
+            ./etc/fips/firewall.sh
+            ./etc/dnsmasq.d/fips.conf
+            ./etc/sysctl.d/fips-gateway.conf
+            ./etc/sysctl.d/fips-bridge.conf
+            ./etc/hotplug.d/net/99-fips
+            ./etc/uci-defaults/90-fips-setup
+            ./lib/upgrade/keep.d/fips
+          )
+          for path in "${REQUIRED[@]}"; do
+            if grep -Fxq "$path" "$DATA_LIST"; then
+              echo "    PASS data: $path"
+            else
+              echo "    FAIL data: missing $path"
+              fail=1
+            fi
+          done
+
+          # Inspect control.tar.gz: must contain control file + maintainer scripts.
+          CTRL_LIST="$WORK/control.list"
+          tar -tzf "$WORK/control.tar.gz" > "$CTRL_LIST"
+          echo "==> control.tar.gz entry count: $(wc -l < "$CTRL_LIST")"
+          for path in ./control ./conffiles ./postinst ./prerm; do
+            if grep -Fxq "$path" "$CTRL_LIST"; then
+              echo "    PASS control: $path"
+            else
+              echo "    FAIL control: missing $path"
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "ipk structural verification FAILED"
+            exit 1
+          fi
+          echo "ipk structural verification PASS"
+
       - name: SHA-256 hashes
         run: |
           echo "==> Binaries:"
