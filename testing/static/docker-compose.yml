@@ -512,6 +512,21 @@ services:
       fips-net:
         ipv4_address: 172.20.0.11
 
+  # Second mesh destination — gives gw-client-2 a distinct npub to target
+  # so the gateway allocates a separate virtual-IP mapping per LAN client.
+  # Mirrors gw-server; not on gateway-lan.
+  gw-server-2:
+    <<: *fips-common
+    profiles: ["gateway"]
+    container_name: fips-gw-server-2
+    hostname: gw-server-2
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/gateway/node-c.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.12
+
   gw-client:
     image: fips-test-app:latest
     profiles: ["gateway"]
@@ -527,6 +542,28 @@ services:
       gateway-lan:
         ipv4_address: 172.20.1.20
         ipv6_address: fd02::20
+    restart: "no"
+    env_file:
+      - ./generated-configs/npubs.env
+
+  # Second LAN client — exercises concurrent multi-client mappings.
+  # Same image and gateway-lan attachment as
+  # gw-client; the gateway must allocate a distinct virtual IP for it.
+  gw-client-2:
+    image: fips-test-app:latest
+    profiles: ["gateway"]
+    container_name: fips-gw-client-2
+    hostname: gw-client-2
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    volumes:
+      - ./configs/gateway-resolv.conf:/etc/resolv.conf:ro
+    networks:
+      gateway-lan:
+        ipv4_address: 172.20.1.21
+        ipv6_address: fd02::21
     restart: "no"
     env_file:
       - ./generated-configs/npubs.env
