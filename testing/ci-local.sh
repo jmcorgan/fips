@@ -17,7 +17,8 @@
 # Integration suites (default coverage):
 #   static-mesh, static-chain, rekey, rekey-accept-off,
 #   rekey-outbound-only, mixed-profile, gateway,
-#   acl-allowlist, nat-cone, nat-symmetric, nat-lan,
+#   acl-allowlist, firewall, nat-cone, nat-symmetric, nat-lan,
+#   nostr-publish-consume, stun-faults,
 #   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
 #   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
@@ -73,7 +74,10 @@ CHAOS_SUITES=(
 SIDECAR_SUITES=(sidecar)
 GATEWAY_SUITES=(gateway)
 ACL_SUITES=(acl-allowlist)
+FIREWALL_SUITES=(firewall)
 NAT_SUITES=(cone symmetric lan)
+NOSTR_RELAY_SUITES=(nostr-publish-consume)
+STUN_FAULTS_SUITES=(stun-faults)
 DNS_RESOLVER_SUITES=(dns-resolver)
 DEB_INSTALL_SUITES=(deb-install)
 TOR_SUITES=(tor-socks5 tor-directory)
@@ -111,8 +115,17 @@ list_suites() {
     echo "  ACL allowlist:"
     for s in "${ACL_SUITES[@]}"; do echo "    $s"; done
     echo ""
+    echo "  Firewall baseline:"
+    for s in "${FIREWALL_SUITES[@]}"; do echo "    $s"; done
+    echo ""
     echo "  NAT scenarios:"
     for s in "${NAT_SUITES[@]}"; do echo "    nat-$s"; done
+    echo ""
+    echo "  Nostr publish/consume:"
+    for s in "${NOSTR_RELAY_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  STUN fault-injection:"
+    for s in "${STUN_FAULTS_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Chaos scenarios:"
     for entry in "${CHAOS_SUITES[@]}"; do
@@ -176,6 +189,20 @@ record() {
 
 run_build() {
     stage "Stage 1: Build"
+
+    info "sudo nft -c -f packaging/common/fips.nft (nftables ruleset syntax check)"
+    if command -v nft &>/dev/null; then
+        if sudo nft -c -f packaging/common/fips.nft 2>&1; then
+            record "nft-syntax" 0
+        else
+            record "nft-syntax" 1
+            return 1
+        fi
+    else
+        info "nftables not installed; install with 'apt install nftables' to validate fips.nft"
+        record "nft-syntax" 1
+        return 1
+    fi
 
     info "cargo build --release"
     if cargo build --release 2>&1; then
@@ -446,6 +473,16 @@ run_acl_allowlist() {
     fi
 }
 
+# Run firewall baseline integration test
+run_firewall() {
+    info "[firewall] Running integration test"
+    if bash testing/firewall/test.sh --skip-build 2>&1; then
+        record "firewall" 0
+    else
+        record "firewall" 1
+    fi
+}
+
 # Run a NAT scenario (cone, symmetric, lan)
 run_nat() {
     local scenario="$1"
@@ -454,6 +491,33 @@ run_nat() {
         record "nat-$scenario" 0
     else
         record "nat-$scenario" 1
+    fi
+}
+
+# Run the Nostr overlay advert publish/consume integration test.
+# Two FIPS daemons + the existing strfry relay; exercises Phase 1
+# (A→B publish/consume), Phase 2 (B→A reverse), and Phase 3 (malformed
+# advert injected directly to the relay; consumer-liveness assertion).
+run_nostr_publish_consume() {
+    info "[nostr-publish-consume] Running Nostr publish/consume test"
+    if bash testing/nat/scripts/nostr-relay-test.sh 2>&1; then
+        record "nostr-publish-consume" 0
+    else
+        record "nostr-publish-consume" 1
+    fi
+}
+
+# Run the STUN fault-injection integration test.
+# One FIPS daemon + a netns-sharing shim that injects tc/iptables faults
+# against UDP egress to the STUN service. Three phases: drop, delay,
+# kill. Asserts the daemon detects each fault, recovers from delay, and
+# never panics.
+run_stun_faults() {
+    info "[stun-faults] Running STUN fault-injection test"
+    if bash testing/nat/scripts/stun-faults-test.sh 2>&1; then
+        record "stun-faults" 0
+    else
+        record "stun-faults" 1
     fi
 }
 
@@ -536,9 +600,22 @@ run_integration() {
     # ACL allowlist
     run_acl_allowlist
 
+    # Firewall baseline
+    run_firewall
+
     # NAT scenarios (sequential — each owns its compose project)
     for scenario in "${NAT_SUITES[@]}"; do
         run_nat "$scenario"
+    done
+
+    # Nostr publish/consume (sequential — shares the NAT compose project)
+    for _suite in "${NOSTR_RELAY_SUITES[@]}"; do
+        run_nostr_publish_consume
+    done
+
+    # STUN fault-injection (sequential — shares the NAT compose project)
+    for _suite in "${STUN_FAULTS_SUITES[@]}"; do
+        run_stun_faults
     done
 
     # Chaos scenarios (parallel, throttled)
@@ -625,8 +702,14 @@ run_suite() {
             run_gateway ;;
         acl-allowlist)
             run_acl_allowlist ;;
+        firewall)
+            run_firewall ;;
         nat-cone|nat-symmetric|nat-lan)
             run_nat "${suite#nat-}" ;;
+        nostr-publish-consume)
+            run_nostr_publish_consume ;;
+        stun-faults)
+            run_stun_faults ;;
         chaos-*)
             local chaos_name="${suite#chaos-}"
             local found=false

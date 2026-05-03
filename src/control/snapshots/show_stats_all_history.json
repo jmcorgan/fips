@@ -1,0 +1,180 @@
+{
+  "data": {
+    "granularity_seconds": 1,
+    "peer": null,
+    "series": [
+      {
+        "granularity_seconds": 1,
+        "metric": "mesh_size",
+        "unit": "nodes",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "tree_depth",
+        "unit": "hops",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "peer_count",
+        "unit": "peers",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "parent_switches",
+        "unit": "events/s",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "bytes_in",
+        "unit": "bytes/s",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "bytes_out",
+        "unit": "bytes/s",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "packets_in",
+        "unit": "packets/s",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "packets_out",
+        "unit": "packets/s",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "loss_rate",
+        "unit": "fraction",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      {
+        "granularity_seconds": 1,
+        "metric": "active_sessions",
+        "unit": "sessions",
+        "values": [
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "window_seconds": 10
+  },
+  "status": "ok"
+}

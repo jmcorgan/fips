@@ -86,6 +86,54 @@ jobs:
             -Version "${{ needs.determine-versioning.outputs.package_version }}" `
             -NoBuild
 
+      - name: Verify ZIP structural correctness
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem deploy\fips-*-windows-*.zip | Select-Object -First 1
+          if (-not $zip) { Write-Error "No ZIP artifact found in deploy\"; exit 1 }
+          Write-Host "Verifying: $($zip.Name)"
+
+          $extractDir = "verify-extract"
+          if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+          Expand-Archive -Path $zip.FullName -DestinationPath $extractDir
+
+          # Expected top-level files (flat ZIP, no wrapper directory).
+          # Source of truth: packaging/windows/build-zip.ps1
+          $expected = @(
+            "fips.exe",
+            "fipsctl.exe",
+            "fipstop.exe",
+            "fips.yaml",
+            "hosts",
+            "install-service.ps1",
+            "uninstall-service.ps1",
+            "README.txt"
+          )
+
+          $missing = @()
+          foreach ($f in $expected) {
+            $path = Join-Path $extractDir $f
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              Write-Host "PASS: $f"
+            } else {
+              Write-Host "FAIL: $f"
+              $missing += $f
+            }
+          }
+
+          Write-Host ""
+          Write-Host "ZIP contents:"
+          Get-ChildItem -Path $extractDir -Recurse | ForEach-Object {
+            Write-Host "  $($_.FullName.Substring((Resolve-Path $extractDir).Path.Length + 1))"
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing expected files: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host ""
+          Write-Host "All expected files present."
+
       - name: SHA-256 hash
         shell: pwsh
         run: |

@@ -1,0 +1,52 @@
+{
+  "data": {
+    "connection_count": 0,
+    "control_socket": "<redacted>",
+    "effective_ipv6_mtu": 1203,
+    "estimated_mesh_size": null,
+    "exe_path": "<redacted>",
+    "forwarding": {
+      "decode_error_bytes": 0,
+      "decode_error_packets": 0,
+      "delivered_bytes": 0,
+      "delivered_packets": 0,
+      "drop_mtu_exceeded_bytes": 0,
+      "drop_mtu_exceeded_packets": 0,
+      "drop_no_route_bytes": 0,
+      "drop_no_route_packets": 0,
+      "drop_send_error_bytes": 0,
+      "drop_send_error_packets": 0,
+      "forwarded_bytes": 0,
+      "forwarded_packets": 0,
+      "originated_bytes": 0,
+      "originated_packets": 0,
+      "received_bytes": 0,
+      "received_packets": 0,
+      "ttl_exhausted_bytes": 0,
+      "ttl_exhausted_packets": 0
+    },
+    "ipv6_addr": "fd1b:4788:b7ab:7a43:6a61:1fc5:9fb1:e34c",
+    "is_leaf_only": false,
+    "link_count": 0,
+    "node_addr": "1b4788b7ab7a436a611fc59fb1e34c6e",
+    "npub": "npub1sx42mj99aql52aklsg70y2jmr95u7uz2p40k769aw46ppjv302kqkhmu5r",
+    "peer_count": 0,
+    "pid": "<redacted>",
+    "session_count": 0,
+    "sparklines": {
+      "bytes_in": [],
+      "bytes_out": [],
+      "loss_rate": [],
+      "mesh_size": [],
+      "peer_count": [],
+      "tree_depth": []
+    },
+    "state": "created",
+    "transport_count": 0,
+    "tun_name": "<redacted>",
+    "tun_state": "disabled",
+    "uptime_secs": "<redacted>",
+    "version": "<redacted>"
+  },
+  "status": "ok"
+}

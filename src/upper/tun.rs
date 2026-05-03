@@ -361,6 +361,41 @@ impl TunDevice {
     }
 }
 
+/// macOS utun protocol family value for IPv6 (matches `<sys/socket.h>`
+/// `AF_INET6` on Darwin). Used as the 4-byte big-endian packet-info
+/// header prepended to every utun frame.
+#[cfg(target_os = "macos")]
+const UTUN_AF_INET6: u32 = 30;
+
+/// Build the 4-byte big-endian utun packet-info header for an IPv6 frame.
+///
+/// utun devices on macOS require a 4-byte address-family prefix on every
+/// frame: a single big-endian `u32` carrying the protocol family. For
+/// IPv6 traffic (the only family FIPS sends) this is `AF_INET6 = 30`,
+/// which serializes as `[0x00, 0x00, 0x00, 0x1e]`.
+#[cfg(target_os = "macos")]
+#[inline]
+fn utun_af_inet6_header() -> [u8; 4] {
+    UTUN_AF_INET6.to_be_bytes()
+}
+
+/// Parse the 4-byte big-endian utun packet-info header.
+///
+/// Returns the address-family value (`AF_INET6 = 30` for IPv6 frames),
+/// or `None` if the buffer is shorter than the 4-byte header. The `tun`
+/// crate's `Read` impl strips this transparently for us in the read
+/// path; this helper exists for round-trip testability with
+/// [`utun_af_inet6_header`] and for any future code path that reads
+/// from the dup'd fd directly.
+#[cfg(target_os = "macos")]
+#[inline]
+fn parse_utun_af_prefix(buf: &[u8]) -> Option<u32> {
+    if buf.len() < 4 {
+        return None;
+    }
+    Some(u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]))
+}
+
 /// Writer thread for TUN device.
 ///
 /// Services a queue of outbound packets and writes them to the TUN device.
@@ -413,10 +448,10 @@ impl TunWriter {
             #[cfg(target_os = "macos")]
             let write_result = {
                 use std::os::unix::io::AsRawFd;
-                const AF_INET6_HEADER: [u8; 4] = [0, 0, 0, 30];
+                let af_header = utun_af_inet6_header();
                 let iov = [
                     libc::iovec {
-                        iov_base: AF_INET6_HEADER.as_ptr() as *mut libc::c_void,
+                        iov_base: af_header.as_ptr() as *mut libc::c_void,
                         iov_len: 4,
                     },
                     libc::iovec {
@@ -1481,5 +1516,73 @@ mod tests {
         lookup.write().unwrap().insert(b, 1452);
         assert_eq!(per_flow_max_mss(&lookup, a.as_bytes(), 1360), 1143);
         assert_eq!(per_flow_max_mss(&lookup, b.as_bytes(), 1360), 1315);
+    }
+
+    // ========================================================================
+    // macOS utun packet-info header (AF_INET6 4-byte big-endian prefix)
+    //
+    // These tests are pure-data byte-buffer manipulation and require no
+    // privilege, no actual TUN device, no system calls. They pin the wire
+    // format that `TunWriter::run` emits ahead of every IPv6 frame on the
+    // dup'd utun fd, and the inverse parse used for round-trip checking.
+    // ========================================================================
+
+    #[cfg(target_os = "macos")]
+    mod macos_utun_header {
+        use super::super::{UTUN_AF_INET6, parse_utun_af_prefix, utun_af_inet6_header};
+
+        #[test]
+        fn af_inet6_constant_matches_darwin() {
+            // Darwin's <sys/socket.h> defines AF_INET6 = 30. If this ever
+            // diverges, every utun write FIPS issues will be misclassified
+            // by the kernel and dropped.
+            assert_eq!(UTUN_AF_INET6, 30);
+        }
+
+        #[test]
+        fn encode_produces_big_endian_af_inet6() {
+            // The kernel reads the 4-byte prefix as a big-endian u32.
+            // 30 == 0x0000001e, so the wire bytes are [0, 0, 0, 0x1e].
+            let header = utun_af_inet6_header();
+            assert_eq!(header, [0x00, 0x00, 0x00, 0x1e]);
+        }
+
+        #[test]
+        fn encode_round_trips_through_parse() {
+            let header = utun_af_inet6_header();
+            let parsed = parse_utun_af_prefix(&header).expect("4 bytes is enough");
+            assert_eq!(parsed, UTUN_AF_INET6);
+        }
+
+        #[test]
+        fn parse_rejects_short_buffer() {
+            // Anything shorter than the 4-byte header is ill-formed.
+            assert_eq!(parse_utun_af_prefix(&[]), None);
+            assert_eq!(parse_utun_af_prefix(&[0x00]), None);
+            assert_eq!(parse_utun_af_prefix(&[0x00, 0x00]), None);
+            assert_eq!(parse_utun_af_prefix(&[0x00, 0x00, 0x00]), None);
+        }
+
+        #[test]
+        fn parse_accepts_minimum_header_with_trailing_payload() {
+            // A real utun read returns header + IP packet concatenated.
+            // The parser only consumes the first 4 bytes.
+            let mut frame = utun_af_inet6_header().to_vec();
+            frame.extend_from_slice(&[0x60; 40]); // dummy IPv6 header
+            let parsed = parse_utun_af_prefix(&frame).expect("4 bytes is enough");
+            assert_eq!(parsed, UTUN_AF_INET6);
+        }
+
+        #[test]
+        fn parse_garbage_bytes_returns_garbage_value_not_panic() {
+            // A well-formed 4-byte buffer whose value is not AF_INET6
+            // should parse successfully (returning the raw u32) without
+            // panicking. Discriminating "expected" vs "unexpected" AF
+            // values is the caller's responsibility.
+            let buf = [0xde, 0xad, 0xbe, 0xef];
+            let parsed = parse_utun_af_prefix(&buf).expect("4 bytes is enough");
+            assert_eq!(parsed, 0xdeadbeef);
+            assert_ne!(parsed, UTUN_AF_INET6);
+        }
     }
 }

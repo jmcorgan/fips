@@ -554,9 +554,17 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
 
 // ============================================================================
 // Unit tests
+//
+// The whole `socket_macos.rs` file is `#[cfg(target_os = "macos")]`-included
+// by `socket.rs`, so this `#[cfg(test)]` mod naturally only compiles on macOS.
+// The redundant `#[cfg(target_os = "macos")]` below is belt-and-suspenders:
+// it makes the macOS-only intent explicit so that any future refactor that
+// includes this file on additional targets won't silently activate macOS-
+// specific tests.
 // ============================================================================
 
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod tests {
     use super::*;
 
@@ -813,6 +821,127 @@ mod tests {
             libc::close(write_fd);
         }
         assert!(readable, "pipe read end should be readable after write");
+    }
+
+    // -----------------------------------------------------------------------
+    // BpfHeader layout pin
+    //
+    // The `bpf_hdr` wire layout is fixed by the macOS kernel. If `BpfHeader`
+    // ever drifts (e.g. someone adds a field, or the timestamp field type
+    // changes), `parse_next_frame` will misread the kernel's frames. Pin
+    // both the size and the per-field byte offsets so any such drift fails
+    // at unit-test time rather than as runtime garbage MAC addresses.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bpf_header_layout_matches_kernel() {
+        // size_of pinned at type-define site too via `const _: () = assert!`,
+        // but repeating here makes the failure mode obvious in test output.
+        assert_eq!(std::mem::size_of::<BpfHeader>(), 20);
+        // bh_hdrlen lives at offset 16 (4 + 4 + 4 + 4).
+        let hdr = BpfHeader {
+            bh_tstamp_sec: 0,
+            bh_tstamp_usec: 0,
+            bh_caplen: 0,
+            bh_datalen: 0,
+            bh_hdrlen: 0xABCD,
+            _pad: 0,
+        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(&hdr as *const BpfHeader as *const u8, 20) };
+        assert_eq!(&bytes[16..18], &0xABCDu16.to_ne_bytes());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_next_frame — additional malformed-header rejection cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_next_frame_caplen_exceeds_remaining_buffer() {
+        // Build a header that claims more captured data than the buffer
+        // actually holds. parse_next_frame should reject (return None)
+        // rather than read past the end.
+        let hdr_size = std::mem::size_of::<BpfHeader>();
+        let claimed_cap_len: usize = 200; // > what's actually in the buffer
+        let hdr = BpfHeader {
+            bh_tstamp_sec: 0,
+            bh_tstamp_usec: 0,
+            bh_caplen: claimed_cap_len as u32,
+            bh_datalen: claimed_cap_len as u32,
+            bh_hdrlen: hdr_size as u16,
+            _pad: 0,
+        };
+        // Allocate only header + 32 bytes — far short of claimed cap_len.
+        let mut buf = vec![0u8; hdr_size + 32];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &hdr as *const BpfHeader as *const u8,
+                buf.as_mut_ptr(),
+                hdr_size,
+            );
+        }
+        let mut out_buf = vec![0u8; 1500];
+        let mut offset = 0usize;
+        // Truncated frame: returns None (skipped, not an error).
+        assert!(parse_next_frame(&buf, &mut offset, buf.len(), &mut out_buf).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ethernet-header construction round-trip
+    //
+    // Mirrors the byte layout that `send_to` lays down in front of the
+    // payload, then runs that through `parse_next_frame` to confirm the
+    // source MAC bytes survive the round trip. Pure data — no actual fd.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ethernet_header_round_trip_via_parse() {
+        // Hand-build the Ethernet header the way send_to() does.
+        let dst_mac: [u8; 6] = [0xff; 6];
+        let src_mac: [u8; 6] = [0x02, 0x00, 0x00, 0x12, 0x34, 0x56];
+        let ethertype: u16 = 0x88B5; // local-experimental EtherType
+        let payload: &[u8] = b"FIPS-frame-payload";
+
+        // Construct the in-buffer BPF frame the kernel would have written:
+        // [bpf_hdr][dst_mac][src_mac][ethertype_be][payload]
+        let cap_len = ETH_HDRLEN + payload.len();
+        let hdr = BpfHeader {
+            bh_tstamp_sec: 0,
+            bh_tstamp_usec: 0,
+            bh_caplen: cap_len as u32,
+            bh_datalen: cap_len as u32,
+            bh_hdrlen: std::mem::size_of::<BpfHeader>() as u16,
+            _pad: 0,
+        };
+        let hdr_size = std::mem::size_of::<BpfHeader>();
+        let total = bpf_wordalign(hdr_size + cap_len);
+        let mut buf = vec![0u8; total];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &hdr as *const BpfHeader as *const u8,
+                buf.as_mut_ptr(),
+                hdr_size,
+            );
+        }
+        let frame_start = hdr_size;
+        buf[frame_start..frame_start + 6].copy_from_slice(&dst_mac);
+        buf[frame_start + 6..frame_start + 12].copy_from_slice(&src_mac);
+        buf[frame_start + 12..frame_start + 14].copy_from_slice(&ethertype.to_be_bytes());
+        buf[frame_start + ETH_HDRLEN..frame_start + ETH_HDRLEN + payload.len()]
+            .copy_from_slice(payload);
+
+        // Parse it back.
+        let mut out_buf = vec![0u8; 1500];
+        let mut offset = 0usize;
+        let (n, parsed_src) = parse_next_frame(&buf, &mut offset, buf.len(), &mut out_buf)
+            .expect("Some")
+            .expect("Ok");
+
+        // The 14-byte Ethernet header is stripped; only the payload survives.
+        assert_eq!(n, payload.len());
+        assert_eq!(&out_buf[..n], payload);
+        // Source MAC is reported directly from bytes [6..12] of the frame.
+        assert_eq!(parsed_src, src_mac);
     }
 }
 

@@ -1100,3 +1100,69 @@ impl NostrDiscovery {
         Ok(())
     }
 }
+
+#[cfg(test)]
+impl NostrDiscovery {
+    /// Build a minimal `NostrDiscovery` for unit tests. No relay client is
+    /// connected and no background tasks are spawned; only the in-memory
+    /// `advert_cache` and `npub` are usable. Intended for cache-injection
+    /// tests of consumers (e.g. `Node::run_open_discovery_sweep`).
+    pub(crate) fn new_for_test() -> Self {
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key();
+        let npub = pubkey.to_bech32().expect("bech32 encode");
+        let client = Client::builder()
+            .signer(keys.clone())
+            .opts(ClientOptions::new().autoconnect(false))
+            .build();
+        let config = NostrDiscoveryConfig::default();
+        let offer_slots = Arc::new(Semaphore::new(config.max_concurrent_incoming_offers));
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        Self {
+            client,
+            keys,
+            pubkey,
+            npub,
+            config,
+            advert_cache: RwLock::new(HashMap::new()),
+            local_advert: RwLock::new(None),
+            current_advert_event_id: RwLock::new(None),
+            pending_answers: Mutex::new(HashMap::new()),
+            active_initiators: Mutex::new(HashSet::new()),
+            seen_sessions: Mutex::new(HashMap::new()),
+            offer_slots,
+            event_tx,
+            event_rx: Mutex::new(event_rx),
+            notify_task: Mutex::new(None),
+            advertise_task: Mutex::new(None),
+        }
+    }
+
+    /// Build a `CachedOverlayAdvert` for tests with a single endpoint and
+    /// a generous validity window (one hour from `now_ms()`).
+    pub(crate) fn cached_advert_for_test(
+        author_npub: String,
+        endpoint: OverlayEndpointAdvert,
+        created_at_secs: u64,
+    ) -> CachedOverlayAdvert {
+        CachedOverlayAdvert {
+            author_npub: author_npub.clone(),
+            advert: OverlayAdvert {
+                identifier: ADVERT_IDENTIFIER.to_string(),
+                version: ADVERT_VERSION,
+                endpoints: vec![endpoint],
+                signal_relays: None,
+                stun_servers: None,
+            },
+            created_at: created_at_secs,
+            valid_until_ms: now_ms().saturating_add(3_600_000),
+        }
+    }
+
+    /// Insert a cached advert directly into the in-memory cache. Used by
+    /// unit tests to set up consumer-side state without needing live relays.
+    pub(crate) async fn insert_advert_for_test(&self, npub: String, advert: CachedOverlayAdvert) {
+        let mut cache = self.advert_cache.write().await;
+        cache.insert(npub, advert);
+    }
+}

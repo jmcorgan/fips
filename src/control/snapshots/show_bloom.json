@@ -1,0 +1,24 @@
+{
+  "data": {
+    "is_leaf_only": false,
+    "leaf_dependent_count": 0,
+    "leaf_dependents": [],
+    "own_node_addr": "1b4788b7ab7a436a611fc59fb1e34c6e",
+    "peer_filters": [],
+    "sequence": 0,
+    "stats": {
+      "accepted": 0,
+      "debounce_suppressed": 0,
+      "decode_error": 0,
+      "fill_exceeded": 0,
+      "invalid": 0,
+      "non_v1": 0,
+      "received": 0,
+      "send_failed": 0,
+      "sent": 0,
+      "stale": 0,
+      "unknown_peer": 0
+    }
+  },
+  "status": "ok"
+}

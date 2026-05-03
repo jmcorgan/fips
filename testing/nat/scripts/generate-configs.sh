@@ -11,7 +11,7 @@ SCENARIO="${1:?usage: generate-configs.sh <cone|symmetric|lan> [mesh-name]}"
 MESH_NAME="${2:-nat-lab-$(date +%s)-$$}"
 
 case "$SCENARIO" in
-    cone|symmetric|lan) ;;
+    cone|symmetric|lan|nostr-publish-consume|stun-faults) ;;
     *)
         echo "Unknown scenario: $SCENARIO" >&2
         exit 1
@@ -30,7 +30,8 @@ npub_b="$(echo "$keys_b" | awk -F= '/^npub=/{print $2}')"
 
 relay_addr="ws://172.31.254.30:7777"
 stun_addr="stun:172.31.254.40:3478"
-if [ "$SCENARIO" = "lan" ]; then
+if [ "$SCENARIO" = "lan" ] || [ "$SCENARIO" = "nostr-publish-consume" ] \
+        || [ "$SCENARIO" = "stun-faults" ]; then
     relay_addr="ws://172.31.10.30:7777"
     stun_addr="stun:172.31.10.40:3478"
 fi
@@ -124,6 +125,22 @@ EOF
 
 write_config "$OUTPUT_DIR/$SCENARIO/node-a.yaml" "$nsec_a" "$peer_block_a"
 write_config "$OUTPUT_DIR/$SCENARIO/node-b.yaml" "$nsec_b" "$peer_block_b"
+
+# stun-faults runs two real FIPS daemons:
+#   stun-fault-node (key "a") — target of tc/iptables faults via the shim
+#   stun-fault-peer (key "b") — fault-free peer that publishes a valid
+#                               overlay advert so the fault-node's
+#                               traversal actually invokes the STUN client
+# Mutual peering ensures both sides advertise; without a real advert the
+# fault-node would abort at "no overlay advert" and never generate STUN
+# egress. The shim's netem/iptables rules can then meaningfully drop
+# the STUN UDP traffic during Phase 1.
+if [ "$SCENARIO" = "stun-faults" ]; then
+    write_config "$OUTPUT_DIR/$SCENARIO/stun-fault-node.yaml" \
+        "$nsec_a" "$peer_block_a"
+    write_config "$OUTPUT_DIR/$SCENARIO/stun-fault-peer.yaml" \
+        "$nsec_b" "$peer_block_b"
+fi
 
 cat > "$OUTPUT_DIR/$SCENARIO/npubs.env" <<EOF
 NPUB_A=$npub_a

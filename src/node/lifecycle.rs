@@ -1207,7 +1207,7 @@ impl Node {
     ///
     /// `caller` is a short label included in log lines so per-tick and
     /// startup sweeps are distinguishable in operator-facing logs.
-    async fn run_open_discovery_sweep(
+    pub(in crate::node) async fn run_open_discovery_sweep(
         &mut self,
         bootstrap: &std::sync::Arc<NostrDiscovery>,
         max_age_secs: Option<u64>,

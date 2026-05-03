@@ -1033,3 +1033,311 @@ async fn test_response_path_mtu_four_node_chain() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+// ============================================================================
+// Open-Discovery Sweep — cache-injection unit test
+// ============================================================================
+
+/// Pin the iterate-filter-queue contract of `run_open_discovery_sweep`.
+///
+/// Builds a `Node` with `nostr.policy = Open` and an empty peer list,
+/// then injects three cached adverts into a test `NostrDiscovery` and
+/// asserts the sweep:
+///   - queues a retry for an eligible (unknown, not-self) advert,
+///   - skips the advert whose author is our own node identity, and
+///   - skips the advert whose author is an already-connected peer.
+///
+/// Uses `NostrDiscovery::new_for_test()` and `insert_advert_for_test()`
+/// (both `#[cfg(test)]`-gated test escape hatches in
+/// `src/discovery/nostr/runtime.rs`) to populate the cache without
+/// requiring live relay subscriptions.
+#[tokio::test]
+async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
+    use crate::config::NostrDiscoveryPolicy;
+    use crate::discovery::nostr::{NostrDiscovery, OverlayEndpointAdvert, OverlayTransportKind};
+    use crate::peer::ActivePeer;
+    use crate::transport::LinkId;
+    use std::sync::Arc;
+
+    // Build node with open-discovery enabled.
+    let mut config = crate::Config::new();
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.policy = NostrDiscoveryPolicy::Open;
+    let mut node = crate::Node::new(config).unwrap();
+
+    // Identity of an already-connected peer; insert into node.peers
+    // so the sweep's `self.peers.contains_key(&node_addr)` filter fires.
+    let connected_identity = crate::Identity::generate();
+    let connected_npub = crate::encode_npub(&connected_identity.pubkey());
+    let connected_node_addr = *connected_identity.node_addr();
+    let connected_peer_identity = crate::PeerIdentity::from_pubkey(connected_identity.pubkey());
+    node.peers.insert(
+        connected_node_addr,
+        ActivePeer::new(connected_peer_identity, LinkId::new(1), 1_000),
+    );
+
+    // Eligible peer: fresh identity not in node.peers / retry_pending.
+    let eligible_identity = crate::Identity::generate();
+    let eligible_npub = crate::encode_npub(&eligible_identity.pubkey());
+    let eligible_node_addr = *eligible_identity.node_addr();
+
+    // Self filter: advert authored by node's own identity.
+    let self_npub = crate::encode_npub(&node.identity().pubkey());
+    let self_node_addr = *node.identity().node_addr();
+
+    // Build a NostrDiscovery test instance and inject the three adverts.
+    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    let endpoint = OverlayEndpointAdvert {
+        transport: OverlayTransportKind::Udp,
+        addr: "203.0.113.7:2121".to_string(),
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for npub in [&eligible_npub, &connected_npub, &self_npub] {
+        let advert =
+            NostrDiscovery::cached_advert_for_test(npub.clone(), endpoint.clone(), now_secs);
+        bootstrap.insert_advert_for_test(npub.clone(), advert).await;
+    }
+
+    // Run the sweep.
+    node.run_open_discovery_sweep(&bootstrap, Some(3_600), "test")
+        .await;
+
+    // Eligible peer was queued.
+    assert!(
+        node.retry_pending.contains_key(&eligible_node_addr),
+        "eligible advert should be queued for retry"
+    );
+    let queued = node.retry_pending.get(&eligible_node_addr).unwrap();
+    assert_eq!(queued.peer_config.npub, eligible_npub);
+
+    // Connected-peer skip filter held.
+    assert!(
+        !node.retry_pending.contains_key(&connected_node_addr),
+        "advert for already-connected peer must not be queued"
+    );
+
+    // Self skip filter held.
+    assert!(
+        !node.retry_pending.contains_key(&self_node_addr),
+        "advert authored by own node must not be queued"
+    );
+
+    // Exactly one queued entry from the three injected adverts.
+    assert_eq!(node.retry_pending.len(), 1);
+}
+
+// ============================================================================
+// Per-Attempt Timeout State Machine — IF-3-A
+// ============================================================================
+
+/// Pin the per-attempt timeout sequence in `check_pending_lookups`.
+///
+/// Drives the state machine deterministically through the default
+/// `node.discovery.attempt_timeouts_secs = [1, 2, 4, 8]` sequence.
+/// Asserts:
+///   1. **Sequence timing** — retries fire at the cumulative deadlines
+///      (t=1100ms, 3100ms, 7100ms) and unreachable at t=15100ms.
+///   2. **Fresh `initiate_lookup` per attempt** — `req_initiated` counter
+///      increments by exactly one on each retry. The actual `request_id`
+///      is generated by `LookupRequest::generate(...)` via `rand::random()`
+///      inside `initiate_lookup` and is not stored on the originator
+///      side, so per-attempt freshness is verified indirectly: each
+///      `req_initiated` increment corresponds to one fresh
+///      `LookupRequest::generate` call.
+///   3. **Final-timeout state transitions** — `pending_lookups` entry is
+///      removed, `discovery.resp_timed_out` counter ticks, queued packet
+///      is drained, and an ICMPv6 Destination Unreachable frame is
+///      emitted via the TUN sender.
+///
+/// Skipped: direct request_id capture (originator does not record its
+/// own request_ids; would require production instrumentation). The
+/// `req_initiated` counter is the strongest cleanly-observable signal
+/// that `initiate_lookup` ran fresh on each attempt.
+#[tokio::test]
+async fn test_check_pending_lookups_default_sequence_unreachable() {
+    use crate::bloom::BloomFilter;
+    use crate::node::handlers::discovery::PendingLookup;
+    use crate::peer::ActivePeer;
+    use crate::transport::LinkId;
+    use std::sync::mpsc;
+
+    let mut node = make_node();
+
+    // Default attempt_timeouts_secs is [1, 2, 4, 8]. Confirm so the test
+    // cannot silently drift if the default changes.
+    assert_eq!(
+        node.config.node.discovery.attempt_timeouts_secs,
+        vec![1, 2, 4, 8],
+        "test pins the [1,2,4,8] default; update the test if the default changes"
+    );
+
+    // Inject a TUN sender so `send_icmpv6_dest_unreachable` is observable.
+    let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
+    node.tun_tx = Some(tun_tx);
+
+    // Build a target identity (the unreachable destination).
+    let target_identity = Identity::generate();
+    let target_addr = *target_identity.node_addr();
+
+    // Build a tree-peer that:
+    //   - has the target in its inbound bloom filter (so `may_reach` is true),
+    //   - declares us as its parent (so `is_tree_peer` returns true).
+    // The peer has no Noise session, so `send_encrypted_link_message` will
+    // fail at the wire-send step — but `initiate_lookup` already incremented
+    // `req_initiated` and the failure is logged at `debug!`. The state-
+    // machine bookkeeping we want to test runs to completion either way.
+    let peer_identity_full = Identity::generate();
+    let peer_addr = *peer_identity_full.node_addr();
+    let peer_identity = crate::PeerIdentity::from_pubkey(peer_identity_full.pubkey());
+    let mut peer = ActivePeer::new(peer_identity, LinkId::new(1), 0);
+    let mut bloom = BloomFilter::new();
+    bloom.insert(&target_addr);
+    peer.update_filter(bloom, 1, 0);
+    node.peers.insert(peer_addr, peer);
+
+    // Make the peer a tree-peer: install a peer declaration that names us
+    // as its parent. `is_tree_peer` checks both directions — the child
+    // direction (peer.parent_id == self.node_addr) is what we exercise.
+    let our_addr = *node.node_addr();
+    let peer_decl = crate::tree::ParentDeclaration::new(peer_addr, our_addr, 1, 0);
+    let peer_coords = TreeCoordinate::from_addrs(vec![peer_addr, our_addr]).unwrap();
+    node.tree_state_mut().update_peer(peer_decl, peer_coords);
+    assert!(node.is_tree_peer(&peer_addr), "peer must be a tree peer");
+
+    // Queue an IPv6 packet for the target so the final-timeout drop +
+    // ICMPv6 emission can be observed. Build a minimal valid IPv6 header
+    // with a non-multicast, non-unspecified source so
+    // `should_send_icmp_error` returns true.
+    let mut ipv6_pkt = vec![0u8; 40];
+    ipv6_pkt[0] = 0x60; // version 6
+    ipv6_pkt[6] = 17; // next_header = UDP (not ICMPv6)
+    ipv6_pkt[7] = 64; // hop limit
+    // src = fd00::1 (non-multicast, non-unspecified)
+    ipv6_pkt[8] = 0xfd;
+    ipv6_pkt[23] = 0x01;
+    // dst = target's IPv6 representation (not strictly required, just non-multicast)
+    let target_ipv6 = crate::FipsAddress::from_node_addr(&target_addr).to_ipv6();
+    ipv6_pkt[24..40].copy_from_slice(&target_ipv6.octets());
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(ipv6_pkt);
+    node.pending_tun_packets.insert(target_addr, queue);
+
+    // Inject a PendingLookup directly: attempt=1, last_sent_ms=0. This
+    // mirrors the post-condition of a successful `maybe_initiate_lookup`
+    // at t=0 without depending on wall-clock-derived `Self::now_ms()`.
+    node.pending_lookups
+        .insert(target_addr, PendingLookup::new(0));
+
+    let baseline_initiated = node.stats().discovery.req_initiated;
+    let baseline_timed_out = node.stats().discovery.resp_timed_out;
+
+    // --- t = 1100ms: first retry deadline (1*1000) ---
+    node.check_pending_lookups(1100).await;
+    {
+        let entry = node
+            .pending_lookups
+            .get(&target_addr)
+            .expect("still pending");
+        assert_eq!(entry.attempt, 2, "after retry #1, attempt should be 2");
+        assert_eq!(entry.last_sent_ms, 1100);
+    }
+    assert_eq!(
+        node.stats().discovery.req_initiated,
+        baseline_initiated + 1,
+        "retry #1 must invoke initiate_lookup exactly once"
+    );
+
+    // --- t = 3100ms: second retry deadline (cumulative 1+2 = 3s) ---
+    node.check_pending_lookups(3100).await;
+    {
+        let entry = node
+            .pending_lookups
+            .get(&target_addr)
+            .expect("still pending");
+        assert_eq!(entry.attempt, 3, "after retry #2, attempt should be 3");
+        assert_eq!(entry.last_sent_ms, 3100);
+    }
+    assert_eq!(
+        node.stats().discovery.req_initiated,
+        baseline_initiated + 2,
+        "retry #2 must invoke initiate_lookup exactly once more"
+    );
+
+    // --- t = 7100ms: third retry deadline (cumulative 1+2+4 = 7s) ---
+    node.check_pending_lookups(7100).await;
+    {
+        let entry = node
+            .pending_lookups
+            .get(&target_addr)
+            .expect("still pending");
+        assert_eq!(entry.attempt, 4, "after retry #3, attempt should be 4");
+        assert_eq!(entry.last_sent_ms, 7100);
+    }
+    assert_eq!(
+        node.stats().discovery.req_initiated,
+        baseline_initiated + 3,
+        "retry #3 must invoke initiate_lookup exactly once more"
+    );
+
+    // --- Just-before-final: at t=15099ms the 8s window is not yet reached ---
+    node.check_pending_lookups(15_099).await;
+    assert!(
+        node.pending_lookups.contains_key(&target_addr),
+        "8s window not yet expired: pending_lookup must persist"
+    );
+    assert_eq!(
+        node.stats().discovery.req_initiated,
+        baseline_initiated + 3,
+        "no new attempt before final deadline"
+    );
+    assert_eq!(
+        node.stats().discovery.resp_timed_out,
+        baseline_timed_out,
+        "no timeout before final deadline"
+    );
+
+    // --- t = 15100ms: final deadline (cumulative 1+2+4+8 = 15s) ---
+    // Drain any TUN frames that may have leaked from earlier steps so the
+    // post-final-timeout drain observes only the unreachable-emission output.
+    while tun_rx.try_recv().is_ok() {}
+
+    node.check_pending_lookups(15_100).await;
+
+    // Pending lookup is dropped.
+    assert!(
+        !node.pending_lookups.contains_key(&target_addr),
+        "final timeout must remove the pending_lookups entry"
+    );
+    // resp_timed_out counter ticked.
+    assert_eq!(
+        node.stats().discovery.resp_timed_out,
+        baseline_timed_out + 1,
+        "final timeout must increment discovery.resp_timed_out"
+    );
+    // No additional initiate_lookup on the timeout step.
+    assert_eq!(
+        node.stats().discovery.req_initiated,
+        baseline_initiated + 3,
+        "the final-timeout step must NOT call initiate_lookup"
+    );
+    // Queued packet was drained from pending_tun_packets.
+    assert!(
+        !node.pending_tun_packets.contains_key(&target_addr),
+        "queued packets for the unreachable target must be drained"
+    );
+
+    // ICMPv6 Destination Unreachable was emitted to the TUN sender.
+    let icmp_frame = tun_rx
+        .try_recv()
+        .expect("ICMPv6 Destination Unreachable must be emitted on final timeout");
+    assert!(
+        icmp_frame.len() >= 48,
+        "ICMPv6 frame must be at least IPv6 header (40) + ICMPv6 header (8)"
+    );
+    assert_eq!(icmp_frame[0] >> 4, 6, "must be IPv6");
+    assert_eq!(icmp_frame[6], 58, "next_header must be IPPROTO_ICMPV6 (58)");
+    assert_eq!(icmp_frame[40], 1, "ICMPv6 type 1 = Destination Unreachable");
+}

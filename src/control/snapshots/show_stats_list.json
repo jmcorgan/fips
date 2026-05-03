@@ -1,0 +1,95 @@
+{
+  "data": {
+    "fast_ring_seconds": 3600,
+    "metrics": [
+      {
+        "name": "mesh_size",
+        "scope": "node",
+        "unit": "nodes"
+      },
+      {
+        "name": "tree_depth",
+        "scope": "node",
+        "unit": "hops"
+      },
+      {
+        "name": "peer_count",
+        "scope": "node",
+        "unit": "peers"
+      },
+      {
+        "name": "parent_switches",
+        "scope": "node",
+        "unit": "events/s"
+      },
+      {
+        "name": "bytes_in",
+        "scope": "node",
+        "unit": "bytes/s"
+      },
+      {
+        "name": "bytes_out",
+        "scope": "node",
+        "unit": "bytes/s"
+      },
+      {
+        "name": "packets_in",
+        "scope": "node",
+        "unit": "packets/s"
+      },
+      {
+        "name": "packets_out",
+        "scope": "node",
+        "unit": "packets/s"
+      },
+      {
+        "name": "loss_rate",
+        "scope": "node",
+        "unit": "fraction"
+      },
+      {
+        "name": "active_sessions",
+        "scope": "node",
+        "unit": "sessions"
+      },
+      {
+        "name": "srtt_ms",
+        "scope": "peer",
+        "unit": "ms"
+      },
+      {
+        "name": "loss_rate",
+        "scope": "peer",
+        "unit": "fraction"
+      },
+      {
+        "name": "bytes_in",
+        "scope": "peer",
+        "unit": "bytes/s"
+      },
+      {
+        "name": "bytes_out",
+        "scope": "peer",
+        "unit": "bytes/s"
+      },
+      {
+        "name": "packets_in",
+        "scope": "peer",
+        "unit": "packets/s"
+      },
+      {
+        "name": "packets_out",
+        "scope": "peer",
+        "unit": "packets/s"
+      },
+      {
+        "name": "ecn_ce",
+        "scope": "peer",
+        "unit": "events/s"
+      }
+    ],
+    "peer_retention_seconds": 86400,
+    "slow_ring_minutes": 1440
+  },
+  "status": "ok"
+}

@@ -201,6 +201,98 @@ fn test_routing_tree_fallback() {
     assert_eq!(result.unwrap().node_addr(), &peer_addr);
 }
 
+/// Regression: bloom hit on a peer that is NOT strictly closer to dest
+/// than we are must fall through to greedy tree routing rather than
+/// returning None. Pinned by commit a859da7.
+///
+/// Pre-fix behavior: bloom candidates exist but `select_best_candidate`
+/// rejects them all under the self-distance check (peer dist >= my dist),
+/// and `find_next_hop` returned None — a NoRoute failure even though the
+/// tree had a valid greedy next hop.
+///
+/// Post-fix behavior: same scenario falls through to greedy tree routing
+/// and returns the tree-routing-selected next hop.
+#[test]
+fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
+
+    // tree_peer: child of self, on the path to dest (greedy tree pick).
+    let tree_link = LinkId::new(1);
+    let (tree_conn, tree_id) = make_completed_connection(&mut node, tree_link, transport_id, 1000);
+    let tree_peer_addr = *tree_id.node_addr();
+    node.add_connection(tree_conn).unwrap();
+    node.promote_connection(tree_link, tree_id, 2000).unwrap();
+
+    // bloom_peer: also a child of self, but with a stale/false-positive
+    // bloom hit for dest. Its tree distance to dest is NOT closer than
+    // ours, so the self-distance check in select_best_candidate excludes
+    // it — leaving zero viable bloom candidates.
+    let bloom_link = LinkId::new(2);
+    let (bloom_conn, bloom_id) =
+        make_completed_connection(&mut node, bloom_link, transport_id, 1000);
+    let bloom_peer_addr = *bloom_id.node_addr();
+    node.add_connection(bloom_conn).unwrap();
+    node.promote_connection(bloom_link, bloom_id, 2000).unwrap();
+
+    // Tree topology (we are root):
+    //   self ── tree_peer ── dest
+    //     └──── bloom_peer
+    //
+    // Distances to dest:
+    //   self        : 2 (root → tree_peer → dest)
+    //   tree_peer   : 1 (tree_peer → dest)            ← greedy winner
+    //   bloom_peer  : 3 (bloom_peer → root → tree_peer → dest)  ← NOT closer than self
+    let tree_peer_coords = TreeCoordinate::from_addrs(vec![tree_peer_addr, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(tree_peer_addr, my_addr, 1, 1000),
+        tree_peer_coords,
+    );
+    let bloom_peer_coords = TreeCoordinate::from_addrs(vec![bloom_peer_addr, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(bloom_peer_addr, my_addr, 1, 1000),
+        bloom_peer_coords,
+    );
+
+    // Destination is a child of tree_peer in the tree.
+    let dest = make_node_addr(99);
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, tree_peer_addr, my_addr]).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
+
+    // dest is in bloom_peer's filter only (the "bloom hit" candidate),
+    // but bloom_peer's tree distance (3) is NOT strictly less than our
+    // distance (2), so select_best_candidate yields no winner.
+    // tree_peer has NO bloom entry for dest.
+    let bloom_peer = node.get_peer_mut(&bloom_peer_addr).unwrap();
+    let mut filter = BloomFilter::new();
+    filter.insert(&dest);
+    bloom_peer.update_filter(filter, 1, 3000);
+
+    // Pre-fix this returned None. Post-fix it falls through to greedy
+    // tree routing and picks tree_peer (distance 1 < self distance 2).
+    let result = node.find_next_hop(&dest);
+    assert!(
+        result.is_some(),
+        "find_next_hop must fall through to tree routing when bloom \
+         candidates exist but none are strictly closer than self"
+    );
+    let next_hop = result.unwrap().node_addr();
+    assert_eq!(
+        next_hop, &tree_peer_addr,
+        "tree-routing winner expected (tree_peer), got {:?}",
+        next_hop,
+    );
+    assert_ne!(
+        next_hop, &bloom_peer_addr,
+        "bloom_peer must be excluded by the self-distance check",
+    );
+}
+
 #[test]
 fn test_routing_tree_no_coords_in_cache() {
     let mut node = make_node();

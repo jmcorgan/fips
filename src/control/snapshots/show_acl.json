@@ -1,0 +1,16 @@
+{
+  "data": {
+    "allow_all": false,
+    "allow_entries": [],
+    "allow_file": "<redacted>",
+    "allow_file_entries": [],
+    "default_decision": "allow",
+    "deny_all": false,
+    "deny_entries": [],
+    "deny_file": "<redacted>",
+    "deny_file_entries": [],
+    "effective_mode": "default_open",
+    "enforcement_active": false
+  },
+  "status": "ok"
+}

@@ -1,0 +1,36 @@
+{
+  "data": {
+    "declaration_sequence": 1,
+    "declaration_signed": true,
+    "depth": 0,
+    "is_root": true,
+    "my_coords": [
+      "1b4788b7ab7a436a611fc59fb1e34c6e"
+    ],
+    "my_node_addr": "1b4788b7ab7a436a611fc59fb1e34c6e",
+    "parent": "1b4788b7ab7a436a611fc59fb1e34c6e",
+    "parent_display_name": "1b4788b7...",
+    "peer_tree_count": 0,
+    "peers": [],
+    "root": "1b4788b7ab7a436a611fc59fb1e34c6e",
+    "stats": {
+      "accepted": 0,
+      "addr_mismatch": 0,
+      "ancestry_changed": 0,
+      "decode_error": 0,
+      "flap_dampened": 0,
+      "loop_detected": 0,
+      "parent_losses": 0,
+      "parent_switched": 0,
+      "parent_switches": 0,
+      "rate_limited": 0,
+      "received": 0,
+      "send_failed": 0,
+      "sent": 0,
+      "sig_failed": 0,
+      "stale": 0,
+      "unknown_peer": 0
+    }
+  },
+  "status": "ok"
+}

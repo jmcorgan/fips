@@ -87,7 +87,11 @@ jobs:
 
       - name: Install system dependencies (Linux only)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev nftables
+
+      - name: Validate fips.nft syntax (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo nft -c -f packaging/common/fips.nft
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -251,6 +255,35 @@ jobs:
         run: cargo nextest run --all --profile ci
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Job 2d – PowerShell lint (Windows packaging scripts)
+#
+# Runs PSScriptAnalyzer against the operator-facing installer/build
+# scripts shipped in the Windows ZIP package. Settings live in
+# packaging/windows/PSScriptAnalyzerSettings.psd1 (each suppressed rule
+# is documented there). Pre-installed on windows-latest runners; no
+# Install-Module step needed.
+# ─────────────────────────────────────────────────────────────────────────────
+  windows-lint:
+    name: PowerShell lint (Windows packaging)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer `
+            -Path packaging/windows/*.ps1 `
+            -Settings packaging/windows/PSScriptAnalyzerSettings.psd1
+          if ($results) {
+            $results | Format-Table -AutoSize
+            Write-Error "PSScriptAnalyzer found $($results.Count) issue(s)"
+            exit 1
+          } else {
+            Write-Host "PSScriptAnalyzer: no issues"
+          }
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Job 3 – Integration tests (static mesh + chaos simulation)
 #
 # Runs only when both build and test succeed.  Each topology / scenario is a
@@ -288,6 +321,9 @@ jobs:
             topology: rekey-outbound-only
           - suite: acl-allowlist
             type: acl-allowlist
+          # ── Firewall baseline (fips0 nftables default-deny) ────────────
+          - suite: firewall
+            type: firewall
           # ── Outbound LAN gateway integration test ──────────────────────
           - suite: gateway
             type: gateway
@@ -343,6 +379,21 @@ jobs:
           - suite: nat-lan
             type: nat
             scenario: lan
+          # ── Nostr overlay advert publish/consume round-trip ─────────────
+          # Two FIPS daemons + the existing strfry relay; covers Phase 1
+          # (A→B publish/consume), Phase 2 (B→A reverse), and Phase 3
+          # (malformed advert injected to relay; consumers must reject
+          # without crashing). UDP transport baseline for v0.3.0.
+          - suite: nostr-publish-consume
+            type: nostr-publish-consume
+          # ── STUN fault-injection ───────────────────────────────────────
+          # One FIPS daemon + a netns-sharing shim that injects tc/iptables
+          # faults against UDP egress to the in-lab STUN server. Three
+          # phases: 100% drop, ~5s delay then clear, then full STUN
+          # container kill. Asserts the daemon notices each fault,
+          # recovers from delay, and never panics.
+          - suite: stun-faults
+            type: stun-faults
           # ── Real-deb install across target distros ─────────────────────
           # Boots a privileged systemd container per distro, runs
           # `apt install ./fips_*.deb` with the locally-built package,
@@ -535,6 +586,22 @@ jobs:
         run: |
           docker compose -f testing/acl-allowlist/docker-compose.yml down --volumes --remove-orphans
 
+      # ── Firewall baseline integration test ─────────────────────────────────
+      - name: Run firewall baseline integration test
+        if: matrix.type == 'firewall'
+        run: bash testing/firewall/test.sh --skip-build --keep-up
+
+      - name: Collect logs on failure (firewall)
+        if: matrix.type == 'firewall' && failure()
+        run: |
+          docker compose -f testing/firewall/docker-compose.yml logs --no-color
+          docker exec fips-fw-container-b nft list table inet fips || true
+
+      - name: Stop containers (firewall)
+        if: matrix.type == 'firewall' && always()
+        run: |
+          docker compose -f testing/firewall/docker-compose.yml down --volumes --remove-orphans
+
       # ── Chaos simulation ───────────────────────────────────────────────────
       - name: Install Python deps (chaos)
         if: matrix.type == 'chaos'
@@ -583,6 +650,40 @@ jobs:
           docker compose -f testing/nat/docker-compose.yml \
             --profile cone --profile symmetric --profile lan \
             down --volumes --remove-orphans
+
+      # ── Nostr overlay advert publish/consume ───────────────────────────
+      - name: Run Nostr publish/consume test
+        if: matrix.type == 'nostr-publish-consume'
+        run: bash testing/nat/scripts/nostr-relay-test.sh
+
+      - name: Collect logs on failure (nostr-publish-consume)
+        if: matrix.type == 'nostr-publish-consume' && failure()
+        run: |
+          docker compose -f testing/nat/docker-compose.yml \
+            --profile nostr-publish-consume logs --no-color | tail -300
+
+      - name: Stop containers (nostr-publish-consume)
+        if: matrix.type == 'nostr-publish-consume' && always()
+        run: |
+          docker compose -f testing/nat/docker-compose.yml \
+            --profile nostr-publish-consume down --volumes --remove-orphans
+
+      # ── STUN fault-injection ───────────────────────────────────────────
+      - name: Run STUN fault-injection test
+        if: matrix.type == 'stun-faults'
+        run: bash testing/nat/scripts/stun-faults-test.sh
+
+      - name: Collect logs on failure (stun-faults)
+        if: matrix.type == 'stun-faults' && failure()
+        run: |
+          docker compose -f testing/nat/docker-compose.yml \
+            --profile stun-faults logs --no-color | tail -300
+
+      - name: Stop containers (stun-faults)
+        if: matrix.type == 'stun-faults' && always()
+        run: |
+          docker compose -f testing/nat/docker-compose.yml \
+            --profile stun-faults down --volumes --remove-orphans
 
       # ── Outbound LAN gateway integration test ──────────────────────────
       - name: Generate configs (gateway)

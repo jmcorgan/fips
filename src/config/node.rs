@@ -1096,6 +1096,52 @@ mod tests {
         assert_eq!(c.startup_sweep_max_age_secs, 3_600);
     }
 
+    #[test]
+    fn test_log_level_parser() {
+        // Pin the observed behavior of NodeConfig::log_level():
+        // - 5 explicit lowercased match arms (trace/debug/warn|warning/error)
+        // - INFO is the default (no explicit "info" arm; falls through default)
+        // - Case-insensitive via .to_lowercase()
+        // - Unknown strings and None both fall through to INFO
+        let cases: &[(Option<&str>, tracing::Level)] = &[
+            // Explicit arms (lowercase canonical form)
+            (Some("trace"), tracing::Level::TRACE),
+            (Some("debug"), tracing::Level::DEBUG),
+            (Some("warn"), tracing::Level::WARN),
+            (Some("warning"), tracing::Level::WARN),
+            (Some("error"), tracing::Level::ERROR),
+            // "info" has no explicit arm — falls through default
+            (Some("info"), tracing::Level::INFO),
+            // None → default INFO
+            (None, tracing::Level::INFO),
+            // Case-insensitivity (parser lowercases via .to_lowercase())
+            (Some("TRACE"), tracing::Level::TRACE),
+            (Some("Debug"), tracing::Level::DEBUG),
+            (Some("Warning"), tracing::Level::WARN),
+            (Some("WARN"), tracing::Level::WARN),
+            (Some("ERROR"), tracing::Level::ERROR),
+            (Some("INFO"), tracing::Level::INFO),
+            // Unknown strings → INFO default (no error path)
+            (Some("verbose"), tracing::Level::INFO),
+            (Some("nonsense"), tracing::Level::INFO),
+            (Some(""), tracing::Level::INFO),
+        ];
+
+        for (input, expected) in cases {
+            let cfg = NodeConfig {
+                log_level: input.map(|s| s.to_string()),
+                ..NodeConfig::default()
+            };
+            assert_eq!(
+                cfg.log_level(),
+                *expected,
+                "input {:?} should map to {:?}",
+                input,
+                expected
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_default_socket_path_windows() {

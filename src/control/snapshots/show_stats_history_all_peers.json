@@ -1,0 +1,10 @@
+{
+  "data": {
+    "granularity_seconds": 1,
+    "metric": "srtt_ms",
+    "peers": [],
+    "unit": "ms",
+    "window_seconds": 10
+  },
+  "status": "ok"
+}

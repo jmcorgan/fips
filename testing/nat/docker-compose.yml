@@ -232,3 +232,106 @@ services:
     networks:
       shared-lan:
         ipv4_address: 172.31.10.11
+
+  # ── Nostr publish/consume profile ──────────────────────────────────────
+  # Two FIPS daemons + the existing strfry relay, exercising the overlay
+  # advert publish → relay → consumer round-trip end-to-end. Both nodes
+  # share the same LAN bridge as the relay (no NAT in the way) so the
+  # focus of the test is the Nostr discovery layer rather than NAT
+  # traversal mechanics. Phase 3 (malformed advert) is driven by a
+  # one-shot publish from the test runner via the relay's WebSocket.
+  nostr-pub-a:
+    <<: *fips-common
+    profiles: ["nostr-publish-consume"]
+    container_name: fips-nat-nostr-pub-a
+    hostname: fips-nat-nostr-pub-a
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/nostr-publish-consume/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: 172.31.10.20
+
+  nostr-pub-b:
+    <<: *fips-common
+    profiles: ["nostr-publish-consume"]
+    container_name: fips-nat-nostr-pub-b
+    hostname: fips-nat-nostr-pub-b
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/nostr-publish-consume/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: 172.31.10.21
+
+  # ── STUN fault-injection profile ───────────────────────────────────────
+  # One FIPS daemon + a netns-sharing shim that injects tc/iptables faults
+  # against UDP egress to the STUN service. The runner script drives the
+  # shim via `docker exec` (Approach A) — no scripted timing inside the
+  # shim itself. Three phases:
+  #   1. drop  — 100% UDP egress drop to STUN; assert daemon notices the
+  #              observation timeout and retries.
+  #   2. delay — ~5s netem delay; assert daemon recovers and STUN succeeds
+  #              again once the rule is removed.
+  #   3. kill  — `docker stop fips-nat-stun`; assert daemon stays up and
+  #              continues to handle "STUN unreachable" gracefully.
+  # The shim shares the daemon's network namespace so `tc qdisc add dev
+  # eth0 ...` operates on the daemon's egress path. The shim therefore
+  # has its own NET_ADMIN cap; the daemon already has one for TUN.
+  stun-fault-node:
+    <<: *fips-common
+    profiles: ["stun-faults"]
+    container_name: fips-nat-stun-fault-node
+    hostname: fips-nat-stun-fault-node
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/stun-faults/stun-fault-node.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: 172.31.10.50
+
+  # Fault-free peer that publishes a valid overlay advert, so the
+  # fault-node's NAT-traversal attempt actually reaches
+  # observe_traversal_addresses() (the STUN client). Without this peer the
+  # daemon would abort with "no overlay advert" and never generate the
+  # STUN egress that the shim's tc/iptables rules are meant to drop.
+  # Intentionally has NO fault shim sharing its netns; runs cleanly.
+  stun-fault-peer:
+    <<: *fips-common
+    profiles: ["stun-faults"]
+    container_name: fips-nat-stun-fault-peer
+    hostname: fips-nat-stun-fault-peer
+    depends_on:
+      - relay
+      - stun
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/stun-faults/stun-fault-peer.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      shared-lan:
+        ipv4_address: 172.31.10.51
+
+  stun-fault-shim:
+    image: fips-test:latest
+    profiles: ["stun-faults"]
+    container_name: fips-nat-stun-fault-shim
+    depends_on:
+      - stun-fault-node
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    network_mode: "service:stun-fault-node"
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "exec sleep infinity"

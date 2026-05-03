@@ -1,0 +1,65 @@
+{
+  "data": {
+    "congestion": {
+      "ce_forwarded": 0,
+      "ce_received": 0,
+      "congestion_detected": 0,
+      "kernel_drop_events": 0
+    },
+    "coord_cache_entries": 0,
+    "discovery": {
+      "req_backoff_suppressed": 0,
+      "req_bloom_miss": 0,
+      "req_decode_error": 0,
+      "req_deduplicated": 0,
+      "req_duplicate": 0,
+      "req_fallback_forwarded": 0,
+      "req_forward_rate_limited": 0,
+      "req_forwarded": 0,
+      "req_initiated": 0,
+      "req_no_tree_peer": 0,
+      "req_received": 0,
+      "req_target_is_us": 0,
+      "req_ttl_exhausted": 0,
+      "resp_accepted": 0,
+      "resp_decode_error": 0,
+      "resp_forwarded": 0,
+      "resp_identity_miss": 0,
+      "resp_proof_failed": 0,
+      "resp_received": 0,
+      "resp_timed_out": 0
+    },
+    "error_signals": {
+      "coords_required": 0,
+      "mtu_exceeded": 0,
+      "path_broken": 0
+    },
+    "forwarding": {
+      "decode_error_bytes": 0,
+      "decode_error_packets": 0,
+      "delivered_bytes": 0,
+      "delivered_packets": 0,
+      "drop_mtu_exceeded_bytes": 0,
+      "drop_mtu_exceeded_packets": 0,
+      "drop_no_route_bytes": 0,
+      "drop_no_route_packets": 0,
+      "drop_send_error_bytes": 0,
+      "drop_send_error_packets": 0,
+      "forwarded_bytes": 0,
+      "forwarded_packets": 0,
+      "originated_bytes": 0,
+      "originated_packets": 0,
+      "received_bytes": 0,
+      "received_packets": 0,
+      "ttl_exhausted_bytes": 0,
+      "ttl_exhausted_packets": 0
+    },
+    "identity_cache_entries": 0,
+    "pending_lookups": [],
+    "pending_tun_destinations": 0,
+    "pending_tun_packets": 0,
+    "recent_requests": 0,
+    "retries": []
+  },
+  "status": "ok"
+}

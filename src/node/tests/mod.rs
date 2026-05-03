@@ -10,6 +10,7 @@ mod ble;
 mod bloom;
 mod bloom_poison;
 mod bootstrap;
+mod decrypt_failure;
 mod disconnect;
 mod discovery;
 #[cfg(target_os = "linux")]
