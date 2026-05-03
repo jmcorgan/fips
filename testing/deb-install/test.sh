@@ -279,6 +279,48 @@ DOCKERFILE
         fail "fips-dns.service not enabled after install"
     fi
 
+    # ── nftables firewall baseline (v0.3.0) ──────────────────────────
+    # The fips-firewall.service unit ships installed but DISABLED by
+    # default; operators opt in explicitly. The fips.nft ruleset is a
+    # dpkg conffile, and /etc/fips/fips.d/ is a drop-in directory the
+    # ruleset includes via a glob. None of these are exercised by the
+    # service-start path below — verify them as static install state.
+    if docker exec "$name" test -f /lib/systemd/system/fips-firewall.service; then
+        pass "fips-firewall.service unit installed at /lib/systemd/system/"
+    else
+        fail "fips-firewall.service unit missing from /lib/systemd/system/"
+    fi
+    # is-enabled prints 'disabled' (and exits non-zero) for an
+    # installed-but-not-enabled unit; capture stdout, don't gate on rc.
+    fw_state=$(docker exec "$name" systemctl is-enabled fips-firewall.service 2>/dev/null || true)
+    if [ "$fw_state" = "disabled" ]; then
+        pass "fips-firewall.service disabled by default (opt-in)"
+    else
+        fail "fips-firewall.service unexpected state: '$fw_state' (expected 'disabled')"
+    fi
+    if docker exec "$name" test -f /etc/fips/fips.nft && \
+       docker exec "$name" dpkg-query -W -f='${Conffiles}\n' fips 2>/dev/null \
+            | grep -q '/etc/fips/fips.nft'; then
+        pass "/etc/fips/fips.nft installed and registered as dpkg conffile"
+    else
+        fail "/etc/fips/fips.nft missing or not a registered conffile"
+    fi
+    if docker exec "$name" test -d /etc/fips/fips.d; then
+        fwd_mode=$(docker exec "$name" stat -c '%a %U:%G' /etc/fips/fips.d 2>/dev/null)
+        if [ "$fwd_mode" = "755 root:root" ]; then
+            pass "/etc/fips/fips.d/ drop-in dir present (755 root:root)"
+        else
+            fail "/etc/fips/fips.d/ wrong mode/owner: '$fwd_mode' (expected '755 root:root')"
+        fi
+    else
+        fail "/etc/fips/fips.d/ drop-in directory missing"
+    fi
+    if docker exec "$name" grep -qF 'include "/etc/fips/fips.d/*.nft"' /etc/fips/fips.nft; then
+        pass "fips.nft includes drop-in glob /etc/fips/fips.d/*.nft"
+    else
+        fail "fips.nft missing drop-in include for /etc/fips/fips.d/*.nft"
+    fi
+
     # Start the services as a simulated boot. (On a real system,
     # they'd come up on next reboot.)
     docker exec "$name" systemctl start fips.service 2>&1 || true
