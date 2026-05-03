@@ -321,6 +321,9 @@ jobs:
             topology: rekey-outbound-only
           - suite: acl-allowlist
             type: acl-allowlist
+          # ── Firewall baseline (fips0 nftables default-deny) ────────────
+          - suite: firewall
+            type: firewall
           # ── Outbound LAN gateway integration test ──────────────────────
           - suite: gateway
             type: gateway
@@ -574,6 +577,22 @@ jobs:
         if: matrix.type == 'acl-allowlist' && always()
         run: |
           docker compose -f testing/acl-allowlist/docker-compose.yml down --volumes --remove-orphans
+
+      # ── Firewall baseline integration test ─────────────────────────────────
+      - name: Run firewall baseline integration test
+        if: matrix.type == 'firewall'
+        run: bash testing/firewall/test.sh --skip-build --keep-up
+
+      - name: Collect logs on failure (firewall)
+        if: matrix.type == 'firewall' && failure()
+        run: |
+          docker compose -f testing/firewall/docker-compose.yml logs --no-color
+          docker exec fips-fw-container-b nft list table inet fips || true
+
+      - name: Stop containers (firewall)
+        if: matrix.type == 'firewall' && always()
+        run: |
+          docker compose -f testing/firewall/docker-compose.yml down --volumes --remove-orphans
 
       # ── Chaos simulation ───────────────────────────────────────────────────
       - name: Install Python deps (chaos)

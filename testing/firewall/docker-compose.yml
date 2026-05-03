@@ -1,0 +1,52 @@
+networks:
+  fw-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.32.0.0/24
+
+x-fips-common: &fips-common
+  build:
+    context: ../docker
+  image: fips-test:latest
+  entrypoint: ["/usr/local/bin/entrypoint.sh"]
+  cap_add:
+    - NET_ADMIN
+    - NET_RAW
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+  restart: "no"
+  environment:
+    - FIPS_TEST_MODE=default
+    - RUST_LOG=info,fips::node=debug
+
+services:
+  service-a:
+    <<: *fips-common
+    container_name: fips-fw-container-a
+    hostname: host-a
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-a/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-a/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-a/fips.key:/etc/fips/fips.key:ro
+    networks:
+      fw-net:
+        ipv4_address: 172.32.0.10
+
+  service-b:
+    <<: *fips-common
+    container_name: fips-fw-container-b
+    hostname: host-b
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/node-b/hosts:/etc/fips/hosts:ro
+      - ./generated-configs/node-b/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs/node-b/fips.key:/etc/fips/fips.key:ro
+      - ../../packaging/common/fips.nft:/etc/fips/fips.nft:ro
+      - ./generated-configs/node-b/fips.d:/etc/fips/fips.d:ro
+    networks:
+      fw-net:
+        ipv4_address: 172.32.0.11

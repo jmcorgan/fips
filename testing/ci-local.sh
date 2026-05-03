@@ -17,7 +17,7 @@
 # Integration suites (default coverage):
 #   static-mesh, static-chain, rekey, rekey-accept-off,
 #   rekey-outbound-only, gateway,
-#   acl-allowlist, nat-cone, nat-symmetric, nat-lan,
+#   acl-allowlist, firewall, nat-cone, nat-symmetric, nat-lan,
 #   nostr-publish-consume,
 #   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
@@ -74,6 +74,7 @@ CHAOS_SUITES=(
 GATEWAY_SUITES=(gateway)
 SIDECAR_SUITES=(sidecar)
 ACL_SUITES=(acl-allowlist)
+FIREWALL_SUITES=(firewall)
 NAT_SUITES=(cone symmetric lan)
 NOSTR_RELAY_SUITES=(nostr-publish-consume)
 DNS_RESOLVER_SUITES=(dns-resolver)
@@ -112,6 +113,9 @@ list_suites() {
     echo ""
     echo "  ACL allowlist:"
     for s in "${ACL_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Firewall baseline:"
+    for s in "${FIREWALL_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  NAT scenarios:"
     for s in "${NAT_SUITES[@]}"; do echo "    nat-$s"; done
@@ -440,6 +444,16 @@ run_acl_allowlist() {
     fi
 }
 
+# Run firewall baseline integration test
+run_firewall() {
+    info "[firewall] Running integration test"
+    if bash testing/firewall/test.sh --skip-build 2>&1; then
+        record "firewall" 0
+    else
+        record "firewall" 1
+    fi
+}
+
 # Run a NAT scenario (cone, symmetric, lan)
 run_nat() {
     local scenario="$1"
@@ -540,6 +554,9 @@ run_integration() {
     # ACL allowlist
     run_acl_allowlist
 
+    # Firewall baseline
+    run_firewall
+
     # NAT scenarios (sequential — each owns its compose project)
     for scenario in "${NAT_SUITES[@]}"; do
         run_nat "$scenario"
@@ -632,6 +649,8 @@ run_suite() {
             run_gateway ;;
         acl-allowlist)
             run_acl_allowlist ;;
+        firewall)
+            run_firewall ;;
         nat-cone|nat-symmetric|nat-lan)
             run_nat "${suite#nat-}" ;;
         nostr-publish-consume)
