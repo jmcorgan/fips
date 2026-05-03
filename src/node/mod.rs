@@ -1609,6 +1609,23 @@ impl Node {
         self.sessions.remove(remote)
     }
 
+    /// Read the path_mtu_lookup entry for a destination FipsAddress.
+    #[cfg(test)]
+    pub(crate) fn path_mtu_lookup_get(&self, fips_addr: &crate::FipsAddress) -> Option<u16> {
+        self.path_mtu_lookup
+            .read()
+            .ok()
+            .and_then(|map| map.get(fips_addr).copied())
+    }
+
+    /// Write a path_mtu_lookup entry directly (for tests that pre-seed the map).
+    #[cfg(test)]
+    pub(crate) fn path_mtu_lookup_insert(&self, fips_addr: crate::FipsAddress, mtu: u16) {
+        if let Ok(mut map) = self.path_mtu_lookup.write() {
+            map.insert(fips_addr, mtu);
+        }
+    }
+
     /// Number of end-to-end sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()

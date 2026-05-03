@@ -2030,6 +2030,20 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
         path_mtu
     );
 
+    // Verify path_mtu_lookup (consulted by the TUN reader/writer at TCP MSS
+    // clamp time) also reflects the tightened bottleneck. The reactive
+    // MtuExceeded handler writes here so subsequent SYN clamps see the
+    // forward-path budget rather than the discovery reverse-path value.
+    let lookup_mtu = nodes[0]
+        .node
+        .path_mtu_lookup_get(&dst_fips)
+        .expect("path_mtu_lookup should have entry for C after MtuExceeded");
+    assert!(
+        lookup_mtu < 1400,
+        "path_mtu_lookup should have tightened from MtuExceeded signal, got {}",
+        lookup_mtu
+    );
+
     // Now send ANOTHER oversized packet — this time handle_tun_outbound
     // should check PathMtuState and generate ICMPv6 PTB on TUN instead
     // of forwarding.
@@ -2094,4 +2108,101 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// Reactive MtuExceeded → path_mtu_lookup focused unit tests
+//
+// These exercise the receive-side write path that mirrors the bottleneck
+// MTU into `path_mtu_lookup` (consulted by the TUN reader/writer at
+// SYN-clamp time). Discovery's reverse-path response and the FMP-promotion
+// seed populate the same lookup; the reactive channel keeps it
+// authoritative under forward-path-asymmetry conditions.
+// ============================================================================
+
+/// Build an MtuExceeded inner payload (35 bytes: flags + dest + reporter + mtu LE).
+///
+/// `handle_mtu_exceeded` receives the payload after the dispatcher strips
+/// the FSP prefix and msg_type byte, so the test wire is just the body.
+fn build_mtu_exceeded_inner(dest: &NodeAddr, reporter: &NodeAddr, mtu: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(35);
+    buf.push(0x00); // flags (reserved)
+    buf.extend_from_slice(dest.as_bytes());
+    buf.extend_from_slice(reporter.as_bytes());
+    buf.extend_from_slice(&mtu.to_le_bytes());
+    buf
+}
+
+#[tokio::test]
+async fn test_handle_mtu_exceeded_writes_path_mtu_lookup_when_empty() {
+    use crate::node::tests::spanning_tree::make_test_node;
+
+    let mut tn = make_test_node().await;
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    assert!(
+        tn.node.path_mtu_lookup_get(&dest_fips).is_none(),
+        "lookup should start empty for this destination"
+    );
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    tn.node.handle_mtu_exceeded(&inner).await;
+
+    assert_eq!(
+        tn.node.path_mtu_lookup_get(&dest_fips),
+        Some(1280),
+        "MtuExceeded should populate path_mtu_lookup with the bottleneck MTU"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_mtu_exceeded_tightens_existing_path_mtu_lookup() {
+    use crate::node::tests::spanning_tree::make_test_node;
+
+    let mut tn = make_test_node().await;
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    // Pre-seed with a generous value (e.g., from a discovery reverse-path
+    // response that didn't reflect the forward-path bottleneck).
+    tn.node.path_mtu_lookup_insert(dest_fips, 1500);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    tn.node.handle_mtu_exceeded(&inner).await;
+
+    assert_eq!(
+        tn.node.path_mtu_lookup_get(&dest_fips),
+        Some(1280),
+        "MtuExceeded with smaller bottleneck must tighten the lookup"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_mtu_exceeded_keeps_tighter_existing_path_mtu_lookup() {
+    use crate::node::tests::spanning_tree::make_test_node;
+
+    let mut tn = make_test_node().await;
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    // Pre-seed with a tighter value than the incoming signal (e.g., from
+    // a prior reactive event on a narrower hop). The clamp must never
+    // loosen — keep the existing value.
+    tn.node.path_mtu_lookup_insert(dest_fips, 1280);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1500);
+    tn.node.handle_mtu_exceeded(&inner).await;
+
+    assert_eq!(
+        tn.node.path_mtu_lookup_get(&dest_fips),
+        Some(1280),
+        "MtuExceeded with looser bottleneck must not loosen a tighter existing value"
+    );
 }
