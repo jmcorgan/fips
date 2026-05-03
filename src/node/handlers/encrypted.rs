@@ -215,7 +215,7 @@ impl Node {
     }
 
     /// Increment decrypt failure counter and force-remove peer if threshold exceeded.
-    fn handle_decrypt_failure(&mut self, node_addr: &crate::NodeAddr) {
+    pub(in crate::node) fn handle_decrypt_failure(&mut self, node_addr: &crate::NodeAddr) {
         if let Some(peer) = self.peers.get_mut(node_addr) {
             let count = peer.increment_decrypt_failures();
             if count >= DECRYPT_FAILURE_THRESHOLD {

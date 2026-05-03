@@ -1209,4 +1209,47 @@ mod tests {
         peer.reset_replay_suppressed();
         assert_eq!(peer.reset_replay_suppressed(), 0);
     }
+
+    #[test]
+    fn test_increment_decrypt_failures_monotonic() {
+        let identity = make_peer_identity();
+        let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+
+        // Initial count is zero
+        assert_eq!(peer.consecutive_decrypt_failures(), 0);
+
+        // Each call returns a strictly increasing count
+        let mut prev = 0u32;
+        for expected in 1..=25u32 {
+            let count = peer.increment_decrypt_failures();
+            assert_eq!(count, expected, "increment must return monotonic count");
+            assert!(count > prev, "count must strictly increase");
+            assert_eq!(peer.consecutive_decrypt_failures(), count);
+            prev = count;
+        }
+    }
+
+    #[test]
+    fn test_reset_decrypt_failures_zeroes_counter() {
+        let identity = make_peer_identity();
+        let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+
+        // Drive counter up
+        for _ in 0..7 {
+            peer.increment_decrypt_failures();
+        }
+        assert_eq!(peer.consecutive_decrypt_failures(), 7);
+
+        // Reset zeroes it
+        peer.reset_decrypt_failures();
+        assert_eq!(peer.consecutive_decrypt_failures(), 0);
+
+        // Reset on zero is a no-op (still zero, no panic)
+        peer.reset_decrypt_failures();
+        assert_eq!(peer.consecutive_decrypt_failures(), 0);
+
+        // Counter resumes at 1 after reset
+        assert_eq!(peer.increment_decrypt_failures(), 1);
+        assert_eq!(peer.consecutive_decrypt_failures(), 1);
+    }
 }
