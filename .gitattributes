@@ -1,0 +1,5 @@
+# Keep snapshot test fixtures LF-only across all platforms so that
+# Windows checkouts with core.autocrlf=true don't convert them to CRLF
+# (which would mismatch the actual JSON serialization output during
+# snapshot comparison).
+src/control/snapshots/*.json text eol=lf

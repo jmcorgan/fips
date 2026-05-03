@@ -1272,6 +1272,9 @@ mod tests {
         }
         let expected = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read snapshot {}: {e}", path.display()));
+        // Normalize line endings: Windows checkouts with core.autocrlf=true
+        // convert fixture files to CRLF; the in-memory JSON output is LF.
+        let expected = expected.replace("\r\n", "\n");
         // Tolerate trailing newline differences from editors.
         if expected.trim_end() != actual.trim_end() {
             panic!(
