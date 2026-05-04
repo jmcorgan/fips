@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nostr::nips::nip17;
 use nostr::nips::nip19::ToBech32;
@@ -14,16 +15,19 @@ use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
+use super::failure_state::FailureState;
 use super::signal::{
-    SignalEnvelope, build_signal_event, create_traversal_answer, create_traversal_offer,
-    unwrap_signal_event, validate_offer_freshness, validate_traversal_answer_for_offer,
+    FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
+    create_traversal_offer, estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
+    validate_traversal_answer_for_offer,
 };
 use super::stun::observe_traversal_addresses;
 use super::traversal::{nonce, now_ms, planned_remote_endpoints, run_punch_attempt};
 use super::types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,
-    CachedOverlayAdvert, OverlayAdvert, OverlayEndpointAdvert, PROTOCOL_VERSION, PunchHint,
-    SIGNAL_KIND, TraversalAnswer, TraversalOffer,
+    CachedOverlayAdvert, NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome,
+    OverlayAdvert, OverlayEndpointAdvert, PROTOCOL_VERSION, PunchHint, SIGNAL_KIND,
+    TraversalAnswer, TraversalOffer,
 };
 use crate::config::{NostrDiscoveryConfig, PeerConfig};
 use crate::discovery::EstablishedTraversal;
@@ -53,6 +57,25 @@ fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
         .join(",")
 }
 
+/// Cached STUN-derived public address for an advert-eligible UDP transport
+/// bound to a wildcard. Lives on `NostrDiscovery` so the freshness window
+/// survives advert refresh cycles.
+struct CachedPublicUdpAddr {
+    /// Most recent STUN observation. `None` means the last attempt failed
+    /// (recorded so we don't re-spam STUN every refresh tick on broken
+    /// network conditions).
+    addr: Option<SocketAddr>,
+    fetched_at: Instant,
+}
+
+/// Cache lifetime for a *failed* STUN observation. Held briefly so that
+/// transient flakes (slow startup network, momentary STUN-server
+/// blip) get retried within ~a minute and the advert grows its UDP
+/// endpoint as soon as STUN starts working — rather than waiting a
+/// full `advert_refresh_secs` (30 min) for the success-path TTL to
+/// expire. Successful results use the longer per-config TTL.
+const PUBLIC_UDP_ADDR_FAILURE_TTL: Duration = Duration::from_secs(60);
+
 pub struct NostrDiscovery {
     client: Client,
     keys: nostr::Keys,
@@ -70,6 +93,11 @@ pub struct NostrDiscovery {
     event_rx: Mutex<mpsc::UnboundedReceiver<BootstrapEvent>>,
     notify_task: Mutex<Option<JoinHandle<()>>>,
     advertise_task: Mutex<Option<JoinHandle<()>>>,
+    failure_state: FailureState,
+    /// STUN-derived public address per advert-eligible UDP transport
+    /// (keyed by `TransportId.as_u32()`). Populated on demand by
+    /// `learn_public_udp_addr()` and refreshed by TTL.
+    public_udp_addr_cache: RwLock<HashMap<u32, CachedPublicUdpAddr>>,
 }
 
 impl NostrDiscovery {
@@ -104,6 +132,13 @@ impl NostrDiscovery {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let offer_slots = Arc::new(Semaphore::new(config.max_concurrent_incoming_offers));
 
+        let failure_state = FailureState::new(
+            config.failure_streak_threshold,
+            config.extended_cooldown_secs,
+            config.warn_log_interval_secs,
+            config.failure_state_max_entries,
+        );
+
         let runtime = Arc::new(Self {
             client,
             keys,
@@ -121,6 +156,8 @@ impl NostrDiscovery {
             event_rx: Mutex::new(event_rx),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
+            failure_state,
+            public_udp_addr_cache: RwLock::new(HashMap::new()),
         });
 
         runtime.subscribe().await?;
@@ -152,6 +189,223 @@ impl NostrDiscovery {
             let _ = runtime.event_tx.send(event);
             runtime.active_initiators.lock().await.remove(&peer_npub);
         });
+    }
+
+    /// Record a NAT-traversal failure for `npub`, returning the
+    /// resulting decision (WARN suppression + extended cooldown +
+    /// threshold-crossing flag for the B6 re-fetch).
+    pub fn record_traversal_failure(&self, npub: &str, now_ms: u64) -> NostrFailureDecision {
+        let d = self.failure_state.record_failure(npub, now_ms);
+        NostrFailureDecision {
+            consecutive_failures: d.consecutive_failures,
+            should_warn: d.should_warn,
+            cooldown_until_ms: d.cooldown_until_ms,
+            crossed_threshold: d.crossed_threshold,
+        }
+    }
+
+    /// Record a successful traversal — clears the streak/cooldown.
+    pub fn record_traversal_success(&self, npub: &str, now_ms: u64) {
+        self.failure_state.record_success(npub, now_ms);
+    }
+
+    /// Cooldown wall-clock ms if the peer is currently suppressed,
+    /// else None. Used by the open-discovery sweep to skip enqueue.
+    pub fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
+        self.failure_state.cooldown_until(npub, now_ms)
+    }
+
+    /// Snapshot of per-npub failure state for `show_peers` rendering.
+    pub fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
+        self.failure_state
+            .snapshot()
+            .into_iter()
+            .map(|(npub, rec)| NostrPeerFailureView {
+                npub,
+                consecutive_failures: rec.consecutive_failures,
+                cooldown_until_ms: rec.cooldown_until_ms,
+                last_observed_skew_ms: rec.last_observed_skew_ms,
+            })
+            .collect()
+    }
+
+    /// Discover (or return cached) the public-Internet address for an
+    /// advert-eligible UDP transport bound to a wildcard. Used by
+    /// `build_overlay_advert` to avoid emitting `udp:0.0.0.0:port`,
+    /// which is invalid as an advertised endpoint. Result is the
+    /// reflexive IP (from STUN against the daemon's first
+    /// `stun_servers` reachable) combined with the configured
+    /// `advertise_port`.
+    ///
+    /// Asymmetric cache TTL: a successful observation is cached for
+    /// `advert_refresh_secs` (default 1800 = same as advert refresh)
+    /// so we don't re-STUN every refresh tick. A failed observation
+    /// is cached for `PUBLIC_UDP_ADDR_FAILURE_TTL` (60s) so we retry
+    /// soon after a transient STUN flake at startup, instead of
+    /// blocking advertise-as-public for half an hour. Once a success
+    /// is cached, subsequent ticks are zero-overhead.
+    pub async fn learn_public_udp_addr(
+        &self,
+        transport_id_key: u32,
+        advertise_port: u16,
+    ) -> Option<SocketAddr> {
+        if let Some(entry) = self
+            .public_udp_addr_cache
+            .read()
+            .await
+            .get(&transport_id_key)
+        {
+            let ttl = if entry.addr.is_some() {
+                Duration::from_secs(self.config.advert_refresh_secs.max(60))
+            } else {
+                PUBLIC_UDP_ADDR_FAILURE_TTL
+            };
+            if entry.fetched_at.elapsed() < ttl {
+                return entry.addr;
+            }
+        }
+        let resolved = self.stun_observe_public_ip(advertise_port).await;
+        let mut cache = self.public_udp_addr_cache.write().await;
+        cache.insert(
+            transport_id_key,
+            CachedPublicUdpAddr {
+                addr: resolved,
+                fetched_at: Instant::now(),
+            },
+        );
+        resolved
+    }
+
+    /// Run a one-shot STUN observation against an ephemeral UDP socket
+    /// to learn this host's public IPv4 (or IPv6, if the local STUN
+    /// server returns one). Returns `<reflexive_ip>:<advertise_port>`,
+    /// or `None` if STUN failed or no `stun_servers` are configured.
+    ///
+    /// The STUN-reported port is the ephemeral source port and is
+    /// discarded — what we want to advertise is the bound listener
+    /// port, which the kernel preserves through 1:1 NAT (AWS EIP,
+    /// GCP/Azure external IPs) and which the operator has explicitly
+    /// chosen via `bind_addr`.
+    async fn stun_observe_public_ip(&self, advertise_port: u16) -> Option<SocketAddr> {
+        if self.config.stun_servers.is_empty() {
+            return None;
+        }
+        let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(err) => {
+                debug!(error = %err, "public-udp-addr: ephemeral bind failed");
+                return None;
+            }
+        };
+        if let Err(err) = socket.set_nonblocking(true) {
+            debug!(error = %err, "public-udp-addr: set_nonblocking failed");
+            return None;
+        }
+        let observed = match super::stun::observe_traversal_addresses(
+            &socket,
+            &self.config.stun_servers,
+            false,
+            super::stun::ADVERT_STUN_TIMEOUT,
+        )
+        .await
+        {
+            Ok((reflexive, _local, stun_server)) => {
+                debug!(
+                    stun = %stun_server.as_deref().unwrap_or("-"),
+                    reflexive = %reflexive
+                        .as_ref()
+                        .map(|a| format!("{}:{}", a.ip, a.port))
+                        .unwrap_or_else(|| "-".into()),
+                    "public-udp-addr: STUN observation"
+                );
+                reflexive
+            }
+            Err(err) => {
+                debug!(error = %err, "public-udp-addr: STUN failed");
+                return None;
+            }
+        };
+        observed.and_then(|addr| {
+            let parsed_ip: std::net::IpAddr = addr.ip.parse().ok()?;
+            Some(SocketAddr::new(parsed_ip, advertise_port))
+        })
+    }
+
+    /// Stale-advert re-check (B6). Called by lifecycle on the
+    /// streak-threshold transition. Actively re-queries the peer's
+    /// Kind 37195 advert from `advert_relays`; evicts the cache entry
+    /// if absent, refreshes if newer than the cached `created_at`,
+    /// otherwise leaves the cache untouched.
+    pub async fn refetch_advert_for_stale_check(&self, peer_npub: &str) -> NostrRefetchOutcome {
+        let target_pubkey = match PublicKey::parse(peer_npub) {
+            Ok(p) => p,
+            Err(_) => return NostrRefetchOutcome::Skipped,
+        };
+        if self.config.advert_relays.is_empty() {
+            return NostrRefetchOutcome::Skipped;
+        }
+        let cached_created_at = self
+            .advert_cache
+            .read()
+            .await
+            .get(peer_npub)
+            .map(|c| c.created_at);
+
+        let events = match self
+            .client
+            .fetch_events_from(
+                self.config.advert_relays.clone(),
+                Filter::new()
+                    .author(target_pubkey)
+                    .kind(Kind::Custom(ADVERT_KIND))
+                    .identifier(ADVERT_IDENTIFIER),
+                Duration::from_secs(2),
+            )
+            .await
+        {
+            Ok(e) => e,
+            Err(_) => return NostrRefetchOutcome::Skipped,
+        };
+
+        let mut newest: Option<(u64, &Event)> = None;
+        for ev in events.iter() {
+            let ts = ev.created_at.as_secs();
+            match newest {
+                Some((cur, _)) if ts <= cur => {}
+                _ => newest = Some((ts, ev)),
+            }
+        }
+
+        let Some((relay_created_at, ev)) = newest else {
+            // Absent on relays. Evict any stale cache entry.
+            self.advert_cache.write().await.remove(peer_npub);
+            self.failure_state.reset_streak_after_refresh(peer_npub);
+            return NostrRefetchOutcome::Evicted;
+        };
+
+        match cached_created_at {
+            Some(cached) if relay_created_at <= cached => NostrRefetchOutcome::SameAdvert,
+            _ => {
+                let Some(valid_until_ms) = self.event_valid_until_ms(ev) else {
+                    return NostrRefetchOutcome::Skipped;
+                };
+                let Ok(advert) = Self::parse_overlay_advert_event(ev, &self.config.app) else {
+                    return NostrRefetchOutcome::Skipped;
+                };
+                let updated = CachedOverlayAdvert {
+                    author_npub: peer_npub.to_string(),
+                    advert,
+                    created_at: relay_created_at,
+                    valid_until_ms,
+                };
+                self.advert_cache
+                    .write()
+                    .await
+                    .insert(peer_npub.to_string(), updated);
+                self.failure_state.reset_streak_after_refresh(peer_npub);
+                NostrRefetchOutcome::Refreshed
+            }
+        }
     }
 
     pub async fn drain_events(&self) -> Vec<BootstrapEvent> {
@@ -536,6 +790,7 @@ impl NostrDiscovery {
             &base_socket,
             &self.config.stun_servers,
             self.config.share_local_candidates,
+            super::stun::TRAVERSAL_STUN_TIMEOUT,
         )
         .await?;
         debug!(
@@ -591,6 +846,7 @@ impl NostrDiscovery {
             }
         };
 
+        let answer_received_at = now_ms();
         debug!(
             peer = %peer_short,
             session = %short_id(&offer.session_id),
@@ -599,14 +855,47 @@ impl NostrDiscovery {
             local = answer.payload.local_addresses.len(),
             "traversal: answer received"
         );
-        validate_traversal_answer_for_offer(
+        if let Some(observed_skew_ms) =
+            estimate_clock_skew(&offer, &answer.payload, answer_received_at)
+        {
+            self.failure_state.note_observed_skew(
+                &peer_config.npub,
+                observed_skew_ms,
+                answer_received_at,
+            );
+            let abs_skew = observed_skew_ms.unsigned_abs();
+            // 30s threshold: well below the 60s SKEW_TOLERANCE wall but loud
+            // enough to surface a real clock problem on either side.
+            if abs_skew >= 30_000 {
+                debug!(
+                    peer = %peer_short,
+                    session = %short_id(&offer.session_id),
+                    skew_ms = observed_skew_ms,
+                    "traversal: significant peer clock skew observed"
+                );
+            } else {
+                trace!(
+                    peer = %peer_short,
+                    skew_ms = observed_skew_ms,
+                    "traversal: peer clock skew within nominal range"
+                );
+            }
+        }
+        let outcome = validate_traversal_answer_for_offer(
             &offer,
             &answer.payload,
-            now_ms(),
+            answer_received_at,
             self.config.signal_ttl_secs * 1000,
             &answer.sender_npub,
             &self.npub,
         )?;
+        if outcome == FreshnessOutcome::FreshWithinSkewTolerance {
+            debug!(
+                peer = %peer_short,
+                session = %short_id(&offer.session_id),
+                "traversal: answer accepted within clock-skew tolerance"
+            );
+        }
         if !answer.payload.accepted {
             return Err(BootstrapError::Protocol(
                 answer
@@ -643,6 +932,9 @@ impl NostrDiscovery {
             .publish_delete(&relays, [offer_event.id, answer.event_id])
             .await;
 
+        self.failure_state
+            .record_success(&peer_config.npub, now_ms());
+
         Ok(
             EstablishedTraversal::new(session_id, peer_config.npub, remote_addr, base_socket)
                 .with_transport_name("nostr-nat"),
@@ -656,6 +948,7 @@ impl NostrDiscovery {
         sender_npub: String,
     ) -> Result<(), BootstrapError> {
         let peer_short = short_npub(&sender_npub);
+        let offer_received_at = now_ms();
         debug!(
             peer = %peer_short,
             session = %short_id(&offer.session_id),
@@ -663,13 +956,22 @@ impl NostrDiscovery {
             local = offer.local_addresses.len(),
             "traversal: offer received"
         );
-        validate_offer_freshness(
+        let outcome = validate_offer_freshness(
             &offer,
-            now_ms(),
+            offer_received_at,
             self.config.signal_ttl_secs * 1000,
             &sender_npub,
             &self.npub,
         )?;
+        if outcome == FreshnessOutcome::FreshWithinSkewTolerance {
+            debug!(
+                peer = %peer_short,
+                session = %short_id(&offer.session_id),
+                offer_issued_at = offer.issued_at,
+                offer_received_at = offer_received_at,
+                "traversal: offer accepted within clock-skew tolerance"
+            );
+        }
         self.mark_session_seen(&offer.session_id).await?;
 
         let base_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))?;
@@ -678,6 +980,7 @@ impl NostrDiscovery {
             &base_socket,
             &self.config.stun_servers,
             self.config.share_local_candidates,
+            super::stun::TRAVERSAL_STUN_TIMEOUT,
         )
         .await?;
         let accepted = reflexive_address.is_some() || !local_addresses.is_empty();
@@ -703,6 +1006,7 @@ impl NostrDiscovery {
             stun_server,
             accepted.then(|| self.punch_hint()),
             (!accepted).then_some("no-usable-addresses".to_string()),
+            Some(offer_received_at),
         );
         let relays = self.preferred_signal_relays(sender, None).await?;
         let answer_event = self.send_signal(&relays, sender, &answer).await?;
@@ -1118,6 +1422,12 @@ impl NostrDiscovery {
         let config = NostrDiscoveryConfig::default();
         let offer_slots = Arc::new(Semaphore::new(config.max_concurrent_incoming_offers));
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let failure_state = FailureState::new(
+            config.failure_streak_threshold,
+            config.extended_cooldown_secs,
+            config.warn_log_interval_secs,
+            config.failure_state_max_entries,
+        );
         Self {
             client,
             keys,
@@ -1135,6 +1445,8 @@ impl NostrDiscovery {
             event_rx: Mutex::new(event_rx),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
+            failure_state,
+            public_udp_addr_cache: RwLock::new(HashMap::new()),
         }
     }
 

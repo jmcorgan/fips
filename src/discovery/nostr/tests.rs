@@ -2,8 +2,8 @@ use nostr::prelude::{EventBuilder, Kind, Tag, Timestamp};
 
 use super::runtime::NostrDiscovery;
 use super::signal::{
-    build_signal_event, create_traversal_answer, create_traversal_offer, validate_offer_freshness,
-    validate_traversal_answer_for_offer,
+    FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
+    estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
 use super::traversal::{
@@ -240,6 +240,7 @@ fn validates_offer_answer_pair() {
             duration_ms: 10_000,
         }),
         None,
+        Some(1_700_000_000_400),
     );
 
     assert!(
@@ -311,6 +312,7 @@ fn rejects_answer_with_mismatched_actual_sender() {
             duration_ms: 10_000,
         }),
         None,
+        Some(1_700_000_000_400),
     );
 
     let result = validate_traversal_answer_for_offer(
@@ -384,6 +386,172 @@ fn planned_remote_endpoints_include_private_and_reflexive_paths() {
 
     assert!(endpoints.contains(&"192.168.1.20:63000".parse().unwrap()));
     assert!(endpoints.contains(&"198.51.100.20:63000".parse().unwrap()));
+}
+
+/// B4: strict-fresh path returns Fresh; the offer is well within TTL and
+/// not expired.
+#[test]
+fn freshness_strict_returns_fresh_outcome() {
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000,
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        Some(addr("203.0.113.10", 62000)),
+        vec![addr("192.168.1.10", 62000)],
+        Some("stun:example.org:3478".to_string()),
+    );
+
+    let result = validate_offer_freshness(
+        &offer,
+        1_700_000_000_500,
+        60_000,
+        "npub1client",
+        "npub1server",
+    )
+    .expect("strict-fresh offer should validate");
+    assert_eq!(result, FreshnessOutcome::Fresh);
+}
+
+/// B4: an offer whose `expires_at` has already passed by < SKEW_TOL is
+/// accepted but flagged FreshWithinSkewTolerance — emulates the case where
+/// the responder's clock is ahead of the initiator's.
+#[test]
+fn freshness_responder_clock_ahead_within_tolerance_is_tolerated() {
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000, // expires_at = 1_700_000_060_000
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        Some(addr("203.0.113.10", 62000)),
+        vec![addr("192.168.1.10", 62000)],
+        None,
+    );
+
+    // now 90s past issued_at — 30s past strict expiry, but inside the 60s
+    // SKEW_TOL grace.
+    let result = validate_offer_freshness(
+        &offer,
+        1_700_000_090_000,
+        60_000,
+        "npub1client",
+        "npub1server",
+    )
+    .expect("offer just past strict expiry should be tolerated");
+    assert_eq!(result, FreshnessOutcome::FreshWithinSkewTolerance);
+}
+
+/// B4: an offer beyond TTL + SKEW_TOL is rejected as expired.
+#[test]
+fn freshness_responder_clock_far_ahead_is_rejected() {
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000,
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        Some(addr("203.0.113.10", 62000)),
+        vec![addr("192.168.1.10", 62000)],
+        None,
+    );
+
+    // 130s past issued_at: 70s past strict expiry, 10s past tolerated expiry.
+    let err = validate_offer_freshness(
+        &offer,
+        1_700_000_130_000,
+        60_000,
+        "npub1client",
+        "npub1server",
+    )
+    .expect_err("offer past tolerated expiry should be rejected");
+    assert!(err.to_string().contains("expired-offer"), "{}", err);
+}
+
+/// B5a: the NTP-style skew estimator returns the responder's apparent
+/// clock offset relative to the initiator. Symmetric one-way delays of
+/// 50ms each plus a +500ms responder skew should yield ≈+500ms.
+#[test]
+fn estimate_clock_skew_matches_responder_offset() {
+    // T1 (initiator sent)
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000,
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        None,
+        vec![addr("192.168.1.10", 62000)],
+        None,
+    );
+    // Wire takes 50ms, responder clock is +500ms ahead, so:
+    //   T2 = 1_700_000_000_000 + 50 + 500 = 1_700_000_000_550
+    //   T3 = 1_700_000_000_550 (no processing time for this synthetic case)
+    //   T4 = T1 + 50 + (T3 - T2 + 500_skew_corrected) + 50 wire return
+    //      For simplicity: T4 = T1 + 100ms wire + 0 responder processing
+    //                       = 1_700_000_000_100 (initiator wall clock)
+    let answer = create_traversal_answer(
+        "sess-1".to_string(),
+        1_700_000_000_550, // T3
+        60_000,
+        "answer-1".to_string(),
+        "npub1server".to_string(),
+        "npub1client".to_string(),
+        "offer-1".to_string(),
+        true,
+        Some(addr("198.51.100.20", 63000)),
+        vec![],
+        None,
+        None,
+        None,
+        Some(1_700_000_000_550), // T2
+    );
+    let answer_received_at = 1_700_000_000_100; // T4
+
+    let skew = estimate_clock_skew(&offer, &answer, answer_received_at)
+        .expect("offer_received_at populated -> Some");
+    // ((550 - 0) + (550 - 100)) / 2 = (550 + 450) / 2 = 500
+    assert_eq!(skew, 500);
+}
+
+/// B5a: backward-compat — when the responder did not populate
+/// `offer_received_at` (older daemon), skew estimation returns None
+/// and callers should silently skip logging it.
+#[test]
+fn estimate_clock_skew_returns_none_without_responder_timestamp() {
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000,
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        None,
+        vec![],
+        None,
+    );
+    let answer = create_traversal_answer(
+        "sess-1".to_string(),
+        1_700_000_000_500,
+        60_000,
+        "answer-1".to_string(),
+        "npub1server".to_string(),
+        "npub1client".to_string(),
+        "offer-1".to_string(),
+        true,
+        Some(addr("198.51.100.20", 63000)),
+        vec![],
+        None,
+        None,
+        None,
+        None, // older responder
+    );
+    assert!(estimate_clock_skew(&offer, &answer, 1_700_000_000_900).is_none());
 }
 
 #[tokio::test]

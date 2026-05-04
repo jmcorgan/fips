@@ -350,6 +350,72 @@ with v0.2.x peers.
 
 ### Fixed
 
+- UDP transport with `advertise_on_nostr: true` + `public: true` +
+  a wildcard `bind_addr` (e.g. `0.0.0.0:2121`) is now advertised
+  with its STUN-discovered public IPv4 instead of being silently
+  dropped from the published Kind 37195 advert. Previously the
+  advert builder filtered the wildcard out (since `0.0.0.0` is
+  not a valid endpoint), but emitted no log explaining what
+  happened — operators saw the daemon up, both flags set, and
+  no UDP endpoint in the advert. The fix runs a one-shot STUN
+  observation against an ephemeral socket on the daemon's
+  configured `stun_servers` and combines the reflexive IPv4 with
+  the configured listener port for the advert (`udp:<eip>:<port>`).
+  Successful STUN observations are cached per-transport for one
+  `advert_refresh_secs` cycle (default 30 min) so we don't re-STUN
+  every refresh. Failed observations are cached for only 60s, so
+  a transient STUN flake at startup retries within ~a minute and
+  grows the advert with UDP as soon as STUN starts working —
+  rather than waiting the full 30-min cycle. Per-server STUN
+  response timeout is 5s for the advert-publish path (vs. 2s for
+  the latency-sensitive per-traversal path), giving slow
+  first-call STUN time to complete without giving up. On STUN
+  failure, the wildcard-bind path still skips, but now logs a
+  loud `warn!` pointing at the operator-side fixes (set
+  `external_addr`, bind to a specific IP, or ensure `stun_servers`
+  reachable). Restores zero-config public-IP autodiscovery on
+  AWS EIP / GCP / Azure setups where binding to the public IP
+  directly is impossible (1:1 NAT)
+- New `external_addr` field on `transports.udp.*` and
+  `transports.tcp.*` for explicit advertise-as override. Accepts
+  either a bare IP (`"54.183.70.180"` — the configured `bind_addr`
+  port is appended) or a full `host:port`
+  (`"54.183.70.180:8443"`). Takes precedence over both the bound
+  address and any STUN-derived autodiscovery. Required for TCP
+  on cloud-NAT setups (AWS EIP, GCP/Azure external IPs) where
+  binding to the public IP directly fails with `EADDRNOTAVAIL`
+  (the EIP isn't on a host interface). Optional but useful for
+  UDP as a deterministic alternative to STUN — operators who
+  want to skip STUN egress (or whose STUN is blocked) can
+  specify it explicitly. Without `external_addr`, TCP with a
+  wildcard `bind_addr` + `advertise_on_nostr: true` now logs a
+  loud `warn!` pointing at the two fixes instead of silently
+  skipping
+- Nostr-discovery now tolerates ±60s of clock skew on offer/answer
+  freshness checks so a responder whose wall clock leads the
+  initiator's by less than that no longer silently rejects every
+  offer. Previously, a public-test daemon with un-NTP'd peers (or
+  long uptime — `now_ms()` anchors to `SystemTime` once at startup,
+  then advances monotonically; post-startup NTP step adjustments
+  don't propagate) would see ~100% signal-timeout rate against
+  skewed peers, indistinguishable from "peer is offline." New
+  optional `offerReceivedAt` field on the answer payload lets the
+  initiator log per-peer NTP-style skew estimates (DEBUG when ≥30s)
+  for operator visibility. Backward-compatible — older responders
+  that don't fill the field still produce valid answers
+- Nostr-discovery NAT-traversal failure suppression: per-npub
+  consecutive-failure counter triggers a 30-min extended cooldown
+  after 5 failures, preventing the daemon from hammering Nostr
+  relays with offers to peers that have gone away. WARN log lines
+  rate-limited to one per peer per 5 min (subsequent failures
+  emit DEBUG with `consecutive_failures` + remaining `cooldown_secs`).
+  Threshold-crossing also fires a one-shot active re-check of the
+  peer's Kind 37195 advert against `advert_relays`; absent →
+  evict cache; newer → refresh + reset streak; same → cooldown
+  stands. New `failure_streak_threshold`, `extended_cooldown_secs`,
+  `warn_log_interval_secs`, `failure_state_max_entries` config
+  fields under `node.discovery.nostr`. Per-peer state visible in
+  `fipsctl show peers` JSON under `nostr_traversal`
 - Tor onion adverts published over Nostr overlay discovery now
   include the public-facing port (`<onion>.onion:<port>`) instead of
   just the bare onion hostname. The publisher previously emitted a

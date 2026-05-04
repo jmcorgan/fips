@@ -365,6 +365,29 @@ pub struct NostrDiscoveryConfig {
     /// `policy: open`. Default: 3600 (1 hour).
     #[serde(default = "NostrDiscoveryConfig::default_startup_sweep_max_age_secs")]
     pub startup_sweep_max_age_secs: u64,
+    /// Number of consecutive NAT-traversal failures against a peer before
+    /// an extended cooldown is applied to throttle further offer publishes.
+    /// At this threshold the daemon also actively re-fetches the peer's
+    /// advert from `advert_relays` to evict cache entries for peers that
+    /// have gone away. Default: 5.
+    #[serde(default = "NostrDiscoveryConfig::default_failure_streak_threshold")]
+    pub failure_streak_threshold: u32,
+    /// Cooldown applied to a peer once `failure_streak_threshold` is hit.
+    /// Suppresses both open-discovery sweep enqueues and per-attempt
+    /// retry firings until elapsed. Default: 1800 (30 minutes).
+    #[serde(default = "NostrDiscoveryConfig::default_extended_cooldown_secs")]
+    pub extended_cooldown_secs: u64,
+    /// Minimum interval between `NAT traversal failed` WARN log lines for
+    /// the same peer. Subsequent failures inside the window log at DEBUG.
+    /// Reduces log spam on public-test nodes with many cache-learned
+    /// peers. Default: 300 (5 minutes).
+    #[serde(default = "NostrDiscoveryConfig::default_warn_log_interval_secs")]
+    pub warn_log_interval_secs: u64,
+    /// Maximum entries retained in the per-npub failure-state map.
+    /// Bounds memory under high cache turnover. Oldest entries (by last
+    /// failure time) evicted when the cap is exceeded. Default: 4096.
+    #[serde(default = "NostrDiscoveryConfig::default_failure_state_max_entries")]
+    pub failure_state_max_entries: usize,
 }
 
 impl Default for NostrDiscoveryConfig {
@@ -392,6 +415,10 @@ impl Default for NostrDiscoveryConfig {
             advert_refresh_secs: Self::default_advert_refresh_secs(),
             startup_sweep_delay_secs: Self::default_startup_sweep_delay_secs(),
             startup_sweep_max_age_secs: Self::default_startup_sweep_max_age_secs(),
+            failure_streak_threshold: Self::default_failure_streak_threshold(),
+            extended_cooldown_secs: Self::default_extended_cooldown_secs(),
+            warn_log_interval_secs: Self::default_warn_log_interval_secs(),
+            failure_state_max_entries: Self::default_failure_state_max_entries(),
         }
     }
 }
@@ -483,6 +510,22 @@ impl NostrDiscoveryConfig {
 
     fn default_startup_sweep_max_age_secs() -> u64 {
         3_600
+    }
+
+    fn default_failure_streak_threshold() -> u32 {
+        5
+    }
+
+    fn default_extended_cooldown_secs() -> u64 {
+        1_800
+    }
+
+    fn default_warn_log_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_failure_state_max_entries() -> usize {
+        4_096
     }
 }
 

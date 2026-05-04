@@ -11,10 +11,23 @@ use super::types::{BootstrapError, TraversalAddress};
 // Local interface discovery remains best-effort and may still be incomplete
 // on dual-stack, NAT64, or heavily firewalled hosts.
 
+/// Default per-server STUN response wait used by the per-traversal flow.
+/// Latency-sensitive: keep tight so a misbehaving STUN server doesn't
+/// stretch every traversal attempt.
+pub(super) const TRAVERSAL_STUN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Per-server STUN response wait used by the advert-publish path's
+/// public-IP discovery. Longer than `TRAVERSAL_STUN_TIMEOUT` because
+/// it's a one-shot at startup (cached afterward) and we'd rather block
+/// the first advert build by a few seconds than skip UDP advertising
+/// over a slow first response. Returns immediately on success.
+pub(super) const ADVERT_STUN_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(super) async fn observe_traversal_addresses(
     socket: &std::net::UdpSocket,
     stun_servers: &[String],
     share_local_candidates: bool,
+    per_server_timeout: Duration,
 ) -> Result<
     (
         Option<TraversalAddress>,
@@ -39,7 +52,7 @@ pub(super) async fn observe_traversal_addresses(
 
     let mut last_error = None;
     for stun_server in stun_servers {
-        match perform_stun(socket, stun_server).await {
+        match perform_stun(socket, stun_server, per_server_timeout).await {
             Ok(mapped) => {
                 debug!(
                     stun_server = %stun_server,
@@ -70,6 +83,7 @@ pub(super) async fn observe_traversal_addresses(
 async fn perform_stun(
     socket: &std::net::UdpSocket,
     stun_server: &str,
+    response_timeout: Duration,
 ) -> Result<Option<SocketAddr>, BootstrapError> {
     let endpoint = parse_stun_url(stun_server)?;
     let txn_id = random_txn_id();
@@ -80,7 +94,7 @@ async fn perform_stun(
     let udp = UdpSocket::from_std(socket.try_clone()?)?;
     udp.send_to(&request, addr).await?;
     let mut buf = [0u8; 2048];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + response_timeout;
     loop {
         let result = tokio::time::timeout_at(deadline, udp.recv_from(&mut buf)).await;
         let Ok(Ok((len, _remote))) = result else {

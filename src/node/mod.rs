@@ -1567,6 +1567,13 @@ impl Node {
         self.peers.values()
     }
 
+    /// Reference to the Nostr discovery handle if discovery is enabled.
+    /// Used by control queries (`show_peers` per-peer Nostr-traversal
+    /// state) to read failure-state without taking shared ownership.
+    pub fn nostr_discovery_handle(&self) -> Option<&crate::discovery::nostr::NostrDiscovery> {
+        self.nostr_discovery.as_deref()
+    }
+
     /// Iterate over all peer node IDs.
     pub fn peer_ids(&self) -> impl Iterator<Item = &NodeAddr> {
         self.peers.keys()

@@ -164,6 +164,16 @@ pub struct TraversalAnswer {
     pub stun_server: Option<String>,
     pub punch: Option<PunchHint>,
     pub reason: Option<String>,
+    /// Responder's local wall-clock (Unix ms) at the moment it received the
+    /// offer. Optional / non-breaking: the initiator uses this to derive an
+    /// NTP-style clock-skew estimate against the offer's `issued_at`. Older
+    /// responders that don't fill this in still produce valid answers.
+    #[serde(
+        rename = "offerReceivedAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub offer_received_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,4 +187,36 @@ pub struct PunchPacket {
     pub kind: PunchPacketKind,
     pub sequence: u32,
     pub session_hash: [u8; 16],
+}
+
+/// Outcome of `NostrDiscovery::record_traversal_failure`.
+#[derive(Debug, Clone, Copy)]
+pub struct NostrFailureDecision {
+    pub consecutive_failures: u32,
+    /// True iff the lifecycle should log at WARN; false → DEBUG (rate-limit).
+    pub should_warn: bool,
+    /// Wall-clock ms before which retries should not fire, if cooldown
+    /// is in effect.
+    pub cooldown_until_ms: Option<u64>,
+    /// True only on the streak-threshold-crossing transition. Lifecycle
+    /// should run a one-shot stale-advert re-check (B6) when set.
+    pub crossed_threshold: bool,
+}
+
+/// Snapshot row for `show_peers` rendering of per-npub Nostr-traversal state.
+#[derive(Debug, Clone)]
+pub struct NostrPeerFailureView {
+    pub npub: String,
+    pub consecutive_failures: u32,
+    pub cooldown_until_ms: Option<u64>,
+    pub last_observed_skew_ms: Option<i64>,
+}
+
+/// Outcome of `NostrDiscovery::refetch_advert_for_stale_check` (B6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NostrRefetchOutcome {
+    Evicted,
+    Refreshed,
+    SameAdvert,
+    Skipped,
 }

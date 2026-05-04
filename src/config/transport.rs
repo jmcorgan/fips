@@ -4,8 +4,30 @@
 //! transport-specific configuration structs.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
+
+/// Parse an `external_addr` config string against a known bind port,
+/// producing the absolute `SocketAddr` to advertise on Nostr.
+///
+/// Accepts either a bare IP (`"54.183.70.180"` or `"[::1]"`) — in which
+/// case the bind port is appended — or a full `host:port` form
+/// (`"54.183.70.180:443"` or `"[::1]:443"`). Returns `None` on any parse
+/// error. IPv6 must use bracket notation when supplying a port.
+fn parse_external_advert_addr(raw: &str, bind_port: u16) -> Option<SocketAddr> {
+    if let Ok(sa) = raw.parse::<SocketAddr>() {
+        return Some(sa);
+    }
+    let ip: IpAddr = raw.parse().ok()?;
+    Some(SocketAddr::new(ip, bind_port))
+}
+
+/// Extract the port from a `bind_addr` string. Returns `None` if the
+/// string can't be parsed (e.g. a bare hostname without port).
+fn parse_bind_port(raw: &str) -> Option<u16> {
+    raw.parse::<SocketAddr>().ok().map(|sa| sa.port())
+}
 
 /// Default UDP bind address.
 const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:2121";
@@ -54,6 +76,16 @@ pub struct UdpConfig {
     /// Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<bool>,
+    /// Optional explicit public address to advertise when `public: true`
+    /// is set. Takes precedence over both the bound address and any
+    /// STUN-derived autodiscovery. Accepts either a bare IP
+    /// (`"54.183.70.180"` — the configured `bind_addr` port is appended)
+    /// or a full `host:port` (`"54.183.70.180:443"`). Useful when the
+    /// public IP isn't on a local interface (e.g. AWS EIP / cloud 1:1
+    /// NAT) and the operator wants to skip STUN autodiscovery for a
+    /// deterministic value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_addr: Option<String>,
     /// Outbound-only mode. When true, the transport binds to a kernel-
     /// assigned ephemeral port (`0.0.0.0:0`) instead of the configured
     /// `bind_addr`, refuses inbound handshake msg1, and is never
@@ -117,6 +149,16 @@ impl UdpConfig {
     /// Whether this UDP transport should be advertised as directly reachable.
     pub fn is_public(&self) -> bool {
         self.public.unwrap_or(false)
+    }
+
+    /// Parse `external_addr` against the configured `bind_addr` port,
+    /// returning the absolute `SocketAddr` to advertise on Nostr.
+    /// Returns `None` if `external_addr` is unset or malformed, or if
+    /// the port cannot be inferred.
+    pub fn external_advert_addr(&self) -> Option<SocketAddr> {
+        let raw = self.external_addr.as_deref()?;
+        let bind_port = parse_bind_port(self.bind_addr())?;
+        parse_external_advert_addr(raw, bind_port)
     }
 
     /// Whether this transport runs in outbound-only mode. Default: false.
@@ -366,6 +408,16 @@ pub struct TcpConfig {
     /// Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise_on_nostr: Option<bool>,
+
+    /// Optional explicit public address to advertise. Required when
+    /// `bind_addr` is wildcard (e.g. `"0.0.0.0:443"`) and
+    /// `advertise_on_nostr: true`, since TCP has no STUN equivalent
+    /// for autodiscovery. Accepts either a bare IP (`"54.183.70.180"`
+    /// — the configured `bind_addr` port is appended) or a full
+    /// `host:port`. Common pattern on AWS EIP / cloud 1:1 NAT setups
+    /// where the public IP isn't bindable on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_addr: Option<String>,
 }
 
 impl TcpConfig {
@@ -409,6 +461,16 @@ impl TcpConfig {
     /// Whether this TCP transport should be advertised on Nostr discovery.
     pub fn advertise_on_nostr(&self) -> bool {
         self.advertise_on_nostr.unwrap_or(false)
+    }
+
+    /// Parse `external_addr` against the configured `bind_addr` port,
+    /// returning the absolute `SocketAddr` to advertise on Nostr.
+    /// Returns `None` if `external_addr` is unset or malformed, or if
+    /// `bind_addr` is unset / unparseable so no port can be inferred.
+    pub fn external_advert_addr(&self) -> Option<SocketAddr> {
+        let raw = self.external_addr.as_deref()?;
+        let bind_port = parse_bind_port(self.bind_addr.as_deref()?)?;
+        parse_external_advert_addr(raw, bind_port)
     }
 }
 
@@ -802,5 +864,105 @@ impl TransportsConfig {
         if !other.ble.is_empty() {
             self.ble = other.ble;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_external_addr_accepts_bare_ipv4_with_appended_bind_port() {
+        let sa = parse_external_advert_addr("54.183.70.180", 2121).unwrap();
+        assert_eq!(sa.to_string(), "54.183.70.180:2121");
+    }
+
+    #[test]
+    fn parse_external_addr_accepts_full_ipv4_socket_addr() {
+        let sa = parse_external_advert_addr("54.183.70.180:443", 2121).unwrap();
+        assert_eq!(sa.to_string(), "54.183.70.180:443");
+        // Explicit port wins over the bind port we passed in.
+    }
+
+    #[test]
+    fn parse_external_addr_accepts_bare_ipv6_with_appended_bind_port() {
+        let sa = parse_external_advert_addr("2001:db8::1", 443).unwrap();
+        assert_eq!(sa.to_string(), "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn parse_external_addr_accepts_bracketed_ipv6_with_explicit_port() {
+        let sa = parse_external_advert_addr("[2001:db8::1]:8443", 443).unwrap();
+        assert_eq!(sa.to_string(), "[2001:db8::1]:8443");
+    }
+
+    #[test]
+    fn parse_external_addr_rejects_garbage() {
+        assert!(parse_external_advert_addr("not-an-ip", 443).is_none());
+        assert!(parse_external_advert_addr("", 443).is_none());
+    }
+
+    #[test]
+    fn udp_external_advert_addr_combines_with_bind_port_default() {
+        let cfg = UdpConfig {
+            external_addr: Some("54.183.70.180".to_string()),
+            ..UdpConfig::default()
+        };
+        // bind_addr unset, so default DEFAULT_UDP_BIND_ADDR (0.0.0.0:2121) applies.
+        let sa = cfg.external_advert_addr().unwrap();
+        assert_eq!(sa.to_string(), "54.183.70.180:2121");
+    }
+
+    #[test]
+    fn udp_external_advert_addr_with_explicit_full_socket_addr_overrides_bind_port() {
+        let cfg = UdpConfig {
+            bind_addr: Some("0.0.0.0:2121".to_string()),
+            external_addr: Some("54.183.70.180:9999".to_string()),
+            ..UdpConfig::default()
+        };
+        let sa = cfg.external_advert_addr().unwrap();
+        assert_eq!(sa.to_string(), "54.183.70.180:9999");
+    }
+
+    #[test]
+    fn udp_external_advert_addr_returns_none_when_unset() {
+        let cfg = UdpConfig::default();
+        assert!(cfg.external_advert_addr().is_none());
+    }
+
+    #[test]
+    fn tcp_external_advert_addr_requires_bind_port() {
+        let cfg = TcpConfig {
+            external_addr: Some("54.183.70.180".to_string()),
+            ..TcpConfig::default()
+        };
+        // bind_addr unset → no port to combine with → None.
+        assert!(cfg.external_advert_addr().is_none());
+
+        let cfg = TcpConfig {
+            bind_addr: Some("0.0.0.0:443".to_string()),
+            external_addr: Some("54.183.70.180".to_string()),
+            ..TcpConfig::default()
+        };
+        let sa = cfg.external_advert_addr().unwrap();
+        assert_eq!(sa.to_string(), "54.183.70.180:443");
+    }
+
+    #[test]
+    fn tcp_external_advert_addr_with_full_socket_addr_independent_of_bind() {
+        let cfg = TcpConfig {
+            bind_addr: Some("0.0.0.0:443".to_string()),
+            external_addr: Some("54.183.70.180:8443".to_string()),
+            ..TcpConfig::default()
+        };
+        let sa = cfg.external_advert_addr().unwrap();
+        assert_eq!(sa.to_string(), "54.183.70.180:8443");
+    }
+
+    #[test]
+    fn parse_bind_port_extracts_from_socket_addr_strings() {
+        assert_eq!(parse_bind_port("0.0.0.0:2121"), Some(2121));
+        assert_eq!(parse_bind_port("[::]:443"), Some(443));
+        assert_eq!(parse_bind_port("not-a-socket-addr"), None);
     }
 }

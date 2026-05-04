@@ -114,6 +114,18 @@ pub fn show_peers(node: &Node) -> Value {
     let parent_id = *tree.my_declaration().parent_id();
     let is_root = tree.is_root();
 
+    // Per-npub Nostr-traversal failure-state snapshot, indexed by npub
+    // for O(1) per-peer lookup. Empty if Nostr discovery is disabled.
+    let nostr_state: std::collections::HashMap<String, _> = node
+        .nostr_discovery_handle()
+        .map(|d| {
+            d.failure_state_snapshot()
+                .into_iter()
+                .map(|view| (view.npub.clone(), view))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let peers: Vec<Value> = node
         .peers()
         .map(|peer| {
@@ -174,6 +186,31 @@ pub fn show_peers(node: &Node) -> Value {
             // Security signals
             peer_json["replay_suppressed"] = json!(peer.replay_suppressed_count());
             peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures());
+
+            // Nostr-traversal state if this peer's npub appears in
+            // failure-state. Always emitted (even null) so the schema
+            // stays stable; values populated only when Nostr discovery
+            // is enabled and the npub has been seen.
+            let npub = peer.npub();
+            let mut nostr_obj = json!({
+                "consecutive_failures": 0,
+                "in_cooldown": false,
+                "cooldown_until_ms": Value::Null,
+                "last_observed_skew_ms": Value::Null,
+            });
+            if let Some(state) = nostr_state.get(&npub) {
+                nostr_obj["consecutive_failures"] = json!(state.consecutive_failures);
+                nostr_obj["in_cooldown"] = json!(state.cooldown_until_ms.is_some());
+                nostr_obj["cooldown_until_ms"] = state
+                    .cooldown_until_ms
+                    .map(|t| json!(t))
+                    .unwrap_or(Value::Null);
+                nostr_obj["last_observed_skew_ms"] = state
+                    .last_observed_skew_ms
+                    .map(|s| json!(s))
+                    .unwrap_or(Value::Null);
+            }
+            peer_json["nostr_traversal"] = nostr_obj;
 
             // Noise session counters (rekey urgency, replay window state)
             if let Some(session) = peer.noise_session() {
