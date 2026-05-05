@@ -9,50 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Security
+#### Mesh Layer (FMP)
 
-- Mesh-interface nftables baseline (Linux). Ships `/etc/fips/fips.nft`
-  as a documented operator conffile and `fips-firewall.service`
-  (disabled by default) for default-deny inbound on the `fips0` mesh
-  interface. Operators enable explicitly with
-  `systemctl enable --now fips-firewall.service`. Drop-ins in
-  `/etc/fips/fips.d/*.nft`. See `docs/fips-security.md`.
-
-#### Platform Support
-
-- Windows platform support: wintun TUN device, TCP control socket on
-  `localhost:21210` (in place of the Unix domain socket), Windows
-  Service lifecycle (`--install-service`, `--uninstall-service`,
-  `--service`), ZIP packaging with PowerShell install/uninstall scripts,
-  and CI build/test matrix entry
-  ([#45](https://github.com/jmcorgan/fips/pull/45))
-- macOS platform support: native `utun` TUN interface management, raw
-  Ethernet transport via BPF, `.pkg` packaging with launchd plist and
-  uninstall script, x86_64 cross-compile from arm64, and CI build/unit
-  test jobs
-- `gateway` Cargo feature flag gates the optional Linux-only
-  `rustables` dependency so macOS and Windows builds never pull in
-  nftables bindings
-
-#### Outbound LAN Gateway
-
-- New `fips-gateway` binary that lets unmodified LAN hosts reach FIPS
-  mesh destinations via DNS-allocated virtual IPs and kernel nftables
-  NAT. Virtual-IP pool (`fd01::/112` by default) with state-machine
-  lifecycle and TTL-based reclamation; conntrack-backed session
-  tracking; proxy NDP on the LAN interface; control socket at
-  `/run/fips/gateway.sock` with `show_gateway` and `show_mappings`;
-  fipstop Gateway tab with pool gauge and mappings table; design doc
-  at `docs/design/fips-gateway.md`; integration test harness
-- Gateway packaging: systemd service unit with `After=fips.service`,
-  Debian and AUR package entries, OpenWrt procd init with dnsmasq
-  forwarding, proxy NDP, RA route advertisements, and IPv6 forwarding
-  sysctls. Gateway enabled by default on OpenWrt
-
-#### Nostr-Mediated Discovery and NAT Traversal
-
-- Optional overlay-discovery and NAT-hole-punching path behind the
-  `nostr-discovery` cargo feature. Nodes publish signed overlay adverts
+- Overlay-discovery and NAT-hole-punching path (opt-in via
+  `node.discovery.nostr.enabled`). Nodes publish signed overlay adverts
   as Nostr kind `37195` parameterized replaceable events listing
   reachable transport endpoints to a configurable set of public relays,
   and consume peer adverts to populate fallback addresses for
@@ -71,48 +31,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation at startup catches mis-configured combinations
 - Docker NAT lab covering cone, symmetric (TCP-fallback), and LAN
   scenarios, wired into the integration CI matrix
+- One-shot startup advert sweep for Nostr open-discovery. On daemon
+  startup under `node.discovery.nostr.policy: open`, after a short
+  settle delay (`startup_sweep_delay_secs`, default 5s) the cached
+  overlay-advert table is iterated once and recent adverts (newer
+  than `startup_sweep_max_age_secs`, default 3600s) are queued for
+  outbound retry, modulo the same skip-filters as the per-tick sweep
+  (configured peer, already connected, retry-pending, connecting).
+  Closes the gap where peers learned only through relay backlog at
+  startup were not dialed until they republished.
+- Diagnostic logging on the open-discovery sweep. Each `queued retry`
+  now logs at info-level with the peer short-npub and advert age,
+  and a one-line summary (cached count, queued count, per-reason
+  skip counts) is emitted on every startup sweep and on any per-tick
+  sweep that queues at least one retry. Operator-facing visibility
+  into what the auto-dial path is doing.
 
-#### Examples
+#### Platform Support
 
-- macOS WireGuard sidecar: run FIPS in a local Docker container and
-  route `.fips` traffic from the macOS host through a WireGuard tunnel
-  to the container's `fips0` interface. Only traffic destined for
-  `fd00::/8` transits the sidecar; regular internet traffic continues
-  to use the host network
-  ([#51](https://github.com/jmcorgan/fips/pull/51))
+- Windows platform support: wintun TUN device, TCP control socket on
+  `localhost:21210` (in place of the Unix domain socket), Windows
+  Service lifecycle (`--install-service`, `--uninstall-service`,
+  `--service`), ZIP packaging with PowerShell install/uninstall scripts,
+  and CI build/test matrix entry
+  ([#45](https://github.com/jmcorgan/fips/pull/45))
+- macOS platform support: native `utun` TUN interface management, raw
+  Ethernet transport via BPF, `.pkg` packaging with launchd plist and
+  uninstall script, x86_64 cross-compile from arm64, and CI build/unit
+  test jobs
+- MIPS atomic ABI support: `std::sync::atomic` replaced with
+  `portable_atomic` so 32-bit MIPS targets without native atomics
+  link cleanly
+  ([#62](https://github.com/jmcorgan/fips/pull/62),
+  [@andrewheadricke](https://github.com/andrewheadricke)).
 
-#### Bluetooth Transport
+#### Mesh Peer Transports
 
-- Bluetooth Low Energy (BLE) L2CAP Connection-Oriented Channel transport
-  with per-link MTU negotiation, behind the `ble` Cargo feature flag
-  (default-on, Linux only, requires BlueZ)
-- BLE peer discovery via continuous scan/probe with cooldown-based
-  deduplication (`probe_cooldown_secs`, default 30s)
-- Continuous BLE advertising for reliable L2CAP connectivity
-- Cross-probe tie-breaker using deterministic NodeAddr comparison
-- Connection pool with configurable capacity and eviction
+- Bluetooth Low Energy (BLE) L2CAP Connection-Oriented Channel
+  transport (Linux only, requires BlueZ): per-link MTU negotiation,
+  continuous scan/probe peer discovery with cooldown-based
+  deduplication, continuous advertising, deterministic NodeAddr
+  cross-probe tie-breaker, and a configurable connection pool with
+  eviction.
+- `transports.udp.outbound_only` (default `false`). When true, the UDP
+  transport binds a kernel-assigned ephemeral port (`0.0.0.0:0`) instead
+  of the configured `bind_addr`, refuses inbound handshakes, and is
+  never advertised on Nostr regardless of `advertise_on_nostr`. Use
+  this to participate in the mesh as a pure client — initiate outbound
+  links without exposing an inbound listener on a known port.
+  Implements the long-form fix for `udp.bind_addr: "127.0.0.1:..."`
+  not actually working as a workaround (Linux pins the loopback source
+  IP, dropping outbound flows to external peers at the routing layer)
+- `transports.udp.accept_connections` (default `true`). Mirrors the
+  Ethernet/BLE knob; setting to `false` produces a "client" posture
+  (initiate outbound, refuse inbound msg1 from new addresses). The
+  Node-level handshake gate carves out msg1 from peers already
+  established on this transport so rekey continues to work. Affects
+  every transport via the `Transport` trait
+- Startup validation now rejects `transports.udp[*].bind_addr` set to a
+  loopback address when at least one peer has a non-loopback UDP
+  address. Replaces the silent "peer link won't establish" failure
+  mode where Linux's source-address routing check dropped outbound
+  flows from the loopback-bound socket. `outbound_only: true` is
+  exempt from the check (it overrides `bind_addr` to `0.0.0.0:0`)
 
-#### DNS
+#### Security
 
-- Multi-backend `.fips` DNS configuration: a detection script
-  configures whichever resolver is available, in priority order:
-  systemd dns-delegate (systemd >= 258), systemd-resolved via
-  `resolvectl`, standalone dnsmasq, NetworkManager with the dnsmasq
-  plugin. Teardown reads the recorded backend from
-  `/run/fips/dns-backend` and reverses only what was applied
+- Mesh-interface nftables baseline (Linux). Ships `/etc/fips/fips.nft`
+  as a documented operator conffile and `fips-firewall.service`
+  (disabled by default) for default-deny inbound on the `fips0` mesh
+  interface. Operators enable explicitly with
+  `systemctl enable --now fips-firewall.service`. Drop-ins in
+  `/etc/fips/fips.d/*.nft`. See `docs/fips-security.md`.
+- Peer access control list enforcement: optional
+  `/etc/fips/peers.allow` and `/etc/fips/peers.deny` files
+  (TCP-Wrappers style) gate outbound connect, inbound msg1, and
+  outbound msg2 against npub, hex pubkey, host alias, or `ALL`.
+  Files are reloaded automatically on mtime change. New
+  `fipsctl acl show` query reports the effective rule set
+  ([#50](https://github.com/jmcorgan/fips/pull/50),
+  [@alexxie16](https://github.com/alexxie16)).
+
+#### LAN Gateway
+
+- New `fips-gateway` binary that lets unmodified LAN hosts reach FIPS
+  mesh destinations via DNS-allocated virtual IPs and kernel nftables
+  NAT. Virtual-IP pool (`fd01::/112` by default) with state-machine
+  lifecycle and TTL-based reclamation; conntrack-backed session
+  tracking; proxy NDP on the LAN interface; control socket at
+  `/run/fips/gateway.sock` with `show_gateway` and `show_mappings`;
+  fipstop Gateway tab with pool gauge and mappings table; design doc
+  at `docs/design/fips-gateway.md`; integration test harness
+- Inbound mesh port forwarding on `fips-gateway`: new
+  `gateway.port_forwards` config (list of `{ listen_port, proto,
+  target }` entries, IPv6 targets only) installs prerouting DNAT
+  rules so mesh peers can reach a configured host:port on the
+  gateway's LAN. A LAN-side masquerade is added when any forwards
+  are configured so replies flow back through conntrack.
+- Gateway packaging: systemd service unit with `After=fips.service`,
+  Debian and AUR package entries, OpenWrt procd init with dnsmasq
+  forwarding, proxy NDP, RA route advertisements, and IPv6 forwarding
+  sysctls. Gateway enabled by default on OpenWrt
+- `fips-gateway` DNS upstream probe now retries up to 5 times with a
+  1-second per-attempt timeout and a 1-second delay between attempts
+  (~10 second worst-case wait), instead of a single 3-second hard-fail.
+  Covers the cold-boot race where the daemon's TUN is up (the systemd
+  ExecStartPre wait gates on that) but the DNS responder is still
+  binding `[::1]:5354`. Without retry the gateway exited and relied on
+  `Restart=on-failure` for recovery (5-second blip + spurious error
+  log line per cycle); with retry the gateway recovers gracefully
+  without a unit restart
+
+#### IPv6 Adapter
+
+- Overhauled `.fips` DNS handling for systemd-based hosts. The
+  default `dns.bind_addr` is `::1` (IPv6 loopback) and the setup
+  script picks one of five backends in priority order: a global
+  drop-in at `/etc/systemd/resolved.conf.d/fips.conf`, the systemd
+  dns-delegate path, `resolvectl` per-link, standalone dnsmasq, or
+  NetworkManager's dnsmasq plugin. Teardown reverses only what was
+  applied. New `testing/dns-resolver/` harness exercises every
+  backend across Debian 12, Debian 13, Ubuntu 22.04, Ubuntu 24.04,
+  and Ubuntu 26.04
   ([#58](https://github.com/jmcorgan/fips/pull/58),
-  fixes [#52](https://github.com/jmcorgan/fips/issues/52))
+  fixes [#52](https://github.com/jmcorgan/fips/issues/52),
+  [#77](https://github.com/jmcorgan/fips/issues/77)).
 
-#### Operator Configuration
+#### Operator Tooling
 
 - `node.log_level` config field (case-insensitive, default `info`)
   replaces the hardcoded `RUST_LOG=info` previously baked into
   systemd units and the OpenWrt procd init script. The daemon now
   loads config before initializing tracing so the configured level
   takes effect; `RUST_LOG` still overrides when set
-
-#### Operator Tooling
-
 - `fipsctl show identity-cache` lists every cached node identity
   (npub, IPv6 address, display name, LRU age) alongside the
   configured cache capacity
@@ -131,12 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet queue depth, and adds per-peer connection retry state
   ([#42](https://github.com/jmcorgan/fips/pull/42),
   [@osh](https://github.com/osh))
-
-#### Documentation
-
-- Pre-implementation proposal for NAT traversal using Nostr relays
-  as the signaling channel and STUN for reflexive address discovery
-  (`docs/proposals/`)
+- Historical node and per-peer statistics: in-memory time-series
+  rings on the daemon, surfaced through new control-socket queries,
+  `fipsctl stats` subcommands, and a `fipstop` Graphs tab with
+  btop-style sparklines
+  ([#64](https://github.com/jmcorgan/fips/pull/64)).
 
 #### Packaging and Deployment
 
@@ -147,36 +197,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (development) packages with sysusers.d/tmpfiles.d integration
   ([#21](https://github.com/jmcorgan/fips/pull/21),
   [@dskvr](https://github.com/dskvr))
-- `transports.udp.outbound_only` (default `false`). When true, the UDP
-  transport binds a kernel-assigned ephemeral port (`0.0.0.0:0`) instead
-  of the configured `bind_addr`, refuses inbound handshakes, and is
-  never advertised on Nostr regardless of `advertise_on_nostr`. Use
-  this to participate in the mesh as a pure client — initiate outbound
-  links without exposing an inbound listener on a known port.
-  Implements the long-form fix for `udp.bind_addr: "127.0.0.1:..."`
-  not actually working as a workaround (Linux pins the loopback source
-  IP, dropping outbound flows to external peers at the routing layer)
-- `transports.udp.accept_connections` (default `true`). Mirrors the
-  Ethernet/BLE knob; setting to `false` produces a "client" posture
-  (initiate outbound, refuse inbound msg1 from new addresses). The
-  Node-level handshake gate carves out msg1 from peers already
-  established on this transport so rekey continues to work
-  (ISSUE-2026-0004). Affects every transport via the `Transport` trait
-- Startup validation now rejects `transports.udp[*].bind_addr` set to a
-  loopback address when at least one peer has a non-loopback UDP
-  address. Replaces the silent "peer link won't establish" failure
-  mode where Linux's source-address routing check dropped outbound
-  flows from the loopback-bound socket. `outbound_only: true` is
-  exempt from the check (it overrides `bind_addr` to `0.0.0.0:0`)
-- `fips-gateway` DNS upstream probe now retries up to 5 times with a
-  1-second per-attempt timeout and a 1-second delay between attempts
-  (~10 second worst-case wait), instead of a single 3-second hard-fail.
-  Covers the cold-boot race where the daemon's TUN is up (the systemd
-  ExecStartPre wait gates on that) but the DNS responder is still
-  binding `[::1]:5354`. Without retry the gateway exited and relied on
-  `Restart=on-failure` for recovery (5-second blip + spurious error
-  log line per cycle); with retry the gateway recovers gracefully
-  without a unit restart
 - `packaging/debian/fips-gateway.service` now waits up to 30 seconds
   for the daemon's `fips0` TUN to appear before exec'ing the gateway
   binary (`ExecStartPre` poll loop). Eliminates the cold-boot race
@@ -194,33 +214,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-`0.3.0` so a tagged release supersedes any prior dev .deb.
   Tagged release builds (no `-dev` in Cargo.toml) keep the clean
   `<version>-1` form. Operator override via `--version` still wins
-- One-shot startup advert sweep for Nostr open-discovery. On daemon
-  startup under `node.discovery.nostr.policy: open`, after a short
-  settle delay (`startup_sweep_delay_secs`, default 5s) the cached
-  overlay-advert table is iterated once and recent adverts (newer
-  than `startup_sweep_max_age_secs`, default 3600s) are queued for
-  outbound retry, modulo the same skip-filters as the per-tick sweep
-  (configured peer, already connected, retry-pending, connecting).
-  Closes the gap where peers learned only through relay backlog at
-  startup were not dialed until they republished.
-- Diagnostic logging on the open-discovery sweep. Each `queued retry`
-  now logs at info-level with the peer short-npub and advert age,
-  and a one-line summary (cached count, queued count, per-reason
-  skip counts) is emitted on every startup sweep and on any per-tick
-  sweep that queues at least one retry. Operator-facing visibility
-  into what the auto-dial path is doing.
+
+#### Examples
+
+- macOS WireGuard sidecar: run FIPS in a local Docker container and
+  route `.fips` traffic from the macOS host through a WireGuard tunnel
+  to the container's `fips0` interface. Only traffic destined for
+  `fd00::/8` transits the sidecar; regular internet traffic continues
+  to use the host network
+  ([#51](https://github.com/jmcorgan/fips/pull/51))
+
+#### Documentation
+
+- Pre-implementation proposal for NAT traversal using Nostr relays
+  as the signaling channel and STUN for reflexive address discovery
+  (`docs/proposals/`)
 
 ### Changed
 
-- Nostr-mediated overlay discovery is now always-on. The
-  `nostr-discovery` cargo feature flag has been dropped along with the
-  `optional = true` markers on `nostr` / `nostr-sdk` dependencies and
-  every `#[cfg(feature = "nostr-discovery")]` source-level gate. Plain
-  `cargo build` produces a binary with overlay discovery available
-  whether or not the operator enables it via
-  `node.discovery.nostr.enabled`. Mirrors PR #79's collapse of the
-  `tui` / `ble` / `gateway` features in favor of platform cfg gates.
-  No runtime behavior change — the feature was in `default` already
+- Cargo feature flags `tui`, `ble`, `gateway`, and
+  `nostr-discovery` removed; subsystem inclusion is now driven by
+  platform `cfg` gates so plain `cargo build` compiles everything
+  available on the target
+  ([#79](https://github.com/jmcorgan/fips/pull/79))
 - MMP link-layer report intervals retuned for constrained transports:
   steady-state floor raised from 100ms to 1000ms, ceiling from 2000ms
   to 5000ms. Cold-start uses a 200ms floor for the first 5 SRTT samples
@@ -366,6 +382,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returning `NoRoute`, which previously caused dropped packets in
   topologies where the tree parent was closer but not a bloom
   candidate
+- TCP-over-FIPS reliability on mesh paths with mixed transport
+  MTUs (e.g. a UDP-1280 hop in the picker set) improved. Three
+  interlocking changes: `Node::transport_mtu()` is now deterministic
+  across restarts (min across operational transports rather than
+  insertion-order-dependent); the TCP MSS clamp at the TUN boundary
+  reads per-destination path MTU instead of a single global ceiling;
+  and reactive `MtuExceeded` from forwarders is mirrored back into
+  the TUN-side `path_mtu_lookup` so later flows pick up forward-path
+  bottlenecks without re-discovery. Windows TUN reader receives the
+  same per-destination plumbing.
 - Auto-connect peers now reconnect after a graceful `Disconnect`
   notification from the remote side. `handle_disconnect` previously
   removed the peer without scheduling a reconnect, orphaning the
@@ -379,14 +405,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bind with `EAFNOSUPPORT`
   ([#61](https://github.com/jmcorgan/fips/issues/61),
   reported by [@SwapMarket](https://github.com/SwapMarket))
-- Rekey msg1 on non-accepting transports (e.g. UDP holepunch) was
-  rejected at the top of `handle_msg1()`, which broke rekey handshakes
-  on established links and produced repeated "dual rekey initiation"
-  log floods. The gate now only blocks truly new inbound handshakes
-  from unknown addresses; rekey and restart msg1s for established
-  peers are processed normally
-  ([#47](https://github.com/jmcorgan/fips/issues/47),
-  [#49](https://github.com/jmcorgan/fips/pull/49))
 - `fipstop` now uses `ratatui::try_init()` instead of `ratatui::init()`,
   so terminal initialization failures (e.g. Docker on macOS Sequoia,
   or environments without a usable tty) produce a clean error message
@@ -395,10 +413,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree specification. The receive path now verifies that the
   ancestry is structurally consistent with the signed parent
   declaration before mutating tree state.
-- Fix DNS resolution on Ubuntu 22 with systemd-resolved. The DNS
-  responder now binds `::` (dual-stack) instead of `127.0.0.1` so
-  systemd-resolved's interface-scoped routing via fips0 reaches
-  it. DNS queries are accepted only from the localhost.
 - Make the tree ancestry acceptance unit test deterministic.
   `test_tree_announce_validate_semantics_accepts_valid_non_root`
   generated a random signing identity while pinning the fixed root
