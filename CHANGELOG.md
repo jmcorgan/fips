@@ -62,6 +62,22 @@ with v0.2.x peers.
 - TLV extension section added to LookupRequest and LookupResponse
   after fixed fields. Transit nodes forward TLV bytes verbatim.
 
+#### Nostr-Discovery Advert Namespace
+
+- Default Nostr-discovery advert namespace bumped from
+  `fips-overlay-v1` to `fips-overlay-v1-next` on the `next` branch.
+  Master continues to publish under `fips-overlay-v1`. Effect: a
+  stock `next`-branch daemon's open-discovery sweep no longer
+  discovers `master` peers, and vice versa — eliminating the
+  cross-version retraversal storms that arise when both sides
+  punched a UDP socket via Nostr but cannot complete an FMP
+  handshake. Operators who genuinely want cross-branch reach (e.g.
+  during a coordinated rolling upgrade) can override per-daemon
+  via `node.discovery.nostr.app` in `fips.yaml`. The
+  `protocol_mismatch_cooldown_secs` defense-in-depth on master is
+  the safety net against any peer that bypasses this default
+  (config override, future fork, static-peer config).
+
 #### Shared-Media Beacons
 
 - Ethernet frame header unified to 4 bytes `[type][flags][length:2

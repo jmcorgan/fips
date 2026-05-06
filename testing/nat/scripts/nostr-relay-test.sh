@@ -191,7 +191,7 @@ pubkey = xonly_pubkey(secret).hex()
 created_at = int(time.time())
 kind = 37195
 tags = [
-    ["d", "fips-overlay-v1"],
+    ["d", "fips-overlay-v1-next"],
     ["app", "fips.nat.lab.v1"],
 ]
 content = "this-is-not-a-valid-overlay-advert-{garbage}"

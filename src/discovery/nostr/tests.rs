@@ -39,7 +39,7 @@ fn can_reach(local_nat: NatType, remote_nat: NatType) -> bool {
 
 fn signed_overlay_advert_event(created_at_secs: u64, expiration_secs: Option<u64>) -> nostr::Event {
     let keys = nostr::Keys::generate();
-    let content = r#"{"identifier":"fips-overlay-v1","version":1,"endpoints":[{"transport":"tcp","addr":"203.0.113.10:443"}]}"#;
+    let content = r#"{"identifier":"fips-overlay-v1-next","version":1,"endpoints":[{"transport":"tcp","addr":"203.0.113.10:443"}]}"#;
     let mut builder = EventBuilder::new(Kind::Custom(ADVERT_KIND), content)
         .custom_created_at(Timestamp::from(created_at_secs));
     if let Some(expiration_secs) = expiration_secs {

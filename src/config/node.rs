@@ -462,7 +462,11 @@ impl NostrDiscoveryConfig {
     }
 
     fn default_app() -> String {
-        "fips-overlay-v1".to_string()
+        // Branch-specific default. `next` runs FMP-v1 which is wire-
+        // incompatible with `master`'s FMP-v0, so the two namespaces
+        // separate the discovery overlays by default — operators who
+        // want cross-branch discovery can override here.
+        "fips-overlay-v1-next".to_string()
     }
 
     fn default_signal_ttl_secs() -> u64 {
