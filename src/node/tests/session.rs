@@ -2206,3 +2206,123 @@ async fn test_handle_mtu_exceeded_keeps_tighter_existing_path_mtu_lookup() {
         "MtuExceeded with looser bottleneck must not loosen a tighter existing value"
     );
 }
+
+// ============================================================================
+// Proactive PathMtuNotification → path_mtu_lookup focused unit tests
+//
+// These exercise the receive-side write path that mirrors the proactive
+// end-to-end echo into `path_mtu_lookup`. Without this mirror, new TCP
+// flows opened on a path the proactive notification has tightened keep
+// getting clamped by the staler discovery-time value until a reactive
+// MtuExceeded fires for those flows — long-lived stable paths can sit
+// in the gap indefinitely.
+// ============================================================================
+
+/// Build a PathMtuNotification body (2 bytes: path_mtu LE).
+fn build_path_mtu_notification_body(mtu: u16) -> Vec<u8> {
+    mtu.to_le_bytes().to_vec()
+}
+
+/// Insert an Established session with MMP initialized so the proactive
+/// PathMtuNotification handler can apply notifications.
+fn install_established_session_with_mmp(node: &mut Node, remote: &Identity) {
+    let session = make_noise_session(node.identity(), remote);
+    let remote_addr = *remote.node_addr();
+    let mut entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+        true,
+    );
+    entry.init_mmp(&node.config.node.session_mmp);
+    node.sessions.insert(remote_addr, entry);
+}
+
+#[test]
+fn test_handle_path_mtu_notification_writes_path_mtu_lookup_when_empty() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+    let remote_fips = crate::FipsAddress::from_node_addr(&remote_addr);
+
+    install_established_session_with_mmp(&mut node, &remote);
+
+    assert!(
+        node.path_mtu_lookup_get(&remote_fips).is_none(),
+        "lookup should start empty for this destination"
+    );
+
+    let body = build_path_mtu_notification_body(1280);
+    node.handle_session_path_mtu_notification(&remote_addr, &body);
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        Some(1280),
+        "PathMtuNotification should populate path_mtu_lookup with the reported MTU"
+    );
+}
+
+#[test]
+fn test_handle_path_mtu_notification_tightens_existing_path_mtu_lookup() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+    let remote_fips = crate::FipsAddress::from_node_addr(&remote_addr);
+
+    install_established_session_with_mmp(&mut node, &remote);
+
+    // Pre-seed with a generous value (e.g., from the discovery seed at link
+    // promotion time, before the destination's proactive echo arrived).
+    node.path_mtu_lookup_insert(remote_fips, 1500);
+
+    let body = build_path_mtu_notification_body(1280);
+    node.handle_session_path_mtu_notification(&remote_addr, &body);
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        Some(1280),
+        "PathMtuNotification with smaller MTU must tighten the lookup"
+    );
+}
+
+#[test]
+fn test_handle_path_mtu_notification_keeps_tighter_existing_path_mtu_lookup() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+    let remote_fips = crate::FipsAddress::from_node_addr(&remote_addr);
+
+    install_established_session_with_mmp(&mut node, &remote);
+
+    // Pre-seed with a tighter value than what the proactive notification
+    // reports (e.g., from a prior reactive MtuExceeded on a narrower hop).
+    // The mirror must never loosen the clamp.
+    node.path_mtu_lookup_insert(remote_fips, 1200);
+
+    let body = build_path_mtu_notification_body(1400);
+    node.handle_session_path_mtu_notification(&remote_addr, &body);
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        Some(1200),
+        "PathMtuNotification with looser MTU must not loosen a tighter existing value"
+    );
+}
+
+#[test]
+fn test_handle_path_mtu_notification_no_session_no_op() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+    let remote_fips = crate::FipsAddress::from_node_addr(&remote_addr);
+
+    // No session installed. The handler should drop the notification entirely.
+    let body = build_path_mtu_notification_body(1280);
+    node.handle_session_path_mtu_notification(&remote_addr, &body);
+
+    assert!(
+        node.path_mtu_lookup_get(&remote_fips).is_none(),
+        "PathMtuNotification with no session must not touch path_mtu_lookup"
+    );
+}

@@ -215,6 +215,30 @@ impl NostrDiscovery {
         self.failure_state.cooldown_until(npub, now_ms)
     }
 
+    /// Record a fatal protocol mismatch (e.g. `Unknown FMP version` on a
+    /// Nostr-adopted bootstrap transport). Returns `true` if this is a
+    /// fresh observation worth a WARN log; `false` if the peer is already
+    /// inside a comparable mismatch cooldown.
+    ///
+    /// The cooldown is `protocol_mismatch_cooldown_secs` from config —
+    /// much longer than `extended_cooldown_secs` because mismatches are
+    /// structural (only resolves when one side upgrades) rather than
+    /// transient.
+    pub fn record_protocol_mismatch(&self, npub: &str, now_ms: u64) -> bool {
+        let cooldown_ms = self
+            .config
+            .protocol_mismatch_cooldown_secs
+            .saturating_mul(1000);
+        self.failure_state
+            .record_protocol_mismatch(npub, now_ms, cooldown_ms)
+    }
+
+    /// Configured protocol-mismatch cooldown in seconds. Exposed so log
+    /// emitters can include the duration without re-reading config.
+    pub fn protocol_mismatch_cooldown_secs(&self) -> u64 {
+        self.config.protocol_mismatch_cooldown_secs
+    }
+
     /// Snapshot of per-npub failure state for `show_peers` rendering.
     pub fn failure_state_snapshot(&self) -> Vec<NostrPeerFailureView> {
         self.failure_state

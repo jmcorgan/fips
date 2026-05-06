@@ -468,6 +468,33 @@ with v0.2.x peers.
   the TUN-side `path_mtu_lookup` so later flows pick up forward-path
   bottlenecks without re-discovery. Windows TUN reader receives the
   same per-destination plumbing.
+- Proactive end-to-end `PathMtuNotification` now mirrors into the
+  TUN-side `path_mtu_lookup` (TCP MSS clamp store), parallel to the
+  reactive `MtuExceeded` mirror that already existed. Previously the
+  proactive handler only updated the session-canonical
+  `MmpSessionState.path_mtu`; on stable long-lived paths where the
+  destination's echo had tightened the session MTU but no transit
+  router had emitted a fresh `MtuExceeded` (because all current
+  traffic was already sized by the tighter session value), new TCP
+  flows opened in that window kept getting clamped by the staler
+  discovery-time value. The proactive mirror closes that gap with
+  the same tighter-only semantics — never loosens the clamp.
+- Nostr-discovered peers running an FMP-protocol version we cannot
+  speak no longer trigger an indefinite retraversal storm. Open-
+  discovery NAT-traversal succeeds at the UDP layer regardless of
+  protocol version, so the daemon would adopt the punched socket,
+  drop every incoming packet at `Unknown FMP version`, idle out
+  after 31s, and re-fire the full STUN-offer-answer-punch sequence
+  ~30s later — every minute, forever, against peers the handshake
+  literally cannot complete with. The rx loop now detects mismatched-
+  version packets arriving on adopted bootstrap transports, reverse-
+  maps to the originating npub, and applies a long structural
+  cooldown to the discovery layer's `failure_state` so the next
+  open-discovery sweep skips the peer until either side upgrades.
+  One-shot WARN per fresh observation; subsequent mismatches inside
+  the cooldown window are silent. New `protocol_mismatch_cooldown_secs`
+  config field under `node.discovery.nostr` (default 86400 = 24h),
+  separate from the transient-failure `extended_cooldown_secs`.
 - Auto-connect peers now reconnect after a graceful `Disconnect`
   notification from the remote side. `handle_disconnect` previously
   removed the peer without scheduling a reconnect, orphaning the

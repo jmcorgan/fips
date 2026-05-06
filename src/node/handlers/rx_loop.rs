@@ -162,6 +162,34 @@ impl Node {
                 transport_id = %packet.transport_id,
                 "Unknown FMP version, dropping"
             );
+
+            // If the packet arrived on an adopted Nostr-NAT bootstrap
+            // transport, the originating peer is necessarily on a
+            // different FMP-protocol version than us — the discovery
+            // sweep would otherwise re-traverse them every cycle even
+            // though no msg1/msg2 exchange can ever succeed. Bump the
+            // discovery-layer cooldown to the long protocol-mismatch
+            // window and emit a single WARN per fresh observation.
+            if self.bootstrap_transports.contains(&packet.transport_id)
+                && let Some(npub) = self
+                    .bootstrap_transport_npubs
+                    .get(&packet.transport_id)
+                    .cloned()
+                && let Some(handle) = self.nostr_discovery_handle()
+            {
+                let now_ms = Self::now_ms();
+                let cooldown_secs = handle.protocol_mismatch_cooldown_secs();
+                if handle.record_protocol_mismatch(&npub, now_ms) {
+                    warn!(
+                        peer_npub = %npub,
+                        transport_id = %packet.transport_id,
+                        peer_version = prefix.version,
+                        our_version = FMP_VERSION,
+                        cooldown_secs,
+                        "Nostr-discovered peer speaks a different FMP version; suppressing retraversal"
+                    );
+                }
+            }
             return;
         }
 

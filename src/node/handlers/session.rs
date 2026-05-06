@@ -1029,7 +1029,11 @@ impl Node {
     ///
     /// The destination is telling us the path MTU has changed.
     /// Apply source-side rules (decrease immediate, increase validated).
-    fn handle_session_path_mtu_notification(&mut self, src_addr: &NodeAddr, body: &[u8]) {
+    pub(in crate::node) fn handle_session_path_mtu_notification(
+        &mut self,
+        src_addr: &NodeAddr,
+        body: &[u8],
+    ) {
         let notif = match PathMtuNotification::decode(body) {
             Ok(n) => n,
             Err(e) => {
@@ -1053,16 +1057,59 @@ impl Node {
 
         let old_mtu = mmp.path_mtu.current_mtu();
         let now = std::time::Instant::now();
-        mmp.path_mtu.apply_notification(notif.path_mtu, now);
+        let changed = mmp.path_mtu.apply_notification(notif.path_mtu, now);
         let new_mtu = mmp.path_mtu.current_mtu();
 
-        if new_mtu != old_mtu {
-            debug!(
-                src = %peer_name,
-                old_mtu,
-                new_mtu,
-                "Path MTU changed via notification"
-            );
+        if !changed {
+            return;
+        }
+
+        debug!(
+            src = %peer_name,
+            old_mtu,
+            new_mtu,
+            "Path MTU changed via notification"
+        );
+
+        // Mirror the new effective MTU into the FipsAddress-keyed lookup used
+        // by the TUN reader/writer at TCP MSS clamp time. Without this, new
+        // TCP flows opened on a path the proactive end-to-end echo has
+        // already tightened keep getting clamped by the staler discovery-
+        // time value until a reactive MtuExceeded happens to fire. Keep the
+        // tighter of existing-or-new — never loosen the clamp.
+        let fips_addr = crate::FipsAddress::from_node_addr(src_addr);
+        match self.path_mtu_lookup.write() {
+            Ok(mut map) => match map.get(&fips_addr).copied() {
+                Some(existing) if existing <= new_mtu => {
+                    debug!(
+                        dest = %peer_name,
+                        fips_addr = %fips_addr,
+                        new_mtu,
+                        existing,
+                        "PathMtuNotification: keeping tighter existing path_mtu_lookup value"
+                    );
+                }
+                other => {
+                    map.insert(fips_addr, new_mtu);
+                    debug!(
+                        dest = %peer_name,
+                        fips_addr = %fips_addr,
+                        new_mtu,
+                        prior = ?other,
+                        map_len = map.len(),
+                        "PathMtuNotification: tightened path_mtu_lookup"
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    dest = %peer_name,
+                    fips_addr = %fips_addr,
+                    new_mtu,
+                    error = %e,
+                    "path_mtu_lookup write lock poisoned; PathMtuNotification not reflected"
+                );
+            }
         }
     }
 

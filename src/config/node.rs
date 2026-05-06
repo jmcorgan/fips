@@ -388,6 +388,14 @@ pub struct NostrDiscoveryConfig {
     /// failure time) evicted when the cap is exceeded. Default: 4096.
     #[serde(default = "NostrDiscoveryConfig::default_failure_state_max_entries")]
     pub failure_state_max_entries: usize,
+    /// Cooldown applied after observing a fatal protocol mismatch on a
+    /// Nostr-adopted bootstrap transport (e.g. `Unknown FMP version`
+    /// from a peer running a different FMP-protocol version). Independent
+    /// of `extended_cooldown_secs` and much longer because the mismatch
+    /// is structural — re-traversing the peer is wasted effort until one
+    /// side upgrades. Default: 86400 (24 hours).
+    #[serde(default = "NostrDiscoveryConfig::default_protocol_mismatch_cooldown_secs")]
+    pub protocol_mismatch_cooldown_secs: u64,
 }
 
 impl Default for NostrDiscoveryConfig {
@@ -419,6 +427,7 @@ impl Default for NostrDiscoveryConfig {
             extended_cooldown_secs: Self::default_extended_cooldown_secs(),
             warn_log_interval_secs: Self::default_warn_log_interval_secs(),
             failure_state_max_entries: Self::default_failure_state_max_entries(),
+            protocol_mismatch_cooldown_secs: Self::default_protocol_mismatch_cooldown_secs(),
         }
     }
 }
@@ -526,6 +535,10 @@ impl NostrDiscoveryConfig {
 
     fn default_failure_state_max_entries() -> usize {
         4_096
+    }
+
+    fn default_protocol_mismatch_cooldown_secs() -> u64 {
+        86_400
     }
 }
 

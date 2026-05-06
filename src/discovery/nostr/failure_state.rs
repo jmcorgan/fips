@@ -176,6 +176,52 @@ impl FailureState {
         }
     }
 
+    /// Record a fatal protocol mismatch against `npub` and apply
+    /// `cooldown_ms` immediately (independent of the streak threshold).
+    ///
+    /// Returns `true` when this is a fresh mismatch entry (caller should
+    /// log a one-shot WARN) or `false` if a comparable mismatch cooldown
+    /// is already in place (caller should remain silent — repeat
+    /// observations of the same mismatch are uninteresting).
+    ///
+    /// Used when the rx loop sees an unhandshakable packet (e.g.,
+    /// `Unknown FMP version`) on a Nostr-adopted bootstrap transport:
+    /// re-traversing the peer at the next sweep cycle is wasted effort
+    /// because the peer cannot accept our handshake until one side
+    /// upgrades. The cooldown is much longer than the transient-failure
+    /// `extended_cooldown_ms` because the mismatch is structural.
+    pub(super) fn record_protocol_mismatch(
+        &self,
+        npub: &str,
+        now_ms: u64,
+        cooldown_ms: u64,
+    ) -> bool {
+        let mut map = self.inner.lock().expect("failure-state mutex poisoned");
+        let entry = map
+            .entry(npub.to_string())
+            .or_insert_with(|| NpubFailureRecord::new(now_ms));
+        // Treat the mismatch as crossing the streak threshold so other
+        // visibility paths (e.g. show_peers JSON) reflect the failed state.
+        entry.consecutive_failures = entry.consecutive_failures.max(self.threshold);
+        entry.last_failure_at_ms = now_ms;
+
+        let cooldown_until = now_ms.saturating_add(cooldown_ms);
+        // "Fresh" means we weren't already inside a comparable cooldown
+        // window. Use the existing-cooldown's remaining time as the test
+        // so that an entry shifted forward by a few seconds doesn't keep
+        // re-triggering WARNs.
+        let already_suppressed = entry
+            .cooldown_until_ms
+            .is_some_and(|t| t > now_ms && t.saturating_sub(now_ms) >= cooldown_ms / 2);
+        entry.cooldown_until_ms = Some(cooldown_until);
+
+        if map.len() > self.max_entries {
+            evict_oldest(&mut map, self.max_entries);
+        }
+
+        !already_suppressed
+    }
+
     /// Return cooldown_until_ms if the peer is currently in extended
     /// cooldown.
     pub(super) fn cooldown_until(&self, npub: &str, now_ms: u64) -> Option<u64> {
@@ -292,6 +338,67 @@ mod tests {
         assert_eq!(npub, "npub1healthy");
         assert_eq!(rec.last_observed_skew_ms, Some(250));
         assert_eq!(rec.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn record_protocol_mismatch_fresh_entry_returns_true() {
+        let s = fs();
+        // 24h cooldown
+        let cooldown_ms = 24 * 60 * 60 * 1000;
+        assert!(
+            s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms),
+            "first mismatch must signal fresh — caller should WARN"
+        );
+        assert_eq!(
+            s.cooldown_until("npub1mismatch", 2000),
+            Some(1000 + cooldown_ms),
+            "cooldown applied immediately"
+        );
+    }
+
+    #[test]
+    fn record_protocol_mismatch_repeat_inside_window_returns_false() {
+        let s = fs();
+        let cooldown_ms = 24 * 60 * 60 * 1000;
+        s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
+        // 30s later, same mismatch — caller should NOT re-WARN
+        assert!(
+            !s.record_protocol_mismatch("npub1mismatch", 31_000, cooldown_ms),
+            "second mismatch inside the existing cooldown must NOT signal fresh"
+        );
+        // Cooldown extends forward.
+        assert_eq!(
+            s.cooldown_until("npub1mismatch", 32_000),
+            Some(31_000 + cooldown_ms),
+        );
+    }
+
+    #[test]
+    fn record_protocol_mismatch_pins_streak_at_threshold() {
+        let s = fs();
+        s.record_protocol_mismatch("npub1mismatch", 1000, 60_000);
+        // Snapshot reflects the threshold pin so show_peers renders the
+        // entry as crossed-threshold.
+        let snap = s.snapshot();
+        let (_, rec) = snap
+            .iter()
+            .find(|(n, _)| n == "npub1mismatch")
+            .expect("entry present");
+        assert!(rec.consecutive_failures >= 3);
+    }
+
+    #[test]
+    fn record_protocol_mismatch_after_old_cooldown_lapsed_signals_fresh() {
+        let s = fs();
+        let cooldown_ms = 24 * 60 * 60 * 1000;
+        s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
+        // Far in the future after cooldown elapsed: a *new* observation
+        // is fresh again so the operator gets a fresh WARN log.
+        let later = 1000 + cooldown_ms + 1;
+        assert!(
+            s.record_protocol_mismatch("npub1mismatch", later, cooldown_ms),
+            "after the cooldown window has elapsed, the next mismatch is fresh"
+        );
     }
 
     #[test]
