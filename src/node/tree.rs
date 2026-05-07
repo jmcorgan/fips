@@ -220,10 +220,14 @@ impl Node {
             "Processed TreeAnnounce"
         );
 
-        // If this peer is (now) a tree peer, ensure bloom filter exchange
-        if self.is_tree_peer(from) {
-            self.bloom_state.mark_update_needed(*from);
-        }
+        // Bloom filter exchange initiation is handled at handshake completion
+        // ([handshake.rs] mark_update_needed on the new peer) and on actual
+        // content changes via [bloom.rs::handle_filter_announce]'s
+        // `mark_changed_peers`. Marking the peer on every received TreeAnnounce
+        // is redundant — and under high TreeAnnounce churn (rapid mid-chain
+        // swap propagation) it amplifies bloom traffic proportionally with
+        // the tree announce rate, even when the local outgoing filter
+        // content has not changed.
 
         // Re-evaluate parent selection with current link costs.
         // Exclude peers without MMP RTT data — they are not yet eligible
@@ -304,8 +308,18 @@ impl Node {
             // Our parent's ancestry changed but we're keeping the same parent.
             // Recompute our own coordinates (which derive from parent's ancestry)
             // and re-announce so downstream nodes stay current.
+            //
+            // Compare the full address path (not just root + depth) so that a
+            // mid-chain ancestor swap also triggers re-announce. A reroute that
+            // replaces an interior ancestor without changing the root or the
+            // path length leaves both `root` and `depth` unchanged but still
+            // alters our coords; downstream peers must learn the new path or
+            // they will route into a phantom intermediate that no longer
+            // exists on our parent's tree.
             let old_root = *self.tree_state.root();
             let old_depth = self.tree_state.my_coords().depth();
+            let old_addrs: Vec<NodeAddr> =
+                self.tree_state.my_coords().node_addrs().copied().collect();
 
             let new_seq = self.tree_state.my_declaration().sequence() + 1;
             let timestamp = std::time::SystemTime::now()
@@ -322,23 +336,32 @@ impl Node {
             self.coord_cache.clear();
             self.reset_discovery_backoff();
 
-            let new_root = *self.tree_state.root();
-            let new_depth = self.tree_state.my_coords().depth();
+            let new_addrs: Vec<NodeAddr> =
+                self.tree_state.my_coords().node_addrs().copied().collect();
 
-            if new_root != old_root || new_depth != old_depth {
+            if old_addrs != new_addrs {
                 self.stats_mut().tree.ancestry_changed += 1;
                 info!(
                     parent = %self.peer_display_name(from),
                     old_root = %old_root,
-                    new_root = %new_root,
-                    new_depth = new_depth,
+                    new_root = %self.tree_state.root(),
+                    old_depth = old_depth,
+                    new_depth = self.tree_state.my_coords().depth(),
                     "Parent ancestry changed, re-announcing"
                 );
                 self.send_tree_announce_to_all().await;
 
-                // Coords changed — trigger bloom filter exchange with all peers
-                let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-                self.bloom_state.mark_all_updates_needed(all_peers);
+                // Bloom contents do not depend on path structure, only on
+                // identity sets. Our parent_id is unchanged in this branch,
+                // so our tree-peer set is unchanged and our outgoing filter
+                // content is unchanged. Use mark_changed_peers, which
+                // checks for actual content delta against last_sent_filters,
+                // instead of mark_all_updates_needed, which marks
+                // unconditionally regardless of whether content changed.
+                let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                let peer_filters = self.peer_inbound_filters();
+                self.bloom_state
+                    .mark_changed_peers(from, &peer_addrs, &peer_filters);
             }
         }
     }

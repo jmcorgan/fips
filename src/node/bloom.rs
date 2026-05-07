@@ -19,7 +19,7 @@ impl Node {
     /// have sent us a FilterAnnounce. Non-routing and leaf peers are
     /// excluded (they don't send filters; their identity is covered
     /// via leaf_dependents).
-    fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
+    pub(super) fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
         let mut filters = HashMap::new();
         for (addr, peer) in &self.peers {
             if self.is_tree_peer(addr)
