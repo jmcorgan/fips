@@ -15,6 +15,14 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 /// Socket path for the gateway control socket.
+///
+/// Hardcoded to `/run/fips/gateway.sock`: gateway operation requires root
+/// for NAT/conntrack management, so the daemon side never needs to fall
+/// back to `XDG_RUNTIME_DIR` or `/tmp`. Client tools resolve the path via
+/// [`crate::config::default_gateway_path`], which uses the shared
+/// [`crate::config::resolve_default_socket`] helper and falls through to
+/// `XDG_RUNTIME_DIR` / `/tmp` for non-root dev runs that don't have
+/// `/run/fips` writable.
 pub const GATEWAY_SOCKET_PATH: &str = "/run/fips/gateway.sock";
 
 /// Maximum request size in bytes (4 KB).

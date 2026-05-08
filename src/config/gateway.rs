@@ -8,7 +8,20 @@ use std::net::SocketAddrV6;
 use serde::{Deserialize, Serialize};
 
 /// Default gateway DNS listen address.
-const DEFAULT_DNS_LISTEN: &str = "[::]:53";
+///
+/// Loopback-only on the unprivileged port 5353. The canonical
+/// gateway deployment is a host already serving DHCP/DNS to a LAN
+/// segment (e.g., an OpenWrt AP), where port 53 is taken by the
+/// existing resolver and `.fips` queries are forwarded to the
+/// gateway over loopback. Operators on a host without a pre-existing
+/// resolver on 53 can opt back into the wildcard bind by setting
+/// `dns.listen: "[::]:53"` explicitly.
+///
+/// `[::1]` is IPv6 loopback only; Linux IPv6 sockets bound to
+/// explicit `::1` do not accept v4-mapped traffic. Forwarders that
+/// reach the gateway over IPv4 loopback (`127.0.0.1`) need to be
+/// pointed at an explicit IPv4 listen address instead.
+const DEFAULT_DNS_LISTEN: &str = "[::1]:5353";
 
 /// Default upstream DNS resolver (FIPS daemon).
 ///
@@ -118,7 +131,7 @@ pub struct PortForward {
 /// Gateway DNS resolver configuration (`gateway.dns.*`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GatewayDnsConfig {
-    /// Listen address and port (default: `0.0.0.0:53`).
+    /// Listen address and port (default: `[::1]:5353`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
 
@@ -133,7 +146,7 @@ pub struct GatewayDnsConfig {
 }
 
 impl GatewayDnsConfig {
-    /// Get the listen address (default: `0.0.0.0:53`).
+    /// Get the listen address (default: `[::1]:5353`).
     pub fn listen(&self) -> &str {
         self.listen.as_deref().unwrap_or(DEFAULT_DNS_LISTEN)
     }
@@ -205,7 +218,7 @@ lan_interface: "eth0"
         assert!(!config.enabled);
         assert_eq!(config.pool, "fd01::/112");
         assert_eq!(config.lan_interface, "eth0");
-        assert_eq!(config.dns.listen(), "[::]:53");
+        assert_eq!(config.dns.listen(), "[::1]:5353");
         assert_eq!(config.dns.upstream(), "[::1]:5354");
         assert_eq!(config.dns.ttl(), 60);
         assert_eq!(config.grace_period(), 60);

@@ -366,6 +366,9 @@ jobs:
           - suite: congestion-stress
             type: chaos
             scenario: congestion-stress
+          - suite: bloom-storm
+            type: chaos
+            scenario: bloom-storm
           # ── Sidecar deployment ──────────────────────────────────────────
           - suite: sidecar
             type: sidecar

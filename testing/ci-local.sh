@@ -23,6 +23,7 @@
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
 #   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
 #   chaos-depth-vs-cost, chaos-mixed-technology, chaos-congestion-stress,
+#   chaos-bloom-storm,
 #   sidecar, dns-resolver, deb-install
 #
 # Opt-in (require --with-tor; depend on live Tor network):
@@ -70,6 +71,7 @@ CHAOS_SUITES=(
     "depth-vs-cost depth-vs-cost"
     "mixed-technology mixed-technology"
     "congestion-stress congestion-stress"
+    "bloom-storm bloom-storm"
 )
 SIDECAR_SUITES=(sidecar)
 GATEWAY_SUITES=(gateway)

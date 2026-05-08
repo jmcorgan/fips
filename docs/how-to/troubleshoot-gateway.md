@@ -82,10 +82,13 @@ for the full flag list.
 ### Port conflict on the DNS listen port
 
 Symptom: gateway fails to start with "address already in use" on
-port 53 (or whatever `gateway.dns.listen` is set to).
+the configured `gateway.dns.listen` address.
 
-Another DNS server (systemd-resolved, dnsmasq, BIND) is bound to
-the port. Identify it:
+The default `[::1]:5353` is loopback-only on an unprivileged port and
+should not collide with any standard resolver. If you have overridden
+`dns.listen` to bind port 53 (or a LAN-side address) and another DNS
+server (systemd-resolved, dnsmasq, BIND) is already bound there,
+identify it:
 
 ```sh
 sudo ss -tulnp | grep ':53'
@@ -93,18 +96,10 @@ sudo ss -tulnp | grep ':53'
 
 Two options:
 
-- **Use an alternate listen address.** Pick a non-conflicting port
-  and update the gateway config:
-
-  ```yaml
-  gateway:
-    dns:
-      listen: "192.168.1.1:5353"
-  ```
-
-  Then either point LAN clients at the alternate port directly, or
-  run a forwarding stub on port 53 that delegates `.fips` queries to
-  the gateway.
+- **Stay on the loopback default.** Drop the override and let the
+  gateway use `[::1]:5353`. Configure the existing resolver to
+  forward `.fips` queries to it (the canonical OpenWrt deployment
+  works this way out of the box).
 
 - **Relocate the conflicting resolver.** Move it to a different port
   (or disable it if not needed) and let the gateway bind 53.
@@ -189,7 +184,7 @@ not running or not enabled. Check that the daemon config has
 **Step 2.** Verify the gateway is listening on its DNS port:
 
 ```sh
-sudo ss -tulnp | grep -E ':53\b'
+sudo ss -tulnp | grep -E ':(53|5353)\b'
 ```
 
 If nothing is listening on the configured `dns.listen` address, the

@@ -12,10 +12,12 @@ import sys
 import time
 from datetime import datetime
 
+from .assertions import AssertionOutcome, BloomSendRateMonitor, evaluate_min_parent_switches
 from .compose import generate_compose
 from .config_gen import write_configs
 from .control import snapshot_all_congestion, snapshot_all_mmp, snapshot_all_trees
 from .docker_exec import docker_compose
+from .link_swap import LinkSwapManager
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
 from .netem import NetemManager
@@ -46,9 +48,14 @@ class SimRunner:
         self.veth_mgr: VethManager | None = None
         self.netem_mgr: NetemManager | None = None
         self.link_mgr: LinkManager | None = None
+        self.link_swap_mgr: LinkSwapManager | None = None
         self.traffic_mgr: TrafficManager | None = None
         self.node_mgr: NodeManager | None = None
         self.peer_churn_mgr: PeerChurnManager | None = None
+
+        # Post-run assertion monitors (sampled near end of run).
+        self.bloom_rate_monitor: BloomSendRateMonitor | None = None
+        self.assertion_outcomes: list[AssertionOutcome] = []
 
     @staticmethod
     def _resolve_output_dir(scenario: Scenario) -> str:
@@ -190,6 +197,20 @@ class SimRunner:
                 self.topology, s.link_flaps, self.rng, netem_mgr=self.netem_mgr
             )
 
+        if s.link_swap.enabled:
+            if not self.netem_mgr:
+                raise RuntimeError(
+                    "link_swap requires netem.enabled (depends on per-link tc state)"
+                )
+            self.link_swap_mgr = LinkSwapManager(
+                self.topology, s.link_swap, self.netem_mgr, self.rng,
+            )
+
+        if s.assertions.bloom_send_rate is not None:
+            self.bloom_rate_monitor = BloomSendRateMonitor(
+                self.topology, s.assertions.bloom_send_rate,
+            )
+
         if s.traffic.enabled:
             self.traffic_mgr = TrafficManager(
                 self.topology, s.traffic, self.rng, down_nodes=self._down_nodes
@@ -226,6 +247,12 @@ class SimRunner:
         if self.peer_churn_mgr:
             self.peer_churn_mgr.refresh_all_npubs()
 
+        # Initial link swap policy assignment (after warmup so the netem
+        # tc state is fully set up and the daemons have already
+        # discovered each other under the calm baseline).
+        if self.link_swap_mgr:
+            self.link_swap_mgr.setup_initial()
+
     def _handle_node_restart(self, node_id: str):
         """Called after a node container is restarted.
 
@@ -260,11 +287,37 @@ class SimRunner:
         next_churn = self._schedule_next(start, s.node_churn.interval_secs) if self.node_mgr else float("inf")
         next_peer_churn = self._schedule_next(start, s.peer_churn.interval_secs) if self.peer_churn_mgr else float("inf")
 
+        # Bloom-send-rate assertion: sample at window_secs before end.
+        bloom_window_start_at = float("inf")
+        if self.bloom_rate_monitor is not None:
+            bloom_window_start_at = (
+                start + duration - s.assertions.bloom_send_rate.window_secs
+            )
+        bloom_window_started = False
+
         while not self._interrupted:
             now = time.time()
             elapsed = now - start
             if elapsed >= duration:
                 break
+
+            # Bloom-rate window-start sampling
+            if (
+                self.bloom_rate_monitor is not None
+                and not bloom_window_started
+                and now >= bloom_window_start_at
+            ):
+                log.info(
+                    "Sampling bloom-rate window start (last %ds of run)...",
+                    s.assertions.bloom_send_rate.window_secs,
+                )
+                self.bloom_rate_monitor.sample_window_start()
+                bloom_window_started = True
+
+            # Deterministic link swap (before netem mutation so a
+            # mutation round can't clobber the swap mid-tick).
+            if self.link_swap_mgr:
+                self.link_swap_mgr.maybe_swap(now)
 
             # Netem mutation
             if self.netem_mgr and now >= next_netem:
@@ -304,6 +357,8 @@ class SimRunner:
             active = self.traffic_mgr.active_count if self.traffic_mgr else 0
             peer_churns = self.peer_churn_mgr.churn_count if self.peer_churn_mgr else 0
             status_extra = f" peer_churns={peer_churns}" if self.peer_churn_mgr else ""
+            if self.link_swap_mgr:
+                status_extra += f" swaps={self.link_swap_mgr.swap_count}"
             print(
                 f"\r  [{elapsed:.0f}s/{duration}s] "
                 f"nodes={len(self.topology.nodes)} "
@@ -320,11 +375,49 @@ class SimRunner:
 
         print()  # Clear status line
 
+        # Bloom-rate window-end sampling.
+        # Done before teardown so containers are still running.
+        if self.bloom_rate_monitor is not None:
+            if not bloom_window_started:
+                # Loop exited before the window-start mark (e.g.,
+                # interrupted). Take both samples now so we still
+                # produce a finite outcome rather than an empty dict.
+                log.warning(
+                    "Bloom-rate window did not start during run; "
+                    "sampling both endpoints at end (delta will be 0)."
+                )
+                self.bloom_rate_monitor.sample_window_start()
+            log.info("Sampling bloom-rate window end...")
+            self.bloom_rate_monitor.sample_end()
+
+    def _evaluate_assertions(self) -> None:
+        """Evaluate post-run assertions and stash outcomes on self.
+
+        Called from teardown while containers are still running so the
+        assertion outcomes (which include per-node detail) can be
+        written alongside the run artifacts.
+        """
+        if self.bloom_rate_monitor is not None:
+            outcome = self.bloom_rate_monitor.evaluate()
+            self.assertion_outcomes.append(outcome)
+            if outcome.passed:
+                log.info("%s", outcome.detail)
+            else:
+                log.error("%s", outcome.detail)
+
+    @property
+    def assertions_failed(self) -> bool:
+        return any(not o.passed for o in self.assertion_outcomes)
+
     def _teardown(self) -> AnalysisResult | None:
         """Stop dynamic elements, collect logs, analyze, stop containers."""
         result = None
 
         if self.topology and self.compose_file:
+            # Evaluate post-run assertions before doing any teardown so
+            # control sockets are still reachable.
+            self._evaluate_assertions()
+
             # Stop traffic
             if self.traffic_mgr:
                 log.info("Stopping traffic sessions...")
@@ -365,6 +458,30 @@ class SimRunner:
             with open(analysis_path, "w") as f:
                 f.write(result.summary())
             print(result.summary())
+
+            # Log-derived assertions (evaluated after analyze_logs so
+            # parent_switches and similar are populated).
+            mps_cfg = self.scenario.assertions.min_parent_switches
+            if mps_cfg is not None:
+                outcome = evaluate_min_parent_switches(
+                    mps_cfg, len(result.parent_switches)
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            # Write assertion outcomes
+            if self.assertion_outcomes:
+                assertions_path = os.path.join(self.output_dir, "assertions.txt")
+                with open(assertions_path, "w") as f:
+                    for o in self.assertion_outcomes:
+                        f.write(o.detail + "\n")
+                print("=== Assertions ===")
+                for o in self.assertion_outcomes:
+                    print(o.detail)
+                print()
 
             # Write metadata
             write_sim_metadata(

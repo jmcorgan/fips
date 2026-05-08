@@ -149,6 +149,27 @@ def snapshot_all_mmp(topology: SimTopology) -> dict[str, dict]:
     return result
 
 
+def query_bloom(container: str) -> dict | None:
+    """Query a node's bloom filter state and stats."""
+    return query_node(container, "show_bloom")
+
+
+def snapshot_all_bloom(topology: SimTopology) -> dict[str, dict]:
+    """Query show_bloom on all nodes, return {node_id: bloom_data}.
+
+    Nodes that fail to respond are omitted from the result.
+    """
+    result = {}
+    for node_id in sorted(topology.nodes):
+        container = topology.container_name(node_id)
+        data = query_bloom(container)
+        if data is not None:
+            result[node_id] = data
+        else:
+            log.warning("No bloom data from %s", node_id)
+    return result
+
+
 def query_routing(container: str) -> dict | None:
     """Query a node's routing stats (includes congestion counters)."""
     return query_node(container, "show_routing")

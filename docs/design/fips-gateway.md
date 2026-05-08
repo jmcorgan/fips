@@ -130,7 +130,7 @@ There is no `fipsctl gateway` subcommand; clients (including
             │                                   │
             │  ┌──────────────┐  ┌───────────┐  │
             │  │   DNS proxy  │  │  Virtual  │  │
-            │  │   ([::]:53)  │─▶│  IP pool  │  │
+            │  │ ([::1]:5353) │─▶│  IP pool  │  │
             │  │   .fips only │  │ (state    │  │
             │  └──────┬───────┘  │  machine) │  │
             │         │          └─────┬─────┘  │
@@ -182,13 +182,18 @@ involving the DNS proxy or the pool.
 ### DNS Resolution Flow
 
 1. A LAN client sends a DNS query to the gateway's listener (default
-   `[::]:53`, configurable via `gateway.dns.listen`).
+   `[::1]:5353`, configurable via `gateway.dns.listen`). The default
+   is loopback-only on an unprivileged port: the canonical deployment
+   has another resolver on the host (dnsmasq, systemd-resolved, BIND)
+   holding port 53 and forwarding `.fips` queries to the gateway over
+   loopback. Operators on a host without a pre-existing resolver on
+   53 can override the listen value to `"[::]:53"` to let LAN clients
+   query the gateway directly.
 2. If the question is not for a `.fips` domain, the gateway replies
    `REFUSED`. The proxy is intentionally narrow — it does not resolve
    public DNS, and the LAN's primary resolver should hold port 53 on
-   the gateway host (the OpenWrt init script wires this up by binding
-   the gateway listener to a non-conflicting port and configuring
-   dnsmasq to forward `.fips` queries there).
+   the gateway host (the OpenWrt init script wires dnsmasq to forward
+   `.fips` queries to the loopback listener automatically).
 3. The gateway forwards the query to the daemon resolver
    (`gateway.dns.upstream`, default `[::1]:5354`). The daemon must
    match: an IPv6 socket bound to `[::1]` does not accept v4-mapped

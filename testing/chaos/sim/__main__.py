@@ -54,6 +54,8 @@ def main():
 
     if result and result.panics:
         sys.exit(2)
+    if runner.assertions_failed:
+        sys.exit(3)
     sys.exit(0)
 
 

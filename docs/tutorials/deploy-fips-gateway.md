@@ -132,7 +132,6 @@ gateway:
   pool: "fd01::/112"            # virtual IP range (up to 65535 addresses)
   lan_interface: "br-lan"       # LAN-facing interface for proxy NDP
   dns:
-    listen: "[::1]:5353"        # gateway DNS listener (dnsmasq forwards here)
     upstream: "[::1]:5354"      # FIPS daemon DNS resolver (matches daemon default)
     ttl: 60                     # DNS TTL and mapping lifetime (seconds)
   pool_grace_period: 60         # seconds after last session before reclaiming
@@ -147,10 +146,11 @@ Three things to notice:
 - `lan_interface: "br-lan"` — the OpenWrt LAN bridge. The gateway
   installs proxy-NDP entries on this interface so LAN clients can
   ARP-equivalent for pool addresses.
-- `dns.listen: "[::1]:5353"` — the gateway's DNS listener is bound
-  to IPv6 loopback only. dnsmasq, which owns LAN port 53, forwards
-  `.fips` queries to it. The init script wires up that forwarding;
-  you don't bind to a LAN address yourself.
+- No `dns.listen` line — the source default `[::1]:5353` is exactly
+  what OpenWrt wants. The gateway listens on IPv6 loopback only;
+  dnsmasq, which owns LAN port 53, forwards `.fips` queries to it.
+  The init script wires up that forwarding; you don't bind to a LAN
+  address yourself.
 
 For the full reference, see
 [../reference/configuration.md § Gateway](../reference/configuration.md#gateway-gateway).
@@ -207,8 +207,21 @@ table install, and pool initialisation.
 
 ## Step 4: Test the outbound half from a LAN client
 
-From a phone or laptop on the AP's LAN — anything that does IPv6 and
-DNS, with no FIPS software installed — try one of the public test
+Before bringing a LAN client into the picture, confirm from the AP
+itself that the mesh side is still healthy after the gateway start:
+
+```sh
+ping6 -c 2 test-us01.fips
+```
+
+This isolates the router-to-mesh path before involving the LAN
+segment. If this fails, the troubleshooting target is the daemon /
+mesh side, not the gateway-to-client side. If it succeeds and the
+LAN-client test below fails, the target is the LAN segment —
+`proxy_ndp`, the RA pool route, or DNS forwarding through dnsmasq.
+
+Now from a phone or laptop on the AP's LAN — anything that does IPv6
+and DNS, with no FIPS software installed — try one of the public test
 mesh nodes:
 
 ```sh
@@ -272,7 +285,7 @@ nft list table inet fips_gateway
 You will see DNAT, SNAT, and masquerade chains populated with one
 rule per active mapping.
 
-## Step 6: Add an inbound port-forward for a LAN service
+## Step 6 (Optional): Add an inbound port-forward for a LAN service
 
 The outbound half is the steady-state use of a gateway. The inbound
 half — exposing a LAN service to mesh peers — is a separate decision,
@@ -321,7 +334,6 @@ gateway:
   pool: "fd01::/112"
   lan_interface: "br-lan"
   dns:
-    listen: "[::1]:5353"
     upstream: "[::1]:5354"
     ttl: 60
   pool_grace_period: 60

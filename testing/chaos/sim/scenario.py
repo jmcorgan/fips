@@ -151,6 +151,67 @@ class IngressConfig:
 
 
 @dataclass
+class LinkSwapEdge:
+    """One edge in a link-swap rotation.
+
+    Edge is a canonical "nXX-nYY" string. ``policy`` names a policy
+    in ``LinkSwapConfig.policies``.
+    """
+
+    edge: str = ""
+    policy: str = ""
+
+
+@dataclass
+class LinkSwapConfig:
+    """Deterministic asymmetric link-cost flapping.
+
+    On each ``interval_secs``, the policies on every pair of edges in
+    ``edges`` are swapped (cyclically rotated by one position). This
+    differs from ``link_flaps`` (random link-down events) and
+    ``netem.mutation`` (random per-edge policy mutation) by being a
+    deterministic, periodic flip between two named netem policies on
+    a fixed set of edges.
+
+    Used to drive a downstream node to repeatedly switch parents on
+    a fixed cadence — exercises the spanning-tree rebalance path
+    without the noise of a random mutation walk.
+    """
+
+    enabled: bool = False
+    interval_secs: float = 4.0
+    policies: dict[str, NetemPolicy] = field(default_factory=dict)
+    edges: list[LinkSwapEdge] = field(default_factory=list)
+
+
+@dataclass
+class BloomSendRateAssertion:
+    """Trailing-window ceiling on per-node ``stats.bloom.sent`` delta."""
+
+    window_secs: int = 30
+    max_per_node: int = 30
+
+
+@dataclass
+class MinParentSwitchesAssertion:
+    """Sanity guard: total parent switches across the run must be at
+    least ``min_total``. Used to detect a misconfigured harness where
+    the flap inducer is firing but the topology never produces a real
+    parent-switch event (e.g., wrong root election).
+    """
+
+    min_total: int = 1
+
+
+@dataclass
+class AssertionsConfig:
+    """Optional post-run assertions evaluated against control-socket data."""
+
+    bloom_send_rate: BloomSendRateAssertion | None = None
+    min_parent_switches: MinParentSwitchesAssertion | None = None
+
+
+@dataclass
 class LoggingConfig:
     rust_log: str = "info"
     output_dir: str = "./sim-results"
@@ -169,6 +230,8 @@ class Scenario:
     peer_churn: PeerChurnConfig = field(default_factory=PeerChurnConfig)
     bandwidth: BandwidthConfig = field(default_factory=BandwidthConfig)
     ingress: IngressConfig = field(default_factory=IngressConfig)
+    link_swap: LinkSwapConfig = field(default_factory=LinkSwapConfig)
+    assertions: AssertionsConfig = field(default_factory=AssertionsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Raw YAML dict appended to each generated FIPS node config.
     # Allows scenarios to override any FIPS config parameter
@@ -320,6 +383,40 @@ def load_scenario(path: str) -> Scenario:
         s.ingress.tiers_kbps = [int(t) for t in tiers]
     s.ingress.burst_bytes = int(ig.get("burst_bytes", 32000))
 
+    # Link swap section (deterministic asymmetric link-cost flapping).
+    ls = raw.get("link_swap", {})
+    s.link_swap.enabled = ls.get("enabled", False)
+    if "interval_secs" in ls:
+        s.link_swap.interval_secs = float(ls["interval_secs"])
+    if "policies" in ls:
+        s.link_swap.policies = {
+            name: _parse_netem_policy(pdata)
+            for name, pdata in ls["policies"].items()
+        }
+    if "edges" in ls:
+        for edata in ls["edges"]:
+            if not isinstance(edata, dict):
+                raise ValueError("link_swap.edges entries must be dicts")
+            edge = str(edata.get("edge", ""))
+            policy = str(edata.get("policy", ""))
+            if not edge or not policy:
+                raise ValueError("link_swap.edges entries require 'edge' and 'policy'")
+            s.link_swap.edges.append(LinkSwapEdge(edge=edge, policy=policy))
+
+    # Assertions section (post-run control-socket-based checks).
+    asrt = raw.get("assertions", {})
+    if "bloom_send_rate" in asrt:
+        bsr = asrt["bloom_send_rate"]
+        s.assertions.bloom_send_rate = BloomSendRateAssertion(
+            window_secs=int(bsr.get("window_secs", 30)),
+            max_per_node=int(bsr.get("max_per_node", 30)),
+        )
+    if "min_parent_switches" in asrt:
+        mps = asrt["min_parent_switches"]
+        s.assertions.min_parent_switches = MinParentSwitchesAssertion(
+            min_total=int(mps.get("min_total", 1)),
+        )
+
     # Logging section
     lg = raw.get("logging", {})
     s.logging.rust_log = lg.get("rust_log", "info")
@@ -435,3 +532,29 @@ def _validate(s: Scenario):
                 raise ValueError(f"ingress.tiers_kbps: all values must be > 0, got {tier}")
         if s.ingress.burst_bytes <= 0:
             raise ValueError(f"ingress.burst_bytes must be > 0, got {s.ingress.burst_bytes}")
+
+    # Validate link_swap
+    if s.link_swap.enabled:
+        if s.link_swap.interval_secs <= 0:
+            raise ValueError("link_swap.interval_secs must be > 0")
+        if len(s.link_swap.edges) < 2:
+            raise ValueError("link_swap.edges must list at least 2 edges to swap")
+        if not s.link_swap.policies:
+            raise ValueError("link_swap.policies must not be empty when link_swap.enabled")
+        for entry in s.link_swap.edges:
+            if entry.policy not in s.link_swap.policies:
+                raise ValueError(
+                    f"link_swap.edges: policy '{entry.policy}' not in link_swap.policies"
+                )
+
+    # Validate assertions
+    if s.assertions.bloom_send_rate is not None:
+        bsr = s.assertions.bloom_send_rate
+        if bsr.window_secs < 1:
+            raise ValueError("assertions.bloom_send_rate.window_secs must be >= 1")
+        if bsr.max_per_node < 0:
+            raise ValueError("assertions.bloom_send_rate.max_per_node must be >= 0")
+        if bsr.window_secs > s.duration_secs:
+            raise ValueError(
+                "assertions.bloom_send_rate.window_secs must not exceed scenario duration"
+            )

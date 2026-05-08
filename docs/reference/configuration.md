@@ -700,7 +700,7 @@ Non-`.fips` queries are answered with `REFUSED`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `gateway.dns.listen` | string | `"[::]:53"` | LAN-facing DNS listen address. Bind on the LAN-side IP (e.g., `"192.168.1.1:53"`) or on all interfaces (`"[::]:53"`) for LAN clients to query. Bind to a non-53 port if another resolver already owns 53 on the host (see [../how-to/troubleshoot-gateway.md](../how-to/troubleshoot-gateway.md)). |
+| `gateway.dns.listen` | string | `"[::1]:5353"` | DNS listen address. The default binds IPv6 loopback on an unprivileged port, matching the canonical deployment where another resolver on the host (dnsmasq, systemd-resolved, BIND) holds port 53 and forwards `.fips` queries to the gateway over loopback. Bind on the LAN-side IP (e.g., `"192.168.1.1:53"`) or wildcard (`"[::]:53"`) only on hosts with no other resolver on 53 and where LAN clients query the gateway directly. See [../how-to/troubleshoot-gateway.md](../how-to/troubleshoot-gateway.md). |
 | `gateway.dns.upstream` | string | `"[::1]:5354"` | Upstream FIPS daemon resolver. **Must match the daemon's `dns.bind_addr` and `dns.port`.** Defaults match the daemon defaults (`::1:5354`). A v4 upstream (`"127.0.0.1:5354"`) cannot reach a daemon bound on `[::1]:5354` — Linux IPv6 sockets bound to explicit `::1` do not accept v4-mapped traffic. If you change the daemon's `dns.bind_addr`, update this field accordingly. |
 | `gateway.dns.ttl` | u32 | `60` | TTL in seconds on AAAA responses returned to LAN clients. Smaller values let the gateway recycle pool addresses faster; larger values reduce LAN-side query traffic. |
 
@@ -747,7 +747,7 @@ gateway:
   pool: "fd01::/112"
   lan_interface: "enp3s0"
   dns:
-    listen: "[::]:53"
+    listen: "[::1]:5353"
     upstream: "[::1]:5354"
     ttl: 60
   pool_grace_period: 60

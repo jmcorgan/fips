@@ -1,0 +1,142 @@
+# Bloom-storm regression scenario.
+#
+# Six-node depth-4 mesh with an induced upstream parent flap. Guards
+# against a regression class where a spanning-tree update that changes
+# only an internal path edge (no root or depth delta) fails to
+# propagate to leaves, producing a sustained bloom-traffic
+# oscillation visible only at fleet scale and only after several
+# minutes of uptime. See README.md alongside this file for the
+# bug-class description and threshold derivation.
+#
+# Topology (n01 should win the root election under deterministic
+# key derivation; the validation snapshot at end-of-run will confirm
+# the assigned root):
+#
+#                n01    (root,  depth 0)
+#               /    \
+#             n02    n03   (parent candidates pa/pb, depth 1)
+#               \    /
+#                n04        (flap, depth 2 — induced parent flap)
+#                 |
+#                n05        (leaf, depth 3 — observes mid-chain swap)
+#                 |
+#                n06        (tail, depth 4 — sees the cascade)
+#
+# The flap is induced by alternating the netem delay on n02-n04 and
+# n03-n04 every 4 seconds. Because the FIPS overrides below disable
+# parent-flap dampening, n04 switches parents on each swap. The bug
+# class under test is whether this localized swap at depth 2 leaks
+# downstream as a bloom-announce storm at depth 3 and depth 4.
+#
+# Assertions (bloom_send_rate.max_per_node_per_window) are evaluated
+# over the trailing 30s of the run, after sustained flapping has had
+# time to expose any cascade behavior.
+
+scenario:
+  name: "bloom-storm"
+  # Seed pinned so deterministic key derivation makes n01 win the
+  # root election and orders the other NodeAddrs as n02 < n03 <
+  # ... < n04 (so n04 is at the bottom of the tiebreak and its
+  # parent candidates n02/n03 are both at depth 1). The warmup tree
+  # snapshot in sim-results/ is the authoritative check.
+  #
+  # Other seeds may elect a different node as root or order n04
+  # ahead of n02/n03, in which case the induced flap will not
+  # exercise the cascade path the assertion is written to catch.
+  seed: 31
+  duration_secs: 180
+
+topology:
+  algorithm: explicit
+  num_nodes: 6
+  params:
+    adjacency:
+      - [n01, n02]
+      - [n01, n03]
+      - [n02, n04]
+      - [n03, n04]
+      - [n04, n05]
+      - [n05, n06]
+  subnet: "172.20.0.0/24"
+  ip_start: 10
+
+netem:
+  enabled: true
+  default_policy:
+    # Calm baseline so steady-state bloom traffic is at its floor.
+    delay_ms: [1, 1]
+    jitter_ms: [0, 0]
+    loss_pct: [0, 0]
+
+# Asymmetric link-cost flap on n04's two upstream candidates. Every
+# `interval_secs`, the policies on the two listed edges are swapped.
+# This drives n04 to alternate parents between n02 and n03 each
+# round. The 4s cadence and 5ms-vs-100ms delta come from the
+# original ISSUE-2026-0019 reproduction harness — they are
+# calibrated to produce a parent switch per round under the
+# zero-hysteresis FIPS overrides below.
+link_swap:
+  enabled: true
+  interval_secs: 4
+  policies:
+    fast:
+      delay_ms: [5, 5]
+      jitter_ms: [0, 0]
+      loss_pct: [0, 0]
+    slow:
+      delay_ms: [100, 100]
+      jitter_ms: [0, 0]
+      loss_pct: [0, 0]
+  # Initial assignment: n02-n04 fast, n03-n04 slow. After each
+  # interval the assignments are swapped.
+  edges:
+    - edge: "n02-n04"
+      policy: fast
+    - edge: "n03-n04"
+      policy: slow
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: false
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"
+
+# Per-node assertions evaluated at the end of the run. Each asserts
+# on the delta of a control-socket counter over a trailing window.
+assertions:
+  bloom_send_rate:
+    # The trailing window is the last `window_secs` of the run.
+    # `max_per_node` is the ceiling on stats.bloom.sent delta over
+    # that window, per node. The threshold is set ~5x above the
+    # observed steady-state ceiling on fixed master and well below
+    # the storm-state value on the regressed binary.
+    window_secs: 30
+    max_per_node: 30
+  min_parent_switches:
+    # Sanity guard: detect a misconfigured harness where the flap
+    # inducer fires but the topology never produces a real parent
+    # switch (e.g., wrong root election made n04's parent
+    # candidates structurally non-equivalent). Without this, the
+    # bloom-rate assertion would trivially pass on any binary,
+    # including a regressed one.
+    #
+    # Floor calibrated against expected behavior under the chosen
+    # seed: 41 link swaps over 180s should produce >= 10 parent
+    # switches at n04 alone if the topology is right.
+    min_total: 10
+
+# FIPS overrides to suppress parent-flap dampening so the asymmetric
+# link-cost flap reliably produces a parent switch per round. The
+# whole point of the scenario is to *force* sustained parent
+# flapping at n04 and assert that bloom layer doesn't amplify it.
+fips_overrides:
+  node:
+    tree:
+      parent_hysteresis: 0.0
+      reeval_interval_secs: 1
+      flap_threshold: 9999
+      hold_down_secs: 0

@@ -14,7 +14,7 @@ secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
 sha2 = "0.10"
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
-rand = "0.10.0"
+rand = "0.10.1"
 thiserror = "2.0"
 bech32 = "0.11"
 serde = { version = "1.0", features = ["derive"] }
@@ -22,7 +22,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 dirs = "6.0"
 hex = "0.4"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process", "io-util"] }
@@ -36,11 +36,11 @@ nostr = { version = "0.44", features = ["std", "nip59"] }
 nostr-sdk = "0.44"
 
 [target.'cfg(unix)'.dependencies]
-tun = { version = "0.8.5", features = ["async"] }
+tun = { version = "0.8.7", features = ["async"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.20.0"
+rtnetlink = "0.21.0"
 rustables = "0.8.7"
 
 # bluer/BlueZ needs glibc — see build.rs `bluer_available` cfg gate.
@@ -49,7 +49,7 @@ bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"
-windows-service = "0.7"
+windows-service = "0.8.1"
 
 [package.metadata.deb]
 maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"

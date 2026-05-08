@@ -379,9 +379,45 @@ with v0.2.x peers.
   `max_fpr` and returns `Option<f64>`, returning `None` for
   saturated filters; this propagates through `compute_mesh_size`
   into `estimated_mesh_size` (already `Option<u64>`)
+- The `docs/` tree is reorganised so readers can find content by
+  what they're trying to do: tutorials for new users, how-to guides
+  for specific tasks, reference material for configuration and
+  protocol details, and design discussion for architectural
+  background. New top-level `getting-started.md` and per-section
+  landing pages anchor the entry points. Content was reconciled
+  against current source: protocol layer details, wire-format
+  diagrams, configuration knobs, and CLI references were brought
+  back into agreement with the implementation. Gateway feature-set
+  documentation was rewritten end-to-end.
+- Test coverage was substantially expanded for the new release
+  surface (discovery state machine, control-socket query handlers,
+  decrypt-failure thresholds, STUN parser, gateway, NAT traversal,
+  packaging install paths) alongside CI-side hardening for the new
+  Windows and macOS platforms.
+- Gateway `dns.listen` source default changed from `[::]:53` to
+  `[::1]:5353` to match the canonical deployment model (a host
+  already serving DHCP/DNS to a LAN segment, where port 53 is
+  taken by the existing resolver and `.fips` queries are forwarded
+  to the gateway over loopback). The OpenWrt ipk previously
+  overrode this in its packaged config; the override is now
+  redundant and has been dropped. Operators on a host without a
+  pre-existing resolver on port 53 can opt back into the wildcard
+  bind by setting `dns.listen: "[::]:53"` explicitly. The new
+  default binds IPv6 loopback only — forwarders that reach the
+  gateway over IPv4 loopback need an explicit IPv4 listen address.
 
 ### Fixed
 
+- Default control-socket path resolution: daemon and client tools now
+  use a shared resolver, eliminating a divergence where `fipsctl` /
+  `fipstop` could connect to a socket the daemon never bound (notably
+  on dev runs with `XDG_RUNTIME_DIR` set, or after a prior packaged
+  install left a root-owned `/run/fips` behind). Canonical order is
+  `/run/fips` → `$XDG_RUNTIME_DIR/fips/` → `/tmp/fips-<name>`, with
+  writability of `/run/fips` probed via tempfile create (ACL- and
+  group-aware) and `XDG_RUNTIME_DIR` validated as an existing
+  directory before being used. The deployed fleet is unaffected:
+  packaged configs set `node.control.socket_path` explicitly.
 - UDP transport with `advertise_on_nostr: true` + `public: true` +
   a wildcard `bind_addr` (e.g. `0.0.0.0:2121`) is now advertised
   with its STUN-discovered public IPv4 instead of being silently
@@ -532,6 +568,11 @@ with v0.2.x peers.
   tree specification. The receive path now verifies that the
   ancestry is structurally consistent with the signed parent
   declaration before mutating tree state.
+- Spanning-tree updates that change only the internal path between
+  root and leaf — without changing the root or the depth — now
+  propagate to leaves correctly. Previously a leaf could continue
+  routing against a stale internal path until the parent or depth
+  also changed.
 - Make the tree ancestry acceptance unit test deterministic.
   `test_tree_announce_validate_semantics_accepts_valid_non_root`
   generated a random signing identity while pinning the fixed root

@@ -142,7 +142,7 @@ pick a different `fdXX::/N`). The `/112` size yields 65 536 virtual
 IPs, which is the gateway's hard cap regardless of CIDR width.
 
 This minimum config is enough to start the gateway. The `dns.*` block
-is optional and defaults to `listen: "[::]:53"` and
+is optional and defaults to `listen: "[::1]:5353"` and
 `upstream: "[::1]:5354"`. The full block — including `dns.*`,
 `pool_grace_period`, `conntrack.*`, and `port_forwards[]` — is
 documented in
@@ -195,20 +195,28 @@ Constraints:
 ```yaml
 gateway:
   dns:
-    listen: "[::]:53"
+    listen: "[::1]:5353"
     upstream: "[::1]:5354"
     ttl: 60
 ```
 
 Common cases:
 
-- **No other resolver on the host:** `listen: "[::]:53"` is the
-  default and works.
-- **systemd-resolved is on port 53:** either disable its stub
-  listener (`DNSStubListener=no` in
-  `/etc/systemd/resolved.conf`) or move the gateway to a different
-  port (e.g., `[::]:5353`) and put a forwarder on 53 that delegates
-  `.fips` to the gateway. See
+- **Another resolver on the host (the canonical case):** the default
+  `listen: "[::1]:5353"` is loopback-only on an unprivileged port,
+  so it never conflicts with dnsmasq, systemd-resolved, or BIND
+  holding 53. Configure the existing resolver to forward `.fips`
+  queries to `[::1]:5353` and you are done — this is what the
+  OpenWrt ipk does automatically.
+- **No other resolver on the host:** set `listen: "[::]:53"`
+  explicitly and LAN clients can query the gateway directly.
+- **systemd-resolved is on port 53:** the default already side-steps
+  this — leave the listen address at `[::1]:5353` and configure the
+  stub or a small forwarder to delegate `.fips` to the gateway. If
+  you would rather have the gateway on 53 directly, disable the
+  systemd stub listener (`DNSStubListener=no` in
+  `/etc/systemd/resolved.conf`) and switch `listen` to `"[::]:53"`.
+  See
   [troubleshoot-gateway.md](troubleshoot-gateway.md#port-conflict-on-the-dns-listen-port).
 - **Bind on the LAN address only:** `listen: "192.168.1.1:53"`
   exposes the resolver only to LAN clients, not loopback.

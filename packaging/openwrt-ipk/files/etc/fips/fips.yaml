@@ -76,16 +76,15 @@ peers: []
 # Allows unmodified LAN hosts to reach FIPS mesh destinations via
 # DNS-allocated virtual IPs and kernel nftables NAT.
 #
-# The gateway DNS listens on port 5353 by default so it does not conflict
-# with dnsmasq on port 53.  The init script configures dnsmasq to forward
-# .fips queries to the gateway automatically.
+# The gateway DNS listens on `[::1]:5353` by default (set in source) so it
+# does not conflict with dnsmasq on port 53.  The init script configures
+# dnsmasq to forward .fips queries to the gateway automatically.
 
 gateway:
   enabled: true
   pool: "fd01::/112"            # virtual IP range (up to 65535 addresses)
   lan_interface: "br-lan"       # LAN-facing interface for proxy NDP
   dns:
-    listen: "[::1]:5353"        # gateway DNS listener (dnsmasq forwards here)
     upstream: "[::1]:5354"      # FIPS daemon DNS resolver (matches daemon default)
     ttl: 60                     # DNS TTL and mapping lifetime (seconds)
   pool_grace_period: 60         # seconds after last session before reclaiming

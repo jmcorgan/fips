@@ -94,7 +94,7 @@ transports:
 #   pool: "fd01::/112"
 #   lan_interface: "eth0"
 #   dns:
-#     listen: "[::]:53"
+#     listen: "[::1]:5353"
 #     # upstream must match the daemon's dns.bind_addr above. The
 #     # default "[::1]:5354" matches the daemon's default. If you set
 #     # the daemon to bind on a wildcard ("::") or specific address,

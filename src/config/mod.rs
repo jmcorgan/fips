@@ -90,21 +90,77 @@ pub fn pub_file_path(config_path: &Path) -> PathBuf {
         .join(PUB_FILENAME)
 }
 
+/// Resolve a default Unix-socket path under the canonical order:
+/// `/run/fips/<filename>` → `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
+///
+/// `/run/fips` is the packaged convention (`root:fips 0770` directory created
+/// by the daemon at bind time). `XDG_RUNTIME_DIR` covers non-root dev runs
+/// where `/run/fips` does not exist or is not writable. `/tmp` is the
+/// last-resort fallback.
+///
+/// Hardening notes:
+/// - `/run/fips` is accepted only if the directory exists and is writable by
+///   the current process. `create_dir_all` reporting `Ok(())` is *not*
+///   sufficient: it returns `Ok` for an existing root-owned dir that we
+///   cannot write to, which would silently steer a non-root daemon onto a
+///   path that fails at bind time. Writability is probed via tempfile create
+///   rather than mode bits so ACLs and group membership (the dir is
+///   `root:fips 0770`) are honored.
+/// - `XDG_RUNTIME_DIR` is validated as an existing directory before being
+///   used; a stale post-logout value (after `pam_systemd` reaps the dir) is
+///   treated as missing.
+#[cfg(unix)]
+pub(crate) fn resolve_default_socket(filename: &str) -> String {
+    // 1. /run/fips — accept only if the directory exists and is writable.
+    let run_fips = Path::new("/run/fips");
+    if run_fips.is_dir() && is_writable_dir(run_fips) {
+        return format!("/run/fips/{filename}");
+    }
+    // Also accept /run/fips if we can create it (covers the first-boot
+    // daemon-as-root case before the directory has been materialized). The
+    // actual chown happens at bind time.
+    if std::fs::create_dir_all(run_fips).is_ok() && is_writable_dir(run_fips) {
+        return format!("/run/fips/{filename}");
+    }
+
+    // 2. $XDG_RUNTIME_DIR/fips/ — only if the variable points at an existing
+    //    directory.
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        let xdg_path = Path::new(&xdg);
+        if xdg_path.is_dir() {
+            return format!("{xdg}/fips/{filename}");
+        }
+    }
+
+    // 3. Last resort: /tmp with a name-mangled prefix so multiple users
+    //    don't collide.
+    format!("/tmp/fips-{filename}")
+}
+
+#[cfg(unix)]
+fn is_writable_dir(path: &Path) -> bool {
+    // Probe via tempfile creation rather than mode bits: mode-bit checks miss
+    // ACLs and group-membership effects (the /run/fips dir is `root:fips
+    // 0770` and the daemon may run as a user that's in the `fips` group).
+    let probe = path.join(format!(".fips-write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Default control socket path for fipsctl / fipstop.
 ///
-/// On Unix, checks the system-wide path first (used when the daemon runs as
-/// a systemd service), then falls back to the user's XDG runtime directory.
-/// On Windows, returns the default TCP port ("21210").
+/// On Unix, delegates to [`resolve_default_socket`] for the canonical
+/// `/run/fips` → `XDG_RUNTIME_DIR` → `/tmp` order. On Windows, returns the
+/// default TCP port ("21210").
 pub fn default_control_path() -> PathBuf {
     #[cfg(unix)]
     {
-        if Path::new("/run/fips").exists() {
-            PathBuf::from("/run/fips/control.sock")
-        } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(format!("{runtime_dir}/fips/control.sock"))
-        } else {
-            PathBuf::from("/tmp/fips-control.sock")
-        }
+        PathBuf::from(resolve_default_socket("control.sock"))
     }
     #[cfg(windows)]
     {
@@ -114,18 +170,16 @@ pub fn default_control_path() -> PathBuf {
 
 /// Default gateway control socket path.
 ///
-/// On Unix, follows the same pattern as the main control socket.
-/// On Windows, returns a placeholder TCP port ("21211").
+/// On Unix, delegates to [`resolve_default_socket`] (same canonical order as
+/// the main control socket). The gateway daemon itself uses a hardcoded
+/// `/run/fips/gateway.sock` since gateway operation requires root for
+/// NAT/conntrack management; this client-side resolver falls through
+/// gracefully for non-root dev runs that need a gateway socket path. On
+/// Windows, returns a placeholder TCP port ("21211").
 pub fn default_gateway_path() -> PathBuf {
     #[cfg(unix)]
     {
-        if Path::new("/run/fips").exists() {
-            PathBuf::from("/run/fips/gateway.sock")
-        } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(format!("{runtime_dir}/fips/gateway.sock"))
-        } else {
-            PathBuf::from("/tmp/fips-gateway.sock")
-        }
+        PathBuf::from(resolve_default_socket("gateway.sock"))
     }
     #[cfg(windows)]
     {
@@ -1465,5 +1519,118 @@ peers:
     fn test_udp_accept_connections_default_true() {
         let cfg = UdpConfig::default();
         assert!(cfg.accept_connections());
+    }
+
+    /// Mutex serializing tests that mutate `XDG_RUNTIME_DIR`. `cargo test`
+    /// runs tests on multiple threads in the same process, and env mutation
+    /// is process-global, so concurrent env-touching tests would race.
+    #[cfg(unix)]
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_default_socket_call_sites_agree() {
+        // The three resolver call sites must all produce strings that agree
+        // on the directory, differing only in the filename suffix.
+        let _g = ENV_MUTEX.lock().unwrap();
+
+        let control_client = default_control_path().to_string_lossy().into_owned();
+        let gateway_client = default_gateway_path().to_string_lossy().into_owned();
+        let control_daemon = ControlConfig::default().socket_path;
+
+        // Daemon-side and client-side control paths must be identical.
+        assert_eq!(
+            control_daemon, control_client,
+            "daemon and client default control-socket paths diverged: \
+             daemon={control_daemon}, client={control_client}"
+        );
+
+        // Control and gateway must share a parent directory (or /tmp prefix).
+        let control_dir = std::path::Path::new(&control_client)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let gateway_dir = std::path::Path::new(&gateway_client)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_eq!(
+            control_dir, gateway_dir,
+            "control and gateway default-socket paths picked different directories: \
+             control={control_client}, gateway={gateway_client}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_default_socket_xdg_when_no_run_fips() {
+        // With /run/fips unwritable (non-root tests) and XDG_RUNTIME_DIR
+        // pointing at an existing directory, the resolver picks XDG.
+        let _g = ENV_MUTEX.lock().unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        // SAFETY: serialized via ENV_MUTEX above.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", temp_dir.path());
+        }
+
+        let path = resolve_default_socket("control.sock");
+
+        // Restore env before asserting so a panic doesn't leak state.
+        unsafe {
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+
+        // If /run/fips happens to be writable in the test environment (CI
+        // running as root, for instance), the resolver legitimately picks
+        // /run/fips and skips XDG entirely. Accept either outcome but
+        // demand that one of the two canonical prefixes is chosen — never
+        // /tmp when XDG was valid.
+        assert!(
+            path.starts_with("/run/fips/")
+                || path.starts_with(&format!("{}/fips/", temp_dir.path().display())),
+            "expected /run/fips or XDG path, got: {path}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_default_socket_tmp_when_xdg_invalid() {
+        // With XDG_RUNTIME_DIR pointing at a non-existent directory and
+        // /run/fips unwritable, the resolver falls through to /tmp.
+        let _g = ENV_MUTEX.lock().unwrap();
+
+        let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        // Use a path that definitely does not exist.
+        let bogus = "/nonexistent-xdg-runtime-dir-for-fips-test-zzz";
+        // SAFETY: serialized via ENV_MUTEX.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", bogus);
+        }
+
+        let path = resolve_default_socket("gateway.sock");
+
+        unsafe {
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+
+        // Accept either /run/fips/ (test running as root with that dir
+        // writable) or /tmp/fips-... (the dev-machine fallback). Never
+        // accept the bogus XDG dir leaking through.
+        assert!(
+            path.starts_with("/run/fips/") || path == "/tmp/fips-gateway.sock",
+            "expected /run/fips or /tmp fallback, got: {path}"
+        );
+        assert!(
+            !path.starts_with(bogus),
+            "stale/invalid XDG_RUNTIME_DIR leaked into resolver: {path}"
+        );
     }
 }
