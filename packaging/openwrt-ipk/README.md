@@ -11,13 +11,16 @@ For ad-hoc deployment without the build system, see
 | Installed path | Purpose |
 |---|---|
 | `/usr/bin/fips` | Mesh daemon |
-| `/usr/bin/fipsctl` | CLI control tool (`fipsctl peers`, `fipsctl links`, …) |
+| `/usr/bin/fipsctl` | CLI control tool (`fipsctl show peers`, `fipsctl show links`, …) |
 | `/usr/bin/fipstop` | Live TUI dashboard |
-| `/etc/init.d/fips` | procd service (auto-start, crash respawn) |
+| `/usr/bin/fips-gateway` | Outbound LAN gateway service (not started by default) |
+| `/etc/init.d/fips` | procd service for the daemon (auto-start, crash respawn) |
+| `/etc/init.d/fips-gateway` | procd service for the gateway (disabled by default) |
 | `/etc/fips/fips.yaml` | Node configuration (edit before first start) |
 | `/etc/fips/firewall.sh` | Firewall helper — accepts traffic on `fips0` |
 | `/etc/dnsmasq.d/fips.conf` | Forwards `.fips` DNS queries to the daemon |
 | `/etc/sysctl.d/fips-bridge.conf` | `br_netfilter` settings for Ethernet transport |
+| `/etc/sysctl.d/fips-gateway.conf` | `proxy_ndp` and IPv6 forwarding for the gateway |
 | `/etc/hotplug.d/net/99-fips` | Applies firewall rules when `fips0` comes up |
 | `/etc/uci-defaults/90-fips-setup` | First-boot kernel module and firewall setup |
 | `/lib/upgrade/keep.d/fips` | Preserves `/etc/fips/` across `sysupgrade` |
@@ -142,17 +145,35 @@ physical interface names for your router. **Always use physical port names
 /etc/init.d/fips disable
 ```
 
+### Outbound LAN gateway (optional)
+
+The `fips-gateway` service is installed but disabled by default. It
+turns the router into an outbound gateway that bridges LAN clients
+onto the FIPS mesh. Enable only after configuring a `gateway:`
+section in `/etc/fips/fips.yaml`:
+
+```bash
+/etc/init.d/fips-gateway enable
+/etc/init.d/fips-gateway start
+```
+
+See `docs/tutorials/deploy-fips-gateway.md` in the source tree for
+the full walkthrough.
+
 ## Inspection and logs
 
 ```bash
-# Peer table
-fipsctl peers
+# Node-level status overview
+fipsctl show status
 
-# Active sessions
-fipsctl sessions
+# Peer table
+fipsctl show peers
 
 # Transport links
-fipsctl links
+fipsctl show links
+
+# Active end-to-end sessions
+fipsctl show sessions
 
 # Live TUI dashboard
 fipstop
@@ -160,6 +181,9 @@ fipstop
 # Daemon logs (OpenWrt syslog)
 logread | grep fips
 ```
+
+See [`docs/reference/cli-fipsctl.md`](../../docs/reference/cli-fipsctl.md)
+for the full subcommand list.
 
 ## Upgrading
 
