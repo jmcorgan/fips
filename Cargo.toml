@@ -49,7 +49,7 @@ bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"
-windows-service = "0.7"
+windows-service = "0.8.1"
 
 [package.metadata.deb]
 maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"
