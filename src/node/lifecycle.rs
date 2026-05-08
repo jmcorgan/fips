@@ -73,6 +73,12 @@ impl Node {
                     error = %e,
                     "Failed to initiate peer connection"
                 );
+                // Schedule a retry so transient address-resolution failures
+                // (e.g. cached endpoints stale, NAT rebinds, all addresses
+                // currently unreachable) recover without a daemon restart.
+                if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_config.npub) {
+                    self.schedule_retry(*peer_identity.node_addr(), Self::now_ms());
+                }
             }
         }
     }
