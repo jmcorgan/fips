@@ -1,14 +1,20 @@
 # FIPS Spanning Tree Protocol Dynamics
 
-A detailed study of the gossip-based spanning tree protocol, focusing on
-operational behavior under various mesh conditions. This document complements
-[fips-intro.md](fips-intro.md) with step-by-step walkthroughs of protocol
-dynamics rather than message formats and data structures.
+A detailed study of the gossip-based spanning tree protocol, focusing
+on operational behavior under various mesh conditions. This document
+complements [fips-concepts.md](fips-concepts.md) and
+[fips-architecture.md](fips-architecture.md) with step-by-step
+walkthroughs of protocol dynamics rather than message formats and
+data structures.
 
-For wire formats, see [fips-wire-formats.md](fips-wire-formats.md) (TreeAnnounce section).
-For spanning tree algorithms and data structures, see
-[fips-spanning-tree.md](fips-spanning-tree.md). For how the spanning tree fits
-into mesh routing, see [fips-mesh-operation.md](fips-mesh-operation.md).
+For wire formats, see
+[../reference/wire-formats.md](../reference/wire-formats.md)
+(TreeAnnounce section). For spanning tree algorithms and data
+structures, see [fips-spanning-tree.md](fips-spanning-tree.md). For
+how the spanning tree fits into mesh routing, see
+[fips-mesh-operation.md](fips-mesh-operation.md). For the academic
+foundations and references that underpin this document, see
+[fips-prior-work.md](fips-prior-work.md).
 
 ## Contents
 
@@ -93,7 +99,7 @@ When a node starts with no peers, it bootstraps as a single-node network.
 **T0: Node A starts.**
 
 - Generates or loads keypair `(npub_A, nsec_A)`
-- Computes `node_addr_A = SHA-256(npub_A)`
+- Computes `node_addr_A = SHA-256(pubkey_A)[..16]` (128 bits)
 - Initializes empty TreeState
 - Sets `parent = self` (A is its own root), `sequence = 1`
 - Records current timestamp
@@ -518,6 +524,11 @@ converge to the same "link failed" state, though B detects it up to
 ## 8. Parent Selection
 
 Parent selection determines tree structure and routing efficiency.
+The algorithm itself (effective-depth ranking, hold-down, hysteresis,
+mandatory-switch bypass) is canonically documented in
+[fips-spanning-tree.md](fips-spanning-tree.md); this section walks
+through what re-selection looks like under specific dynamic
+conditions and the rationale for the local-only cost metric.
 
 ### Cost-Based Selection with Effective Depth
 
@@ -537,10 +548,15 @@ purely by tree depth without link quality consideration.
 2. **Compute effective depth for each candidate.** For every peer whose
    announced root matches the smallest root, the algorithm calculates
    `effective_depth = peer.depth + link_cost`, where `link_cost` comes from
-   `peer_costs` (MMP-derived) or defaults to 1.0 when metrics have not yet
-   converged. The best candidate is the peer with the lowest effective depth,
-   with ties broken by numerically smallest `NodeAddr`.  If the best candidate
-   is already the current parent, no switch is needed.
+   `peer_costs` (MMP-derived). During cold start, when no peer has MMP data
+   yet (`peer_costs` is empty), unmeasured candidates default to 1.0; once
+   any peer has MMP data, unmeasured candidates are skipped so a freshly
+   connected peer cannot win on its default cost. Candidates whose ancestry
+   already contains the local node are also rejected, preventing an
+   alternating two-node loop. The best candidate is the peer with the
+   lowest effective depth, with ties broken by numerically smallest
+   `NodeAddr`. If the best candidate is already the current parent, no
+   switch is needed.
 
 3. **Check for mandatory switches.** Two conditions bypass all stability
    mechanisms and trigger an immediate parent change: the current parent is no
@@ -571,10 +587,10 @@ re-evaluation independent of TreeAnnounce traffic).
 
 Where ETX (Expected Transmission Count, from De Couto et al., "A
 High-Throughput Path Metric for Multi-Hop Wireless Routing", 2003) comes from
-bidirectional MMP delivery ratios and SRTT (Smoothed Round-Trip Time) from MMP
-timestamp-echo. When MMP
-metrics have not yet converged, `link_cost` defaults to 1.0, preserving
-depth-only behavior as a graceful fallback.
+bidirectional MMP delivery ratios and SRTT (Smoothed Round-Trip Time) from
+MMP timestamp-echo. During cold start, before any peer has MMP data, the
+default cost of 1.0 is used and the algorithm reduces to depth-only
+selection.
 
 **What this means for tree structure**: The algorithm can prefer a deeper parent
 with a better link over a shallower parent with a poor link, when the effective
@@ -942,28 +958,16 @@ costs to form efficient tree structures.
 
 ### Prior Art and FIPS Contributions
 
-The protocol builds on established foundations and adds several new elements:
-
-**Derived from prior work**:
-
-- Spanning tree coordinate routing (Yggdrasil/Ironwood, building on Kleinberg
-  2007 and Cvetkovski/Crovella 2009)
-- Deterministic root discovery via smallest identifier (Yggdrasil; echoes
-  IEEE 802.1D STP bridge ID selection)
-- CRDT-based distributed state (Shapiro et al. 2011)
-- Gossip dissemination (epidemic model; Kermarrec 2007)
-- Heartbeat-based failure detection (SWIM; Das et al. 2002)
-- ETX link metric (De Couto et al. 2003)
-- Hysteresis and hold-down for route stability (OSPF, BGP, IS-IS)
-
-**FIPS additions**:
-
-- Cost-aware parent selection using local-only link metrics (effective depth =
-  tree depth + link cost), replacing Yggdrasil's depth-only selection
-- Combined ETX + SRTT link cost formula with MMP-measured components
-- Flap dampening with mandatory switch bypass
-- Announcement suppression for transient state changes
-- Tree-only bloom filter merge with split-horizon exclusion
+The protocol builds on established foundations (Yggdrasil/Ironwood
+tree-coordinate routing, IEEE 802.1D STP root election, CRDT-based
+distributed state, SWIM-style failure detection, ETX, OSPF-style
+hysteresis and hold-down) and adds several new elements (cost-aware
+parent selection on local-only metrics, the combined ETX + SRTT cost
+formula, flap dampening with mandatory-switch bypass, announcement
+suppression, and tree-only bloom filter merge with split-horizon).
+Both the prior-art map and the FIPS contributions list are
+consolidated in
+[fips-prior-work.md](fips-prior-work.md#fips-contributions).
 
 ---
 
@@ -971,75 +975,17 @@ The protocol builds on established foundations and adds several new elements:
 
 ### FIPS Internal Documentation
 
-- [fips-spanning-tree.md](fips-spanning-tree.md) — Spanning tree algorithms and data structures
-- [fips-mesh-operation.md](fips-mesh-operation.md) — How the spanning tree fits into mesh routing
-- [fips-wire-formats.md](fips-wire-formats.md) — TreeAnnounce wire format
+- [fips-spanning-tree.md](fips-spanning-tree.md) — Spanning tree
+  algorithms and data structures
+- [fips-mesh-operation.md](fips-mesh-operation.md) — How the spanning
+  tree fits into mesh routing
+- [../reference/wire-formats.md](../reference/wire-formats.md) —
+  TreeAnnounce wire format
 
-### Yggdrasil Documentation
+### Prior Art and Academic Foundations
 
-- [Yggdrasil v0.5 Release Notes](https://yggdrasil-network.github.io/2023/10/22/upcoming-v05-release.html)
-- [Ironwood Routing Library](https://github.com/Arceliar/ironwood)
-- [The World Tree (Yggdrasil Blog)](https://yggdrasil-network.github.io/2018/07/17/world-tree.html)
-- [Yggdrasil Implementation Overview](https://yggdrasil-network.github.io/implementation.html)
-
-### Academic Foundations
-
-#### Virtual Coordinate Routing
-
-- Rao, A., Ratnasamy, S., Papadimitriou, C., Shenker, S., Stoica, I.
-  ["Geographic Routing without Location Information"](https://people.eecs.berkeley.edu/~sylvia/papers/p327-rao.pdf).
-  MobiCom 2003. *Established virtual coordinate routing using network topology.*
-
-#### Greedy Embedding Theory
-
-- Kleinberg, R.
-  ["Geographic Routing Using Hyperbolic Space"](https://www.semanticscholar.org/paper/Geographic-Routing-Using-Hyperbolic-Space-Kleinberg/f506b2ddb142d2ec539400297ba53383d958abef).
-  IEEE INFOCOM 2007. *Proved every connected graph has a greedy embedding in
-  hyperbolic space; showed spanning trees enable coordinate assignment.*
-
-- Cvetkovski, A., Crovella, M.
-  ["Hyperbolic Embedding and Routing for Dynamic Graphs"](https://www.cs.bu.edu/faculty/crovella/paper-archive/infocom09-hyperbolic.pdf).
-  IEEE INFOCOM 2009. *Dynamic embedding for nodes joining/leaving; introduced
-  Gravity-Pressure routing for failure recovery.*
-
-- Crovella, M. et al.
-  ["On the Choice of a Spanning Tree for Greedy Embedding"](https://www.cs.bu.edu/faculty/crovella/paper-archive/networking-science13.pdf).
-  Networking Science 2013. *Analysis of how tree structure affects routing stretch.*
-
-- Bläsius, T. et al.
-  ["Hyperbolic Embeddings for Near-Optimal Greedy Routing"](https://dl.acm.org/doi/10.1145/3381751).
-  ACM Journal of Experimental Algorithmics 2020. *Achieved 100% success ratio
-  with 6% stretch on Internet graph.*
-
-#### Link Metrics
-
-- De Couto, D., Aguayo, D., Bicket, J., Morris, R.
-  "A High-Throughput Path Metric for Multi-Hop Wireless Routing".
-  MobiCom 2003. *Introduced ETX (Expected Transmission Count) as a link
-  quality metric for wireless mesh networks.*
-
-#### Routing Protocol Stability
-
-- IEEE 802.1D. "IEEE Standard for Local and Metropolitan Area
-  Networks: Media Access Control (MAC) Bridges". *Spanning Tree
-  Protocol (STP) — root election via bridge ID, BPDU exchange.*
-
-- Moy, J. [RFC 2328](https://datatracker.ietf.org/doc/html/rfc2328):
-  "OSPF Version 2". 1998. *Link-state routing with cumulative path
-  costs and SPF computation. FIPS's local-only cost approach is
-  contrasted with OSPF's cumulative model in §8.*
-
-#### Distributed Systems Primitives
-
-- Shapiro, M., Preguiça, N., Baquero, C., Zawirski, M.
-  "Conflict-free Replicated Data Types". SSS 2011.
-  *Formal definition of CRDTs enabling coordination-free consistency.*
-
-- Das, A., Gupta, I., Motivala, A.
-  ["SWIM: Scalable Weakly-consistent Infection-style Process Group Membership"](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf).
-  IPDPS 2002. *O(1) failure detection, O(log N) dissemination via gossip.*
-
-- Kermarrec, A-M.
-  ["Gossiping in Distributed Systems"](https://www.distributed-systems.net/my-data/papers/2007.osr.pdf).
-  ACM SIGOPS Operating Systems Review 2007. *Framework for gossip-based
-  protocols achieving O(log N) propagation.*
+The Yggdrasil documentation and the academic-foundations bibliography
+(virtual coordinate routing, greedy embedding theory, link metrics,
+routing-protocol stability, and distributed systems primitives) are
+collected in
+[fips-prior-work.md](fips-prior-work.md#spanning-tree-dynamics-foundations).

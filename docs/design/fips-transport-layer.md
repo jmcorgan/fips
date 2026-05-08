@@ -1,5 +1,7 @@
 # FIPS Transport Layer
 
+<!-- markdownlint-disable MD024 -->
+
 The transport layer is the bottom of the FIPS protocol stack. It delivers
 datagrams between transport-specific endpoints over arbitrary physical or
 logical media. Everything above — peer authentication, routing, encryption,
@@ -50,7 +52,7 @@ determine how much payload can fit in a single packet after link-layer
 encryption overhead.
 
 MTU is fundamentally a per-link property. A transport with a fixed MTU
-(Ethernet: 1500, UDP configured at 1472) returns the same value for every
+(Ethernet effective 1499, UDP default 1280) returns the same value for every
 link — this is the degenerate case. Transports that negotiate MTU
 per-connection (e.g., BLE ATT_MTU) report the negotiated value for each
 link individually.
@@ -68,7 +70,7 @@ forwarding and LookupResponse transit annotation.
 ### Connection Lifecycle
 
 For connection-oriented transports, manage the underlying connection: TCP
-handshake, Tor circuit establishment, Bluetooth pairing. FMP cannot begin
+handshake, Tor circuit establishment, BLE pairing. FMP cannot begin
 the Noise XX link handshake until the transport-layer connection is
 established.
 
@@ -117,7 +119,6 @@ for internet connectivity:
 | --------- | ---------- | --- | ----------- | ----- |
 | UDP/IP | host:port | 1280–1472 | Unreliable | Primary internet transport |
 | TCP/IP | host:port | Stream | Reliable | Requires length-prefix framing |
-| WebSocket | URL | Stream | Reliable | Browser-compatible |
 | Tor | .onion | Stream | Reliable | High latency, strong anonymity |
 
 **Shared medium transports** operate over broadcast- or multicast-capable
@@ -127,7 +128,6 @@ media:
 | --------- | ---------- | --- | ----------- | ----- |
 | Ethernet | MAC | 1500 | Unreliable | Raw AF_PACKET frames |
 | WiFi | MAC | 1500 | Unreliable | Infrastructure mode = Ethernet |
-| Bluetooth | BD_ADDR | 672–64K | Reliable | L2CAP |
 | BLE | BD_ADDR | 23–517 | Reliable | Negotiated ATT_MTU |
 | Radio | Device addr | 51–222 | Unreliable | Low bandwidth, long range |
 
@@ -157,9 +157,9 @@ require connection setup before FMP can begin the Noise XX link handshake,
 adding startup latency.
 
 **Stream vs. datagram**: Datagram transports have natural packet boundaries.
-Stream transports (TCP, WebSocket, Tor) require framing to delineate FIPS
-packets within the byte stream. The FMP common prefix includes a payload
-length field that provides this framing directly, replacing the need for a
+Stream transports (TCP, Tor) require framing to delineate FIPS packets
+within the byte stream. The FMP common prefix includes a payload length
+field that provides this framing directly, replacing the need for a
 separate length-prefix layer.
 
 **Addressing opacity**: Transport addresses are opaque byte vectors. FMP
@@ -189,9 +189,7 @@ proceed.
 | Transport | Connection Setup |
 | --------- | ---------------- |
 | TCP/IP | TCP three-way handshake |
-| WebSocket | HTTP upgrade + TCP |
-| Tor | Circuit establishment (500ms–5s) |
-| Bluetooth | L2CAP connection |
+| Tor | Circuit establishment (typically 10–60s, default timeout 120s) |
 | BLE | L2CAP CoC or GATT connection |
 | Serial | Physical connection (static) |
 
@@ -203,9 +201,9 @@ Connected → Disconnected. Failure can occur during connection setup, adding
 error handling paths that connectionless transports don't have.
 
 **Startup latency**: Connection-oriented transports add delay before a peer
-becomes usable. This ranges from milliseconds (TCP) to seconds (Tor
-circuit). Peer timeout configuration must account for transport-specific
-setup times.
+becomes usable. This ranges from milliseconds (TCP) to tens of seconds
+(Tor circuit). Peer timeout configuration must account for
+transport-specific setup times.
 
 **Framing**: Stream transports must delimit FIPS packets within the byte
 stream. The FMP common prefix includes a payload length field that provides
@@ -229,45 +227,29 @@ NAT devices and firewalls, limiting deployment to networks without NAT.
 
 ### Socket Buffer Sizing
 
-The default Linux UDP receive buffer (`net.core.rmem_default`, typically
-212 KB) is insufficient for high-throughput forwarding. At ~85 MB/s, a 212 KB
-buffer fills in ~2.5 ms; any stall in the async receive loop (decryption,
-routing, forwarding overhead) causes the kernel to silently drop incoming
-datagrams.
+The default Linux UDP receive buffer (`net.core.rmem_default`,
+typically 212 KB) is insufficient for high-throughput forwarding. At
+~85 MB/s, a 212 KB buffer fills in ~2.5 ms; any stall in the async
+receive loop (decryption, routing, forwarding overhead) causes the
+kernel to silently drop incoming datagrams.
 
-FIPS uses `socket2::Socket` wrapped in `tokio::io::unix::AsyncFd` for the
-UDP receive path. This replaces `tokio::UdpSocket` and enables direct
-`libc::recvmsg()` calls with ancillary data parsing — specifically the
-`SO_RXQ_OVFL` socket option, which delivers a cumulative kernel receive
-buffer drop counter on every received packet. The drop counter feeds into
-the ECN congestion detection system (see
-[fips-mesh-layer.md](fips-mesh-layer.md#ecn-congestion-signaling)).
+FIPS uses `socket2::Socket` wrapped in `tokio::io::unix::AsyncFd` for
+the UDP receive path. This replaces `tokio::UdpSocket` and enables
+direct `libc::recvmsg()` calls with ancillary data parsing —
+specifically the `SO_RXQ_OVFL` socket option, which delivers a
+cumulative kernel receive buffer drop counter on every received
+packet. The drop counter feeds into the ECN congestion detection
+system (see [fips-mmp.md](fips-mmp.md#ecn-congestion-signaling)).
 
-Socket buffers are configured at bind time via `socket2`:
-
-| Parameter        | Default | Description                          |
-| ---------------- | ------- | ------------------------------------ |
-| `recv_buf_size`  | 2 MB    | `SO_RCVBUF` — kernel receive buffer  |
-| `send_buf_size`  | 2 MB    | `SO_SNDBUF` — kernel send buffer     |
-
-Linux internally doubles the requested value (to account for kernel
-bookkeeping overhead), so requesting 2 MB yields 4 MB actual buffer space.
-The kernel silently clamps to `net.core.rmem_max` if the request exceeds it.
-
-**Host requirement**: `net.core.rmem_max` and `net.core.wmem_max` must be
-set to at least the requested buffer size on the host. For Docker containers,
-this must be configured on the Docker host (containers share the host kernel).
-Verify with:
-
-```text
-sysctl net.core.rmem_max net.core.wmem_max
-```
-
-Actual buffer sizes are logged at startup:
-
-```text
-UDP transport started local_addr=0.0.0.0:2121 recv_buf=4194304 send_buf=4194304
-```
+Socket buffers (`recv_buf_size`, `send_buf_size`) are configured at
+bind time via `socket2`. Linux internally doubles the requested value
+(to account for kernel bookkeeping overhead) and silently clamps to
+`net.core.rmem_max` / `net.core.wmem_max` if the request exceeds the
+host kernel limits. The full UDP transport configuration is in
+[../reference/configuration.md](../reference/configuration.md). The
+host-side sysctl requirements and how to set them persistently live
+in
+[../how-to/tune-udp-buffers.md](../how-to/tune-udp-buffers.md).
 
 ## Ethernet: The Local Network Transport
 
@@ -315,18 +297,16 @@ learned from the Noise XX handshake after the connection is established.
 Receiving nodes extract the MAC source address from the frame and report
 the discovered address to FMP.
 
-Four configuration flags control discovery behavior:
+Four configuration flags control discovery behavior — `discovery`
+(listen for beacons), `announce` (broadcast beacons), `auto_connect`
+(initiate handshakes to discovered peers), and `accept_connections`
+(accept inbound handshakes). The flag table and per-flag defaults
+live in [../reference/configuration.md](../reference/configuration.md)
+under `transports.ethernet.*`.
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `discovery` | true | Listen for beacons from other nodes |
-| `announce` | false | Broadcast beacons periodically |
-| `auto_connect` | false | Initiate handshakes to discovered peers |
-| `accept_connections` | false | Accept inbound handshake attempts |
-
-A typical discoverable node sets `announce: true`, `auto_connect: true`, and
-`accept_connections: true`. A passive listener uses just `discovery: true` to
-observe the network without announcing itself.
+A typical discoverable node sets `announce`, `auto_connect`, and
+`accept_connections` all true. A passive listener uses just
+`discovery: true` to observe the network without announcing itself.
 
 ### WiFi Compatibility
 
@@ -341,10 +321,12 @@ Startup logging:
 Ethernet transport started name=eth0 interface=eth0 mac=aa:bb:cc:dd:ee:ff mtu=1499 if_mtu=1500
 ```
 
-## TCP/IP: Firewall Traversal Transport
+## TCP/IP: Transport for UDP-Filtered Networks
 
-For networks where UDP is blocked but TCP port 443 is open, the TCP
-transport provides an alternative path.
+For peers whose networks filter outbound UDP, the TCP transport
+provides an alternative datagram path between public endpoints. TCP
+is not a NAT-traversal mechanism — there is no `tcp:nat` analogue to
+the UDP hole-punch flow.
 
 FIPS protocols (FMP, FSP, MMP) are all unreliable datagrams. Running them
 over TCP introduces head-of-line blocking, which adds latency jitter. MMP
@@ -423,21 +405,12 @@ removes it from the pool and aborts its receive task.
 
 ### Configuration
 
-```yaml
-transports:
-  tcp:
-    bind_addr: "0.0.0.0:8443"      # Listen address (omit for outbound-only)
-    mtu: 1400                       # Default MTU
-    connect_timeout_ms: 5000        # Outbound connect timeout
-    nodelay: true                   # TCP_NODELAY (disable Nagle)
-    keepalive_secs: 30              # TCP keepalive interval (0 = disabled)
-    recv_buf_size: 2097152          # SO_RCVBUF (2 MB)
-    send_buf_size: 2097152          # SO_SNDBUF (2 MB)
-    max_inbound_connections: 256    # Resource protection limit
-```
-
-If `bind_addr` is configured, the transport accepts inbound connections.
-Without it, the transport operates in outbound-only mode (no listener
+The TCP transport configuration block (`transports.tcp.*` — bind
+address, MTU, connect timeout, TCP_NODELAY, keepalive, socket buffer
+sizes, max inbound connections) is documented in
+[../reference/configuration.md](../reference/configuration.md). If
+`bind_addr` is configured, the transport accepts inbound connections;
+without it, the transport operates in outbound-only mode (no listener
 socket is created).
 
 ## Tor: The Anonymity Transport
@@ -529,22 +502,13 @@ connections arrive from `127.0.0.1` (Tor daemon's local forwarding); peer
 identity is resolved during the Noise XX handshake, not from the transport
 address.
 
-Configuration requires coordinating `torrc` and `fips.yaml`:
-
-```text
-# torrc
-HiddenServiceDir /var/lib/tor/fips
-HiddenServicePort 8443 127.0.0.1:8444
-
-# fips.yaml tor section
-mode: "directory"
-directory_service:
-  hostname_file: "/var/lib/tor/fips/hostname"
-  bind_addr: "127.0.0.1:8444"
-```
-
-The `HiddenServicePort` external port (8443) is what peers connect to.
-The bind_addr must match the `HiddenServicePort` target address.
+Configuration requires coordinating `torrc` and `fips.yaml`. The
+operator setup — torrc directives, `fips.yaml` `tor` section,
+HiddenServiceDir permissions, and `Sandbox 1` notes — is in
+[../how-to/deploy-tor-onion.md](../how-to/deploy-tor-onion.md). In
+brief: the `HiddenServicePort` external port is what peers connect
+to, and `tor.directory_service.bind_addr` must match the
+`HiddenServicePort` target address.
 
 ### Session Independence
 
@@ -567,10 +531,9 @@ anonymous node's IP.
 
 ### Latency Characteristics
 
-Tor adds 200ms–2s RTT per circuit. First-packet latency after connection
-is higher (~2.8s) due to circuit warm-up. MMP measures this elevated
-latency, and cost-based parent selection penalizes Tor links (high SRTT
-→ high link cost). ETX is 1.0 since TCP handles retransmission.
+Tor adds 200ms–2s RTT per circuit. MMP measures this elevated latency,
+and cost-based parent selection penalizes Tor links (high SRTT → high
+link cost). ETX is 1.0 since TCP handles retransmission.
 
 Tor throughput is typically 1–5 Mbps — adequate for control plane and
 moderate data transfer, not for bulk transfer.
@@ -598,37 +561,22 @@ connections (`/run/tor/control`) are preferred over TCP for security.
 
 ### Configuration
 
-```yaml
-transports:
-  tor:
-    mode: "socks5"                  # "socks5", "control_port", or "directory"
-    socks5_addr: "127.0.0.1:9050"  # SOCKS5 proxy address
-    connect_timeout_ms: 120000     # Connect timeout (120s for Tor circuits)
-    mtu: 1400                      # Default MTU
-    # control_port mode: monitoring via Tor control port (no inbound)
-    # control_addr: "/run/tor/control"   # Unix socket (preferred) or host:port
-    # control_auth: "cookie"             # "cookie" or "password:<secret>"
-    # cookie_path: "/var/run/tor/control.authcookie"
-    # directory mode: inbound via Tor-managed HiddenServiceDir
-    # directory_service:
-    #   hostname_file: "/var/lib/tor/fips/hostname"
-    #   bind_addr: "127.0.0.1:8444"
-    # max_inbound_connections: 64
-```
-
-Three modes are available:
+The Tor transport block (`transports.tor.*`) is documented in
+[../reference/configuration.md](../reference/configuration.md). Three
+modes are available:
 
 - **`socks5`** (default): Outbound-only through a SOCKS5 proxy. No
   control port, no inbound connections.
 - **`control_port`**: Outbound via SOCKS5 plus control port connection
   for Tor daemon monitoring. No inbound connections.
 - **`directory`** (recommended for inbound): Outbound via SOCKS5 plus
-  inbound via Tor-managed `HiddenServiceDir` onion service. Optionally
-  connects to the control port for monitoring when `control_addr` is set.
-  Enables Tor's `Sandbox 1` for maximum security.
+  inbound via Tor-managed `HiddenServiceDir` onion service.
+  Optionally connects to the control port for monitoring when
+  `control_addr` is set. Enables Tor's `Sandbox 1` for maximum
+  security.
 
-The Tor transport requires an external Tor daemon. Named instances are
-supported for multiple proxy endpoints.
+The Tor transport requires an external Tor daemon. Named instances
+are supported for multiple proxy endpoints.
 
 ### Implementation Roadmap
 
@@ -643,21 +591,11 @@ supported for multiple proxy endpoints.
 
 ### Statistics
 
-The transport tracks per-instance statistics:
-
-| Counter | Description |
-| ------- | ----------- |
-| `packets_sent` / `bytes_sent` | Successful sends |
-| `packets_recv` / `bytes_recv` | Successful receives |
-| `send_errors` / `recv_errors` | Send/receive failures |
-| `connections_established` | Successful SOCKS5 connections |
-| `connect_timeouts` | Connection timeout count |
-| `connect_refused` | Connection refused count |
-| `socks5_errors` | SOCKS5 protocol errors |
-| `mtu_exceeded` | Packets rejected for MTU violation |
-| `connections_accepted` | Accepted inbound connections via onion service |
-| `connections_rejected` | Rejected inbound connections (limit exceeded) |
-| `control_errors` | Tor control port errors |
+The Tor transport exposes per-instance counters covering successful
+send/receive, send/receive errors, connection establishment,
+SOCKS5-level errors, MTU rejections, accepted/rejected inbound
+connections, and Tor control-port errors. The full counter table
+lives in [../reference/transports.md](../reference/transports.md).
 
 ## Discovery
 
@@ -729,8 +667,8 @@ Key properties:
 > control whether discovered peers are connected automatically or require
 > explicit configuration. TCP and Tor have no built-in discovery mechanism.
 > Nostr relay discovery and STUN-assisted UDP hole punching are
-> implemented behind the `nostr-discovery` cargo feature; see
-> [fips-configuration.md](fips-configuration.md) for the
+> implemented and toggled via configuration; see
+> [../reference/configuration.md](../reference/configuration.md) for the
 > `node.discovery.nostr.*` configuration tree.
 
 ## Transport Interface
@@ -815,8 +753,9 @@ on all forwarded datagrams.
 ### Transport Addresses
 
 Transport addresses (`TransportAddr`) are opaque byte vectors. The transport
-layer interprets them (e.g., UDP/TCP resolve "host:port" strings (IP fast path, DNS fallback with 60s cache for UDP)); all layers above
-treat them as opaque handles passed back to the transport for sending.
+layer interprets them — e.g. UDP and TCP resolve `host:port` strings (IP
+fast path, DNS fallback with a 60s cache on UDP). All layers above treat
+them as opaque handles passed back to the transport for sending.
 
 ### Transport State Machine
 
@@ -837,9 +776,9 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | UDP/IP | **Implemented** | Primary transport, AsyncFd/recvmsg, SO_RXQ_OVFL kernel drop detection |
 | TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect, per-connection MSS MTU |
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
-| WiFi | Future direction | Infrastructure mode = Ethernet driver |
+| WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
-| BLE | Future direction | ATT_MTU negotiation, per-link MTU |
+| BLE | **Implemented** (Linux/glibc only; experimental) | L2CAP CoC, ATT_MTU negotiation, per-link MTU; musl/macOS/Windows skip |
 | Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |
 
@@ -847,7 +786,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 
 ### TCP-over-TCP Avoidance
 
-Running TCP application traffic over a reliable transport (TCP, WebSocket)
+Running TCP application traffic over a reliable transport (TCP, Tor)
 creates a layering violation where retransmission and congestion control
 operate at both levels. When the inner TCP detects loss (which may just be
 transport-layer retransmission delay), it retransmits, creating more traffic
@@ -882,6 +821,15 @@ quality difference is significant. Link cost is not yet used in
 
 ## References
 
-- [fips-intro.md](fips-intro.md) — Protocol overview and layer architecture
-- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification (the layer above)
-- [fips-wire-formats.md](fips-wire-formats.md) — Transport framing details
+- [fips-concepts.md](fips-concepts.md) — Protocol overview
+- [fips-architecture.md](fips-architecture.md) — Layer architecture
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification (the
+  layer above)
+- [fips-mtu.md](fips-mtu.md) — How transport-reported `link_mtu`
+  feeds the unified path-MTU model
+- [../reference/wire-formats.md](../reference/wire-formats.md) —
+  Transport framing details
+- [../reference/configuration.md](../reference/configuration.md) —
+  Per-transport configuration blocks
+- [../reference/transports.md](../reference/transports.md) —
+  Per-transport statistics counter inventory

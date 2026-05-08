@@ -5,6 +5,45 @@ protocol layers. It covers transport framing, link-layer message formats,
 and session-layer message formats, with an encapsulation walkthrough showing
 how application data is wrapped through each layer.
 
+## FMP Message Type Catalog
+
+The FMP link layer defines the following message types, dispatched by the
+`msg_type` byte in the encrypted inner header:
+
+| Type | Name | Forwarding |
+| ---- | ---- | ---------- |
+| 0x00 | SessionDatagram | Routed hop-by-hop toward the destination |
+| 0x01 | SenderReport | Peer-to-peer (MMP, link-layer instance) |
+| 0x02 | ReceiverReport | Peer-to-peer (MMP, link-layer instance) |
+| 0x10 | TreeAnnounce | Peer-to-peer (spanning-tree gossip) |
+| 0x20 | FilterAnnounce | Peer-to-peer (bloom-filter gossip) |
+| 0x30 | LookupRequest | Forwarded — bloom-guided through tree peers |
+| 0x31 | LookupResponse | Forwarded — reverse-path via `recent_requests` |
+| 0x50 | Disconnect | Peer-to-peer (orderly link teardown) |
+| 0x51 | Heartbeat | Peer-to-peer (link liveness) |
+
+Handshake messages travel before encryption is established and are identified
+by the FMP common-prefix `phase` field rather than a `msg_type` byte
+(phase 0x1 = Noise XX msg1, phase 0x2 = Noise XX msg2, phase 0x3 = Noise XX msg3).
+
+## Packet Type Summary
+
+A higher-level summary that includes typical sizes and forwarding category:
+
+| Message | Typical Size | When | Forwarded? |
+| ------- | ------------ | ---- | ---------- |
+| TreeAnnounce | Variable (depth-dependent) | Topology changes | No (peer-to-peer) |
+| FilterAnnounce | variable (RLE compressed) | Topology changes | No (peer-to-peer) |
+| LookupRequest | 44 bytes + TLV | First contact, recovery | Yes (bloom-guided tree) |
+| LookupResponse | ~400 bytes | Response to discovery | Yes (reverse-path) |
+| SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
+| SessionDatagram + SessionAck | ~170 bytes | Session confirmation | Yes (routed) |
+| SessionDatagram + Data (minimal) | 77 bytes + IPv6 payload | Bulk IPv6 traffic (compressed) | Yes (routed) |
+| SessionDatagram + Data (with CP) | 77 + coords + IPv6 payload | Warmup/recovery (compressed) | Yes (routed) |
+| SessionDatagram + CoordsRequired | 70 bytes | Cache miss error | Yes (routed) |
+| SessionDatagram + PathBroken | 70+ bytes | Dead-end error | Yes (routed) |
+| Disconnect | 2 bytes | Link teardown | No (peer-to-peer) |
+
 ## Encoding Rules
 
 - All multi-byte integers are **little-endian** (LE)
@@ -19,10 +58,10 @@ how application data is wrapped through each layer.
 
 Datagram-oriented transports (UDP, raw Ethernet, radio) preserve natural
 packet boundaries and require no additional framing. Stream-oriented
-transports (TCP, WebSocket, Tor) must delineate FIPS packets within the
-byte stream; the common prefix `payload_len` field provides this
-framing directly. TCP and Tor share a common stream reader
-(`tcp/stream.rs`) that implements this framing.
+transports (TCP, Tor) must delineate FIPS packets within the byte
+stream; the common prefix `payload_len` field provides this framing
+directly. TCP and Tor share a common stream reader (`tcp/stream.rs`)
+that implements this framing.
 
 **Ethernet frame header.** The Ethernet transport prepends a 4-byte
 unified header before the payload: `[type:1][flags:1][length:2 LE]`.
@@ -597,10 +636,21 @@ Message types 0x10-0x14 are carried inside the AEAD ciphertext (dispatched
 by the `msg_type` field in the encrypted inner header). Types 0x20-0x22 are
 plaintext error signals (U flag set, no encryption).
 
-Session-layer SenderReport (0x11) and ReceiverReport (0x12) use the same
-body format as their link-layer counterparts (0x01 and 0x02). The msg_type
-byte in the body matches the link-layer value; dispatch to the correct layer
-happens at the session level based on the FSP message type.
+Session-layer SenderReport (0x11) and ReceiverReport (0x12) carry the same
+metric fields as their link-layer counterparts (0x01 and 0x02), but the
+body framing differs because the FSP encrypted inner header already
+carries the message-type byte. The session body therefore omits the
+msg_type byte and uses 2 reserved bytes (not 3) before the fields:
+
+| Layer | Wire size | Header inside body |
+| ----- | --------- | ------------------ |
+| Link SenderReport (0x01) | 48 bytes | msg_type(1) + reserved(3) + fields(44) |
+| Session SenderReport (0x11) | 46 bytes | reserved(2) + fields(44) |
+| Link ReceiverReport (0x02) | 68 bytes | msg_type(1) + reserved(3) + fields(64) |
+| Session ReceiverReport (0x12) | 66 bytes | reserved(2) + fields(64) |
+
+Dispatch happens at the session level via the `msg_type` byte in the FSP
+encrypted inner header.
 
 ### SessionSetup (phase 0x1)
 
@@ -977,8 +1027,10 @@ endpoint session keys).
 
 ## References
 
-- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP behavioral specification
-- [fips-session-layer.md](fips-session-layer.md) — FSP behavioral specification
-- [fips-transport-layer.md](fips-transport-layer.md) — Transport framing
-- [fips-mesh-operation.md](fips-mesh-operation.md) — How messages work together
-- [fips-ipv6-adapter.md](fips-ipv6-adapter.md) — MTU enforcement
+- [../design/fips-mesh-layer.md](../design/fips-mesh-layer.md) — FMP behavioral specification
+- [../design/fips-session-layer.md](../design/fips-session-layer.md) — FSP behavioral specification
+- [../design/fips-transport-layer.md](../design/fips-transport-layer.md) — Transport framing
+- [../design/fips-mesh-operation.md](../design/fips-mesh-operation.md) — How messages work together
+- [../design/fips-ipv6-adapter.md](../design/fips-ipv6-adapter.md) — MTU enforcement
+- [../design/fips-bloom-filters.md](../design/fips-bloom-filters.md) — FilterAnnounce parameters and FPR analysis
+- [../design/fips-mtu.md](../design/fips-mtu.md) — How `path_mtu` and MtuExceeded fit together

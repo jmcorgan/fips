@@ -1,7 +1,7 @@
 # FIPS Node Configuration
 #
 # Edit this file before starting the FIPS daemon.
-# Full reference: https://github.com/jmcorgan/fips/blob/master/docs/design/fips-configuration.md
+# Full reference: https://github.com/jmcorgan/fips/blob/master/docs/reference/configuration.md
 #
 # After editing, restart the daemon:
 #   /etc/init.d/fips restart

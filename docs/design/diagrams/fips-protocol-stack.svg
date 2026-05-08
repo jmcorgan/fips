@@ -19,7 +19,7 @@
   <rect x="50" y="25" width="775" height="100" class="layer app"/>
   <text x="75" y="58" class="name">Application Layer Interface</text>
   <text x="75" y="78" class="desc">Native FIPS API — for FIPS-aware applications</text>
-  <text x="75" y="98" class="desc">IPv6 Shim — for traditional IP application backward compatibility</text>
+  <text x="75" y="98" class="desc">IPv6 adapter — for traditional IP application backward compatibility</text>
 
   <!-- FSP layer -->
   <rect x="50" y="150" width="775" height="120" class="layer fsp"/>

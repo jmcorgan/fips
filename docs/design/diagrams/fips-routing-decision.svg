@@ -76,54 +76,54 @@
   <text x="372" y="364" class="branch">No</text>
 
   <!-- ============================================================ -->
-  <!-- STEP 3: Bloom filter hit?                                    -->
+  <!-- STEP 3: Coords known?                                        -->
   <!-- ============================================================ -->
   <text x="240" y="395" text-anchor="end" class="step">3</text>
   <polygon points="360,380 440,420 360,460 280,420" class="diamond"/>
-  <text x="360" y="416" text-anchor="middle" class="decision">Bloom filter</text>
-  <text x="360" y="430" text-anchor="middle" class="decision">hit?</text>
+  <text x="360" y="416" text-anchor="middle" class="decision">Coords</text>
+  <text x="360" y="430" text-anchor="middle" class="decision">known?</text>
 
-  <!-- Yes → right to interim step -->
+  <!-- No → right to error outcome -->
   <line x1="440" y1="420" x2="520" y2="420" class="arrow" marker-end="url(#arrowhead)"/>
-  <text x="475" y="412" text-anchor="middle" class="branch">Yes</text>
-  <rect x="520" y="396" width="176" height="48" class="interim"/>
-  <text x="608" y="412" text-anchor="middle" class="action">Rank candidates by</text>
-  <text x="608" y="426" text-anchor="middle" class="action">tree distance and</text>
-  <text x="608" y="440" text-anchor="middle" class="action">link performance</text>
+  <text x="475" y="412" text-anchor="middle" class="branch">No</text>
+  <rect x="528" y="402" width="160" height="36" class="error"/>
+  <text x="608" y="425" text-anchor="middle" class="action">No route → error signal</text>
 
-  <!-- Arrow from interim → final outcome -->
-  <line x1="608" y1="444" x2="608" y2="470" class="arrow" marker-end="url(#arrowhead)"/>
-  <rect x="528" y="478" width="160" height="36" class="outcome"/>
-  <text x="608" y="501" text-anchor="middle" class="action">Forward to 'best'</text>
-
-  <!-- No → down -->
+  <!-- Yes → down -->
   <line x1="360" y1="460" x2="360" y2="530" class="arrow" marker-end="url(#arrowhead)"/>
-  <text x="372" y="500" class="branch">No</text>
+  <text x="372" y="500" class="branch">Yes</text>
 
   <!-- ============================================================ -->
-  <!-- STEP 4: Coords known?                                        -->
+  <!-- STEP 4: Bloom filter hit?                                    -->
   <!-- ============================================================ -->
   <text x="240" y="545" text-anchor="end" class="step">4</text>
   <polygon points="360,530 440,570 360,610 280,570" class="diamond"/>
-  <text x="360" y="566" text-anchor="middle" class="decision">Coords</text>
-  <text x="360" y="580" text-anchor="middle" class="decision">known?</text>
+  <text x="360" y="566" text-anchor="middle" class="decision">Bloom filter</text>
+  <text x="360" y="580" text-anchor="middle" class="decision">hit?</text>
 
-  <!-- Yes → right to outcome -->
+  <!-- Yes → right to interim step -->
   <line x1="440" y1="570" x2="520" y2="570" class="arrow" marker-end="url(#arrowhead)"/>
   <text x="475" y="562" text-anchor="middle" class="branch">Yes</text>
-  <rect x="528" y="552" width="160" height="36" class="outcome"/>
-  <text x="608" y="575" text-anchor="middle" class="action">Greedy tree forward</text>
+  <rect x="520" y="546" width="176" height="48" class="interim"/>
+  <text x="608" y="562" text-anchor="middle" class="action">Rank candidates by</text>
+  <text x="608" y="576" text-anchor="middle" class="action">tree distance and</text>
+  <text x="608" y="590" text-anchor="middle" class="action">link performance</text>
+
+  <!-- Arrow from interim → final outcome -->
+  <line x1="608" y1="594" x2="608" y2="620" class="arrow" marker-end="url(#arrowhead)"/>
+  <rect x="528" y="628" width="160" height="36" class="outcome"/>
+  <text x="608" y="651" text-anchor="middle" class="action">Forward to 'best'</text>
 
   <!-- No → down -->
   <line x1="360" y1="610" x2="360" y2="660" class="arrow" marker-end="url(#arrowhead)"/>
   <text x="372" y="640" class="branch">No</text>
 
   <!-- ============================================================ -->
-  <!-- STEP 5: No route → error signal                              -->
+  <!-- STEP 5: Greedy tree forward                                  -->
   <!-- ============================================================ -->
   <text x="240" y="683" text-anchor="end" class="step">5</text>
-  <rect x="260" y="668" width="200" height="36" class="error"/>
-  <text x="360" y="691" text-anchor="middle" class="action">No route → error signal</text>
+  <rect x="260" y="668" width="200" height="36" class="outcome"/>
+  <text x="360" y="691" text-anchor="middle" class="action">Greedy tree forward</text>
 
   <!-- ============================================================ -->
   <!-- Legend                                                        -->
@@ -149,5 +149,5 @@
   <text x="442" y="835" font-size="11" fill="#a0a0b0">Control flow direction</text>
 
   <!-- Caption -->
-  <text x="360" y="896" text-anchor="middle" class="caption">Each hop evaluates destinations in priority order 1–4, falling through on miss</text>
+  <text x="360" y="896" text-anchor="middle" class="caption">Each hop checks 1–4 in priority order, falling through to greedy tree (5) when bloom yields no candidate; missing coords is the only error path</text>
 </svg>

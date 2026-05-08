@@ -71,8 +71,11 @@ quality.
 2. Compute **effective depth** for each candidate peer:
    `effective_depth = peer.depth + link_cost`, where
    `link_cost = etx * (1.0 + srtt_ms / 100.0)` using locally measured MMP
-   metrics. When MMP metrics have not yet converged, `link_cost` defaults to
-   1.0, preserving pure depth-based behavior as a graceful fallback.
+   metrics. During cold start (no peer has MMP data yet), candidates without
+   measurements default to `link_cost = 1.0`, preserving pure depth-based
+   behavior. Once any peer has MMP data, unmeasured candidates are excluded
+   so that a freshly connected peer cannot win parent selection on the
+   default cost alone.
 3. Apply **hysteresis**: switch parents only when the best candidate's
    effective depth is significantly better than the current parent's:
    `best_eff_depth < current_eff_depth * (1.0 - parent_hysteresis)`
@@ -109,6 +112,9 @@ immediate parent reselection:
   (ETX and SRTT). No cumulative path costs are propagated, avoiding
   the trust problems inherent in self-reported cost metrics in a
   permissionless network.
+- **Loop rejection**: Candidates whose advertised ancestry already contains
+  the local node are skipped, preventing two nodes from selecting each
+  other as parent and entering an alternating coordinate loop.
 
 ### After Parent Change
 
@@ -180,9 +186,14 @@ A node re-announces (propagates) only when its own state changes:
 
 - **Root changed**: Always propagate — this is a significant topology event
 - **Depth changed**: Always propagate — affects routing distance calculations
+- **Mid-chain ancestor swap**: A reroute that replaces an interior ancestor
+  without changing the root or the path length still alters the node's
+  coordinate path, so it propagates. Without this, downstream peers would
+  route into a phantom intermediate that no longer appears on the parent's
+  tree.
 - **Sequence-only refresh**: Does NOT propagate beyond depth 1 — peers that
-  receive a sequence-only update do not re-announce, because their own root
-  and depth have not changed
+  receive a sequence-only update do not re-announce, because their own root,
+  depth, and address path have not changed
 
 This means TreeAnnounce cascades through the tree proportional to depth,
 not network size. A change at depth D affects at most D nodes along the
@@ -303,12 +314,15 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | Rate limiting (500ms per peer) | **Implemented** |
 | Coord cache flush on parent change | **Implemented** |
 | Flap dampening (extended hold-down on rapid switches) | **Implemented** |
+| Loop rejection (ancestry self-check in `evaluate_parent`) | **Implemented** |
+| Mid-chain ancestor swap propagation | **Implemented** |
 | Per-ancestry-entry signatures | Future direction |
 
 ## References
 
 - [fips-mesh-operation.md](fips-mesh-operation.md) — How the spanning tree
   fits into mesh routing
-- [fips-wire-formats.md](fips-wire-formats.md) — TreeAnnounce wire format
+- [../reference/wire-formats.md](../reference/wire-formats.md) —
+  TreeAnnounce wire format
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Convergence
   scenario walkthroughs

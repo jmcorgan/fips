@@ -153,6 +153,15 @@ this node, and this node thinks it can reach the same destination through Q.
 Split-horizon is computed per-peer: the outbound filter for peer Q merges
 all tree peer inbound filters except Q's.
 
+### Filter Propagation Diagram
+
+![Bloom filter propagation on a spanning tree](diagrams/fips-bloom-propagation.svg)
+
+The outbound filter for peer Q merges this node's identity with tree
+peer inbound filters except Q's (split-horizon exclusion). Upward
+filters (child → parent) contain the child's subtree, while downward
+filters (parent → child) contain the complement.
+
 ### Directional Asymmetry
 
 Because merge is restricted to tree peers, outgoing filters exhibit
@@ -202,9 +211,10 @@ Filter updates are event-driven, not periodic:
 
 ### Rate Limiting
 
-Updates are rate-limited at 500ms minimum interval per peer to prevent
-storms during topology changes. Multiple pending changes within the
-cooldown period are coalesced into a single announcement.
+Updates are rate-limited at a 500ms minimum interval per peer
+(`node.bloom.update_debounce_ms`) to prevent storms during topology
+changes. Multiple pending changes within the cooldown period are
+coalesced into a single announcement.
 
 ### Propagation Scope
 
@@ -249,24 +259,15 @@ Where `filter_bits = 8 × (512 << size_class)` — 8,192 for size_class 1 (defau
 
 ## Wire Format
 
-FilterAnnounce messages are carried inside encrypted link-layer frames:
-
-| Offset | Field | Size | Description |
-| ------ | ----- | ---- | ----------- |
-| 0 | msg_type | 1 byte | 0x20 |
-| 1 | flags | 1 byte | Bit 0: delta (XOR diff), bits 1-7 reserved |
-| 2 | sequence | 8 bytes LE | Monotonic counter, per-peer |
-| 10 | base_seq | 8 bytes LE | Reference filter sequence for delta (0 if full) |
-| 18 | size_class | 1 byte | Filter size: `512 << size_class` bytes |
-| 19 | compressed_payload | variable | RLE-encoded filter or XOR diff |
-
-Payloads are RLE-compressed: each run = `[count:2 LE][word:8 LE]`
-(10 bytes per run). XOR diffs between consecutive filters are mostly
-zero words, compressing to very few runs. A FilterNack (msg_type 0x21)
-requests full retransmission when a sequence gap is detected.
-
-See [fips-wire-formats.md](fips-wire-formats.md) for the complete wire
-format reference.
+The FilterAnnounce byte layout (`msg_type 0x20`, flags, sequence,
+base_seq, size_class, compressed payload) lives in
+[../reference/wire-formats.md](../reference/wire-formats.md). The
+v2 payload uses RLE-compressed full filters and XOR deltas
+(`[count:2 LE][word:8 LE]` runs) so steady-state announcements are
+typically a few dozen bytes; a `FilterNack` (msg_type 0x21) requests
+full retransmission when a sequence gap is detected. Link encryption
+adds 36 bytes of FMP framing (16-byte outer header + 4-byte inner
+timestamp + 16-byte AEAD tag) on top of the compressed payload.
 
 ## Scale and Size Classes
 
@@ -333,6 +334,33 @@ The hash function design supports folding: membership tests at a smaller
 size use `hash(item, i) % smaller_bit_count`, which maps to the same bit
 positions that folding produces.
 
+## Mesh Size Estimation
+
+Each filter's saturation can be inverted into an estimated entry count
+via the standard formula `n ≈ -(m/k) · ln(1 − X/m)`, where `m` is the
+filter size in bits, `k` is the hash count, and `X` is the population
+count. Combining the parent's inbound filter with the children's
+inbound filters gives an estimate of the whole network: parent + each
+child's subtree are disjoint by construction, and adding 1 for the
+node itself yields the total. The result is cached on the node and
+exposed through the control socket and `fipstop` dashboard.
+
+The estimator refuses to produce a value when any contributing filter
+is above the antipoison FPR cap (`node.bloom.max_inbound_fpr`,
+default `0.05`); a partial aggregate would silently underestimate.
+Consumers handle the resulting `None` by displaying an "unknown"
+state rather than a misleading number.
+
+## Antipoison: Inbound FPR Cap
+
+Inbound `FilterAnnounce` payloads are checked against
+`node.bloom.max_inbound_fpr` (default `0.05`). Filters whose
+estimated false positive rate exceeds the cap are dropped silently
+(no NACK on the wire) — they would otherwise inflate downstream
+candidate evaluation cost without contributing useful discrimination.
+The cap also gates filters from feeding into mesh size estimation,
+as described above.
+
 ## Implementation Status
 
 | Feature | Status |
@@ -351,6 +379,8 @@ positions that folding produces.
 | Fold/duplicate size conversion | **Implemented** |
 | FilterAnnounce gossip (all peers) | **Implemented** |
 | Filter cardinality logging | **Implemented** |
+| Mesh size estimation (parent + children + 1) | **Implemented** |
+| Inbound FPR cap (antipoison) | **Implemented** |
 | Size class negotiation | Future direction |
 | Folding support | Future direction |
 | Adaptive filter sizing | Future direction |
@@ -359,6 +389,7 @@ positions that folding produces.
 
 - [fips-mesh-operation.md](fips-mesh-operation.md) — How bloom filters fit
   into routing
-- [fips-wire-formats.md](fips-wire-formats.md) — FilterAnnounce wire format
+- [../reference/wire-formats.md](../reference/wire-formats.md) —
+  FilterAnnounce wire format
 - [fips-spanning-tree.md](fips-spanning-tree.md) — The coordinate system
   that bloom filter candidates are ranked by

@@ -31,183 +31,51 @@ and self-healing.
 
 ## Spanning Tree Formation and Maintenance
 
-### What the Spanning Tree Provides
+For routing purposes, the spanning tree provides each node with a
+coordinate (its ancestry path from itself to the root) plus a way to
+compute distance between any two nodes (hops to their lowest common
+ancestor). The strictly-decreasing distance invariant gives greedy
+forwarding its loop-freedom.
 
-The spanning tree gives each node a **coordinate**: its ancestry path from
-itself to the root, expressed as a sequence of node_addrs. These coordinates
-enable:
+The tree forms through distributed parent selection — root is the
+smallest node_addr (no election), and each node picks the peer with
+the lowest `effective_depth = depth + link_cost`. Cost-aware parent
+selection lets the tree trade hop count for link quality once MMP has
+accumulated SRTT and ETX metrics. Hysteresis (20% improvement
+required to switch) and hold-down (suppress non-mandatory
+re-evaluation after a switch) keep the tree stable under metric
+noise. Partitions self-resolve — each segment converges to its own
+root and reconverges to the smallest reachable root when segments
+rejoin.
 
-- **Distance calculation**: The tree distance between two nodes is the number
-  of hops from each to their lowest common ancestor (LCA). This provides a
-  routing metric without any node knowing the full topology.
-- **Greedy routing**: At each hop, forward to the peer that minimizes tree
-  distance to the destination. The strictly-decreasing distance invariant
-  guarantees loop-free forwarding.
+Liveness is detected via FMP heartbeats; dead-peer removal triggers
+tree reconvergence and bloom filter recomputation for the affected
+subtree. The heartbeat and dead-timeout mechanism lives at the link
+layer; see [fips-mesh-layer.md](fips-mesh-layer.md#liveness-detection).
 
-### How the Tree Forms
-
-Nodes self-organize into a spanning tree through distributed parent selection:
-
-1. **Root discovery**: The node with the smallest node_addr becomes the root.
-   No election protocol — this is a consequence of each node independently
-   preferring lower-addressed roots.
-2. **Parent selection**: Each node selects a single parent from among its
-   direct peers based on which offers the lowest effective depth (tree depth
-   weighted by local link cost).
-3. **Coordinate computation**: Once a node has a parent, its coordinate is
-   computed from its ancestry path.
-
-### How the Tree Maintains Itself
-
-Nodes exchange **TreeAnnounce** messages with their direct peers (not
-forwarded — peer-to-peer only). Each TreeAnnounce carries the sender's
-current ancestry chain and a sequence number.
-
-Changes cascade through the tree:
-
-- A node that changes its parent recomputes its coordinates and announces to
-  all peers
-- Each receiving peer evaluates whether the change affects its own parent
-  selection
-- Only nodes that actually change their coordinates (root or depth changed)
-  propagate further
-
-TreeAnnounce propagation is rate-limited at 500ms minimum interval per peer.
-A tree of depth D reconverges in roughly D×0.5s to D×1.0s.
-
-### How the Tree Adapts to Link Quality
-
-The initial tree forms based on hop count alone — all links default to a
-cost of 1.0 before measurements are available. As the Metrics Measurement
-Protocol (MMP) accumulates bidirectional delivery ratios and round-trip
-time estimates, each node computes a per-link cost:
-
-```text
-link_cost = ETX × (1.0 + SRTT_ms / 100.0)
-```
-
-ETX (Expected Transmission Count) captures loss — a perfect link has
-ETX = 1.0, while 10% loss in each direction yields ETX ≈ 1.23. The SRTT
-term weights latency so that a low-loss but high-latency link (e.g., a
-satellite hop) costs more than a low-loss, low-latency link.
-
-Parent selection uses **effective depth** rather than raw hop count:
-
-```text
-effective_depth = peer.depth + link_cost_to_peer
-```
-
-This allows a node to trade a shorter but lossy path for a longer but
-higher-quality one. A node two hops from the root over clean links
-(effective depth ≈ 3.0) is preferred over a node one hop away over a
-degraded link (effective depth ≈ 4.5).
-
-Parent reselection is triggered by three paths:
-
-1. **TreeAnnounce**: When a peer announces a new tree position, the node
-   re-evaluates using current link costs
-2. **Periodic re-evaluation**: Every 60s (configurable), the node
-   re-evaluates its parent choice using the latest MMP metrics, catching
-   gradual link degradation that doesn't trigger TreeAnnounce
-3. **Parent loss**: When the current parent is removed, the node
-   immediately selects the best alternative
-
-To prevent oscillation from metric noise, parent switches are subject to
-**hysteresis**: a candidate must offer an effective depth at least 20%
-better than the current parent to trigger a switch. A **hold-down period**
-(default 30s) suppresses non-mandatory re-evaluation after a switch,
-allowing MMP metrics to stabilize on the new link before reconsidering.
-
-### Flap Dampening
-
-Unstable links that repeatedly connect and disconnect can cause cascading
-tree reconvergence. The spanning tree uses flap dampening with hysteresis
-and hold-down periods to suppress rapid parent oscillation. Links that flap
-above a configurable threshold are temporarily penalized, preventing them
-from being selected as parent until the link stabilizes.
-
-### Link Liveness
-
-Each node sends a dedicated **Heartbeat** message (0x51, 1 byte, no
-payload) to every peer at a fixed interval (default 10s). Any
-authenticated encrypted frame — heartbeat, MMP report, TreeAnnounce,
-data packet — resets the peer's liveness timer. On an idle link with no
-application data or topology changes, the heartbeat is the only traffic
-that keeps the link alive.
-
-Peers that are silent for a configurable dead timeout (default 30s) are
-considered dead and removed from the peer table. With the default 10s
-heartbeat interval, a peer must miss three consecutive heartbeats before
-removal. This triggers tree reconvergence and bloom filter recomputation
-for the affected subtree.
-
-### Partition Handling
-
-If the network partitions, each segment independently rediscovers its own
-root (the smallest node_addr in the segment) and reconverges. When segments
-rejoin, nodes discover the globally-smallest root through TreeAnnounce
-exchange and reconverge to a single tree.
-
-See [fips-spanning-tree.md](fips-spanning-tree.md) for algorithm details
-and [spanning-tree-dynamics.md](spanning-tree-dynamics.md) for convergence
-walkthroughs.
+For the parent-selection algorithm, hold-down/hysteresis details, and
+the convergence walkthroughs, see
+[fips-spanning-tree.md](fips-spanning-tree.md) and
+[spanning-tree-dynamics.md](spanning-tree-dynamics.md).
 
 ## Bloom Filter Gossip and Propagation
 
-### What Bloom Filters Provide
+For routing purposes, each node maintains a bloom filter per peer
+that answers "can peer P possibly reach destination D?" — either "no"
+(definitive) or "maybe" (probabilistic). Because filters propagate
+along tree edges with split-horizon exclusion, a bloom hit on a tree
+peer reliably indicates which subtree contains the destination, and
+tree-coordinate distance ranks competing matches.
 
-Each node maintains a bloom filter per peer, answering: "can peer P possibly
-reach destination D?" The answer is either "no" (definitive) or "maybe"
-(probabilistic — false positives are possible).
+FilterAnnounce updates are event-driven (peer changes, tree
+restructuring, local identity changes) and rate-limited to prevent
+storms. False positives at large scale never cause loops — the
+self-distance check at each hop guarantees forward progress, and
+mismatched bloom matches fall through to greedy tree routing.
 
-Because filters propagate along tree edges with split-horizon exclusion,
-they encode directional reachability: a bloom hit on a tree peer reliably
-indicates which subtree contains the destination. When multiple peers match,
-tree coordinate distance ranks them.
-
-### How Filters Propagate
-
-Nodes exchange **FilterAnnounce** messages with all direct peers. Each
-FilterAnnounce replaces the previous filter for that peer — there is no
-incremental update.
-
-Filter computation uses **tree-only merge with split-horizon exclusion**:
-the outbound filter for peer Q is computed by merging the local node's own
-identity, its leaf-only dependents (if any), and the inbound filters from
-tree peers (parent and children) *except* Q. Filters from non-tree mesh
-peers are stored locally for routing queries but are not merged into
-outgoing filters. This prevents saturation where mesh shortcuts cause
-filters to converge toward the full network.
-
-The restriction creates **directional asymmetry**: upward filters
-(child → parent) contain the child's subtree, while downward filters
-(parent → child) contain the complement. Together they cover the entire
-network.
-
-Filters propagate transitively through tree edges. At steady state, every
-reachable destination appears in at least one tree peer's filter.
-
-### Update Triggers
-
-Filter updates are event-driven, not periodic:
-
-- Peer connects or disconnects
-- A peer's incoming filter changes (triggers recomputation for other peers)
-- Tree relationship changes (new parent, new child, parent switch)
-- Local state changes (new identity, leaf-only dependent changes)
-
-Updates are rate-limited at 500ms to prevent storms during topology changes.
-
-### Scale Properties
-
-At moderate network sizes, bloom filters are highly accurate. At larger
-scales (~1M nodes), hub nodes with many peers may see elevated false positive
-rates (7–15% for nodes with 20+ peers). False positives may cause a packet
-to be forwarded toward the wrong subtree, but the self-distance check at
-each hop prevents loops and the packet falls through to greedy tree routing.
-
-See [fips-bloom-filters.md](fips-bloom-filters.md) for filter parameters,
-FPR calculations, and size class folding.
+For the filter computation, split-horizon merge rules, FPR analysis,
+size classes, and folding, see
+[fips-bloom-filters.md](fips-bloom-filters.md).
 
 ## Routing Decision Process
 
@@ -222,34 +90,33 @@ priority chain. This is the core routing algorithm.
 2. **Direct peer** — The destination is an authenticated neighbor. Forward
    directly. No coordinates or bloom filters needed.
 
-3. **Bloom-guided routing** — One or more peers' bloom filters contain the
+3. **Coordinate cache check** — Multi-hop forwarding requires the
+   destination's tree coordinates to be in the local cache. On miss,
+   `find_next_hop()` returns None immediately — bloom filters are never
+   consulted — and the source receives a CoordsRequired error signal.
+
+4. **Bloom-guided routing** — One or more peers' bloom filters contain the
    destination. Select the best peer by composite key:
-   `(link_cost, tree_distance, node_addr)`. This requires the destination's
-   tree coordinates to be in the local coordinate cache.
+   `(link_cost, tree_distance, node_addr)`.
 
-4. **Greedy tree routing** — Fallback when bloom filters haven't converged
-   for this destination. Forward to the peer that minimizes tree distance.
-   Also requires destination coordinates.
+5. **Greedy tree routing** — Fall-through when bloom yields no candidate.
+   Forward to the peer that minimizes tree distance. If the tree has no
+   next hop closer to the destination, the source receives a PathBroken
+   error signal.
 
-5. **No route** — Destination unreachable. Generate an error signal
-   (CoordsRequired or PathBroken) back to the source.
+### Convergence Requirements
 
-### The Coordinate Requirement
-
-All multi-hop routing (steps 3–4) requires the destination's tree coordinates
-to be in the local coordinate cache. Without coordinates, `find_next_hop()`
-returns None immediately — bloom filters are never even consulted.
-
-This creates two simultaneous convergence requirements for multi-hop routing:
+Multi-hop routing depends on two propagation processes that must run
+to convergence simultaneously:
 
 1. **Bloom convergence**: Filters must propagate so peers advertise
    reachability
 2. **Coordinate availability**: Destination coordinates must be cached at
    every transit node on the path
 
-Both must be satisfied simultaneously. Bloom convergence without coordinates
-causes a coordinate cache miss. Coordinates without bloom convergence falls
-through to greedy tree routing (functional but suboptimal).
+Bloom convergence without coordinates trips step 3 (coord-cache miss →
+CoordsRequired). Coordinates without bloom convergence falls through to
+greedy tree routing — functional but suboptimal.
 
 ### Candidate Ranking
 
@@ -270,6 +137,10 @@ A peer with a bloom filter hit but no entry in the peer ancestry table
 (missing TreeAnnounce) defaults to maximum distance and is effectively
 invisible to routing.
 
+### Routing Decision Flowchart
+
+![Per-hop routing decision flowchart](diagrams/fips-routing-decision.svg)
+
 ### Loop Prevention
 
 The routing decision enforces strict progress: a packet is only forwarded
@@ -284,48 +155,12 @@ PathBroken error.
 
 ## Coordinate Caching
 
-The coordinate cache maps `NodeAddr → TreeCoordinate` and is the critical
-data structure for multi-hop routing. Without it, forwarding decisions cannot
-be made.
-
-### Unified Cache
-
-The coordinate cache is a single unified cache. All sources — SessionSetup
-transit, CP-flagged data packets, LookupResponse — write to the same cache.
-
-### Population Sources
-
-| Source | When | What |
-| ------ | ---- | ---- |
-| SessionSetup transit | Session establishment | Both src and dest coordinates |
-| SessionAck transit | Session establishment | Both src and dest coordinates |
-| CP-flagged data packet | Warmup or recovery | Both src and dest coordinates (cleartext) |
-| LookupResponse | Discovery | Target's coordinates |
-
-### Eviction
-
-- **TTL-based**: Entries expire after 300s (configurable)
-- **Refresh on use**: Active routing refreshes the TTL, keeping hot entries
-  alive
-- **LRU**: When full, least recently used entries are evicted first
-- **Flush on parent change**: When the local node's tree parent changes, the
-  entire cache is flushed. Parent changes mean the node's own coordinates
-  have changed, making relative distance calculations with cached coordinates
-  potentially invalid. Flushing is preferred over stale routing: the cost of
-  re-discovery is lower than routing packets to dead ends.
-
-### Cache and Session Timer Ordering
-
-Timer values are ordered so that idle sessions tear down before transit
-caches expire:
-
-| Timer | Default | Purpose |
-| ----- | ------- | ------- |
-| Session idle | 90s | Session teardown |
-| Coordinate cache TTL | 300s | Coordinate expiration |
-
-When traffic stops, the session tears down at 90s. When traffic resumes, a
-fresh SessionSetup re-warms transit caches (still within their 300s TTL).
+The coordinate cache maps `NodeAddr → TreeCoordinate` and is the
+critical data structure for multi-hop routing. The session layer owns
+this cache (its eviction policy, TTL/refresh semantics, parent-change
+flush, and timer ordering with session idle timeout); see
+[fips-session-layer.md](fips-session-layer.md#coordinate-cache) for
+the canonical treatment.
 
 ## Discovery Protocol
 
@@ -375,28 +210,17 @@ where a request might arrive via both tree and fallback paths.
 
 Single-path forwarding is more fragile than flooding — if any transit node
 on the path has a stale bloom filter or loses a link, the request fails.
-To compensate, the originator retries:
+To compensate, each discovery is a sequence of attempts with growing
+per-attempt timeouts. The default sequence is `[1s, 2s, 4s, 8s]`
+(configurable via `node.discovery.attempt_timeouts_secs`); the destination
+is declared unreachable only after the full sequence is exhausted (15s
+total at default).
 
-- **T=0**: Initial lookup sent
-- **T=5s**: Retry if no response (configurable via `retry_interval_secs`)
-- **T=10s**: Timeout, fail (configurable via `timeout_secs`)
-
-The default `max_attempts` is 2 (initial + one retry). Each retry generates
-a fresh `request_id` and re-evaluates bloom filter matches, so it can take
-a different path if the tree has restructured.
-
-### Per-Attempt Timeouts
-
-Each discovery is a sequence of attempts with growing per-attempt timeouts.
-Default sequence is `[1s, 2s, 4s, 8s]` (configurable via
-`node.discovery.attempt_timeouts_secs`). When the current attempt's deadline
-elapses without a `LookupResponse`, the originator sends another
-`LookupRequest` with a **fresh `request_id`** and the next entry in the
-sequence as its deadline. Fresh request_ids let each attempt take a
-different forwarding path as the bloom and tree state evolve, which is
-particularly useful during cold-start convergence. The destination is
-declared unreachable only after the full sequence is exhausted (15s total
-with the default).
+When the current attempt's deadline elapses without a `LookupResponse`,
+the originator sends another `LookupRequest` with a **fresh `request_id`**
+and the next entry in the sequence as its deadline. Fresh `request_id`s
+let each attempt take a different forwarding path as the bloom and tree
+state evolve, which is particularly useful during cold-start convergence.
 
 ### Originator Backoff (optional, off by default)
 
@@ -462,6 +286,10 @@ verification at the source confirms the target holds the claimed position.
 The `path_mtu` field is excluded from the proof because it is a transit
 annotation modified at each hop.
 
+### Coordinate Discovery Sequence
+
+![Coordinate discovery and cache warming sequence](diagrams/fips-coordinate-discovery.svg)
+
 ### Discovery Outcome
 
 On receiving a verified LookupResponse, the source caches the target's
@@ -473,50 +301,19 @@ If discovery times out (no response after all retry attempts), queued
 packets receive ICMPv6 Destination Unreachable and the target enters
 backoff.
 
-## SessionSetup Self-Bootstrapping
+## Coordinate Cache Warming
 
-SessionSetup is the mechanism that warms transit node coordinate caches
-along a path, enabling subsequent data packets to route efficiently.
-
-### How It Works
-
-SessionSetup carries plaintext coordinates (outside the Noise handshake
-payload, visible to transit nodes):
-
-- **src_coords**: Source's current tree coordinates
-- **dest_coords**: Destination's tree coordinates (learned from discovery)
-
-As the SessionSetup transits each intermediate node:
-
-1. The transit node extracts both coordinate sets
-2. Caches `src_addr → src_coords` and `dest_addr → dest_coords` in its
-   coordinate cache
-3. Forwards the message using the cached destination coordinates
-
-SessionAck returns along the reverse path, carrying both the responder's
-and initiator's coordinates and warming caches in the other direction. This
-ensures return-path transit nodes can route even when the reverse path
-diverges from the forward path (e.g., after tree reconvergence).
-
-### Result
-
-After the handshake completes, the entire forward and reverse paths have
-cached coordinates for both endpoints. Subsequent data packets use minimal
-headers (no coordinates) and route efficiently through the warmed caches.
-
-## Hybrid Coordinate Warmup (CP + CoordsWarmup)
-
-The CP flag in the FSP common prefix and the standalone CoordsWarmup message
-(0x14) together provide a hybrid cache-warming mechanism that complements
-SessionSetup. See [fips-session-layer.md](fips-session-layer.md) for the
-full warmup strategy.
-
-Transit nodes parse the CP flag from the FSP header and extract source and
-destination coordinates from the cleartext section between the header and
-ciphertext — no decryption needed. This is the same caching operation
-performed for SessionSetup coordinates. CoordsWarmup messages use the same
-CP-flag format and are handled identically by transit nodes via the existing
-`try_warm_coord_cache()` path.
+SessionSetup carries plaintext source and destination coordinates,
+which transit nodes cache as the message travels — warming the
+forward path. SessionAck carries them back along the reverse path,
+warming return-path caches. Steady-state data packets piggyback
+coordinates via the FSP CP flag during the warmup window, falling
+back to standalone CoordsWarmup messages when piggybacking would
+exceed the transport MTU. See
+[fips-session-layer.md](fips-session-layer.md#hybrid-coordinate-warmup-strategy)
+for the canonical hybrid-warmup design (SessionSetup
+self-bootstrapping plus CP-flag piggyback plus standalone
+CoordsWarmup).
 
 ## Error Recovery
 
@@ -723,21 +520,10 @@ routing decisions but retains its own end-to-end encryption and identity.
 
 ## Packet Type Summary
 
-| Message | Typical Size | When | Forwarded? |
-| ------- | ------------ | ---- | ---------- |
-| TreeAnnounce | Variable (depth-dependent) | Topology changes | No (peer-to-peer) |
-| FilterAnnounce | variable (RLE compressed) | Topology changes | No (peer-to-peer) |
-| LookupRequest | 44 bytes + TLV | First contact, recovery | Yes (bloom-guided tree) |
-| LookupResponse | ~400 bytes | Response to discovery | Yes (greedy routed) |
-| SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
-| SessionDatagram + SessionAck | ~170 bytes | Session confirmation | Yes (routed) |
-| SessionDatagram + Data (minimal) | 77 bytes + IPv6 payload | Bulk IPv6 traffic (compressed) | Yes (routed) |
-| SessionDatagram + Data (with CP) | 77 + coords + IPv6 payload | Warmup/recovery (compressed) | Yes (routed) |
-| SessionDatagram + CoordsRequired | 70 bytes | Cache miss error | Yes (routed) |
-| SessionDatagram + PathBroken | 70+ bytes | Dead-end error | Yes (routed) |
-| Disconnect | 2 bytes | Link teardown | No (peer-to-peer) |
-
-See [fips-wire-formats.md](fips-wire-formats.md) for byte-level layouts.
+For typical sizes, forwarding category, and the byte-level layouts
+of each FMP and FSP message type, see
+[../reference/wire-formats.md](../reference/wire-formats.md). The
+canonical Packet Type Summary table lives there.
 
 ## Privacy Considerations
 
@@ -791,11 +577,14 @@ recovery).
 
 ## References
 
-- [fips-intro.md](fips-intro.md) — Protocol overview
+- [fips-concepts.md](fips-concepts.md) — Protocol overview
+- [fips-architecture.md](fips-architecture.md) — Layer architecture and
+  identity model
 - [fips-mesh-layer.md](fips-mesh-layer.md) — FMP specification
 - [fips-spanning-tree.md](fips-spanning-tree.md) — Tree algorithms and data
   structures
 - [fips-bloom-filters.md](fips-bloom-filters.md) — Filter parameters and math
-- [fips-wire-formats.md](fips-wire-formats.md) — Wire format reference
+- [../reference/wire-formats.md](../reference/wire-formats.md) — Wire
+  format reference
 - [spanning-tree-dynamics.md](spanning-tree-dynamics.md) — Convergence
   walkthroughs

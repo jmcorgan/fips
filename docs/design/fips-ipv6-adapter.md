@@ -69,6 +69,24 @@ Known cache population mechanisms:
 - **Inbound traffic**: Authenticated sessions from other nodes populate the
   cache with their identity information
 
+### Mesh-Interface Query Filter
+
+The DNS responder is intended for local applications resolving `.fips`
+names; queries arriving over the mesh interface itself are dropped. The
+daemon records the index of the TUN interface at startup and compares
+it against the arrival interface of each incoming UDP DNS query. When
+they match — meaning the query came from another mesh node, not from a
+local socket — the responder discards the query without replying.
+
+The check is implemented in
+[`is_mesh_interface_query`](../../src/upper/dns.rs) and prevents two
+classes of misbehaviour: a peer asking the daemon to resolve `.fips`
+names on its behalf (which would let one node use another as an
+identity-cache priming proxy), and accidental query loops where a
+misconfigured resolver forwards `.fips` queries back into the mesh.
+Local applications binding to the host's loopback or non-mesh
+interfaces are unaffected.
+
 ## IPv6 Address Derivation
 
 FIPS addresses use the IPv6 Unique Local Address (ULA) prefix `fd00::/8`:
@@ -125,41 +143,24 @@ entry hasn't been evicted by memory pressure.
 
 ## MTU Enforcement
 
-FIPS does not provide fragmentation or reassembly at the session or mesh
-protocol layers — every datagram must fit in a single transport-layer packet.
-Some transports may perform fragmentation and reassembly internally (e.g., BLE
-L2CAP) and can advertise a larger virtual MTU than the physical medium
-supports, but this is transparent to FIPS. The mesh layer provides two
-facilities to manage MTU across heterogeneous paths: route discovery can
-constrain results to paths that support a required minimum MTU, and transit
-nodes that cannot forward an oversized datagram send an MtuExceeded error
-signal back to the source. The adapter must ensure that IPv6 packets from
-applications fit within the FIPS encapsulation budget after all layers of
-wrapping.
+The adapter sits at the boundary between the host's IPv6 stack and the
+FIPS encapsulation budget. Its job is to keep IPv6 packets small
+enough that they fit through the FIPS protocol envelope on every link
+along the path. The cross-cutting MTU model — proactive
+SessionDatagram `path_mtu` annotation, reactive MtuExceeded signals,
+end-to-end PathMtuNotification echo, and per-destination MTU storage
+— is documented in [fips-mtu.md](fips-mtu.md). What the adapter
+contributes is the IPv6-specific overhead accounting and the TUN-side
+enforcement integration.
 
-### Encapsulation Overhead
+### IPv6-Specific Overhead
 
-| Layer | Overhead | Purpose |
-| ----- | -------- | ------- |
-| Link encryption | 37 bytes | 16-byte outer header + 5-byte inner header (timestamp + msg_type) + 16-byte AEAD tag |
-| SessionDatagram body | 35 bytes | ttl + path_mtu + src_addr + dest_addr (msg_type counted in inner header) |
-| FSP header | 12 bytes | 4-byte prefix + 8-byte counter (used as AEAD AAD) |
-| FSP inner header | 6 bytes | 4-byte timestamp + 1-byte msg_type + 1-byte inner_flags (inside AEAD) |
-| Session AEAD tag | 16 bytes | ChaCha20-Poly1305 tag on session-encrypted payload |
-| **Protocol envelope** | **106 bytes** | `FIPS_OVERHEAD` constant |
-| Port header | 4 bytes | src_port + dst_port (DataPacket service dispatch) |
-| IPv6 compression | −33 bytes | 40-byte IPv6 header → 7-byte format + residual |
-| **IPv6 data path total** | **77 bytes** | `FIPS_IPV6_OVERHEAD` constant |
-
-Coordinate piggybacking (CP flag) adds variable overhead: `2 + entries × 16`
-per coordinate, with both src and dst coords sent. The send path skips the
-CP flag if adding coords would exceed the transport MTU.
-
-The `FIPS_OVERHEAD` constant (106 bytes) represents the base protocol
-envelope overhead (link encryption + routing + session encryption). For IPv6
-traffic, FSP port multiplexing adds 4 bytes (port header) while IPv6 header
-compression saves 33 bytes (40-byte header → 7-byte format + residual),
-yielding a net `FIPS_IPV6_OVERHEAD` of 77 bytes.
+For IPv6 traffic, FSP port multiplexing adds 4 bytes (port header)
+while IPv6 header compression saves 33 bytes (40-byte header →
+7-byte format + residual), yielding a net `FIPS_IPV6_OVERHEAD` of
+77 bytes on top of the base `FIPS_OVERHEAD` (106 bytes) protocol
+envelope. The full encapsulation breakdown lives in
+[fips-mtu.md](fips-mtu.md#encapsulation-overhead).
 
 ### Effective IPv6 MTU
 
@@ -183,48 +184,51 @@ transport path MTU for the IPv6 adapter is therefore:
 1280 + 77 = 1357 bytes
 ```
 
-Transports with smaller MTUs (radio at ~250 bytes, serial at 256 bytes) cannot
-support the IPv6 adapter without some form of internal fragmentation and
-reassembly. Otherwise, applications on those transports must use the native
-FIPS datagram API.
+Transports with smaller MTUs (radio at ~250 bytes, serial at 256
+bytes) cannot support the IPv6 adapter without some form of internal
+fragmentation and reassembly. Otherwise, applications on those
+transports must use the native FIPS datagram API.
 
-### ICMP Packet Too Big
+### TUN-Side ICMP Packet Too Big
 
-When an outbound packet at the TUN exceeds the effective IPv6 MTU, the adapter
-generates an ICMPv6 Packet Too Big message and delivers it back to the
-application via the TUN. This triggers the kernel's Path MTU Discovery (PMTUD)
-mechanism, which adjusts TCP segment sizes for subsequent transmissions.
+When an outbound packet at the TUN exceeds the effective IPv6 MTU,
+the adapter generates an ICMPv6 Packet Too Big message and delivers
+it back to the application via the TUN. This triggers the kernel's
+Path MTU Discovery mechanism, which adjusts TCP segment sizes for
+subsequent transmissions.
 
-ICMP Packet Too Big generation is rate-limited per source address (100ms
-interval) to prevent storms from applications sending many oversized packets.
+ICMP Packet Too Big generation is rate-limited per source address
+(100ms interval) to prevent storms from applications sending many
+oversized packets. The ICMP response is delivered locally back through
+the TUN; no network traversal is needed, so delivery is reliable.
 
-The ICMP response is delivered locally (back through the TUN to the kernel) —
-no network traversal is needed, so delivery is reliable.
+### TUN-Side TCP MSS Clamping
 
-### TCP MSS Clamping
-
-The adapter intercepts TCP SYN and SYN-ACK packets at the TUN interface and
-clamps the Maximum Segment Size (MSS) option:
+The adapter intercepts TCP SYN and SYN-ACK packets at the TUN
+interface and clamps the Maximum Segment Size (MSS) option:
 
 ```text
 clamped_mss = effective_ipv6_mtu - 40 (IPv6 header) - 20 (TCP header)
 ```
 
-This prevents TCP connections from negotiating segment sizes that would exceed
-the FIPS path MTU. Clamping is applied in two places:
+Clamping is applied in two places:
 
 - **TUN reader** (outbound): Clamps MSS on outbound SYN packets
 - **TUN writer** (inbound): Clamps MSS on inbound SYN-ACK packets
 
-Together, these ensure both directions of a TCP connection use appropriately
-sized segments from the start, avoiding the initial oversized packet loss
-that would occur with ICMP Packet Too Big alone.
+Together, these ensure both directions of a TCP connection use
+appropriately sized segments from the start, avoiding the initial
+oversized packet loss that would occur with ICMP Packet Too Big
+alone. The conditional clamp (per-flow lookup with cold-flow
+fallback) and the rationale for `max_mss` semantics are in
+[fips-mtu.md](fips-mtu.md#tcp-mss-clamping).
 
 ### ICMP Rate Limiting
 
-ICMPv6 error generation is rate-limited per source address using a token bucket
-(100ms interval). This matches the standard ICMP rate limiting approach and
-prevents amplification when an application sends a burst of oversized packets.
+ICMPv6 error generation is rate-limited per source address using a
+token bucket (100ms interval). This matches the standard ICMP rate
+limiting approach and prevents amplification when an application sends
+a burst of oversized packets.
 
 ## TUN Interface
 
@@ -287,20 +291,16 @@ path.
 
 ### Configuration
 
-```yaml
-tun:
-  enabled: true
-  name: fips0
-  mtu: 1280
-```
+The TUN block (`tun.*`) is documented in
+[../reference/configuration.md](../reference/configuration.md).
 
 ### Privileges
 
-TUN device creation requires `CAP_NET_ADMIN`. Options:
-
-- Run as root
-- Set capability: `sudo setcap cap_net_admin+ep ./target/debug/fips`
-- Pre-created persistent TUN device
+TUN device creation requires `CAP_NET_ADMIN`. The shipped Debian
+systemd unit runs the daemon as `root` by default; for the
+alternative — running under a dedicated unprivileged service
+account with the capability granted on the binary — see
+[../how-to/run-as-unprivileged-user.md](../how-to/run-as-unprivileged-user.md).
 
 ## Implementation Status
 
@@ -314,6 +314,7 @@ TUN device creation requires `CAP_NET_ADMIN`. Options:
 | ICMP rate limiting (per-source) | **Implemented** |
 | TCP MSS clamping (SYN + SYN-ACK) | **Implemented** |
 | DNS service (.fips domain) | **Implemented** |
+| DNS responder mesh-interface filter | **Implemented** |
 | Port-based service multiplexing (port 256) | **Implemented** |
 | IPv6 header compression (format 0x00) | **Implemented** |
 | Per-destination route MTU (netlink) | Planned |
@@ -324,38 +325,27 @@ TUN device creation requires `CAP_NET_ADMIN`. Options:
 
 ## Design Considerations
 
-### Path MTU Discovery
+### Path MTU Discovery and No-Fragmentation Policy
 
-Two complementary mechanisms support full PMTUD:
-
-1. **Proactive**: The `path_mtu` field (2 bytes) in the SessionDatagram envelope
-   is implemented at the FMP level. The source sets it to its outbound link MTU
-   minus overhead; each transit node applies
-   `min(current, own_outbound_mtu - overhead)`. The destination receives the
-   forward-path minimum. PathMtuNotification is handled at the session layer;
-   the destination sends the observed forward-path MTU back to the source,
-   which applies it with decrease-immediate / increase-requires-3-consecutive
-   hysteresis.
-
-2. **Reactive**: When a transit node cannot forward a packet (MTU exceeded), it
-   sends an error signal back to the source. This handles the in-flight gap
-   between a path MTU decrease and the source learning via the echo.
-
-Both are needed: proactive handles steady state; reactive handles the transient
-window when oversized packets hit a new bottleneck before the source adapts.
-
-### No Fragmentation
-
-FIPS remains a pure datagram service with no fragmentation at transit nodes.
-Session-layer encryption is end-to-end — the AEAD tag authenticates the entire
-plaintext. Fragmenting encrypted datagrams would require either exposing
-plaintext structure to transit nodes (unacceptable) or reassembly before
-decryption (opens attack surface).
+Path MTU Discovery (proactive `path_mtu` annotation, reactive
+MtuExceeded, end-to-end PathMtuNotification) and the no-fragmentation
+policy that drives the design both live in the unified MTU treatment
+at [fips-mtu.md](fips-mtu.md). The adapter is a consumer of that
+model — its job is to enforce the resulting effective IPv6 MTU at the
+TUN with ICMP Packet Too Big and TCP MSS clamping.
 
 ## References
 
-- [fips-intro.md](fips-intro.md) — Protocol overview and architecture
+- [fips-concepts.md](fips-concepts.md) — Protocol overview
+- [fips-architecture.md](fips-architecture.md) — Layer architecture and
+  identity model
 - [fips-session-layer.md](fips-session-layer.md) — FSP (below the adapter)
-- [fips-wire-formats.md](fips-wire-formats.md) — FSP and SessionDatagram wire
-  formats
-- [fips-configuration.md](fips-configuration.md) — TUN configuration parameters
+- [fips-mtu.md](fips-mtu.md) — Unified path MTU model (proactive,
+  reactive, hysteresis, no-fragmentation)
+- [../reference/wire-formats.md](../reference/wire-formats.md) — FSP and
+  SessionDatagram wire formats
+- [../reference/configuration.md](../reference/configuration.md) — TUN
+  configuration parameters
+- [../how-to/run-as-unprivileged-user.md](../how-to/run-as-unprivileged-user.md)
+  — privilege options for the daemon, including the unprivileged
+  service-account path

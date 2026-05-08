@@ -71,7 +71,7 @@
   <!-- Arrow down from pubkey -->
   <line x1="400" y1="120" x2="400" y2="170" class="derive"/>
   <polygon points="396,168 400,176 404,168" class="dhead"/>
-  <text x="416" y="148" class="op">one-way hash</text>
+  <text x="416" y="148" class="op">SHA-256, truncate to 16 bytes</text>
 
   <!-- node_addr box -->
   <rect x="280" y="176" width="240" height="50" class="box derived"/>
@@ -95,7 +95,7 @@
   <!-- Arrow down from node_addr -->
   <line x1="400" y1="226" x2="400" y2="276" class="derive"/>
   <polygon points="396,274 400,282 404,274" class="dhead"/>
-  <text x="416" y="254" class="op">add fd00::/8 prefix</text>
+  <text x="416" y="254" class="op">0xfd + node_addr[0..15]</text>
 
   <!-- IPv6 address box -->
   <rect x="280" y="282" width="240" height="50" class="box compat"/>

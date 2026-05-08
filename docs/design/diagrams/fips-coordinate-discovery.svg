@@ -82,7 +82,7 @@
   <text x="610" y="223" text-anchor="middle" class="alabel" fill="#5080c0">LookupRequest</text>
 
   <!-- Bloom filter annotation -->
-  <text x="430" y="260" text-anchor="middle" class="annot">guided by bloom filters at each hop</text>
+  <text x="430" y="260" text-anchor="middle" class="annot">guided by bloom filters at each hop; transits do not cache</text>
 
   <!-- ═══ Phase separator ═══ -->
   <line x1="70" y1="285" x2="830" y2="285" class="sep"/>
@@ -99,23 +99,19 @@
   <polygon points="534,335 524,340 534,345" class="resp"/>
   <text x="610" y="333" text-anchor="middle" class="alabel" fill="#d0a040">LookupResponse + coords</text>
 
-  <!-- Cache box at C -->
-  <rect x="490" y="358" width="60" height="22" class="cache"/>
-  <text x="520" y="373" text-anchor="middle" class="clabel">cache D</text>
+  <!-- C → B LookupResponse (transit forwards without caching) -->
+  <line x1="510" y1="380" x2="352" y2="380" class="resp"/>
+  <polygon points="354,375 344,380 354,385" class="resp"/>
+  <text x="430" y="373" text-anchor="middle" class="alabel" fill="#d0a040">LookupResponse + coords</text>
 
-  <!-- C → B LookupResponse -->
-  <line x1="510" y1="395" x2="352" y2="395" class="resp"/>
-  <polygon points="354,390 344,395 354,400" class="resp"/>
-  <text x="430" y="388" text-anchor="middle" class="alabel" fill="#d0a040">LookupResponse + coords</text>
+  <!-- B → A LookupResponse (transit forwards without caching) -->
+  <line x1="330" y1="420" x2="172" y2="420" class="resp"/>
+  <polygon points="174,415 164,420 174,425" class="resp"/>
+  <text x="250" y="413" text-anchor="middle" class="alabel" fill="#d0a040">LookupResponse + coords</text>
 
-  <!-- Cache box at B -->
-  <rect x="310" y="413" width="60" height="22" class="cache"/>
-  <text x="340" y="428" text-anchor="middle" class="clabel">cache D</text>
-
-  <!-- B → A LookupResponse -->
-  <line x1="330" y1="448" x2="172" y2="448" class="resp"/>
-  <polygon points="174,443 164,448 174,453" class="resp"/>
-  <text x="250" y="441" text-anchor="middle" class="alabel" fill="#d0a040">LookupResponse + coords</text>
+  <!-- Cache box at A — only the originator caches on LookupResponse -->
+  <rect x="130" y="438" width="60" height="22" class="cache"/>
+  <text x="160" y="453" text-anchor="middle" class="clabel">cache D</text>
 
   <!-- ═══ Phase separator ═══ -->
   <line x1="70" y1="475" x2="830" y2="475" class="sep"/>
@@ -125,32 +121,34 @@
   <!-- ═══════════════════════════════════════════════ -->
 
   <text x="40" y="508" text-anchor="middle" class="plabel">Phase 3</text>
-  <text x="40" y="524" text-anchor="middle" class="annot">Routing</text>
+  <text x="40" y="524" text-anchor="middle" class="annot">Data flow</text>
 
-  <!-- A → B Data -->
+  <!-- A → B Data with coords (CP flag / SessionSetup) -->
   <line x1="170" y1="530" x2="328" y2="530" class="data"/>
   <polygon points="326,525 336,530 326,535" class="data"/>
-  <text x="250" y="523" text-anchor="middle" class="alabel" fill="#40a060">Data</text>
+  <text x="250" y="523" text-anchor="middle" class="alabel" fill="#40a060">Data + coords</text>
 
-  <!-- Cached coords note at B -->
-  <text x="340" y="553" text-anchor="middle" class="annot">cached coords</text>
+  <!-- Cache box at B — warmed in-band from CP-flagged data -->
+  <rect x="310" y="540" width="60" height="22" class="cache"/>
+  <text x="340" y="555" text-anchor="middle" class="clabel">cache D</text>
 
-  <!-- B → C Data -->
-  <line x1="350" y1="565" x2="508" y2="565" class="data"/>
-  <polygon points="506,560 516,565 506,570" class="data"/>
-  <text x="430" y="558" text-anchor="middle" class="alabel" fill="#40a060">Data</text>
+  <!-- B → C Data with coords -->
+  <line x1="350" y1="572" x2="508" y2="572" class="data"/>
+  <polygon points="506,567 516,572 506,577" class="data"/>
+  <text x="430" y="565" text-anchor="middle" class="alabel" fill="#40a060">Data + coords</text>
 
-  <!-- Cached coords note at C -->
-  <text x="520" y="588" text-anchor="middle" class="annot">cached coords</text>
+  <!-- Cache box at C — warmed in-band -->
+  <rect x="490" y="582" width="60" height="22" class="cache"/>
+  <text x="520" y="597" text-anchor="middle" class="clabel">cache D</text>
 
   <!-- C → D Data -->
-  <line x1="530" y1="600" x2="688" y2="600" class="data"/>
-  <polygon points="686,595 696,600 686,605" class="data"/>
-  <text x="610" y="593" text-anchor="middle" class="alabel" fill="#40a060">Data</text>
+  <line x1="530" y1="614" x2="688" y2="614" class="data"/>
+  <polygon points="686,609 696,614 686,619" class="data"/>
+  <text x="610" y="607" text-anchor="middle" class="alabel" fill="#40a060">Data + coords</text>
 
   <!-- Efficient forwarding annotation -->
-  <text x="430" y="622" text-anchor="middle" class="annot">cached coords enable efficient forwarding — no re-discovery needed</text>
+  <text x="430" y="636" text-anchor="middle" class="annot">transits cache coords from in-flight data; subsequent traffic forwards without re-discovery</text>
 
   <!-- ═══ Caption ═══ -->
-  <text x="430" y="660" text-anchor="middle" class="caption">Each transit node caches coordinates from the LookupResponse return path</text>
+  <text x="430" y="668" text-anchor="middle" class="caption">LookupResponse caches coords at the originator only; transit caches warm during the subsequent data flow</text>
 </svg>

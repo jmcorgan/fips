@@ -81,7 +81,7 @@ assets = [
     ["packaging/debian/fips.tmpfiles", "/usr/lib/tmpfiles.d/fips.conf", "644"],
     ["target/release/fips-gateway", "/usr/bin/", "755"],
     ["packaging/debian/fips-gateway.service", "/lib/systemd/system/fips-gateway.service", "644"],
-    ["docs/fips-security.md", "/usr/share/doc/fips/fips-security.md", "644"],
+    ["docs/design/fips-security.md", "/usr/share/doc/fips/fips-security.md", "644"],
 ]
 conf-files = ["/etc/fips/fips.yaml", "/etc/fips/hosts", "/etc/fips/fips.nft"]
 

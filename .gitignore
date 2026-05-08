@@ -20,7 +20,7 @@ agents/
 deploy/
 vps.env
 
-reference/
+/reference/
 
 dist/
 *.ipk

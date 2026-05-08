@@ -1,39 +1,43 @@
 # FIPS Mesh-Interface Security
 
-This document describes the operator-facing security posture of the
-`fips0` mesh interface on Linux: the threat model, the default-deny
-nftables baseline shipped as `/etc/fips/fips.nft`, how to enable it,
-and how to extend it with per-host allowances.
+This document describes the threat model and design rationale for the
+operator-facing security posture of the `fips0` mesh interface on Linux.
+The default-deny nftables baseline shipped as `/etc/fips/fips.nft` is the
+artifact discussed below; for the operator activation steps and drop-in
+extension recipes, see [enable-mesh-firewall.md](../how-to/enable-mesh-firewall.md).
 
 The baseline is a documented operator conffile, not an auto-loaded
 package side-effect. Activation is an explicit one-liner. The
-rationale for that design and the operator workflow follow.
+rationale for that design follows.
 
 ## Threat Model for `fips0`
 
-The mesh is a flat layer-3 segment. Every authenticated peer on the
-mesh can route packets to every other peer's `fips0` address. Identity
-on the mesh is the peer's npub — the FMP link layer authenticates that
-identity with Noise IK and the FSP session layer authenticates
-endpoints with Noise XK — but identity is **not** authorization.
+The mesh is a flat layer-3 segment. Every mesh node that can route to
+you can deliver packets to your `fips0` address — your direct peers
+forward traffic from non-peer mesh nodes onto your `fips0` the same
+way any router forwards transit traffic. Identity on the mesh is the
+originating node's npub — the FMP link layer authenticates direct
+peers with Noise XX and the FSP session layer authenticates session
+endpoints with Noise XX — but identity is **not** authorization.
 Knowing who sent a packet does not, by itself, decide whether the
 local host should accept it.
 
 That means: any service on a mesh host that binds to a wildcard
 address (`0.0.0.0`, `[::]`, or any IPv6 address that includes the
-`fips0` interface in its scope) is reachable from every peer in the
-mesh by default. There is no NAT, no perimeter firewall, no
-"local-only" address space between you and an arbitrary peer. The
-mesh is closer to a shared LAN than to the public internet.
+`fips0` interface in its scope) is reachable from every mesh node
+that can route to you by default, not only from your direct peers.
+There is no NAT, no perimeter firewall, no "local-only" address
+space between you and an arbitrary mesh node. The mesh is closer
+to a shared LAN than to the public internet.
 
 Compare to the corresponding internet trust assumptions:
 
 | Surface | Public internet | FIPS mesh (no baseline) |
 |---|---|---|
-| Reachability from arbitrary peer | Mediated by NAT, firewalls, ISPs | Direct |
-| Default identity | None | Peer npub (authenticated) |
+| Reachability from arbitrary mesh node | Mediated by NAT, firewalls, ISPs | Direct |
+| Default identity | None | Originating node's npub (authenticated) |
 | Default authorization | None | None |
-| Accidental exposure cost | Low (NAT hides you) | High (every peer sees you) |
+| Accidental exposure cost | Low (NAT hides you) | High (every mesh node sees you) |
 
 The third row is the gap this document closes. The default-deny
 baseline removes "accidental exposure" from the failure modes an
@@ -70,36 +74,7 @@ operator on upgrade rather than silently overwriting local changes.
 The canonical artifact is the file itself; read it for the inline
 documentation that the rest of this document references.
 
-## Loading the Baseline
-
-The package ships `fips-firewall.service`, a systemd oneshot unit
-that runs `nft -f /etc/fips/fips.nft` on start and removes the
-`inet fips` table on stop. It is **not** enabled by default. To
-activate the baseline:
-
-```sh
-sudo systemctl enable --now fips-firewall.service
-```
-
-This loads the table now and arranges for it to load on every
-subsequent boot. To disable and tear it down:
-
-```sh
-sudo systemctl disable --now fips-firewall.service
-```
-
-To reload after editing `/etc/fips/fips.nft` or adding a drop-in
-under `/etc/fips/fips.d/`:
-
-```sh
-sudo systemctl reload-or-restart fips-firewall.service
-```
-
-(or equivalently `sudo nft -f /etc/fips/fips.nft`, since the file is
-idempotent — it begins with `add table inet fips; flush table inet
-fips;` so re-running it replaces the live ruleset atomically.)
-
-### Why no auto-load on package install
+## Why no auto-load on package install
 
 The `postinst` script does **not** enable `fips-firewall.service`.
 This is deliberate. Quietly mutating host firewall state on package
@@ -115,7 +90,7 @@ rationale is documented in the file's inline header and in this
 document. That is enough; auto-loading would trade discoverability
 for no real gain.
 
-### Coexistence with other firewalls
+## Coexistence with other firewalls
 
 The `inet fips` table only matches packets arriving on `fips0`.
 Anything else returns from the chain on the first rule. Specifically:
@@ -140,128 +115,6 @@ Anything else returns from the chain on the first rule. Specifically:
   mesh addresses. It is a separate concern owned by the gateway
   binary and is unrelated to this baseline. See the section below.
 
-If you prefer to fold the baseline into your existing
-`/etc/nftables.conf` instead of using the systemd unit, you can:
-
-```nft
-# in /etc/nftables.conf
-include "/etc/fips/fips.nft"
-```
-
-In that case do not enable `fips-firewall.service` — let the host's
-main nftables setup own the loading. The two are mutually exclusive.
-
-## Operator Extension via `/etc/fips/fips.d/*.nft`
-
-The baseline drops everything inbound on `fips0` except conntrack
-replies and ICMPv6 echo. To open specific services to specific peers,
-drop a file into `/etc/fips/fips.d/` ending in `.nft`. Each file is
-included inline into the `inbound` chain at the marked point and may
-contain any nftables rule lines valid in that context.
-
-Reload after editing:
-
-```sh
-sudo systemctl reload-or-restart fips-firewall.service
-# or:  sudo nft -f /etc/fips/fips.nft
-```
-
-Common patterns follow.
-
-### Allow inbound SSH from a specific peer
-
-```nft
-# /etc/fips/fips.d/ssh-from-bastion.nft
-ip6 saddr fd97:1234:5678:9abc:def0:1234:5678:9abc tcp dport 22 accept
-```
-
-The source filter is the peer's mesh address. To find a peer's mesh
-address, look in their `fips.pub` (which contains the npub) and
-derive the `fd97:...` address from it, or query the running daemon:
-
-```sh
-fipsctl show identity-cache
-fipsctl show peers
-```
-
-### Allow inbound HTTP from one /64 of peers
-
-If you operate a logical group of peers under a shared address
-prefix, source-filter by the prefix:
-
-```nft
-# /etc/fips/fips.d/http-from-cluster.nft
-ip6 saddr fd97:1234:5678:9abc::/64 tcp dport 80 accept
-```
-
-The mesh address space is `fd00::/8`, so `/64` filters carve out
-manageable subgroups. Plan your prefixes before deploying many peers.
-
-### Allow inbound DNS broadly
-
-Some services need to be reachable from any mesh peer (a public DNS
-resolver, a public bootstrap node):
-
-```nft
-# /etc/fips/fips.d/dns-public.nft
-udp dport 53 accept
-tcp dport 53 accept
-```
-
-Omit the source filter only when the service is intended to be
-universally reachable on the mesh. The baseline's purpose is to make
-"universally reachable" an explicit decision rather than the default.
-
-### Multiple peers, one service
-
-```nft
-# /etc/fips/fips.d/git-from-trusted.nft
-ip6 saddr {
-    fd97:1111:2222:3333:4444:5555:6666:7777,
-    fd97:8888:9999:aaaa:bbbb:cccc:dddd:eeee
-} tcp dport 9418 accept
-```
-
-Set syntax keeps multi-peer rules readable and is more efficient than
-a chain of individual rules.
-
-## Drop Visibility and Debugging
-
-The baseline counter increments on every dropped packet. Inspect it:
-
-```sh
-sudo nft list table inet fips
-```
-
-Look for the `counter packets N bytes M drop` line at the bottom of
-the `inbound` chain. A non-zero counter means peers are sending
-traffic that hits the default-deny — usually benign (probes,
-neighbor discovery) but occasionally a misconfigured drop-in.
-
-To see which packets are being dropped, uncomment the `log` line
-near the bottom of `/etc/fips/fips.nft`:
-
-```nft
-log prefix "fips drop: " level info limit rate 10/minute
-```
-
-Reload:
-
-```sh
-sudo nft -f /etc/fips/fips.nft
-```
-
-Then tail the kernel log:
-
-```sh
-sudo journalctl -k -f -g "fips drop:"
-```
-
-The rate-limit prevents flooding the journal under sustained probing.
-Adjust the rate, log level, or prefix as needed for the situation.
-Re-comment the rule when you are done; production hosts do not need
-the log line on by default.
-
 ## Coexistence with `inet fips_gateway`
 
 When `fips-gateway` is running, it manages a separate nftables
@@ -279,8 +132,8 @@ The two tables do not interfere:
 They operate on different interfaces and at different hook points
 (`input` filter vs. `prerouting`/`postrouting` NAT). Both can be
 loaded simultaneously on a gateway host, and that is the intended
-deployment shape. See `docs/design/fips-gateway.md` for the gateway
-table's structure.
+deployment shape. See [fips-gateway.md](fips-gateway.md) for the
+gateway table's structure.
 
 ## What the Baseline Does Not Cover
 
@@ -292,20 +145,28 @@ explicitly not:
   can send to the mesh, add rules to a separate chain hooked at
   `output` — out of scope for the baseline.
 - **Application-layer authorization.** The baseline decides whether
-  a packet reaches a service. It does not decide whether the peer
-  npub on the other end is allowed to use that service. That is the
-  application's responsibility (e.g., an `authorized_keys` file for
-  SSH, an ACL in the application's configuration).
-- **ACL on the mesh handshake.** The FMP Noise IK handshake currently
-  authenticates the peer's npub but does not consult an allowlist
-  before establishing a link. A peer with a known npub can connect
-  and become a routing peer regardless of operator intent. Mesh-
-  level ACLs are tracked under IDEA-0047 / PR #50 and are a separate
-  concern from the inbound packet filter described here.
+  a packet reaches a service. It does not decide whether the
+  originating mesh node's npub is allowed to use that service. That
+  is the application's responsibility (e.g., an `authorized_keys`
+  file for SSH, an ACL in the application's configuration).
+- **ACL on the mesh handshake.** The FMP Noise XX handshake
+  authenticates the peer's npub and, on both inbound and outbound
+  paths, consults the peer ACL (`peers.allow` / `peers.deny`) before
+  promoting the connection. The ACL evaluates in TCP-Wrappers order:
+  an `allow` match permits, otherwise a `deny` match rejects,
+  otherwise the connection is permitted. A strict allowlist posture
+  therefore requires an explicit `ALL` entry in `peers.deny`; a
+  populated `peers.allow` alone does not turn the ACL into a strict
+  allowlist. Mesh-level ACLs are a separate concern from the inbound
+  packet filter described here; see the peer ACL section in
+  [../reference/security.md](../reference/security.md).
 - **Compromised peers.** A peer whose key has been stolen or whose
   host has been taken over is, by mesh-level identity, still that
-  peer. Source-address filtering in drop-ins limits damage, but the
-  baseline cannot revoke trust on its own.
+  peer. Source-address filtering in drop-ins operates on the source
+  mesh address of inbound traffic regardless of whether that source
+  is a direct peer or a multi-hop mesh node, and so can limit damage
+  from a known-compromised mesh address; but the baseline cannot
+  revoke trust on its own.
 
 Treat the baseline as removing the "wide-open by default" failure
 mode. Higher-layer authorization decisions are the operator's and
@@ -336,9 +197,19 @@ The current baseline is Linux-only. Parallel work for other targets:
   netlink API directly. macOS gateway support requires a PF-backed
   equivalent behind a shared backend trait. This is a larger lift
   than the static baseline and is tracked separately under the same
-  IDEA thread.
+  cross-OS thread.
 
 When those land, this document will grow per-OS sections describing
 each baseline's load mechanism and extension points. The threat
 model and the operator-extension principle are the same on every OS;
 only the filter syntax and the activation gesture differ.
+
+## See also
+
+- [enable-mesh-firewall.md](../how-to/enable-mesh-firewall.md) — operator
+  activation steps, drop-in recipes, drop visibility and debugging
+- [../reference/security.md](../reference/security.md) — consolidated
+  security reference (cryptographic primitives, peer ACL format,
+  filesystem permissions, default network exposures)
+- [fips-gateway.md](fips-gateway.md) — `fips-gateway` service and the
+  separate `inet fips_gateway` table

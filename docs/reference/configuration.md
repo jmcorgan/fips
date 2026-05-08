@@ -54,7 +54,7 @@ peers:       # Static peer list
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.control.enabled` | bool | `true` | Enable the control socket |
-| `node.control.socket_path` | string | *(auto)* | **Linux:** Socket file path. Default: `$XDG_RUNTIME_DIR/fips/control.sock`, then `/run/fips/control.sock` (if root), then `/tmp/fips-control.sock`. **Windows:** TCP port number (default: `21210`); the control socket listens on `localhost` at this port. |
+| `node.control.socket_path` | string | *(auto)* | **Linux:** Socket file path. Resolved at daemon startup: `$XDG_RUNTIME_DIR/fips/control.sock` if `XDG_RUNTIME_DIR` is set, else `/run/fips/control.sock` if `/run/fips` can be created (typical when running under the shipped systemd unit), else `/tmp/fips-control.sock`. (Note: the `fipsctl` / `fipstop` clients use a different fallback order — `/run/fips` first if it already exists, then `XDG_RUNTIME_DIR`, then `/tmp` — so when both schemes apply, set this field explicitly to avoid mismatch.) **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. |
 
 The control socket provides access to node state and runtime management
 via the `fipsctl` command-line tool. In addition to read-only status
@@ -110,6 +110,7 @@ to the highest-priority config file for operator visibility, even in ephemeral m
 | `node.base_rtt_ms` | u64 | `100` | Initial RTT estimate for new links before measurements converge |
 | `node.heartbeat_interval_secs` | u64 | `10` | Heartbeat send interval per peer for liveness detection |
 | `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed |
+| `node.log_level` | string | `"info"` | Tracing filter default. Case-insensitive; one of `trace`, `debug`, `info`, `warn`, `error`. Overridden by the `RUST_LOG` environment variable when set |
 
 ### Resource Limits (`node.limits.*`)
 
@@ -182,8 +183,9 @@ offer/answer + punch-through, after which the established UDP socket is handed
 into the normal FIPS transport/session stack.
 Inbox-relay discovery falls back to the local DM relay list if remote relay
 metadata cannot be fetched.
-This support is compiled behind the crate feature `nostr-discovery`; builds
-without that feature ignore `udp:nat` bootstrap configuration.
+The Nostr discovery runtime is compiled into every build of the crate; it
+is enabled at runtime via `node.discovery.nostr.enabled: true` and stays
+inert otherwise.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -197,7 +199,8 @@ without that feature ignore `udp:nat` bootstrap configuration.
 | `node.discovery.nostr.advert_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for service adverts |
 | `node.discovery.nostr.dm_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for encrypted signaling events |
 | `node.discovery.nostr.stun_servers` | list[string] | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used for local reflexive address discovery |
-| `node.discovery.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace and advert identifier suffix |
+| `node.discovery.nostr.share_local_candidates` | bool | `false` | Whether to advertise local (RFC 1918 / ULA) interface addresses as host candidates in the traversal offer. Off by default: in most deployments peers aren't on the same broadcast domain, and sharing private host candidates causes misleading punch successes when an asymmetric L3 path (VPN, Tailscale subnet route, overlapping address space) makes a peer's private IP one-way reachable. Enable only when peers are on the same physical LAN |
+| `node.discovery.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace, published in the advert's `protocol` tag (the `d` tag itself is hardcoded to `fips-overlay-v1`) |
 | `node.discovery.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds |
 | `node.discovery.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds |
 | `node.discovery.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds |
@@ -208,6 +211,11 @@ without that feature ignore `udp:nat` bootstrap configuration.
 | `node.discovery.nostr.advert_refresh_secs` | u64 | `1800` | How often adverts are refreshed in seconds |
 | `node.discovery.nostr.startup_sweep_delay_secs` | u64 | `5` | Settle delay after Nostr discovery starts before the one-shot startup advert sweep runs (only used under `policy: open`). Allows the relay subscription backlog to populate the in-memory advert cache before the sweep fires |
 | `node.discovery.nostr.startup_sweep_max_age_secs` | u64 | `3600` | Maximum advert age (`now - created_at`) considered by the one-shot startup sweep (only used under `policy: open`). Adverts older than this are skipped on startup; the per-tick sweep still considers them up to `valid_until_ms` |
+| `node.discovery.nostr.failure_streak_threshold` | u32 | `5` | Consecutive NAT-traversal failures against a peer before an extended cooldown is applied. At this threshold the daemon also actively re-fetches the peer's advert from `advert_relays` to evict cache entries for peers that have gone away |
+| `node.discovery.nostr.extended_cooldown_secs` | u64 | `1800` | Cooldown applied to a peer once `failure_streak_threshold` is hit. Suppresses both open-discovery sweep enqueues and per-attempt retry firings until elapsed (30 minutes default) |
+| `node.discovery.nostr.warn_log_interval_secs` | u64 | `300` | Minimum interval between `NAT traversal failed` WARN log lines for the same peer. Subsequent failures inside the window log at DEBUG to reduce log spam on public-test nodes with many cache-learned peers |
+| `node.discovery.nostr.failure_state_max_entries` | usize | `4096` | Maximum entries retained in the per-npub failure-state map. Bounds memory under high cache turnover; oldest entries (by last failure time) are evicted when the cap is exceeded |
+| `node.discovery.nostr.protocol_mismatch_cooldown_secs` | u64 | `86400` | Cooldown applied after observing a fatal protocol mismatch on a Nostr-adopted bootstrap transport (e.g. `Unknown FMP version` from a peer running a different FMP-protocol version). Independent of `extended_cooldown_secs` and much longer (24 hours default) because the mismatch is structural — re-traversing is wasted effort until one side upgrades |
 
 If `stun_servers` is omitted, the built-in default list above is used. If it is
 specified in YAML, the configured list fully overrides the defaults.
@@ -247,6 +255,7 @@ Controls tree construction and parent selection.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.bloom.update_debounce_ms` | u64 | `500` | Debounce interval for filter update propagation |
+| `node.bloom.max_inbound_fpr` | f64 | `0.05` | Antipoison cap: reject inbound `FilterAnnounce` frames whose advertised false-positive rate exceeds this value. Valid range `(0.0, 1.0)`. The default `0.05` corresponds to fill 0.549 at k=5 (≈3,200 entries on the 1 KB filter) |
 
 Bloom filter size (1 KB), hash count (5), and size classes are protocol
 constants and not configurable.
@@ -303,7 +312,7 @@ configurable.
 ### Link-Layer MMP (`node.mmp.*`)
 
 Metrics Measurement Protocol for per-peer link measurement. See
-[fips-mesh-layer.md](fips-mesh-layer.md) for behavioral details.
+[../design/fips-mesh-layer.md](../design/fips-mesh-layer.md) for behavioral details.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -351,7 +360,7 @@ with the node for routing.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `dns.enabled` | bool | `true` | Enable DNS responder |
-| `dns.bind_addr` | string | `"127.0.0.1"` | Bind address |
+| `dns.bind_addr` | string | `"::1"` | Bind address. Default is IPv6 loopback only; the shipped `fips-dns-setup` configures systemd-resolved to forward `.fips` queries to `[::1]:5354`. To expose the responder to mesh peers (or to the gateway over IPv4), override (e.g., `"::"` for all interfaces). |
 | `dns.port` | u16 | `5354` | Listen port |
 | `dns.ttl` | u32 | `300` | AAAA record TTL in seconds |
 
@@ -368,8 +377,14 @@ The host map is populated from two sources:
 2. **Hosts file** — `/etc/fips/hosts`, one `hostname npub1...` per line.
    Blank lines and `#` comments are allowed.
 
-The hosts file is auto-reloaded on modification (mtime change) without
+On conflict, hosts-file entries take precedence over peer aliases. The
+hosts file is auto-reloaded on modification (mtime change) without
 restarting the daemon. Hostnames are case-insensitive.
+
+The installer ships `/etc/fips/hosts` pre-populated with the public test
+mesh roster (`test-us01` … `test-uk01`). Operator-style guide for
+adding entries and the precedence rules:
+[../how-to/host-aliases.md](../how-to/host-aliases.md).
 
 ## Transports (`transports.*`)
 
@@ -377,12 +392,15 @@ restarting the daemon. Hostnames are case-insensitive.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port |
+| `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port. Ignored when `outbound_only: true` (kernel-assigned ephemeral port is used regardless). |
 | `transports.udp.mtu` | u16 | `1280` | Transport MTU |
 | `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
 | `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
-| `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts |
+| `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts. Implicitly forced false when `outbound_only: true`. |
 | `transports.udp.public` | bool | `false` | If advertised: `true` publishes direct `host:port`; `false` publishes `udp:nat` rendezvous |
+| `transports.udp.external_addr` | string | *(none)* | Explicit advertise-as override. Bare IP (`"203.0.113.45"` — bind port is appended) or full `host:port`. Takes precedence over the bound address and STUN autodiscovery. Useful when the public IP isn't on a local interface (cloud 1:1 NAT, EIP) or to skip STUN for a deterministic value. |
+| `transports.udp.outbound_only` | bool | `false` | Pure-client posture. When `true`, the transport binds to `0.0.0.0:0` (kernel-assigned ephemeral port) regardless of `bind_addr`, refuses inbound handshake msg1, and is never advertised on Nostr regardless of `advertise_on_nostr`. |
+| `transports.udp.accept_connections` | bool | `true` | Accept inbound handshake msg1 from new peers. Combine with `outbound_only: false` and `accept_connections: false` (plus `auto_connect` on peer entries) for a node that initiates outbound links but rejects fresh inbound handshakes. The handshake handler carves out msg1 from peers already established on this transport so rekey continues to work. |
 
 ### Ethernet (`transports.ethernet.*`)
 
@@ -437,6 +455,8 @@ overhead.
 | `transports.tcp.recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
 | `transports.tcp.send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
 | `transports.tcp.max_inbound_connections` | usize | `256` | Maximum simultaneous inbound connections |
+| `transports.tcp.advertise_on_nostr` | bool | `false` | Include this TCP transport in Nostr endpoint adverts |
+| `transports.tcp.external_addr` | string | *(none)* | Explicit advertise-as override. Bare IP or full `host:port`. **Required** when `bind_addr` is wildcard (e.g. `"0.0.0.0:443"`) and `advertise_on_nostr: true`, since TCP has no STUN equivalent for autodiscovery. Common on cloud 1:1 NAT / EIP setups where the public IP isn't bindable on the host. |
 
 **Named instances.** Like other transports, multiple TCP instances can
 be configured with named sub-keys:
@@ -560,9 +580,13 @@ HiddenServicePort 8443 127.0.0.1:8444
 ### BLE (`transports.ble.*`)
 
 Bluetooth Low Energy transport using L2CAP Connection-Oriented Channels.
-Requires BlueZ and the `ble` Cargo feature flag (default-on). Linux only;
-guarded by `#[cfg(target_os = "linux")]`. Communicates with BlueZ via D-Bus
-using the `bluer` crate.
+Linux + glibc only — at build time, `build.rs` probes for the BlueZ /
+`bluer` crate dependencies and sets the `bluer_available` `cfg`; the BLE
+runtime is gated behind `#[cfg(bluer_available)]`. There is no Cargo
+feature flag to toggle. On non-glibc Linux (musl) or non-Linux platforms,
+BLE config still parses but the transport runtime is absent and config
+entries become no-ops. Communicates with BlueZ via D-Bus through the
+`bluer` crate.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -637,12 +661,107 @@ Static peer list. Each entry defines a peer to connect to.
 |-----------|------|---------|-------------|
 | `peers[].npub` | string | *(required)* | Peer's Nostr public key (npub-encoded) |
 | `peers[].alias` | string | *(none)* | Human-readable name for logging |
+| `peers[].addresses` | list | `[]` | Transport addresses for the peer. May be left empty (or omitted) when `via_nostr: true`, in which case the daemon resolves endpoints from the peer's Nostr advert at dial time. |
 | `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp`, `tcp`, `ethernet`, `tor`, or `ble` |
 | `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP/TCP: `"host:port"` (IP or DNS hostname). Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`). BLE: `"adapter/device_address"` (e.g., `"hci0/AA:BB:CC:DD:EE:FF"`). Tor: `".onion:port"` or `"host:port"` |
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
-| `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
+| `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual`. Note: `on_demand` and `manual` are reserved for future use; the only policy currently honored at runtime is `auto_connect`. |
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
 | `peers[].via_nostr` | bool | `false` | Append Nostr advert-derived endpoints after static addresses for this peer |
+
+## Gateway (`gateway.*`)
+
+The `gateway.*` block configures the optional `fips-gateway`
+service, which lets unmodified LAN hosts reach mesh destinations
+through DNS proxy + virtual-IP NAT (and, optionally, exposes
+LAN-side services back into the mesh through inbound port forwards).
+The gateway is a separate service from the FIPS daemon but reads the
+same `fips.yaml` file. The block is read only when `fips-gateway` is
+running; the `fips` daemon ignores it. Linux only — the field is
+gated behind `#[cfg(target_os = "linux")]`. For setup, see
+[../how-to/deploy-gateway.md](../how-to/deploy-gateway.md); for the
+end-to-end design, see
+[../design/fips-gateway.md](../design/fips-gateway.md).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gateway.enabled` | bool | `false` | Enable the gateway. Must be `true` for `fips-gateway` to start. |
+| `gateway.pool` | string | *(required)* | Virtual IPv6 pool CIDR (e.g., `"fd01::/112"`). Must not overlap with the FIPS mesh address space (`fd00::/8`) or any address space already in use on the LAN. The `/112` size yields 65 536 virtual IPs, which is the gateway's hard cap regardless of CIDR width. |
+| `gateway.lan_interface` | string | *(required)* | LAN-facing network interface name (e.g., `"enp3s0"`). Used for proxy-NDP entry installation so LAN clients can resolve the link-layer address of allocated virtual IPs. |
+| `gateway.pool_grace_period` | u64 | `60` | Seconds a virtual-IP allocation is retained after its last referencing session ends, before the address is returned to the free pool. Larger values reduce churn for short-lived flows; smaller values reclaim addresses faster. |
+
+### Gateway DNS (`gateway.dns.*`)
+
+Settings for the gateway's DNS listener and its upstream link to the
+FIPS daemon's `.fips` resolver. The gateway proxies `.fips` queries to
+the daemon's resolver, which returns mesh addresses; the gateway then
+allocates a virtual IP from the pool and rewrites the response.
+Non-`.fips` queries are answered with `REFUSED`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gateway.dns.listen` | string | `"[::]:53"` | LAN-facing DNS listen address. Bind on the LAN-side IP (e.g., `"192.168.1.1:53"`) or on all interfaces (`"[::]:53"`) for LAN clients to query. Bind to a non-53 port if another resolver already owns 53 on the host (see [../how-to/troubleshoot-gateway.md](../how-to/troubleshoot-gateway.md)). |
+| `gateway.dns.upstream` | string | `"[::1]:5354"` | Upstream FIPS daemon resolver. **Must match the daemon's `dns.bind_addr` and `dns.port`.** Defaults match the daemon defaults (`::1:5354`). A v4 upstream (`"127.0.0.1:5354"`) cannot reach a daemon bound on `[::1]:5354` — Linux IPv6 sockets bound to explicit `::1` do not accept v4-mapped traffic. If you change the daemon's `dns.bind_addr`, update this field accordingly. |
+| `gateway.dns.ttl` | u32 | `60` | TTL in seconds on AAAA responses returned to LAN clients. Smaller values let the gateway recycle pool addresses faster; larger values reduce LAN-side query traffic. |
+
+### Conntrack (`gateway.conntrack.*`)
+
+Linux conntrack timeout overrides for the gateway's NAT table. These
+adjust the kernel-default timeouts for NAT sessions installed by the
+gateway. All values are in seconds; omit any field to inherit the
+gateway's built-in default (which itself usually matches the kernel
+default for that protocol).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gateway.conntrack.tcp_established` | u64 | `432000` | TCP established-state timeout (5 days). Long-lived TCP flows (SSH, persistent HTTP) keep their NAT mapping alive for at least this long without traffic. |
+| `gateway.conntrack.udp_timeout` | u64 | `30` | UDP unreplied timeout. Applied until reply traffic is observed in the reverse direction. |
+| `gateway.conntrack.udp_assured` | u64 | `180` | UDP assured (bidirectional) timeout. Applied once reply traffic has been observed. |
+| `gateway.conntrack.icmp_timeout` | u64 | `30` | ICMP echo / error timeout. |
+
+### Inbound Port Forwards (`gateway.port_forwards[]`)
+
+Optional list of inbound port-forward rules. Each rule maps a TCP or
+UDP port on the gateway's `fips0` mesh-side address to a `host:port`
+on the LAN. Mesh peers connect to the gateway's mesh address on the
+listen port; the gateway terminates the connection and forwards the
+payload to the LAN target. This is the inverse of the outbound mode:
+the LAN service is exposed to the mesh, not the other way around. See
+[../how-to/deploy-gateway.md](../how-to/deploy-gateway.md) for the
+operator recipe.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gateway.port_forwards[].listen_port` | u16 | *(required)* | Port on `fips0` that mesh peers connect to. Must be non-zero. The `(listen_port, proto)` pair must be unique across the list. |
+| `gateway.port_forwards[].proto` | string | *(required)* | Transport protocol: `tcp` or `udp`. |
+| `gateway.port_forwards[].target` | string | *(required)* | LAN destination as IPv6 `[addr]:port` (e.g., `"[fd12:3456::10]:80"`). IPv4 targets are rejected at config-load time. |
+
+### Gateway Example
+
+A typical gateway with both outbound (LAN-to-mesh) and inbound
+(mesh-to-LAN) modes enabled:
+
+```yaml
+gateway:
+  enabled: true
+  pool: "fd01::/112"
+  lan_interface: "enp3s0"
+  dns:
+    listen: "[::]:53"
+    upstream: "[::1]:5354"
+    ttl: 60
+  pool_grace_period: 60
+  conntrack:
+    tcp_established: 432000
+    udp_assured: 180
+  port_forwards:
+    - listen_port: 8080
+      proto: tcp
+      target: "[fd12:3456::10]:80"
+    - listen_port: 5353
+      proto: udp
+      target: "[fd12:3456::10]:53"
+```
 
 ## Minimal Example
 
@@ -782,6 +901,7 @@ node:
     flap_dampening_secs: 120             # extended hold-down on flap
   bloom:
     update_debounce_ms: 500
+    max_inbound_fpr: 0.05            # antipoison cap on inbound FilterAnnounce FPR
   session:
     default_ttl: 64
     pending_packets_per_dest: 16
@@ -820,7 +940,7 @@ tun:
 
 dns:
   enabled: true
-  bind_addr: "127.0.0.1"
+  bind_addr: "::1"
   port: 5354
   ttl: 300
 
@@ -861,9 +981,10 @@ transports:
   #   # cookie_path: "/var/run/tor/control.authcookie"
   #   # directory mode (inbound via Tor-managed onion service):
   #   # directory_service:
-  #   #   hostname_file: "/var/lib/tor/fips/hostname"
-  #   #   bind_addr: "127.0.0.1:8444"
+  #   #   hostname_file: "/var/lib/tor/fips_onion_service/hostname"
+  #   #   bind_addr: "127.0.0.1:8443"
   #   # max_inbound_connections: 64
+  #   # advertised_port: 443           # public-facing onion port for Nostr adverts
   # ble:                              # uncomment to enable BLE transport (Linux only, requires BlueZ)
   #   adapter: "hci0"                 # HCI adapter name
   #   psm: 0x0085                     # L2CAP PSM (133)

@@ -225,8 +225,8 @@ The plaintext inside the encrypted frame begins with a 5-byte inner header
 (4-byte session-relative timestamp followed by a message type byte), then the
 message-specific payload.
 
-See [fips-wire-formats.md](fips-wire-formats.md) for the complete wire format
-specification.
+See [../reference/wire-formats.md](../reference/wire-formats.md) for
+the complete wire format specification.
 
 ### What Encryption Provides
 
@@ -306,7 +306,7 @@ Roaming addresses *mid-session* NAT rebinding. Establishing the initial UDP
 path through NAT is a separate concern, addressed by the optional
 Nostr-mediated overlay discovery and STUN-assisted hole punching feature
 (see [fips-transport-layer.md](fips-transport-layer.md) and
-[fips-configuration.md](fips-configuration.md)).
+[../reference/configuration.md](../reference/configuration.md)).
 
 ## Replay Protection
 
@@ -351,7 +351,9 @@ Additional protections:
   memory usage
 - **Handshake timeout**: Stale pending handshakes are cleaned up after a
   configurable timeout
-- **Allowlist/blocklist**: Optional peer filtering before handshake processing
+- **Peer ACL**: Optional allowlist / denylist filtering of peer npubs
+  before handshake processing (loaded from `/etc/fips/peers.allow` and
+  `/etc/fips/peers.deny`, mtime-watched and reloaded automatically)
 
 ## Disconnect
 
@@ -371,6 +373,73 @@ links.
 On node shutdown, Disconnect is sent to all active peers before transports are
 stopped.
 
+## Rekey
+
+FMP periodically negotiates a fresh Noise session over each established link
+to bound forward-secrecy exposure: limiting AEAD nonce reuse risk, bounding
+the volume of ciphertext recoverable from a stolen long-term static key, and
+rotating the session indices that addressed packets carry on the wire.
+
+A rekey is initiated when either threshold is reached on the link's current
+session: `node.rekey.after_secs` (default 120) elapsed since the link came
+up or last rekeyed, or `node.rekey.after_messages` (default 65536) frames
+sent. Either side can be the initiator independently. Rekey is on by
+default and can be disabled via `node.rekey.enabled: false` (the
+configuration tree is documented in
+[../reference/configuration.md](../reference/configuration.md)).
+
+### Mechanism
+
+A rekey reuses the Noise XX pattern of the initial handshake, but the
+three messages travel over the existing link as ordinary encrypted FMP
+frames rather than as plaintext bootstrap packets. The initiator builds
+a fresh `HandshakeState`, generates msg1, and sends it through the
+current session; the responder consumes msg1, builds msg2, and replies;
+the initiator then sends msg3. After both sides have exchanged messages
+and finalised the new keys, traffic transitions from the old session to
+the new one.
+
+Cutover is signalled in-band by the **K-bit** in the FMP flags byte. Each
+side starts emitting frames under the new session with K set; on receipt
+of the first K-marked frame the peer accepts the cutover and follows
+suit. A new pair of session indices is allocated as part of the new
+session, replacing the old indices on subsequent frames (see
+[Index Properties](#index-properties)).
+
+### Drain Window
+
+To absorb in-flight reordering across the cutover, the old session is not
+discarded immediately. Each peer retains it in a `previous_session` slot
+on the active-peer state for `DRAIN_WINDOW_SECS = 10` seconds (a
+compile-time constant in `src/node/handlers/rekey.rs`). During the
+window, decrypt attempts fall back to `previous_session` when the new
+session rejects a frame, so a packet sent under the old keys that
+arrives a few hundred milliseconds late still decrypts. After the
+window expires, the old session is dropped.
+
+### Dual-Initiation Race
+
+On high-latency links, both sides' rekey timers can fire close enough
+together that each peer's msg1 crosses the other in flight. Without
+arbitration, each side would act as both initiator and responder, end
+up with two different Noise sessions, and lose connectivity at cutover.
+FMP arbitrates with a deterministic tie-breaker: the peer with the
+**numerically smaller `NodeAddr`** wins the role of initiator and
+discards any inbound msg1 it sees during the race; the larger-`NodeAddr`
+peer abandons its own initiation and processes the inbound msg1 as
+responder. The same tie-breaker is applied to cross-connection races
+during initial handshake.
+
+### Operator Visibility
+
+Successful cutover is reported at INFO level on the K-bit observation;
+intermediate steps (handshake start, msg1/msg2 exchange, drain-window
+fallback decrypts) log at DEBUG/TRACE. Failures (handshake error,
+drain-window expiry without cutover) log at WARN.
+
+The end-to-end rekey at the session layer follows a parallel design;
+see [fips-session-layer.md](fips-session-layer.md).
+
 ## Liveness Detection
 
 FMP detects link liveness through a combination of explicit heartbeats and
@@ -378,8 +447,8 @@ traffic observation.
 
 ### Heartbeat
 
-A Heartbeat message (0x51) is sent to each active peer every
-`node.heartbeat_interval_secs` (default 10s). The heartbeat is a minimal
+A Heartbeat message (0x51) is sent to each active peer at a configurable
+interval (`node.heartbeat_interval_secs`). The heartbeat is a minimal
 encrypted frame with no payload beyond the standard inner header (timestamp +
 message type). Any successfully decrypted frame — data, gossip, MMP report,
 or heartbeat — resets the peer's last-receive timestamp tracked by the MMP
@@ -387,8 +456,8 @@ receiver.
 
 ### Dead Timeout
 
-When no traffic (of any kind) is received from a peer for
-`node.link_dead_timeout_secs` (default 30s), the peer is declared dead and
+When no traffic (of any kind) is received from a peer for the
+configured `node.link_dead_timeout_secs` window, the peer is declared dead and
 removed via `remove_active_peer()`. This triggers the full teardown cascade:
 spanning tree parent reselection (if the dead peer was the parent),
 TreeAnnounce propagation, coordinate cache flush, and bloom filter recompute.
@@ -396,150 +465,74 @@ TreeAnnounce propagation, coordinate cache flush, and bloom filter recompute.
 If the dead peer is eligible for auto-reconnect (see [Auto-Reconnect]
 (#auto-reconnect)), reconnection is scheduled immediately after removal.
 
-The heartbeat is independent of MMP — it is needed because idle links in
-Lightweight MMP mode have no guaranteed periodic traffic (gossip is
-event-driven, and MMP reports require at least one side running Full mode).
+The heartbeat is independent of MMP. Gossip is event-driven, Lightweight
+produces receiver reports only when traffic arrives, and Minimal emits no
+reports at all — so on a fully idle link no MMP-mode combination
+guarantees periodic activity. The heartbeat is the always-on liveness
+signal.
 
 ## Link Message Types
 
-FMP defines eight message types carried inside encrypted frames:
+FMP defines several encrypted message types carried inside the
+established-frame envelope. They group naturally by purpose:
 
-| Type | Name | Purpose |
-| ---- | ---- | ------- |
-| 0x10 | TreeAnnounce | Spanning tree state announcements between peers |
-| 0x20 | FilterAnnounce | Bloom filter reachability updates |
-| 0x30 | LookupRequest | Coordinate discovery — flood toward destination |
-| 0x31 | LookupResponse | Coordinate discovery — response with coordinates |
-| 0x00 | SessionDatagram | Encapsulated session-layer payload for forwarding |
-| 0x01 | SenderReport | MMP sender-side metrics report |
-| 0x02 | ReceiverReport | MMP receiver-side metrics report |
-| 0x50 | Disconnect | Orderly link teardown with reason code |
-| 0x51 | Heartbeat | Link liveness probe |
+- **Routing gossip**: TreeAnnounce carries spanning-tree announcements
+  between direct peers; FilterAnnounce carries bloom-filter
+  reachability updates between direct peers. Both are peer-to-peer
+  (not forwarded).
+- **Discovery**: LookupRequest is forwarded through tree peers under
+  bloom-filter guidance to find a destination's coordinates;
+  LookupResponse routes back to the requester via reverse-path lookup
+  in `recent_requests`.
+- **Forwarded payload**: SessionDatagram carries a session-layer
+  payload hop-by-hop toward the destination.
+- **Metrics**: SenderReport and ReceiverReport carry the link-layer
+  MMP report stream peer-to-peer.
+- **Liveness and lifecycle**: Heartbeat is a minimal frame sent
+  peer-to-peer to keep the link alive; Disconnect carries an orderly
+  teardown reason code peer-to-peer.
 
-Additionally, handshake messages (phase 0x1 msg1, phase 0x2 msg2) are sent
-unencrypted before the link session is established.
+Handshake messages (phase 0x1 msg1, phase 0x2 msg2) travel before
+encryption is established and are identified by the FMP common-prefix
+`phase` field rather than a `msg_type` byte.
 
-TreeAnnounce and FilterAnnounce are exchanged between direct peers only — they
-are not forwarded. LookupRequest and LookupResponse are forwarded through the
-mesh (flooded with deduplication). SessionDatagram is forwarded hop-by-hop
-toward the destination. Disconnect is peer-to-peer.
-
-See [fips-mesh-operation.md](fips-mesh-operation.md) for how these messages
-work together to build and maintain the mesh, and
-[fips-wire-formats.md](fips-wire-formats.md) for byte-level message layouts.
+See [../reference/wire-formats.md](../reference/wire-formats.md) for
+byte-level message layouts and the canonical FMP message type
+catalog, and [fips-mesh-operation.md](fips-mesh-operation.md) for how
+these messages work together to build and maintain the mesh.
 
 ## Metrics Measurement Protocol (MMP)
 
-Each active peer link runs an instance of the Metrics Measurement Protocol,
-providing per-link quality metrics to the operator and to the spanning tree
-layer for cost-based parent selection.
+MMP runs on every active link to provide per-link quality metrics
+(SRTT, loss, jitter, goodput, OWD trend, ETX) to the operator and to
+the spanning tree layer for cost-based parent selection. Reports are
+exchanged peer-to-peer between direct neighbors at RTT-adaptive
+intervals clamped to `[1s, 5s]`, with a 200 ms cold-start floor for
+the first five SRTT samples.
 
-### Metrics Tracked
+The CE (Congestion Experienced) bit in the FMP flags byte carries
+hop-by-hop ECN signaling: transit nodes detect congestion on outgoing
+links (via MMP loss/ETX or `SO_RXQ_OVFL` kernel drops) and set CE on
+forwarded packets, which the destination then mirrors to the IPv6
+Traffic Class for ECN-capable flows.
 
-MMP computes the following metrics from the per-frame counter and timestamp
-fields in the FMP wire format:
-
-- **SRTT** — Smoothed round-trip time (Jacobson/RFC 6298, α=1/8). Derived
-  from timestamp-echo in ReceiverReports with dwell-time compensation.
-- **Loss rate** — Bidirectional loss inferred from counter gaps. Tracked as
-  both instantaneous (per-interval) and long-term EWMA.
-- **Jitter** — Interarrival jitter (RFC 3550 algorithm) in microseconds.
-- **Goodput** — Bytes per second of payload data (excludes MMP reports).
-- **OWD trend** — One-way delay trend (µs/s, signed). Indicates congestion
-  buildup before loss occurs.
-- **ETX** — Expected Transmission Count, computed from bidirectional delivery
-  ratios. Used in cost-based parent selection via
-  `link_cost = etx * (1.0 + srtt_ms / 100.0)`; not yet used in
-  `find_next_hop()` candidate ranking.
-- **Dual EWMA trends** — Short-term (α=1/4) and long-term (α=1/32) trend
-  indicators for both RTT and loss, enabling change detection.
-
-### Operating Modes
-
-MMP supports three modes, configured via `node.mmp.mode`:
-
-| Mode | Reports Exchanged | Metrics Available |
-| ---- | ----------------- | ----------------- |
-| **Full** (default) | SenderReport + ReceiverReport | All metrics including RTT, loss, jitter, goodput, OWD trend |
-| **Lightweight** | ReceiverReport only | Loss (from counter gaps), jitter, OWD trend. No RTT. |
-| **Minimal** | None | CE echo flags only. No computed metrics. |
-
-### Report Scheduling
-
-Reports are sent at RTT-adaptive intervals, clamped to [100ms, 2s]. A
-cold-start interval of 500ms is used before SRTT converges. The interval
-formula is `clamp(2 × SRTT, 100ms, 2000ms)`.
-
-### RTT Measurement
-
-RTT is measured exclusively via timestamp-echo in ReceiverReports with
-dwell-time compensation.
-
-### ECN Congestion Signaling
-
-The CE (Congestion Experienced) flag (bit 1 in the FMP flags byte) provides
-hop-by-hop congestion signaling through the mesh. Transit nodes detect
-congestion on outgoing links and set CE on forwarded packets; once set, the
-flag stays set for all subsequent hops to the destination.
-
-**Congestion detection** (`detect_congestion()`) triggers on any of:
-
-- Outgoing link MMP loss rate ≥ `node.ecn.loss_threshold` (default 5%)
-- Outgoing link MMP ETX ≥ `node.ecn.etx_threshold` (default 3.0)
-- Kernel receive buffer drops detected on any local transport (via
-  `SO_RXQ_OVFL` on UDP)
-
-**CE relay**: The forwarding path computes `outgoing_ce = incoming_ce ||
-local_congestion`. The `send_encrypted_link_message_with_ce()` method ORs
-`FLAG_CE` into the FMP header flags when ce is true. The original
-`send_encrypted_link_message()` delegates with `ce_flag=false`, leaving the
-20+ existing call sites unchanged.
-
-**IPv6 ECN-CE marking**: When a CE-flagged DataPacket arrives at its final
-destination, the IPv6 Traffic Class ECN bits are marked CE (0b11) before
-TUN delivery — but only for ECN-capable packets (ECT(0) or ECT(1)). Not-ECT
-packets are never marked per RFC 3168. The host TCP stack then echoes ECE in
-ACKs, triggering sender cwnd reduction through standard congestion control.
-
-**Session-layer tracking**: The `ecn_ce_count` field in MMP ReceiverReports
-tracks CE-flagged packets received per link, providing end-to-end visibility
-into congestion propagation.
-
-**Monitoring**: `CongestionStats` tracks four counters — `ce_forwarded`,
-`ce_received`, `congestion_detected`, and `kernel_drop_events` — exposed via
-`fipsctl show routing` (congestion block) and `fipstop` (routing tab).
-Rate-limited warn logging (5s interval) alerts on congestion detection events.
-
-See `node.ecn.*` in
-[fips-configuration.md](fips-configuration.md#ecn-signaling-nodeecn) for
-tuning parameters.
-
-### Operator Logging
-
-MMP emits periodic link metrics at info level (configurable via
-`node.mmp.log_interval_secs`, default 30s):
-
-```text
-MMP link metrics peer=node-b rtt=2.3ms loss=0.2% jitter=0.1ms goodput=76.0MB/s tx_pkts=1234 rx_pkts=5678
-```
-
-Teardown logs include final SRTT, loss rate, jitter, ETX, goodput, and
-cumulative tx/rx packet and byte counts.
+For the full MMP design — operating modes, report scheduling, spin
+bit interaction, ECN, and the algorithmic details shared with
+session-layer MMP — see [fips-mmp.md](fips-mmp.md). For the
+SenderReport and ReceiverReport byte layouts, see
+[../reference/wire-formats.md](../reference/wire-formats.md).
+Configuration knobs live under `node.mmp.*` and `node.ecn.*` in
+[../reference/configuration.md](../reference/configuration.md).
 
 ## Security Properties
 
 ### Threat Resistance
 
-| Threat | Mitigation |
-| ------ | ---------- |
-| Connection exhaustion | Token bucket rate limit + connection count limit |
-| CPU exhaustion (msg1 flood) | Rate limit before crypto operations |
-| Replay attacks | Counter-based nonces with sliding window |
-| State confusion | Strict handshake state machine validation |
-| Spoofed encrypted packets | Index lookup + AEAD verification |
-| Spoofed msg2 | Index lookup + Noise ephemeral key binding |
-| Address spoofing | Cryptographic authority, not address-based |
-| Session correlation | Index rotation on rekey |
+The link-layer threat-resistance matrix (connection exhaustion, CPU
+exhaustion, replay, state confusion, spoofing variants, address
+spoofing, session correlation) is consolidated in
+[../reference/security.md](../reference/security.md) along with the
+session-layer matrix and operator-facing controls.
 
 ### Unauthenticated Attack Surface
 
@@ -586,13 +579,17 @@ an attacker sends invalid packets to elicit responses.
 | Metrics Measurement Protocol (MMP) | **Implemented** |
 | ECN congestion signaling (CE relay, IPv6 marking) | **Implemented** |
 | Rekey with index rotation | **Implemented** |
-| Allowlist/blocklist | Planned |
+| Peer ACL (allowlist / denylist) | **Implemented** |
 
 ## References
 
-- [fips-intro.md](fips-intro.md) — Protocol overview and architecture
+- [fips-concepts.md](fips-concepts.md) — Protocol overview
+- [fips-architecture.md](fips-architecture.md) — Layer architecture and
+  identity model
 - [fips-transport-layer.md](fips-transport-layer.md) — Transport layer (below FMP)
 - [fips-session-layer.md](fips-session-layer.md) — FSP (above FMP)
+- [fips-mmp.md](fips-mmp.md) — Metrics Measurement Protocol (link + session)
 - [fips-mesh-operation.md](fips-mesh-operation.md) — How FMP's routing and
   self-organization work in practice
-- [fips-wire-formats.md](fips-wire-formats.md) — Byte-level wire format reference
+- [../reference/wire-formats.md](../reference/wire-formats.md) — Byte-level
+  wire format reference

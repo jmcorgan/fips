@@ -9,15 +9,14 @@ For peers behind UDP NAT, the same relay channel carries an encrypted
 offer/answer exchange, and STUN supplies the reflexive address used for
 a coordinated hole-punch.
 
-The feature is compiled into FIPS by default on all supported platforms
-(Linux, macOS, Windows) and ships in every stock packaging artifact
+Nostr discovery is unconditionally compiled into the `fips` binary on
+every supported platform and ships in every stock packaging artifact
 (`.deb`, AUR, systemd tarball, OpenWrt `.ipk`, macOS `.pkg`, Windows
 `.zip`). It is runtime-opt-in: the YAML configuration defaults to
-disabled, so shipping the feature is a no-op until an operator enables
-it. When disabled, nodes behave exactly as before: only the static
-`peers[]` addresses are used. See
-[Build configuration](#build-configuration) for details on opting out
-at build time.
+disabled (`node.discovery.nostr.enabled: false`), so the discovery
+runtime stays dormant — and opens no relay connections — until an
+operator flips the flag and supplies a relay list. When disabled, nodes
+behave exactly as before: only the static `peers[]` addresses are used.
 
 ## Role
 
@@ -59,301 +58,27 @@ relay dependencies, STUN round-trips for NAT cases, and a small ambient
 background of relay traffic; none of that is useful when you already
 know where peers are.
 
-## Build configuration
-
-`nostr-discovery` is a default Cargo feature. Plain `cargo build
---release` produces a binary with the feature compiled in, and every
-stock packaging artifact under `packaging/` ships with it enabled.
-There is no extra `--features` flag to remember, on any platform.
-
-Shipping the feature is runtime-safe: Nostr discovery is **off by
-default in the YAML configuration**
-(`node.discovery.nostr.enabled: false` in every stock config). An
-operator opts in per-node by flipping the flag and providing a relay
-list; until then the feature is dormant and does not open connections
-to any relay.
-
-To build a binary **without** the feature — for example, to reduce
-the dependency footprint on a minimal build — use
-`--no-default-features`:
-
-```bash
-cargo build --release --no-default-features
-```
-
-The `nostr` and `nostr-sdk` crates are then omitted from the
-dependency tree entirely, and `node.discovery.nostr` config blocks
-fail at startup validation.
-
 ## Scenarios and configuration
 
-Each scenario below gives the minimal YAML fragment that enables it.
-Only keys relevant to Nostr discovery are shown; surrounding node,
-transport, TUN, DNS, and peer configuration follows the usual shape
-described in [fips-configuration.md](fips-configuration.md).
-
-All scenarios assume `node.identity` is set to a persistent key — an
-ephemeral identity would invalidate any advert the moment the node
-restarts.
-
-### Scenario 1: Advertise a directly-reachable UDP node
-
-The node has a public IP (or a stable port-forward) and binds UDP on a
-known port. It publishes `udp:host:port` to the advert relays. Any peer
-that knows this node's npub and has Nostr discovery enabled can dial it
-without knowing the address out-of-band.
-
-```yaml
-node:
-  identity:
-    persistent: true
-  discovery:
-    nostr:
-      enabled: true
-      advertise: true
-
-transports:
-  udp:
-    bind_addr: "0.0.0.0:2121"
-    advertise_on_nostr: true
-    public: true
-```
-
-What this achieves: the node publishes a single `udp:<public-ip>:2121`
-endpoint to the three default advert relays
-(`wss://relay.damus.io`, `wss://nos.lol`, `wss://offchain.pub`).
-
-What the other side needs: either a static `addresses` entry for this
-peer, or a peer entry with `via_nostr: true` and an empty (or omitted)
-`addresses` list — the advert-resolved endpoint will be used at dial
-time. Static and Nostr-resolved addresses can also be combined: when
-both are present, static addresses are tried first and Nostr-resolved
-endpoints are appended as fallback.
-
-### Scenario 2: Advertise a Tor onion node
-
-The node runs a Tor onion service in directory mode (Tor-managed
-`HiddenServiceDir`) and advertises the `.onion` address. Peers dial via
-their local Tor SOCKS5 proxy without ever knowing the onion string
-out-of-band.
-
-```yaml
-node:
-  identity:
-    persistent: true
-  discovery:
-    nostr:
-      enabled: true
-      advertise: true
-
-transports:
-  tor:
-    mode: directory
-    socks5_addr: "127.0.0.1:9050"
-    directory_service:
-      hostname_file: "/var/lib/tor/fips/hostname"
-      bind_addr: "127.0.0.1:8444"
-    advertise_on_nostr: true
-```
-
-What this achieves: the node publishes a `tor:<hash>.onion:8443`
-endpoint alongside any other advertised transports. The advert itself
-is still published over clearnet WebSocket relays — Tor protects the
-data plane, not the discovery plane. See
-[Security and threat model](#security-and-threat-model) for the trade-off.
-
-### Scenario 3: Lookup a configured peer by npub (no advertising)
-
-The node does not publish any advert of its own. It only consumes
-adverts for peers it has explicitly listed with `via_nostr: true`. This
-is the right shape for a client that wants Nostr-mediated resolution
-without becoming a rendezvous target itself.
-
-```yaml
-node:
-  identity:
-    persistent: true
-  discovery:
-    nostr:
-      enabled: true
-      advertise: false
-      policy: configured_only
-
-transports:
-  udp:
-    bind_addr: "0.0.0.0:2121"
-
-peers:
-  - npub: "npub1peer..."
-    alias: "remote-node"
-    addresses:
-      - transport: udp
-        addr: "203.0.113.45:2121"
-        priority: 10
-    via_nostr: true
-    connect_policy: auto_connect
-```
-
-What this achieves: on dial, the static address is tried first; if the
-peer has published a newer advert (for example, its public IP has
-changed), those addresses are appended as additional candidates.
-`configured_only` is the default — it is shown here for clarity.
-
-If you have no static address for the peer at all, omit `addresses`
-entirely (or leave it empty) — `via_nostr: true` is sufficient on its
-own and dial endpoints are taken from the advert.
-
-### Scenario 4: UDP NAT hole-punch with a configured peer
-
-Neither side has a stable public UDP endpoint. Both sides advertise
-`udp:nat`, run the STUN + offer/answer exchange, and punch through
-their NATs to establish a direct UDP link. This is the full
-NAT-traversal path.
-
-```yaml
-node:
-  identity:
-    persistent: true
-  discovery:
-    nostr:
-      enabled: true
-      advertise: true
-      dm_relays:
-        - "wss://relay.damus.io"
-        - "wss://nos.lol"
-      stun_servers:
-        - "stun:stun.l.google.com:19302"
-        - "stun:stun.cloudflare.com:3478"
-
-transports:
-  udp:
-    bind_addr: "0.0.0.0:2121"
-    advertise_on_nostr: true
-    public: false
-
-peers:
-  - npub: "npub1peer..."
-    alias: "nat-peer"
-    addresses:
-      - transport: udp
-        addr: "nat"
-        priority: 1
-    via_nostr: true
-    connect_policy: auto_connect
-    auto_reconnect: true
-```
-
-What this achieves: the node publishes a `udp:nat` endpoint plus its
-signaling relays and STUN server list in the advert. The peer side runs
-the same configuration. When either side initiates, an encrypted offer
-is sealed to the peer's npub, a matching answer comes back, and both
-sides punch at the negotiated time. On success, the punch socket is
-adopted as an FMP UDP transport and Noise IK proceeds normally.
-
-> **Validation:** `advertise_on_nostr: true` with `public: false` on UDP
-> requires both `dm_relays` and `stun_servers` to be non-empty. The
-> node fails startup with a config validation error if either list is
-> empty. This is enforced because a `udp:nat` advert without signaling
-> relays or STUN servers is unreachable by construction.
-
-Works best with full-cone NAT on at least one side. Symmetric NAT on
-both sides is not reliably traversable with this protocol and will time
-out after `punch_duration_ms`; fall back to a Tor or TCP transport in
-that case.
-
-### Scenario 5: Open discovery — no pre-configured peers
-
-Under `policy: open`, any node that publishes an advert under the same
-`app` namespace becomes a candidate. Discovered peers are queued for
-connection attempts subject to `open_discovery_max_pending`.
-
-```yaml
-node:
-  identity:
-    persistent: true
-  discovery:
-    nostr:
-      enabled: true
-      advertise: true
-      policy: open
-      open_discovery_max_pending: 32
-      app: "my-experiment.v1"
-
-transports:
-  udp:
-    bind_addr: "0.0.0.0:2121"
-    advertise_on_nostr: true
-    public: true
-
-peers: []
-```
-
-What this achieves: peers are discovered entirely through ambient advert
-traffic on the configured relays. Setting a non-default `app` value
-(replacing `fips-overlay-v1`) scopes the discovery set to participants
-who opt into the same experiment and avoids being joined to unrelated
-overlays that happen to share the default namespace.
-
-> **Scope warning:** Open discovery is an admission-free mode. Any node
-> that publishes on the same `app` name and passes the peer-ACL check
-> becomes a connection candidate. If you rely on peer ACLs for admission
-> control, verify that list is set correctly before enabling this mode.
-
-## Operational knobs
-
-All fields below live under `node.discovery.nostr.*`. Defaults are
-defined in `src/config/node.rs`.
-
-| Field | Type | Default | Purpose |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master switch. When false, the discovery runtime is not started. |
-| `advertise` | bool | `true` | If true, publish this node's own overlay advert. |
-| `advert_relays` | list | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used to publish and fetch overlay adverts (kind 37195). |
-| `dm_relays` | list | same as `advert_relays` | Relays used for encrypted offer/answer signaling (kind 21059). |
-| `stun_servers` | list | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used to observe the local reflexive address before a punch. Peer-advertised STUN values are not used. |
-| `share_local_candidates` | bool | `false` | If true, include this node's RFC 1918 / ULA interface addresses as host candidates in the traversal offer. Off by default — sharing private host candidates is only useful when peers are on the same physical LAN, and tends to cause misleading punch successes when an asymmetric L3 path (corporate VPN, Tailscale subnet route, overlapping address space) makes a peer's private IP one-way reachable. Enable per-node only when same-LAN punching is wanted. |
-| `app` | string | `"fips-overlay-v1"` | Application namespace. Included in the advert identifier; only peers with the same value cross-resolve. |
-| `policy` | enum | `configured_only` | Advert consumption policy: `disabled`, `configured_only`, or `open`. |
-| `signal_ttl_secs` | u64 | `120` | TTL on the encrypted offer/answer events. Also caps the wait for an answer. |
-| `advert_ttl_secs` | u64 | `3600` | NIP-40 expiration set on this node's published advert. |
-| `advert_refresh_secs` | u64 | `1800` | Interval between re-publishes. Must be less than `advert_ttl_secs`. |
-| `attempt_timeout_secs` | u64 | `10` | Overall timeout for a single punch attempt (STUN + signal + punch). |
-| `punch_start_delay_ms` | u64 | `2000` | Delay between receiving the answer and sending the first punch packet. Gives the remote side time to arrive at the same point. |
-| `punch_interval_ms` | u64 | `200` | Gap between successive punch probes. |
-| `punch_duration_ms` | u64 | `10000` | How long to keep probing before declaring the attempt failed. |
-| `replay_window_secs` | u64 | `300` | How long a session id stays in the replay-detection cache. |
-| `max_concurrent_incoming_offers` | usize | `16` | Semaphore cap on inbound offers being processed simultaneously. Excess offers are dropped with a warn log. |
-| `advert_cache_max_entries` | usize | `2048` | Max cached peer adverts (LRU by expiry). |
-| `seen_sessions_max_entries` | usize | `2048` | Max tracked session ids for replay detection. |
-| `open_discovery_max_pending` | usize | `64` | Max peers queued for connection attempts under `policy: open`. |
-
-The per-transport keys are:
-
-| Key | Type | Where | Default | Purpose |
-| --- | --- | --- | --- | --- |
-| `advertise_on_nostr` | bool | `transports.{udp,tcp,tor}` | `false` | Include this transport's endpoint in the overlay advert. |
-| `public` | bool | `transports.udp` | `false` | When `advertise_on_nostr` is true: `true` publishes `udp:host:port`, `false` publishes `udp:nat`. |
-| `via_nostr` | bool | `peers[]` | `false` | Append advert-resolved endpoints to this peer's dial list. |
-
-## Validation rules at startup
-
-The following combinations are rejected with `ConfigError::Validation`:
-
-- Any transport sets `advertise_on_nostr: true` while
-  `node.discovery.nostr.enabled` is `false` or absent.
-- Any peer sets `via_nostr: true` while
-  `node.discovery.nostr.enabled` is `false` or absent.
-- A UDP transport sets `advertise_on_nostr: true` with `public: false`
-  (a `udp:nat` advert) but `dm_relays` is empty.
-- A UDP transport sets `advertise_on_nostr: true` with `public: false`
-  but `stun_servers` is empty.
+For end-to-end operator recipes — each of the five activation scenarios
+(advertise a directly-reachable UDP node, advertise a Tor onion node,
+look up a configured peer by npub without advertising, NAT hole-punch
+between two configured peers, and open discovery within an `app`
+namespace) — see
+[../how-to/enable-nostr-discovery.md](../how-to/enable-nostr-discovery.md).
+The full configuration knob tables, per-transport keys, and startup
+validation rules live in
+[../reference/configuration.md](../reference/configuration.md) under
+`node.discovery.nostr.*`. The Kind 37195 advert event format is in
+[../reference/nostr-events.md](../reference/nostr-events.md). The rest
+of this document covers the design of the discovery runtime itself.
 
 ## Under the covers
 
 The rest of this document describes how the feature works inside the
-node. For the on-the-wire event format and NIP references, see the
-protocol reference at
-[../proposals/nostr-udp-hole-punch-protocol.md](../proposals/nostr-udp-hole-punch-protocol.md).
+node. For the generic protocol shape (event tags, NIP usage, on-the-
+wire offer/answer schema, failure-suppression machinery), see
+[port-advertisement-and-nat-traversal.md](port-advertisement-and-nat-traversal.md).
 
 ### Overview
 
@@ -403,32 +128,18 @@ configuration and by connection attempts made by the rest of the node.
 Adverts are published as Nostr kind `37195` parameterized replaceable
 events (FIPS-specific, in the application-defined replaceable range
 `30000–39999`; the digits visually spell `FIPS` — 7=F, 1=I, 9=P, 5=S).
-The `d` tag is set to the `app` value (default `fips-overlay-v1`), so
-each node has a single, in-place-updatable advert under its identity.
-The event is signed with the node's FIPS identity key; there is no
-separate Nostr key. A NIP-40 `expiration` tag is set to now +
-`advert_ttl_secs`.
-
-The advert content is a JSON document shaped as `OverlayAdvert`:
-
-```json
-{
-  "identifier": "fips-overlay-v1",
-  "version": 1,
-  "endpoints": [
-    {"transport": "udp", "addr": "203.0.113.45:2121"},
-    {"transport": "tor", "addr": "xxxxx.onion:8443"},
-    {"transport": "udp", "addr": "nat"}
-  ],
-  "signalRelays": ["wss://relay.damus.io", "wss://nos.lol"],
-  "stunServers": ["stun:stun.l.google.com:19302"]
-}
-```
-
-`signalRelays` and `stunServers` are only present when at least one
-endpoint is `udp:nat`; for advert shapes that cannot involve punching
-they are omitted to reduce advert size and keep the relay and STUN
-lists private to the nodes that need them.
+The `d` tag is hardcoded to the wire-format identifier
+`fips-overlay-v1` (or `fips-overlay-v1-next` on the `next` branch),
+so each node has a single, in-place-updatable advert under its
+identity. The configurable `app` value populates a separate
+`protocol` tag, which scopes adverts within a relay set without
+splitting them across multiple `d`-tag streams. The event is signed
+with the node's FIPS identity key; there is no separate Nostr key. A
+NIP-40 `expiration` tag is set to now + `advert_ttl_secs`, and a
+`version` tag carries the protocol version. The advert content is a
+JSON document shaped as `OverlayAdvert` (see
+[../reference/nostr-events.md](../reference/nostr-events.md) for the
+schema).
 
 Publication happens on startup, again whenever the set of advertised
 endpoints changes (for example, when a Tor onion hostname first
@@ -438,13 +149,23 @@ deleted using a NIP-9 kind 5 delete event. Advert publication is
 fan-out: the same event is sent to every relay in `advert_relays` with
 no explicit failover — relay redundancy is implicit.
 
+For a UDP or TCP transport with `public: true`, the address advertised
+follows a fixed precedence: an operator-supplied `external_addr` wins;
+otherwise a non-wildcard bound `local_addr` is used directly;
+otherwise — only for UDP — the runtime asks `stun_servers` for the
+reflexive address of the bound socket and advertises that. TCP has no
+STUN equivalent, so wildcard-bound TCP without `external_addr`
+produces a loud WARN and the endpoint is omitted from the advert.
+
 ### Phase 2 — Lookup
 
 When the node decides to dial a peer that is eligible for Nostr
 resolution (a `via_nostr` peer, or any peer under `policy: open`), it
 issues a Nostr REQ filtered by `author = peer_pubkey`, `kind = 37195`,
-`#d = <app>`. The fetch is time-bounded (~2 s) and runs against all
-configured `advert_relays` in parallel. The first valid advert wins.
+`#d = fips-overlay-v1`. The fetch is time-bounded (~2 s) and runs
+against all configured `advert_relays` in parallel. The first valid
+advert wins; adverts whose `protocol` tag does not match the local
+`app` value are rejected at validation.
 
 Results are kept in an in-memory cache keyed by author npub. Cache
 entries carry the advert's expiration time; a periodic prune drops
@@ -477,7 +198,7 @@ The initiator performs STUN first (see Phase 4), then builds a
 
 The offer is sealed to the recipient's npub and published to the peer's
 preferred signaling relays — the node first tries to resolve the peer's
-NIP-65 inbox relay list (kind 10002), and falls back to `dm_relays` if
+NIP-17 DM relay list (kind 10050), and falls back to `dm_relays` if
 the inbox-relays fetch fails. Each side also publishes its own inbox
 relay list on startup so dialers can discover it.
 
@@ -542,7 +263,7 @@ carrying the session id, the punch socket, and the learned remote
 address. `adopt_established_traversal()` in the node lifecycle takes
 the socket, registers it with the UDP transport layer as a new
 transport instance, and calls `initiate_connection()` with the peer's
-FIPS identity as the expected remote. FMP's Noise IK handshake runs on
+FIPS identity as the expected remote. FMP's Noise XX handshake runs on
 the same socket — there is no "promote link" step between punch and
 handshake; the punch socket *is* the FMP socket.
 
@@ -580,11 +301,22 @@ machinery:
 | Signal TTL (`signal_ttl_secs`) | 120 s | Indefinite in-flight offers on relays. | Expired offers rejected at validation. |
 | Open discovery queue (`open_discovery_max_pending`) | 64 | Unbounded retry queue under ambient advert load. | New candidates skipped until the queue drains. |
 | Punch window (`punch_duration_ms`) | 10 s | Endless probe traffic after one side has given up. | Attempt declared failed; sockets discarded. |
+| Failure-streak threshold (`failure_streak_threshold`) | 5 | Repeated traversal attempts against a peer that keeps failing. | Peer enters extended cooldown. |
+| Extended cooldown (`extended_cooldown_secs`) | 1800 s | Tight retry loops after a failure streak. | Per-peer suppression for the cooldown window. |
+| WARN log throttle (`warn_log_interval_secs`) | 300 s | Log floods from a peer that fails on every attempt. | One WARN per peer per interval; the rest demote to debug. |
+| Failure-state cap (`failure_state_max_entries`) | 4096 | Memory growth from per-peer failure tracking. | LRU eviction. |
 
-Only one of these (`max_concurrent_incoming_offers`) is a load-shedding
-mechanism — the rest are capacity bounds. The load-shedding threshold
-is deliberately conservative so that a misbehaving relay cannot flood
-the node with offers fast enough to starve legitimate traffic.
+The load-shedding mechanisms (`max_concurrent_incoming_offers` and the
+failure-streak / extended-cooldown pair) are deliberately conservative
+so that a misbehaving relay cannot flood the node with offers and a
+chronically unreachable peer cannot keep the traversal pipeline
+saturated. The remaining rows are capacity bounds.
+
+Adverts also undergo a stale-advert sweep: cached entries whose
+`expiresAt` has passed are evicted on the periodic prune tick. Inbound
+signaling tolerates ±60 s of clock skew between sender and receiver,
+and the runtime maintains an NTP-style skew estimate per remote so
+that consistently-skewed relays don't trip the freshness check.
 
 ### Relay model
 
@@ -595,12 +327,12 @@ relay selection. Redundancy is implicit — a downed relay simply means
 its copy of the advert or signal is unavailable, while other relays
 still serve the same data.
 
-For signaling specifically, the node prefers the recipient's NIP-65
-inbox relays when available (the recipient publishes its inbox list as
-a kind 10002 event to its own DM relays on startup) and falls back to
+For signaling specifically, the node prefers the recipient's NIP-17
+DM relays when available (the recipient publishes its DM relay list as
+a kind 10050 event to its own DM relays on startup) and falls back to
 the local `dm_relays` list otherwise. This keeps the common case
 off the sender's DM relays when those are different from the
-recipient's, at the cost of one extra NIP-65 fetch per offer.
+recipient's, at the cost of one extra NIP-17 fetch per offer.
 
 There is no per-relay rate limiting or health check. The relay model
 assumes that an operator chooses relays they trust to be best-effort
@@ -640,20 +372,35 @@ semaphore and replay-cache layers downstream.
   non-default `app` value to scope visibility.
 - **Nothing about discovery bypasses FMP.** A successful punch yields
   a UDP socket with a claimed remote identity. That identity is not
-  trusted until FMP's Noise IK handshake completes. A peer whose
+  trusted until FMP's Noise XX handshake completes. A peer whose
   advert says "I am npub X at 1.2.3.4:5678" but whose FMP handshake
   presents a different static key is rejected at the mesh layer.
 
 ## See also
 
-- [fips-configuration.md](fips-configuration.md) — full configuration
-  reference, including all surrounding keys elided from the scenarios
-  above.
+- [../how-to/enable-nostr-discovery.md](../how-to/enable-nostr-discovery.md)
+  — operator activation recipes grouped under three capabilities
+  (resolve, advertise, open) across five scenarios.
+- [../tutorials/resolve-peers-via-nostr.md](../tutorials/resolve-peers-via-nostr.md),
+  [../tutorials/advertise-your-node.md](../tutorials/advertise-your-node.md),
+  and [../tutorials/open-discovery.md](../tutorials/open-discovery.md)
+  — hand-held walkthroughs of the three capabilities, in
+  pedagogical order.
+- [../reference/configuration.md](../reference/configuration.md) — full
+  configuration reference, including all surrounding keys elided from
+  the scenarios above.
+- [../reference/nostr-events.md](../reference/nostr-events.md) — Kind
+  37195 (overlay advert), Kind 21059 (gift-wrapped traversal
+  signaling), Kind 10050 (NIP-17 inbox relay list).
+- [../reference/security.md](../reference/security.md) — consolidated
+  security reference, including how the FIPS identity key signs both
+  adverts and Noise handshakes.
 - [fips-transport-layer.md](fips-transport-layer.md) — UDP, TCP, and
   Tor transport mechanics; the punch socket is adopted as a normal
   UDP transport after handoff.
-- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP Noise IK handshake
+- [fips-mesh-layer.md](fips-mesh-layer.md) — FMP Noise XX handshake
   that runs on the adopted socket.
-- [../proposals/nostr-udp-hole-punch-protocol.md](../proposals/nostr-udp-hole-punch-protocol.md)
-  — protocol-level reference for event tags, NIP usage, and the
-  on-the-wire offer/answer schema.
+- [port-advertisement-and-nat-traversal.md](port-advertisement-and-nat-traversal.md)
+  — generic protocol reference (event tags, NIP usage, on-the-wire
+  offer/answer schema, failure-suppression machinery), with the
+  FIPS-specific values called out as worked examples.
