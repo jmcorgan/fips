@@ -113,6 +113,40 @@ ip6 saddr {
 Set syntax keeps multi-node rules readable and is more efficient than a
 chain of individual rules.
 
+## Verify with fipstop
+
+`fipstop`'s Node tab carries a **Listening on fips0** panel
+(right-half of the Traffic block) that pairs each local IPv6
+listener with its current baseline-filter classification. After
+adding or editing a drop-in and reloading, this is the fastest
+way to confirm the rule landed correctly without manually
+parsing `nft list table inet fips`.
+
+| Panel state | Reading |
+| ----------- | ------- |
+| Service row in **default White** with `OPEN` in the State column | The chain has a canonical, unrestricted accept rule for this (proto, port). The service is reachable from any mesh node. |
+| Service row in **DarkGray** with `filt` | No matching accept rule; the chain falls through to `counter drop`. The service is not reachable from the mesh. |
+| Service row in **DarkGray** with `filt?` | A rule references the port but uses matchers the panel cannot fully decompose (saddr filter, jump, daddr filter). The intent is operator-defined; inspect with `sudo nft list table inet fips` to see the actual rule. |
+| **Yellow banner** above the panel: "fips-firewall.service inactive — all listeners exposed" | The `inet fips` table is not loaded. Every listener is mesh-reachable (subject only to whatever ACL you have at the peer layer). |
+
+A common workflow when extending the baseline is to keep `fipstop`
+open on the Node tab in one terminal while editing
+`/etc/fips/fips.d/` in another. After each
+`sudo systemctl reload-or-restart fips-firewall.service`, the panel
+re-classifies on the next poll tick and the affected row's State
+column flips. A row staying `filt` after you expected `OPEN`
+usually means the drop-in failed to load (syntax error in any file
+under `/etc/fips/fips.d/` aborts the whole reload) or carries a
+saddr filter that triggers `filt?` rather than `OPEN`.
+
+The classifier is conservative: it recognizes only the canonical
+unrestricted shapes (`tcp dport N accept`, `udp dport N accept`,
+`dport { ... } accept`, `dport A-B accept`). Source-restricted
+accepts intentionally render as `filt?` rather than `OPEN` —
+the panel is a security screen, and any rule that varies by
+source is an operator decision the panel will not silently bless
+as fully open.
+
 ## Inspect drops
 
 The baseline counter increments on every dropped packet. Inspect it:

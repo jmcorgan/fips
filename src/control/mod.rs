@@ -9,6 +9,8 @@
 //! - Windows: Uses a TCP socket on localhost (see commit 3)
 
 pub mod commands;
+pub mod firewall_state;
+pub mod listening;
 pub mod protocol;
 pub mod queries;
 

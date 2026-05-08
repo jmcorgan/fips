@@ -65,6 +65,17 @@ fn fetch_data(
         }
     }
 
+    // Listening-on-fips0 panel — fetched only while the Node tab is
+    // active (it's the only place the data is rendered). Errors are
+    // non-fatal: an old daemon without the query just leaves the
+    // payload at None and the panel hides.
+    if app.active_tab == Tab::Node {
+        match rt.block_on(client.query("show_listening_sockets")) {
+            Ok(data) => app.listening_sockets = Some(data),
+            Err(_) => app.listening_sockets = None,
+        }
+    }
+
     // Gateway tab uses a separate socket
     if app.active_tab == Tab::Gateway {
         match rt.block_on(gateway_client.query("show_gateway")) {

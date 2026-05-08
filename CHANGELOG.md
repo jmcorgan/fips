@@ -279,6 +279,20 @@ with v0.2.x peers.
   `fipsctl stats` subcommands, and a `fipstop` Graphs tab with
   btop-style sparklines
   ([#64](https://github.com/jmcorgan/fips/pull/64)).
+- `fipstop` Node tab now carries a "Listening on fips0" panel
+  (right-half of the Traffic block) that lists local IPv6 listening
+  sockets reachable from the mesh interface, paired with the
+  `inet fips` baseline filter classification for each (proto, port).
+  Rows render in default White (`OPEN` — the chain has a canonical
+  unrestricted accept rule), DarkGray (`filt` — chain falls through
+  to `counter drop`), or DarkGray with a `?` State suffix (`filt?` —
+  the chain references the port but with matchers the panel cannot
+  fully decompose, e.g. saddr filters or jumps). When the
+  `fips-firewall.service` is not active, the panel renders a yellow
+  banner reminding the operator that all listeners are
+  mesh-exposed. Wildcard binds (`local_addr == ::`) carry a `*`
+  suffix in the Process column. Powered by a new
+  `show_listening_sockets` control query (Linux-only).
 
 #### Packaging and Deployment
 
@@ -413,11 +427,15 @@ with v0.2.x peers.
   `fipstop` could connect to a socket the daemon never bound (notably
   on dev runs with `XDG_RUNTIME_DIR` set, or after a prior packaged
   install left a root-owned `/run/fips` behind). Canonical order is
-  `/run/fips` → `$XDG_RUNTIME_DIR/fips/` → `/tmp/fips-<name>`, with
-  writability of `/run/fips` probed via tempfile create (ACL- and
-  group-aware) and `XDG_RUNTIME_DIR` validated as an existing
-  directory before being used. The deployed fleet is unaffected:
-  packaged configs set `node.control.socket_path` explicitly.
+  `/run/fips` → `$XDG_RUNTIME_DIR/fips/` → `/tmp/fips-<name>`. The
+  `/run/fips` arm is selected by directory existence; the kernel
+  enforces actual access at `connect(2)` time, surfacing a clear
+  `EACCES` for users not yet in the `fips` group rather than silently
+  steering them to a path the daemon never bound. `XDG_RUNTIME_DIR` is
+  validated as an existing directory before being used so stale
+  post-logout values are treated as missing. The deployed fleet is
+  unaffected: packaged configs set `node.control.socket_path`
+  explicitly.
 - UDP transport with `advertise_on_nostr: true` + `public: true` +
   a wildcard `bind_addr` (e.g. `0.0.0.0:2121`) is now advertised
   with its STUN-discovered public IPv4 instead of being silently

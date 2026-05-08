@@ -42,6 +42,7 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.21.0"
 rustables = "0.8.7"
+procfs = { version = "0.18", default-features = false }
 
 # bluer/BlueZ needs glibc — see build.rs `bluer_available` cfg gate.
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]

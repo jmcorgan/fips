@@ -210,6 +210,9 @@ pub struct App {
     pub gateway_running: bool,
     /// Mappings data fetched from the gateway (separate from summary).
     pub gateway_mappings: Option<serde_json::Value>,
+    /// `show_listening_sockets` payload for the Node-tab "Listening on
+    /// fips0" panel; refreshed each tick alongside `show_status`.
+    pub listening_sockets: Option<serde_json::Value>,
     /// Scroll offset (rows) for the stacked Graphs tab.
     pub graphs_scroll: u16,
     /// Selected (window, granularity) index for the Graphs tab.
@@ -243,6 +246,7 @@ impl App {
             selected_tree_item: SelectedTreeItem::None,
             gateway_running: false,
             gateway_mappings: None,
+            listening_sockets: None,
             graphs_scroll: 0,
             graphs_window_idx: 1, // default 10m
             graphs_mode: GraphsMode::Node,

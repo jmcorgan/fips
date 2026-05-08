@@ -189,6 +189,16 @@ server.
 > verified is reachability *from another mesh node*. That is
 > the next concern.
 
+If you have `fipstop` available, open it now in another terminal
+and switch to the **Node** tab. The right-half of the Traffic
+block — the **Listening on fips0** panel — should list a `tcp`
+row at port 8080 with a `python(<pid>)` Process column. The State
+column reads `OPEN` because the firewall has not been turned on
+yet; everything bound to `fips0` is currently mesh-reachable. The
+yellow banner above the panel says
+"fips-firewall.service inactive — all listeners exposed". Both
+signals will flip in the next two steps.
+
 ## Step 4: Reachability from a mesh node
 
 Any mesh node — a direct peer, or a node several hops away —
@@ -277,6 +287,13 @@ inbound on `fips0` hits the final `counter ... drop`.
 > TCP SYN dropped before it can reach your server. From the
 > remote end the connection times out.
 
+The fipstop panel reflects the change immediately: the yellow
+"firewall inactive" banner disappears, the panel title becomes a
+plain "Listening on fips0", and your `tcp 8080 python(<pid>)` row
+flips to **DarkGray** with `filt` in the State column. Every
+other row also goes DarkGray — none of them have an explicit
+accept rule yet, and the chain falls through to `counter drop`.
+
 So the firewall is in the right shape but in the wrong state
 for our purpose: we *want* mesh nodes to reach port 8080. The
 next step opens that one port.
@@ -316,6 +333,18 @@ path is: remote node's mesh data plane → forwarded across the
 mesh → your direct peer's link to you → `fips0` ingress →
 `inbound` chain → matches `tcp dport 8080 accept` → delivered
 to the HTTP server.
+
+In the fipstop panel, your `tcp 8080 python(<pid>)` row flips
+back to **default White** with `OPEN` in the State column on the
+next poll tick. No other row changes — they remain DarkGray
+`filt` because you have only opened this one port. The panel
+doubles as a security screen for the rest of the tutorial: any
+service whose row reads `OPEN` is mesh-reachable, anything
+DarkGray is filtered. If you later add a saddr-restricted
+drop-in (covered just below), the row will land at `filt?`
+rather than `OPEN`, signalling that the rule exists but is
+source-scoped — the panel deliberately does not classify
+restricted accepts as fully open.
 
 If you only want to expose the service to a *specific* node
 or set of nodes, source-filter the rule. The address filter
@@ -386,7 +415,10 @@ sudo systemctl disable --now fips-firewall.service
   opts in to one audience; binding to wildcard
   (`0.0.0.0` / `[::]`) opts in to *all* of them, including
   ones you forgot you had. For mesh-only exposure, bind to
-  your `fd97:...` address.
+  your `fd97:...` address. The fipstop **Listening on fips0**
+  panel marks wildcard binds with a trailing `*` after the
+  process name as a reminder that the bind is not
+  fips0-specific.
 - **Same-host loopback is misleading.** A local curl to your
   own `fd97:...` address goes via the loopback path, not
   through `fips0` ingress. To actually verify mesh-side
@@ -442,6 +474,14 @@ its own port — same `--bind` rule, same drop-in shape.
   mesh node attempts to reach a port you have not opened,
   `sudo nft list table inet fips` will show the counter
   packet count rising.
+- **Use fipstop to spot-check listener and filter state.** The
+  Listening on fips0 panel on the Node tab shows every
+  fips0-reachable listener and its current filter state. A row
+  staying `filt` after you expected `OPEN` usually means the
+  drop-in failed to load (a syntax error in any file under
+  `/etc/fips/fips.d/` aborts the whole reload, leaving the
+  previous ruleset in place) or the drop-in carries a source
+  filter and now reads `filt?` rather than `OPEN`.
 
 ## What's next
 

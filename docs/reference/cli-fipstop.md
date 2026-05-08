@@ -36,7 +36,7 @@ query on its first activation and on every refresh tick while active.
 
 | Tab | Query | Shows |
 | --- | ----- | ----- |
-| **Node** | `show_status` | Identity, version, uptime, peer/link/session counts, sparklines for mesh size, tree depth, peer count, bytes, loss. |
+| **Node** | `show_status` (+ `show_listening_sockets`) | Identity, version, uptime, peer/link/session counts, sparklines for mesh size, tree depth, peer count, bytes, loss. The Traffic block on this tab is split: TUN counters on the left, the **Listening on fips0** panel on the right (see below). |
 | **Peers** | `show_peers` (+ `show_links`, `show_transports` cross-refs) | Authenticated peers in a table. Selecting a row and pressing Enter opens a detail view. |
 | **Transports** | `show_transports` (+ `show_links`, `show_peers` cross-refs) | Tree of transport instances with per-link children when expanded. |
 | **Sessions** | `show_sessions` | End-to-end FSP sessions. |
@@ -51,6 +51,38 @@ The cycle order in the UI is: Node → Peers → Transports → Sessions →
 Tree → Filters → Performance → Routing → Graphs → Gateway. The Links
 and Cache tabs are not in the cycle but are fetched as cross-references
 to populate Peers, Transports, and Routing detail views.
+
+## Listening on fips0 panel (Node tab)
+
+The right half of the Node tab's Traffic block lists local IPv6
+listening sockets reachable from `fips0`, paired with the current
+`inet fips` baseline filter classification for each (proto, port).
+The panel exists to remind the operator which local services are
+exposed to the mesh and which of those are admitted by the
+default-deny firewall.
+
+| Column | Meaning |
+| ------ | ------- |
+| **Proto** | `tcp` or `udp`. IPv4 listeners are not enumerated; `fips0` is IPv6-only. |
+| **Port** | Listening port number. |
+| **Process** | `comm(pid)` resolved by walking `/proc/<pid>/fd/`. A trailing `*` marks wildcard binds (`local_addr == ::`) — the bind is not fips0-specific, so the operator sees that the service is exposed across every interface, not just the mesh. |
+| **State** | `OPEN` (default White) — the baseline filter has a canonical accept rule for this (proto, port). `filt` (DarkGray) — chain falls through to `counter drop`. `filt?` (DarkGray) — a rule references the port but uses matchers (saddr filter, jump, daddr) the panel cannot fully decompose; operator should `nft list table inet fips` to confirm. |
+
+When `fips-firewall.service` is **not** active, the `inet fips`
+table is absent. The panel renders every row in default White and
+replaces the title with a yellow banner reading
+"`Listening on fips0  fips-firewall.service inactive — all listeners exposed`".
+
+The panel is read-only and unselectable. It refreshes on the same
+poll tick as the rest of the Node tab. Sockets owned by other users
+that the daemon could not resolve to a PID render as `?` in the
+Process column; this only happens if the daemon itself is running
+without root privileges (an unusual dev setup), since walking
+`/proc/<pid>/fd/` for processes the daemon does not own requires
+elevated capabilities.
+
+The panel is Linux-only; on non-Linux daemons the query returns an
+empty list and the panel hides.
 
 ## Keybindings
 

@@ -93,33 +93,30 @@ pub fn pub_file_path(config_path: &Path) -> PathBuf {
 /// Resolve a default Unix-socket path under the canonical order:
 /// `/run/fips/<filename>` → `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
 ///
-/// `/run/fips` is the packaged convention (`root:fips 0770` directory created
-/// by the daemon at bind time). `XDG_RUNTIME_DIR` covers non-root dev runs
-/// where `/run/fips` does not exist or is not writable. `/tmp` is the
-/// last-resort fallback.
+/// `/run/fips` is the packaged convention (`root:fips 0770` directory
+/// created by the daemon at bind time, or by the postinst script).
+/// `XDG_RUNTIME_DIR` covers dev runs where `/run/fips` does not exist.
+/// `/tmp` is the last-resort fallback.
 ///
-/// Hardening notes:
-/// - `/run/fips` is accepted only if the directory exists and is writable by
-///   the current process. `create_dir_all` reporting `Ok(())` is *not*
-///   sufficient: it returns `Ok` for an existing root-owned dir that we
-///   cannot write to, which would silently steer a non-root daemon onto a
-///   path that fails at bind time. Writability is probed via tempfile create
-///   rather than mode bits so ACLs and group membership (the dir is
-///   `root:fips 0770`) are honored.
-/// - `XDG_RUNTIME_DIR` is validated as an existing directory before being
-///   used; a stale post-logout value (after `pam_systemd` reaps the dir) is
-///   treated as missing.
+/// Selection is by *existence*, not writability. A fips-group member
+/// whose shell session has not picked up the supplementary group (no
+/// re-login after `usermod -aG fips`) cannot tempfile-probe a
+/// `root:fips 0770` directory but can still connect to a socket inside
+/// it once the kernel checks the actual group at `connect(2)` time —
+/// and even where the user genuinely cannot connect, surfacing an
+/// `EACCES` from the socket call is clearer than silently steering
+/// fipstop / fipsctl to a path the daemon never bound. The daemon's
+/// own bind code (`ControlSocket::bind`) creates `/run/fips` if it is
+/// missing, so the resolver does not need to materialize the directory
+/// itself.
+///
+/// `XDG_RUNTIME_DIR` is validated as an existing directory before being
+/// used; a stale post-logout value (after `pam_systemd` reaps the dir)
+/// is treated as missing.
 #[cfg(unix)]
 pub(crate) fn resolve_default_socket(filename: &str) -> String {
-    // 1. /run/fips — accept only if the directory exists and is writable.
-    let run_fips = Path::new("/run/fips");
-    if run_fips.is_dir() && is_writable_dir(run_fips) {
-        return format!("/run/fips/{filename}");
-    }
-    // Also accept /run/fips if we can create it (covers the first-boot
-    // daemon-as-root case before the directory has been materialized). The
-    // actual chown happens at bind time.
-    if std::fs::create_dir_all(run_fips).is_ok() && is_writable_dir(run_fips) {
+    // 1. /run/fips — preferred whenever the directory exists.
+    if Path::new("/run/fips").is_dir() {
         return format!("/run/fips/{filename}");
     }
 
@@ -135,21 +132,6 @@ pub(crate) fn resolve_default_socket(filename: &str) -> String {
     // 3. Last resort: /tmp with a name-mangled prefix so multiple users
     //    don't collide.
     format!("/tmp/fips-{filename}")
-}
-
-#[cfg(unix)]
-fn is_writable_dir(path: &Path) -> bool {
-    // Probe via tempfile creation rather than mode bits: mode-bit checks miss
-    // ACLs and group-membership effects (the /run/fips dir is `root:fips
-    // 0770` and the daemon may run as a user that's in the `fips` group).
-    let probe = path.join(format!(".fips-write-probe-{}", std::process::id()));
-    match std::fs::File::create(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 /// Default control socket path for fipsctl / fipstop.
@@ -1564,8 +1546,11 @@ peers:
     #[cfg(unix)]
     #[test]
     fn test_resolve_default_socket_xdg_when_no_run_fips() {
-        // With /run/fips unwritable (non-root tests) and XDG_RUNTIME_DIR
-        // pointing at an existing directory, the resolver picks XDG.
+        // With /run/fips absent and XDG_RUNTIME_DIR pointing at an
+        // existing directory, the resolver picks XDG. On test hosts where
+        // /run/fips happens to exist (a real fips deployment), the
+        // resolver legitimately picks /run/fips and skips XDG entirely;
+        // both outcomes are accepted below.
         let _g = ENV_MUTEX.lock().unwrap();
 
         let temp_dir = TempDir::new().unwrap();
@@ -1601,7 +1586,9 @@ peers:
     #[test]
     fn test_resolve_default_socket_tmp_when_xdg_invalid() {
         // With XDG_RUNTIME_DIR pointing at a non-existent directory and
-        // /run/fips unwritable, the resolver falls through to /tmp.
+        // /run/fips absent, the resolver falls through to /tmp. On hosts
+        // where /run/fips exists, the resolver legitimately picks it
+        // first; both outcomes are accepted below.
         let _g = ENV_MUTEX.lock().unwrap();
 
         let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
