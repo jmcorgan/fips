@@ -40,7 +40,7 @@ tun = { version = "0.8.7", features = ["async"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.20.0"
+rtnetlink = "0.21.0"
 rustables = "0.8.7"
 
 # bluer/BlueZ needs glibc — see build.rs `bluer_available` cfg gate.
