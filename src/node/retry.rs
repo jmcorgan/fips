@@ -4,7 +4,7 @@
 //! automatically retry with exponential backoff. Retry state lives on Node
 //! (not PeerConnection) because each retry creates a fresh connection.
 
-use super::Node;
+use super::{Node, NodeError};
 use crate::PeerIdentity;
 use crate::config::PeerConfig;
 use crate::identity::NodeAddr;
@@ -301,6 +301,20 @@ impl Node {
                         error = %e,
                         "Retry connection initiation failed"
                     );
+                    // No-transport failures usually mean the cached overlay
+                    // advert is stale (peer rebound NAT, switched relay, etc.).
+                    // The advert cache is read-only inside fetch_advert, so
+                    // every retry returns the same dead address until the
+                    // entry expires. Force a re-fetch so the next retry tick
+                    // picks up fresh endpoints.
+                    if matches!(e, NodeError::NoTransportForType(_))
+                        && let Some(bootstrap) = self.nostr_discovery.clone()
+                    {
+                        let npub = peer_config.npub.clone();
+                        tokio::spawn(async move {
+                            let _ = bootstrap.refetch_advert_for_stale_check(&npub).await;
+                        });
+                    }
                     // Immediate failure counts as an attempt — schedule next retry
                     // (reconnect flag is preserved on existing retry_pending entry)
                     self.schedule_retry(node_addr, now_ms);

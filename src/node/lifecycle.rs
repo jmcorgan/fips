@@ -79,6 +79,19 @@ impl Node {
                 if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_config.npub) {
                     self.schedule_retry(*peer_identity.node_addr(), Self::now_ms());
                 }
+                // No-transport failures most often mean the cached overlay
+                // advert is pointing at a dead post-NAT-rebind address. The
+                // advert cache is read-only inside fetch_advert, so retries
+                // would loop on the same dead address until expiry. Force a
+                // re-fetch so the next retry tick picks up fresh endpoints.
+                if matches!(e, crate::node::NodeError::NoTransportForType(_))
+                    && let Some(bootstrap) = self.nostr_discovery.clone()
+                {
+                    let npub = peer_config.npub.clone();
+                    tokio::spawn(async move {
+                        let _ = bootstrap.refetch_advert_for_stale_check(&npub).await;
+                    });
+                }
             }
         }
     }
