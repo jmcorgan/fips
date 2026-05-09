@@ -412,6 +412,11 @@ impl Drop for UdpTransport {
 }
 
 /// UDP receive loop - runs as a spawned task.
+///
+/// On Linux, drains the kernel UDP queue in 32-packet bursts via `recvmmsg`
+/// to amortise the per-syscall + per-task-wakeup overhead. macOS / Windows
+/// fall through to single-packet `recv_from`. Either way every datagram
+/// is forwarded to `packet_tx` in arrival order.
 async fn udp_receive_loop(
     socket: AsyncUdpSocket,
     transport_id: TransportId,
@@ -419,66 +424,129 @@ async fn udp_receive_loop(
     mtu: u16,
     stats: Arc<UdpStats>,
 ) {
-    // Buffer with headroom for slightly oversized packets
-    let mut buf = vec![0u8; mtu as usize + 100];
-
     debug!(transport_id = %transport_id, "UDP receive loop starting");
 
-    loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, remote_addr, kernel_drops)) => {
-                stats.record_recv(len);
-                stats.set_kernel_drops(kernel_drops as u64);
+    #[cfg(target_os = "linux")]
+    {
+        const BATCH: usize = 32;
+        let buf_size = mtu as usize + 100;
+        // One contiguous backing alloc; slice it for recvmmsg.
+        let mut backing: Vec<Vec<u8>> = (0..BATCH).map(|_| vec![0u8; buf_size]).collect();
+        let mut addrs: [Option<std::net::SocketAddr>; BATCH] = std::array::from_fn(|_| None);
+        let mut lens: [usize; BATCH] = [0; BATCH];
 
-                // Drop stray punch probes / acks. After bootstrap-handoff
-                // adopts a socket, the remote side may keep retrying its
-                // own punch attempt for several seconds; those probes
-                // arrive here and would otherwise be parsed as FMP frames
-                // (their first byte 0x4E has high-nibble 0x4 → bogus
-                // "FMP version 4" warnings).
-                if is_punch_packet(&buf[..len]) {
-                    trace!(
-                        transport_id = %transport_id,
-                        remote_addr = %remote_addr,
-                        bytes = len,
-                        "Dropping stray punch probe/ack on UDP transport"
-                    );
-                    continue;
+        loop {
+            // Build mutable slice references for the syscall layer.
+            // Drawing from a single `iter_mut()` keeps the borrows disjoint
+            // without `MaybeUninit`/`transmute`.
+            let mut bufs: [&mut [u8]; BATCH] = {
+                let mut iter = backing.iter_mut();
+                std::array::from_fn(|_| iter.next().unwrap().as_mut_slice())
+            };
+
+            match socket.recv_batch(&mut bufs, &mut addrs, &mut lens).await {
+                Ok((count, kernel_drops)) => {
+                    stats.set_kernel_drops(kernel_drops as u64);
+                    for i in 0..count {
+                        let len = lens[i];
+                        let Some(remote_addr) = addrs[i] else {
+                            continue;
+                        };
+                        stats.record_recv(len);
+
+                        let buf = &backing[i][..len];
+                        if is_punch_packet(buf) {
+                            trace!(
+                                transport_id = %transport_id,
+                                remote_addr = %remote_addr,
+                                bytes = len,
+                                "Dropping stray punch probe/ack on UDP transport"
+                            );
+                            continue;
+                        }
+
+                        let data = buf.to_vec();
+                        let addr = TransportAddr::from_string(&remote_addr.to_string());
+                        let packet = ReceivedPacket::new(transport_id, addr, data);
+
+                        trace!(
+                            transport_id = %transport_id,
+                            remote_addr = %remote_addr,
+                            bytes = len,
+                            "UDP packet received"
+                        );
+
+                        if packet_tx.send(packet).await.is_err() {
+                            debug!(
+                                transport_id = %transport_id,
+                                "Packet channel closed, stopping receive loop"
+                            );
+                            return;
+                        }
+                    }
                 }
-
-                let data = buf[..len].to_vec();
-                let addr = TransportAddr::from_string(&remote_addr.to_string());
-                let packet = ReceivedPacket::new(transport_id, addr, data);
-
-                trace!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    bytes = len,
-                    "UDP packet received"
-                );
-
-                if packet_tx.send(packet).await.is_err() {
-                    // Receiver dropped, exit loop
-                    debug!(
+                Err(e) => {
+                    stats.record_recv_error();
+                    warn!(
                         transport_id = %transport_id,
-                        "Packet channel closed, stopping receive loop"
+                        error = %e,
+                        "UDP receive error"
                     );
-                    break;
                 }
-            }
-            Err(e) => {
-                stats.record_recv_error();
-                // Log error but continue - transient errors are expected
-                warn!(
-                    transport_id = %transport_id,
-                    error = %e,
-                    "UDP receive error"
-                );
             }
         }
     }
 
-    debug!(transport_id = %transport_id, "UDP receive loop stopped");
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut buf = vec![0u8; mtu as usize + 100];
+
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((len, remote_addr, kernel_drops)) => {
+                    stats.record_recv(len);
+                    stats.set_kernel_drops(kernel_drops as u64);
+
+                    if is_punch_packet(&buf[..len]) {
+                        trace!(
+                            transport_id = %transport_id,
+                            remote_addr = %remote_addr,
+                            bytes = len,
+                            "Dropping stray punch probe/ack on UDP transport"
+                        );
+                        continue;
+                    }
+
+                    let data = buf[..len].to_vec();
+                    let addr = TransportAddr::from_string(&remote_addr.to_string());
+                    let packet = ReceivedPacket::new(transport_id, addr, data);
+
+                    trace!(
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        bytes = len,
+                        "UDP packet received"
+                    );
+
+                    if packet_tx.send(packet).await.is_err() {
+                        debug!(
+                            transport_id = %transport_id,
+                            "Packet channel closed, stopping receive loop"
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    stats.record_recv_error();
+                    warn!(
+                        transport_id = %transport_id,
+                        error = %e,
+                        "UDP receive error"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
