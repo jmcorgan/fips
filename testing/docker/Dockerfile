@@ -39,6 +39,11 @@ RUN printf '%s\n' \
 COPY fips fipsctl fipstop fips-gateway /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop /usr/local/bin/fips-gateway
 
+# Mirror systemd's RuntimeDirectory=fips so the daemon's resolver picks
+# /run/fips/control.sock — matches production layout and the chaos sim
+# harness probe path (testing/chaos/sim/control.py).
+RUN mkdir -p /run/fips
+
 # Static web page for HTTP server (chaos/static modes)
 RUN printf 'Fuck IPs!\n' > /root/index.html
 

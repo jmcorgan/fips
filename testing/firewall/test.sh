@@ -238,7 +238,7 @@ fi
 # ── Drop-counter sanity ────────────────────────────────────────────────
 log "Drop counter incremented (case a should have ticked it)"
 DROP_PKTS="$(docker exec "$CONTAINER_B" nft list table inet fips \
-    | awk '/counter packets/ {print $3; exit}')"
+    | awk '/counter packets/ && !seen { print $3; seen=1 }')"
 if [ -z "${DROP_PKTS:-}" ] || [ "$DROP_PKTS" -lt 1 ]; then
     fail "drop counter is $DROP_PKTS — case (a) should have produced drops"
 fi
