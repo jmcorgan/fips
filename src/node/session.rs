@@ -14,6 +14,15 @@ use crate::noise::{HandshakeState, NoiseSession};
 use secp256k1::PublicKey;
 
 /// State machine for an end-to-end session.
+///
+/// `Established` is intentionally larger than the handshake variants:
+/// `NoiseSession` carries ring's `LessSafeKey` (×2, send + recv), each of
+/// which embeds the precomputed Poly1305 key + per-implementation AEAD
+/// state. That precomputation is exactly the win — it lets the per-packet
+/// AEAD skip key derivation and dispatch straight to NEON / AVX. Boxing
+/// the variant would add an allocation per session and double-indirection
+/// on every encrypt/decrypt, working against that win.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum EndToEndState {
     /// We initiated: sent SessionSetup with Noise XK msg1, awaiting SessionAck.
     Initiating(HandshakeState),

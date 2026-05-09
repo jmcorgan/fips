@@ -1056,7 +1056,6 @@ version = "0.3.0-dev"
 dependencies = [
  "bech32",
  "bluer",
- "chacha20poly1305",
  "clap",
  "criterion",
  "dirs",
@@ -1070,6 +1069,7 @@ dependencies = [
  "procfs",
  "rand 0.10.1",
  "ratatui",
+ "ring",
  "rtnetlink",
  "rustables",
  "secp256k1 0.30.0",
