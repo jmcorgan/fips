@@ -247,11 +247,14 @@ impl Node {
                 .unwrap_or(0);
 
             let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
+            // recompute_coords may demote to self_root if the new path would be
+            // invalid; sign AFTER recompute so the signature covers the final
+            // declaration.
+            self.tree_state.recompute_coords();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after parent switch");
                 return;
             }
-            self.tree_state.recompute_coords();
             self.coord_cache.clear();
             self.reset_discovery_backoff();
 
@@ -273,6 +276,25 @@ impl Node {
             self.send_tree_announce_to_all().await;
 
             // Tree structure changed — trigger bloom filter exchange with all peers
+            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+            self.bloom_state.mark_all_updates_needed(all_peers);
+        } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
+            // Self is the smallest visible NodeAddr — promote to root rather
+            // than continuing to advertise a stale ancestry rooted elsewhere.
+            self.tree_state.become_root();
+            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                warn!(error = %e, "Failed to sign self-root declaration");
+                return;
+            }
+            self.coord_cache.clear();
+            self.reset_discovery_backoff();
+            self.stats_mut().tree.parent_switched += 1;
+            self.stats_mut().tree.parent_switches += 1;
+            info!(
+                new_root = %self.tree_state.root(),
+                "Self-promoted to root: smallest visible NodeAddr"
+            );
+            self.send_tree_announce_to_all().await;
             let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
             self.bloom_state.mark_all_updates_needed(all_peers);
         } else if !self.tree_state.is_root()
@@ -328,11 +350,11 @@ impl Node {
                 .unwrap_or(0);
 
             self.tree_state.set_parent(*from, new_seq, timestamp);
+            self.tree_state.recompute_coords();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after parent update");
                 return;
             }
-            self.tree_state.recompute_coords();
             self.coord_cache.clear();
             self.reset_discovery_backoff();
 
@@ -418,11 +440,11 @@ impl Node {
                 .unwrap_or(0);
 
             let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
+            self.tree_state.recompute_coords();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
                 return;
             }
-            self.tree_state.recompute_coords();
             self.coord_cache.clear();
             self.reset_discovery_backoff();
 
@@ -444,6 +466,24 @@ impl Node {
 
             self.send_tree_announce_to_all().await;
 
+            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+            self.bloom_state.mark_all_updates_needed(all_peers);
+        } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
+            self.tree_state.become_root();
+            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                warn!(error = %e, "Failed to sign self-root declaration in periodic reeval");
+                return;
+            }
+            self.coord_cache.clear();
+            self.reset_discovery_backoff();
+            self.stats_mut().tree.parent_switched += 1;
+            self.stats_mut().tree.parent_switches += 1;
+            info!(
+                new_root = %self.tree_state.root(),
+                trigger = "periodic",
+                "Self-promoted to root in periodic reeval: smallest visible NodeAddr"
+            );
+            self.send_tree_announce_to_all().await;
             let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
             self.bloom_state.mark_all_updates_needed(all_peers);
         }

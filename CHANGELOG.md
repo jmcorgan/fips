@@ -338,6 +338,45 @@ with v0.2.x peers.
 
 ### Changed
 
+- Linux UDP receive path uses `recvmmsg(2)` with a 32-packet batch
+  in place of single-packet `recvmsg(2)`. A single `readable()`
+  wakeup drains up to 32 datagrams in one syscall before yielding
+  back to the reactor, eliminating the per-packet scheduler-hop +
+  futex cost that previously capped inbound rate at one event per
+  scheduler quantum independent of CPU. `SO_RXQ_OVFL` is sampled
+  once per batch from the cmsg chain of `msgs[0]` and surfaced
+  through `AsyncUdpSocket::recv_batch` so the 1Hz
+  `sample_transport_congestion()` detector continues to feed the
+  per-transport `dropping` flag. macOS / Windows fall through to
+  the per-packet path; `recvmmsg` is Linux-specific
+  ([#81](https://github.com/jmcorgan/fips/pull/81),
+  [@mmalmi](https://github.com/mmalmi))
+- `Node::run_rx_loop` drains up to 256 additional ready items via
+  `try_recv()` after each `tokio::select!` await fires on
+  `packet_rx` / `tun_outbound_rx`, in a tight inner loop before
+  yielding. Previously the select cost a full scheduler hop +
+  futex per packet, capping throughput at one event per scheduler
+  quantum with the worker near-idle. `biased` ordering keeps
+  data-plane branches priority over tick / control / DNS under
+  sustained load; the 256 cap is empirically tuned to keep the
+  worker on a busy stream between yield points (≈ 400 KB of
+  contiguous traffic) while still bounding the inner loop so a
+  flood on one branch can't starve the periodic tick or control
+  socket. Pairs with the UDP `recvmmsg` change above
+  ([#81](https://github.com/jmcorgan/fips/pull/81),
+  [@mmalmi](https://github.com/mmalmi))
+- `PeerIdentity::pubkey_full()` now precomputes the parity-aware
+  full public key at construction in `from_pubkey`. Previously the
+  method fell through to a secp256k1 EC point parse (`fe_sqrt` +
+  `fe_mul` + `ge_set_xo_var`) on every call when the full key
+  wasn't passed at construction (i.e. for every peer constructed
+  from an npub or x-only key) — ~6% of per-packet CPU on the
+  bulk-data send path for a value that never changed after
+  construction. The same EC point parse already runs at
+  construction inside `NodeAddr::from_pubkey`, so the cost is paid
+  once where it would be paid anyway
+  ([#81](https://github.com/jmcorgan/fips/pull/81),
+  [@mmalmi](https://github.com/mmalmi))
 - Cargo feature flags `tui`, `ble`, `gateway`, and
   `nostr-discovery` removed; subsystem inclusion is now driven by
   platform `cfg` gates so plain `cargo build` compiles everything
@@ -422,6 +461,84 @@ with v0.2.x peers.
 
 ### Fixed
 
+- Adopted NAT-traversed UDP transports inherit the primary listener's
+  MTU and buffer config. `Node::adopt_established_traversal`
+  constructed the adopted UDP transport with `UdpConfig::default()`
+  (MTU 1280, default recv/send buffer sizes, default accept/advertise
+  flags) regardless of the operator's primary `[transports.udp]`
+  listener. Operators who set the primary MTU higher (e.g. 1500 on
+  a known-clean LAN path) silently dropped full-sized tunnel
+  datagrams over the NAT-traversed link with no log explaining why
+  throughput collapsed. Lookup now tries `transport_name` first (so
+  multiple named listeners pick up inheritance from the matching
+  one) and falls back to the unnamed `Single` listener; bind /
+  external-address fields are cleared since the adopted socket is
+  already bound. The 1280 default was deliberately the IPv6 minimum
+  (the only value guaranteed across arbitrary middlebox paths);
+  with this change, operators who raise the primary MTU accept the
+  tradeoff that NAT-traversed flows initially attempt the higher
+  MTU and may black-hole on tighter paths until reactive
+  `MtuExceeded` recovery kicks in
+  ([#83](https://github.com/jmcorgan/fips/pull/83),
+  [@mmalmi](https://github.com/mmalmi))
+- TreeAnnounce ancestry on self-root transitions. When a node had
+  no smaller-NodeAddr peer to use as a parent, the spanning-tree
+  state correctly promoted it to root, but the ancestry it
+  advertised on the next `TreeAnnounce` still referenced its
+  previous parent's path. Receiving peers rejected the announce
+  with `invalid ancestry: advertised root X is not the minimum
+  path entry Y`, blocking mesh transit on any path that needed to
+  traverse the node. The self-root transition is now detected
+  explicitly in `TreeState::become_root` and the advertised
+  ancestry rebuilt to start from self. The MMP receive handler
+  surfaces the same path so stale ancestry inherited across
+  reconnect is corrected eagerly rather than waiting for the next
+  observation tick
+  ([#82](https://github.com/jmcorgan/fips/pull/82),
+  [@mmalmi](https://github.com/mmalmi))
+- Auto-connect retry refetches the cached overlay advert
+  unconditionally before each retry attempt, not only when
+  `fetch_advert` returns zero endpoints (`NoTransportForType`).
+  The much more common stale-cache failure was: cache returned an
+  endpoint that *looked* valid (the address learned before the
+  peer's NAT rebound), the dial succeeded at the IP layer, the
+  handshake timed out, MMP fired, the next retry hit the same
+  cached endpoint, looped forever — no `NoTransportForType` ever
+  fired because the cache had data, just dead data. Refetch now
+  runs unconditionally before each retry attempt (one Filter query
+  against `advert_relays` with a 2s per-attempt timeout, bounded
+  by the retry backoff cadence). Keeps the retry loop pinned to
+  relay ground truth instead of whatever the cache happened to
+  learn at startup
+  ([#82](https://github.com/jmcorgan/fips/pull/82),
+  [@mmalmi](https://github.com/mmalmi))
+- Stale overlay-advert eviction on `NoTransportForType`. Mirrors
+  the existing stale-advert sweep that ran from the
+  `BootstrapEvent::Failed` (NAT-traversal-streak) path, but covers
+  the case where `initiate_peer_connection` / a retry tick returns
+  `NodeError::NoTransportForType` — the cache had no addresses for
+  the peer at all. A fire-and-forget `refetch_advert_for_stale_check`
+  against the peer's npub re-fetches kind `37195` from
+  `advert_relays`; if the relay has a newer advert it replaces the
+  cached entry, if it has nothing it evicts the entry. Either way
+  the next retry tick goes to fresh data instead of looping on the
+  same dead endpoint. Resolves a deployment regression where a
+  macOS daemon's view of a Linux peer would flap after NAT rebind
+  with no recovery short of a daemon restart
+  ([#82](https://github.com/jmcorgan/fips/pull/82),
+  [@mmalmi](https://github.com/mmalmi))
+- Schedule retry on startup peer-init failure. When
+  `initiate_peer_connections()` ran at boot, an address-resolution
+  failure (no operational transport for the configured transport
+  types, all addresses unreachable, NAT rebind invalidating cached
+  endpoints) was logged and silently forgotten — the peer entry
+  stayed in a dead state forever, accepting incoming pings but
+  unable to answer them, until the daemon was manually restarted.
+  Now mirrors the `BootstrapEvent::Failed` path: on a startup
+  peer-init error, parse the peer's npub and call `schedule_retry`
+  so the peer recovers without operator intervention
+  ([#82](https://github.com/jmcorgan/fips/pull/82),
+  [@mmalmi](https://github.com/mmalmi))
 - Default control-socket path resolution: daemon and client tools now
   use a shared resolver, eliminating a divergence where `fipsctl` /
   `fipstop` could connect to a socket the daemon never bound (notably

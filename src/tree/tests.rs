@@ -581,6 +581,89 @@ fn test_handle_parent_lost_finds_alternative() {
 }
 
 #[test]
+fn test_handle_parent_lost_becomes_root_when_self_smaller_than_remaining() {
+    // Regression: self (NodeAddr 1) had peer 0 as parent. Peer 0 disappears,
+    // leaving only peers with bigger NodeAddrs (and bigger roots). The old
+    // evaluate_parent() picked one of them — recompute_coords() then
+    // produced [self, peer, ..., peer_root] where last (peer_root) > min
+    // (self), an ancestry that recipients reject as
+    // "advertised root X is not the minimum path entry Y". This is the
+    // bug seen in production where ubuntu-dev (3847a4..) advertised itself
+    // as root while its path still contained mac (312c79..).
+    let my_node = make_node_addr(1); // our addr is the smallest
+    let mut state = TreeState::new(my_node);
+
+    let smaller = make_node_addr(0);
+    let bigger1 = make_node_addr(2);
+    let bigger2 = make_node_addr(3);
+
+    // Initially: peer 0 (smaller) is our parent.
+    state.update_peer(
+        ParentDeclaration::self_root(smaller, 1, 1000),
+        make_coords(&[0]),
+    );
+    // Bigger peers exist, both rooted at themselves (no smaller node visible
+    // through them).
+    state.update_peer(
+        ParentDeclaration::self_root(bigger1, 1, 1000),
+        make_coords(&[2]),
+    );
+    state.update_peer(
+        ParentDeclaration::self_root(bigger2, 1, 1000),
+        make_coords(&[3]),
+    );
+
+    state.set_parent(smaller, 2, 2000);
+    state.recompute_coords();
+    assert_eq!(state.my_coords().entries().len(), 2);
+    assert_eq!(state.root(), &smaller);
+
+    // Smaller peer disconnects.
+    state.remove_peer(&smaller);
+    let changed = state.handle_parent_lost(&HashMap::new());
+    assert!(changed);
+
+    // Must become root (we're the smallest visible), NOT pick bigger1/bigger2.
+    assert!(
+        state.is_root(),
+        "must self-root when no smaller peer remains"
+    );
+    assert_eq!(state.root(), &my_node);
+    assert_eq!(state.my_coords().entries().len(), 1);
+
+    // The resulting ancestry must be valid: last == min.
+    let entries = state.my_coords().entries();
+    let min = entries.iter().map(|e| e.node_addr).min().unwrap();
+    assert_eq!(*state.my_coords().root_id(), min);
+}
+
+#[test]
+fn test_recompute_coords_demotes_when_self_smaller_than_parent_root() {
+    // Defensive: even if set_parent is called with a parent whose root is
+    // bigger than us (e.g., a stale evaluate_parent decision in some legacy
+    // path), recompute_coords must produce a valid ancestry by demoting to
+    // self-root rather than emit [self, peer, peer_root] with last > min.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node);
+
+    let bigger_peer = make_node_addr(7);
+    state.update_peer(
+        ParentDeclaration::self_root(bigger_peer, 1, 1000),
+        make_coords(&[7]),
+    );
+
+    state.set_parent(bigger_peer, 2, 2000);
+    state.recompute_coords();
+
+    assert!(state.is_root(), "recompute_coords demoted to self-root");
+    assert_eq!(state.root(), &my_node);
+    assert_eq!(state.my_coords().entries().len(), 1);
+    let entries = state.my_coords().entries();
+    let min = entries.iter().map(|e| e.node_addr).min().unwrap();
+    assert_eq!(*state.my_coords().root_id(), min);
+}
+
+#[test]
 fn test_handle_parent_lost_becomes_root() {
     let my_node = make_node_addr(5);
     let mut state = TreeState::new(my_node);

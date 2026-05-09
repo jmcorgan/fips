@@ -29,6 +29,13 @@ mod platform {
     use std::os::unix::io::{AsRawFd, RawFd};
     use tokio::io::unix::AsyncFd;
 
+    /// Maximum number of datagrams a single recvmmsg / sendmmsg syscall
+    /// will pull from / push to the kernel. Tuned to amortise syscall +
+    /// per-task-wakeup overhead across a useful burst without blowing
+    /// the stack (each slot owns an mmsghdr + sockaddr_storage + iovec).
+    #[cfg(target_os = "linux")]
+    const BATCH_SIZE: usize = 32;
+
     /// Wrapper around a `socket2::Socket` providing sync send/recv with
     /// `SO_RXQ_OVFL` ancillary data parsing.
     pub struct UdpRawSocket {
@@ -232,6 +239,11 @@ mod platform {
         /// Returns `(bytes_read, source_addr, kernel_drops)`. The `kernel_drops`
         /// value is a cumulative counter since socket creation; it is 0 if
         /// `SO_RXQ_OVFL` is not supported.
+        ///
+        /// On Linux the production receive path uses `recv_batch` (recvmmsg);
+        /// this single-packet variant remains for non-Linux unix targets and
+        /// for the local `tests` module.
+        #[cfg_attr(target_os = "linux", allow(dead_code))]
         pub fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr, u32)> {
             let fd = self.inner.as_raw_fd();
 
@@ -287,6 +299,98 @@ mod platform {
             Ok((n as usize, addr, drops))
         }
 
+        /// Receive up to `BATCH_SIZE` datagrams in a single recvmmsg syscall
+        /// (Linux only — macOS falls through to per-packet recvmsg).
+        ///
+        /// Returns `(count, kernel_drops)`. Caller pre-sizes `bufs` (each
+        /// must be at least the configured MTU) and the matching `addrs` /
+        /// `lens` slices; on return, slots `[0..count)` are valid.
+        ///
+        /// `kernel_drops` is the `SO_RXQ_OVFL` cumulative counter sampled
+        /// from the cmsg chain of the FIRST datagram in the batch. The
+        /// counter is monotonic per-socket since `SO_RXQ_OVFL` was enabled,
+        /// so a single sample per batch is sufficient to feed the 1Hz
+        /// congestion detector in `sample_transport_congestion()`. Returns
+        /// `(0, 0)` on a spurious wakeup with no datagrams ready.
+        #[cfg(target_os = "linux")]
+        pub fn recv_batch(
+            &self,
+            bufs: &mut [&mut [u8]],
+            addrs: &mut [Option<SocketAddr>],
+            lens: &mut [usize],
+        ) -> std::io::Result<(usize, u32)> {
+            let n = bufs.len().min(addrs.len()).min(lens.len()).min(BATCH_SIZE);
+            if n == 0 {
+                return Ok((0, 0));
+            }
+            let fd = self.inner.as_raw_fd();
+
+            // CMSG buffer wired to msgs[0] only. SO_RXQ_OVFL delivers a
+            // monotonic u32 drop counter; sampling once per batch gives
+            // the 1Hz congestion detector ample fresh values under load
+            // (one batch = up to 32 datagrams).
+            const CMSG_BUF_SIZE: usize = unsafe { libc::CMSG_SPACE(4) } as usize;
+            let mut cmsg_buf = [0u8; CMSG_BUF_SIZE];
+
+            // Stack-allocated parallel arrays; lifetime tied to this call.
+            let mut iovs: [libc::iovec; BATCH_SIZE] = unsafe { std::mem::zeroed() };
+            let mut storages: [libc::sockaddr_storage; BATCH_SIZE] = unsafe { std::mem::zeroed() };
+            let mut msgs: [libc::mmsghdr; BATCH_SIZE] = unsafe { std::mem::zeroed() };
+
+            for i in 0..n {
+                iovs[i].iov_base = bufs[i].as_mut_ptr() as *mut libc::c_void;
+                iovs[i].iov_len = bufs[i].len();
+                msgs[i].msg_hdr.msg_name = &mut storages[i] as *mut _ as *mut libc::c_void;
+                msgs[i].msg_hdr.msg_namelen =
+                    std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                msgs[i].msg_hdr.msg_iov = &mut iovs[i];
+                msgs[i].msg_hdr.msg_iovlen = 1;
+                msgs[i].msg_len = 0;
+            }
+            // Only msgs[0] carries a cmsg buffer — sampling the OVFL counter
+            // there is enough since it is socket-wide and monotonic.
+            msgs[0].msg_hdr.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+            msgs[0].msg_hdr.msg_controllen = cmsg_buf.len() as _;
+
+            let r = unsafe {
+                libc::recvmmsg(
+                    fd,
+                    msgs.as_mut_ptr(),
+                    n as libc::c_uint,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if r < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let count = r as usize;
+            for i in 0..count {
+                lens[i] = msgs[i].msg_len as usize;
+                addrs[i] = sockaddr_to_socket_addr(&storages[i]).ok();
+            }
+
+            // Walk msgs[0] cmsg chain for SO_RXQ_OVFL. Skip when no
+            // datagram landed (cmsg buffer is undefined in that case).
+            let mut drops: u32 = 0;
+            if count > 0 {
+                unsafe {
+                    let mut cmsg = libc::CMSG_FIRSTHDR(&msgs[0].msg_hdr);
+                    while !cmsg.is_null() {
+                        if (*cmsg).cmsg_level == libc::SOL_SOCKET
+                            && (*cmsg).cmsg_type == libc::SO_RXQ_OVFL
+                        {
+                            let data = libc::CMSG_DATA(cmsg);
+                            drops = std::ptr::read_unaligned(data as *const u32);
+                        }
+                        cmsg = libc::CMSG_NXTHDR(&msgs[0].msg_hdr, cmsg);
+                    }
+                }
+            }
+
+            Ok((count, drops))
+        }
+
         /// Wrap this socket in a tokio `AsyncFd` for async I/O.
         pub fn into_async(self) -> Result<AsyncUdpSocket, TransportError> {
             let async_fd = AsyncFd::new(self)
@@ -336,7 +440,11 @@ mod platform {
 
         /// Receive a payload, source address, and kernel drop counter.
         ///
-        /// Returns `(bytes_read, source_addr, kernel_drops)`.
+        /// Returns `(bytes_read, source_addr, kernel_drops)`. On Linux the
+        /// production receive path uses `recv_batch`; this single-packet
+        /// variant remains for non-Linux unix targets and for the local
+        /// `tests` module.
+        #[cfg_attr(target_os = "linux", allow(dead_code))]
         pub async fn recv_from(
             &self,
             buf: &mut [u8],
@@ -349,6 +457,37 @@ mod platform {
                     .map_err(|e| TransportError::RecvFailed(format!("readable wait: {}", e)))?;
 
                 match guard.try_io(|inner| inner.get_ref().recv_from(buf)) {
+                    Ok(Ok(result)) => return Ok(result),
+                    Ok(Err(e)) => return Err(TransportError::RecvFailed(format!("{}", e))),
+                    Err(_would_block) => continue,
+                }
+            }
+        }
+
+        /// Drain up to `BATCH_SIZE` datagrams from the kernel via
+        /// `recvmmsg` (Linux). Returns `(count, kernel_drops)`; same
+        /// buffer / addr / len contract as `UdpRawSocket::recv_batch`.
+        #[cfg(target_os = "linux")]
+        pub async fn recv_batch(
+            &self,
+            bufs: &mut [&mut [u8]],
+            addrs: &mut [Option<SocketAddr>],
+            lens: &mut [usize],
+        ) -> Result<(usize, u32), TransportError> {
+            loop {
+                let mut guard = self
+                    .inner
+                    .readable()
+                    .await
+                    .map_err(|e| TransportError::RecvFailed(format!("readable wait: {}", e)))?;
+
+                match guard.try_io(|inner| inner.get_ref().recv_batch(bufs, addrs, lens)) {
+                    Ok(Ok((0, _))) => {
+                        // Spurious wakeup or no datagrams ready — yield
+                        // back to the reactor instead of busy-looping.
+                        guard.clear_ready();
+                        continue;
+                    }
                     Ok(Ok(result)) => return Ok(result),
                     Ok(Err(e)) => return Err(TransportError::RecvFailed(format!("{}", e))),
                     Err(_would_block) => continue,

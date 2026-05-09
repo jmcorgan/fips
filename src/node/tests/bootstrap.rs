@@ -2,10 +2,11 @@
 
 use super::*;
 use crate::EstablishedTraversal;
-use crate::config::UdpConfig;
+use crate::config::{TransportInstances, UdpConfig};
 use crate::node::wire::{PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
 use crate::transport::udp::UdpTransport;
 use crate::utils::index::IndexAllocator;
+use std::collections::HashMap;
 use tokio::time::{Duration, timeout, timeout_at};
 
 #[tokio::test]
@@ -281,6 +282,93 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
         transport.stop().await.ok();
     }
     for (_, transport) in node_c.transports.iter_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_adopted_udp_inherits_mtu_from_single_primary_config() {
+    let mut node = make_node();
+    node.config.transports.udp = TransportInstances::Single(UdpConfig {
+        mtu: Some(1500),
+        ..Default::default()
+    });
+
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+    node.state = NodeState::Running;
+
+    let peer = make_node();
+    let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let handoff = EstablishedTraversal::new(
+        "sess-inherit-single",
+        peer.npub(),
+        "127.0.0.1:9".parse().unwrap(),
+        adopted_socket,
+    );
+
+    let result = node.adopt_established_traversal(handoff).await.unwrap();
+    let adopted = node
+        .get_transport(&result.transport_id)
+        .expect("adopted transport present");
+    assert_eq!(
+        adopted.mtu(),
+        1500,
+        "adopted UDP transport should inherit MTU from the primary [transports.udp] config",
+    );
+
+    for (_, transport) in node.transports.iter_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_adopted_udp_inherits_mtu_from_named_primary_config() {
+    let mut node = make_node();
+    let mut named = HashMap::new();
+    named.insert(
+        "primary".to_string(),
+        UdpConfig {
+            mtu: Some(1500),
+            ..Default::default()
+        },
+    );
+    named.insert(
+        "secondary".to_string(),
+        UdpConfig {
+            mtu: Some(1280),
+            ..Default::default()
+        },
+    );
+    node.config.transports.udp = TransportInstances::Named(named);
+
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+    node.state = NodeState::Running;
+
+    let peer = make_node();
+    let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let handoff = EstablishedTraversal::new(
+        "sess-inherit-named",
+        peer.npub(),
+        "127.0.0.1:9".parse().unwrap(),
+        adopted_socket,
+    )
+    .with_transport_name("primary");
+
+    let result = node.adopt_established_traversal(handoff).await.unwrap();
+    let adopted = node
+        .get_transport(&result.transport_id)
+        .expect("adopted transport present");
+    assert_eq!(
+        adopted.mtu(),
+        1500,
+        "adopted UDP transport should inherit MTU from the named [transports.udp.<name>] config matching transport_name",
+    );
+
+    for (_, transport) in node.transports.iter_mut() {
         transport.stop().await.ok();
     }
 }

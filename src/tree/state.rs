@@ -170,6 +170,12 @@ impl TreeState {
     }
 
     /// Update this node's coordinates based on current parent's ancestry.
+    ///
+    /// Defensive: if extending the parent's ancestry would put `self` at the
+    /// minimum (because `self` is smaller than the parent's root), the
+    /// declaration is demoted to self-root in place. The caller is responsible
+    /// for re-signing the declaration after this call (do `set_parent → recompute_coords → sign_declaration`,
+    /// not `set_parent → sign_declaration → recompute_coords`).
     pub fn recompute_coords(&mut self) {
         if self.my_declaration.is_root() {
             self.my_coords = TreeCoordinate::root_with_meta(
@@ -183,6 +189,18 @@ impl TreeState {
 
         let parent_id = self.my_declaration.parent_id();
         if let Some(parent_coords) = self.peer_ancestry.get(parent_id) {
+            let parent_root = *parent_coords.root_id();
+            if self.my_node_addr <= parent_root {
+                // Prepending self would put a smaller-or-equal node at depth 0,
+                // breaking the "advertised root = min path entry" invariant.
+                // Demote to self-root rather than emit a path peers will reject.
+                let seq = self.my_declaration.sequence();
+                let ts = self.my_declaration.timestamp();
+                self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, seq, ts);
+                self.my_coords = TreeCoordinate::root_with_meta(self.my_node_addr, seq, ts);
+                self.root = self.my_node_addr;
+                return;
+            }
             // Our coords = [self_entry] ++ parent_coords entries
             let self_entry = CoordEntry::new(
                 self.my_node_addr,
@@ -194,6 +212,33 @@ impl TreeState {
             self.my_coords = TreeCoordinate::new(entries).expect("non-empty path");
             self.root = *self.my_coords.root_id();
         }
+    }
+
+    /// Smallest root_id visible across known peers.
+    pub fn smallest_visible_root(&self) -> Option<NodeAddr> {
+        self.peer_ancestry.values().map(|c| *c.root_id()).min()
+    }
+
+    /// Whether this node should be the tree root: either there are no peers,
+    /// or our NodeAddr is `<=` every visible root.
+    pub fn should_be_root(&self) -> bool {
+        match self.smallest_visible_root() {
+            Some(sr) => self.my_node_addr <= sr,
+            None => true,
+        }
+    }
+
+    /// Promote self to root with an incremented sequence number.
+    ///
+    /// Caller must `sign_declaration` afterwards before sending the result.
+    pub fn become_root(&mut self) {
+        let new_seq = self.my_declaration.sequence() + 1;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, new_seq, timestamp);
+        self.recompute_coords();
     }
 
     /// Calculate tree distance to a peer.
@@ -341,8 +386,14 @@ impl TreeState {
 
         let smallest_root = smallest_root?;
 
-        // If we are the smallest node in the network, stay root
-        if self.my_node_addr <= smallest_root && self.is_root() {
+        // If our own NodeAddr is smaller than (or equal to) the smallest visible
+        // root, we are the network's smallest node and must be root. Returning
+        // `None` lets the caller promote us via `become_root` / `should_be_root`.
+        // Picking any peer here would produce an invalid path, since prepending
+        // `self` to that peer's ancestry would put `self` at depth 0 and the
+        // peer's larger root at the tail — violating "advertised root = min path
+        // entry" and getting rejected by recipients' `validate_semantics`.
+        if self.my_node_addr <= smallest_root {
             return None;
         }
 

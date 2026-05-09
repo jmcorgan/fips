@@ -150,11 +150,11 @@ impl Node {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
+                self.tree_state.recompute_coords();
                 if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                     warn!(error = %e, "Failed to sign declaration after first-RTT parent eval");
                     return;
                 }
-                self.tree_state.recompute_coords();
                 self.coord_cache.clear();
                 self.reset_discovery_backoff();
                 self.stats_mut().tree.parent_switched += 1;
@@ -171,6 +171,24 @@ impl Node {
                     self.stats_mut().tree.flap_dampened += 1;
                     warn!("Flap dampening engaged: excessive parent switches detected");
                 }
+                self.send_tree_announce_to_all().await;
+                let all_peers: Vec<crate::NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
+            } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
+                self.tree_state.become_root();
+                if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                    warn!(error = %e, "Failed to sign self-root declaration after first-RTT");
+                    return;
+                }
+                self.coord_cache.clear();
+                self.reset_discovery_backoff();
+                self.stats_mut().tree.parent_switched += 1;
+                self.stats_mut().tree.parent_switches += 1;
+                info!(
+                    new_root = %self.tree_state.root(),
+                    trigger = "first-rtt",
+                    "Self-promoted to root after first RTT: smallest visible NodeAddr"
+                );
                 self.send_tree_announce_to_all().await;
                 let all_peers: Vec<crate::NodeAddr> = self.peers.keys().copied().collect();
                 self.bloom_state.mark_all_updates_needed(all_peers);

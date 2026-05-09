@@ -955,6 +955,38 @@ fn test_promote_clears_retry_pending() {
     );
 }
 
+/// Initial peer-init failure at startup must enqueue a retry. Otherwise a peer
+/// whose addresses cannot be dialed at boot (no operational transport for the
+/// configured transport types, all addresses unreachable, NAT rebind, etc.)
+/// stays dead forever — pings arrive but cannot be answered until the daemon
+/// is manually restarted.
+#[tokio::test]
+async fn test_initiate_peer_connections_schedules_retry_on_no_transport() {
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+
+    let mut config = Config::new();
+    // udp address but no UDP transport registered on the node — every dial
+    // attempt resolves to NodeError::NoTransportForType.
+    config.peers.push(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "10.0.0.2:2121",
+    ));
+
+    let mut node = Node::new(config).unwrap();
+    assert!(node.retry_pending.is_empty());
+
+    node.initiate_peer_connections().await;
+
+    assert!(
+        node.retry_pending.contains_key(&peer_node_addr),
+        "startup peer-init failure must enqueue a retry so the peer can recover \
+         without a daemon restart"
+    );
+}
+
 // ============================================================================
 // transport_mtu() — ISSUE-2026-0011 regression coverage
 // ============================================================================
