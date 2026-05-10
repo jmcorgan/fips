@@ -98,7 +98,7 @@ rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}"
 
 # Copy binaries
-for bin in fips fipsctl fipstop; do
+for bin in fips fipsctl fipstop fips-gateway; do
     if [[ ! -f "${BINARY_DIR}/${bin}" ]]; then
         echo "Missing binary: ${BINARY_DIR}/${bin}" >&2
         exit 1
@@ -111,15 +111,24 @@ if ! command -v "${STRIP_BIN}" &>/dev/null; then
     echo "Strip tool not found: ${STRIP_BIN}" >&2
     exit 1
 fi
-"${STRIP_BIN}" "${STAGING_DIR}/fips" "${STAGING_DIR}/fipsctl" "${STAGING_DIR}/fipstop"
+"${STRIP_BIN}" \
+    "${STAGING_DIR}/fips" \
+    "${STAGING_DIR}/fipsctl" \
+    "${STAGING_DIR}/fipstop" \
+    "${STAGING_DIR}/fips-gateway"
 
 # Copy packaging files
 cp "${SCRIPT_DIR}/install.sh" "${STAGING_DIR}/"
 cp "${SCRIPT_DIR}/uninstall.sh" "${STAGING_DIR}/"
 cp "${SCRIPT_DIR}/fips.service" "${STAGING_DIR}/"
 cp "${SCRIPT_DIR}/fips-dns.service" "${STAGING_DIR}/"
+cp "${SCRIPT_DIR}/fips-gateway.service" "${STAGING_DIR}/"
+cp "${SCRIPT_DIR}/fips-firewall.service" "${STAGING_DIR}/"
 cp "${PACKAGING_DIR}/common/fips.yaml" "${STAGING_DIR}/"
 cp "${PACKAGING_DIR}/common/hosts" "${STAGING_DIR}/"
+cp "${PACKAGING_DIR}/common/fips.nft" "${STAGING_DIR}/"
+cp "${PACKAGING_DIR}/common/fips-dns-setup" "${STAGING_DIR}/"
+cp "${PACKAGING_DIR}/common/fips-dns-teardown" "${STAGING_DIR}/"
 cp "${SCRIPT_DIR}/README.install.md" "${STAGING_DIR}/"
 
 chmod +x "${STAGING_DIR}/install.sh" "${STAGING_DIR}/uninstall.sh"

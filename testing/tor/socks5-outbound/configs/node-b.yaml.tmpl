@@ -1,6 +1,6 @@
 # FIPS Tor test node B — socks5-outbound
 #
-# Connects outbound to vps-chi (217.77.8.91:443) via Tor SOCKS5 proxy.
+# Connects outbound to test-us01 (217.77.8.91:443) via Tor SOCKS5 proxy.
 # Identity generated per-run to avoid mesh clashes with parallel tests.
 
 node:
@@ -21,7 +21,7 @@ transports:
 
 peers:
   - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
-    alias: "vps-chi"
+    alias: "test-us01"
     addresses:
       - transport: tor
         addr: "217.77.8.91:443"

@@ -10,7 +10,7 @@ depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
 optdepends=('systemd-resolved: .fips DNS resolution')
 conflicts=('fips-git')
-backup=('etc/fips/fips.yaml' 'etc/fips/hosts')
+backup=('etc/fips/fips.yaml' 'etc/fips/hosts' 'etc/fips/fips.nft')
 install=fips.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/jmcorgan/fips/archive/v$pkgver.tar.gz"
         "fips.sysusers"
@@ -51,10 +51,12 @@ package() {
     install -Dm0644 packaging/debian/fips.service "$pkgdir/usr/lib/systemd/system/fips.service"
     install -Dm0644 packaging/debian/fips-dns.service "$pkgdir/usr/lib/systemd/system/fips-dns.service"
     install -Dm0644 packaging/debian/fips-gateway.service "$pkgdir/usr/lib/systemd/system/fips-gateway.service"
+    install -Dm0644 packaging/debian/fips-firewall.service "$pkgdir/usr/lib/systemd/system/fips-firewall.service"
 
     # Config files (from packaging/common/)
     install -Dm0600 packaging/common/fips.yaml "$pkgdir/etc/fips/fips.yaml"
     install -Dm0644 packaging/common/hosts "$pkgdir/etc/fips/hosts"
+    install -Dm0644 packaging/common/fips.nft "$pkgdir/etc/fips/fips.nft"
 
     # System integration (from local source files in $srcdir)
     install -Dm0644 "$srcdir/fips.sysusers" "$pkgdir/usr/lib/sysusers.d/fips.conf"

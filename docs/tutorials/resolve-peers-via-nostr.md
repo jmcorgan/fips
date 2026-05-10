@@ -125,9 +125,10 @@ Two knobs, one job each:
   `wss://offchain.pub`) and is now able to query and consume
   adverts.
 - `advertise: false` keeps the publish side off. Your daemon
-  will not publish an advert of its own at this stage. (This
-  is the default, but it is good practice to make the choice
-  explicit while you're learning.)
+  will not publish an advert of its own at this stage. The
+  default is `true`, so we are setting it explicitly to
+  disable advertising for this consume-only tutorial. The next
+  tutorial flips it back on.
 
 ## Step 3: Switch the peer entry to `via_nostr`
 
@@ -270,8 +271,9 @@ If the link does not come up:
   [advertise-your-node](advertise-your-node.md) publishes your
   daemon's UDP endpoint on Nostr so other operators can add
   you to their `peers:` list with `via_nostr: true` and reach
-  you the way you just reached `test-us01`. Includes a section
-  on `udp:nat` NAT traversal for symmetric-NAT networks.
+  you the way you just reached `test-us01`. Includes a short
+  final section on `udp:nat`, the best-effort hole-punching
+  path for nodes without a directly reachable UDP endpoint.
 
 - **Discover peers with no prior configuration.**
   [open-discovery](open-discovery.md) switches your daemon to

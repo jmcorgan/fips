@@ -9,10 +9,15 @@
 #   /usr/local/bin/fips           Daemon binary
 #   /usr/local/bin/fipsctl        CLI query tool
 #   /usr/local/bin/fipstop        TUI monitor
+#   /usr/local/bin/fips-gateway   Outbound LAN gateway binary (opt-in)
 #   /etc/fips/fips.yaml           Configuration (preserved if exists)
 #   /etc/fips/hosts               Host-to-npub mappings (preserved if exists)
-#   /etc/systemd/system/fips.service      systemd unit
-#   /etc/systemd/system/fips-dns.service  DNS routing for .fips domain
+#   /etc/fips/fips.nft            Mesh-interface nftables baseline (preserved if exists)
+#   /etc/fips/fips.d/             Operator drop-in directory for nft rules
+#   /etc/systemd/system/fips.service           Daemon unit (enabled)
+#   /etc/systemd/system/fips-dns.service       DNS routing for .fips domain (enabled)
+#   /etc/systemd/system/fips-gateway.service   Gateway unit (NOT enabled; opt-in)
+#   /etc/systemd/system/fips-firewall.service  Firewall baseline unit (NOT enabled; opt-in)
 
 set -euo pipefail
 
@@ -60,6 +65,9 @@ install -m 0755 "${SCRIPT_DIR}/fipsctl" "${INSTALL_PREFIX}/bin/fipsctl"
 if [ -f "${SCRIPT_DIR}/fipstop" ]; then
     install -m 0755 "${SCRIPT_DIR}/fipstop" "${INSTALL_PREFIX}/bin/fipstop"
 fi
+if [ -f "${SCRIPT_DIR}/fips-gateway" ]; then
+    install -m 0755 "${SCRIPT_DIR}/fips-gateway" "${INSTALL_PREFIX}/bin/fips-gateway"
+fi
 
 # --- Install configuration ---
 
@@ -82,7 +90,27 @@ else
     echo "Hosts file installed to ${HOSTS_FILE}"
 fi
 
-# --- Install systemd unit ---
+# Mesh-interface nftables baseline. Preserved on upgrade like fips.yaml
+# so operator edits aren't clobbered.
+NFT_FILE="${CONFIG_DIR}/fips.nft"
+if [ -f "${NFT_FILE}" ]; then
+    echo "Firewall baseline exists at ${NFT_FILE}, not overwriting."
+    install -m 0644 "${SCRIPT_DIR}/fips.nft" "${CONFIG_DIR}/fips.nft.template"
+    echo "  New template installed as ${CONFIG_DIR}/fips.nft.template"
+elif [ -f "${SCRIPT_DIR}/fips.nft" ]; then
+    install -m 0644 "${SCRIPT_DIR}/fips.nft" "${NFT_FILE}"
+    echo "Firewall baseline installed to ${NFT_FILE}"
+fi
+
+# Drop-in directory for operator nftables rules included by
+# /etc/fips/fips.nft. Empty by default; the include glob matches
+# nothing cleanly out of the box.
+if [ ! -d "${CONFIG_DIR}/fips.d" ]; then
+    install -d -m 0755 "${CONFIG_DIR}/fips.d"
+    echo "Drop-in directory created at ${CONFIG_DIR}/fips.d/"
+fi
+
+# --- Install systemd units ---
 
 was_active=false
 if systemctl is-active --quiet fips.service 2>/dev/null; then
@@ -100,9 +128,23 @@ fi
 
 install -m 0644 "${SCRIPT_DIR}/fips.service" "${SYSTEMD_DIR}/fips.service"
 install -m 0644 "${SCRIPT_DIR}/fips-dns.service" "${SYSTEMD_DIR}/fips-dns.service"
+if [ -f "${SCRIPT_DIR}/fips-gateway.service" ]; then
+    install -m 0644 "${SCRIPT_DIR}/fips-gateway.service" "${SYSTEMD_DIR}/fips-gateway.service"
+fi
+if [ -f "${SCRIPT_DIR}/fips-firewall.service" ]; then
+    install -m 0644 "${SCRIPT_DIR}/fips-firewall.service" "${SYSTEMD_DIR}/fips-firewall.service"
+fi
+# DNS helpers ship flat in the tarball alongside install.sh; from a
+# source checkout they live under packaging/common/. Resolve from
+# either layout.
 install -d -m 0755 /usr/lib/fips
-install -m 0755 "${SCRIPT_DIR}/../common/fips-dns-setup" /usr/lib/fips/fips-dns-setup
-install -m 0755 "${SCRIPT_DIR}/../common/fips-dns-teardown" /usr/lib/fips/fips-dns-teardown
+if [ -f "${SCRIPT_DIR}/fips-dns-setup" ]; then
+    install -m 0755 "${SCRIPT_DIR}/fips-dns-setup" /usr/lib/fips/fips-dns-setup
+    install -m 0755 "${SCRIPT_DIR}/fips-dns-teardown" /usr/lib/fips/fips-dns-teardown
+else
+    install -m 0755 "${SCRIPT_DIR}/../common/fips-dns-setup" /usr/lib/fips/fips-dns-setup
+    install -m 0755 "${SCRIPT_DIR}/../common/fips-dns-teardown" /usr/lib/fips/fips-dns-teardown
+fi
 systemctl daemon-reload
 echo "systemd units and DNS scripts installed."
 
@@ -148,6 +190,16 @@ echo "  3. Add static peers (if bootstrapping over UDP/TCP)"
 echo ""
 echo "Start the service:"
 echo "  sudo systemctl start fips"
+echo ""
+echo "Optional services (NOT enabled by default):"
+echo ""
+echo "  Mesh-interface firewall baseline (default-deny on fips0):"
+echo "    sudo systemctl enable --now fips-firewall.service"
+echo "    Operator drop-ins under /etc/fips/fips.d/*.nft"
+echo ""
+echo "  Outbound LAN gateway (bridge unmodified LAN hosts to .fips):"
+echo "    sudo systemctl enable --now fips-gateway.service"
+echo "    Configure under the gateway: section of ${CONFIG_FILE}"
 echo ""
 echo "Monitor:"
 echo "  sudo journalctl -u fips -f"

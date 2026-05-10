@@ -10,7 +10,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY src ./src
 
-RUN cargo build --release --no-default-features --features tui && \
+RUN cargo build --release && \
     cp target/release/fips target/release/fipsctl target/release/fipstop /usr/local/bin/
 
 # ── Runtime stage ──

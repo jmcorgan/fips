@@ -17,7 +17,7 @@ Before changing code, read the protocol docs in this order:
 
 ## Prerequisites
 
-- Rust 1.94.0 and Linux with TUN support
+- Rust 1.94.1 and Linux with TUN support
 - Use the pinned toolchain from [rust-toolchain.toml](rust-toolchain.toml) for deterministic builds
 - For the default BLE-enabled build on Debian/Ubuntu:
   `sudo apt install bluez libdbus-1-dev pkg-config`
@@ -74,6 +74,7 @@ See [testing/README.md](testing/README.md) for the available integration and cha
 - Keep commits focused — one logical change per commit.
 - Add tests for new functionality.
 - Reference relevant design docs if the change touches protocol behavior.
+- Pull requests are merged via squash-merge.
 - Update docs in the same change when you modify:
   - protocol or routing behavior
   - wire formats

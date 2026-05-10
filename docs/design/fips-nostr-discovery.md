@@ -15,8 +15,9 @@ every supported platform and ships in every stock packaging artifact
 `.zip`). It is runtime-opt-in: the YAML configuration defaults to
 disabled (`node.discovery.nostr.enabled: false`), so the discovery
 runtime stays dormant — and opens no relay connections — until an
-operator flips the flag and supplies a relay list. When disabled, nodes
-behave exactly as before: only the static `peers[]` addresses are used.
+operator flips the flag. Default relay and STUN-server lists ship in
+the config; both are optional overrides. When disabled, nodes behave
+exactly as before: only the static `peers[]` addresses are used.
 
 ## Role
 

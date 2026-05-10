@@ -2,11 +2,11 @@
 # Tor transport integration test.
 #
 # Validates end-to-end connectivity through a real Tor network:
-#   fips-a --tor/socks5--> vps-chi <--tor/socks5-- fips-b
+#   fips-a --tor/socks5--> test-us01 <--tor/socks5-- fips-b
 #
 # Both local FIPS nodes connect outbound through a local Tor daemon
-# to vps-chi's TCP listener (217.77.8.91:443). Once both are peered
-# with vps-chi, traffic between fips-a and fips-b is routed through it.
+# to test-us01's TCP listener (217.77.8.91:443). Once both are peered
+# with test-us01, traffic between fips-a and fips-b is routed through it.
 #
 # Each run generates ephemeral identities to avoid mesh clashes when
 # multiple instances of this test run concurrently.
@@ -107,7 +107,7 @@ fi
 echo ""
 
 # ── Phase 3: Wait for FIPS peers via Tor ─────────────────────────
-echo "Phase 3: Waiting for FIPS nodes to peer with vps-chi via Tor (up to ${MAX_WAIT_PEER}s)..."
+echo "Phase 3: Waiting for FIPS nodes to peer with test-us01 via Tor (up to ${MAX_WAIT_PEER}s)..."
 echo "  (First SOCKS5 attempt may timeout while Tor builds circuits)"
 
 peers_a=0
@@ -199,7 +199,7 @@ print(f'{sum(trimmed)/len(trimmed):.1f}')
 }
 
 echo ""
-echo "  Ping via Tor (routed through vps-chi):"
+echo "  Ping via Tor (routed through test-us01):"
 ping_series fips-tor-a "$NPUB_B" "A → B"
 ping_series fips-tor-b "$NPUB_A" "B → A"
 

@@ -59,7 +59,7 @@ peers:       # Static peer list
 The control socket provides access to node state and runtime management
 via the `fipsctl` command-line tool. In addition to read-only status
 queries, `fipsctl connect` and `fipsctl disconnect` enable runtime peer
-management. See the project [README](../../README.md#inspect) for the
+management. See the [`fipsctl` reference](cli-fipsctl.md) for the
 command list.
 
 On Linux, the control socket is a Unix domain socket with filesystem

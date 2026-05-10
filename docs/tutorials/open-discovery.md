@@ -110,8 +110,12 @@ You should be coming out of
 [advertise-your-node](advertise-your-node.md) with:
 
 - Persistent identity, advertising enabled
-  (`discovery.nostr.advertise: true`), UDP advertising on
-  Nostr (`transports.udp.advertise_on_nostr: true`).
+  (`discovery.nostr.advertise: true`), and either the
+  direct-UDP path
+  (`transports.udp.advertise_on_nostr: true`,
+  `transports.udp.public: true`) or the `udp:nat` path
+  (`transports.udp.advertise_on_nostr: true`,
+  `transports.udp.public: false`) from the previous tutorial.
 - A static `test-us01` peer entry that the daemon dials
   outbound; possibly an inbound `test-us03` peer (the
   open-discovery test mesh node that dialed in after seeing
@@ -288,11 +292,12 @@ the previous tutorial:
   WebSocket connection to the relays is failing repeatedly,
   no adverts arrive. Look for relay-connection errors in
   `sudo journalctl -u fips -n 200`.
-- **`policy: open` typo.** YAML accepts and ignores unknown
-  values silently. If `fipsctl show status` (or the daemon's
-  startup log) shows `policy: configured_only`, the YAML
-  didn't parse the new value — re-check spelling and
-  indentation.
+- **`policy: open` typo.** YAML is case-sensitive, and the
+  `policy` field is a serde enum that rejects unknown values —
+  a misspelled value produces a config-parse error at startup
+  rather than a silent fall-back. If the daemon refuses to
+  start, check `sudo journalctl -u fips -n 200` for the
+  parse-error line naming the field and value.
 
 If too many peers are appearing and you want to dial down:
 

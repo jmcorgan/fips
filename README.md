@@ -66,9 +66,17 @@ same way it would on a local network.
   Protocol.
 - **ECN congestion signaling.** Hop-by-hop CE-flag relay with RFC
   3168 IPv6 marking and transport kernel-drop detection.
-- **Operator visibility.** `fipsctl` CLI for control and inspection,
-  `fipstop` TUI for live status, and a JSON-line control socket on
-  each binary for direct programmatic access.
+- **Mesh-interface security baseline.** Optional default-deny
+  nftables policy for `fips0` shipped as a packaged conffile
+  (`/etc/fips/fips.nft`) with an operator drop-in directory
+  (`/etc/fips/fips.d/`) and a disabled-by-default
+  `fips-firewall.service`. The baseline polices only the mesh
+  interface, leaving Docker, Tor, and the host firewall untouched.
+- **Operator visibility.** `fipsctl` CLI for control and inspection
+  with time-series stats history queryable for any metric,
+  `fipstop` TUI for live status with inline sparkline dashboards,
+  and a JSON-line control socket on each binary for direct
+  programmatic access.
 - **Reproducible builds** with toolchain pinning and
   `SOURCE_DATE_EPOCH`.
 
@@ -103,7 +111,7 @@ tutorial progression starting at
 cargo build --release
 ```
 
-Requires Rust 1.85+ (edition 2024). Linux, macOS, and Windows are
+Requires Rust 1.94.1+ (edition 2024). Linux, macOS, and Windows are
 supported; transport availability varies by platform.
 
 | Transport | Linux | macOS | Windows | OpenWrt |

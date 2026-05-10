@@ -480,8 +480,32 @@ with v0.2.x peers.
   bind by setting `dns.listen: "[::]:53"` explicitly. The new
   default binds IPv6 loopback only — forwarders that reach the
   gateway over IPv4 loopback need an explicit IPv4 listen address.
+- Generic systemd install tarball brought to feature parity with
+  the `.deb` and AUR packages. The tarball now ships the
+  `fips-gateway` binary with its (operator-opt-in)
+  `fips-gateway.service`, a `fips-firewall.service` unit with the
+  `/etc/fips/fips.nft` mesh-interface nftables baseline (also
+  opt-in), an `/etc/fips/fips.d/` operator drop-in directory for
+  per-service nft rules, and the multi-backend `fips-dns-setup` /
+  `fips-dns-teardown` helpers. `install.sh` and `uninstall.sh`
+  handle the new units and conffile (preserve-on-upgrade for
+  `fips.nft`, like `fips.yaml`). `README.install.md` documents
+  the gateway, firewall, and DNS-routing services. Closes the
+  longest-standing parity gap for non-Debian / non-Arch systemd
+  Linux distros (Fedora, RHEL/CentOS, openSUSE, etc.) installing
+  from the release-distribution tarball.
 
 ### Fixed
+
+- Generic systemd install tarball: `install.sh` now correctly
+  resolves the `fips-dns-setup` and `fips-dns-teardown` helpers
+  from the tarball staging directory. Previously the script
+  referenced them at `${SCRIPT_DIR}/../common/`, a path that
+  exists only in the source-repo layout, not in the extracted
+  tarball. Bug latent since the multi-backend DNS helpers
+  landed in `7260ad2`; only manifested when operators ran
+  `install.sh` from an extracted tarball rather than from a
+  source checkout.
 
 - Adopted NAT-traversed UDP transports inherit the primary listener's
   MTU and buffer config. `Node::adopt_established_traversal`

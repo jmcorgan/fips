@@ -29,9 +29,10 @@ running nodes can mesh.
 
 - A Linux, macOS, or Windows host. Linux is the most exercised
   platform; macOS and Windows installers are available.
-- The pre-built installer for your platform (see the
-  [Releases page](../README.md#installation)), **or** a source
-  checkout if you want to build the installer yourself.
+- The pre-built installer for your platform (see the project
+  README's [Quick start](../README.md#quick-start) section for
+  download links), **or** a source checkout if you want to build
+  the installer yourself.
 - For the source-build path only: a working Rust toolchain (the
   version pinned in `rust-toolchain.toml` is auto-installed by
   rustup), and the platform-specific build dependencies listed in
@@ -63,7 +64,7 @@ per-platform installer:
 - Windows — `.zip` with service-install scripts
 - Generic systemd Linux — `.tar.gz` with an `install.sh` script
 
-See the [project README's Installation section](../README.md#installation)
+See the [project README's Quick start section](../README.md#quick-start)
 for download links and per-platform invocations.
 
 ### From source

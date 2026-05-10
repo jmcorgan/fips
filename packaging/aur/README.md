@@ -23,6 +23,22 @@ Both PKGBUILDs reference files from `packaging/debian/` (service files) and
 `packaging/common/` (config files) at build time. These are pulled from the
 source tree during `package()`, not from this directory.
 
+### What Gets Installed
+
+Both PKGBUILDs install the same payload, kept at parity with the Debian
+package:
+
+- Binaries: `fips`, `fipsctl`, `fipstop`, `fips-gateway`
+- Systemd units: `fips.service`, `fips-dns.service`, `fips-gateway.service`,
+  `fips-firewall.service`
+- Config: `/etc/fips/fips.yaml`, `/etc/fips/hosts`, `/etc/fips/fips.nft`
+- sysusers/tmpfiles fragments for the `fips` group and `/run/fips/`
+
+The `fips.nft` baseline is shipped as a conffile (listed in `backup=()`) so
+operator edits to the nftables ruleset survive package upgrades.
+`fips-firewall.service` is shipped disabled by default, matching the Debian
+package: operators opt in by enabling it explicitly.
+
 ## Local Build and Validation
 
 Build and validate the `-git` package locally using the Makefile target:

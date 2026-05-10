@@ -4,7 +4,8 @@ Nostr-mediated discovery lets FIPS nodes find each other (and punch
 through UDP NAT) using public Nostr relays as the signaling channel.
 The feature ships in every stock packaging artifact but is **off by
 default** — it activates when an operator sets
-`node.discovery.nostr.enabled: true` and provides a relay list. See
+`node.discovery.nostr.enabled: true`. Default relay and STUN-server
+lists ship in the config; both are optional overrides. See
 [../design/fips-nostr-discovery.md](../design/fips-nostr-discovery.md)
 for the design and rationale; see
 [../reference/configuration.md](../reference/configuration.md) for the
@@ -126,15 +127,20 @@ transports:
   udp:
     bind_addr: "0.0.0.0:2121"
     advertise_on_nostr: true
-    external_addr: "203.0.113.45:2121"   # ← explicit
+    public: true                         # ← required, master switch
+    external_addr: "203.0.113.45:2121"   # ← explicit address
 ```
 
 `external_addr` accepts a bare IP (combined with the bind port) or a
-full `host:port`. Setting both `public: true` and `external_addr`
-together is allowed — the explicit override wins, with STUN as a
-logging cross-check. If UDP is bound directly to a public IP rather
-than to a wildcard, neither flag is needed; the daemon advertises
-the bound endpoint.
+full `host:port`. `public: true` is the master switch that gates UDP
+advertisement; inside that branch, the daemon picks the advertised
+address in precedence order: explicit `external_addr` (no STUN
+observation), a non-wildcard `bind_addr`, or STUN auto-discovery.
+Setting `external_addr` alongside `public: true` skips STUN entirely
+— there is no logging cross-check. If UDP is bound directly to a
+public IP rather than to a wildcard, neither `external_addr` nor STUN
+is needed — but `advertise_on_nostr: true` and `public: true` are
+still both required for the daemon to publish the endpoint.
 
 What this achieves: the node publishes a single
 `udp:<public-ip>:2121` endpoint to the three default advert relays
@@ -202,9 +208,17 @@ proceeds normally.
 > a `udp:nat` advert without signaling relays or STUN servers is
 > unreachable by construction.
 
-Works best with full-cone NAT on at least one side. Symmetric NAT on
-both sides is not reliably traversable with this protocol and will
-time out after `punch_duration_ms`.
+Hole-punching is best-effort. It works reliably when both sides are
+full-cone or port-restricted NATs. Symmetric NAT on either side
+typically defeats the punch — the public port a peer sees varies per
+remote endpoint, so the address learned via STUN does not match the
+mapping the peer actually needs. The punch attempt times out after
+`punch_duration_ms`. `udp:nat` is the only NAT-traversal mechanism
+in FIPS; when it can't succeed, there's no in-protocol substitute.
+Being reachable then becomes a deployment-prerequisite question
+rather than a transport question — a publicly reachable port (UDP
+or TCP — both require the same kind of network resource) published
+as a direct advert per Sub-scenario 2a or 2b.
 
 ### Sub-scenario 2b: TCP
 

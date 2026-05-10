@@ -8,8 +8,9 @@ your own endpoint(s), so any other operator who knows your
 npub can dial you the same way you dialed `test-us01`.
 
 The whole exercise should take about ten minutes if you have
-a public IP or full-cone home NAT. A short final section
-covers the alternative path for symmetric-NAT networks.
+a public IP or a UDP listener that's reachable from outside.
+A short final section covers `udp:nat` best-effort hole-punching
+for the cases where direct UDP advertising isn't an option.
 
 ## What you'll build
 
@@ -74,9 +75,13 @@ port to put in the advert:
 > - `public: true` — daemon does a one-shot STUN observation
 >   against the configured STUN servers and uses the reflexive
 >   IPv4 it learns. Right when your public IP is dynamic or
->   you'd rather not pin it in config. Works for nodes with a
->   directly-bound public IP and for nodes behind full-cone
->   NAT (most home routers).
+>   you'd rather not pin it in config. Note: STUN observes the
+>   reflexive IP from an ephemeral socket, then pairs it with
+>   the listener's bind port for the advert — the advert is
+>   only useful if your listener really is reachable at that
+>   public IP/port, which the daemon can't tell from STUN
+>   alone. A manual probe from a second host is the only sure
+>   check.
 > - `external_addr: "<ip>[:<port>]"` — explicit override.
 >   Right when you already know your public IP — a static
 >   residential IP, an Elastic IP behind 1:1 NAT, a cloud
@@ -86,8 +91,9 @@ port to put in the advert:
 >   to the public IP returns `EADDRNOTAVAIL`.
 >
 > If you bind UDP to a specific public IP rather than
-> `0.0.0.0`, neither flag is needed — the daemon advertises
-> whatever it's bound to.
+> `0.0.0.0`, neither STUN nor `external_addr` is needed — but
+> `advertise_on_nostr: true` and `public: true` are still both
+> required for the daemon to publish the endpoint.
 
 Adverts don't sit on the relays forever:
 
@@ -167,14 +173,17 @@ transports:
   udp:
     bind_addr: "0.0.0.0:2121"
     advertise_on_nostr: true
+    public: true
     external_addr: "203.0.113.45:2121"
 ```
 
 Replace `203.0.113.45:2121` with your actual public IP and
 port. The bare-IP form `external_addr: "203.0.113.45"` is also
-accepted; the daemon combines it with the bind port. You may
-set both `public: true` and `external_addr` together — the
-explicit override wins, with STUN as a logging cross-check.
+accepted; the daemon combines it with the bind port. `public:
+true` is still required as the master switch that gates UDP
+advertisement; setting `external_addr` alongside it wins, and
+STUN auto-discovery is skipped entirely (no logging
+cross-check).
 
 `advertise_on_nostr: true` is the bit that says "include this
 transport in my published advert" — common to both paths.
@@ -191,8 +200,11 @@ sudo systemctl status fips
 Status should show `active (running)`. Within a few seconds the
 daemon will:
 
-1. Run a one-shot STUN observation against the default STUN
-   servers to learn its public IP.
+1. Determine the address to advertise. If you set `external_addr`,
+   the daemon uses it directly and skips STUN. If you set only
+   `public: true`, the daemon runs a one-shot STUN observation
+   against the default STUN servers and uses the reflexive IPv4 it
+   learns.
 2. Build a Kind 37195 advert listing
    `udp:<public-ip>:2121` (and any other transports you have
    `advertise_on_nostr: true` on).
@@ -200,12 +212,13 @@ daemon will:
 4. Publish it to the three default advert relays.
 5. Schedule a refresh every 30 minutes.
 
-If STUN fails (for example, if the network blocks outbound
-UDP/3478), the daemon emits a WARN line in the journal and
-suppresses the UDP entry from the advert rather than publishing
-a wrong address. The link to `test-us01` from the previous
-tutorial keeps working regardless — only the publish side is
-gated on STUN.
+If you took the `public: true` path and STUN fails (for example,
+the network blocks outbound UDP/3478), the daemon emits a WARN
+line in the journal and suppresses the UDP entry from the advert
+rather than publishing a wrong address. The link to `test-us01`
+from the previous tutorial keeps working regardless — only the
+publish side is gated on STUN, and only on the STUN path. The
+`external_addr` path doesn't depend on STUN reachability at all.
 
 Quick sanity check on the journal:
 
@@ -295,22 +308,24 @@ verifiable in Step 4.
   to them specifically or not. The test mesh's open-discovery
   nodes will pick you up automatically.
 
-## If you're behind symmetric NAT
+## If your direct UDP advert isn't reachable
 
-`public: true` + STUN works on most home and office NATs (the
-full-cone variety) and on nodes with a directly-bound public
-IP. It does *not* work on symmetric NAT, where the NAT mapping
-is keyed on (source-port, destination-host) so the IP/port
-your STUN server saw isn't the IP/port a different peer would
-see.
+`public: true` advertises the IP STUN observes paired with your
+listener's bind port. That advert is only useful if your listener
+really is reachable at that public IP/port — STUN can confirm the
+public IP but not that an unsolicited inbound packet to the bind
+port will make it through. The most common cause of the listener
+being unreachable is symmetric NAT (where the public port a peer
+sees varies per remote endpoint), but other configurations can
+have the same effect.
 
-For symmetric-NAT networks the alternative is `udp:nat` mode,
-which advertises a placeholder `udp:nat` endpoint along with
-the daemon's signaling-relay and STUN-server lists, and
-performs UDP hole-punching at dial time. Both sides need to be
-running matching configs and at least one side needs a
-non-symmetric NAT for the punch to succeed; symmetric on both
-sides is not reliably traversable and will time out.
+When direct UDP advertising can't be relied on, the alternative
+is `udp:nat` mode, which advertises a placeholder `udp:nat`
+endpoint along with the daemon's signaling-relay and STUN-server
+lists, and performs UDP hole-punching at dial time. Hole-punching
+is best-effort — it works reliably when both sides are full-cone
+or port-restricted, and symmetric NAT on either side typically
+defeats it. Both sides need matching configs.
 
 The minimal config switch:
 
@@ -339,7 +354,7 @@ discovery:
 
 For the full setup including peer-side config and the punch-
 duration knob, see
-[../how-to/enable-nostr-discovery.md § Capability 2c](../how-to/enable-nostr-discovery.md#sub-scenario-2c-udp-hole-punching-for-nodes-behind-nat).
+[../how-to/enable-nostr-discovery.md § When the node is behind NAT](../how-to/enable-nostr-discovery.md#when-the-node-is-behind-nat).
 
 Separately from NAT considerations, FIPS supports running a
 node behind a Tor onion service as a deployment shape in its
@@ -347,7 +362,7 @@ own right — chosen for the privacy, anonymity, and
 censorship-resistance properties it brings, not as a fallback
 when UDP or TCP fail. If those properties are an independent
 goal for your node, see
-[../how-to/enable-nostr-discovery.md § Sub-scenario 2b](../how-to/enable-nostr-discovery.md#sub-scenario-2b-tor-onion-node)
+[../how-to/enable-nostr-discovery.md § Tor onion node](../how-to/enable-nostr-discovery.md#tor-onion-node)
 and
 [../how-to/deploy-tor-onion.md](../how-to/deploy-tor-onion.md).
 
@@ -364,10 +379,12 @@ If your advert doesn't appear on the relays:
   with a non-public address (e.g., `10.x.x.x` or
   `192.168.x.x`), STUN didn't see your real public IP — likely
   you're behind a CGNAT that NATs your STUN traffic too, or a
-  corporate firewall that proxies it. Switch to the
-  `external_addr` form from Step 2 with your actual public
-  IP, or replace `public: true` with the bound interface IP
-  directly under `bind_addr`.
+  corporate firewall that proxies it. Two correct fixes:
+  (a) keep `public: true` and add `external_addr: <your-IP>`
+  (the explicit override wins and skips STUN); or (b) bind
+  directly to your public interface
+  (`bind_addr: <pub-ip>:2121`) and keep `advertise_on_nostr:
+  true` and `public: true`. Don't drop those flags.
 
 - **Relay reachability.** `nak req` against a relay you can
   reach but no events return — possibly the publish failed
@@ -379,9 +396,14 @@ If your advert doesn't appear on the relays:
   nak req ... wss://offchain.pub
   ```
 
-- **`advertise_on_nostr` typo.** YAML is case-sensitive and
-  silently ignores unknown keys. If `nak` returns no advert at
-  all, double-check the spelling on the UDP block and that
+- **`advertise_on_nostr` typo.** YAML is case-sensitive. The
+  config parser rejects unknown keys via
+  `serde(deny_unknown_fields)` on the per-section structs, so a
+  misspelled field will refuse the daemon's start with a
+  parse-error line in the journal naming the unknown field.
+  If the daemon is running but `nak` returns no advert, the
+  field was accepted but something else is wrong; double-check
+  the spelling on the UDP block and that
   `discovery.nostr.advertise: true` is also set.
 
 ## What's next
