@@ -11,9 +11,9 @@ use nostr::prelude::{
 };
 use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::failure_state::FailureState;
 use super::signal::{
@@ -160,10 +160,20 @@ impl NostrDiscovery {
             public_udp_addr_cache: RwLock::new(HashMap::new()),
         });
 
+        // Subscribe to the relay-pool broadcast channel BEFORE issuing the
+        // Nostr REQs. tokio's broadcast channel only delivers messages sent
+        // after the receiver is created — historical events that arrive in
+        // response to subscribe() (REQ replays) would otherwise be dropped
+        // by the pool's `external_notification_sender.send(...)` returning
+        // `Err(SendError)` when no subscriber exists yet. Without this,
+        // freshly-restarted nodes with `policy: open` waited up to one
+        // `advert_refresh_secs` interval (default 30 min) for non-configured
+        // peers to re-publish before discovering them.
+        let notifications = runtime.client.notifications();
         runtime.subscribe().await?;
         runtime.publish_inbox_relays().await?;
         *runtime.advertise_task.lock().await = Some(runtime.clone().spawn_advertise_loop());
-        *runtime.notify_task.lock().await = Some(runtime.clone().spawn_notify_loop());
+        *runtime.notify_task.lock().await = Some(runtime.clone().spawn_notify_loop(notifications));
 
         Ok(runtime)
     }
@@ -515,10 +525,36 @@ impl NostrDiscovery {
         Ok(())
     }
 
-    fn spawn_notify_loop(self: Arc<Self>) -> JoinHandle<()> {
+    fn spawn_notify_loop(
+        self: Arc<Self>,
+        mut notifications: broadcast::Receiver<RelayPoolNotification>,
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut notifications = self.client.notifications();
-            while let Ok(notification) = notifications.recv().await {
+            let started_at = Instant::now();
+            let mut first_event_seen = false;
+            info!("nostr notify loop entered");
+            loop {
+                let notification = match notifications.recv().await {
+                    Ok(notification) => notification,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            skipped,
+                            "nostr notification channel lagged; advert/signal events dropped"
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("nostr notification channel closed; notify loop exiting");
+                        break;
+                    }
+                };
+                if !first_event_seen {
+                    first_event_seen = true;
+                    info!(
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "nostr notify loop received first event"
+                    );
+                }
                 if let RelayPoolNotification::Event { event, .. } = notification {
                     if event.kind == Kind::Custom(ADVERT_KIND) {
                         let author_npub = event.pubkey.to_bech32().expect("infallible");
