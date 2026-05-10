@@ -13,7 +13,7 @@ ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
 sha2 = "0.10"
 hkdf = "0.12"
-chacha20poly1305 = "0.10"
+ring = "0.17"
 rand = "0.10.1"
 thiserror = "2.0"
 bech32 = "0.11"

@@ -338,6 +338,28 @@ with v0.2.x peers.
 
 ### Changed
 
+- Noise session ChaCha20-Poly1305 backend switched from RustCrypto's
+  `chacha20poly1305` to `ring 0.17`. ring wraps BoringSSL's
+  hand-tuned ChaCha20-Poly1305 implementation, dispatching to NEON
+  on aarch64 and AVX2 / AVX-512 on x86_64 — typically 3-5 GB/s/core
+  vs the ~600-800 MB/s/core RustCrypto soft path on the same
+  hardware. Wire format unchanged: ChaCha20-Poly1305 is
+  byte-deterministic for a given `(key, nonce, plaintext, aad)`,
+  so any correct AEAD produces identical ciphertext and a mixed
+  pre-swap / post-swap mesh interoperates without protocol
+  awareness. The keyed AEAD is now cached on `CipherState` instead
+  of being re-derived per packet (the cached Poly1305 key state is
+  the actual perf win); `EndToEndState` grew from ~600 B to
+  ~1.5 KB as a consequence and is annotated
+  `#[allow(clippy::large_enum_variant)]` since boxing would re-add
+  a per-packet indirection on every encrypt/decrypt. aarch64
+  measurements (Apple Silicon docker, two nodes): TCP 1-stream
+  437 → 1097 Mbps (~2.5×); UDP at 1000 Mbit goes from
+  599 Mbps / 40 % loss to lossless line-rate; 3-node ping under
+  load 7.68 ms avg / 215 ms max → 0.72 ms / 3.6 ms max as the
+  relay path stops being crypto-bound
+  ([#80](https://github.com/jmcorgan/fips/pull/80),
+  [@mmalmi](https://github.com/mmalmi))
 - Linux UDP receive path uses `recvmmsg(2)` with a 32-packet batch
   in place of single-packet `recvmsg(2)`. A single `readable()`
   wakeup drains up to 32 datagrams in one syscall before yielding
