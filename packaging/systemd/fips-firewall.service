@@ -1,0 +1,17 @@
+# Firewall is not enabled by default. Enable with: systemctl enable --now fips-firewall
+[Unit]
+Description=FIPS mesh-interface nftables baseline
+Documentation=file:///etc/fips/fips.nft
+Before=fips.service
+ConditionPathExists=/etc/fips/fips.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/fips/fips.nft
+ExecStop=-/usr/sbin/nft delete table inet fips
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

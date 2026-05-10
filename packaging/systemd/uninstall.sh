@@ -18,30 +18,26 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# --- Stop and disable service ---
+# --- Stop and disable services ---
+# Stop dependents (firewall, gateway, dns) before the daemon to avoid
+# noisy "fips0 disappeared" cascades during the teardown.
 
-if systemctl is-active --quiet fips-dns.service 2>/dev/null; then
-    echo "Stopping fips-dns service..."
-    systemctl stop fips-dns.service
-fi
-
-if systemctl is-enabled --quiet fips-dns.service 2>/dev/null; then
-    systemctl disable fips-dns.service
-fi
-
-if systemctl is-active --quiet fips.service 2>/dev/null; then
-    echo "Stopping fips service..."
-    systemctl stop fips.service
-fi
-
-if systemctl is-enabled --quiet fips.service 2>/dev/null; then
-    systemctl disable fips.service
-fi
+for unit in fips-gateway.service fips-firewall.service fips-dns.service fips.service; do
+    if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+        echo "Stopping ${unit}..."
+        systemctl stop "${unit}"
+    fi
+    if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+        systemctl disable "${unit}"
+    fi
+done
 
 # --- Remove systemd units ---
 
 rm -f /etc/systemd/system/fips.service
 rm -f /etc/systemd/system/fips-dns.service
+rm -f /etc/systemd/system/fips-gateway.service
+rm -f /etc/systemd/system/fips-firewall.service
 rm -rf /usr/lib/fips/
 systemctl daemon-reload
 echo "systemd units and DNS scripts removed."
@@ -57,7 +53,7 @@ rm -f /etc/tmpfiles.d/fips.conf
 
 # --- Remove binaries ---
 
-rm -f /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop
+rm -f /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop /usr/local/bin/fips-gateway
 echo "Binaries removed."
 
 # --- Optionally remove configuration and group ---

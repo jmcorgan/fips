@@ -15,12 +15,24 @@ sudo ./install.sh
 | fips (daemon) | /usr/local/bin/fips |
 | fipsctl (CLI) | /usr/local/bin/fipsctl |
 | fipstop (TUI) | /usr/local/bin/fipstop |
+| fips-gateway (LAN bridge) | /usr/local/bin/fips-gateway |
 | Configuration | /etc/fips/fips.yaml |
 | Identity key | /etc/fips/fips.key (auto-generated) |
 | Public key | /etc/fips/fips.pub (auto-generated) |
-| systemd unit | /etc/systemd/system/fips.service |
+| Hosts file | /etc/fips/hosts |
+| Firewall baseline | /etc/fips/fips.nft |
+| Firewall drop-in directory | /etc/fips/fips.d/ |
+| Daemon unit | /etc/systemd/system/fips.service (enabled) |
+| DNS routing unit | /etc/systemd/system/fips-dns.service (enabled) |
+| Gateway unit | /etc/systemd/system/fips-gateway.service (NOT enabled) |
+| Firewall unit | /etc/systemd/system/fips-firewall.service (NOT enabled) |
+| DNS helpers | /usr/lib/fips/fips-dns-{setup,teardown} |
 
-A system group `fips` is created for control socket access.
+A system group `fips` is created for control socket access. By
+default, only `fips.service` and `fips-dns.service` are enabled at
+install time. `fips-gateway.service` and `fips-firewall.service`
+are installed but require explicit operator opt-in (see the
+sections below).
 
 ## Post-Install Configuration
 
@@ -101,25 +113,68 @@ peers:
     connect_policy: auto_connect
 ```
 
-### 5. DNS Resolver (optional, requires systemd-resolved)
+### 5. DNS Resolver
 
-FIPS includes a DNS responder for `.fips` domain names (port 5354).
-On systems running `systemd-resolved`, the installer automatically enables
-`fips-dns.service` to route `.fips` queries to the FIPS resolver.
+FIPS includes a DNS responder for `.fips` domain names that listens on
+`fips0` and on `[::1]:5354`. The `fips-dns.service` helper detects the
+host's DNS routing system and configures it to forward `.fips` queries
+to the responder. Backends tried in order:
 
-If `systemd-resolved` is not running at install time, DNS integration is
-skipped. To enable it later (after starting `systemd-resolved`):
+1. systemd `dns-delegate` drop-in (systemd >= 258, declarative)
+2. `systemd-resolved` global drop-in via `/etc/systemd/resolved.conf.d/`
+3. `systemd-resolved` per-link `resolvectl` (legacy fallback)
+4. `dnsmasq` (standalone, drops a config in `/etc/dnsmasq.d/`)
+5. NetworkManager with the `dnsmasq` plugin
+
+If none of the supported backends is detected, `fips-dns-setup` logs a
+warning with manual instructions and exits cleanly. The daemon itself
+keeps working; only the host's `.fips` resolution is left unwired.
+
+The installer enables `fips-dns.service` automatically. To disable
+or re-enable later:
 
 ```bash
-sudo systemctl enable --now fips-dns.service
+sudo systemctl disable --now fips-dns.service   # disable
+sudo systemctl enable --now fips-dns.service    # re-enable
 ```
 
-For manual configuration without `fips-dns.service`:
+### 6. Mesh-interface firewall baseline (optional)
+
+`fips.nft` is a default-deny baseline for inbound traffic on the
+`fips0` mesh interface. It is shipped as `/etc/fips/fips.nft` (not
+loaded by default) along with a disabled `fips-firewall.service`
+unit. Enable it explicitly:
 
 ```bash
-sudo resolvectl dns fips0 127.0.0.1:5354
-sudo resolvectl domain fips0 ~fips
+sudo systemctl enable --now fips-firewall.service
 ```
+
+The baseline polices only `fips0`, leaving Docker, Tor, the host
+firewall, and other interfaces untouched. Outbound from `fips0` is
+unrestricted; inbound is dropped except for replies to outbound
+flows, ICMPv6 echo-request, and any operator drop-ins under
+`/etc/fips/fips.d/*.nft`. Read the comments at the top of
+`/etc/fips/fips.nft` for the full policy and how to add per-service
+allow rules.
+
+### 7. Outbound LAN gateway (optional)
+
+`fips-gateway` bridges unmodified LAN hosts to `.fips` destinations
+through a DNS-allocated virtual IPv6 pool and kernel nftables NAT.
+The binary is installed at `/usr/local/bin/fips-gateway` and a
+`fips-gateway.service` unit ships disabled by default.
+
+To enable it, configure the gateway block in `/etc/fips/fips.yaml`,
+then:
+
+```bash
+sudo systemctl enable --now fips-gateway.service
+```
+
+The unit `Requires=fips.service`, waits up to 30 seconds for `fips0`
+to come up, and runs `fips-gateway --config /etc/fips/fips.yaml`.
+Inbound port-forward rules can be added in the same `gateway:`
+block.
 
 ## Firewall Ports
 
@@ -130,14 +185,28 @@ sudo resolvectl domain fips0 ~fips
 
 ## Service Management
 
+The install ships four units. `fips.service` and `fips-dns.service`
+are enabled at install time. `fips-gateway.service` and
+`fips-firewall.service` are installed but disabled until the
+operator opts in.
+
 ```bash
-# Start / stop / restart
+# Daemon
 sudo systemctl start fips
 sudo systemctl stop fips
 sudo systemctl restart fips
 
-# View logs
+# DNS routing helper
+sudo systemctl restart fips-dns
+
+# Optional services (opt-in)
+sudo systemctl enable --now fips-firewall   # mesh-interface nftables baseline
+sudo systemctl enable --now fips-gateway    # outbound LAN gateway
+
+# View logs (any of the units above)
 sudo journalctl -u fips -f
+sudo journalctl -u fips-gateway -f
+sudo journalctl -u fips-firewall -f
 
 # Switch to debug logging
 sudo systemctl set-environment RUST_LOG=debug

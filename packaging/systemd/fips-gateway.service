@@ -1,0 +1,33 @@
+# Gateway is not enabled by default. Enable with: systemctl enable --now fips-gateway
+[Unit]
+Description=FIPS Outbound LAN Gateway
+After=fips.service
+Requires=fips.service
+
+[Service]
+Type=simple
+# Wait up to 30s for the fips daemon's TUN to come up before launching
+# the gateway. fips-gateway hard-fails on a missing fips0 interface; with
+# Requires=fips.service the daemon unit is started, but the TUN device
+# itself is brought up some time after the daemon process starts. Without
+# this wait the gateway's first ExecStart tends to lose a race on fresh
+# boot, exit, and rely on Restart=on-failure for ~5s of recovery. Bounded
+# wait avoids the noisy restart cycle while still surfacing real failures
+# (if fips0 never appears, the wait expires and the gateway's existing
+# error path runs).
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip link show fips0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "fips0 did not appear within 30s" >&2; exit 1'
+ExecStart=/usr/local/bin/fips-gateway --config /etc/fips/fips.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=15
+
+# Security hardening (needs CAP_NET_ADMIN for nftables and proxy NDP)
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=no
+
+[Install]
+WantedBy=multi-user.target
