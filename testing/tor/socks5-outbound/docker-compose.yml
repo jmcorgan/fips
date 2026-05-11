@@ -1,7 +1,7 @@
 # Tor transport integration test — socks5-outbound
 #
 # Topology:
-#   [fips-a] --tor/socks5--> test-us01 (217.77.8.91:443) <--tor/socks5-- [fips-b]
+#   [fips-a] --tor/socks5--> test-us01 (test-us01.fips.network:443) <--tor/socks5-- [fips-b]
 #
 # Both FIPS nodes connect outbound through a local Tor daemon's SOCKS5
 # proxy to test-us01's TCP listener. test-us01 routes between them.

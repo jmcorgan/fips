@@ -96,7 +96,7 @@ You should currently have:
   ```
 
   Expect `test-us01` listed with `connectivity` active and a
-  `transport_addr` of roughly `217.77.8.91:2121`.
+  `transport_addr` of roughly `test-us01.fips.network:2121`.
 
 If either of those isn't true, finish the previous two
 tutorials first; the Nostr discovery layer is built on top of
@@ -189,7 +189,7 @@ sudo fipsctl show peers
 
 `test-us01` should appear with `connectivity` active and a
 `transport_addr` reflecting the address that was resolved from
-the advert — `217.77.8.91:2121` at time of writing. That field
+the advert — `test-us01.fips.network:2121` at time of writing. That field
 is the strong signal: nothing in your config gave the daemon
 that IP, yet there it is.
 

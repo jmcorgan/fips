@@ -28,7 +28,7 @@ controlled through the standard service control manager.
 | Flag | Argument | Description |
 | ---- | -------- | ----------- |
 | `-c`, `--config` | `FILE` | Use `FILE` as the configuration. Skips the default search paths. |
-| `-V` | — | Print the short version (e.g. `0.3.0-dev (rev abcdef1)`). |
+| `-V` | — | Print the short version (e.g. `0.4.0-dev (rev abcdef1)`). |
 | `--version` | — | Print the long version: short version plus build target triple. |
 | `-h`, `--help` | — | Print usage and exit. |
 | `--install-service` | — | (Windows only) Install `fips` as a Windows service. Requires Administrator. |

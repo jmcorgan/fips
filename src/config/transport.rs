@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 /// Parse an `external_addr` config string against a known bind port,
 /// producing the absolute `SocketAddr` to advertise on Nostr.
 ///
-/// Accepts either a bare IP (`"54.183.70.180"` or `"[::1]"`) — in which
+/// Accepts either a bare IP (`"198.51.100.1"` or `"[::1]"`) — in which
 /// case the bind port is appended — or a full `host:port` form
-/// (`"54.183.70.180:443"` or `"[::1]:443"`). Returns `None` on any parse
+/// (`"198.51.100.1:443"` or `"[::1]:443"`). Returns `None` on any parse
 /// error. IPv6 must use bracket notation when supplying a port.
 fn parse_external_advert_addr(raw: &str, bind_port: u16) -> Option<SocketAddr> {
     if let Ok(sa) = raw.parse::<SocketAddr>() {
@@ -79,8 +79,8 @@ pub struct UdpConfig {
     /// Optional explicit public address to advertise when `public: true`
     /// is set. Takes precedence over both the bound address and any
     /// STUN-derived autodiscovery. Accepts either a bare IP
-    /// (`"54.183.70.180"` — the configured `bind_addr` port is appended)
-    /// or a full `host:port` (`"54.183.70.180:443"`). Useful when the
+    /// (`"198.51.100.1"` — the configured `bind_addr` port is appended)
+    /// or a full `host:port` (`"198.51.100.1:443"`). Useful when the
     /// public IP isn't on a local interface (e.g. AWS EIP / cloud 1:1
     /// NAT) and the operator wants to skip STUN autodiscovery for a
     /// deterministic value.
@@ -414,7 +414,7 @@ pub struct TcpConfig {
     /// Optional explicit public address to advertise. Required when
     /// `bind_addr` is wildcard (e.g. `"0.0.0.0:443"`) and
     /// `advertise_on_nostr: true`, since TCP has no STUN equivalent
-    /// for autodiscovery. Accepts either a bare IP (`"54.183.70.180"`
+    /// for autodiscovery. Accepts either a bare IP (`"198.51.100.1"`
     /// — the configured `bind_addr` port is appended) or a full
     /// `host:port`. Common pattern on AWS EIP / cloud 1:1 NAT setups
     /// where the public IP isn't bindable on the host.
@@ -875,14 +875,14 @@ mod tests {
 
     #[test]
     fn parse_external_addr_accepts_bare_ipv4_with_appended_bind_port() {
-        let sa = parse_external_advert_addr("54.183.70.180", 2121).unwrap();
-        assert_eq!(sa.to_string(), "54.183.70.180:2121");
+        let sa = parse_external_advert_addr("198.51.100.1", 2121).unwrap();
+        assert_eq!(sa.to_string(), "198.51.100.1:2121");
     }
 
     #[test]
     fn parse_external_addr_accepts_full_ipv4_socket_addr() {
-        let sa = parse_external_advert_addr("54.183.70.180:443", 2121).unwrap();
-        assert_eq!(sa.to_string(), "54.183.70.180:443");
+        let sa = parse_external_advert_addr("198.51.100.1:443", 2121).unwrap();
+        assert_eq!(sa.to_string(), "198.51.100.1:443");
         // Explicit port wins over the bind port we passed in.
     }
 
@@ -907,23 +907,23 @@ mod tests {
     #[test]
     fn udp_external_advert_addr_combines_with_bind_port_default() {
         let cfg = UdpConfig {
-            external_addr: Some("54.183.70.180".to_string()),
+            external_addr: Some("198.51.100.1".to_string()),
             ..UdpConfig::default()
         };
         // bind_addr unset, so default DEFAULT_UDP_BIND_ADDR (0.0.0.0:2121) applies.
         let sa = cfg.external_advert_addr().unwrap();
-        assert_eq!(sa.to_string(), "54.183.70.180:2121");
+        assert_eq!(sa.to_string(), "198.51.100.1:2121");
     }
 
     #[test]
     fn udp_external_advert_addr_with_explicit_full_socket_addr_overrides_bind_port() {
         let cfg = UdpConfig {
             bind_addr: Some("0.0.0.0:2121".to_string()),
-            external_addr: Some("54.183.70.180:9999".to_string()),
+            external_addr: Some("198.51.100.1:9999".to_string()),
             ..UdpConfig::default()
         };
         let sa = cfg.external_advert_addr().unwrap();
-        assert_eq!(sa.to_string(), "54.183.70.180:9999");
+        assert_eq!(sa.to_string(), "198.51.100.1:9999");
     }
 
     #[test]
@@ -935,7 +935,7 @@ mod tests {
     #[test]
     fn tcp_external_advert_addr_requires_bind_port() {
         let cfg = TcpConfig {
-            external_addr: Some("54.183.70.180".to_string()),
+            external_addr: Some("198.51.100.1".to_string()),
             ..TcpConfig::default()
         };
         // bind_addr unset → no port to combine with → None.
@@ -943,22 +943,22 @@ mod tests {
 
         let cfg = TcpConfig {
             bind_addr: Some("0.0.0.0:443".to_string()),
-            external_addr: Some("54.183.70.180".to_string()),
+            external_addr: Some("198.51.100.1".to_string()),
             ..TcpConfig::default()
         };
         let sa = cfg.external_advert_addr().unwrap();
-        assert_eq!(sa.to_string(), "54.183.70.180:443");
+        assert_eq!(sa.to_string(), "198.51.100.1:443");
     }
 
     #[test]
     fn tcp_external_advert_addr_with_full_socket_addr_independent_of_bind() {
         let cfg = TcpConfig {
             bind_addr: Some("0.0.0.0:443".to_string()),
-            external_addr: Some("54.183.70.180:8443".to_string()),
+            external_addr: Some("198.51.100.1:8443".to_string()),
             ..TcpConfig::default()
         };
         let sa = cfg.external_advert_addr().unwrap();
-        assert_eq!(sa.to_string(), "54.183.70.180:8443");
+        assert_eq!(sa.to_string(), "198.51.100.1:8443");
     }
 
     #[test]

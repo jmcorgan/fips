@@ -38,7 +38,7 @@ nodes:
   # External/public node (not a Docker container)
   pub:
     npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
-    external_ip: "217.77.8.91"
+    external_ip: "test-us01.fips.network"
     peers: [a, b, c]
 
 # Spanning Tree Structure (rooted at node A):

@@ -99,6 +99,8 @@ with v0.2.x peers.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-11
+
 ### Added
 
 #### Mesh Layer (FMP)
@@ -296,9 +298,6 @@ with v0.2.x peers.
 
 #### Packaging and Deployment
 
-- Linux release artifact workflow: builds x86_64 and aarch64 tarballs
-  and `.deb` packages on `v*` tag push, with SHA-256 checksums
-- AUR publish workflow for tagged stable releases
 - Arch Linux AUR packaging for `fips` (release) and `fips-git`
   (development) packages with sysusers.d/tmpfiles.d integration
   ([#21](https://github.com/jmcorgan/fips/pull/21),
@@ -332,9 +331,9 @@ with v0.2.x peers.
 
 #### Documentation
 
-- Pre-implementation proposal for NAT traversal using Nostr relays
-  as the signaling channel and STUN for reflexive address discovery
-  (`docs/proposals/`)
+- `docs/design/port-advertisement-and-nat-traversal.md` documents
+  how nodes find each other through Nostr relays and the
+  STUN-assisted UDP hole punch
 
 ### Changed
 
@@ -444,16 +443,6 @@ with v0.2.x peers.
   (`backoff_base_secs`/`backoff_max_secs` now both `0`); operators
   with chatty apps generating repeat lookups against unreachable
   destinations can opt back in
-- Validate bloom filter fill ratio on FilterAnnounce ingress.
-  Inbound FilterAnnounce messages whose derived false-positive
-  rate exceeds `node.bloom.max_inbound_fpr` (new config field,
-  default 0.05) are rejected silently on the wire, logged at WARN,
-  and counted in a new `bloom.fill_exceeded` counter. A
-  rate-limited WARN also fires if our own outgoing filter's FPR
-  exceeds the cap. `BloomFilter::estimated_count` now takes
-  `max_fpr` and returns `Option<f64>`, returning `None` for
-  saturated filters; this propagates through `compute_mesh_size`
-  into `estimated_mesh_size` (already `Option<u64>`)
 - The `docs/` tree is reorganised so readers can find content by
   what they're trying to do: tutorials for new users, how-to guides
   for specific tasks, reference material for configuration and
@@ -627,9 +616,9 @@ with v0.2.x peers.
   directly is impossible (1:1 NAT)
 - New `external_addr` field on `transports.udp.*` and
   `transports.tcp.*` for explicit advertise-as override. Accepts
-  either a bare IP (`"54.183.70.180"` — the configured `bind_addr`
+  either a bare IP (`"198.51.100.1"` — the configured `bind_addr`
   port is appended) or a full `host:port`
-  (`"54.183.70.180:8443"`). Takes precedence over both the bound
+  (`"198.51.100.1:8443"`). Takes precedence over both the bound
   address and any STUN-derived autodiscovery. Required for TCP
   on cloud-NAT setups (AWS EIP, GCP/Azure external IPs) where
   binding to the public IP directly fails with `EADDRNOTAVAIL`
@@ -675,22 +664,6 @@ with v0.2.x peers.
   matching the Tor `HiddenServicePort` convention) controls the
   advertised port; operators with non-default virtual ports can
   override.
-- Control socket path detection in fipsctl and fipstop now checks for
-  the `/run/fips/` directory instead of the socket file inside it, so
-  users not yet in the `fips` group get a clear "Permission denied"
-  error instead of a misleading "No such file" fallback to
-  `$XDG_RUNTIME_DIR` ([#30](https://github.com/jmcorgan/fips/issues/30),
-  reported by [@Sebastix](https://github.com/Sebastix))
-- OpenWrt ipk build excluded BLE feature that requires D-Bus, which is
-  unavailable on OpenWrt targets
-- IPv6 routing policy rule added at TUN setup to protect `fd00::/8`
-  from interception by Tailscale's table 52 default route
-- Bloom filter routing no longer swallows traffic when no bloom
-  candidate is strictly closer than the current node. `find_next_hop`
-  now falls through to greedy tree routing in that case instead of
-  returning `NoRoute`, which previously caused dropped packets in
-  topologies where the tree parent was closer but not a bloom
-  candidate
 - TCP-over-FIPS reliability on mesh paths with mixed transport
   MTUs (e.g. a UDP-1280 hop in the picker set) improved. Three
   interlocking changes: `Node::transport_mtu()` is now deterministic
@@ -728,6 +701,55 @@ with v0.2.x peers.
   the cooldown window are silent. New `protocol_mismatch_cooldown_secs`
   config field under `node.discovery.nostr` (default 86400 = 24h),
   separate from the transient-failure `extended_cooldown_secs`.
+- `fipstop` now uses `ratatui::try_init()` instead of `ratatui::init()`,
+  so terminal initialization failures (e.g. Docker on macOS Sequoia,
+  or environments without a usable tty) produce a clean error message
+  instead of a hard crash
+- Spanning-tree updates that change only the internal path between
+  root and leaf — without changing the root or the depth — now
+  propagate to leaves correctly. Previously a leaf could continue
+  routing against a stale internal path until the parent or depth
+  also changed.
+
+## [0.2.1] - 2026-05-11
+
+### Added
+
+- Linux release artifact workflow: builds x86_64 and aarch64 tarballs
+  and `.deb` packages on `v*` tag push, with SHA-256 checksums
+- AUR publish workflow for tagged stable releases
+
+### Changed
+
+- Validate bloom filter fill ratio on FilterAnnounce ingress.
+  Inbound FilterAnnounce messages whose derived false-positive
+  rate exceeds `node.bloom.max_inbound_fpr` (new config field,
+  default 0.05) are rejected silently on the wire, logged at WARN,
+  and counted in a new `bloom.fill_exceeded` counter. A
+  rate-limited WARN also fires if our own outgoing filter's FPR
+  exceeds the cap. `BloomFilter::estimated_count` now takes
+  `max_fpr` and returns `Option<f64>`, returning `None` for
+  saturated filters; this propagates through `compute_mesh_size`
+  into `estimated_mesh_size` (already `Option<u64>`)
+
+### Fixed
+
+- Control socket path detection in fipsctl and fipstop now checks for
+  the `/run/fips/` directory instead of the socket file inside it, so
+  users not yet in the `fips` group get a clear "Permission denied"
+  error instead of a misleading "No such file" fallback to
+  `$XDG_RUNTIME_DIR` ([#30](https://github.com/jmcorgan/fips/issues/30),
+  reported by [@Sebastix](https://github.com/Sebastix))
+- OpenWrt ipk build excluded BLE feature that requires D-Bus, which is
+  unavailable on OpenWrt targets
+- IPv6 routing policy rule added at TUN setup to protect `fd00::/8`
+  from interception by Tailscale's table 52 default route
+- Bloom filter routing no longer swallows traffic when no bloom
+  candidate is strictly closer than the current node. `find_next_hop`
+  now falls through to greedy tree routing in that case instead of
+  returning `NoRoute`, which previously caused dropped packets in
+  topologies where the tree parent was closer but not a bloom
+  candidate
 - Auto-connect peers now reconnect after a graceful `Disconnect`
   notification from the remote side. `handle_disconnect` previously
   removed the peer without scheduling a reconnect, orphaning the
@@ -741,19 +763,10 @@ with v0.2.x peers.
   bind with `EAFNOSUPPORT`
   ([#61](https://github.com/jmcorgan/fips/issues/61),
   reported by [@SwapMarket](https://github.com/SwapMarket))
-- `fipstop` now uses `ratatui::try_init()` instead of `ratatui::init()`,
-  so terminal initialization failures (e.g. Docker on macOS Sequoia,
-  or environments without a usable tty) produce a clean error message
-  instead of a hard crash
 - Tighten TreeAnnounce ancestry validation to match the spanning
   tree specification. The receive path now verifies that the
   ancestry is structurally consistent with the signed parent
   declaration before mutating tree state.
-- Spanning-tree updates that change only the internal path between
-  root and leaf — without changing the root or the depth — now
-  propagate to leaves correctly. Previously a leaf could continue
-  routing against a stale internal path until the parent or depth
-  also changed.
 - Make the tree ancestry acceptance unit test deterministic.
   `test_tree_announce_validate_semantics_accepts_valid_non_root`
   generated a random signing identity while pinning the fixed root
@@ -762,17 +775,6 @@ with v0.2.x peers.
   `AncestryRootNotMinimum`. The test now regenerates the identity
   until its `node_addr` is strictly larger than both the fixed
   parent and root.
-- Responder now sends an encrypted `Disconnect` frame on the
-  newly-established Noise session when rejecting a peer in
-  `handle_msg3`, before tearing down. Under Noise XX the responder
-  only learns the initiator's identity from msg3, so by the time an
-  inbound-handshake policy check can reject, the initiator has
-  already received msg2 and promoted its side of the peering. Without
-  an explicit notification the initiator would keep the "connected"
-  state until link-dead timeout fired, producing the
-  `acl-allowlist` CI failure on the `next` branch. The notification
-  allows the initiator's existing `handle_disconnect` path to clean
-  up within one RTT.
 
 ## [0.2.0] - 2026-03-22
 

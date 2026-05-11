@@ -5,7 +5,7 @@
 #   fips-a --tor/socks5--> test-us01 <--tor/socks5-- fips-b
 #
 # Both local FIPS nodes connect outbound through a local Tor daemon
-# to test-us01's TCP listener (217.77.8.91:443). Once both are peered
+# to test-us01's TCP listener (test-us01.fips.network:443). Once both are peered
 # with test-us01, traffic between fips-a and fips-b is routed through it.
 #
 # Each run generates ephemeral identities to avoid mesh clashes when

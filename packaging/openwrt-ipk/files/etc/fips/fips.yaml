@@ -1,20 +1,38 @@
 # FIPS Node Configuration
-#
-# Edit this file before starting the FIPS daemon.
-# Full reference: https://github.com/jmcorgan/fips/blob/master/docs/reference/configuration.md
-#
-# After editing, restart the daemon:
-#   /etc/init.d/fips restart
 
 node:
   identity:
-    # A persistent keypair is generated on first start and saved to
-    # /etc/fips/fips.key (private) and /etc/fips/fips.pub (public).
-    # The router keeps the same FIPS identity across reboots.
+    # By default, a new ephemeral keypair is generated on each start.
+    # Uncomment persistent to keep the same identity across restarts;
+    # on first start a keypair is saved to fips.key/fips.pub next to
+    # this config file (mode 0600/0644).
+    # persistent: true
     #
-    # To use an explicit key instead, comment out 'persistent' and set:
-    #   nsec: "your-64-char-hex-private-key"
-    persistent: true
+    # Or set an explicit key (overrides persistent):
+    # nsec: "nsec1..."
+  discovery:
+    # Optional Nostr-mediated overlay endpoint discovery.
+    # nostr:
+    #   enabled: true
+    #   policy: configured_only  # disabled | configured_only | open
+    #   open_discovery_max_pending: 64 # caps queued open-discovery retries
+    #   app: "fips-overlay-v1"
+    #   advertise: true
+    #   advert_relays:
+    #     - "wss://relay.damus.io"
+    #     - "wss://nos.lol"
+    #     - "wss://offchain.pub"
+    #   dm_relays:
+    #     - "wss://relay.damus.io"
+    #     - "wss://nos.lol"
+    #     - "wss://offchain.pub"
+    #   # Optional override. If omitted, FIPS uses the built-in STUN list.
+    #   # Built-in relay/STUN defaults are best-effort and should be
+    #   # overridden by operators for production use.
+    #   stun_servers:
+    #     - "stun:stun.l.google.com:19302"
+    #     - "stun:stun.cloudflare.com:3478"
+    #     - "stun:global.stun.twilio.com:3478"
 
 tun:
   enabled: true
@@ -23,68 +41,85 @@ tun:
 
 dns:
   enabled: true
-  # bind_addr defaults to "::1" (IPv6 loopback). On OpenWrt, dnsmasq
-  # owns port 53; fips-dns-setup adds a forwarder rule pointing at
-  # 127.0.0.1#5354. Loopback bind is sufficient for that path.
+  # bind_addr defaults to "::1" (IPv6 loopback). The shipped
+  # fips-dns-setup script configures systemd-resolved with a global
+  # /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
+  # [::1]:5354.
   #
-  # Set "::" to expose the responder to LAN clients directly (rare —
-  # most installs let dnsmasq forward instead). The mesh-interface
-  # filter in src/upper/dns.rs defends /etc/fips/hosts aliases from
-  # cross-mesh enumeration when bound to a wildcard.
+  # Set "::" to expose the responder to mesh peers as well (e.g. for
+  # gateway hosts that resolve .fips on behalf of LAN clients). The
+  # mesh-interface filter in src/upper/dns.rs will still defend
+  # /etc/fips/hosts aliases from cross-mesh enumeration.
   # bind_addr: "::1"
   port: 5354
 
 transports:
   udp:
     bind_addr: "0.0.0.0:2121"
+    # advertise_on_nostr: true
+    # public: false # false => advertise udp:nat; true => advertise bound host:port
+    # accept_connections: true # default; refuse inbound msg1 when false
+    # outbound_only: false     # true => bind ephemeral, no listener on a
+    #                          # known port. Forces advertise_on_nostr=false
+    #                          # and accept_connections=false. Pure-client
+    #                          # posture; bind_addr is ignored.
 
-  # Ethernet transport — uncomment and set your interface names.
-  # Use physical port names, NOT bridge names (e.g. eth1, not br-lan).
+  tcp:
+    # Accepts inbound connections. No static outbound peers.
+    bind_addr: "0.0.0.0:8443"
+    # advertise_on_nostr: true
+
+  # Ethernet transport — physical port names, NOT bridge names.
   # Run 'ip link show' on the router to identify port names.
-  # See: https://github.com/jmcorgan/fips/blob/master/deploy/native/README.md
-  
   ethernet:
     wan:
-      interface: "eth0" # WAN
+      interface: "eth0"
       discovery: true
       announce: true
       auto_connect: true
       accept_connections: true
     wwan:
-      interface: "phy0-sta0" # WWAN
+      interface: "phy0-sta0"
       discovery: true
       announce: true
       auto_connect: true
       accept_connections: true
     lan:
-      interface: "br-lan"       # LAN
+      interface: "br-lan"
       discovery: true
       announce: true
       auto_connect: true
       accept_connections: true
 
-peers: []
-  # Static peers for bootstrapping (add at least one if using UDP-only):
-  # - npub: "npub1..."
-  #   alias: "gateway"
-  #   addresses:
-  #     - transport: udp
-  #       addr: "1.2.3.4:2121"  # IP or hostname
+  # Bluetooth Low Energy transport — requires BlueZ and the 'ble' feature.
+  # ble:
+  #   adapter: "hci0"
+  #   mtu: 2048
+  #   advertise: true
+  #   scan: true
+  #   auto_connect: true
+  #   accept_connections: true
 
-# --- Outbound LAN gateway ---
-#
-# Allows unmodified LAN hosts to reach FIPS mesh destinations via
-# DNS-allocated virtual IPs and kernel nftables NAT.
-#
-# The gateway DNS listens on `[::1]:5353` by default (set in source) so it
-# does not conflict with dnsmasq on port 53.  The init script configures
-# dnsmasq to forward .fips queries to the gateway automatically.
-
+# Outbound LAN gateway. dnsmasq forwards .fips queries to listen=[::1]:5353
+# (configured by the fips init script). Requires IPv6 forwarding enabled.
 gateway:
   enabled: true
-  pool: "fd01::/112"            # virtual IP range (up to 65535 addresses)
-  lan_interface: "br-lan"       # LAN-facing interface for proxy NDP
+  pool: "fd01::/112"
+  lan_interface: "br-lan"
   dns:
-    upstream: "[::1]:5354"      # FIPS daemon DNS resolver (matches daemon default)
-    ttl: 60                     # DNS TTL and mapping lifetime (seconds)
-  pool_grace_period: 60         # seconds after last session before reclaiming
+    listen: "[::1]:5353"
+    upstream: "[::1]:5354"
+    ttl: 60
+  pool_grace_period: 60
+
+peers: []
+  # Static peers for bootstrapping (UDP or TCP):
+  # - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
+  #   alias: "gateway"
+  #   via_nostr: true
+  #   addresses:
+  #     - transport: udp
+  #       addr: "test-us01.fips.network:2121"  # IP or hostname (e.g., "peer.example.com:2121")
+  #     - transport: udp
+  #       addr: "nat"  # Use node.discovery.nostr for Nostr/STUN hole punching
+  #   connect_policy: auto_connect
