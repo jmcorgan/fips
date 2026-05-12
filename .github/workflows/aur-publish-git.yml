@@ -1,0 +1,36 @@
+name: AUR Publish (fips-git)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - 'packaging/aur/PKGBUILD-git'
+      - 'packaging/aur/fips.sysusers'
+      - 'packaging/aur/fips.tmpfiles'
+      - 'packaging/aur/fips.install'
+      - '.github/workflows/aur-publish-git.yml'
+
+jobs:
+  aur-publish-fips-git:
+    name: Publish fips-git to AUR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        with:
+          pkgname: fips-git
+          pkgbuild: packaging/aur/PKGBUILD-git
+          updpkgsums: false
+          assets: |
+            packaging/aur/fips.sysusers
+            packaging/aur/fips.tmpfiles
+            packaging/aur/fips.install
+          commit_username: ${{ github.repository_owner }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update PKGBUILD-git (${{ github.sha }})"
