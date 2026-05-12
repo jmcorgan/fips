@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Breaking
 
-Wire-format breaking changes for v0.4.0. All nodes in a mesh must
+Wire-format breaking changes for v0.5.0. All nodes in a mesh must
 run the same major version — these changes are not backward compatible
-with v0.2.x peers.
+with v0.3.x peers.
 
 ### Changed
 

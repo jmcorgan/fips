@@ -3,7 +3,7 @@
 ![banner](docs/logos/fips_banner.png)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.4.0--dev-green.svg)](#status--roadmap)
+[![Status](https://img.shields.io/badge/status-v0.5.0--dev-green.svg)](#status--roadmap)
 
 A self-organizing encrypted mesh network built on Nostr identities,
 capable of operating over arbitrary transports without central
@@ -183,16 +183,16 @@ testing/      Docker-based integration test harnesses + chaos simulation
 
 ## Status & roadmap
 
-FIPS is at **v0.4.0-dev** on the `next` branch.
+FIPS is at **v0.5.0-dev** on the `next` branch.
 [v0.3.0](https://github.com/jmcorgan/fips/releases/tag/v0.3.0)
 has shipped from `master`; this development line carries
-wire-format-breaking work for v0.4.0 — unified Noise XX handshake
+wire-format-breaking work for v0.5.0 — unified Noise XX handshake
 at both layers, FMP node profiles, slimmer MMP reports, and an
 extensible bloom-filter encoding — that will not interoperate with
 v0.2.x or v0.3.x peers. The core protocol works end-to-end over
 UDP, TCP, Ethernet, Tor, and Bluetooth on a small live mesh of
 deployed nodes. See the CHANGELOG `## Breaking` section for the
-full list of v0.4.0 wire-format changes in flight.
+full list of v0.5.0 wire-format changes in flight.
 
 ### What works today
 
