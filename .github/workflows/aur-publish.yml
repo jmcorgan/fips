@@ -2,6 +2,11 @@ name: AUR Publish
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.3.0). Defaults to the tag the workflow was dispatched from.'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
@@ -10,23 +15,73 @@ jobs:
   aur-publish-fips:
     name: Publish fips to AUR
     runs-on: ubuntu-latest
-    continue-on-error: true
-    if: "!contains(github.ref_name, '-')"
+    if: github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-')
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Update pkgver in PKGBUILD
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "Tag '$TAG' does not look like a release tag (vX.Y.Z)"; exit 1 ;;
+          esac
+          case "$TAG" in
+            *-*)
+              if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+                echo "Pre-release tag '$TAG' — skipping AUR publish"
+                exit 1
+              fi
+              ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Patch PKGBUILD with pkgver and b2sums
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/${TAG}.tar.gz"
+          echo "Fetching $URL"
+          SOURCE_SUM=$(curl -fsSL --retry 3 "$URL" | b2sum | awk '{print $1}')
+          SYSUSERS_SUM=$(b2sum packaging/aur/fips.sysusers | awk '{print $1}')
+          TMPFILES_SUM=$(b2sum packaging/aur/fips.tmpfiles | awk '{print $1}')
+          for v in SOURCE_SUM SYSUSERS_SUM TMPFILES_SUM; do
+            eval val=\$$v
+            if [ -z "$val" ]; then echo "$v is empty"; exit 1; fi
+          done
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/aur/PKGBUILD
+          sed -i "s|^b2sums=('SKIP'.*|b2sums=('${SOURCE_SUM}'|" packaging/aur/PKGBUILD
+          awk -v s1="$SYSUSERS_SUM" -v s2="$TMPFILES_SUM" '
+            /^b2sums=\(/ { in_block=1; count=0 }
+            in_block {
+              count++
+              if (count == 2) sub(/[a-f0-9]{128}/, s1)
+              if (count == 3) sub(/[a-f0-9]{128}/, s2)
+              if ($0 ~ /\)/) in_block=0
+            }
+            { print }
+          ' packaging/aur/PKGBUILD > packaging/aur/PKGBUILD.new
+          mv packaging/aur/PKGBUILD.new packaging/aur/PKGBUILD
+          echo "Patched PKGBUILD:"
+          grep -E "^pkgver=" packaging/aur/PKGBUILD
+          awk '/^b2sums=\(/,/\)$/' packaging/aur/PKGBUILD
 
       - name: Publish to AUR
         uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
         with:
           pkgname: fips
           pkgbuild: packaging/aur/PKGBUILD
-          updpkgsums: true
+          updpkgsums: false
           assets: |
             packaging/aur/fips.sysusers
             packaging/aur/fips.tmpfiles
@@ -34,4 +89,4 @@ jobs:
           commit_username: ${{ github.repository_owner }}
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update to ${{ github.ref_name }}"
+          commit_message: "Update to ${{ steps.tag.outputs.tag }}"
