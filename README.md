@@ -3,7 +3,7 @@
 ![banner](docs/logos/fips_banner.png)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.3.0-green.svg)](#status--roadmap)
+[![Status](https://img.shields.io/badge/status-v0.4.0--dev-green.svg)](#status--roadmap)
 
 A self-organizing encrypted mesh network built on Nostr identities,
 capable of operating over arbitrary transports without central
