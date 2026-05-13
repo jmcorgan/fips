@@ -99,6 +99,20 @@ with v0.3.x peers.
 
 ## [Unreleased]
 
+### Fixed
+
+- XX rekey dual-initiation race that broke six pair-directions
+  post-rekey when both endpoints initiated rekey simultaneously.
+  The `handle_msg3` tie-breaker only fired when `rekey_in_progress`
+  was still true, but XX's three-message handshake lets both sides
+  clear that flag (via `set_pending_session`) before either's msg3
+  lands. The drop-on-pending-session guard then silently discarded
+  the peer's msg3, each side cut over to its own initiator session,
+  and the link broke asymmetrically. The tie-breaker now also fires
+  when `pending_new_session().is_some()`, applying the same
+  smaller-NodeAddr resolution rule. Mirrored to the FSP rekey msg1
+  path for symmetry.
+
 ## [0.3.0] - 2026-05-11
 
 ### Added

@@ -60,8 +60,14 @@ impl Node {
 
             if k_bit_flipped {
                 let display_name = self.peer_display_name(&node_addr);
+                let pending_our = peer.pending_our_index();
+                let pending_their = peer.pending_their_index();
                 info!(
                     peer = %display_name,
+                    our_addr = %self.identity.node_addr(),
+                    their_addr = %node_addr,
+                    pending_our_index = ?pending_our,
+                    pending_their_index = ?pending_their,
                     "Peer K-bit flip detected, promoting new session"
                 );
 

@@ -189,6 +189,8 @@ impl Node {
                 let display_name = self.peer_display_name(src_addr);
                 info!(
                     peer = %display_name,
+                    our_addr = %self.identity.node_addr(),
+                    their_addr = %src_addr,
                     "Peer FSP K-bit flip detected, promoting new session"
                 );
                 let now_ms = Self::now_ms();
@@ -432,33 +434,41 @@ impl Node {
                     let rekey_in_progress = existing.has_rekey_in_progress();
                     let has_pending = existing.pending_new_session().is_some();
 
-                    // Dual-initiation detection: both sides sent SessionSetup
-                    // simultaneously. Apply tie-breaker — smaller NodeAddr
-                    // wins as initiator (same as initial session setup).
-                    if rekey_in_progress {
+                    // Dual-initiation detection: both sides initiated rekey
+                    // simultaneously. Two states can reach this point:
+                    //   - rekey_in_progress=true: both sides still mid-handshake
+                    //   - pending_new_session=Some && !rekey_in_progress: we've
+                    //     already completed our initiator path
+                    //     (set_pending_session cleared rekey_in_progress) and
+                    //     the peer's msg1 arrives now. Symmetric of the FMP
+                    //     msg3 case at handle_msg3.
+                    // Apply the smaller-NodeAddr tie-breaker uniformly so
+                    // both sides converge on a single Noise session.
+                    if rekey_in_progress || has_pending {
                         if self.identity.node_addr() < src_addr {
-                            // We win as initiator — drop their msg1.
-                            debug!(
+                            // We win — keep our session, drop their msg1.
+                            info!(
                                 src = %self.peer_display_name(src_addr),
-                                "Dual FSP rekey initiation: we win (smaller addr), dropping their msg1"
+                                our_addr = %self.identity.node_addr(),
+                                their_addr = %src_addr,
+                                rekey_in_progress = rekey_in_progress,
+                                pending_new_session = has_pending,
+                                "FSP rekey-msg1 tie-break: we win (smaller addr), drop their msg1"
                             );
                             return;
                         }
-                        // We lose — abandon our rekey, become responder below.
-                        debug!(
+                        // We lose — abandon our rekey/pending, fall through as responder.
+                        info!(
                             src = %self.peer_display_name(src_addr),
-                            "Dual FSP rekey initiation: we lose (larger addr), abandoning ours"
+                            our_addr = %self.identity.node_addr(),
+                            their_addr = %src_addr,
+                            rekey_in_progress = rekey_in_progress,
+                            pending_new_session = has_pending,
+                            "FSP rekey-msg1 tie-break: we lose (larger addr), abandon ours"
                         );
                         if let Some(entry) = self.sessions.get_mut(src_addr) {
                             entry.abandon_rekey();
                         }
-                    } else if has_pending {
-                        // Guard: already have a pending session waiting for K-bit cutover
-                        debug!(
-                            src = %self.peer_display_name(src_addr),
-                            "FSP rekey msg1 received but already have pending session, dropping"
-                        );
-                        return;
                     }
                     let our_keypair = self.identity.keypair();
                     let mut handshake = HandshakeState::new_responder(our_keypair);
@@ -666,6 +676,8 @@ impl Node {
 
             debug!(
                 src = %self.peer_display_name(src_addr),
+                our_addr = %self.identity.node_addr(),
+                their_addr = %src_addr,
                 "FSP rekey: completed XX as initiator, pending cutover"
             );
             return;
@@ -847,6 +859,8 @@ impl Node {
 
             debug!(
                 src = %self.peer_display_name(src_addr),
+                our_addr = %self.identity.node_addr(),
+                their_addr = %src_addr,
                 "FSP rekey: completed XX as responder, pending cutover"
             );
             return;

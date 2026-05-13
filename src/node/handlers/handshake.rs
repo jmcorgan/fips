@@ -387,9 +387,10 @@ impl Node {
 
                                 debug!(
                                     peer = %display_name,
+                                    our_addr = %self.identity.node_addr(),
                                     new_our_index = %our_index,
                                     new_their_index = %header.sender_idx,
-                                    "Rekey completed (initiator), pending K-bit cutover"
+                                    "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
                                 );
                             } else {
                                 // msg3 send failed — abandon rekey
@@ -1015,36 +1016,46 @@ impl Node {
                         && existing_peer.is_healthy()
                         && session_age_secs >= 30
                     {
-                        // Guard: already have a pending session from a completed
-                        // rekey (waiting for K-bit cutover). Don't overwrite.
-                        if existing_peer.pending_new_session().is_some() {
-                            debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                "Rekey msg3 received but already have pending session, dropping"
-                            );
-                            self.connections.remove(&link_id);
-                            self.links.remove(&link_id);
-                            return;
-                        }
-
-                        // Dual-initiation detection: both sides sent msg1
-                        // simultaneously. Apply tie-breaker.
-                        if existing_peer.rekey_in_progress() {
+                        // Dual-initiation detection: both sides initiated rekey
+                        // simultaneously. Two states can reach this point:
+                        //   - rekey_in_progress=true: both sides still mid-handshake
+                        //   - pending_new_session=Some && !rekey_in_progress: both
+                        //     sides already completed their initiator path
+                        //     (set_pending_session cleared rekey_in_progress)
+                        // The IK fix only caught the first state; the XX three-message
+                        // handshake widens the window so the second state is reached
+                        // when both sides' set_pending_session runs before either's
+                        // msg3 lands at the peer. Apply the smaller-NodeAddr
+                        // tie-breaker uniformly in both states so both sides converge
+                        // on a single Noise session post-cutover.
+                        if existing_peer.rekey_in_progress()
+                            || existing_peer.pending_new_session().is_some()
+                        {
                             let our_addr = self.identity.node_addr();
                             if our_addr < &peer_node_addr {
-                                // We win as initiator — drop their msg3/handshake.
-                                debug!(
+                                // We win — keep our session, drop their msg3.
+                                info!(
                                     peer = %self.peer_display_name(&peer_node_addr),
-                                    "Dual rekey initiation: we win (smaller addr), dropping their msg3"
+                                    our_addr = %our_addr,
+                                    their_addr = %peer_node_addr,
+                                    rekey_in_progress = existing_peer.rekey_in_progress(),
+                                    pending_new_session = existing_peer.pending_new_session().is_some(),
+                                    "rekey-msg3 tie-break: we win (smaller addr), drop their msg3"
                                 );
                                 self.connections.remove(&link_id);
                                 self.links.remove(&link_id);
                                 return;
                             }
-                            // We lose — abandon our rekey, become responder below.
-                            debug!(
+                            // We lose — abandon our rekey/pending, fall through as responder.
+                            // abandon_rekey clears both rekey_in_progress and any pending
+                            // session state, returning whichever index needs freeing.
+                            info!(
                                 peer = %self.peer_display_name(&peer_node_addr),
-                                "Dual rekey initiation: we lose (larger addr), abandoning ours"
+                                our_addr = %our_addr,
+                                their_addr = %peer_node_addr,
+                                rekey_in_progress = existing_peer.rekey_in_progress(),
+                                pending_new_session = existing_peer.pending_new_session().is_some(),
+                                "rekey-msg3 tie-break: we lose (larger addr), abandon ours"
                             );
                             if let Some(peer) = self.peers.get_mut(&peer_node_addr)
                                 && let Some(idx) = peer.abandon_rekey()
@@ -1103,8 +1114,10 @@ impl Node {
 
                         debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
+                            our_addr = %self.identity.node_addr(),
                             new_our_index = %our_new_index,
-                            "Rekey completed (responder), pending K-bit cutover"
+                            new_their_index = %header.sender_idx,
+                            "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
                         );
                         return;
                     }
@@ -1282,8 +1295,10 @@ impl Node {
 
                     debug!(
                         peer = %display_name,
+                        our_addr = %self.identity.node_addr(),
                         new_our_index = %our_index,
-                        "Rekey msg3 completed (responder), pending K-bit cutover"
+                        new_their_index = %header.sender_idx,
+                        "rekey-msg3 responder (existing link): pending session set, awaiting K-bit cutover"
                     );
                 }
                 Err(e) => {

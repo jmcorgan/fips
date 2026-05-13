@@ -10,7 +10,7 @@ use crate::node::Node;
 use crate::node::wire::build_msg1;
 use crate::noise::HandshakeState;
 use crate::protocol::{SessionDatagram, SessionSetup};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Keep previous session alive for this long after cutover.
 const DRAIN_WINDOW_SECS: u64 = 10;
@@ -95,8 +95,14 @@ impl Node {
                         )),
                     "peers_by_index should contain pre-registered new index after cutover"
                 );
-                debug!(
+                let our_index = peer.our_index();
+                let their_index = peer.their_index();
+                info!(
                     peer = %self.peer_display_name(&node_addr),
+                    our_addr = %self.identity.node_addr(),
+                    their_addr = %node_addr,
+                    our_index = ?our_index,
+                    their_index = ?their_index,
                     "Rekey cutover complete (initiator), K-bit flipped"
                 );
             }
