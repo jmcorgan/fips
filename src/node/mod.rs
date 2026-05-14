@@ -30,7 +30,15 @@ use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 /// +REKEY_JITTER_SECS]` seconds at construction. Desynchronizes
 /// dual-initiation in symmetric-start meshes; the configured
 /// `node.rekey.after_secs` remains the nominal interval (mean preserved).
-pub(crate) const REKEY_JITTER_SECS: i64 = 15;
+///
+/// Disabled (set to 0) on next pending investigation: the jitter mechanism
+/// was authored against the IK FMP rekey path on maint/master and works
+/// cleanly there, but on next's XX FMP rekey path it produces reproducible
+/// post-cutover routing-convergence failures (~50% Phase 5 ping loss in
+/// the `rekey` integration suite). Restoring jitter on next requires
+/// understanding why the XX cutover state cleanup doesn't absorb
+/// variable-interval rekeys the way the IK path does. See CHANGELOG.
+pub(crate) const REKEY_JITTER_SECS: i64 = 0;
 use self::wire::{
     FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header, prepend_inner_header,
 };

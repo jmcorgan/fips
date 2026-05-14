@@ -138,6 +138,17 @@ with v0.3.x peers.
     is not tied to release tags.
   - Tag-triggered `package-*` release-build workflows remain
     untouched.
+- Rekey timer jitter disabled on next (`REKEY_JITTER_SECS = 0` at
+  `src/node/mod.rs`). The jitter mechanism added on maint/master
+  (per-session signed jitter `[-15, +15]` seconds) works cleanly on
+  the IK FMP rekey path on those branches, but on next's XX FMP
+  rekey path it produces reproducible post-cutover routing-convergence
+  failures: ~50% Phase 5 per-pair-ping loss in the `rekey` integration
+  suite, with all crypto/transport/link-state log assertions still
+  green (Phase 6 all-green). With the const set to 0 the same suite
+  passes 70/70. The constant and surrounding draw/redraw machinery
+  are kept in place pending diagnosis of why XX cutover state cleanup
+  doesn't absorb variable-interval rekeys the way IK does.
 
 ### Fixed
 
