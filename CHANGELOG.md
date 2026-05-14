@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously required `gh run rerun --failed`. Cost on the success
   path is unchanged because the wait loop returns as soon as all 20
   pairs converge.
+- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
+  added a post-second-rekey settle window in Phase 5, mirroring
+  Phase 3's existing 12-second pattern. Closes the intermittent
+  GitHub-runner Phase 5 per-pair-ping flake caused by post-rekey
+  routing convergence exceeding the per-ping 5-second timeout under
+  runner CPU contention. Cost on the success path is a fixed 12s per
+  suite run.
 
 ## [0.3.0] - 2026-05-11
 
