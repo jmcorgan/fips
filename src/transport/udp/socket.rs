@@ -844,7 +844,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         const RECV_BUF: usize = 4 * 1024 * 1024;
-        const SEND_BUF: usize = 1 * 1024 * 1024;
+        const SEND_BUF: usize = 1024 * 1024;
         const PAYLOAD_LEN: usize = 100;
         const WINDOW: Duration = Duration::from_secs(3);
         const WARMUP: Duration = Duration::from_millis(500);
