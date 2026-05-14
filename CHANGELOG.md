@@ -22,12 +22,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assistant policy, and project communication channels. Added
   `docs/branching.md` as the long-form companion covering the release
   workflow, version conventions, and merge-direction rationale.
-- CI workflow (`.github/workflows/ci.yml`) now declares a top-level
-  `concurrency` block keyed on `(workflow, ref)` with
-  `cancel-in-progress: true`. Force-pushes and rapid successive
-  pushes to the same ref now retire the in-flight run rather than
-  letting superseded and current-tip runs both consume runner minutes.
-  Tag-triggered release-build workflows are deliberately untouched.
+- CI and release-publish workflows hardened:
+  - `ci.yml` declares a top-level `concurrency` block keyed on
+    `(workflow, ref)` with `cancel-in-progress: true`. Force-pushes
+    and rapid successive pushes to the same ref now retire any
+    in-flight run rather than letting superseded and current-tip runs
+    both burn runner minutes.
+  - `aur-publish.yml` rewritten to fetch the upstream source tarball
+    and compute its `b2sum` in CI, then patch `pkgver` and the
+    `b2sums` SKIP placeholder in `PKGBUILD` in-place. Previously
+    `updpkgsums: true` downloaded the tarball into the AUR working
+    tree, where it was rejected by AUR's 488 KiB max-blob hook —
+    silently no-op'ing the v0.3.0 stable AUR push. `fips.sysusers` /
+    `fips.tmpfiles` asset b2sums are recomputed in the same step to
+    stay in sync with the local files. `workflow_dispatch` gains a
+    tag input so historical release tags can be re-published
+    manually, and `continue-on-error: true` is dropped so future
+    regressions surface in CI.
+  - New `aur-publish-git.yml` workflow for the `fips-git` VCS
+    PKGBUILD, triggered on master pushes touching `PKGBUILD-git` or
+    companion files plus `workflow_dispatch`. `pkgver` is computed at
+    build time by the PKGBUILD's `pkgver()` function, so this workflow
+    is not tied to release tags.
+  - Tag-triggered `package-*` release-build workflows remain
+    untouched.
 
 ### Fixed
 
@@ -50,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routing convergence exceeding the per-ping 5-second timeout under
   runner CPU contention. Cost on the success path is a fixed 12s per
   suite run.
+- ACL-allowlist integration test (`testing/acl-allowlist/test.sh`):
+  converted `assert_log_contains` from a one-shot `docker logs | grep`
+  snapshot into a bounded poll with the same wait-with-timeout shape
+  as `wait_for_peers_exact`. Absorbs the millisecond-to-second
+  variance in the XX-handshake cross-connection tie-breaker: the
+  inbound-handshake-context rejection can land tens of milliseconds
+  after the test's previous one-shot grep gave up, producing a
+  pre-existing flake on next-branch CI. Success-path cost is
+  unchanged — the helper returns as soon as the pattern appears.
 
 ## [0.3.0] - 2026-05-11
 
