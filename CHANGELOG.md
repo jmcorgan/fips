@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assistant policy, and project communication channels. Added
   `docs/branching.md` as the long-form companion covering the release
   workflow, version conventions, and merge-direction rationale.
+- CI workflow (`.github/workflows/ci.yml`) now declares a top-level
+  `concurrency` block keyed on `(workflow, ref)` with
+  `cancel-in-progress: true`. Force-pushes and rapid successive
+  pushes to the same ref now retire the in-flight run rather than
+  letting superseded and current-tip runs both consume runner minutes.
+  Tag-triggered release-build workflows are deliberately untouched.
 
 ### Fixed
 
