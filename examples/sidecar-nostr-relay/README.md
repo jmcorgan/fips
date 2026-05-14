@@ -187,6 +187,7 @@ docker exec sidecar-nostr-relay-app-1 ping -c1 127.0.0.1
 | `FIPS_TCP_BIND` | `0.0.0.0:8443` | TCP transport bind address |
 | `FIPS_PEER_TRANSPORT` | `udp` | Peer transport type (`udp` or `tcp`) |
 | `FIPS_TUN_MTU` | `1280` | TUN interface MTU |
+| `FIPS_UDP_MTU` | `1472` | UDP transport MTU (default is Docker bridge IPv4 max; set to `1280` for IPv6-min-safe deploys) |
 | `FIPS_NETWORK` | `fips-sidecar-net` | Docker network name (set to join external network) |
 | `FIPS_SUBNET` | `172.20.1.0/24` | Docker network subnet |
 | `FIPS_IPV4` | `172.20.1.20` | Sidecar's IPv4 address on the Docker network |

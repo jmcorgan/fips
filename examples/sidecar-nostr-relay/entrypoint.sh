@@ -8,6 +8,7 @@ FIPS_NSEC="${FIPS_NSEC:?FIPS_NSEC is required}"
 FIPS_UDP_BIND="${FIPS_UDP_BIND:-0.0.0.0:2121}"
 FIPS_TCP_BIND="${FIPS_TCP_BIND:-0.0.0.0:8443}"
 FIPS_TUN_MTU="${FIPS_TUN_MTU:-1280}"
+FIPS_UDP_MTU="${FIPS_UDP_MTU:-1472}"
 FIPS_PEER_TRANSPORT="${FIPS_PEER_TRANSPORT:-udp}"
 
 mkdir -p /etc/fips
@@ -41,7 +42,9 @@ dns:
 transports:
   udp:
     bind_addr: "${FIPS_UDP_BIND}"
-    mtu: 1472
+    # 1472 = Docker bridge IPv4 max (1500 MTU - 8 UDP - 20 IPv4 header).
+    # Override with FIPS_UDP_MTU=1280 for IPv6-min-safe deploys.
+    mtu: ${FIPS_UDP_MTU}
   tcp:
     bind_addr: "${FIPS_TCP_BIND}"
 

@@ -22,6 +22,8 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:2121"
+    # Docker bridge supports 1500-MTU IPv4 so 1472 is safe here.
+    # Operator-facing daemon default is 1280 (IPv6 minimum).
     mtu: 1472
     # recv_buf_size: 2097152   # 2 MB (default)
     # send_buf_size: 2097152   # 2 MB (default)

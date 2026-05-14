@@ -99,6 +99,22 @@ with v0.3.x peers.
 
 ## [Unreleased]
 
+### Changed
+
+- Sidecar example (`examples/sidecar-nostr-relay`): `udp.mtu` is now
+  overridable via the `FIPS_UDP_MTU` environment variable, defaulting to
+  1472 (preserving prior behavior). Plumbed through `docker-compose.yml`
+  and documented in the README env-var table. Annotated the static-CI
+  node template `mtu: 1472` literal with the same Docker-bridge
+  rationale and a pointer at the daemon's 1280 default.
+- Overhauled `CONTRIBUTING.md`: replaced generic Rust-template framing
+  with a FIPS-specific entry point covering the four-layer
+  architecture, branch model and PR-target selection, structured bug
+  reporting, scope discipline and local-CI requirements, an AI coding
+  assistant policy, and project communication channels. Added
+  `docs/branching.md` as the long-form companion covering the release
+  workflow, version conventions, and merge-direction rationale.
+
 ### Fixed
 
 - XX rekey dual-initiation race that broke six pair-directions
@@ -112,6 +128,12 @@ with v0.3.x peers.
   when `pending_new_session().is_some()`, applying the same
   smaller-NodeAddr resolution rule. Mirrored to the FSP rekey msg1
   path for symmetry.
+- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
+  bumped Phase 1 baseline-convergence headroom from 36s to 60s.
+  Eliminates the intermittent GitHub-runner Phase 1 timeout that
+  previously required `gh run rerun --failed`. Cost on the success
+  path is unchanged because the wait loop returns as soon as all 20
+  pairs converge.
 
 ## [0.3.0] - 2026-05-11
 
