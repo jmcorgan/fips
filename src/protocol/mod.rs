@@ -33,7 +33,7 @@ pub use error::ProtocolError;
 pub use filter::FilterAnnounce;
 pub use link::{
     Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType,
-    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram,
+    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
 };
 pub use session::{
     COORDS_REQUIRED_SIZE, CoordsRequired, FspFlags, FspInnerFlags, MTU_EXCEEDED_SIZE, MtuExceeded,
