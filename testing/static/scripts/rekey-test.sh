@@ -368,7 +368,8 @@ echo "Phase 4: Second rekey cycle (waiting ${SECOND_REKEY_WAIT}s)"
 sleep "$SECOND_REKEY_WAIT"
 
 # Verify connectivity after second rekey (back-to-back)
-echo "Phase 5: Post-second-rekey connectivity"
+echo "Phase 5: Post-second-rekey connectivity (settling ${REKEY_SETTLE}s)"
+sleep "$REKEY_SETTLE"
 ping_all
 phase_result "Post-second-rekey (all 20 pairs)"
 echo ""

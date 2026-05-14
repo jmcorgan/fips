@@ -5,15 +5,22 @@
 
 use crate::bloom::BloomFilter;
 use crate::mmp::{MmpConfig, MmpPeerState};
+use crate::node::REKEY_JITTER_SECS;
 use crate::noise::{HandshakeState as NoiseHandshakeState, NoiseError, NoiseSession};
 use crate::protocol::{NegotiationPayload, NodeProfile};
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use crate::utils::index::SessionIndex;
 use crate::{FipsAddress, NodeAddr, PeerIdentity};
+use rand::RngExt;
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
 use std::time::Instant;
+
+/// Draw a fresh per-session rekey jitter from `[-REKEY_JITTER_SECS, +REKEY_JITTER_SECS]`.
+fn draw_rekey_jitter() -> i64 {
+    rand::rng().random_range(-REKEY_JITTER_SECS..=REKEY_JITTER_SECS)
+}
 
 /// Connectivity state for an active peer.
 ///
@@ -165,6 +172,12 @@ pub struct ActivePeer {
     // === Rekey (Key Rotation) ===
     /// When the current Noise session was established (for rekey timer).
     session_established_at: Instant,
+    /// Per-session symmetric jitter applied to the rekey timer trigger.
+    /// Drawn once at construction (and at each cutover) uniformly from
+    /// `[-REKEY_JITTER_SECS, +REKEY_JITTER_SECS]`. Desynchronizes
+    /// dual-initiation in symmetric-start meshes; mean interval is
+    /// preserved.
+    rekey_jitter_secs: i64,
     /// Current K-bit epoch value (alternates each rekey).
     current_k_bit: bool,
     /// Previous session kept alive during drain window after cutover.
@@ -237,6 +250,7 @@ impl ActivePeer {
             replay_suppressed_count: 0,
             consecutive_decrypt_failures: 0,
             session_established_at: now,
+            rekey_jitter_secs: draw_rekey_jitter(),
             current_k_bit: false,
             previous_session: None,
             previous_our_index: None,
@@ -330,6 +344,7 @@ impl ActivePeer {
             replay_suppressed_count: 0,
             consecutive_decrypt_failures: 0,
             session_established_at: now,
+            rekey_jitter_secs: draw_rekey_jitter(),
             current_k_bit: false,
             previous_session: None,
             previous_our_index: None,
@@ -832,6 +847,16 @@ impl ActivePeer {
         self.session_established_at
     }
 
+    /// Per-session symmetric rekey-timer jitter offset (seconds).
+    ///
+    /// Drawn at session construction and at each rekey cutover; uniform
+    /// over `[-REKEY_JITTER_SECS, +REKEY_JITTER_SECS]`. Callers add this
+    /// to the configured `node.rekey.after_secs` to obtain the effective
+    /// trigger interval for this session.
+    pub fn rekey_jitter_secs(&self) -> i64 {
+        self.rekey_jitter_secs
+    }
+
     /// Current K-bit epoch value.
     pub fn current_k_bit(&self) -> bool {
         self.current_k_bit
@@ -936,6 +961,7 @@ impl ActivePeer {
         self.session_established_at = Instant::now();
         self.session_start = Instant::now();
         self.rekey_in_progress = false;
+        self.rekey_jitter_secs = draw_rekey_jitter();
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
@@ -971,6 +997,7 @@ impl ActivePeer {
         self.session_established_at = Instant::now();
         self.session_start = Instant::now();
         self.rekey_in_progress = false;
+        self.rekey_jitter_secs = draw_rekey_jitter();
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
@@ -1387,5 +1414,45 @@ mod tests {
         // Counter resumes at 1 after reset
         assert_eq!(peer.increment_decrypt_failures(), 1);
         assert_eq!(peer.consecutive_decrypt_failures(), 1);
+    }
+
+    #[test]
+    fn test_rekey_jitter_in_range() {
+        // Every newly constructed peer's jitter must lie in the
+        // symmetric range [-REKEY_JITTER_SECS, +REKEY_JITTER_SECS].
+        for _ in 0..100 {
+            let identity = make_peer_identity();
+            let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+            let j = peer.rekey_jitter_secs();
+            assert!(
+                (-REKEY_JITTER_SECS..=REKEY_JITTER_SECS).contains(&j),
+                "jitter {} outside [-{}, +{}]",
+                j,
+                REKEY_JITTER_SECS,
+                REKEY_JITTER_SECS
+            );
+        }
+    }
+
+    #[test]
+    fn test_rekey_jitter_mean_near_zero() {
+        // Sanity check that the distribution is roughly symmetric and
+        // not stuck at one extreme. With N=200 draws from a uniform
+        // ~30-second-wide range, the empirical mean should be well
+        // under 5 in absolute value with overwhelming probability.
+        let mut sum: i64 = 0;
+        let n: i64 = 200;
+        for _ in 0..n {
+            let identity = make_peer_identity();
+            let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+            sum += peer.rekey_jitter_secs();
+        }
+        let mean = sum / n;
+        assert!(
+            mean.abs() < 5,
+            "empirical mean {} not within 5 of 0 over {} samples",
+            mean,
+            n
+        );
     }
 }

@@ -24,6 +24,13 @@ pub(crate) mod wire;
 use self::discovery_rate_limit::{DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use self::rate_limit::HandshakeRateLimiter;
 use self::routing_error_rate_limit::RoutingErrorRateLimiter;
+
+/// Half-range of the symmetric jitter applied to the per-session rekey timer.
+/// Each session draws an offset uniformly from `[-REKEY_JITTER_SECS,
+/// +REKEY_JITTER_SECS]` seconds at construction. Desynchronizes
+/// dual-initiation in symmetric-start meshes; the configured
+/// `node.rekey.after_secs` remains the nominal interval (mean preserved).
+pub(crate) const REKEY_JITTER_SECS: i64 = 15;
 use self::wire::{
     FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header, prepend_inner_header,
 };

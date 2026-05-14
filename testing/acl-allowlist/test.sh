@@ -98,13 +98,25 @@ wait_for_peers_exact() {
 assert_log_contains() {
     local container="$1"
     local pattern="$2"
+    local timeout="${3:-15}"
     local logs
-    logs="$(docker logs "$container" 2>&1 | python3 -c 'import re,sys; print(re.sub(r"\x1b\[[0-9;]*m", "", sys.stdin.read()), end="")' || true)"
-    if ! printf '%s' "$logs" | grep -F "$pattern" >/dev/null; then
-        echo "FAIL: missing log pattern in $container: $pattern" >&2
-        exit 1
-    fi
-    echo "PASS: $container logs contain expected ACL rejection"
+
+    # Poll docker logs instead of one-shot reading: under XX handshake,
+    # the cross-connection tie-breaker determines which side reaches
+    # its ACL-check point first, so the inbound-handshake-context
+    # rejection may not emit until a later retry. Same wait-with-timeout
+    # shape as wait_for_peers_exact above.
+    for _ in $(seq 1 "$timeout"); do
+        logs="$(docker logs "$container" 2>&1 | python3 -c 'import re,sys; print(re.sub(r"\x1b\[[0-9;]*m", "", sys.stdin.read()), end="")' || true)"
+        if printf '%s' "$logs" | grep -F "$pattern" >/dev/null; then
+            echo "PASS: $container logs contain expected ACL rejection"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "FAIL: missing log pattern in $container: $pattern (waited ${timeout}s)" >&2
+    exit 1
 }
 
 if [ "$SKIP_BUILD" = false ]; then

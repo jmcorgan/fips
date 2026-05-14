@@ -74,7 +74,11 @@ impl Node {
                 .map(|s| s.current_send_counter())
                 .unwrap_or(0);
 
-            if elapsed >= rekey_after_secs || counter >= rekey_after_messages {
+            // Apply per-session symmetric jitter to desynchronize
+            // dual-initiation in symmetric-start meshes.
+            let effective_after_secs =
+                rekey_after_secs.saturating_add_signed(peer.rekey_jitter_secs());
+            if elapsed >= effective_after_secs || counter >= rekey_after_messages {
                 peers_to_rekey.push(*node_addr);
             }
         }
@@ -330,7 +334,11 @@ impl Node {
             let elapsed_secs = now_ms.saturating_sub(entry.session_start_ms()) / 1000;
             let counter = entry.send_counter();
 
-            if elapsed_secs >= rekey_after_secs || counter >= rekey_after_messages {
+            // Apply per-session symmetric jitter to desynchronize
+            // dual-initiation in symmetric-start meshes.
+            let effective_after_secs =
+                rekey_after_secs.saturating_add_signed(entry.rekey_jitter_secs());
+            if elapsed_secs >= effective_after_secs || counter >= rekey_after_messages {
                 sessions_to_rekey.push(*node_addr);
             }
         }
