@@ -278,8 +278,10 @@ For before/after measurements across commits or branches:
 
 The comparison script builds each ref into a separate Docker image, runs the
 same topology and `iperf3` settings for both images, and prints a bandwidth
-summary. Override `DURATION`, `PARALLEL`, `SETTLE_SECONDS`, or `IPERF_TIMEOUT`
-in the environment when needed.
+summary. Override `DURATION`, `PARALLEL`, `SETTLE_SECONDS`, `IPERF_TIMEOUT`,
+or `RUNS` in the environment when needed. `RUNS` is the total number of
+measurements per ref; for example, `RUNS=3` runs each ref three times and
+prints both per-run and aggregate tables.
 
 ## Network Impairment
 

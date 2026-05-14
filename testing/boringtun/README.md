@@ -25,4 +25,5 @@ testing/static/scripts/iperf-compare-refs.sh origin/master HEAD mesh
 That script builds each ref into a separate `fips-test:*` image, runs the
 same static `iperf3` topology against both images, and prints a bandwidth
 summary for each path. Override `DURATION`, `PARALLEL`, `SETTLE_SECONDS`, or
-`IPERF_TIMEOUT` in the environment when needed.
+`IPERF_TIMEOUT` in the environment when needed. Set `RUNS=3` or similar to
+repeat each ref and print aggregate results.
