@@ -321,6 +321,9 @@ jobs:
             topology: rekey-outbound-only
           - suite: acl-allowlist
             type: acl-allowlist
+          # ── Mixed-profile node-role integration test ─────────────────
+          - suite: mixed-profile
+            type: mixed-profile
           # ── Firewall baseline (fips0 nftables default-deny) ────────────
           - suite: firewall
             type: firewall
@@ -573,6 +576,35 @@ jobs:
         run: |
           docker compose -f testing/static/docker-compose.yml \
             --profile rekey-outbound-only down --volumes --remove-orphans
+
+      # ── Mixed-profile node-role integration test ───────────────────────────
+      - name: Generate and inject configs (mixed-profile)
+        if: matrix.type == 'mixed-profile'
+        run: |
+          bash testing/static/scripts/generate-configs.sh mixed-profile
+          bash testing/static/scripts/mixed-profile-test.sh inject-config
+
+      - name: Start containers (mixed-profile)
+        if: matrix.type == 'mixed-profile'
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile mixed-profile up -d
+
+      - name: Run mixed-profile test
+        if: matrix.type == 'mixed-profile'
+        run: bash testing/static/scripts/mixed-profile-test.sh
+
+      - name: Collect logs on failure (mixed-profile)
+        if: matrix.type == 'mixed-profile' && failure()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile mixed-profile logs --no-color | tail -300
+
+      - name: Stop containers (mixed-profile)
+        if: matrix.type == 'mixed-profile' && always()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile mixed-profile down --volumes --remove-orphans
 
       # ── ACL allowlist integration test ─────────────────────────────────────
       - name: Run ACL allowlist integration test
