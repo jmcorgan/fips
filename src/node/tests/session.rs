@@ -77,8 +77,7 @@ fn test_session_entry_rekey_jitter_in_range() {
     for _ in 0..100 {
         let identity_a = Identity::generate();
         let identity_b = Identity::generate();
-        let handshake =
-            HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
+        let handshake = HandshakeState::new_initiator(identity_a.keypair());
         let entry = crate::node::session::SessionEntry::new(
             *identity_b.node_addr(),
             identity_b.pubkey_full(),
@@ -109,8 +108,7 @@ fn test_session_entry_rekey_jitter_mean_near_zero() {
     for _ in 0..n {
         let identity_a = Identity::generate();
         let identity_b = Identity::generate();
-        let handshake =
-            HandshakeState::new_initiator(identity_a.keypair(), identity_b.pubkey_full());
+        let handshake = HandshakeState::new_initiator(identity_a.keypair());
         let entry = crate::node::session::SessionEntry::new(
             *identity_b.node_addr(),
             identity_b.pubkey_full(),
