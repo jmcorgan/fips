@@ -1,7 +1,9 @@
 use super::*;
+use crate::discovery::nostr::{BootstrapEvent, NostrDiscovery};
 use crate::peer::PromotionResult;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{TransportHandle, packet_channel};
+use std::sync::Arc;
 
 #[test]
 fn test_node_creation() {
@@ -776,6 +778,89 @@ fn test_schedule_retry_skips_connected_peer() {
     assert!(
         node.retry_pending.is_empty(),
         "No retry for already-connected peer"
+    );
+}
+
+#[tokio::test]
+async fn test_try_peer_addresses_skips_connected_peer() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let link_id = LinkId::new(1);
+    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let peer_config = crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9");
+
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, peer_identity, 2000)
+        .unwrap();
+    let link_count = node.link_count();
+    let connection_count = node.connection_count();
+
+    node.try_peer_addresses(&peer_config, peer_identity, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        node.link_count(),
+        link_count,
+        "stale retry/traversal fallback must not create a duplicate link"
+    );
+    assert_eq!(
+        node.connection_count(),
+        connection_count,
+        "stale retry/traversal fallback must not create a duplicate handshake"
+    );
+}
+
+#[tokio::test]
+async fn test_try_peer_addresses_skips_connecting_peer() {
+    let mut node = make_node();
+    let peer_identity = make_peer_identity();
+    let peer_config = crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9");
+    let pending = PeerConnection::outbound(LinkId::new(1), peer_identity, 1000);
+    node.add_connection(pending).unwrap();
+
+    node.try_peer_addresses(&peer_config, peer_identity, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        node.connection_count(),
+        1,
+        "stale retry/traversal fallback must not start a second handshake"
+    );
+    assert_eq!(
+        node.link_count(),
+        0,
+        "stale retry/traversal fallback must not allocate a link while a handshake is pending"
+    );
+}
+
+#[tokio::test]
+async fn test_nostr_traversal_failure_skips_connected_peer() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let link_id = LinkId::new(1);
+    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, peer_identity, 2000)
+        .unwrap();
+
+    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    bootstrap.push_event_for_test(BootstrapEvent::Failed {
+        peer_config: crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9"),
+        reason: "stale traversal failure".to_string(),
+    });
+    node.nostr_discovery = Some(bootstrap.clone());
+
+    node.poll_nostr_discovery().await;
+
+    assert!(
+        bootstrap.failure_state_snapshot().is_empty(),
+        "stale failures for connected peers must not affect traversal cooldown"
+    );
+    assert!(
+        node.retry_pending.is_empty(),
+        "stale failures for connected peers must not enqueue reconnect attempts"
     );
 }
 

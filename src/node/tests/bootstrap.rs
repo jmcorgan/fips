@@ -118,6 +118,51 @@ async fn test_failed_adopted_traversal_cleans_up_transport() {
 }
 
 #[tokio::test]
+async fn test_adopted_traversal_skips_already_connected_peer() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+    node.state = NodeState::Running;
+
+    let transport_id = TransportId::new(1);
+    let link_id = LinkId::new(1);
+    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1_000);
+    let peer_node_addr = *peer_identity.node_addr();
+    node.add_connection(conn).unwrap();
+    node.promote_connection(link_id, peer_identity, 2_000)
+        .unwrap();
+
+    let link_count = node.link_count();
+    let transport_count = node.transport_count();
+
+    let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let handoff = EstablishedTraversal::new(
+        "sess-stale",
+        peer_identity.npub(),
+        "127.0.0.1:9".parse().unwrap(),
+        adopted_socket,
+    )
+    .with_transport_name("nostr-stale");
+
+    let result = node.adopt_established_traversal(handoff).await;
+    assert!(
+        matches!(result, Err(NodeError::PeerAlreadyExists(addr)) if addr == peer_node_addr),
+        "stale traversal handoff should be ignored once the peer is already active"
+    );
+    assert_eq!(
+        node.link_count(),
+        link_count,
+        "ignored traversal must not create a duplicate link"
+    );
+    assert_eq!(
+        node.transport_count(),
+        transport_count,
+        "ignored traversal must not leak an adopted transport"
+    );
+}
+
+#[tokio::test]
 async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
     let mut node_a = make_node(); // Existing traversal peer (Alice)
     let mut node_b = make_node(); // Node with adopted socket (Bob)
