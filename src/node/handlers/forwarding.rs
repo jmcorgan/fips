@@ -12,7 +12,8 @@ use crate::node::session_wire::{
 };
 use crate::node::{Node, NodeError};
 use crate::protocol::{
-    CoordsRequired, MtuExceeded, PathBroken, SessionAck, SessionDatagram, SessionSetup,
+    CoordsRequired, MtuExceeded, PathBroken, SessionAck, SessionDatagram, SessionDatagramRef,
+    SessionSetup,
 };
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -30,7 +31,7 @@ impl Node {
     ) {
         self.stats_mut().forwarding.record_received(payload.len());
 
-        let mut datagram = match SessionDatagram::decode(payload) {
+        let datagram_ref = match SessionDatagramRef::decode(payload) {
             Ok(dg) => dg,
             Err(e) => {
                 self.stats_mut()
@@ -41,34 +42,40 @@ impl Node {
             }
         };
 
-        // TTL enforcement: decrement and drop if exhausted
-        if !datagram.decrement_ttl() {
+        // TTL enforcement: decrement for forwarding and drop only if the
+        // received datagram was already exhausted.
+        if datagram_ref.ttl == 0 {
             self.stats_mut()
                 .forwarding
                 .record_ttl_exhausted(payload.len());
             debug!(
-                src = %datagram.src_addr,
-                dest = %datagram.dest_addr,
+                src = %datagram_ref.src_addr,
+                dest = %datagram_ref.dest_addr,
                 "SessionDatagram TTL exhausted, dropping"
             );
             return;
         }
+        let forwarded_ttl = datagram_ref.ttl - 1;
 
         // Coordinate cache warming from plaintext session-layer headers
-        self.try_warm_coord_cache(&datagram);
+        self.try_warm_coord_cache_ref(&datagram_ref);
 
-        // Local delivery: dispatch to session layer handlers
-        if datagram.dest_addr == *self.node_addr() {
+        // Local delivery: dispatch to session layer handlers without
+        // materializing an owned SessionDatagram payload Vec.
+        if datagram_ref.dest_addr == *self.node_addr() {
             self.stats_mut().forwarding.record_delivered(payload.len());
             self.handle_session_payload(
-                &datagram.src_addr,
-                &datagram.payload,
-                datagram.path_mtu,
+                &datagram_ref.src_addr,
+                datagram_ref.payload,
+                datagram_ref.path_mtu,
                 incoming_ce,
             )
             .await;
             return;
         }
+
+        let mut datagram = datagram_ref.into_owned();
+        datagram.ttl = forwarded_ttl;
 
         // Find next hop toward destination
         let next_hop_addr = match self.find_next_hop(&datagram.dest_addr) {
@@ -153,8 +160,8 @@ impl Node {
     ///
     /// Decode failures are logged and silently ignored — they don't block
     /// forwarding.
-    fn try_warm_coord_cache(&mut self, datagram: &SessionDatagram) {
-        let prefix = match FspCommonPrefix::parse(&datagram.payload) {
+    fn try_warm_coord_cache_ref(&mut self, datagram: &SessionDatagramRef<'_>) {
+        let prefix = match FspCommonPrefix::parse(datagram.payload) {
             Some(p) => p,
             None => return,
         };

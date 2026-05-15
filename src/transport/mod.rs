@@ -399,6 +399,15 @@ impl TransportAddr {
         Self(s.as_bytes().to_vec())
     }
 
+    /// Create a UDP/TCP transport address directly from a socket address.
+    pub fn from_socket_addr(addr: std::net::SocketAddr) -> Self {
+        use std::io::Write;
+
+        let mut buf = Vec::with_capacity(56);
+        write!(&mut buf, "{addr}").expect("Vec<u8>::write_fmt is infallible");
+        Self(buf)
+    }
+
     /// Get the raw bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -1309,6 +1318,15 @@ mod tests {
 
         let addr2: TransportAddr = String::from("hello").into();
         assert_eq!(addr2.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_transport_addr_from_socket_addr() {
+        let addr = TransportAddr::from_socket_addr("127.0.0.1:2121".parse().unwrap());
+        assert_eq!(addr.as_str(), Some("127.0.0.1:2121"));
+
+        let addr = TransportAddr::from_socket_addr("[::1]:2121".parse().unwrap());
+        assert_eq!(addr.as_str(), Some("[::1]:2121"));
     }
 
     #[test]

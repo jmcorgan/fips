@@ -46,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is not tied to release tags.
   - Tag-triggered `package-*` release-build workflows remain
     untouched.
+- Receive hot path: removed two per-packet copies. New borrowed
+  `SessionDatagramRef` decoder is used in the forwarding handler so
+  local delivery and coordinate-cache warming no longer allocate or
+  copy the session payload; the owned `SessionDatagram` is materialized
+  only when re-encoding for the next hop. Owned `SessionDatagram::
+  decode` is reimplemented as `Ref::decode + into_owned`, so the two
+  decoders cannot drift. On Linux + macOS the `recvmmsg` / `recvmsg_x`
+  receive loop now moves each filled slot buffer into `ReceivedPacket`
+  via `mem::replace` instead of cloning it, and `TransportAddr` is
+  formatted directly from the `SocketAddr` without an intermediate
+  `String`. Focused decode bench: ref 1.6 ns/op vs owned 34.7 ns/op
+  (21.4x).
 
 ### Fixed
 
