@@ -29,12 +29,40 @@ mod platform {
     use std::os::unix::io::{AsRawFd, RawFd};
     use tokio::io::unix::AsyncFd;
 
-    /// Maximum number of datagrams a single recvmmsg / sendmmsg syscall
-    /// will pull from / push to the kernel. Tuned to amortise syscall +
-    /// per-task-wakeup overhead across a useful burst without blowing
-    /// the stack (each slot owns an mmsghdr + sockaddr_storage + iovec).
-    #[cfg(target_os = "linux")]
+    /// Maximum number of datagrams a single recvmmsg / recvmsg_x / sendmmsg
+    /// syscall will pull from / push to the kernel. Tuned to amortise syscall +
+    /// per-task-wakeup overhead across a useful burst without blowing the
+    /// stack (each slot owns an mmsghdr/msghdr_x + sockaddr_storage + iovec).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const BATCH_SIZE: usize = 32;
+
+    /// Darwin-private `msghdr_x` for the `recvmsg_x` / `sendmsg_x` syscalls.
+    /// Layout matches `bsd/sys/socket_private.h` in xnu — same as `msghdr` plus
+    /// a trailing `msg_datalen` (per-message bytes-received output, in lieu of
+    /// the `msg_len` field that `mmsghdr` uses on Linux).
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    struct msghdr_x {
+        msg_name: *mut libc::c_void,
+        msg_namelen: libc::socklen_t,
+        msg_iov: *mut libc::iovec,
+        msg_iovlen: libc::c_int,
+        msg_control: *mut libc::c_void,
+        msg_controllen: libc::socklen_t,
+        msg_flags: libc::c_int,
+        msg_datalen: usize,
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn recvmsg_x(
+            s: libc::c_int,
+            msgp: *const msghdr_x,
+            cnt: libc::c_uint,
+            flags: libc::c_int,
+        ) -> isize;
+    }
 
     /// Wrapper around a `socket2::Socket` providing sync send/recv with
     /// `SO_RXQ_OVFL` ancillary data parsing.
@@ -240,10 +268,10 @@ mod platform {
         /// value is a cumulative counter since socket creation; it is 0 if
         /// `SO_RXQ_OVFL` is not supported.
         ///
-        /// On Linux the production receive path uses `recv_batch` (recvmmsg);
-        /// this single-packet variant remains for non-Linux unix targets and
-        /// for the local `tests` module.
-        #[cfg_attr(target_os = "linux", allow(dead_code))]
+        /// The production receive path on Linux/macOS uses `recv_batch`
+        /// (recvmmsg / recvmsg_x); this single-packet variant remains for
+        /// other unix targets and for the local `tests` module.
+        #[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
         pub fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr, u32)> {
             let fd = self.inner.as_raw_fd();
 
@@ -391,6 +419,56 @@ mod platform {
             Ok((count, drops))
         }
 
+        /// Receive up to `BATCH_SIZE` datagrams in a single `recvmsg_x` syscall
+        /// (macOS). Same `(count, drops)` contract as the Linux `recv_batch`,
+        /// except `drops` is always 0 — Darwin has no `SO_RXQ_OVFL` equivalent.
+        ///
+        /// `recvmsg_x` is a Darwin-private syscall (not in the public SDK) but
+        /// is shipped in production xnu and is used by quinn-udp for the same
+        /// per-syscall-amortisation reason as our Linux `recvmmsg` path.
+        #[cfg(target_os = "macos")]
+        pub fn recv_batch(
+            &self,
+            bufs: &mut [&mut [u8]],
+            addrs: &mut [Option<SocketAddr>],
+            lens: &mut [usize],
+        ) -> std::io::Result<(usize, u32)> {
+            let n = bufs.len().min(addrs.len()).min(lens.len()).min(BATCH_SIZE);
+            if n == 0 {
+                return Ok((0, 0));
+            }
+            let fd = self.inner.as_raw_fd();
+
+            let mut iovs: [libc::iovec; BATCH_SIZE] = unsafe { std::mem::zeroed() };
+            let mut storages: [libc::sockaddr_storage; BATCH_SIZE] = unsafe { std::mem::zeroed() };
+            let mut msgs: [msghdr_x; BATCH_SIZE] = unsafe { std::mem::zeroed() };
+
+            for i in 0..n {
+                iovs[i].iov_base = bufs[i].as_mut_ptr() as *mut libc::c_void;
+                iovs[i].iov_len = bufs[i].len();
+                msgs[i].msg_name = &mut storages[i] as *mut _ as *mut libc::c_void;
+                msgs[i].msg_namelen =
+                    std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                msgs[i].msg_iov = &mut iovs[i];
+                msgs[i].msg_iovlen = 1;
+                // No cmsg consumption — leave msg_control null. (msg_controllen
+                // is documented as not overwritten by macOS recvmsg_x; zeroed
+                // init keeps it sane.)
+            }
+
+            let r = unsafe { recvmsg_x(fd, msgs.as_ptr(), n as libc::c_uint, 0) };
+            if r < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let count = r as usize;
+            for i in 0..count {
+                lens[i] = msgs[i].msg_datalen;
+                addrs[i] = sockaddr_to_socket_addr(&storages[i]).ok();
+            }
+
+            Ok((count, 0))
+        }
+
         /// Wrap this socket in a tokio `AsyncFd` for async I/O.
         pub fn into_async(self) -> Result<AsyncUdpSocket, TransportError> {
             let async_fd = AsyncFd::new(self)
@@ -440,11 +518,11 @@ mod platform {
 
         /// Receive a payload, source address, and kernel drop counter.
         ///
-        /// Returns `(bytes_read, source_addr, kernel_drops)`. On Linux the
-        /// production receive path uses `recv_batch`; this single-packet
-        /// variant remains for non-Linux unix targets and for the local
-        /// `tests` module.
-        #[cfg_attr(target_os = "linux", allow(dead_code))]
+        /// Returns `(bytes_read, source_addr, kernel_drops)`. On Linux/macOS
+        /// the production receive path uses `recv_batch`; this single-packet
+        /// variant remains for other unix targets and for the local `tests`
+        /// module.
+        #[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
         pub async fn recv_from(
             &self,
             buf: &mut [u8],
@@ -465,9 +543,10 @@ mod platform {
         }
 
         /// Drain up to `BATCH_SIZE` datagrams from the kernel via
-        /// `recvmmsg` (Linux). Returns `(count, kernel_drops)`; same
-        /// buffer / addr / len contract as `UdpRawSocket::recv_batch`.
-        #[cfg(target_os = "linux")]
+        /// `recvmmsg` (Linux) or `recvmsg_x` (macOS). Returns
+        /// `(count, kernel_drops)`; same buffer / addr / len contract as
+        /// `UdpRawSocket::recv_batch`. `kernel_drops` is always 0 on macOS.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         pub async fn recv_batch(
             &self,
             bufs: &mut [&mut [u8]],
@@ -738,5 +817,168 @@ mod tests {
         assert_eq!(n, payload.len());
         assert_eq!(&buf[..n], payload);
         assert_eq!(src, addr1);
+    }
+
+    /// Microbench: compare per-packet `recv_from` (single recvmsg syscall +
+    /// task wakeup per datagram — the macOS pre-recvmsg_x baseline) vs
+    /// `recv_batch` (the new recvmsg_x path, up to 32 datagrams per syscall).
+    /// Both modes run back-to-back in this binary on loopback so the only
+    /// thing that varies is the receive-syscall strategy. Sender is a tight
+    /// `socket.send_to()` loop in a separate task; receiver counts datagrams
+    /// drained over a fixed wall-clock window per mode.
+    ///
+    /// Run with:
+    ///   cargo test --release -p fips --lib transport::udp::socket::tests::bench_udp_recv_amortization -- --ignored --nocapture
+    ///
+    /// Sender runs on a dedicated *blocking* OS thread (std::net::UdpSocket
+    /// in default blocking mode) so it always saturates the kernel rx queue
+    /// regardless of how the tokio receiver schedules. That's the scenario
+    /// where recvmmsg / recvmsg_x is meant to win: the receiver wakes up to
+    /// find N packets already buffered, and one syscall reaps the burst.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn bench_udp_recv_amortization() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        const RECV_BUF: usize = 4 * 1024 * 1024;
+        const SEND_BUF: usize = 1024 * 1024;
+        const PAYLOAD_LEN: usize = 100;
+        const WINDOW: Duration = Duration::from_secs(3);
+        const WARMUP: Duration = Duration::from_millis(500);
+
+        async fn run_mode(
+            label: &str,
+            batched: bool,
+            sender_threads: usize,
+        ) -> (u64, u64, Duration) {
+            let rx_sock = UdpRawSocket::open("127.0.0.1:0".parse().unwrap(), RECV_BUF, SEND_BUF)
+                .expect("rx bind");
+            let rx_addr = rx_sock.local_addr();
+            let rx = rx_sock.into_async().expect("rx into_async");
+
+            // Senders: N dedicated blocking std threads. More threads → deeper
+            // kernel rx queue → larger amortization opportunity for recv_batch.
+            // ENOBUFS / EAGAIN just yield and retry; we want saturation, not
+            // perfect accounting. Sent count is best-effort.
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut sender_handles = Vec::with_capacity(sender_threads);
+            for _ in 0..sender_threads {
+                let stop_tx = stop.clone();
+                sender_handles.push(std::thread::spawn(move || {
+                    let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("tx bind");
+                    sock.connect(rx_addr).expect("tx connect");
+                    let payload = vec![0xABu8; PAYLOAD_LEN];
+                    let mut sent: u64 = 0;
+                    while !stop_tx.load(Ordering::Relaxed) {
+                        match sock.send(&payload) {
+                            Ok(_) => sent += 1,
+                            Err(_) => std::thread::yield_now(),
+                        }
+                    }
+                    sent
+                }));
+            }
+
+            // Warm-up: let the sender thread reach steady state and the
+            // kernel rx queue start filling.
+            tokio::time::sleep(WARMUP).await;
+
+            let start = Instant::now();
+            let deadline = start + WINDOW;
+            let mut recv_count: u64 = 0;
+            let mut last_drops: u32 = 0;
+
+            if batched {
+                const BATCH: usize = 32;
+                let mut backing: Vec<Vec<u8>> =
+                    (0..BATCH).map(|_| vec![0u8; PAYLOAD_LEN + 64]).collect();
+                let mut addrs: [Option<SocketAddr>; BATCH] = std::array::from_fn(|_| None);
+                let mut lens: [usize; BATCH] = [0; BATCH];
+                let mut batch_sum: u64 = 0;
+                let mut batch_calls: u64 = 0;
+
+                while Instant::now() < deadline {
+                    let mut bufs: [&mut [u8]; BATCH] = {
+                        let mut iter = backing.iter_mut();
+                        std::array::from_fn(|_| iter.next().unwrap().as_mut_slice())
+                    };
+                    match rx.recv_batch(&mut bufs, &mut addrs, &mut lens).await {
+                        Ok((n, drops)) => {
+                            recv_count += n as u64;
+                            batch_sum += n as u64;
+                            batch_calls += 1;
+                            last_drops = drops;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let avg_batch = if batch_calls > 0 {
+                    batch_sum as f64 / batch_calls as f64
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "[{:>10}] avg_batch_per_call={:.2} ({} calls)",
+                    label, avg_batch, batch_calls
+                );
+            } else {
+                let mut buf = vec![0u8; PAYLOAD_LEN + 64];
+                while Instant::now() < deadline {
+                    match rx.recv_from(&mut buf).await {
+                        Ok((_n, _src, drops)) => {
+                            recv_count += 1;
+                            last_drops = drops;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            let elapsed = start.elapsed();
+
+            stop.store(true, Ordering::Relaxed);
+            drop(rx);
+            let sent: u64 = sender_handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(0))
+                .sum();
+
+            let pps = (recv_count as f64) / elapsed.as_secs_f64();
+            let mbps =
+                (recv_count as f64) * (PAYLOAD_LEN as f64) * 8.0 / 1e6 / elapsed.as_secs_f64();
+            eprintln!(
+                "[{:>10}] recv={:>10} sent={:>10} elapsed={:?} pps={:>12.0} mbps={:>7.1} kdrops={}",
+                label, recv_count, sent, elapsed, pps, mbps, last_drops
+            );
+            (recv_count, sent, elapsed)
+        }
+
+        eprintln!("--- udp recv amortization bench ---");
+        eprintln!(
+            "payload={}B window={:?} warmup={:?} runtime=multi_thread(2)",
+            PAYLOAD_LEN, WINDOW, WARMUP
+        );
+
+        // Sweep sender concurrency. Each level shows how the win scales as
+        // the rx queue gets deeper (more amortization opportunity).
+        for senders in [1usize, 2, 4, 8] {
+            eprintln!("\n=== sender_threads = {} ===", senders);
+            let (b_recv, _, b_el) = run_mode(" recv_from", false, senders).await;
+            let (x_recv, _, x_el) = run_mode("recv_batch", true, senders).await;
+            let (x_recv2, _, x_el2) = run_mode("recv_batch", true, senders).await;
+            let (b_recv2, _, b_el2) = run_mode(" recv_from", false, senders).await;
+
+            let baseline_pps =
+                (b_recv as f64 / b_el.as_secs_f64() + b_recv2 as f64 / b_el2.as_secs_f64()) / 2.0;
+            let batched_pps =
+                (x_recv as f64 / x_el.as_secs_f64() + x_recv2 as f64 / x_el2.as_secs_f64()) / 2.0;
+            let speedup = batched_pps / baseline_pps;
+            eprintln!(
+                "--- senders={}: baseline={:.0} pps  batched={:.0} pps  speedup={:.2}x ---",
+                senders, baseline_pps, batched_pps, speedup
+            );
+        }
     }
 }
