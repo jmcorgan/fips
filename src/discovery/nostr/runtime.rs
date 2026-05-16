@@ -11,7 +11,7 @@ use nostr::prelude::{
 };
 use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
@@ -75,6 +75,8 @@ struct CachedPublicUdpAddr {
 /// full `advert_refresh_secs` (30 min) for the success-path TTL to
 /// expire. Successful results use the longer per-config TTL.
 const PUBLIC_UDP_ADDR_FAILURE_TTL: Duration = Duration::from_secs(60);
+const RELAY_STARTUP_OP_TIMEOUT: Duration = Duration::from_secs(5);
+const ADVERT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct NostrDiscovery {
     client: Client,
@@ -91,6 +93,10 @@ pub struct NostrDiscovery {
     offer_slots: Arc<Semaphore>,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
     event_rx: Mutex<mpsc::UnboundedReceiver<BootstrapEvent>>,
+    connect_task: Mutex<Option<JoinHandle<()>>>,
+    relay_startup_task: Mutex<Option<JoinHandle<()>>>,
+    publish_task: Mutex<Option<JoinHandle<()>>>,
+    publish_notify: Notify,
     notify_task: Mutex<Option<JoinHandle<()>>>,
     advertise_task: Mutex<Option<JoinHandle<()>>>,
     failure_state: FailureState,
@@ -125,8 +131,6 @@ impl NostrDiscovery {
                 .await
                 .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         }
-        client.connect().await;
-
         let pubkey = keys.public_key();
         let npub = crate::encode_npub(&identity.pubkey());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -154,6 +158,10 @@ impl NostrDiscovery {
             offer_slots,
             event_tx,
             event_rx: Mutex::new(event_rx),
+            connect_task: Mutex::new(None),
+            relay_startup_task: Mutex::new(None),
+            publish_task: Mutex::new(None),
+            publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
             failure_state,
@@ -170,8 +178,9 @@ impl NostrDiscovery {
         // `advert_refresh_secs` interval (default 30 min) for non-configured
         // peers to re-publish before discovering them.
         let notifications = runtime.client.notifications();
-        runtime.subscribe().await?;
-        runtime.publish_inbox_relays().await?;
+        *runtime.publish_task.lock().await = Some(runtime.clone().spawn_publish_loop());
+        *runtime.connect_task.lock().await = Some(runtime.clone().spawn_connect_loop());
+        *runtime.relay_startup_task.lock().await = Some(runtime.clone().spawn_relay_startup_loop());
         *runtime.advertise_task.lock().await = Some(runtime.clone().spawn_advertise_loop());
         *runtime.notify_task.lock().await = Some(runtime.clone().spawn_notify_loop(notifications));
 
@@ -452,7 +461,7 @@ impl NostrDiscovery {
     }
 
     pub async fn update_local_advert(
-        &self,
+        self: &Arc<Self>,
         advert: Option<OverlayAdvert>,
     ) -> Result<(), BootstrapError> {
         let changed = {
@@ -467,7 +476,8 @@ impl NostrDiscovery {
         if !changed {
             return Ok(());
         }
-        self.publish_advert().await
+        self.request_publish_advert();
+        Ok(())
     }
 
     pub async fn advert_endpoints_for_peer(
@@ -507,6 +517,15 @@ impl NostrDiscovery {
 
     pub async fn shutdown(&self) -> Result<(), BootstrapError> {
         if let Some(handle) = self.advertise_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.connect_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.relay_startup_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.publish_task.lock().await.take() {
             handle.abort();
         }
 
@@ -663,16 +682,90 @@ impl NostrDiscovery {
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(Duration::from_secs(self.config.advert_refresh_secs.max(1)));
-            // Swallow the immediate first tick: Node::start() already publishes
-            // the initial advert via refresh_overlay_advert().
+            // Swallow the immediate first tick: Node::start() requests the
+            // initial advert publish via update_local_advert().
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if let Err(err) = self.publish_advert().await {
-                    warn!(error = %err, "failed to refresh traversal advert");
+                self.request_publish_advert();
+            }
+        })
+    }
+
+    fn spawn_relay_startup_loop(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut retry_delay = Duration::from_secs(2);
+            loop {
+                let subscribed =
+                    match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.subscribe()).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(err)) => {
+                            warn!(error = %err, "failed to subscribe to Nostr discovery relays");
+                            false
+                        }
+                        Err(_) => {
+                            warn!(
+                                timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
+                                "Nostr discovery relay subscribe timed out"
+                            );
+                            false
+                        }
+                    };
+                match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.publish_inbox_relays())
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "failed to publish Nostr inbox relay list");
+                    }
+                    Err(_) => {
+                        warn!(
+                            timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
+                            "Nostr inbox relay publish timed out"
+                        );
+                    }
+                }
+
+                self.request_publish_advert();
+
+                if subscribed {
+                    break;
+                }
+
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(60));
+            }
+        })
+    }
+
+    fn spawn_connect_loop(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            self.client.connect().await;
+        })
+    }
+
+    fn spawn_publish_loop(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                self.publish_notify.notified().await;
+                match tokio::time::timeout(ADVERT_PUBLISH_TIMEOUT, self.publish_advert()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "failed to publish traversal advert");
+                    }
+                    Err(_) => {
+                        warn!(
+                            timeout_ms = ADVERT_PUBLISH_TIMEOUT.as_millis() as u64,
+                            "Nostr traversal advert publish timed out"
+                        );
+                    }
                 }
             }
         })
+    }
+
+    fn request_publish_advert(&self) {
+        self.publish_notify.notify_one();
     }
 
     fn punch_hint(&self) -> PunchHint {
@@ -1503,6 +1596,10 @@ impl NostrDiscovery {
             offer_slots,
             event_tx,
             event_rx: Mutex::new(event_rx),
+            connect_task: Mutex::new(None),
+            relay_startup_task: Mutex::new(None),
+            publish_task: Mutex::new(None),
+            publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
             failure_state,

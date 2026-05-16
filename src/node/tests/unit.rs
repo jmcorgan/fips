@@ -114,6 +114,35 @@ async fn test_node_state_transitions() {
 }
 
 #[tokio::test]
+async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
+    let mut config = Config::new();
+    config.node.control.enabled = false;
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.advertise = true;
+    config.node.discovery.nostr.policy = crate::config::NostrDiscoveryPolicy::Open;
+    config.node.discovery.nostr.advert_relays = vec!["wss://127.0.0.1:9".to_string()];
+    config.node.discovery.nostr.dm_relays = vec!["wss://127.0.0.1:9".to_string()];
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        advertise_on_nostr: Some(true),
+        public: Some(false),
+        accept_connections: Some(true),
+        ..Default::default()
+    });
+
+    let mut node = Node::new(config).unwrap();
+    tokio::time::timeout(std::time::Duration::from_millis(500), node.start())
+        .await
+        .expect("node start should not wait for relay I/O")
+        .unwrap();
+
+    assert!(node.is_running());
+    assert!(node.nostr_discovery_handle().is_some());
+
+    node.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_node_double_start() {
     let mut node = make_node();
     node.start().await.unwrap();
