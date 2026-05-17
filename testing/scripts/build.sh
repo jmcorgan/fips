@@ -40,6 +40,8 @@ done
 UNAME_S=$(uname -s)
 CARGO_TARGET="x86_64-unknown-linux-musl"
 
+TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
+
 if [ "$UNAME_S" = "Darwin" ]; then
     echo "Detected macOS host — using cross-compilation for Linux..."
 
@@ -57,12 +59,12 @@ if [ "$UNAME_S" = "Darwin" ]; then
     echo "Building FIPS for Linux (release) using cargo-zigbuild..."
     cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
-    TARGET_DIR="$PROJECT_ROOT/target/$CARGO_TARGET/release"
+    TARGET_DIR="$TARGET_ROOT/$CARGO_TARGET/release"
 else
     echo "Building FIPS (release)..."
     cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
-    TARGET_DIR="$PROJECT_ROOT/target/release"
+    TARGET_DIR="$TARGET_ROOT/release"
 fi
 
 echo "Copying binaries to $DOCKER_DIR/"

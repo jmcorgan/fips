@@ -15,7 +15,9 @@
 //! See `docs/design/fips-security.md` for the operator-side narrative
 //! that motivates the panel.
 
-use std::net::{IpAddr, Ipv6Addr};
+#[cfg(target_os = "linux")]
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 
 /// Transport protocol of a listening socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

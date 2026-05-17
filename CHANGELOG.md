@@ -149,6 +149,18 @@ with v0.3.x peers.
   passes 70/70. The constant and surrounding draw/redraw machinery
   are kept in place pending diagnosis of why XX cutover state cleanup
   doesn't absorb variable-interval rekeys the way IK does.
+- Receive hot path: removed two per-packet copies. New borrowed
+  `SessionDatagramRef` decoder is used in the forwarding handler so
+  local delivery and coordinate-cache warming no longer allocate or
+  copy the session payload; the owned `SessionDatagram` is materialized
+  only when re-encoding for the next hop. Owned `SessionDatagram::
+  decode` is reimplemented as `Ref::decode + into_owned`, so the two
+  decoders cannot drift. On Linux + macOS the `recvmmsg` / `recvmsg_x`
+  receive loop now moves each filled slot buffer into `ReceivedPacket`
+  via `mem::replace` instead of cloning it, and `TransportAddr` is
+  formatted directly from the `SocketAddr` without an intermediate
+  `String`. Focused decode bench: ref 1.6 ns/op vs owned 34.7 ns/op
+  (21.4x).
 
 ### Fixed
 
@@ -191,6 +203,20 @@ with v0.3.x peers.
   after the test's previous one-shot grep gave up, producing a
   pre-existing flake on next-branch CI. Success-path cost is
   unchanged — the helper returns as soon as the pattern appears.
+- Nostr-discovered NAT-traversal events (`BootstrapEvent::Established`
+  and `BootstrapEvent::Failed`) for peers that are already connected
+  or actively handshaking are now short-circuited at the
+  `poll_nostr_discovery` dispatch sites before any cooldown
+  bookkeeping or fallback retry scheduling runs. Stale `Failed` events
+  previously poisoned the per-peer failure-state cooldown of healthy
+  peers and could trigger redundant retraversal attempts via
+  `schedule_retry` / `try_peer_addresses`; stale `Established`
+  handoffs could attempt to adopt a second socket against a live
+  connection. A defense-in-depth guard was added to
+  `adopt_established_traversal` so the same invariant holds if a
+  future caller bypasses the outer dispatch check. As a side benefit,
+  narrows a cooldown-poisoning vector previously available to an
+  attacker injecting stale failure events for an active peer.
 
 ## [0.3.0] - 2026-05-11
 

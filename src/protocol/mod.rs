@@ -34,7 +34,7 @@ pub use error::ProtocolError;
 pub use filter::{FilterAnnounce, FilterNack};
 pub use link::{
     Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType,
-    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram,
+    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
 };
 pub use negotiation::{
     FMP_FEAT_PROFILE_MASK, FMP_FEAT_PROVIDES_RR, FMP_FEAT_PROVIDES_SR, FMP_FEAT_WANTS_RR,

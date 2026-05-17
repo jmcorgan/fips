@@ -1,0 +1,46 @@
+# Minimal 2-node boringtun setup for iperf3 throughput comparison.
+# Both containers join the same docker bridge; each runs a boringtun
+# userspace WireGuard tunnel and they peer with each other over UDP.
+# Inner WG IPs: 10.99.0.1/24 (alice) <-> 10.99.0.2/24 (bob).
+
+networks:
+  bt-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.99.0.0/24
+
+x-boringtun-common: &boringtun-common
+  image: boringtun-test:latest
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv4.conf.all.forwarding=1
+  restart: "no"
+  env_file:
+    - ./generated/peers.env
+
+services:
+  alice:
+    <<: *boringtun-common
+    container_name: bt-alice
+    hostname: alice
+    environment:
+      - ROLE=alice
+      - PEER_HOST=bob
+    networks:
+      bt-net:
+        ipv4_address: 172.99.0.10
+
+  bob:
+    <<: *boringtun-common
+    container_name: bt-bob
+    hostname: bob
+    environment:
+      - ROLE=bob
+      - PEER_HOST=alice
+    networks:
+      bt-net:
+        ipv4_address: 172.99.0.11

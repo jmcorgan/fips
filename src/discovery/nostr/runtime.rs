@@ -1537,4 +1537,10 @@ impl NostrDiscovery {
         let mut cache = self.advert_cache.write().await;
         cache.insert(npub, advert);
     }
+
+    /// Queue a bootstrap event directly for lifecycle tests without live relays
+    /// or a running traversal task.
+    pub(crate) fn push_event_for_test(&self, event: BootstrapEvent) {
+        let _ = self.event_tx.send(event);
+    }
 }

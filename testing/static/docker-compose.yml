@@ -13,7 +13,7 @@ networks:
         - subnet: fd02::/64
 
 x-fips-common: &fips-common
-  image: fips-test:latest
+  image: ${FIPS_TEST_IMAGE:-fips-test:latest}
   cap_add:
     - NET_ADMIN
   devices:

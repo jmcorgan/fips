@@ -155,7 +155,9 @@ impl Node {
                     warn!(error = %e, "Failed to sign declaration after first-RTT parent eval");
                     return;
                 }
-                self.coord_cache.clear();
+                // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+                self.coord_cache
+                    .invalidate_via_node(self.identity.node_addr());
                 self.reset_discovery_backoff();
                 self.stats_mut().tree.parent_switched += 1;
                 self.stats_mut().tree.parent_switches += 1;
@@ -180,7 +182,9 @@ impl Node {
                     warn!(error = %e, "Failed to sign self-root declaration after first-RTT");
                     return;
                 }
-                self.coord_cache.clear();
+                // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
+                self.coord_cache
+                    .invalidate_other_roots(self.identity.node_addr());
                 self.reset_discovery_backoff();
                 self.stats_mut().tree.parent_switched += 1;
                 self.stats_mut().tree.parent_switches += 1;

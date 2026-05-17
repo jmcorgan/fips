@@ -205,6 +205,40 @@ impl CoordCache {
         self.entries.clear();
     }
 
+    /// Drop entries whose cached destination ancestry contains the given
+    /// `NodeAddr`.
+    ///
+    /// Used at parent-position-change sites: when our own position in the
+    /// tree changes, destinations downstream of us (whose cached coordinates
+    /// embed our previous prefix) have stale path information and must be
+    /// re-learned. Entries whose ancestry does not include `node_addr` are
+    /// unaffected by the local position change and are retained.
+    ///
+    /// Returns the count of entries removed.
+    pub fn invalidate_via_node(&mut self, node_addr: &NodeAddr) -> usize {
+        let len_before = self.entries.len();
+        self.entries
+            .retain(|_, entry| !entry.coords().contains(node_addr));
+        len_before - self.entries.len()
+    }
+
+    /// Drop entries whose cached destination `root_id` differs from
+    /// `current_root`.
+    ///
+    /// Used at root-change sites (become_root, root handover via
+    /// TreeAnnounce). `find_next_hop` returns `None` for any destination
+    /// whose root does not match the local root, so entries from a stale
+    /// root cannot route and would otherwise occupy cache slots until
+    /// TTL expiry.
+    ///
+    /// Returns the count of entries removed.
+    pub fn invalidate_other_roots(&mut self, current_root: &NodeAddr) -> usize {
+        let len_before = self.entries.len();
+        self.entries
+            .retain(|_, entry| entry.coords().root_id() == current_root);
+        len_before - self.entries.len()
+    }
+
     /// Evict one entry (expired first, then LRU).
     fn evict_one(&mut self, current_time_ms: u64) {
         // First try to evict an expired entry
@@ -506,5 +540,102 @@ mod tests {
         assert_eq!(stats.max_entries, 100);
         assert_eq!(stats.expired, 0);
         assert_eq!(stats.avg_age_ms, 0);
+    }
+
+    // ===== Surgical invalidation tests =====
+
+    #[test]
+    fn test_invalidate_via_node_at_self_depth() {
+        // Entry whose own NodeAddr (depth 0) is the invalidation target.
+        let mut cache = CoordCache::new(100, 1000);
+        let target = make_node_addr(1);
+
+        cache.insert(target, make_coords(&[1, 0]), 0);
+        assert_eq!(cache.len(), 1);
+
+        let removed = cache.invalidate_via_node(&target);
+        assert_eq!(removed, 1);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_invalidate_via_node_interior() {
+        // Entry whose ancestry contains the target in the interior of the path.
+        let mut cache = CoordCache::new(100, 1000);
+        let dest = make_node_addr(5);
+        // Path: 5 -> 3 -> 1 -> 0 (root). Target 3 appears at depth 1.
+        cache.insert(dest, make_coords(&[5, 3, 1, 0]), 0);
+
+        let removed = cache.invalidate_via_node(&make_node_addr(3));
+        assert_eq!(removed, 1);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_invalidate_via_node_absent() {
+        // Entry whose ancestry does NOT contain the target must be retained.
+        let mut cache = CoordCache::new(100, 1000);
+        let dest = make_node_addr(5);
+        cache.insert(dest, make_coords(&[5, 3, 1, 0]), 0);
+
+        let removed = cache.invalidate_via_node(&make_node_addr(99));
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains(&dest, 0));
+    }
+
+    #[test]
+    fn test_invalidate_via_node_empty_cache() {
+        let mut cache = CoordCache::new(100, 1000);
+        let removed = cache.invalidate_via_node(&make_node_addr(1));
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_invalidate_other_roots_current_root_kept() {
+        let mut cache = CoordCache::new(100, 1000);
+        // Entries rooted at addr(0)
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0);
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 0);
+
+        let removed = cache.invalidate_other_roots(&make_node_addr(0));
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_invalidate_other_roots_different_root_dropped() {
+        let mut cache = CoordCache::new(100, 1000);
+        // Three entries rooted at addr(0), one rooted at addr(9)
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0);
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 0);
+        cache.insert(make_node_addr(3), make_coords(&[3, 0]), 0);
+        cache.insert(make_node_addr(4), make_coords(&[4, 9]), 0);
+
+        let removed = cache.invalidate_other_roots(&make_node_addr(0));
+        assert_eq!(removed, 1);
+        assert_eq!(cache.len(), 3);
+        assert!(!cache.contains(&make_node_addr(4), 0));
+        assert!(cache.contains(&make_node_addr(1), 0));
+    }
+
+    #[test]
+    fn test_invalidate_other_roots_all_match() {
+        let mut cache = CoordCache::new(100, 1000);
+        cache.insert(make_node_addr(1), make_coords(&[1, 0]), 0);
+        cache.insert(make_node_addr(2), make_coords(&[2, 0]), 0);
+
+        let removed = cache.invalidate_other_roots(&make_node_addr(0));
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_invalidate_other_roots_empty_cache() {
+        let mut cache = CoordCache::new(100, 1000);
+        let removed = cache.invalidate_other_roots(&make_node_addr(0));
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 0);
     }
 }

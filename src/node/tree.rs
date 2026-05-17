@@ -255,7 +255,9 @@ impl Node {
                 warn!(error = %e, "Failed to sign declaration after parent switch");
                 return;
             }
-            self.coord_cache.clear();
+            // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+            self.coord_cache
+                .invalidate_via_node(self.identity.node_addr());
             self.reset_discovery_backoff();
 
             self.stats_mut().tree.parent_switched += 1;
@@ -266,7 +268,7 @@ impl Node {
                 new_seq = new_seq,
                 new_root = %self.tree_state.root(),
                 depth = self.tree_state.my_coords().depth(),
-                "Parent switched, flushed coord cache, announcing to all peers"
+                "Parent switched, invalidated downstream coord cache entries, announcing to all peers"
             );
             if flap_dampened {
                 self.stats_mut().tree.flap_dampened += 1;
@@ -286,7 +288,9 @@ impl Node {
                 warn!(error = %e, "Failed to sign self-root declaration");
                 return;
             }
-            self.coord_cache.clear();
+            // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
+            self.coord_cache
+                .invalidate_other_roots(self.identity.node_addr());
             self.reset_discovery_backoff();
             self.stats_mut().tree.parent_switched += 1;
             self.stats_mut().tree.parent_switches += 1;
@@ -320,7 +324,12 @@ impl Node {
                         warn!(error = %e, "Failed to sign declaration after loop detection");
                         return;
                     }
-                    self.coord_cache.clear();
+                    // handle_parent_lost may promote to root OR find new parent;
+                    // cover both invalidation classes.
+                    self.coord_cache
+                        .invalidate_via_node(self.identity.node_addr());
+                    self.coord_cache
+                        .invalidate_other_roots(self.tree_state.root());
                     self.reset_discovery_backoff();
                     self.send_tree_announce_to_all().await;
                 }
@@ -355,7 +364,9 @@ impl Node {
                 warn!(error = %e, "Failed to sign declaration after parent update");
                 return;
             }
-            self.coord_cache.clear();
+            // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+            self.coord_cache
+                .invalidate_via_node(self.identity.node_addr());
             self.reset_discovery_backoff();
 
             let new_addrs: Vec<NodeAddr> =
@@ -445,7 +456,9 @@ impl Node {
                 warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
                 return;
             }
-            self.coord_cache.clear();
+            // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+            self.coord_cache
+                .invalidate_via_node(self.identity.node_addr());
             self.reset_discovery_backoff();
 
             self.stats_mut().tree.parent_switched += 1;
@@ -474,7 +487,9 @@ impl Node {
                 warn!(error = %e, "Failed to sign self-root declaration in periodic reeval");
                 return;
             }
-            self.coord_cache.clear();
+            // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
+            self.coord_cache
+                .invalidate_other_roots(self.identity.node_addr());
             self.reset_discovery_backoff();
             self.stats_mut().tree.parent_switched += 1;
             self.stats_mut().tree.parent_switches += 1;

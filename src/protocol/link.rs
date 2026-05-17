@@ -307,6 +307,19 @@ pub struct SessionDatagram {
     pub payload: Vec<u8>,
 }
 
+/// Borrowed view of a session datagram payload.
+///
+/// This avoids allocating and copying the inner payload when the caller only
+/// needs to inspect or locally deliver it.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionDatagramRef<'a> {
+    pub src_addr: NodeAddr,
+    pub dest_addr: NodeAddr,
+    pub ttl: u8,
+    pub path_mtu: u16,
+    pub payload: &'a [u8],
+}
+
 /// SessionDatagram fixed header size: msg_type(1) + ttl(1) + path_mtu(2) + src_addr(16) + dest_addr(16).
 pub const SESSION_DATAGRAM_HEADER_SIZE: usize = 36;
 
@@ -363,6 +376,14 @@ impl SessionDatagram {
 
     /// Decode from link-layer payload (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+        let view = SessionDatagramRef::decode(payload)?;
+        Ok(view.into_owned())
+    }
+}
+
+impl<'a> SessionDatagramRef<'a> {
+    /// Decode a borrowed view from link-layer payload after the msg_type byte.
+    pub fn decode(payload: &'a [u8]) -> Result<Self, ProtocolError> {
         // ttl(1) + path_mtu(2) + src_addr(16) + dest_addr(16) = 35
         if payload.len() < 35 {
             return Err(ProtocolError::MessageTooShort {
@@ -376,15 +397,25 @@ impl SessionDatagram {
         src_bytes.copy_from_slice(&payload[3..19]);
         let mut dest_bytes = [0u8; 16];
         dest_bytes.copy_from_slice(&payload[19..35]);
-        let inner_payload = payload[35..].to_vec();
 
         Ok(Self {
             src_addr: NodeAddr::from_bytes(src_bytes),
             dest_addr: NodeAddr::from_bytes(dest_bytes),
             ttl,
             path_mtu,
-            payload: inner_payload,
+            payload: &payload[35..],
         })
+    }
+
+    /// Materialize an owned datagram for forwarding/re-encoding paths.
+    pub fn into_owned(self) -> SessionDatagram {
+        SessionDatagram {
+            src_addr: self.src_addr,
+            dest_addr: self.dest_addr,
+            ttl: self.ttl,
+            path_mtu: self.path_mtu,
+            payload: self.payload.to_vec(),
+        }
     }
 }
 
@@ -559,6 +590,75 @@ mod tests {
         assert_eq!(decoded.dest_addr, dest);
         assert_eq!(decoded.ttl, 32);
         assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn test_session_datagram_ref_decode_borrows_payload() {
+        let src = make_node_addr(0xAA);
+        let dest = make_node_addr(0xBB);
+        let payload = vec![0x10, 0x00, 0x05, 0x00, 1, 2, 3, 4, 5];
+        let dg = SessionDatagram::new(src, dest, payload.clone())
+            .with_ttl(32)
+            .with_path_mtu(1400);
+
+        let encoded = dg.encode();
+        let decoded = SessionDatagramRef::decode(&encoded[1..]).unwrap();
+
+        assert_eq!(decoded.src_addr, src);
+        assert_eq!(decoded.dest_addr, dest);
+        assert_eq!(decoded.ttl, 32);
+        assert_eq!(decoded.path_mtu, 1400);
+        assert_eq!(decoded.payload, payload.as_slice());
+        assert_eq!(
+            decoded.payload.as_ptr(),
+            encoded[SESSION_DATAGRAM_HEADER_SIZE..].as_ptr()
+        );
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_session_datagram_decode_owned_vs_ref() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERS: usize = 300_000;
+
+        let src = make_node_addr(0xAA);
+        let dest = make_node_addr(0xBB);
+        let payload = vec![0x5A; 1200];
+        let datagram = SessionDatagram::new(src, dest, payload)
+            .with_ttl(32)
+            .with_path_mtu(1400);
+        let encoded = datagram.encode();
+        let link_payload = &encoded[1..];
+
+        let ref_start = Instant::now();
+        let mut ref_bytes = 0usize;
+        for _ in 0..ITERS {
+            let decoded = SessionDatagramRef::decode(black_box(link_payload)).unwrap();
+            ref_bytes = ref_bytes.wrapping_add(decoded.payload.len());
+            black_box(decoded);
+        }
+        let ref_elapsed = ref_start.elapsed();
+
+        let owned_start = Instant::now();
+        let mut owned_bytes = 0usize;
+        for _ in 0..ITERS {
+            let decoded = SessionDatagram::decode(black_box(link_payload)).unwrap();
+            owned_bytes = owned_bytes.wrapping_add(decoded.payload.len());
+            black_box(decoded);
+        }
+        let owned_elapsed = owned_start.elapsed();
+
+        assert_eq!(ref_bytes, owned_bytes);
+        println!(
+            "SessionDatagram decode: ref={:.1} ns/op owned={:.1} ns/op speedup={:.2}x iters={} payload_bytes={}",
+            ref_elapsed.as_secs_f64() * 1_000_000_000.0 / ITERS as f64,
+            owned_elapsed.as_secs_f64() * 1_000_000_000.0 / ITERS as f64,
+            owned_elapsed.as_secs_f64() / ref_elapsed.as_secs_f64(),
+            ITERS,
+            link_payload.len() - 35
+        );
     }
 
     #[test]

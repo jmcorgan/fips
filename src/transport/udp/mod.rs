@@ -413,10 +413,10 @@ impl Drop for UdpTransport {
 
 /// UDP receive loop - runs as a spawned task.
 ///
-/// On Linux, drains the kernel UDP queue in 32-packet bursts via `recvmmsg`
-/// to amortise the per-syscall + per-task-wakeup overhead. macOS / Windows
-/// fall through to single-packet `recv_from`. Either way every datagram
-/// is forwarded to `packet_tx` in arrival order.
+/// Drains the kernel UDP queue in 32-packet bursts via `recvmmsg` (Linux) or
+/// `recvmsg_x` (macOS) to amortise the per-syscall + per-task-wakeup overhead.
+/// Other unix targets and Windows fall through to single-packet `recv_from`.
+/// Either way every datagram is forwarded to `packet_tx` in arrival order.
 async fn udp_receive_loop(
     socket: AsyncUdpSocket,
     transport_id: TransportId,
@@ -426,11 +426,13 @@ async fn udp_receive_loop(
 ) {
     debug!(transport_id = %transport_id, "UDP receive loop starting");
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         const BATCH: usize = 32;
         let buf_size = mtu as usize + 100;
-        // One contiguous backing alloc; slice it for recvmmsg.
+        // One Vec per recvmmsg / recvmsg_x slot. When a packet lands, move the
+        // filled buffer directly into ReceivedPacket and install a fresh empty
+        // buffer for the next syscall, avoiding a per-packet memcpy.
         let mut backing: Vec<Vec<u8>> = (0..BATCH).map(|_| vec![0u8; buf_size]).collect();
         let mut addrs: [Option<std::net::SocketAddr>; BATCH] = std::array::from_fn(|_| None);
         let mut lens: [usize; BATCH] = [0; BATCH];
@@ -454,8 +456,7 @@ async fn udp_receive_loop(
                         };
                         stats.record_recv(len);
 
-                        let buf = &backing[i][..len];
-                        if is_punch_packet(buf) {
+                        if is_punch_packet(&backing[i][..len]) {
                             trace!(
                                 transport_id = %transport_id,
                                 remote_addr = %remote_addr,
@@ -465,8 +466,9 @@ async fn udp_receive_loop(
                             continue;
                         }
 
-                        let data = buf.to_vec();
-                        let addr = TransportAddr::from_string(&remote_addr.to_string());
+                        let mut data = std::mem::replace(&mut backing[i], vec![0u8; buf_size]);
+                        data.truncate(len);
+                        let addr = TransportAddr::from_socket_addr(remote_addr);
                         let packet = ReceivedPacket::new(transport_id, addr, data);
 
                         trace!(
@@ -497,7 +499,7 @@ async fn udp_receive_loop(
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let mut buf = vec![0u8; mtu as usize + 100];
 
@@ -951,6 +953,51 @@ mod tests {
             .expect("channel closed");
 
         assert_eq!(packet.data, data);
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
+    }
+
+    /// Burst more than one datagram into the kernel queue before yielding to
+    /// the receive loop, then assert all are delivered in arrival order. On
+    /// Linux/macOS this exercises the recvmmsg / recvmsg_x batching path
+    /// (multiple datagrams reaped per syscall); on other unix targets it
+    /// degrades to N single-packet recvmsg calls and still must pass.
+    #[tokio::test]
+    async fn test_burst_recv_batch() {
+        let (tx1, _rx1) = packet_channel(100);
+        let (tx2, mut rx2) = packet_channel(100);
+
+        let mut t1 = UdpTransport::new(TransportId::new(1), None, make_config(0), tx1);
+        let mut t2 = UdpTransport::new(TransportId::new(2), None, make_config(0), tx2);
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let addr2 = TransportAddr::from_string(&t2.local_addr().unwrap().to_string());
+
+        // Fire BURST datagrams back-to-back. Each carries its index in the
+        // first 4 bytes so we can verify per-datagram boundaries (recvmsg_x
+        // must not coalesce them).
+        const BURST: u32 = 10;
+        for i in 0..BURST {
+            let mut payload = vec![0u8; 32];
+            payload[..4].copy_from_slice(&i.to_be_bytes());
+            payload[4..].fill(b'x');
+            t1.send_async(&addr2, &payload).await.unwrap();
+        }
+
+        // Drain. Order must match send order (UDP loopback is in-order, and
+        // recvmmsg/recvmsg_x preserve it across the batch).
+        for expected in 0..BURST {
+            let packet = timeout(Duration::from_secs(1), rx2.recv())
+                .await
+                .expect("timeout draining burst")
+                .expect("channel closed");
+            assert_eq!(packet.data.len(), 32);
+            let got = u32::from_be_bytes(packet.data[..4].try_into().unwrap());
+            assert_eq!(got, expected, "datagram out of order");
+        }
 
         t1.stop_async().await.unwrap();
         t2.stop_async().await.unwrap();

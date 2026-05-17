@@ -18,8 +18,10 @@ if [ "$2" = "--live" ] || [ "$1" = "--live" ]; then
     [ "$1" = "--live" ] && PROFILE="mesh"
 fi
 
-DURATION=10
-PARALLEL=8
+DURATION="${DURATION:-10}"
+PARALLEL="${PARALLEL:-8}"
+SETTLE_SECONDS="${SETTLE_SECONDS:-3}"
+IPERF_TIMEOUT="${IPERF_TIMEOUT:-$((DURATION + 30))}"
 PASSED=0
 FAILED=0
 
@@ -47,7 +49,7 @@ iperf_test() {
     if [ "$LIVE_OUTPUT" = true ]; then
         # Show live output
         echo "Running iperf3 test (live output):"
-        if docker exec "fips-$client_node" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL"; then
+        if docker exec "fips-$client_node" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL"; then
             PASSED=$((PASSED + 1))
         else
             echo "FAIL"
@@ -57,7 +59,7 @@ iperf_test() {
         # Capture and summarize output
         echo -n "Running iperf3 test... "
         local output
-        if output=$(docker exec "fips-$client_node" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL" 2>&1); then
+        if output=$(docker exec "fips-$client_node" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL" 2>&1); then
             # Check if we got valid results
             if echo "$output" | grep -q "sender"; then
                 # Extract and display results (get SUM line for aggregate bandwidth)
@@ -83,8 +85,8 @@ echo "=== FIPS iperf3 Bandwidth Test ($PROFILE topology) ==="
 echo ""
 
 # Wait for nodes to converge
-echo "Waiting 3s for mesh convergence..."
-sleep 3
+echo "Waiting ${SETTLE_SECONDS}s for mesh convergence..."
+sleep "$SETTLE_SECONDS"
 
 if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     # Test key paths in mesh topology
