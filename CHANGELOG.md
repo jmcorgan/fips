@@ -46,6 +46,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is not tied to release tags.
   - Tag-triggered `package-*` release-build workflows remain
     untouched.
+- macOS UDP receive path now batches up to 32 datagrams per kernel
+  wakeup via `recvmsg_x(2)`, matching the Linux `recvmmsg(2)`
+  amortization shape introduced in v0.3.0. Previously macOS fell
+  through to single-packet `recv_from`, capping inbound rate on
+  Apple builds with the same per-syscall + per-task-wakeup overhead
+  Linux had already eliminated. `recvmsg_x` is an xnu-private syscall
+  declared via `unsafe extern "C"` against a local repr(C)
+  `msghdr_x`; same approach used by `quinn-udp`. Same
+  `(count, kernel_drops)` contract as the Linux path, with
+  `kernel_drops` always 0 on macOS (no `SO_RXQ_OVFL` equivalent).
+  Bench numbers on aarch64-apple-darwin (100B payloads, 3 s
+  windows): 1 sender 1.09x, 2 senders 1.72x, 4 senders 1.56x,
+  8 senders 1.46x.
 - Receive hot path: removed two per-packet copies. New borrowed
   `SessionDatagramRef` decoder is used in the forwarding handler so
   local delivery and coordinate-cache warming no longer allocate or
@@ -58,6 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formatted directly from the `SocketAddr` without an intermediate
   `String`. Focused decode bench: ref 1.6 ns/op vs owned 34.7 ns/op
   (21.4x).
+- Quieted non-Linux test-build warnings from intentionally
+  platform-specific code: the nftables firewall parser
+  (`#[allow(dead_code)]` now gated to non-Linux targets where the
+  parser is compiled but unused), the macOS `utun` address-family
+  helper and the long TUN reader entry point (narrow allowances),
+  and a macOS Ethernet test module's clippy struct-layout lint
+  (rewritten MAC-copy loop, explicit layout annotation). No
+  behavioral change; the goal is to keep `cargo test` and
+  `cargo clippy` clean on cross-platform builds so unrelated
+  warning fixes don't get bundled into behavioral PRs.
 
 ### Fixed
 
