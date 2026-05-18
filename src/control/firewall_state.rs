@@ -31,6 +31,8 @@
 //! and the ICMPv6-echo-request accept are not classified — they
 //! don't pertain to listening TCP/UDP ports the operator binds.
 
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use serde_json::Value;
 
 use crate::control::listening::Proto;

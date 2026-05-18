@@ -534,8 +534,8 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
                     // MAC address starts after the interface name in sdl_data
                     let data_ptr = sdl.sdl_data.as_ptr();
                     let mut mac = [0u8; 6];
-                    for i in 0..6 {
-                        mac[i] = unsafe { *data_ptr.add(nlen + i) } as u8;
+                    for (i, byte) in mac.iter_mut().enumerate() {
+                        *byte = unsafe { *data_ptr.add(nlen + i) } as u8;
                     }
                     return Ok(mac);
                 }
@@ -565,6 +565,7 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
 
 #[cfg(test)]
 #[cfg(target_os = "macos")]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

@@ -149,6 +149,19 @@ with v0.3.x peers.
   passes 70/70. The constant and surrounding draw/redraw machinery
   are kept in place pending diagnosis of why XX cutover state cleanup
   doesn't absorb variable-interval rekeys the way IK does.
+- macOS UDP receive path now batches up to 32 datagrams per kernel
+  wakeup via `recvmsg_x(2)`, matching the Linux `recvmmsg(2)`
+  amortization shape introduced in v0.3.0. Previously macOS fell
+  through to single-packet `recv_from`, capping inbound rate on
+  Apple builds with the same per-syscall + per-task-wakeup overhead
+  Linux had already eliminated. `recvmsg_x` is an xnu-private syscall
+  declared via `unsafe extern "C"` against a local repr(C)
+  `msghdr_x`; same approach used by `quinn-udp`. Same
+  `(count, kernel_drops)` contract as the Linux path, with
+  `kernel_drops` always 0 on macOS (no `SO_RXQ_OVFL` equivalent).
+  Bench numbers on aarch64-apple-darwin (100B payloads, 3 s
+  windows): 1 sender 1.09x, 2 senders 1.72x, 4 senders 1.56x,
+  8 senders 1.46x.
 - Receive hot path: removed two per-packet copies. New borrowed
   `SessionDatagramRef` decoder is used in the forwarding handler so
   local delivery and coordinate-cache warming no longer allocate or
@@ -161,9 +174,44 @@ with v0.3.x peers.
   formatted directly from the `SocketAddr` without an intermediate
   `String`. Focused decode bench: ref 1.6 ns/op vs owned 34.7 ns/op
   (21.4x).
+- Quieted non-Linux test-build warnings from intentionally
+  platform-specific code: the nftables firewall parser
+  (`#[allow(dead_code)]` now gated to non-Linux targets where the
+  parser is compiled but unused), the macOS `utun` address-family
+  helper and the long TUN reader entry point (narrow allowances),
+  and a macOS Ethernet test module's clippy struct-layout lint
+  (rewritten MAC-copy loop, explicit layout annotation). No
+  behavioral change; the goal is to keep `cargo test` and
+  `cargo clippy` clean on cross-platform builds so unrelated
+  warning fixes don't get bundled into behavioral PRs.
 
 ### Fixed
 
+- Coord cache invalidation made surgical at parent-position-change
+  and root-change sites. Replaces the previous unconditional
+  `CoordCache::clear()` calls with two targeted methods:
+  `invalidate_via_node(node_addr)` (drops entries whose cached
+  ancestry contains the changed node, used at parent-switch /
+  become-root / loop-detection sites) and `invalidate_other_roots`
+  (drops entries from a different tree, used at root-change sites).
+  The previous global flush left `find_next_hop` returning `None`
+  for every non-direct-peer destination after every parent switch
+  until the cache passively re-warmed; surgical invalidation
+  preserves entries that remain correct across the topology change.
+  Peer-removal retains the original "no invalidation" behavior
+  (`find_next_hop` already recomputes against the current peer set
+  every call, and Discovery handles "no route" on demand).
+- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
+  Phase 1, Phase 3, and Phase 5 strict per-pair pings now retry up
+  to 4 attempts (configurable via `MAX_PING_ATTEMPTS` /
+  `PING_RETRY_DELAY`). Under low-level packet loss (1% per
+  direction), single-shot 20-pair ping_all misses with probability
+  ~33% per phase from ICMP noise alone, masking the routing-state
+  signal the asserts target. The 4-attempt retry brings that floor
+  to ~3.2e-6 per phase. The `wait_for_full_baseline` convergence
+  loop itself stays single-shot — retries there would conflate
+  transient ping loss with still-converging routing state. Test
+  scaffold only; no daemon code changes.
 - Apply ±15s symmetric jitter per session to the FMP and FSP rekey
   timer trigger. Eliminates the steady-state dual-initiation race
   in symmetric-start meshes; previously the smaller-NodeAddr

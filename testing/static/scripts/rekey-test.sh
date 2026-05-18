@@ -157,6 +157,23 @@ LOG_EVENT_POLL_INTERVAL=1
 
 TIMEOUT=5
 CONVERGENCE_PING_TIMEOUT=1
+# Strict-ping retry policy for the per-phase ping_all asserts. Under 1%
+# i.i.d. packet loss (the lab condition surfaced by ISSUE-2026-0028) a
+# single-shot ping fails at roughly 2% per directed pair, so a 20-pair
+# strict assert misses with probability ~1 - (0.98)^20 ≈ 33%, which is
+# below the per-pair loss-math floor but well above the routing-state
+# signal we want to measure. Retrying each failing pair up to
+# MAX_PING_ATTEMPTS-1 additional times with ~PING_RETRY_DELAY between
+# attempts drops the loss-math floor to ~(0.02)^MAX_PING_ATTEMPTS per
+# pair, making any residual failure attributable to a non-loss
+# mechanism rather than ICMP noise. Applied to Phase 1 (final strict
+# ping_all after wait_for_full_baseline converges) and Phase 3 / Phase
+# 5 (post-rekey strict asserts). The wait_for_full_baseline convergence
+# loop itself stays single-shot — its job is to detect when the mesh
+# first sees a fully clean 20-pair batch, and retries inside the loop
+# would conflate "transient ping loss" with "still converging."
+MAX_PING_ATTEMPTS=4
+PING_RETRY_DELAY=1
 PASSED=0
 FAILED=0
 TOTAL_PASSED=0
@@ -181,25 +198,43 @@ ping_one() {
     local label="$3"
     local quiet="${4:-}"
     local ping_timeout="${5:-$TIMEOUT}"
+    local max_attempts="${6:-1}"
 
-    if output=$(docker exec "fips-$from" ping6 -c 1 -W "$ping_timeout" "${to_npub}.fips" 2>&1); then
-        local rtt=$(echo "$output" | grep -oE 'time=[0-9.]+' | cut -d= -f2)
-        if [ -z "$quiet" ]; then
-            echo "  $label ... OK (${rtt:-?}ms)"
+    local attempt=1
+    local output rtt
+    while (( attempt <= max_attempts )); do
+        if (( attempt > 1 )); then
+            sleep "$PING_RETRY_DELAY"
         fi
-        PASSED=$((PASSED + 1))
-    else
-        if [ -z "$quiet" ]; then
+        if output=$(docker exec "fips-$from" ping6 -c 1 -W "$ping_timeout" "${to_npub}.fips" 2>&1); then
+            rtt=$(echo "$output" | grep -oE 'time=[0-9.]+' | cut -d= -f2)
+            if [ -z "$quiet" ]; then
+                if (( attempt == 1 )); then
+                    echo "  $label ... OK (${rtt:-?}ms)"
+                else
+                    echo "  $label ... OK (${rtt:-?}ms, attempt $attempt)"
+                fi
+            fi
+            PASSED=$((PASSED + 1))
+            return
+        fi
+        attempt=$((attempt + 1))
+    done
+    if [ -z "$quiet" ]; then
+        if (( max_attempts > 1 )); then
+            echo "  $label ... FAIL (after $max_attempts attempts)"
+        else
             echo "  $label ... FAIL"
         fi
-        FAILED=$((FAILED + 1))
     fi
+    FAILED=$((FAILED + 1))
 }
 
 # Run all 20 directed pairs
 ping_all() {
     local quiet="${1:-}"
     local ping_timeout="${2:-$TIMEOUT}"
+    local max_attempts="${3:-1}"
     PASSED=0
     FAILED=0
     for i in 0 1 2 3 4; do
@@ -209,7 +244,7 @@ ping_all() {
         for j in 0 1 2 3 4; do
             [ "$i" -eq "$j" ] && continue
             ping_one "node-${LABELS[$i],,}" "${NPUBS[$j]}" \
-                "${LABELS[$i]} → ${LABELS[$j]}" "$quiet" "$ping_timeout"
+                "${LABELS[$i]} → ${LABELS[$j]}" "$quiet" "$ping_timeout" "$max_attempts"
         done
     done
 }
@@ -332,7 +367,7 @@ echo ""
 echo "Phase 1: Pre-rekey connectivity (waiting for convergence)"
 wait_for_peers fips-node-a 2 "$BASELINE_CONVERGENCE_TIMEOUT" || true
 if wait_for_full_baseline "$BASELINE_CONVERGENCE_TIMEOUT"; then
-    ping_all
+    ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
     phase_result "Pre-rekey baseline (all 20 pairs)"
 else
     echo "  Best observed baseline before timeout: $PASSED/$((PASSED + FAILED)) passed"
@@ -359,7 +394,7 @@ echo ""
 # Verify connectivity after first rekey (strict — no failures allowed)
 echo "Phase 3: Post-rekey connectivity (settling ${REKEY_SETTLE}s)"
 sleep "$REKEY_SETTLE"
-ping_all
+ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
 phase_result "Post-first-rekey (all 20 pairs)"
 echo ""
 
@@ -370,7 +405,7 @@ sleep "$SECOND_REKEY_WAIT"
 # Verify connectivity after second rekey (back-to-back)
 echo "Phase 5: Post-second-rekey connectivity (settling ${REKEY_SETTLE}s)"
 sleep "$REKEY_SETTLE"
-ping_all
+ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
 phase_result "Post-second-rekey (all 20 pairs)"
 echo ""
 

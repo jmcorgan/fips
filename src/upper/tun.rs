@@ -389,6 +389,7 @@ fn utun_af_inet6_header() -> [u8; 4] {
 /// from the dup'd fd directly.
 #[cfg(target_os = "macos")]
 #[inline]
+#[allow(dead_code)]
 fn parse_utun_af_prefix(buf: &[u8]) -> Option<u32> {
     if buf.len() < 4 {
         return None;
@@ -565,6 +566,7 @@ impl Drop for ShutdownFd {
 /// avoiding the need to close the TUN fd externally (which would cause a
 /// double-close when `TunDevice` drops).
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 pub fn run_tun_reader(
     mut device: TunDevice,
     mtu: u16,
