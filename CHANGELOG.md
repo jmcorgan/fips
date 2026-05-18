@@ -49,6 +49,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coord cache invalidation made surgical at parent-position-change
+  and root-change sites. Replaces the previous unconditional
+  `CoordCache::clear()` calls with two targeted methods:
+  `invalidate_via_node(node_addr)` (drops entries whose cached
+  ancestry contains the changed node, used at parent-switch /
+  become-root / loop-detection sites) and `invalidate_other_roots`
+  (drops entries from a different tree, used at root-change sites).
+  The previous global flush left `find_next_hop` returning `None`
+  for every non-direct-peer destination after every parent switch
+  until the cache passively re-warmed; surgical invalidation
+  preserves entries that remain correct across the topology change.
+  Peer-removal retains the original "no invalidation" behavior
+  (`find_next_hop` already recomputes against the current peer set
+  every call, and Discovery handles "no route" on demand).
+- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
+  Phase 1, Phase 3, and Phase 5 strict per-pair pings now retry up
+  to 4 attempts (configurable via `MAX_PING_ATTEMPTS` /
+  `PING_RETRY_DELAY`). Under low-level packet loss (1% per
+  direction), single-shot 20-pair ping_all misses with probability
+  ~33% per phase from ICMP noise alone, masking the routing-state
+  signal the asserts target. The 4-attempt retry brings that floor
+  to ~3.2e-6 per phase. The `wait_for_full_baseline` convergence
+  loop itself stays single-shot — retries there would conflate
+  transient ping loss with still-converging routing state. Test
+  scaffold only; no daemon code changes.
 - Apply ±15s symmetric jitter per session to the FMP and FSP rekey
   timer trigger. Eliminates the steady-state dual-initiation race
   in symmetric-start meshes; previously the smaller-NodeAddr
