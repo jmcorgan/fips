@@ -11,6 +11,7 @@ use crate::identity::NodeAddr;
 use tracing::{debug, info, warn};
 
 // MAX_BACKOFF_MS is now derived from config: node.retry.max_backoff_secs * 1000
+const MAX_RETRY_CONNECTIONS_PER_TICK: usize = 16;
 
 /// Tracks retry state for a peer across connection attempts.
 pub struct RetryState {
@@ -238,8 +239,17 @@ impl Node {
             .filter(|(_, state)| now_ms >= state.retry_after_ms)
             .map(|(addr, _)| *addr)
             .collect();
+        let deferred = due.len().saturating_sub(MAX_RETRY_CONNECTIONS_PER_TICK);
+        if deferred > 0 {
+            debug!(
+                due = due.len(),
+                processing = MAX_RETRY_CONNECTIONS_PER_TICK,
+                deferred,
+                "Retry processing budget exhausted; deferring remaining peers"
+            );
+        }
 
-        for node_addr in due {
+        for node_addr in due.into_iter().take(MAX_RETRY_CONNECTIONS_PER_TICK) {
             // Peer may have connected inbound while we waited
             if self.peers.contains_key(&node_addr) {
                 self.retry_pending.remove(&node_addr);

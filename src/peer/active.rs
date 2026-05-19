@@ -593,6 +593,13 @@ impl ActivePeer {
         self.remote_epoch
     }
 
+    /// Update the remote peer's startup epoch after a successful in-place
+    /// rekey. Initial handshakes set this through `with_session`, but recovery
+    /// rekeys also exchange epochs and must keep restart detection current.
+    pub(crate) fn set_remote_epoch(&mut self, remote_epoch: Option<[u8; 8]>) {
+        self.remote_epoch = remote_epoch;
+    }
+
     // === Tree Accessors ===
 
     /// Get the peer's tree coordinates, if known.
@@ -1099,7 +1106,10 @@ impl ActivePeer {
     /// Takes the stored handshake state, reads msg2, and returns the
     /// completed NoiseSession. Clears the handshake-related fields but
     /// leaves rekey_our_index for set_pending_session to use.
-    pub fn complete_rekey_msg2(&mut self, msg2_bytes: &[u8]) -> Result<NoiseSession, NoiseError> {
+    pub fn complete_rekey_msg2(
+        &mut self,
+        msg2_bytes: &[u8],
+    ) -> Result<(NoiseSession, Option<[u8; 8]>), NoiseError> {
         let mut hs = self
             .rekey_handshake
             .take()
@@ -1109,13 +1119,14 @@ impl ActivePeer {
             })?;
 
         hs.read_message_2(msg2_bytes)?;
+        let remote_epoch = hs.remote_epoch();
         let session = hs.into_session()?;
 
         // Clear msg1 resend state
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
 
-        Ok(session)
+        Ok((session, remote_epoch))
     }
 
     /// Check if msg1 needs resending.

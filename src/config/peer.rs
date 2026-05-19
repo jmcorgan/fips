@@ -45,7 +45,27 @@ pub struct PeerAddress {
     /// are tried first.
     #[serde(default = "default_priority")]
     pub priority: u8,
+
+    /// Wall-clock observation timestamp (Unix ms) for ranking by recency.
+    ///
+    /// `None` means "no freshness signal", typically an operator-edited
+    /// static config. The dialer sorts candidates by this field descending
+    /// so freshly observed overlay or runtime hints can be tried before stale
+    /// static addresses. This field is runtime-only and is ignored when
+    /// comparing peer-address lists for config changes.
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub seen_at_ms: Option<u64>,
 }
+
+impl PartialEq for PeerAddress {
+    fn eq(&self, other: &Self) -> bool {
+        self.transport == other.transport
+            && self.addr == other.addr
+            && self.priority == other.priority
+    }
+}
+
+impl Eq for PeerAddress {}
 
 fn default_priority() -> u8 {
     100
@@ -62,6 +82,7 @@ impl PeerAddress {
             transport: transport.into(),
             addr: addr.into(),
             priority: default_priority(),
+            seen_at_ms: None,
         }
     }
 
@@ -75,7 +96,15 @@ impl PeerAddress {
             transport: transport.into(),
             addr: addr.into(),
             priority,
+            seen_at_ms: None,
         }
+    }
+
+    /// Tag this address with a freshness timestamp for source-agnostic
+    /// candidate ranking.
+    pub fn with_seen_at_ms(mut self, seen_at_ms: u64) -> Self {
+        self.seen_at_ms = Some(seen_at_ms);
+        self
     }
 }
 

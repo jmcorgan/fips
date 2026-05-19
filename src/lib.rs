@@ -67,4 +67,4 @@ pub use peer::{
 };
 
 // Re-export node types
-pub use node::{Node, NodeError, NodeState};
+pub use node::{Node, NodeError, NodeState, UpdatePeersOutcome};
