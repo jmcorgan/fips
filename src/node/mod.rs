@@ -449,6 +449,11 @@ pub struct Node {
 
     /// Optional Nostr/STUN overlay discovery coordinator for `udp:nat` peers.
     nostr_discovery: Option<Arc<crate::discovery::nostr::NostrDiscovery>>,
+    /// mDNS / DNS-SD responder + browser for local-link peer discovery.
+    /// Identity is unverified at this layer — the Noise XX handshake
+    /// initiated against an mDNS-observed endpoint is what proves the
+    /// peer holds the matching private key.
+    lan_discovery: Option<Arc<crate::discovery::lan::LanDiscovery>>,
     /// Wall-clock ms when Nostr discovery successfully started, used to
     /// schedule the one-shot startup advert sweep after a settle delay.
     /// `None` until discovery comes up; remains `None` if discovery is
@@ -668,6 +673,7 @@ impl Node {
             retry_pending: HashMap::new(),
             nostr_discovery: None,
             nostr_discovery_started_at_ms: None,
+            lan_discovery: None,
             startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             bootstrap_transport_npubs: HashMap::new(),
@@ -813,6 +819,7 @@ impl Node {
             retry_pending: HashMap::new(),
             nostr_discovery: None,
             nostr_discovery_started_at_ms: None,
+            lan_discovery: None,
             startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             bootstrap_transport_npubs: HashMap::new(),

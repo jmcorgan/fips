@@ -15,11 +15,19 @@ use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, 
 use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 const OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER: u64 = 2;
+
+fn socket_addr_families_compatible(local: SocketAddr, remote: SocketAddr) -> bool {
+    matches!(
+        (local, remote),
+        (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_))
+    )
+}
 
 impl Node {
     /// Initiate connections to configured static peers.
@@ -140,6 +148,31 @@ impl Node {
                 .map(|id| id.node_addr() == peer_node_addr)
                 .unwrap_or(false)
         })
+    }
+
+    /// Find a UDP transport whose bound socket can send to `remote_addr`.
+    ///
+    /// LAN discovery can surface both IPv4 and IPv6 addresses for the same
+    /// service. A wildcard IPv4 socket cannot send to an IPv6 link-local
+    /// target, and vice versa, so callers must choose by socket family rather
+    /// than by transport type alone.
+    fn find_udp_transport_for_remote_addr(
+        &self,
+        remote_addr: SocketAddr,
+    ) -> Option<(TransportId, SocketAddr)> {
+        self.transports
+            .iter()
+            .filter(|(id, handle)| {
+                handle.transport_type().name == "udp"
+                    && handle.is_operational()
+                    && !self.bootstrap_transports.contains(id)
+            })
+            .filter_map(|(id, handle)| {
+                let local_addr = handle.local_addr()?;
+                socket_addr_families_compatible(local_addr, remote_addr)
+                    .then_some((*id, local_addr))
+            })
+            .min_by_key(|(id, _)| id.as_u32())
     }
 
     /// Initiate a connection to a peer on a specific transport and address.
@@ -544,6 +577,90 @@ impl Node {
         self.queue_open_discovery_retries(&bootstrap).await;
     }
 
+    /// Resolve the LAN-only discovery scope. Applications with explicit
+    /// connectivity config can set `node.discovery.lan.scope` without
+    /// changing the public Nostr discovery `app` tag. The older fallback
+    /// extracts a scope from the Nostr app tag used by default scoped
+    /// discovery.
+    pub(super) fn lan_discovery_scope(&self) -> Option<String> {
+        if let Some(scope) = self.config.node.discovery.lan.scope.as_deref() {
+            let scope = scope.trim();
+            if !scope.is_empty() {
+                return Some(scope.to_string());
+            }
+        }
+
+        let app = self.config.node.discovery.nostr.app.trim();
+        if app.is_empty() {
+            return None;
+        }
+        if let Some(rest) = app.strip_prefix("fips-overlay-v1:") {
+            let scope = rest.trim();
+            if scope.is_empty() {
+                None
+            } else {
+                Some(scope.to_string())
+            }
+        } else {
+            Some(app.to_string())
+        }
+    }
+
+    /// Drain mDNS-discovered peers and initiate Noise XX handshakes.
+    /// The handshake itself is the authentication — a spoofed mDNS advert
+    /// with someone else's npub fails the XX exchange and is dropped.
+    pub(super) async fn poll_lan_discovery(&mut self) {
+        let Some(runtime) = self.lan_discovery.clone() else {
+            return;
+        };
+        let events = runtime.drain_events().await;
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let crate::discovery::lan::LanEvent::Discovered(peer) = event;
+            let Some((transport_id, local_addr)) =
+                self.find_udp_transport_for_remote_addr(peer.addr)
+            else {
+                debug!(
+                    addr = %peer.addr,
+                    "lan: skip discovered peer with no compatible UDP transport"
+                );
+                continue;
+            };
+            let identity = match crate::PeerIdentity::from_npub(&peer.npub) {
+                Ok(id) => id,
+                Err(err) => {
+                    debug!(npub = %peer.npub, error = %err, "lan: skip bad npub");
+                    continue;
+                }
+            };
+            let peer_node_addr = *identity.node_addr();
+            let remote_addr = crate::transport::TransportAddr::from_string(&peer.addr.to_string());
+            if self.peers.contains_key(&peer_node_addr)
+                || self.is_connecting_to_peer(&peer_node_addr)
+            {
+                continue;
+            }
+            info!(
+                npub = %identity.short_npub(),
+                addr = %peer.addr,
+                local_addr = %local_addr,
+                "lan: initiating handshake to discovered peer"
+            );
+            if let Err(err) = self
+                .initiate_connection(transport_id, remote_addr, identity)
+                .await
+            {
+                debug!(
+                    npub = %peer.npub,
+                    error = %err,
+                    "lan: failed to initiate connection to discovered peer"
+                );
+            }
+        }
+    }
+
     /// Poll pending transport connects and initiate handshakes for ready ones.
     ///
     /// Called from the tick handler. For each pending connect, queries the
@@ -740,6 +857,36 @@ impl Node {
                 }
                 Err(err) => {
                     warn!(error = %err, "Failed to start Nostr overlay discovery");
+                }
+            }
+        }
+
+        // mDNS / DNS-SD LAN discovery. Independent of Nostr — runs even
+        // when Nostr is disabled, since it gives us sub-second pairing
+        // on the same link without any relay or NAT-traversal roundtrip.
+        if self.config.node.discovery.lan.enabled {
+            let advertised_udp_port = self
+                .transports
+                .values()
+                .filter(|h| h.is_operational())
+                .filter(|h| h.transport_type().name == "udp")
+                .find_map(|h| h.local_addr().map(|addr| addr.port()))
+                .unwrap_or(0);
+            let scope = self.lan_discovery_scope();
+            match crate::discovery::lan::LanDiscovery::start(
+                &self.identity,
+                scope,
+                advertised_udp_port,
+                self.config.node.discovery.lan.clone(),
+            )
+            .await
+            {
+                Ok(runtime) => {
+                    self.lan_discovery = Some(runtime);
+                    info!("LAN mDNS discovery enabled");
+                }
+                Err(err) => {
+                    debug!(error = %err, "LAN mDNS discovery not started");
                 }
             }
         }
@@ -1029,6 +1176,13 @@ impl Node {
             warn!(error = %e, "Failed to shutdown Nostr overlay discovery");
         }
 
+        // Tear down LAN mDNS responder + browser. Best-effort: the
+        // OS will eventually time the advert out via its TTL even if
+        // we don't get a clean unregister out before the daemon exits.
+        if let Some(lan) = self.lan_discovery.take() {
+            lan.shutdown().await;
+        }
+
         // Shutdown transports (they're packet producers)
         let transport_ids: Vec<_> = self.transports.keys().cloned().collect();
         for transport_id in transport_ids {
@@ -1271,15 +1425,31 @@ impl Node {
                     continue;
                 }
             } else {
-                let tid = match self.find_transport_for_type(&addr.transport) {
-                    Some(id) => id,
-                    None => {
-                        debug!(
-                            transport = %addr.transport,
-                            addr = %addr.addr,
-                            "No operational transport for address type"
-                        );
-                        continue;
+                let tid = if addr.transport == "udp"
+                    && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
+                {
+                    match self.find_udp_transport_for_remote_addr(remote_socket_addr) {
+                        Some((id, _)) => id,
+                        None => {
+                            debug!(
+                                transport = %addr.transport,
+                                addr = %addr.addr,
+                                "No compatible operational UDP transport for address"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    match self.find_transport_for_type(&addr.transport) {
+                        Some(id) => id,
+                        None => {
+                            debug!(
+                                transport = %addr.transport,
+                                addr = %addr.addr,
+                                "No operational transport for address type"
+                            );
+                            continue;
+                        }
                     }
                 };
                 (tid, TransportAddr::from_string(&addr.addr))
