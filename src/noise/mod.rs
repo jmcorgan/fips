@@ -394,6 +394,21 @@ impl CipherState {
     pub fn has_key(&self) -> bool {
         self.has_key
     }
+
+    /// Clone the underlying keyed AEAD, for off-task AEAD workers.
+    ///
+    /// Returns `None` if no key. The cloned `LessSafeKey` pairs with
+    /// `decrypt_with_counter[_and_aad]` / `encrypt_with_counter[_and_aad]`
+    /// or with bare `ring::aead::LessSafeKey::seal_in_place_separate_tag` —
+    /// the worker holds the cipher and a pre-assigned counter, while the
+    /// dispatcher keeps the replay window and counter assignment sequential.
+    pub fn cipher_clone(&self) -> Option<LessSafeKey> {
+        if self.has_key {
+            Self::build_cipher(&self.key)
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Debug for CipherState {
@@ -429,7 +444,7 @@ fn seal(
 /// Decrypt `ciphertext` (with appended tag) with the given keyed AEAD,
 /// counter, and AAD, returning the plaintext as a `Vec<u8>`. Truncates
 /// in place to drop the AEAD tag.
-fn open(
+pub(crate) fn open(
     cipher: Option<&LessSafeKey>,
     counter: u64,
     aad: &[u8],

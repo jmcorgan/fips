@@ -100,6 +100,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavioral change; the goal is to keep `cargo test` and
   `cargo clippy` clean on cross-platform builds so unrelated
   warning fixes don't get bundled into behavioral PRs.
+- Data-plane: AEAD encrypt and AEAD decrypt now run on per-shard
+  worker-pool threads (`std::thread` + `crossbeam_channel`), off the
+  rx_loop. Hash-by-destination dispatch pins each TCP flow to one
+  worker so wire ordering is preserved; per-worker `sendmmsg(2)`
+  batches up to 32 outbound packets per syscall, with UDP_GSO
+  (`UDP_SEGMENT`) when the batch is uniform-sized — the same kernel
+  primitive WireGuard's in-kernel module and Cloudflare's userspace
+  BoringTun use to hit multi-Gbps single-stream rates. On Linux +
+  macOS each established UDP peer also gets a dedicated `connect(2)`-
+  ed kernel socket bound to the same wildcard listen port via
+  `SO_REUSEPORT`, so the kernel caches per-packet route + neighbor
+  lookup and the worker sends with `msg_name = NULL`. The receive
+  side mirrors: per-shard thread-local `HashMap` owns each session's
+  recv cipher + replay window, replacing the previous shared
+  `RwLock`. Sessions are re-registered with the decrypt pool on
+  K-bit flip and rekey cutover, and unregistered on rekey drain
+  completion and peer removal so the per-shard tables stay bounded.
+  New `crossbeam-channel = "0.5"` dependency. Worker counts default
+  to `num_cpus`; both pools are overridable via
+  `FIPS_ENCRYPT_WORKERS` and `FIPS_DECRYPT_WORKERS` (the latter
+  accepts `0` to disable the pool and fall back to in-line decrypt
+  in rx_loop). Per-peer connected UDP can be disabled via
+  `FIPS_CONNECTED_UDP=0`. Optional per-stage timing reporter
+  available via `FIPS_PERF=1` (or `FIPS_PIPELINE_TRACE=1`); detailed
+  knob documentation is a follow-up at
+  `docs/how-to/tune-worker-pools.md`. Bench (5 × 15 s × 1 stream
+  medians, Linux x86_64, docker-bridge mesh): A→D 1379→2708 Mbps
+  (1.96×), A→E 1394→2663 Mbps (1.91×), E→A 1406→2624 Mbps (1.87×);
+  RTT +0.11–0.19 ms from the worker queue handoff. Windows
+  continues on the existing tokio-based send/recv path.
 
 ### Fixed
 

@@ -155,20 +155,32 @@ impl Node {
         // Free session indices (current, rekey, pending, previous)
         if let Some(tid) = transport_id {
             if let Some(idx) = peer.our_index() {
-                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                let cache_key = (tid, idx.as_u32());
+                self.peers_by_index.remove(&cache_key);
+                #[cfg(unix)]
+                self.unregister_decrypt_worker_session(cache_key);
                 let _ = self.index_allocator.free(idx);
             }
             if let Some(idx) = peer.rekey_our_index() {
-                self.pending_outbound.remove(&(tid, idx.as_u32()));
-                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                let cache_key = (tid, idx.as_u32());
+                self.pending_outbound.remove(&cache_key);
+                self.peers_by_index.remove(&cache_key);
+                #[cfg(unix)]
+                self.unregister_decrypt_worker_session(cache_key);
                 let _ = self.index_allocator.free(idx);
             }
             if let Some(idx) = peer.pending_our_index() {
-                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                let cache_key = (tid, idx.as_u32());
+                self.peers_by_index.remove(&cache_key);
+                #[cfg(unix)]
+                self.unregister_decrypt_worker_session(cache_key);
                 let _ = self.index_allocator.free(idx);
             }
             if let Some(idx) = peer.previous_our_index() {
-                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                let cache_key = (tid, idx.as_u32());
+                self.peers_by_index.remove(&cache_key);
+                #[cfg(unix)]
+                self.unregister_decrypt_worker_session(cache_key);
                 let _ = self.index_allocator.free(idx);
             }
         }

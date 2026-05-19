@@ -15,6 +15,7 @@ pub mod mmp;
 pub mod node;
 pub mod noise;
 pub mod peer;
+pub mod perf_profile;
 pub mod protocol;
 pub mod transport;
 pub mod tree;

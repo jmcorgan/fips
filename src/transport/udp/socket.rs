@@ -93,6 +93,16 @@ mod platform {
                 TransportError::StartFailed(format!("set nonblocking failed: {}", e))
             })?;
 
+            // SO_REUSEPORT lets per-peer `ConnectedPeerSocket`s bind
+            // to the same wildcard port the listen socket holds. Must
+            // be set BEFORE bind. Without this, the connected-UDP
+            // activation handler fails with EADDRINUSE on Linux and
+            // every outbound packet falls back to the wildcard listen
+            // socket — losing the kernel 5-tuple cache benefit and
+            // most of the multihop forwarding throughput gain.
+            let _ = sock.set_reuse_port(true);
+            let _ = sock.set_reuse_address(true);
+
             sock.bind(&bind_addr.into())
                 .map_err(|e| TransportError::StartFailed(format!("bind failed: {}", e)))?;
 
@@ -492,6 +502,12 @@ mod platform {
     #[derive(Clone)]
     pub struct AsyncUdpSocket {
         inner: Arc<AsyncFd<UdpRawSocket>>,
+    }
+
+    impl AsRawFd for AsyncUdpSocket {
+        fn as_raw_fd(&self) -> RawFd {
+            self.inner.get_ref().as_raw_fd()
+        }
     }
 
     impl AsyncUdpSocket {

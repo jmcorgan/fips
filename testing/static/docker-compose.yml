@@ -25,6 +25,12 @@ x-fips-common: &fips-common
     - ./generated-configs/npubs.env
   environment:
     - RUST_LOG=info
+    # Passthrough for A/B benchmarking — set on the host shell before
+    # `docker compose up` to override the worker-pool defaults.
+    - FIPS_ENCRYPT_WORKERS=${FIPS_ENCRYPT_WORKERS:-}
+    - FIPS_DECRYPT_WORKERS=${FIPS_DECRYPT_WORKERS:-}
+    - FIPS_PERF=${FIPS_PERF:-0}
+    - FIPS_PERF_INTERVAL_SECS=${FIPS_PERF_INTERVAL_SECS:-5}
 
 services:
   # ── Mesh topology ──────────────────────────────────────────────

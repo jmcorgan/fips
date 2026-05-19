@@ -402,7 +402,6 @@ impl TransportAddr {
     /// Create a UDP/TCP transport address directly from a socket address.
     pub fn from_socket_addr(addr: std::net::SocketAddr) -> Self {
         use std::io::Write;
-
         let mut buf = Vec::with_capacity(56);
         write!(&mut buf, "{addr}").expect("Vec<u8>::write_fmt is infallible");
         Self(buf)
