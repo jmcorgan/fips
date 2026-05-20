@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- AUR packaging: the `fips` and `fips-git` PKGBUILDs now install the
+  `fips-dns-setup` and `fips-dns-teardown` helpers into
+  `/usr/lib/fips/`, matching the Debian package. The AUR `package()`
+  step previously omitted them, so `fips-dns.service` failed to
+  start on Arch installs ("Unable to locate executable
+  `/usr/lib/fips/fips-dns-setup`", #98). The PKGBUILDs additionally
+  opt out of the debug split package and declare the `*-debug`
+  variant as a conflict, so a stale debug build cannot own installed
+  files across a package switch.
 - Nostr discovery: filter unroutable direct UDP/TCP advert endpoints.
   Publisher and validator now retain only endpoints that parse as
   concrete socket addresses with routable IPs and nonzero ports.
