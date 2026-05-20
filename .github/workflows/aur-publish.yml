@@ -7,6 +7,10 @@ on:
         description: 'Release tag to publish (e.g. v0.3.0). Defaults to the tag the workflow was dispatched from.'
         required: false
         default: ''
+      pkgrel:
+        description: 'AUR pkgrel to publish. Use 2+ for packaging-only republishes of an existing tag.'
+        required: false
+        default: '1'
   push:
     tags:
       - 'v*'
@@ -22,12 +26,17 @@ jobs:
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PKGREL: ${{ inputs.pkgrel }}
         run: |
           set -euo pipefail
           TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          PKGREL="${INPUT_PKGREL:-1}"
           case "$TAG" in
             v*) ;;
             *) echo "Tag '$TAG' does not look like a release tag (vX.Y.Z)"; exit 1 ;;
+          esac
+          case "$PKGREL" in
+            ''|*[!0-9]*|0) echo "pkgrel '$PKGREL' must be a positive integer"; exit 1 ;;
           esac
           case "$TAG" in
             *-*)
@@ -39,15 +48,17 @@ jobs:
           esac
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=${PKGREL}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
-      - name: Patch PKGBUILD with pkgver and b2sums
+      - name: Patch PKGBUILD with pkgver, pkgrel, conflicts, and b2sums
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           VERSION: ${{ steps.tag.outputs.version }}
+          PKGREL: ${{ steps.tag.outputs.pkgrel }}
         run: |
           set -euo pipefail
           URL="https://github.com/${GITHUB_REPOSITORY}/archive/${TAG}.tar.gz"
@@ -60,6 +71,9 @@ jobs:
             if [ -z "$val" ]; then echo "$v is empty"; exit 1; fi
           done
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/aur/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=${PKGREL}/" packaging/aur/PKGBUILD
+          sed -i "s/^conflicts=.*/conflicts=('fips-git' 'fips-git-debug')/" packaging/aur/PKGBUILD
+          sed -i "s/^options=.*/options=('!lto' '!debug')/" packaging/aur/PKGBUILD
           sed -i "s|^b2sums=('SKIP'.*|b2sums=('${SOURCE_SUM}'|" packaging/aur/PKGBUILD
           awk -v s1="$SYSUSERS_SUM" -v s2="$TMPFILES_SUM" '
             /^b2sums=\(/ { in_block=1; count=0 }
@@ -73,7 +87,7 @@ jobs:
           ' packaging/aur/PKGBUILD > packaging/aur/PKGBUILD.new
           mv packaging/aur/PKGBUILD.new packaging/aur/PKGBUILD
           echo "Patched PKGBUILD:"
-          grep -E "^pkgver=" packaging/aur/PKGBUILD
+          grep -E "^(pkgver|pkgrel|conflicts|options)=" packaging/aur/PKGBUILD
           awk '/^b2sums=\(/,/\)$/' packaging/aur/PKGBUILD
 
       - name: Publish to AUR
