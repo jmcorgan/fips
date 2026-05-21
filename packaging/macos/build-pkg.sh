@@ -55,7 +55,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 VERSION="${VERSION_OVERRIDE:-$(grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')}"
-ARCH="$(uname -m)"
+
+# Derive the package architecture from the build target, not the build
+# host. When cross-compiling (for example building the x86_64 package on
+# an Apple-silicon machine) `uname -m` reports the host architecture and
+# would mislabel the package; the Rust target triple is authoritative.
+if [[ -n "${TARGET_TRIPLE}" ]]; then
+    case "${TARGET_TRIPLE}" in
+        aarch64-*) ARCH="arm64" ;;
+        x86_64-*) ARCH="x86_64" ;;
+        *)
+            echo "Unsupported target triple: ${TARGET_TRIPLE}" >&2
+            exit 1
+            ;;
+    esac
+else
+    ARCH="$(uname -m)"
+fi
 PKG_NAME="fips-${VERSION}-macos-${ARCH}"
 DEPLOY_DIR="${PROJECT_ROOT}/deploy"
 STAGING_DIR="$(mktemp -d)"

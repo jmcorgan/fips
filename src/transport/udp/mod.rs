@@ -6,7 +6,13 @@ use super::{
     DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
     TransportId, TransportState, TransportType,
 };
-mod socket;
+#[cfg(unix)]
+pub(crate) mod connected_peer;
+#[cfg(target_os = "macos")]
+pub(crate) mod darwin_sockopts;
+#[cfg(unix)]
+pub(crate) mod peer_drain;
+pub(crate) mod socket;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
@@ -83,9 +89,44 @@ impl UdpTransport {
         self.local_addr
     }
 
+    /// Configured recv buffer size — used when opening per-peer
+    /// `ConnectedPeerSocket`s so they get the same buffer ceiling as
+    /// the wildcard listen socket.
+    pub fn recv_buf_size(&self) -> usize {
+        self.config.recv_buf_size()
+    }
+
+    /// Configured send buffer size — companion to `recv_buf_size`.
+    pub fn send_buf_size(&self) -> usize {
+        self.config.send_buf_size()
+    }
+
+    /// Clone the `PacketTx` end of the packet channel for off-task
+    /// receive paths (per-peer connected-socket drains).
+    pub fn clone_packet_tx(&self) -> PacketTx {
+        self.packet_tx.clone()
+    }
+
     /// Get the transport statistics.
     pub fn stats(&self) -> &Arc<UdpStats> {
         &self.stats
+    }
+
+    /// Resolve a transport address (numeric `1.2.3.4:5678` or hostname)
+    /// to a `SocketAddr` via the per-transport DNS cache. Public
+    /// companion to `async_socket()` for off-task workers.
+    pub async fn resolve_for_off_task(
+        &self,
+        addr: &TransportAddr,
+    ) -> Result<SocketAddr, TransportError> {
+        self.resolve_cached(addr).await
+    }
+
+    /// Clone the underlying async UDP socket. Returns `None` if the
+    /// transport hasn't been started yet. The clone is just an `Arc`
+    /// refcount bump on `AsyncFd<UdpRawSocket>`.
+    pub fn async_socket(&self) -> Option<AsyncUdpSocket> {
+        self.socket.clone()
     }
 
     /// Resolve a transport address, using cached results for hostnames.
@@ -456,6 +497,8 @@ async fn udp_receive_loop(
                         };
                         stats.record_recv(len);
 
+                        // Peek before swap — punch probes / acks are
+                        // discarded without consuming a buffer move.
                         if is_punch_packet(&backing[i][..len]) {
                             trace!(
                                 transport_id = %transport_id,
@@ -466,6 +509,13 @@ async fn udp_receive_loop(
                             continue;
                         }
 
+                        // Move the filled buffer out of the slot and
+                        // refill with a fresh one. `mem::replace`
+                        // returns the OLD Vec and writes the new one —
+                        // single pointer swap, no per-packet memcpy of
+                        // the ~MTU-sized payload (previously
+                        // `buf.to_vec()` cost ~150 MB/sec of memory
+                        // bandwidth on the RX hot path at 100 kpps).
                         let mut data = std::mem::replace(&mut backing[i], vec![0u8; buf_size]);
                         data.truncate(len);
                         let addr = TransportAddr::from_socket_addr(remote_addr);
@@ -520,7 +570,7 @@ async fn udp_receive_loop(
                     }
 
                     let data = buf[..len].to_vec();
-                    let addr = TransportAddr::from_string(&remote_addr.to_string());
+                    let addr = TransportAddr::from_socket_addr(remote_addr);
                     let packet = ReceivedPacket::new(transport_id, addr, data);
 
                     trace!(

@@ -99,8 +99,27 @@ with v0.3.x peers.
 
 ## [Unreleased]
 
+### Added
+
+- [`PR-REVIEW.md`](PR-REVIEW.md) — the 13-criteria PR review checklist
+  the maintainer runs against every incoming PR, published at the
+  repo root so contributors can run the same pass on their own change
+  (directly or by handing the document to a coding agent) before
+  opening. Linked from `CONTRIBUTING.md` under "Submitting pull
+  requests" and "Further reading". Running the checklist before
+  opening surfaces problems that would otherwise come back as review
+  comments, saving a round trip.
+
 ### Changed
 
+- Nostr discovery startup is now non-blocking. `Node::start` no
+  longer waits for relay connect, subscribe, or initial advert
+  publish before returning. A slow or unreachable relay no longer
+  holds node startup hostage; local transports come up immediately
+  and the relay path catches up asynchronously in background tasks.
+  Subscribe retries with exponential backoff (2 s base, 60 s cap),
+  publish attempts time out at 10 s, and the new tasks are aborted
+  cleanly on `Node::stop`.
 - Sidecar example (`examples/sidecar-nostr-relay`): `udp.mtu` is now
   overridable via the `FIPS_UDP_MTU` environment variable, defaulting to
   1472 (preserving prior behavior). Plumbed through `docker-compose.yml`
@@ -184,9 +203,72 @@ with v0.3.x peers.
   behavioral change; the goal is to keep `cargo test` and
   `cargo clippy` clean on cross-platform builds so unrelated
   warning fixes don't get bundled into behavioral PRs.
+- Data-plane: AEAD encrypt and AEAD decrypt now run on per-shard
+  worker-pool threads (`std::thread` + `crossbeam_channel`), off the
+  rx_loop. Hash-by-destination dispatch pins each TCP flow to one
+  worker so wire ordering is preserved; per-worker `sendmmsg(2)`
+  batches up to 32 outbound packets per syscall, with UDP_GSO
+  (`UDP_SEGMENT`) when the batch is uniform-sized — the same kernel
+  primitive WireGuard's in-kernel module and Cloudflare's userspace
+  BoringTun use to hit multi-Gbps single-stream rates. On Linux +
+  macOS each established UDP peer also gets a dedicated `connect(2)`-
+  ed kernel socket bound to the same wildcard listen port via
+  `SO_REUSEPORT`, so the kernel caches per-packet route + neighbor
+  lookup and the worker sends with `msg_name = NULL`. The receive
+  side mirrors: per-shard thread-local `HashMap` owns each session's
+  recv cipher + replay window, replacing the previous shared
+  `RwLock`. Sessions are re-registered with the decrypt pool on
+  K-bit flip and rekey cutover, and unregistered on rekey drain
+  completion and peer removal so the per-shard tables stay bounded.
+  New `crossbeam-channel = "0.5"` dependency. Worker counts default
+  to `num_cpus`; both pools are overridable via
+  `FIPS_ENCRYPT_WORKERS` and `FIPS_DECRYPT_WORKERS` (the latter
+  accepts `0` to disable the pool and fall back to in-line decrypt
+  in rx_loop). Per-peer connected UDP can be disabled via
+  `FIPS_CONNECTED_UDP=0`. Optional per-stage timing reporter
+  available via `FIPS_PERF=1` (or `FIPS_PIPELINE_TRACE=1`); detailed
+  knob documentation is a follow-up at
+  `docs/how-to/tune-worker-pools.md`. Bench (5 × 15 s × 1 stream
+  medians, Linux x86_64, docker-bridge mesh): A→D 1379→2708 Mbps
+  (1.96×), A→E 1394→2663 Mbps (1.91×), E→A 1406→2624 Mbps (1.87×);
+  RTT +0.11–0.19 ms from the worker queue handoff. Windows
+  continues on the existing tokio-based send/recv path.
 
 ### Fixed
 
+- AUR packaging: the `fips` and `fips-git` PKGBUILDs now install the
+  `fips-dns-setup` and `fips-dns-teardown` helpers into
+  `/usr/lib/fips/`, matching the Debian package. The AUR `package()`
+  step previously omitted them, so `fips-dns.service` failed to
+  start on Arch installs ("Unable to locate executable
+  `/usr/lib/fips/fips-dns-setup`", #98). The PKGBUILDs additionally
+  opt out of the debug split package and declare the `*-debug`
+  variant as a conflict, so a stale debug build cannot own installed
+  files across a package switch.
+- macOS package build: the `.pkg` architecture is now derived from
+  the Cargo `--target` triple instead of the build host's
+  `uname -m`. The arm64 and x86_64 release legs build on the same
+  Apple-silicon runner, so `uname -m` named both outputs
+  `fips-0.3.0-macos-arm64.pkg`; the release job's `merge-multiple`
+  artifact download then interleaved the two identically named
+  files into a single corrupt xar archive, and no x86_64 package
+  reached the release at all. (This shipped as the broken v0.3.0
+  macOS `.pkg`, GitHub #102.) The release workflow now also asserts
+  the arch-named file is present and carries a SHA-256 integrity
+  chain from the build runner through to `gh release upload`, so a
+  recurrence fails CI instead of publishing.
+- Nostr discovery: filter unroutable direct UDP/TCP advert endpoints.
+  Publisher and validator now retain only endpoints that parse as
+  concrete socket addresses with routable IPs and nonzero ports.
+  `udp:nat` rendezvous endpoints and Tor endpoints pass through
+  unchanged. Adverts that collapse to zero usable endpoints after
+  filtering are rejected with a clear "missing publicly routable
+  endpoints" error. Before this change, misconfigured nodes could
+  publish RFC1918, loopback, link-local, CGNAT 100.64/10, IPv6 ULA,
+  or IPv6 link-local endpoints into Nostr discovery, and consumers
+  would cache and dial them; in mixed LAN/VPN/NAT environments, that
+  could prefer a misleading one-way private path over the intended
+  `udp:nat` bootstrap.
 - Coord cache invalidation made surgical at parent-position-change
   and root-change sites. Replaces the previous unconditional
   `CoordCache::clear()` calls with two targeted methods:

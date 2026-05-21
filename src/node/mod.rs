@@ -6,7 +6,11 @@
 
 mod acl;
 mod bloom;
+#[cfg(unix)]
+pub(crate) mod decrypt_worker;
 mod discovery_rate_limit;
+#[cfg(unix)]
+pub(crate) mod encrypt_worker;
 mod handlers;
 mod lifecycle;
 mod rate_limit;
@@ -40,7 +44,8 @@ use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 /// variable-interval rekeys the way the IK path does. See CHANGELOG.
 pub(crate) const REKEY_JITTER_SECS: i64 = 0;
 use self::wire::{
-    FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header, prepend_inner_header,
+    ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
+    prepend_inner_header,
 };
 use crate::bloom::BloomState;
 use crate::cache::CoordCache;
@@ -514,6 +519,40 @@ pub struct Node {
     /// Static hostname → npub mapping for DNS resolution.
     /// Built at construction from peer aliases and /etc/fips/hosts.
     host_map: Arc<HostMap>,
+
+    /// Off-task FMP-encrypt + UDP-send worker pool. Unix-only —
+    /// the worker issues direct sendmmsg(2) / sendmsg+UDP_GSO calls
+    /// on raw fds via `AsRawFd`. None on Windows or when the worker
+    /// pool failed to spawn.
+    #[cfg(unix)]
+    pub(crate) encrypt_workers: Option<encrypt_worker::EncryptWorkerPool>,
+
+    /// Off-task FMP decrypt worker pool — receiver-side mirror of
+    /// `encrypt_workers`. Workers are shards: each owns its session
+    /// state directly in a thread-local `HashMap` (no `RwLock`,
+    /// no `Mutex` per packet). Hash-by-cache-key dispatch.
+    #[cfg(unix)]
+    pub(crate) decrypt_workers: Option<decrypt_worker::DecryptWorkerPool>,
+
+    /// Sessions whose recv cipher + replay window have been handed
+    /// off to a decrypt shard worker. Lookup gate on the hot receive
+    /// path: if the cache-key is in here, dispatch to worker; else
+    /// fall through to the legacy synchronous decrypt (test mode +
+    /// not-yet-registered first packets).
+    #[cfg(unix)]
+    pub(crate) decrypt_registered_sessions: std::collections::HashSet<(TransportId, u32)>,
+
+    /// Decrypt worker fallback channel: workers bounce
+    /// authenticated-FMP-plaintext back here for the rx_loop to
+    /// finish the per-peer side-effects (stats, MMP, ECN
+    /// propagation, dispatch_link_message). `Option` so the receive
+    /// end can be `take()`-en by the rx_loop arm.
+    #[cfg(unix)]
+    pub(crate) decrypt_fallback_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<decrypt_worker::DecryptWorkerEvent>>,
+    #[cfg(unix)]
+    pub(crate) decrypt_fallback_tx:
+        tokio::sync::mpsc::UnboundedSender<decrypt_worker::DecryptWorkerEvent>,
 }
 
 impl Node {
@@ -587,6 +626,10 @@ impl Node {
             hosts_path,
         );
 
+        #[cfg(unix)]
+        let (decrypt_fallback_tx, decrypt_fallback_rx) =
+            tokio::sync::mpsc::unbounded_channel::<decrypt_worker::DecryptWorkerEvent>();
+
         Ok(Self {
             identity,
             startup_epoch,
@@ -658,6 +701,16 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            #[cfg(unix)]
+            encrypt_workers: None,
+            #[cfg(unix)]
+            decrypt_workers: None,
+            #[cfg(unix)]
+            decrypt_registered_sessions: std::collections::HashSet::new(),
+            #[cfg(unix)]
+            decrypt_fallback_rx: Some(decrypt_fallback_rx),
+            #[cfg(unix)]
+            decrypt_fallback_tx,
         })
     }
 
@@ -721,6 +774,10 @@ impl Node {
             base_host_map,
             std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH),
         );
+
+        #[cfg(unix)]
+        let (decrypt_fallback_tx, decrypt_fallback_rx) =
+            tokio::sync::mpsc::unbounded_channel::<decrypt_worker::DecryptWorkerEvent>();
 
         Ok(Self {
             identity,
@@ -791,6 +848,16 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            #[cfg(unix)]
+            encrypt_workers: None,
+            #[cfg(unix)]
+            decrypt_workers: None,
+            #[cfg(unix)]
+            decrypt_registered_sessions: std::collections::HashSet::new(),
+            #[cfg(unix)]
+            decrypt_fallback_rx: Some(decrypt_fallback_rx),
+            #[cfg(unix)]
+            decrypt_fallback_tx,
         })
     }
 
@@ -1977,6 +2044,12 @@ impl Node {
             flags |= FLAG_KEY_EPOCH;
         }
 
+        // Snapshot the per-peer connect()-ed UDP socket BEFORE the
+        // session borrow so the encrypt-worker dispatch can refcount-
+        // clone the Arc without re-borrowing self.peers later.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let connected_socket = peer.connected_udp();
+
         let session = peer
             .noise_session_mut()
             .ok_or_else(|| NodeError::SendFailed {
@@ -1984,12 +2057,96 @@ impl Node {
                 reason: "no noise session".into(),
             })?;
 
-        // Inner plaintext: [timestamp:4 LE][msg_type][payload...]
+        // ── Off-task encrypt + sendmmsg/GSO fast path (unix + UDP) ──
+        // Build the wire buffer directly as
+        // `[16-byte header][4-byte timestamp][plaintext]` with
+        // TAG_SIZE trailing capacity for the AEAD tag — one alloc,
+        // one extend, no intermediate `inner_plaintext` Vec. The
+        // worker `seal_in_place_separate_tag`s on `wire_buf[16..]`
+        // and appends the tag — buffer IS the wire packet.
+        const INNER_TS_LEN: usize = 4;
+        let inner_len = INNER_TS_LEN + plaintext.len();
+        let payload_len = inner_len as u16;
+
+        #[cfg(unix)]
+        {
+            let send_cipher_opt = session.send_cipher_clone();
+            if let Some(fmp_cipher) = send_cipher_opt
+                && let Some(workers) = self.encrypt_workers.as_ref().cloned()
+                && let Some(transport) = self.transports.get(&transport_id)
+                && let TransportHandle::Udp(udp) = transport
+                && let Some(socket) = udp.async_socket()
+            {
+                // Skip per-packet DNS resolve on the steady-state path
+                // when the connected socket already knows the peer
+                // address (kernel 5-tuple cache wins over re-parsing
+                // the configured TransportAddr).
+                let socket_addr_opt = {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    {
+                        match connected_socket.as_ref() {
+                            Some(s) => Some(s.peer_addr()),
+                            None => udp.resolve_for_off_task(&remote_addr).await.ok(),
+                        }
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    {
+                        udp.resolve_for_off_task(&remote_addr).await.ok()
+                    }
+                };
+                if let Some(dest_socket_addr) = socket_addr_opt {
+                    let counter =
+                        session
+                            .take_send_counter()
+                            .map_err(|e| NodeError::SendFailed {
+                                node_addr: *node_addr,
+                                reason: format!("counter reservation failed: {}", e),
+                            })?;
+                    let header = build_established_header(their_index, counter, flags, payload_len);
+                    let wire_capacity =
+                        ESTABLISHED_HEADER_SIZE + inner_len + crate::noise::TAG_SIZE;
+                    let mut wire_buf = Vec::with_capacity(wire_capacity);
+                    wire_buf.extend_from_slice(&header);
+                    wire_buf.extend_from_slice(&timestamp_ms.to_le_bytes());
+                    wire_buf.extend_from_slice(plaintext);
+
+                    let predicted_bytes = wire_capacity;
+                    // Drop bulk endpoint data on UDP backpressure to
+                    // keep the queue moving; control frames retry.
+                    let drop_on_backpressure = plaintext.first().is_some_and(|t| *t == 0x00);
+                    workers.dispatch(crate::node::encrypt_worker::FmpSendJob {
+                        cipher: fmp_cipher,
+                        counter,
+                        wire_buf,
+                        fsp_seal: None,
+                        socket,
+                        dest_addr: dest_socket_addr,
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        connected_socket,
+                        drop_on_backpressure,
+                        queued_at: None,
+                    });
+
+                    if let Some(peer) = self.peers.get_mut(node_addr) {
+                        peer.link_stats_mut().record_sent(predicted_bytes);
+                        if let Some(mmp) = peer.mmp_mut() {
+                            mmp.sender
+                                .record_sent(counter, timestamp_ms, predicted_bytes);
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        // Legacy inline path: only reached for non-UDP transports or
+        // unit-test mode (no worker pool spawned). Materialise the
+        // inner plaintext lazily here so the worker path above
+        // avoids the alloc.
         let inner_plaintext = prepend_inner_header(timestamp_ms, plaintext);
 
         // Build 16-byte outer header (used as AAD for AEAD)
         let counter = session.current_send_counter();
-        let payload_len = inner_plaintext.len() as u16;
         let header = build_established_header(their_index, counter, flags, payload_len);
 
         // Encrypt with AAD binding to the outer header

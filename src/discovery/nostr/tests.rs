@@ -119,6 +119,57 @@ fn rejects_invalid_overlay_adverts() {
 }
 
 #[test]
+fn validate_overlay_advert_filters_unroutable_direct_endpoints() {
+    let advert = OverlayAdvert {
+        identifier: ADVERT_IDENTIFIER.to_string(),
+        version: ADVERT_VERSION,
+        endpoints: vec![
+            OverlayEndpointAdvert {
+                transport: OverlayTransportKind::Tcp,
+                addr: "192.168.1.10:443".to_string(),
+            },
+            OverlayEndpointAdvert {
+                transport: OverlayTransportKind::Udp,
+                addr: "100.64.1.2:2121".to_string(),
+            },
+            OverlayEndpointAdvert {
+                transport: OverlayTransportKind::Tcp,
+                addr: "8.8.8.8:443".to_string(),
+            },
+        ],
+        signal_relays: None,
+        stun_servers: None,
+    };
+
+    let validated = NostrDiscovery::validate_overlay_advert(advert).unwrap();
+    assert_eq!(validated.endpoints.len(), 1);
+    assert_eq!(validated.endpoints[0].addr, "8.8.8.8:443");
+}
+
+#[test]
+fn validate_overlay_advert_rejects_only_unroutable_direct_endpoints() {
+    let advert = OverlayAdvert {
+        identifier: ADVERT_IDENTIFIER.to_string(),
+        version: ADVERT_VERSION,
+        endpoints: vec![
+            OverlayEndpointAdvert {
+                transport: OverlayTransportKind::Tcp,
+                addr: "127.0.0.1:443".to_string(),
+            },
+            OverlayEndpointAdvert {
+                transport: OverlayTransportKind::Udp,
+                addr: "10.0.0.2:2121".to_string(),
+            },
+        ],
+        signal_relays: None,
+        stun_servers: None,
+    };
+
+    let err = NostrDiscovery::validate_overlay_advert(advert).unwrap_err();
+    assert!(err.to_string().contains("missing publicly routable"));
+}
+
+#[test]
 fn advert_freshness_rejects_expired_events() {
     let now_secs = Timestamp::now().as_secs();
     let event = signed_overlay_advert_event(now_secs, Some(now_secs.saturating_sub(1)));

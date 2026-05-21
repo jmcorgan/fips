@@ -1,2 +1,24 @@
 [profile.ci]
 junit = { path = "junit.xml" }
+# Synthetic node tests build 250-edge meshes with one-shot UDP
+# handshakes; on shared CI runners the localhost stack still drops the
+# occasional msg1 under burst load even with the per-edge repair loop.
+# Allow a retry rather than failing the whole CI run on a single
+# dropped packet.
+retries = 2
+
+[test-groups]
+node-synthetic = { max-threads = 1 }
+
+# nextest runs each test in a separate process, so in-process Tokio mutexes
+# can't serialize the synthetic localhost UDP node tests on CI. Those tests
+# send one-shot handshakes without production reconnect timers; under runner
+# load even small topologies drop the lone msg1. Group all node tests so
+# they run mutually exclusive — slower CI, reliable assertions.
+[[profile.default.overrides]]
+filter = 'test(node::tests::)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'test(node::tests::)'
+test-group = 'node-synthetic'

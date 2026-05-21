@@ -31,6 +31,8 @@ package:
 - Binaries: `fips`, `fipsctl`, `fipstop`, `fips-gateway`
 - Systemd units: `fips.service`, `fips-dns.service`, `fips-gateway.service`,
   `fips-firewall.service`
+- DNS helpers: `/usr/lib/fips/fips-dns-setup`,
+  `/usr/lib/fips/fips-dns-teardown`
 - Config: `/etc/fips/fips.yaml`, `/etc/fips/hosts`, `/etc/fips/fips.nft`
 - sysusers/tmpfiles fragments for the `fips` group and `/run/fips/`
 
@@ -38,6 +40,11 @@ The `fips.nft` baseline is shipped as a conffile (listed in `backup=()`) so
 operator edits to the nftables ruleset survive package upgrades.
 `fips-firewall.service` is shipped disabled by default, matching the Debian
 package: operators opt in by enabling it explicitly.
+
+Both PKGBUILDs opt out of makepkg's automatic `*-debug` split packages. The
+package metadata still conflicts with stale peer debug package names
+(`fips-debug` / `fips-git-debug`) so switching between release and development
+variants removes old debug-file owners cleanly.
 
 ## Local Build and Validation
 
@@ -321,3 +328,8 @@ Push an update when a new version is tagged. The steps are:
 
 Phase 4 CI automation will handle this workflow automatically on new GitHub
 releases.
+
+For a packaging-only republish of an existing release tag, run the AUR Publish
+workflow manually with the existing tag and incremented `pkgrel` (for example,
+`tag=v0.3.0`, `pkgrel=2`). This keeps the upstream source tarball unchanged
+while forcing AUR helpers to rebuild with the corrected package metadata.

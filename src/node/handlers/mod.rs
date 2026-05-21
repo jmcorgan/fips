@@ -1,5 +1,7 @@
 //! RX event loop and message handlers.
 
+#[cfg(unix)]
+pub(crate) mod connected_udp;
 pub(crate) mod discovery;
 mod dispatch;
 mod encrypted;

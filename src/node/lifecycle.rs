@@ -723,6 +723,52 @@ impl Node {
             info!(count = self.transports.len(), "Transports initialized");
         }
 
+        // Spawn the off-task FMP-encrypt + UDP-send worker pool.
+        // Unix only — the worker issues sendmmsg(2) / sendmsg+UDP_GSO
+        // calls on raw fds via `AsRawFd`, a unix-only trait. Worker
+        // count defaults to num_cpus, overridable via FIPS_ENCRYPT_WORKERS.
+        // Hash-by-destination pins a TCP flow to one worker (preserves
+        // wire ordering); additional workers light up under multi-flow load.
+        #[cfg(unix)]
+        {
+            let cpu_default = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .max(1);
+            let encrypt_worker_count: usize = std::env::var("FIPS_ENCRYPT_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(cpu_default)
+                .max(1);
+            self.encrypt_workers = Some(super::encrypt_worker::EncryptWorkerPool::spawn(
+                encrypt_worker_count,
+            ));
+            info!(
+                workers = encrypt_worker_count,
+                "Spawned FMP-encrypt worker pool"
+            );
+
+            // `FIPS_DECRYPT_WORKERS=0` disables the pool entirely and
+            // forces the in-line rx_loop decrypt path (useful as an A/B
+            // against the worker pipeline). Any non-zero value (env or
+            // default) spawns the shard-owned decrypt pool.
+            let decrypt_worker_count: usize = std::env::var("FIPS_DECRYPT_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(cpu_default);
+            if decrypt_worker_count == 0 {
+                info!("FIPS_DECRYPT_WORKERS=0 → in-line decrypt in rx_loop");
+            } else {
+                self.decrypt_workers = Some(super::decrypt_worker::DecryptWorkerPool::spawn(
+                    decrypt_worker_count,
+                ));
+                info!(
+                    workers = decrypt_worker_count,
+                    "Spawned FMP-decrypt worker pool"
+                );
+            }
+        }
+
         if self.config.node.discovery.nostr.enabled {
             match NostrDiscovery::start(&self.identity, self.config.node.discovery.nostr.clone())
                 .await

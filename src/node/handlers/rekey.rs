@@ -85,41 +85,63 @@ impl Node {
 
         // Execute cutover for initiator side
         for node_addr in peers_to_cutover {
-            if let Some(peer) = self.peers.get_mut(&node_addr)
-                && let Some(_old_our_index) = peer.cutover_to_new_session()
-            {
-                // New index was pre-registered in peers_by_index during
-                // msg2 handling (handshake.rs). Verify, don't duplicate.
-                debug_assert!(
-                    peer.transport_id().is_some()
-                        && peer.our_index().is_some()
-                        && self.peers_by_index.contains_key(&(
-                            peer.transport_id().unwrap(),
-                            peer.our_index().unwrap().as_u32()
-                        )),
-                    "peers_by_index should contain pre-registered new index after cutover"
-                );
-                let our_index = peer.our_index();
-                let their_index = peer.their_index();
-                info!(
-                    peer = %self.peer_display_name(&node_addr),
-                    our_addr = %self.identity.node_addr(),
-                    their_addr = %node_addr,
-                    our_index = ?our_index,
-                    their_index = ?their_index,
-                    "Rekey cutover complete (initiator), K-bit flipped"
-                );
+            let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
+                if let Some(_old_our_index) = peer.cutover_to_new_session() {
+                    // New index was pre-registered in peers_by_index during
+                    // msg2 handling (handshake.rs). Verify, don't duplicate.
+                    debug_assert!(
+                        peer.transport_id().is_some()
+                            && peer.our_index().is_some()
+                            && self.peers_by_index.contains_key(&(
+                                peer.transport_id().unwrap(),
+                                peer.our_index().unwrap().as_u32()
+                            )),
+                        "peers_by_index should contain pre-registered new index after cutover"
+                    );
+                    let our_index = peer.our_index();
+                    let their_index = peer.their_index();
+                    info!(
+                        peer = %self.peer_display_name(&node_addr),
+                        our_addr = %self.identity.node_addr(),
+                        their_addr = %node_addr,
+                        our_index = ?our_index,
+                        their_index = ?their_index,
+                        "Rekey cutover complete (initiator), K-bit flipped"
+                    );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            // Re-register the new session with the decrypt worker — the
+            // cache_key (transport_id, our_index) just changed, so the
+            // old worker entry is stale and every packet on the new
+            // session would miss the worker's HashMap lookup.
+            #[cfg(unix)]
+            if did_cutover {
+                self.register_decrypt_worker_session(&node_addr);
             }
+            #[cfg(not(unix))]
+            let _ = did_cutover;
         }
 
         // Execute drain completion
         for node_addr in peers_to_drain {
-            if let Some(peer) = self.peers.get_mut(&node_addr)
-                && let Some(old_our_index) = peer.complete_drain()
-            {
-                if let Some(transport_id) = peer.transport_id() {
-                    self.peers_by_index
-                        .remove(&(transport_id, old_our_index.as_u32()));
+            // Extract the old index and transport_id under the peer
+            // borrow, then drop the borrow so the cache_key cleanup
+            // below can take &mut self for unregister_decrypt_worker_session.
+            let drained = self
+                .peers
+                .get_mut(&node_addr)
+                .and_then(|peer| peer.complete_drain().map(|idx| (idx, peer.transport_id())));
+            if let Some((old_our_index, transport_id)) = drained {
+                if let Some(tid) = transport_id {
+                    let cache_key = (tid, old_our_index.as_u32());
+                    self.peers_by_index.remove(&cache_key);
+                    #[cfg(unix)]
+                    self.unregister_decrypt_worker_session(cache_key);
                 }
                 let _ = self.index_allocator.free(old_our_index);
                 trace!(

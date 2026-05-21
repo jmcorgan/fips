@@ -148,6 +148,20 @@ that touches your code path.
 This is the same matrix that runs on GitHub Actions. Catching a
 regression locally is much cheaper than catching it in CI.
 
+### Self-review against the project review checklist
+
+The 13-criteria checklist the maintainer runs on every incoming PR is
+published at [PR-REVIEW.md](PR-REVIEW.md). Run your own change through
+it before opening — or hand the document to your coding agent with
+"review my branch against this checklist" and let it do the pass. The
+checklist covers PR hygiene (body, commit shape, base freshness), diff
+content (does the change do what the description says, does it fit the
+codebase as a natural extension), and cross-cutting concerns (tests,
+docs, dependencies, security, contributor-conventional Rust patterns).
+
+This is the first thing the maintainer does on any submission, so
+running it yourself saves a review round trip.
+
 ### Additional requirements for feature PRs
 
 - **New CI coverage.** Features added without a test that exercises
@@ -233,6 +247,9 @@ home yet, file a GitHub issue with the `design` label.
 
 ## Further reading
 
+- [PR-REVIEW.md](PR-REVIEW.md) — the 13-criteria PR review checklist
+  the maintainer runs on every incoming PR; run it yourself before
+  opening to save a round trip.
 - [docs/design/README.md](docs/design/README.md) — protocol design tree.
 - [docs/branching.md](docs/branching.md) — full release workflow and
   merge-direction rationale.

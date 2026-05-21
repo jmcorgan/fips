@@ -148,6 +148,43 @@ impl NoiseSession {
         self.replay_window.highest()
     }
 
+    /// Clone the recv-side AEAD instance, for off-task decrypt workers.
+    pub fn recv_cipher_clone(&self) -> Option<ring::aead::LessSafeKey> {
+        self.recv_cipher.cipher_clone()
+    }
+
+    /// Snapshot the current replay-window state as an **owned**
+    /// `ReplayWindow`, for hand-off to a shard-owning decrypt worker.
+    /// After this snapshot, the worker becomes the sole authority for
+    /// replay protection on the session.
+    pub fn recv_replay_snapshot_owned(&self) -> ReplayWindow {
+        self.replay_window.clone()
+    }
+
+    /// Clone the send-side AEAD instance, for off-task encrypt workers.
+    /// Pair with `take_send_counter` to keep counter assignment serial
+    /// under the session's `&mut`.
+    pub fn send_cipher_clone(&self) -> Option<ring::aead::LessSafeKey> {
+        self.send_cipher.cipher_clone()
+    }
+
+    /// Reserve and return the next send counter, advancing the internal
+    /// nonce. For pipelined encrypt paths.
+    pub fn take_send_counter(&mut self) -> Result<u64, NoiseError> {
+        if self.send_cipher.nonce == u64::MAX {
+            return Err(NoiseError::NonceOverflow);
+        }
+        let counter = self.send_cipher.nonce;
+        self.send_cipher.nonce += 1;
+        Ok(counter)
+    }
+
+    /// Accept a counter into the replay window after a successful out-of-task
+    /// decrypt. Caller is responsible for verifying decrypt success first.
+    pub fn accept_replay(&mut self, counter: u64) {
+        self.replay_window.accept(counter);
+    }
+
     /// Reset the replay window (use when rekeying).
     pub fn reset_replay_window(&mut self) {
         self.replay_window.reset();

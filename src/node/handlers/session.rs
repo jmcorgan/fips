@@ -15,18 +15,41 @@ use crate::node::session_wire::{
     FspCommonPrefix, FspEncryptedHeader, build_fsp_header, fsp_prepend_inner_header,
     fsp_strip_inner_header, parse_encrypted_coords,
 };
+#[cfg(unix)]
+use crate::node::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::node::{Node, NodeError};
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
+#[cfg(unix)]
+use crate::protocol::LinkMessageType;
 use crate::protocol::NegotiationPayload;
+#[cfg(unix)]
+use crate::protocol::SESSION_DATAGRAM_HEADER_SIZE;
 use crate::protocol::{
     CoordsRequired, FspInnerFlags, MtuExceeded, PathBroken, PathMtuNotification, SessionAck,
     SessionDatagram, SessionMessageType, SessionMsg3, SessionReceiverReport, SessionSenderReport,
     SessionSetup,
 };
 use crate::protocol::{coords_wire_size, encode_coords};
+#[cfg(unix)]
+use crate::transport::TransportHandle;
 use crate::upper::icmp::FIPS_OVERHEAD;
 use secp256k1::PublicKey;
 use tracing::{debug, info, trace, warn};
+
+/// Inputs to `try_send_session_data_pipelined` — the FSP+FMP pipelined
+/// fast path that hands both AEAD operations to the encrypt worker
+/// in a single dispatch.
+#[cfg(unix)]
+struct PipelinedSend<'a> {
+    dest_addr: &'a NodeAddr,
+    payload: &'a [u8],
+    now_ms: u64,
+    timestamp: u32,
+    fsp_flags: u8,
+    inner_plaintext: &'a [u8],
+    my_coords: Option<&'a crate::tree::TreeCoordinate>,
+    dest_coords: Option<&'a crate::tree::TreeCoordinate>,
+}
 
 impl Node {
     /// Handle a locally-delivered session datagram payload.
@@ -1485,6 +1508,29 @@ impl Node {
             flags |= FSP_FLAG_K;
         }
 
+        // ── Pipelined FSP+FMP fast path (unix + UDP) ──
+        // Both AEAD layers + the sendmmsg syscall run on the encrypt
+        // worker. The rx_loop only builds the wire buffer + reserves
+        // counters on both sessions. Falls through to the legacy
+        // sync FSP encrypt + send_session_datagram path on any
+        // prereq miss (non-UDP, no worker, no cipher, …).
+        #[cfg(unix)]
+        if self
+            .try_send_session_data_pipelined(PipelinedSend {
+                dest_addr,
+                payload,
+                now_ms,
+                timestamp,
+                fsp_flags: flags,
+                inner_plaintext: &inner_plaintext,
+                my_coords: my_coords.as_ref(),
+                dest_coords: dest_coords.as_ref(),
+            })
+            .await?
+        {
+            return Ok(());
+        }
+
         // Borrow session for counter + encryption (after potential standalone send)
         let entry = self
             .sessions
@@ -1541,6 +1587,281 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    /// Pipelined send: FSP+FMP AEAD + sendmsg on the encrypt worker.
+    ///
+    /// Returns `Ok(true)` when the worker accepted the job (caller is
+    /// done), `Ok(false)` on prereq miss (non-UDP, no worker, no
+    /// cipher) so the caller falls back to the legacy synchronous
+    /// path. `Err` on routing / state errors that prevent any send.
+    ///
+    /// Wire layout built directly (no intermediate `inner_plaintext`
+    /// or `fsp_payload` Vecs):
+    /// ```text
+    ///   [16 FMP header][8 link-ts][1 SessionDatagram][1 ttl][2 mtu]
+    ///   [16 src_addr][16 dest_addr][12 FSP header][coords?]
+    ///   [FSP plaintext]    <- worker seals here, appends FSP tag,
+    ///                         then seals the full FMP plaintext and
+    ///                         appends the FMP tag.
+    /// ```
+    #[cfg(unix)]
+    async fn try_send_session_data_pipelined(
+        &mut self,
+        send: PipelinedSend<'_>,
+    ) -> Result<bool, NodeError> {
+        let dest_addr = send.dest_addr;
+        let Some(workers) = self.encrypt_workers.as_ref().cloned() else {
+            return Ok(false);
+        };
+
+        let Some(next_hop_addr) = self.find_next_hop(dest_addr).map(|peer| *peer.node_addr())
+        else {
+            return Err(NodeError::SendFailed {
+                node_addr: *dest_addr,
+                reason: "no route to destination".into(),
+            });
+        };
+
+        // Read the next hop's transport / link MTU for the
+        // SessionDatagram's path_mtu field. Saves a path_mtu round-
+        // trip vs the legacy path where we'd seed in
+        // send_session_datagram.
+        let mut path_mtu = u16::MAX;
+        if let Some(peer) = self.peers.get(&next_hop_addr)
+            && let Some(tid) = peer.transport_id()
+            && let Some(transport) = self.transports.get(&tid)
+        {
+            if let Some(addr) = peer.current_addr() {
+                path_mtu = path_mtu.min(transport.link_mtu(addr));
+            } else {
+                path_mtu = path_mtu.min(transport.mtu());
+            }
+        }
+
+        // Extract next-hop info + FMP cipher in one peers/sessions borrow scope.
+        let (their_index, transport_id, remote_addr, timestamp_ms, fmp_flags, fmp_cipher) = {
+            let peer = self
+                .peers
+                .get_mut(&next_hop_addr)
+                .ok_or(NodeError::PeerNotFound(next_hop_addr))?;
+            let their_index = peer.their_index().ok_or_else(|| NodeError::SendFailed {
+                node_addr: next_hop_addr,
+                reason: "no their_index".into(),
+            })?;
+            let transport_id = peer.transport_id().ok_or_else(|| NodeError::SendFailed {
+                node_addr: next_hop_addr,
+                reason: "no transport_id".into(),
+            })?;
+            let remote_addr =
+                peer.current_addr()
+                    .cloned()
+                    .ok_or_else(|| NodeError::SendFailed {
+                        node_addr: next_hop_addr,
+                        reason: "no current_addr".into(),
+                    })?;
+            let timestamp_ms = peer.session_elapsed_ms();
+            let mut fmp_flags = 0u8;
+            if peer.current_k_bit() {
+                fmp_flags |= FLAG_KEY_EPOCH;
+            }
+            let session = peer
+                .noise_session_mut()
+                .ok_or_else(|| NodeError::SendFailed {
+                    node_addr: next_hop_addr,
+                    reason: "no noise session".into(),
+                })?;
+            let Some(fmp_cipher) = session.send_cipher_clone() else {
+                return Ok(false);
+            };
+            (
+                their_index,
+                transport_id,
+                remote_addr,
+                timestamp_ms,
+                fmp_flags,
+                fmp_cipher,
+            )
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let connected_socket = self
+            .peers
+            .get(&next_hop_addr)
+            .and_then(|peer| peer.connected_udp());
+
+        // Need a UDP transport (this whole path is sendmsg-on-raw-fd).
+        let transport = self
+            .transports
+            .get(&transport_id)
+            .ok_or(NodeError::TransportNotFound(transport_id))?;
+        let TransportHandle::Udp(udp) = transport else {
+            return Ok(false);
+        };
+        let socket_addr_opt = {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                match connected_socket.as_ref() {
+                    Some(s) => Some(s.peer_addr()),
+                    None => udp.resolve_for_off_task(&remote_addr).await.ok(),
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                udp.resolve_for_off_task(&remote_addr).await.ok()
+            }
+        };
+        let Some(socket_addr) = socket_addr_opt else {
+            return Ok(false);
+        };
+        let Some(socket) = udp.async_socket() else {
+            return Ok(false);
+        };
+
+        // FSP cipher + counter — separate session from next-hop FMP session.
+        let (fsp_counter, fsp_cipher) = {
+            let entry = self
+                .sessions
+                .get_mut(dest_addr)
+                .ok_or_else(|| NodeError::SendFailed {
+                    node_addr: *dest_addr,
+                    reason: "no session".into(),
+                })?;
+            if let Some(mmp) = entry.mmp_mut() {
+                mmp.path_mtu.seed_source_mtu(path_mtu);
+            }
+            let session = match entry.state_mut() {
+                EndToEndState::Established(s) => s,
+                _ => {
+                    return Err(NodeError::SendFailed {
+                        node_addr: *dest_addr,
+                        reason: "session not established".into(),
+                    });
+                }
+            };
+            let Some(fsp_cipher) = session.send_cipher_clone() else {
+                return Ok(false);
+            };
+            let counter = session
+                .take_send_counter()
+                .map_err(|e| NodeError::SendFailed {
+                    node_addr: *dest_addr,
+                    reason: format!("session counter reservation failed: {}", e),
+                })?;
+            (counter, fsp_cipher)
+        };
+
+        // FSP header (the AAD for the inner AEAD seal).
+        let fsp_header = build_fsp_header(
+            fsp_counter,
+            send.fsp_flags,
+            send.inner_plaintext.len() as u16,
+        );
+
+        let coords_size = match (send.my_coords, send.dest_coords) {
+            (Some(src), Some(dst)) => coords_wire_size(src) + coords_wire_size(dst),
+            _ => 0,
+        };
+        // FMP inner = [link-ts u64][SessionDatagram-encoded after msg_type] + [FSP-encrypted blob]
+        // SessionDatagram-encoded includes: [0x00 type][ttl][mtu][src][dest][fsp_payload]
+        // fsp_payload = [fsp_header][coords][fsp_plaintext][16-byte FSP tag]
+        let link_plaintext_len = SESSION_DATAGRAM_HEADER_SIZE
+            + FSP_HEADER_SIZE
+            + coords_size
+            + send.inner_plaintext.len();
+        let fmp_inner_len = 4 + link_plaintext_len + crate::noise::TAG_SIZE;
+
+        // FMP counter + header (the AAD for the outer AEAD seal).
+        let fmp_counter = {
+            let peer = self
+                .peers
+                .get_mut(&next_hop_addr)
+                .ok_or(NodeError::PeerNotFound(next_hop_addr))?;
+            let session = peer
+                .noise_session_mut()
+                .ok_or_else(|| NodeError::SendFailed {
+                    node_addr: next_hop_addr,
+                    reason: "no noise session".into(),
+                })?;
+            session
+                .take_send_counter()
+                .map_err(|e| NodeError::SendFailed {
+                    node_addr: next_hop_addr,
+                    reason: format!("counter reservation failed: {}", e),
+                })?
+        };
+        let fmp_header =
+            build_established_header(their_index, fmp_counter, fmp_flags, fmp_inner_len as u16);
+
+        // Build the wire buffer once, in place. The two FSP/FMP tags
+        // are appended by the worker after the seals — reserve their
+        // capacity here so the worker doesn't have to re-grow.
+        let wire_capacity = ESTABLISHED_HEADER_SIZE + fmp_inner_len + crate::noise::TAG_SIZE;
+        let mut wire_buf = Vec::with_capacity(wire_capacity);
+        wire_buf.extend_from_slice(&fmp_header);
+        wire_buf.extend_from_slice(&timestamp_ms.to_le_bytes());
+        // SessionDatagram-encoded layout (matches `SessionDatagram::encode`):
+        wire_buf.push(LinkMessageType::SessionDatagram.to_byte());
+        wire_buf.push(self.config.node.session.default_ttl);
+        wire_buf.extend_from_slice(&path_mtu.to_le_bytes());
+        wire_buf.extend_from_slice(self.node_addr().as_bytes());
+        wire_buf.extend_from_slice(dest_addr.as_bytes());
+        // FSP layer (worker seals on `inner_plaintext` portion):
+        let fsp_aad_offset = wire_buf.len();
+        wire_buf.extend_from_slice(&fsp_header);
+        if let (Some(src), Some(dst)) = (send.my_coords, send.dest_coords) {
+            encode_coords(src, &mut wire_buf);
+            encode_coords(dst, &mut wire_buf);
+        }
+        let fsp_plaintext_offset = wire_buf.len();
+        wire_buf.extend_from_slice(send.inner_plaintext);
+
+        // Stats update — predict size exactly (ChaCha20-Poly1305 tag
+        // is constant 16 bytes).
+        let predicted_bytes = wire_capacity;
+        if let Some(peer) = self.peers.get_mut(&next_hop_addr) {
+            peer.link_stats_mut().record_sent(predicted_bytes);
+            if let Some(mmp) = peer.mmp_mut() {
+                mmp.sender
+                    .record_sent(fmp_counter, timestamp_ms, predicted_bytes);
+            }
+        }
+        self.stats_mut()
+            .forwarding
+            .record_originated(link_plaintext_len + crate::noise::TAG_SIZE);
+
+        if let Some(entry) = self.sessions.get_mut(dest_addr) {
+            entry.record_sent(send.payload.len());
+            if let Some(mmp) = entry.mmp_mut() {
+                mmp.sender.record_sent(
+                    fsp_counter,
+                    send.timestamp,
+                    send.inner_plaintext.len() + crate::noise::TAG_SIZE,
+                );
+            }
+            entry.touch(send.now_ms);
+        }
+
+        workers.dispatch(crate::node::encrypt_worker::FmpSendJob {
+            cipher: fmp_cipher,
+            counter: fmp_counter,
+            wire_buf,
+            fsp_seal: Some(crate::node::encrypt_worker::FspSealJob {
+                cipher: fsp_cipher,
+                counter: fsp_counter,
+                aad_offset: fsp_aad_offset,
+                plaintext_offset: fsp_plaintext_offset,
+            }),
+            socket,
+            dest_addr: socket_addr,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            connected_socket,
+            // Bulk endpoint data: drop on UDP backpressure so the
+            // worker queue keeps moving instead of stranding under
+            // sustained congestion.
+            drop_on_backpressure: true,
+            queued_at: None,
+        });
+        Ok(true)
     }
 
     /// Send an IPv6 packet through the IPv6 shim (port 256) with header compression.

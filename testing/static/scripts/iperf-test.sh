@@ -84,40 +84,48 @@ iperf_test() {
 echo "=== FIPS iperf3 Bandwidth Test ($PROFILE topology) ==="
 echo ""
 
+# Print topology so the operator can see the configured routing
+# context. The bench measures iperf3 throughput between the named
+# nodes — labels DO NOT encode hop count, since peer discovery
+# converges every same-subnet pair onto a direct UDP path within a
+# few ticks regardless of the static `peers:` list.
+if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
+    echo "Topology (static \`peers:\` from mesh.yaml):"
+    echo "  A peers with: D, E"
+    echo "  B peers with: C"
+    echo "  C peers with: B, D, E"
+    echo "  D peers with: A, C, E"
+    echo "  E peers with: A, C, D"
+    echo "  (Same docker-bridge subnet — discovery converges every"
+    echo "   pair onto a direct UDP path; static \`peers:\` only seeds"
+    echo "   the initial mesh, not the steady-state routing.)"
+elif [ "$PROFILE" = "chain" ]; then
+    echo "Topology (static chain): A — B — C — D — E"
+    echo "  (Same docker-bridge subnet — see mesh note above.)"
+fi
+echo ""
+
 # Wait for nodes to converge
 echo "Waiting ${SETTLE_SECONDS}s for mesh convergence..."
 sleep "$SETTLE_SECONDS"
 
 if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
-    # Test key paths in mesh topology
     echo ""
     echo "Testing mesh topology paths:"
-    
-    # Direct peer links (client on A, server on D/E)
-    iperf_test node-d node-a "$NPUB_D" "A → D (direct peer)"
-    iperf_test node-e node-a "$NPUB_E" "A → E (direct peer)"
-
-    # Multi-hop paths (client on A, server on B/C)
-    iperf_test node-b node-a "$NPUB_B" "A → B (multi-hop)"
-    iperf_test node-c node-a "$NPUB_C" "A → C (multi-hop)"
-
-    # Reverse test (client on E, server on A)
-    iperf_test node-a node-e "$NPUB_A" "E → A (direct peer)"
+    iperf_test node-d node-a "$NPUB_D" "A→D"
+    iperf_test node-e node-a "$NPUB_E" "A→E"
+    iperf_test node-b node-a "$NPUB_B" "A→B"
+    iperf_test node-c node-a "$NPUB_C" "A→C"
+    iperf_test node-a node-e "$NPUB_A" "E→A"
 
 elif [ "$PROFILE" = "chain" ]; then
     echo ""
     echo "Testing chain topology paths:"
-    
-    # Adjacent hop (client on A, server on B)
-    iperf_test node-b node-a "$NPUB_B" "A → B (1 hop)"
-
-    # Multi-hop tests (client on A, server on C/D/E)
-    iperf_test node-c node-a "$NPUB_C" "A → C (2 hops)"
-    iperf_test node-d node-a "$NPUB_D" "A → D (3 hops)"
-    iperf_test node-e node-a "$NPUB_E" "A → E (4 hops)"
-
-    # Reverse multi-hop (client on E, server on A)
-    iperf_test node-a node-e "$NPUB_A" "E → A (4 hops)"
+    iperf_test node-b node-a "$NPUB_B" "A→B"
+    iperf_test node-c node-a "$NPUB_C" "A→C"
+    iperf_test node-d node-a "$NPUB_D" "A→D"
+    iperf_test node-e node-a "$NPUB_E" "A→E"
+    iperf_test node-a node-e "$NPUB_A" "E→A"
 fi
 
 echo ""

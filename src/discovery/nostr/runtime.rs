@@ -11,7 +11,7 @@ use nostr::prelude::{
 };
 use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
@@ -57,6 +57,67 @@ fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
         .join(",")
 }
 
+fn is_unroutable_direct_advert_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+fn endpoint_advert_is_publicly_usable(endpoint: &OverlayEndpointAdvert) -> bool {
+    let addr = endpoint.addr.trim();
+    if addr.is_empty() {
+        return false;
+    }
+
+    if endpoint.transport == super::types::OverlayTransportKind::Udp
+        && addr.eq_ignore_ascii_case("nat")
+    {
+        return true;
+    }
+    if addr.eq_ignore_ascii_case("nat") {
+        return false;
+    }
+
+    match endpoint.transport {
+        super::types::OverlayTransportKind::Udp | super::types::OverlayTransportKind::Tcp => {
+            let Ok(socket_addr) = addr.parse::<SocketAddr>() else {
+                let Some((host, port)) = addr.rsplit_once(':') else {
+                    return false;
+                };
+                let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+                if host.is_empty() || port.trim().parse::<u16>().ok().is_none_or(|p| p == 0) {
+                    return false;
+                }
+                if host.eq_ignore_ascii_case("localhost") {
+                    return false;
+                }
+                return host
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+                    .is_none_or(|ip| !is_unroutable_direct_advert_ip(ip));
+            };
+            socket_addr.port() != 0 && !is_unroutable_direct_advert_ip(socket_addr.ip())
+        }
+        super::types::OverlayTransportKind::Tor => true,
+    }
+}
+
 /// Cached STUN-derived public address for an advert-eligible UDP transport
 /// bound to a wildcard. Lives on `NostrDiscovery` so the freshness window
 /// survives advert refresh cycles.
@@ -75,6 +136,8 @@ struct CachedPublicUdpAddr {
 /// full `advert_refresh_secs` (30 min) for the success-path TTL to
 /// expire. Successful results use the longer per-config TTL.
 const PUBLIC_UDP_ADDR_FAILURE_TTL: Duration = Duration::from_secs(60);
+const RELAY_STARTUP_OP_TIMEOUT: Duration = Duration::from_secs(5);
+const ADVERT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct NostrDiscovery {
     client: Client,
@@ -91,6 +154,10 @@ pub struct NostrDiscovery {
     offer_slots: Arc<Semaphore>,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
     event_rx: Mutex<mpsc::UnboundedReceiver<BootstrapEvent>>,
+    connect_task: Mutex<Option<JoinHandle<()>>>,
+    relay_startup_task: Mutex<Option<JoinHandle<()>>>,
+    publish_task: Mutex<Option<JoinHandle<()>>>,
+    publish_notify: Notify,
     notify_task: Mutex<Option<JoinHandle<()>>>,
     advertise_task: Mutex<Option<JoinHandle<()>>>,
     failure_state: FailureState,
@@ -125,8 +192,6 @@ impl NostrDiscovery {
                 .await
                 .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         }
-        client.connect().await;
-
         let pubkey = keys.public_key();
         let npub = crate::encode_npub(&identity.pubkey());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -154,6 +219,10 @@ impl NostrDiscovery {
             offer_slots,
             event_tx,
             event_rx: Mutex::new(event_rx),
+            connect_task: Mutex::new(None),
+            relay_startup_task: Mutex::new(None),
+            publish_task: Mutex::new(None),
+            publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
             failure_state,
@@ -170,8 +239,9 @@ impl NostrDiscovery {
         // `advert_refresh_secs` interval (default 30 min) for non-configured
         // peers to re-publish before discovering them.
         let notifications = runtime.client.notifications();
-        runtime.subscribe().await?;
-        runtime.publish_inbox_relays().await?;
+        *runtime.publish_task.lock().await = Some(runtime.clone().spawn_publish_loop());
+        *runtime.connect_task.lock().await = Some(runtime.clone().spawn_connect_loop());
+        *runtime.relay_startup_task.lock().await = Some(runtime.clone().spawn_relay_startup_loop());
         *runtime.advertise_task.lock().await = Some(runtime.clone().spawn_advertise_loop());
         *runtime.notify_task.lock().await = Some(runtime.clone().spawn_notify_loop(notifications));
 
@@ -452,7 +522,7 @@ impl NostrDiscovery {
     }
 
     pub async fn update_local_advert(
-        &self,
+        self: &Arc<Self>,
         advert: Option<OverlayAdvert>,
     ) -> Result<(), BootstrapError> {
         let changed = {
@@ -467,7 +537,8 @@ impl NostrDiscovery {
         if !changed {
             return Ok(());
         }
-        self.publish_advert().await
+        self.request_publish_advert();
+        Ok(())
     }
 
     pub async fn advert_endpoints_for_peer(
@@ -507,6 +578,15 @@ impl NostrDiscovery {
 
     pub async fn shutdown(&self) -> Result<(), BootstrapError> {
         if let Some(handle) = self.advertise_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.connect_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.relay_startup_task.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.publish_task.lock().await.take() {
             handle.abort();
         }
 
@@ -663,16 +743,90 @@ impl NostrDiscovery {
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(Duration::from_secs(self.config.advert_refresh_secs.max(1)));
-            // Swallow the immediate first tick: Node::start() already publishes
-            // the initial advert via refresh_overlay_advert().
+            // Swallow the immediate first tick: Node::start() requests the
+            // initial advert publish via update_local_advert().
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if let Err(err) = self.publish_advert().await {
-                    warn!(error = %err, "failed to refresh traversal advert");
+                self.request_publish_advert();
+            }
+        })
+    }
+
+    fn spawn_relay_startup_loop(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut retry_delay = Duration::from_secs(2);
+            loop {
+                let subscribed =
+                    match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.subscribe()).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(err)) => {
+                            warn!(error = %err, "failed to subscribe to Nostr discovery relays");
+                            false
+                        }
+                        Err(_) => {
+                            warn!(
+                                timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
+                                "Nostr discovery relay subscribe timed out"
+                            );
+                            false
+                        }
+                    };
+                match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.publish_inbox_relays())
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "failed to publish Nostr inbox relay list");
+                    }
+                    Err(_) => {
+                        warn!(
+                            timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
+                            "Nostr inbox relay publish timed out"
+                        );
+                    }
+                }
+
+                self.request_publish_advert();
+
+                if subscribed {
+                    break;
+                }
+
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(60));
+            }
+        })
+    }
+
+    fn spawn_connect_loop(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            self.client.connect().await;
+        })
+    }
+
+    fn spawn_publish_loop(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                self.publish_notify.notified().await;
+                match tokio::time::timeout(ADVERT_PUBLISH_TIMEOUT, self.publish_advert()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "failed to publish traversal advert");
+                    }
+                    Err(_) => {
+                        warn!(
+                            timeout_ms = ADVERT_PUBLISH_TIMEOUT.as_millis() as u64,
+                            "Nostr traversal advert publish timed out"
+                        );
+                    }
                 }
             }
         })
+    }
+
+    fn request_publish_advert(&self) {
+        self.publish_notify.notify_one();
     }
 
     fn punch_hint(&self) -> PunchHint {
@@ -758,6 +912,7 @@ impl NostrDiscovery {
 
         advert.identifier = ADVERT_IDENTIFIER.to_string();
         advert.version = ADVERT_VERSION;
+        advert.endpoints.retain(endpoint_advert_is_publicly_usable);
         // Defensive: build_overlay_advert returns None on empty endpoints,
         // so this is only reachable from non-lifecycle callers.
         if advert.endpoints.is_empty() {
@@ -1300,12 +1455,11 @@ impl NostrDiscovery {
                 "missing required endpoints".to_string(),
             ));
         }
-        for endpoint in &advert.endpoints {
-            if endpoint.addr.trim().is_empty() {
-                return Err(BootstrapError::InvalidAdvert(
-                    "endpoint addr cannot be empty".to_string(),
-                ));
-            }
+        advert.endpoints.retain(endpoint_advert_is_publicly_usable);
+        if advert.endpoints.is_empty() {
+            return Err(BootstrapError::InvalidAdvert(
+                "missing publicly routable endpoints".to_string(),
+            ));
         }
 
         let has_nat = advert.has_udp_nat_endpoint();
@@ -1503,6 +1657,10 @@ impl NostrDiscovery {
             offer_slots,
             event_tx,
             event_rx: Mutex::new(event_rx),
+            connect_task: Mutex::new(None),
+            relay_startup_task: Mutex::new(None),
+            publish_task: Mutex::new(None),
+            publish_notify: Notify::new(),
             notify_task: Mutex::new(None),
             advertise_task: Mutex::new(None),
             failure_state,

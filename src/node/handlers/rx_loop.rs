@@ -11,6 +11,18 @@ use crate::transport::ReceivedPacket;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+/// Inside the packet_rx burst drain, run a fallback drain every
+/// N packets so bounced FMP plaintexts can't sit behind a full
+/// 256-packet UDP burst. Used on unix; on Windows the decrypt-worker
+/// pool isn't spawned so the fallback channel is always empty —
+/// hold the constants at module scope anyway so the burst-loop
+/// dispatch in `run_rx_loop` doesn't need a `#[cfg]` on every site.
+const FALLBACK_INTERLEAVE_EVERY: usize = 32;
+/// How many fallback events to drain per interleave step. Bounded so
+/// the inner loop can keep making forward progress on packet_rx.
+#[cfg(unix)]
+const FALLBACK_INTERLEAVE_BUDGET: usize = 32;
+
 impl Node {
     /// Run the receive event loop.
     ///
@@ -80,11 +92,64 @@ impl Node {
         // Drop unused sender to avoid keeping channel open if control is disabled
         drop(control_tx);
 
+        // Decrypt-worker fallback receiver. The worker pushes each
+        // authenticated FMP plaintext here so rx_loop can finish the
+        // per-peer side-effects (stats, MMP, ECN, link dispatch).
+        // Always declared so the `tokio::select!` arm doesn't need
+        // a `cfg` (which the macro doesn't support); on Windows the
+        // channel just never sees events.
+        let (mut decrypt_fallback_rx, _decrypt_fallback_guard) = {
+            #[cfg(unix)]
+            {
+                match self.decrypt_fallback_rx.take() {
+                    Some(rx) => (rx, None),
+                    None => {
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                        (rx, Some(tx))
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-unix nothing ever sends, but the macro arm
+                // still needs an existing rx. Keep the sender alive to
+                // avoid the channel closing into an Err loop.
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+                (rx, Some(tx))
+            }
+        };
+
         info!("RX event loop started");
+        // Optional per-stage perf profiler (FIPS_PERF=1). No-op otherwise.
+        crate::perf_profile::maybe_spawn_reporter();
 
         loop {
             tokio::select! {
                 biased;
+                // Decrypt-worker fallback drains FIRST. Under sustained
+                // inbound bursts the packet_rx drain (up to 256 packets)
+                // can starve fallback work for tens of ms — TCP doesn't
+                // tolerate that (late ACKs → dup-ACK fast retransmits →
+                // cwnd collapse). Promoting fallback gives the kernel's
+                // TCP machinery a fair chance to ACK in time.
+                Some(event) = decrypt_fallback_rx.recv() => {
+                    #[cfg(unix)]
+                    {
+                        self.process_decrypt_worker_event(event).await;
+                        let mut drained = 0;
+                        while drained < 255 {
+                            match decrypt_fallback_rx.try_recv() {
+                                Ok(ev) => {
+                                    self.process_decrypt_worker_event(ev).await;
+                                    drained += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = event;
+                }
                 packet = packet_rx.recv() => {
                     match packet {
                         Some(p) => self.process_packet(p).await,
@@ -97,14 +162,57 @@ impl Node {
                     // datagrams available per wake. Caps at a batch
                     // boundary so other branches (tick, control) eventually
                     // get a turn even under sustained load.
-                    let mut drained = 0;
+                    //
+                    // **Interleave fallback drain** every N packets so
+                    // bounced FMP plaintexts (heartbeats, post-FMP-
+                    // decrypt forwarding payloads, control frames) don't
+                    // sit in the fallback queue for a full 256-packet
+                    // burst. Even with the priority-first ordering of
+                    // the outer select!, once we're inside this inner
+                    // loop only this interleave can free queued
+                    // fallbacks. On multihop forwarding paths this is
+                    // the difference between back-to-back encrypt-
+                    // worker dispatches happening promptly vs piling up
+                    // behind the rx burst.
+                    let mut drained: usize = 1; // count the packet processed above
                     while drained < 256 {
+                        if drained.is_multiple_of(FALLBACK_INTERLEAVE_EVERY) {
+                            #[cfg(unix)]
+                            {
+                                let mut fb_drained = 0;
+                                while fb_drained < FALLBACK_INTERLEAVE_BUDGET {
+                                    match decrypt_fallback_rx.try_recv() {
+                                        Ok(ev) => {
+                                            self.process_decrypt_worker_event(ev).await;
+                                            fb_drained += 1;
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
                         match packet_rx.try_recv() {
                             Ok(p) => {
                                 self.process_packet(p).await;
                                 drained += 1;
                             }
                             Err(_) => break,
+                        }
+                    }
+                    // Trailing fallback drain so the last bounced
+                    // packets of the burst aren't held up by the
+                    // next select! iteration.
+                    #[cfg(unix)]
+                    {
+                        let mut fb_drained = 0;
+                        while fb_drained < 256 {
+                            match decrypt_fallback_rx.try_recv() {
+                                Ok(ev) => {
+                                    self.process_decrypt_worker_event(ev).await;
+                                    fb_drained += 1;
+                                }
+                                Err(_) => break,
+                            }
                         }
                     }
                 }
@@ -163,6 +271,8 @@ impl Node {
                     self.check_pending_lookups(now_ms).await;
                     self.poll_transport_discovery().await;
                     self.sample_transport_congestion();
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.activate_connected_udp_sessions().await;
                 }
             }
         }

@@ -1565,6 +1565,14 @@ impl Node {
                 "Connection promoted to active peer"
             );
 
+            // Hand the FMP recv cipher + replay window to the
+            // decrypt shard worker. From this point on the worker
+            // is the sole authority on FMP replay protection for
+            // this session. No-op when the worker pool isn't
+            // spawned (unit-test path or `FIPS_DECRYPT_WORKERS=0`).
+            #[cfg(unix)]
+            self.register_decrypt_worker_session(&peer_node_addr);
+
             Ok(PromotionResult::Promoted(peer_node_addr))
         }
     }

@@ -209,6 +209,23 @@ pub struct ActivePeer {
     rekey_responder_handshake: Option<NoiseHandshakeState>,
     /// In-progress rekey responder: our new session index.
     rekey_responder_our_index: Option<SessionIndex>,
+
+    /// Unix UDP fast-path: per-peer `connect()`-ed socket (paired with
+    /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
+    /// the connected 5-tuple, so inbound packets land here; the
+    /// encrypt-worker send path sends with `msg_name = NULL`, skipping
+    /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
+    /// in-flight worker jobs survive rekey/address-change rotations.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    connected_udp:
+        Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>>,
+
+    /// Per-peer recv drain thread. Always paired with `connected_udp`:
+    /// the kernel routes inbound packets from this peer to the
+    /// connected socket, so it *must* be drained or the kernel recv
+    /// buffer fills. Drop signals shutdown via self-pipe.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    peer_recv_drain: Option<crate::transport::udp::peer_drain::PeerRecvDrain>,
 }
 
 impl ActivePeer {
@@ -266,6 +283,10 @@ impl ActivePeer {
             rekey_msg1_next_resend: 0,
             rekey_responder_handshake: None,
             rekey_responder_our_index: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            connected_udp: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            peer_recv_drain: None,
         }
     }
 
@@ -360,7 +381,51 @@ impl ActivePeer {
             rekey_msg1_next_resend: 0,
             rekey_responder_handshake: None,
             rekey_responder_our_index: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            connected_udp: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            peer_recv_drain: None,
         }
+    }
+
+    // === Connected-UDP fast path ===
+
+    /// Refcount the per-peer `connect()`-ed UDP socket if installed.
+    /// Encrypt-worker send path uses this to bypass the wildcard
+    /// listen socket's per-packet sockaddr handling.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn connected_udp(
+        &self,
+    ) -> Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>> {
+        self.connected_udp.clone()
+    }
+
+    /// Install a per-peer `connect()`-ed UDP socket with its paired
+    /// recv drain thread. The two own each other's lifetime: the drain
+    /// is the only consumer of packets on this socket.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn set_connected_udp(
+        &mut self,
+        socket: std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>,
+        drain: crate::transport::udp::peer_drain::PeerRecvDrain,
+    ) {
+        // Drop the old drain BEFORE the old socket so its last fd
+        // reference is released cleanly.
+        self.peer_recv_drain = None;
+        self.connected_udp = None;
+        self.connected_udp = Some(socket);
+        self.peer_recv_drain = Some(drain);
+    }
+
+    /// Clear the per-peer connected UDP socket + drain. The drain
+    /// exits via self-pipe signal; the kernel fd closes on last `Arc`
+    /// drop (any in-flight worker jobs holding the old `Arc` stay
+    /// valid until they complete).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(dead_code)] // called from session-deregister + rekey follow-up
+    pub(crate) fn clear_connected_udp(&mut self) {
+        self.peer_recv_drain = None;
+        self.connected_udp = None;
     }
 
     // === Identity Accessors ===
@@ -487,9 +552,15 @@ impl ActivePeer {
     /// Update the current address (for roaming support).
     ///
     /// Called when we receive a valid authenticated packet from a new address.
-    pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) {
+    /// Returns `true` if `(transport_id, addr)` actually changed — callers
+    /// use this to invalidate per-peer `connect(2)`-ed UDP sockets whose
+    /// 5-tuple just went stale.
+    pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
+        let changed =
+            self.transport_id != Some(transport_id) || self.current_addr.as_ref() != Some(&addr);
         self.transport_id = Some(transport_id);
         self.current_addr = Some(addr);
+        changed
     }
 
     // === Handshake Resend ===
