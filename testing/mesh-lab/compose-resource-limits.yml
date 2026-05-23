@@ -1,0 +1,58 @@
+# Compose override applied by the mesh-lab harness to constrain the
+# rekey-family daemon containers to roughly the per-container slice
+# they'd get on a GitHub Actions ubuntu-latest runner (2 cores / 7 GiB
+# total, shared among 5 daemons + the test harness + OS overhead).
+#
+# Used by passing `-f testing/static/docker-compose.yml -f this-file`
+# in the lab's `docker compose up` invocation. The base compose file
+# is unmodified so ci-local.sh on a developer host stays unconstrained
+# unless the developer deliberately opts into these limits.
+#
+# Sizing math: 5 daemons × 0.3 cpus = 1.5 cores; 5 daemons × 1 GiB =
+# 5 GiB. Leaves ~0.5 cores and ~2 GiB for the test harness + OS on a
+# 2-core / 7-GiB GHA runner, which matches reality on a fully-loaded
+# CI box.
+#
+# Service names follow the per-profile naming in the base compose:
+# the `rekey` profile uses rekey-a..rekey-e, `rekey-accept-off` uses
+# rekey-accept-off-a..e, and `rekey-outbound-only` uses
+# rekey-outbound-only-a..e. The override repeats the limits anchor
+# across all three so any rekey-family profile picks them up.
+#
+# 2026-05-16 first cut: 0.3 cpus + 1 GiB per daemon, measured rate TBD.
+
+x-fips-limits: &fips-limits
+  cpus: 0.3
+  mem_limit: 1g
+
+services:
+  rekey-a:
+    <<: *fips-limits
+  rekey-b:
+    <<: *fips-limits
+  rekey-c:
+    <<: *fips-limits
+  rekey-d:
+    <<: *fips-limits
+  rekey-e:
+    <<: *fips-limits
+  rekey-accept-off-a:
+    <<: *fips-limits
+  rekey-accept-off-b:
+    <<: *fips-limits
+  rekey-accept-off-c:
+    <<: *fips-limits
+  rekey-accept-off-d:
+    <<: *fips-limits
+  rekey-accept-off-e:
+    <<: *fips-limits
+  rekey-outbound-only-a:
+    <<: *fips-limits
+  rekey-outbound-only-b:
+    <<: *fips-limits
+  rekey-outbound-only-c:
+    <<: *fips-limits
+  rekey-outbound-only-d:
+    <<: *fips-limits
+  rekey-outbound-only-e:
+    <<: *fips-limits

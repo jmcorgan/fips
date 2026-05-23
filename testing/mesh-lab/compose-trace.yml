@@ -1,0 +1,73 @@
+# Compose override that bumps RUST_LOG to trace level on the modules
+# relevant to rekey-class flake evidence collection:
+#
+#   - fips::node::handlers::rekey       — FMP/FSP rekey state machine
+#   - fips::node::handlers::handshake   — Noise handshake (cross-init,
+#                                          dual-init, msg1/2/3 dispatch)
+#   - fips::node::handlers::forwarding  — transit datagram forwarding,
+#                                          route lookup, drops
+#   - fips::node::handlers::session     — FSP K-bit cutover, drain
+#   - fips::node::handlers::encrypted   — FMP K-bit flip detection
+#   - fips::node::handlers::mmp         — link liveness, SRTT, ETX
+#
+# Other modules stay at info to keep log volume manageable. The base
+# docker-compose.yml's per-service RUST_LOG values (currently
+# `info,fips::node::handlers::rekey=debug` for the rekey profile, plus
+# handshake=debug on the variant profiles) are fully replaced by the
+# values below via the YAML map form: docker compose's override
+# semantics replace the map entry rather than merging individual
+# environment keys.
+#
+# Service-name layout follows the base compose: per-profile services
+# named `<profile>-<node-letter>` (rekey-a..e for the rekey profile,
+# rekey-accept-off-a..e for the accept-off variant,
+# rekey-outbound-only-a..e for the outbound-only variant). All 15
+# rekey-family services get the same trace-RUST_LOG value.
+#
+# Include this override alongside the base compose via:
+#   docker compose -f testing/static/docker-compose.yml \
+#                  -f testing/mesh-lab/compose-resource-limits.yml \
+#                  -f testing/mesh-lab/compose-trace.yml up -d
+#
+# The run-loop.sh harness includes it automatically when the mesh-lab
+# environment variable FIPS_MESH_LAB_TRACE=1 is set.
+
+x-trace-rust-log: &trace-rust-log
+  RUST_LOG: "info,fips::node::handlers::rekey=trace,fips::node::handlers::handshake=trace,fips::node::handlers::forwarding=trace,fips::node::handlers::session=trace,fips::node::handlers::encrypted=trace,fips::node::handlers::mmp=trace"
+
+services:
+  # rekey profile
+  rekey-a:
+    environment: *trace-rust-log
+  rekey-b:
+    environment: *trace-rust-log
+  rekey-c:
+    environment: *trace-rust-log
+  rekey-d:
+    environment: *trace-rust-log
+  rekey-e:
+    environment: *trace-rust-log
+
+  # rekey-accept-off profile
+  rekey-accept-off-a:
+    environment: *trace-rust-log
+  rekey-accept-off-b:
+    environment: *trace-rust-log
+  rekey-accept-off-c:
+    environment: *trace-rust-log
+  rekey-accept-off-d:
+    environment: *trace-rust-log
+  rekey-accept-off-e:
+    environment: *trace-rust-log
+
+  # rekey-outbound-only profile
+  rekey-outbound-only-a:
+    environment: *trace-rust-log
+  rekey-outbound-only-b:
+    environment: *trace-rust-log
+  rekey-outbound-only-c:
+    environment: *trace-rust-log
+  rekey-outbound-only-d:
+    environment: *trace-rust-log
+  rekey-outbound-only-e:
+    environment: *trace-rust-log

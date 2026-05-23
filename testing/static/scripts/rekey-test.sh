@@ -497,14 +497,30 @@ echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
 if [ "$TOTAL_FAILED" -eq 0 ]; then
     exit 0
 else
-    # Dump logs on failure for diagnostics
+    # Dump logs on failure for diagnostics.
+    #
+    # Wider pattern + larger line cap than the original head -30 (which
+    # truncated before the actual ping-failure timestamp on Phase 5
+    # fires, making the post-cutover convergence window invisible to
+    # offline triage). Two passes per node:
+    #   1) rekey-related events across the whole run (cap 200 lines).
+    #   2) Last 80 lines unfiltered, to surface forwarding decisions,
+    #      route lookups, congestion warnings, decrypt errors, and any
+    #      other surrounding context near the failure point.
     echo ""
-    echo "=== Node logs (rekey-related) ==="
+    echo "=== Node logs (rekey-related, head -200) ==="
     for node in $NODES; do
         echo "--- node-$node ---"
         docker logs "fips-node-$node" 2>&1 | \
-            grep -E "(rekey|Rekey|cross|Cross|teardown|ERROR|PANIC|K-bit)" | \
-            head -30
+            grep -E "(rekey|Rekey|cross|Cross|teardown|ERROR|PANIC|K-bit|no route|next hop|TTL exhausted|MTU exceeded|Congestion|decrypt|Decrypt|AEAD|Notify|drain|Drain|promot)" | \
+            head -200
+        echo ""
+    done
+
+    echo "=== Node logs (last 80 lines, unfiltered) ==="
+    for node in $NODES; do
+        echo "--- node-$node ---"
+        docker logs "fips-node-$node" 2>&1 | tail -80
         echo ""
     done
     exit 1

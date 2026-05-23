@@ -1,0 +1,5 @@
+# Raw per-rep diagnostic outputs are gigabyte-scale, ephemeral, and
+# per-developer. The lab harness writes them here; we never commit them.
+# Curated artifacts that prove a mechanism match get copied (by hand)
+# into ../../workspace ../issues/YYYY-NNNN-diagnostics/ when relevant.
+runs/
