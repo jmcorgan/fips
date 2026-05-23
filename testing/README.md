@@ -54,3 +54,11 @@ testing. Scenarios are
 defined in YAML and executed via a Python harness that manages the full
 lifecycle: topology generation, Docker orchestration, fault scheduling,
 log collection, and analysis.
+
+### [interop/](interop/) -- Mixed-Version Interop Harness
+
+On-demand harness that runs an N-node full mesh from a node-spec where
+each node can run a different build of the FIPS daemon, then attributes
+every FMP/FSP/rekey/connectivity failure to a specific version pair
+(same-version vs MIXED). Used to catch interop regressions between
+builds, not as a per-commit CI gate; not part of `ci-local.sh`.
