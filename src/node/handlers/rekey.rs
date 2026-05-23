@@ -19,8 +19,14 @@ const DRAIN_WINDOW_SECS: u64 = 10;
 /// a peer's rekey msg1.
 const REKEY_DAMPENING_SECS: u64 = 30;
 
-/// Delay FSP initiator cutover after handshake completion to allow
-/// XX msg3 to reach the responder before K-bit-flipped data arrives.
+/// Liveness bound on how long the FSP rekey initiator holds the
+/// `current` + `pending` state before cutting over to the new epoch.
+///
+/// This is NOT safety-critical: overlapping-epoch trial-decrypt covers
+/// any skew between the two endpoints' cutovers. The timer only bounds
+/// how long the initiator advertises the old K-bit. An opportunistic
+/// early cutover also fires if the initiator authenticates a peer frame
+/// against its own `pending` session (the responder cut over first).
 const FSP_CUTOVER_DELAY_MS: u64 = 2000;
 
 impl Node {
@@ -298,12 +304,114 @@ impl Node {
         }
     }
 
+    /// Retransmit FSP rekey msg3 until the responder is confirmed on the
+    /// new epoch.
+    ///
+    /// Called from the tick loop. The rekey initiator retains its msg3
+    /// wire payload after the first send (`handle_session_ack`); this
+    /// driver resends it on the handshake resend interval (with backoff)
+    /// while the payload is still retained.
+    ///
+    /// This is a **liveness-only** mechanism. Overlapping-epoch
+    /// trial-decrypt makes the rekey transition safe regardless of
+    /// cutover skew; retransmission only guarantees the responder
+    /// eventually derives the new session. Its lifetime is tied to the
+    /// responder *receiving* msg3 — the retained payload is cleared when
+    /// an inbound peer frame authenticates against `pending` or
+    /// post-cutover `current` — decoupled from the initiator's own
+    /// cutover. The initiator may cut over on its liveness timer while
+    /// the responder still lacks the new session; retransmission
+    /// continues, and overlapping-epoch decrypt keeps both directions
+    /// working meanwhile.
+    ///
+    /// After `handshake_max_resends` attempts with no confirmed progress,
+    /// the rekey cycle is abandoned cleanly (`abandon_rekey`): the
+    /// pending session is dropped and the next cycle retries fresh. This
+    /// is safe — an abandoned cycle never leaves a divergent unsafe
+    /// state.
+    pub(in crate::node) async fn resend_pending_session_msg3(&mut self, now_ms: u64) {
+        if !self.config.node.rekey.enabled || self.sessions.is_empty() {
+            return;
+        }
+
+        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config.node.rate_limit.handshake_resend_backoff;
+        let max_resends = self.config.node.rate_limit.handshake_max_resends;
+        let ttl = self.config.node.session.default_ttl;
+        let my_addr = *self.node_addr();
+
+        // Collect rekey initiators whose msg3 retransmission is due.
+        let mut to_resend: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
+        let mut to_abandon: Vec<NodeAddr> = Vec::new();
+
+        for (node_addr, entry) in &self.sessions {
+            // Only the rekey initiator retains a msg3 payload.
+            let payload = match entry.rekey_msg3_payload() {
+                Some(p) => p,
+                None => continue,
+            };
+            if entry.rekey_msg3_next_resend_ms() == 0 || now_ms < entry.rekey_msg3_next_resend_ms()
+            {
+                continue;
+            }
+            if entry.rekey_msg3_resend_count() >= max_resends {
+                to_abandon.push(*node_addr);
+                continue;
+            }
+            to_resend.push((*node_addr, payload.to_vec()));
+        }
+
+        // Abandon rekey cycles that exhausted their retransmission budget.
+        for node_addr in to_abandon {
+            if let Some(entry) = self.sessions.get_mut(&node_addr) {
+                entry.abandon_rekey();
+            }
+            warn!(
+                peer = %self.peer_display_name(&node_addr),
+                "FSP rekey aborted: msg3 unconfirmed after max retransmissions, abandoning cycle"
+            );
+        }
+
+        // Retransmit msg3 for cycles still within budget.
+        for (node_addr, payload) in to_resend {
+            let mut datagram = SessionDatagram::new(my_addr, node_addr, payload).with_ttl(ttl);
+            let sent = match self.send_session_datagram(&mut datagram).await {
+                Ok(_) => true,
+                Err(e) => {
+                    debug!(
+                        peer = %self.peer_display_name(&node_addr),
+                        error = %e,
+                        "FSP rekey msg3 retransmission failed"
+                    );
+                    false
+                }
+            };
+
+            if sent && let Some(entry) = self.sessions.get_mut(&node_addr) {
+                let count = entry.rekey_msg3_resend_count() + 1;
+                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                entry.record_rekey_msg3_resend(next);
+                trace!(
+                    peer = %self.peer_display_name(&node_addr),
+                    resend = count,
+                    "Resent FSP rekey msg3"
+                );
+            }
+        }
+    }
+
     /// Periodic session (FSP) rekey check. Called from the tick loop.
     ///
     /// For each established session:
-    /// - If the initiator has a pending session, perform K-bit cutover
+    /// - If the initiator holds a pending session past the liveness
+    ///   timer, perform the K-bit cutover (overlapping-epoch decrypt
+    ///   makes this safe on any schedule — see `FSP_CUTOVER_DELAY_MS`)
     /// - If the drain window has expired, clean up the previous session
     /// - If the rekey timer/counter fires, initiate a new XX handshake
+    ///
+    /// msg3 retransmission is handled separately by
+    /// `resend_pending_session_msg3`; its lifetime is tied to the
+    /// responder receiving msg3, not to this initiator's cutover.
     pub(in crate::node) async fn check_session_rekey(&mut self) {
         if !self.config.node.rekey.enabled {
             return;
@@ -324,10 +432,14 @@ impl Node {
                 continue;
             }
 
-            // 1. Initiator-side cutover: completed rekey, pending session ready.
-            //    Defer cutover until msg3 has had time to reach the responder.
-            //    Without this delay, K-bit-flipped data can arrive before
-            //    msg3, causing decryption failures on the responder.
+            // 1. Initiator-side cutover (option A): completed rekey,
+            //    pending session ready, liveness timer elapsed. This is
+            //    an unconditional timer, NOT gated on responder progress —
+            //    overlapping-epoch trial-decrypt covers the cutover skew,
+            //    so flipping the K-bit here is always safe. An
+            //    opportunistic early cutover also happens in
+            //    `handle_encrypted_session_msg` if the initiator
+            //    authenticates a peer frame against its own `pending`.
             if entry.pending_new_session().is_some()
                 && !entry.has_rekey_in_progress()
                 && entry.is_rekey_initiator()
@@ -347,7 +459,14 @@ impl Node {
                 continue;
             }
             if entry.pending_new_session().is_some() {
-                continue; // Responder with pending session, wait for initiator's K-bit
+                continue; // Pending session present, awaiting cutover
+            }
+            if entry.rekey_msg3_payload().is_some() {
+                // Initiator already cut over on its liveness timer but is
+                // still retransmitting msg3 to a responder not yet
+                // confirmed on the new epoch. Don't start another rekey
+                // until the current cycle's msg3 is delivered or abandoned.
+                continue;
             }
             if entry.is_rekey_dampened(now_ms, dampening_ms) {
                 continue;

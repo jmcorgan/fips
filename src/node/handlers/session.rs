@@ -8,7 +8,7 @@
 use crate::NodeAddr;
 use crate::mmp::report::ReceiverReport;
 use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
-use crate::node::session::{EndToEndState, SessionEntry};
+use crate::node::session::{EndToEndState, EpochSlot, SessionEntry};
 use crate::node::session_wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
     FSP_PHASE_MSG1, FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,
@@ -199,80 +199,87 @@ impl Node {
             }
         }
 
-        // K-bit flip detection: peer has cut over to the new session.
+        // The received K-bit is only an ordering hint for the
+        // trial-decrypt cascade — it picks which key epoch to try first.
+        // Correctness never depends on it; promotion is driven by which
+        // slot actually authenticates the frame, not by the header bit.
         let received_k_bit = header.flags & FSP_FLAG_K != 0;
-        {
-            let Some(entry) = self.sessions.get(src_addr) else {
-                return;
-            };
-            let k_bit_flipped =
-                received_k_bit != entry.current_k_bit() && entry.pending_new_session().is_some();
-
-            if k_bit_flipped {
-                let display_name = self.peer_display_name(src_addr);
-                info!(
-                    peer = %display_name,
-                    our_addr = %self.identity.node_addr(),
-                    their_addr = %src_addr,
-                    "Peer FSP K-bit flip detected, promoting new session"
-                );
-                let now_ms = Self::now_ms();
-                let Some(entry) = self.sessions.get_mut(src_addr) else {
-                    return;
-                };
-                entry.handle_peer_kbit_flip(now_ms);
-            }
-        }
 
         let mut entry = match self.sessions.remove(src_addr) {
             Some(e) => e,
             None => return,
         };
 
-        // Decrypt with AAD = the 12-byte header
-        let session = match entry.state_mut() {
-            EndToEndState::Established(s) => s,
-            _ => {
-                debug!(src = %self.peer_display_name(src_addr), "Encrypted message but session not established");
+        let now_ms = Self::now_ms();
+
+        // Overlapping-epoch trial-decrypt: try current, pending and
+        // previous so any epoch the peer might have sealed this frame in
+        // can be decrypted. This makes rekey correctness independent of
+        // cutover timing — no ordering and no reordering can cause a
+        // decrypt failure. A successful `previous`-slot decrypt also
+        // refreshes the drain deadline so the old epoch is retained as
+        // long as the peer keeps using it.
+        let (plaintext, slot) = match entry.fsp_trial_decrypt(
+            ciphertext,
+            header.counter,
+            &header.header_bytes,
+            received_k_bit,
+            now_ms,
+        ) {
+            Some(result) => result,
+            None => {
+                // Every live slot failed — a genuine drop. The upper
+                // layer retransmits.
+                debug!(
+                    src = %self.peer_display_name(src_addr),
+                    counter = header.counter,
+                    "Session AEAD decryption failed (all epochs)"
+                );
                 self.sessions.insert(*src_addr, entry);
                 return;
             }
         };
 
-        let plaintext = match session.decrypt_with_replay_check_and_aad(
-            ciphertext,
-            header.counter,
-            &header.header_bytes,
-        ) {
-            Ok(pt) => pt,
-            Err(e) => {
-                // Current session failed — try previous session (drain window)
-                if let Some(prev_session) = entry.previous_noise_session_mut() {
-                    match prev_session.decrypt_with_replay_check_and_aad(
-                        ciphertext,
-                        header.counter,
-                        &header.header_bytes,
-                    ) {
-                        Ok(pt) => pt,
-                        Err(_) => {
-                            debug!(
-                                error = %e, src = %self.peer_display_name(src_addr), counter = header.counter,
-                                "Session AEAD decryption failed (current and previous)"
-                            );
-                            self.sessions.insert(*src_addr, entry);
-                            return;
-                        }
-                    }
-                } else {
-                    debug!(
-                        error = %e, src = %self.peer_display_name(src_addr), counter = header.counter,
-                        "Session AEAD decryption failed"
-                    );
-                    self.sessions.insert(*src_addr, entry);
-                    return;
+        // React to the epoch the frame decrypted against.
+        match slot {
+            EpochSlot::Pending => {
+                // A frame that authenticates against `pending` is itself
+                // the cutover signal — proof the peer derived the new
+                // session and moved to it. Promote now: current →
+                // previous, pending → current, flip the K-bit. The
+                // header K-bit is no longer the gating event; the
+                // authenticated decrypt is.
+                info!(
+                    peer = %self.peer_display_name(src_addr),
+                    "Peer FSP new-epoch frame authenticated, FSP rekey cutover complete, promoting new session"
+                );
+                // The peer derived the new session, so it received msg3:
+                // confirm it on the new epoch and stop retransmitting.
+                // `handle_peer_kbit_flip` consumes the pending session,
+                // so confirm first.
+                if entry.rekey_msg3_payload().is_some() {
+                    entry.confirm_peer_new_epoch();
+                }
+                entry.handle_peer_kbit_flip(now_ms);
+            }
+            EpochSlot::Current => {
+                // If we still retain a msg3 retransmission payload but no
+                // longer hold a `pending` session, we are the rekey
+                // initiator that already cut over on its own timer:
+                // `current` is now the new epoch, so a frame decrypting
+                // against it confirms the responder reached the new
+                // epoch. Stop retransmitting msg3.
+                if entry.rekey_msg3_payload().is_some() && entry.pending_new_session().is_none() {
+                    entry.confirm_peer_new_epoch();
                 }
             }
-        };
+            EpochSlot::Previous => {
+                // The peer is still on the old epoch. `fsp_trial_decrypt`
+                // already refreshed the drain deadline so the `previous`
+                // slot is not retired while the peer keeps using it —
+                // no further state change here, just deliver.
+            }
+        }
 
         self.sessions.insert(*src_addr, entry);
 
@@ -672,7 +679,7 @@ impl Node {
             let msg3_wire = SessionMsg3::new(msg3);
             let msg3_payload = msg3_wire.encode();
             let my_addr = *self.node_addr();
-            let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload)
+            let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload.clone())
                 .with_ttl(self.config.node.session.default_ttl);
 
             if let Err(e) = self.send_session_datagram(&mut datagram).await {
@@ -693,15 +700,26 @@ impl Node {
                 }
             };
 
+            // Retain msg3 for retransmission (liveness): a single msg3
+            // loss must not leave the responder without the new session.
+            // Retransmission runs until the responder is confirmed on the
+            // new epoch — an authenticated peer frame against `pending` or
+            // post-cutover `current` — decoupled from this initiator's own
+            // cutover. The initiator may cut over on its liveness timer
+            // before the responder receives msg3; overlapping-epoch
+            // decrypt keeps both directions safe meanwhile.
+            let now_ms = Self::now_ms();
+            let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
             entry.set_pending_session(session);
-            entry.set_rekey_completed_ms(Self::now_ms());
+            entry.set_rekey_completed_ms(now_ms);
+            entry.set_rekey_msg3_payload(msg3_payload, now_ms + resend_interval);
             self.sessions.insert(*src_addr, entry);
 
             debug!(
                 src = %self.peer_display_name(src_addr),
                 our_addr = %self.identity.node_addr(),
                 their_addr = %src_addr,
-                "FSP rekey: completed XX as initiator, pending cutover"
+                "FSP rekey: completed XX as initiator, msg3 sent, pending cutover"
             );
             return;
         }

@@ -416,17 +416,23 @@ FAILED=0
 
 # FSP session rekey trails link-layer rekey in practice. Wait boundedly for
 # at least one initiator and responder cutover before the final assertions.
-wait_for_log_pattern_count "FSP rekey cutover complete" 1 "$FIRST_REKEY_TIMEOUT" || true
-wait_for_log_pattern_count "Peer FSP K-bit flip detected" 1 "$REKEY_SETTLE" || true
+#
+# The responder-side cutover is driven by the overlapping-epoch
+# trial-decrypt cascade: a frame that authenticates against the pending
+# session is itself the cutover signal, logged as "Peer FSP new-epoch
+# frame authenticated". The header K-bit is only an ordering hint now,
+# so there is no longer a standalone "K-bit flip detected" event.
+wait_for_log_pattern_count "FSP rekey cutover complete (initiator)" 1 "$FIRST_REKEY_TIMEOUT" || true
+wait_for_log_pattern_count "Peer FSP new-epoch frame authenticated" 1 "$REKEY_SETTLE" || true
 
 # Positive checks: rekey machinery worked
 assert_min_count "Rekey cutover complete (initiator), K-bit flipped" 4 \
     "FMP rekey initiator cutovers (>= 2 cycles)"
 
 # FSP rekey checks (sessions between non-adjacent nodes)
-assert_min_count "FSP rekey cutover complete" 1 \
+assert_min_count "FSP rekey cutover complete (initiator)" 1 \
     "FSP session rekey initiator cutovers"
-assert_min_count "Peer FSP K-bit flip detected" 1 \
+assert_min_count "Peer FSP new-epoch frame authenticated" 1 \
     "FSP session rekey responder cutovers"
 
 # Negative checks: no bad things happened

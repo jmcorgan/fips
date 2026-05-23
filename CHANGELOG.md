@@ -236,6 +236,26 @@ with v0.3.x peers.
 
 ### Fixed
 
+- FSP session rekey is now hitless under packet loss and reordering.
+  Previously, a rekey could leave the two endpoints holding different
+  key sets for a brief window — if a handshake message was lost in
+  transit one side rotated keys while the other did not, and traffic
+  sealed in one key epoch reached a peer still on the other epoch and
+  failed to decrypt, producing bursts of AEAD decryption failures and
+  dropped connectivity until a later rekey reconverged the pair. The
+  receive path now trial-decrypts each frame against every live key
+  epoch (current, pending, and the draining previous session) for the
+  duration of the rekey transition, so no rotation ordering and no
+  packet reordering can cause a decryption failure. The previous-epoch
+  slot is retained as long as the peer keeps using it, with its drain
+  deadline anchored on the last frame the peer authenticates against
+  it rather than a fixed wall-clock timer, so a peer that did not
+  receive the new keys is not stranded by a silent permanent decrypt
+  failure. The lost-handshake case is closed by retransmitting the
+  third rekey handshake message until the peer is confirmed on the
+  new keys, with a bounded retry budget after which the rekey cycle
+  is cleanly abandoned and retried. There are no FSP decryption
+  failures across a rekey under lossy, jittery links.
 - AUR packaging: the `fips` and `fips-git` PKGBUILDs now install the
   `fips-dns-setup` and `fips-dns-teardown` helpers into
   `/usr/lib/fips/`, matching the Debian package. The AUR `package()`
