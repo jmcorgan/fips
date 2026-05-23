@@ -84,6 +84,12 @@ impl Node {
                 self.stats_mut()
                     .forwarding
                     .record_drop_no_route(payload.len());
+                debug!(
+                    src = %self.peer_display_name(&datagram.src_addr),
+                    dest = %self.peer_display_name(&datagram.dest_addr),
+                    bytes = payload.len(),
+                    "Dropping transit SessionDatagram: no route to destination"
+                );
                 self.send_routing_error(&datagram).await;
                 return;
             }

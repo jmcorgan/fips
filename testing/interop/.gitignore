@@ -1,0 +1,10 @@
+# Generated per-node configs, generated compose, manifests
+# (generated-configs/ is ignored wholesale, so docker-compose.generated.yml
+# and nodes.env are covered).
+generated-configs/
+
+# Per-ref worktree + build-context scratch space (build-images.sh)
+.build/
+
+# Netem stress-loop artifacts (interop-stress.sh)
+.stress-runs/

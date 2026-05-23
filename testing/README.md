@@ -54,3 +54,21 @@ testing. Scenarios are
 defined in YAML and executed via a Python harness that manages the full
 lifecycle: topology generation, Docker orchestration, fault scheduling,
 log collection, and analysis.
+
+### [interop/](interop/) -- Mixed-Version Interop Harness
+
+On-demand harness that runs an N-node full mesh from a node-spec where
+each node can run a different build of the FIPS daemon, then attributes
+every FMP/FSP/rekey/connectivity failure to a specific version pair
+(same-version vs MIXED). Used to catch interop regressions between
+builds, not as a per-commit CI gate; not part of `ci-local.sh`.
+
+### [mesh-lab/](mesh-lab/) -- Mesh Reliability Lab
+
+On-demand harness that runs a chosen integration suite N times under a
+configurable host-pressure profile (idle / light / github-runner-
+equivalent / heavy via `stress-ng`), per-container netem impairment,
+and optional trace-level RUST_LOG, capturing per-rep diagnostics and a
+mechanism-match summary across the run. Used for statistical reliability
+characterization of known flake classes under calibrated stress, not as
+a per-commit gate; not part of `ci-local.sh`.
