@@ -327,9 +327,58 @@ mechanism_match_rekey() {
 run_nat_lan() {
     local REP_DIR="$1"
     local rc=0
+
+    # Optional CPU-pinning sidecar. Mirrors the bloom-storm pattern at
+    # run_bloom_storm above. nat-test.sh uses docker-compose, but the
+    # mesh-lab compose-resource-limits.yml override is rekey-family
+    # service-name specific (services rekey-* / rekey-accept-off-* /
+    # rekey-outbound-only-*), so it does NOT constrain the nat-lan
+    # containers (lan-a, lan-b). To pressure-match the GHA 2-core
+    # constraint without adding nat-specific resource-limits files, the
+    # sidecar polls for `fips-nat-lan-*` containers as compose spawns
+    # them and applies `docker update --cpuset-cpus <set>` to each.
+    # Pinning is idempotent — re-applying the same cpuset is a no-op.
+    # Default `0,1` mimics a GHA 2-core runner; set FIPS_NAT_LAN_CPUSET
+    # to a wider set (e.g. `0,1,2,3`) to relax, or to the empty string
+    # to disable the sidecar.
+    local cpuset="${FIPS_NAT_LAN_CPUSET-0,1}"
+    local pinning_pid=""
+    if [ -n "$cpuset" ]; then
+        (
+            while true; do
+                for c in $(docker ps --filter "name=fips-nat-lan-" --format '{{.Names}}' 2>/dev/null); do
+                    docker update --cpuset-cpus "$cpuset" "$c" >/dev/null 2>&1 || true
+                done
+                sleep 0.5
+            done
+        ) &
+        pinning_pid=$!
+        echo "nat-lan: cpu-pinning sidecar PID $pinning_pid (cpuset=$cpuset)" \
+            >"$REP_DIR/setup.log"
+    fi
+
+    # Trace-logging override. When FIPS_MESH_LAB_TRACE is set, point
+    # nat-test.sh at the nat-specific trace overlay via the
+    # FIPS_NAT_EXTRA_COMPOSE env-var hook in nat-test.sh. The overlay
+    # bumps RUST_LOG to trace on discovery::nostr, transport::udp,
+    # node::lifecycle, handlers::handshake, handlers::forwarding —
+    # the modules covering the cross-init / adoption / handshake
+    # path that ISSUE-2026-0027 exhibits. Path is repo-relative.
+    local -a env_args=(FIPS_NAT_SKIP_FINAL_CLEANUP=1)
+    if [ -n "${FIPS_MESH_LAB_TRACE:-}" ]; then
+        env_args+=(FIPS_NAT_EXTRA_COMPOSE=testing/mesh-lab/compose-trace-nat.yml)
+        echo "nat-lan: FIPS_MESH_LAB_TRACE set, layering compose-trace-nat.yml" \
+            >>"$REP_DIR/setup.log"
+    fi
+
+    # nat-test.sh's run_lan() tears containers down on the success
+    # path (line 404 cleanup), which races with our docker-logs
+    # capture below. FIPS_NAT_SKIP_FINAL_CLEANUP=1 disables that
+    # final teardown; failure paths in run_lan already leave
+    # containers up. We do the teardown explicitly after capture.
     (
         cd "$REPO_ROOT" || exit 1
-        bash testing/nat/scripts/nat-test.sh lan
+        env "${env_args[@]}" bash testing/nat/scripts/nat-test.sh lan
     ) >"$REP_DIR/test-output.log" 2>&1 || rc=$?
 
     mkdir -p "$REP_DIR/docker-logs"
@@ -337,7 +386,131 @@ run_nat_lan() {
         docker logs "$c" >"$REP_DIR/docker-logs/$c.log" 2>&1 || true
     done
 
+    # Post-capture teardown. nat-test.sh skipped its final cleanup
+    # (skipping is success-path only; failure paths return without
+    # cleanup either way), so we tear down here. Mirrors nat-test.sh's
+    # cleanup() shape: all three profiles + -v --remove-orphans.
+    (
+        cd "$REPO_ROOT" || exit 1
+        docker compose -f testing/nat/docker-compose.yml \
+            --profile cone --profile symmetric --profile lan \
+            down -v --remove-orphans \
+            >>"$REP_DIR/teardown.log" 2>&1 || true
+    )
+
+    if [ -n "$pinning_pid" ]; then
+        kill "$pinning_pid" 2>/dev/null || true
+        wait "$pinning_pid" 2>/dev/null || true
+    fi
+
     return "$rc"
+}
+
+# Extract the timestamp of the last line in $log matching $pattern. The
+# daemon's tracing-subscriber emits ISO 8601 UTC timestamps with sub-
+# second precision as the first token on each line (after ANSI escapes
+# are stripped). Returns the empty string if no line matches. Helper
+# scoped to parse_nat_lan; relies on grep -E semantics.
+_nat_lan_extract_last_ts() {
+    local log="$1"
+    local pattern="$2"
+    [ -f "$log" ] || { echo ""; return; }
+    grep -E "$pattern" "$log" 2>/dev/null \
+        | sed -E 's/\x1b\[[0-9;]*[mK]//g' \
+        | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z' \
+        | tail -1
+}
+
+# Compute the per-node stall_signature events dict + derived fields by
+# scanning the container's docker log for known event patterns. Echoes
+# a JSON object suitable for inlining into the rep's signature.json.
+_nat_lan_node_stall_signature() {
+    local nodelog="$1"
+
+    local startup_ts nostr_ts adoption_ts handshake_init_ts msg2_sent_ts
+    local cross_init_progress_ts cross_init_connected_ts handshake_failed_ts
+    local last_log_ts
+
+    startup_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Node started')
+    nostr_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Started Nostr UDP NAT traversal attempt|nostr notify loop entered')
+    adoption_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Adopted NAT traversal socket')
+    handshake_init_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Connection initiated')
+    msg2_sent_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Sent msg2 response')
+    cross_init_progress_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Ignoring established NAT traversal while peer handshake is already in progress')
+    cross_init_connected_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Ignoring established NAT traversal for already-connected peer')
+    handshake_failed_ts=$(_nat_lan_extract_last_ts "$nodelog" 'Handshake completion failed')
+    last_log_ts=$(_nat_lan_extract_last_ts "$nodelog" '.')
+
+    # Derive last_meaningful_event_category and ts by string-max across
+    # categories (ISO 8601 string compare == time compare). Empty
+    # category timestamps don't contribute.
+    local cat="" cat_ts=""
+    local -a pairs=(
+        "startup:$startup_ts"
+        "discovery:$nostr_ts"
+        "adoption:$adoption_ts"
+        "handshake_init:$handshake_init_ts"
+        "msg2_sent:$msg2_sent_ts"
+        "cross_init_ignore_progress:$cross_init_progress_ts"
+        "cross_init_ignore_connected:$cross_init_connected_ts"
+        "handshake_failed:$handshake_failed_ts"
+    )
+    local p name ts
+    for p in "${pairs[@]}"; do
+        name="${p%%:*}"
+        ts="${p#*:}"
+        if [ -n "$ts" ] && [[ "$ts" > "$cat_ts" ]]; then
+            cat_ts="$ts"
+            cat="$name"
+        fi
+    done
+
+    # silent_gap_s: seconds between last_meaningful_event_ts and
+    # last_log_ts. Large gap → daemon stayed alive but stopped doing
+    # meaningful work. Computed via Python (date math is fragile in
+    # pure bash). Empty if either timestamp is missing.
+    local silent_gap_s=""
+    if [ -n "$last_log_ts" ] && [ -n "$cat_ts" ]; then
+        silent_gap_s=$(python3 -c "
+from datetime import datetime
+def p(s):
+    return datetime.strptime(s.rstrip('Z')[:26], '%Y-%m-%dT%H:%M:%S.%f' if '.' in s else '%Y-%m-%dT%H:%M:%S')
+try:
+    print(round((p('$last_log_ts') - p('$cat_ts')).total_seconds(), 3))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    fi
+
+    jq -n \
+        --arg last_log "$last_log_ts" \
+        --arg last_meaningful "$cat_ts" \
+        --arg last_cat "$cat" \
+        --arg silent_gap "$silent_gap_s" \
+        --arg startup "$startup_ts" \
+        --arg discovery "$nostr_ts" \
+        --arg adoption "$adoption_ts" \
+        --arg handshake_init "$handshake_init_ts" \
+        --arg msg2_sent "$msg2_sent_ts" \
+        --arg ci_progress "$cross_init_progress_ts" \
+        --arg ci_connected "$cross_init_connected_ts" \
+        --arg hs_failed "$handshake_failed_ts" \
+        '{
+            last_log_ts: (if $last_log == "" then null else $last_log end),
+            last_meaningful_event_ts: (if $last_meaningful == "" then null else $last_meaningful end),
+            last_event_category: (if $last_cat == "" then null else $last_cat end),
+            silent_gap_s: (if $silent_gap == "" then null else ($silent_gap | tonumber) end),
+            events: {
+                startup: (if $startup == "" then null else $startup end),
+                discovery: (if $discovery == "" then null else $discovery end),
+                adoption: (if $adoption == "" then null else $adoption end),
+                handshake_init: (if $handshake_init == "" then null else $handshake_init end),
+                msg2_sent: (if $msg2_sent == "" then null else $msg2_sent end),
+                cross_init_ignore_progress: (if $ci_progress == "" then null else $ci_progress end),
+                cross_init_ignore_connected: (if $ci_connected == "" then null else $ci_connected end),
+                handshake_failed: (if $hs_failed == "" then null else $hs_failed end)
+            }
+        }'
 }
 
 parse_nat_lan() {
@@ -355,12 +528,59 @@ parse_nat_lan() {
         cross_init_observed="true"
     fi
 
-    cat <<EOF >"$REP_DIR/signature.json"
-{
-  "peer_adoption_timeout": $peer_adoption_timeout,
-  "cross_init_observed": $cross_init_observed
-}
-EOF
+    # Per-node stall_signature: scan each container's docker log for
+    # known event patterns and extract last-occurrence timestamps. Used
+    # by the aggregation phase to bin stalls into localized (both nodes
+    # last at same category) / distributed (different categories) /
+    # silent (daemon emitted nothing meaningful for >threshold s before
+    # timeout) classes. See _nat_lan_node_stall_signature for the event
+    # taxonomy.
+    local sig_a sig_b
+    sig_a=$(_nat_lan_node_stall_signature "$REP_DIR/docker-logs/fips-nat-lan-a.log")
+    sig_b=$(_nat_lan_node_stall_signature "$REP_DIR/docker-logs/fips-nat-lan-b.log")
+
+    # Top-level stall_class derived from per-node last_event_category:
+    #   no_timeout — peer_adoption_timeout=false (success case)
+    #   silent     — either node's silent_gap_s > 5
+    #   localized  — both nodes' last_event_category is the same
+    #   distributed — categories differ
+    #   incomplete  — categories missing on one or both nodes
+    local stall_class="no_timeout"
+    if [ "$peer_adoption_timeout" = "true" ]; then
+        local cat_a cat_b gap_a gap_b
+        cat_a=$(echo "$sig_a" | jq -r '.last_event_category // ""')
+        cat_b=$(echo "$sig_b" | jq -r '.last_event_category // ""')
+        gap_a=$(echo "$sig_a" | jq -r '.silent_gap_s // 0')
+        gap_b=$(echo "$sig_b" | jq -r '.silent_gap_s // 0')
+        local silent_a silent_b
+        silent_a=$(awk -v g="$gap_a" 'BEGIN{ print (g > 5) ? "1" : "0" }')
+        silent_b=$(awk -v g="$gap_b" 'BEGIN{ print (g > 5) ? "1" : "0" }')
+        if [ "$silent_a" = "1" ] || [ "$silent_b" = "1" ]; then
+            stall_class="silent"
+        elif [ -z "$cat_a" ] || [ -z "$cat_b" ]; then
+            stall_class="incomplete"
+        elif [ "$cat_a" = "$cat_b" ]; then
+            stall_class="localized"
+        else
+            stall_class="distributed"
+        fi
+    fi
+
+    jq -n \
+        --argjson peer_adoption_timeout "$peer_adoption_timeout" \
+        --argjson cross_init_observed "$cross_init_observed" \
+        --argjson sig_a "$sig_a" \
+        --argjson sig_b "$sig_b" \
+        --arg stall_class "$stall_class" \
+        '{
+            peer_adoption_timeout: $peer_adoption_timeout,
+            cross_init_observed: $cross_init_observed,
+            stall_class: $stall_class,
+            stall_signature: {
+                "fips-nat-lan-a": $sig_a,
+                "fips-nat-lan-b": $sig_b
+            }
+        }' >"$REP_DIR/signature.json"
 }
 
 mechanism_match_nat_lan() {

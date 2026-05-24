@@ -96,16 +96,24 @@ each rep does, set them in the invoking shell:
   injection point.
 
 - **`FIPS_MESH_LAB_TRACE`** — when set to any non-empty value, the
-  harness layers `compose-trace.yml` on top of the base + resource-
-  limits compose stack. That override bumps `RUST_LOG` to trace
-  level on the modules relevant to the rekey-class flake: `rekey`,
-  `handshake`, `forwarding`, `session`, `encrypted`, `mmp`. Use
-  only when capturing primary failure-moment evidence for mechanism
-  investigation — log volume increases substantially. Without this
-  knob, daemon logs only capture state transitions (rekey cutover,
-  K-bit flip), not per-datagram forwarding decisions, which makes
-  evidence collection for routing-state stalls effectively
-  impossible.
+  harness layers a suite-specific trace-RUST_LOG compose override
+  on top of the base stack. Module sets are per-suite:
+  - rekey / rekey-accept-off / rekey-outbound-only — `rekey`,
+    `handshake`, `forwarding`, `session`, `encrypted`, `mmp`
+    (via `compose-trace.yml`).
+  - nat-lan — `discovery::nostr`, `transport::udp`,
+    `node::lifecycle`, `handlers::handshake`, `handlers::forwarding`
+    (via `compose-trace-nat.yml`, picked up by
+    `testing/nat/scripts/nat-test.sh` through the
+    `FIPS_NAT_EXTRA_COMPOSE` env-var hook).
+  - bloom-storm — no compose override applies; chaos uses its own
+    python sim runner.
+
+  Use only when capturing primary failure-moment evidence for
+  mechanism investigation — log volume increases substantially.
+  Without this knob, daemon logs only capture state transitions and
+  not per-datagram forwarding decisions, which makes evidence
+  collection for routing-state stalls effectively impossible.
 
 - **`FIPS_BLOOM_STORM_CPUSET`** — comma-separated CPU set for the
   bloom-storm dispatch's container-pinning sidecar (default
@@ -115,6 +123,17 @@ each rep does, set them in the invoking shell:
   `ubuntu-latest` runner. Set to a wider set (e.g. `0,1,2,3`) to
   relax, or to the empty string to disable the sidecar entirely.
   Only applies to the `bloom-storm` suite; other suites ignore it.
+
+- **`FIPS_NAT_LAN_CPUSET`** — comma-separated CPU set for the
+  nat-lan dispatch's container-pinning sidecar (default `0,1`).
+  Same shape as `FIPS_BLOOM_STORM_CPUSET`, but the sidecar polls
+  for `fips-nat-lan-*` containers and applies the cpuset as the
+  compose-up creates them. The mesh-lab
+  `compose-resource-limits.yml` overlay is rekey-family
+  service-name-specific (services `rekey-*` / `rekey-accept-off-*`
+  / `rekey-outbound-only-*`), so it does NOT constrain the nat-lan
+  containers; the sidecar fills that gap. Only applies to the
+  `nat-lan` suite; other suites ignore it.
 
 - **`FIPS_MESH_LAB_RUNS_DIR`** — root directory for harness output
   (the `runs/<timestamp>/` tree). When unset, the harness falls back
