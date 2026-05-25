@@ -1413,6 +1413,17 @@ impl Node {
                     (old_peer.transport_id(), old_peer.our_index())
                 {
                     self.peers_by_index.remove(&(old_tid, old_idx.as_u32()));
+                    // Unregister the OLD cache_key from the decrypt
+                    // worker pool BEFORE freeing the index for reuse.
+                    // Otherwise the worker's per-shard HashMap retains a
+                    // stale entry pointing at the removed peer's session;
+                    // if the index allocator later recycles old_idx to a
+                    // different peer, the new register call overwrites
+                    // the stale entry — but until that point, decrypt
+                    // jobs that land at the recycled cache_key resolve
+                    // to the wrong session and AEAD silently fails.
+                    #[cfg(unix)]
+                    self.unregister_decrypt_worker_session((old_tid, old_idx.as_u32()));
                     let _ = self.index_allocator.free(old_idx);
                 }
 
