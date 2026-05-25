@@ -49,7 +49,8 @@ use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{
-    Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError, TransportHandle, TransportId,
+    ConnectionState, Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError,
+    TransportHandle, TransportId,
 };
 use crate::tree::TreeState;
 use crate::upper::hosts::HostMap;
@@ -2122,6 +2123,27 @@ impl Node {
             .transports
             .get(&transport_id)
             .ok_or(NodeError::TransportNotFound(transport_id))?;
+
+        // Gate: don't drive connect-on-send from the tick path. If the
+        // transport's connection isn't ready, kick off a non-blocking
+        // background connect (no-op if already in flight or pooled) and
+        // fail this send fast. A subsequent tick will retry once the
+        // pool entry exists. The historical connect-on-send wedged the
+        // rx_loop tick body for up to `connect_timeout_ms` (5 s default)
+        // per unreachable peer, which under convergence-phase mesh
+        // pressure cascaded into multi-tick stalls and control-RPC HOL.
+        match transport.connection_state(&remote_addr) {
+            ConnectionState::Connected => {}
+            other => {
+                if matches!(other, ConnectionState::None) {
+                    let _ = transport.connect(&remote_addr).await;
+                }
+                return Err(NodeError::SendFailed {
+                    node_addr: *node_addr,
+                    reason: format!("transport connection not ready: {:?}", other),
+                });
+            }
+        }
 
         let bytes_sent = transport
             .send(&remote_addr, &wire_packet)
