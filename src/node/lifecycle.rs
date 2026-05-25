@@ -464,11 +464,44 @@ impl Node {
                             continue;
                         }
                         if self.is_connecting_to_peer(&peer_addr) {
+                            // Dual cross-init: both nodes' Nostr-mediated punches
+                            // completed simultaneously, and each side already
+                            // holds in-flight handshake state for the other.
+                            // Apply the deterministic NodeAddr tie-breaker —
+                            // smaller NodeAddr wins as adopter (same convention
+                            // as cross_connection_winner and the rekey dual-
+                            // init resolution at handshake.rs:269). The winner
+                            // tears down its in-flight state and adopts the
+                            // fresh traversal socket; the loser keeps continue
+                            // semantics, and its existing cross-connection
+                            // logic in handle_msg1 reconciles when the winner's
+                            // fresh msg1 arrives over the adopted socket.
+                            let our_addr = self.identity.node_addr();
+                            if our_addr >= &peer_addr {
+                                debug!(
+                                    peer_npub = %peer_npub,
+                                    "Dual cross-init NAT traversal: we lose (larger addr), keeping in-flight handshake"
+                                );
+                                continue;
+                            }
                             debug!(
                                 peer_npub = %peer_npub,
-                                "Ignoring established NAT traversal while peer handshake is already in progress"
+                                "Dual cross-init NAT traversal: we win (smaller addr), tearing down in-flight handshake to adopt fresh socket"
                             );
-                            continue;
+                            let now_ms = Self::now_ms();
+                            let stale: Vec<LinkId> = self
+                                .connections
+                                .iter()
+                                .filter(|(_, conn)| {
+                                    conn.expected_identity()
+                                        .map(|id| id.node_addr() == &peer_addr)
+                                        .unwrap_or(false)
+                                })
+                                .map(|(link_id, _)| *link_id)
+                                .collect();
+                            for link_id in stale {
+                                self.cleanup_stale_connection(link_id, now_ms);
+                            }
                         }
                     }
                     match self.adopt_established_traversal(traversal).await {

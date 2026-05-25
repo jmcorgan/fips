@@ -13,6 +13,21 @@ WAIT_LIB="$ROOT_DIR/testing/lib/wait-converge.sh"
 SCENARIO="${1:-all}"
 COMPOSE=(docker compose -f "$NAT_DIR/docker-compose.yml")
 
+# Optional extra compose-file overlay chain (colon-separated paths), e.g.
+# trace-RUST_LOG overrides supplied by the mesh-lab harness when
+# FIPS_MESH_LAB_TRACE=1. Paths are interpreted relative to the repo root
+# (ROOT_DIR) unless absolute. The mesh-lab harness sets this env var to
+# `testing/mesh-lab/compose-trace-nat.yml` for nat-lan trace runs.
+if [ -n "${FIPS_NAT_EXTRA_COMPOSE:-}" ]; then
+    IFS=':' read -ra _NAT_EXTRA <<< "${FIPS_NAT_EXTRA_COMPOSE}"
+    for _f in "${_NAT_EXTRA[@]}"; do
+        case "$_f" in
+            /*) COMPOSE+=(-f "$_f") ;;
+            *)  COMPOSE+=(-f "$ROOT_DIR/$_f") ;;
+        esac
+    done
+fi
+
 source "$WAIT_LIB"
 
 cleanup() {
@@ -386,7 +401,14 @@ run_lan() {
     source "$NAT_DIR/generated-configs/lan/npubs.env"
     ping_peer fips-nat-lan-a "$NPUB_B"
     ping_peer fips-nat-lan-b "$NPUB_A"
-    cleanup
+    # Skip the final teardown when the mesh-lab harness wraps this
+    # script: it needs to docker-logs the containers before teardown,
+    # and will run its own cleanup after capture. Failure paths above
+    # already leave containers up via the bare `return 1` so the
+    # harness can capture stall-state evidence.
+    if [ -z "${FIPS_NAT_SKIP_FINAL_CLEANUP:-}" ]; then
+        cleanup
+    fi
 }
 
 main() {

@@ -236,6 +236,56 @@ with v0.3.x peers.
 
 ### Fixed
 
+- `rx_loop` tick-arm stall under convergence-phase mesh pressure
+  is eliminated. Previously, the tick body's per-peer `check_*`
+  loops (heartbeats, bloom announces, MMP reports, tree announces)
+  called `transport.send` directly for every active peer. For
+  TCP/Tor peers whose pool entry was not yet established,
+  `send_async` fell through to a synchronous connect-on-send
+  branch that wrapped `TcpStream::connect` in
+  `tokio::time::timeout(connect_timeout_ms, …)` — 5 seconds by
+  default — and blocked the entire tick body for the duration per
+  unreachable peer. Under post-restart convergence on a high-peer
+  mesh, this cascaded into multi-second tick stalls; the same
+  mechanism also starved the master-only per-tick control-snapshot
+  republish and pushed `fipsctl show *` queries onto an mpsc
+  fallback that was itself queued behind the wedged `rx_loop`,
+  producing the five-second `fipsctl` head-of-line pattern
+  operators observed on loaded nodes. The send path now gates on
+  `transport.connection_state(addr)` before sending: proceed only
+  when `Connected`; on `None`, kick off a non-blocking background
+  `connect` (idempotent — deduplicates against the connecting
+  pool, spawns the timeout-bounded `TcpStream::connect` inside its
+  own tokio task) and fail this send fast with a clear
+  `transport connection not ready` error. A subsequent tick
+  retries once the pool has an entry. The existing reconnect
+  lifecycle (heartbeat-dead detection in `check_link_heartbeats`,
+  scheduled retries via `process_pending_retries`, background-
+  connect polling via `poll_pending_connects`) is unchanged.
+  The connect-on-send branch in `transport.send_async` itself
+  remains in place for code paths that legitimately need
+  synchronous connect (e.g., explicit operator-driven
+  `fipsctl connect`); the tick path just no longer trips it.
+
+- NAT-traversal cross-init adoption is now deterministic under
+  simultaneous dual-initiation. Previously, when two peers'
+  Nostr-mediated UDP punches completed within the same scheduling
+  window, each side's bootstrap-completion event arrived with an
+  in-flight handshake already recorded against the other peer (each
+  side had received an inbound msg1 from the other's pre-punch
+  outbound attempt). The deduplication skip then fired on both
+  sides, neither installed the fresh traversal socket as canonical,
+  and the 45-second peer-adoption budget expired with both nodes
+  stuck waiting for an adoption that never happened. The handler now
+  applies the same deterministic NodeAddr tie-breaker the codebase
+  already uses for rekey dual-initiation and cross-connection
+  resolution: the smaller NodeAddr wins as adopter, tears down its
+  in-flight handshake state, and proceeds with adoption; the larger
+  NodeAddr keeps the skip semantics, and its in-flight outbound is
+  reconciled by the cross-connection logic when the winner's fresh
+  msg1 arrives over the adopted socket. The dual cross-init stall is
+  eliminated; cross-init NAT-traversal completes in well under a
+  second even under host CPU contention.
 - FSP session rekey is now hitless under packet loss and reordering.
   Previously, a rekey could leave the two endpoints holding different
   key sets for a brief window — if a handshake message was lost in

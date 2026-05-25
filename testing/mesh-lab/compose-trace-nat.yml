@@ -1,0 +1,42 @@
+# Compose override that bumps RUST_LOG to trace level on the modules
+# relevant to NAT-traversal handshake-completion flake evidence
+# collection (ISSUE-2026-0027):
+#
+#   - fips::discovery::nostr            — overlay advert publish/consume
+#                                          (where the cross-init race begins)
+#   - fips::transport::udp              — UDP socket bind/send/recv
+#                                          (where the punch packets flow)
+#   - fips::node::lifecycle             — daemon bootstrap, peer state
+#                                          machine, adoption transitions
+#   - fips::node::handlers::handshake   — Noise handshake msg1/2/3,
+#                                          cross-init tie-breaker
+#                                          ("Ignoring established NAT
+#                                          traversal..." emits here)
+#   - fips::node::handlers::forwarding  — transit/local datagram routing
+#                                          (catches drops post-adoption)
+#
+# Other modules stay at info to keep log volume manageable. The base
+# docker-compose.yml's `*fips-common` env block sets RUST_LOG as a
+# list-form env var (`- RUST_LOG=...`); the override below replaces
+# it entirely via the YAML map form, which is the docker-compose
+# override semantics for the environment field.
+#
+# Service-name layout: only the two `lan-*` services are FIPS daemons;
+# the relay and stun services are not (and don't honor RUST_LOG).
+#
+# Include this override via the FIPS_NAT_EXTRA_COMPOSE env var that
+# testing/nat/scripts/nat-test.sh consults:
+#   FIPS_NAT_EXTRA_COMPOSE=testing/mesh-lab/compose-trace-nat.yml \
+#       bash testing/nat/scripts/nat-test.sh lan
+#
+# The mesh-lab harness sets it automatically when FIPS_MESH_LAB_TRACE
+# is set and the suite is nat-lan.
+
+x-trace-rust-log: &trace-rust-log
+  RUST_LOG: "info,fips::discovery::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::handlers::forwarding=trace"
+
+services:
+  lan-a:
+    environment: *trace-rust-log
+  lan-b:
+    environment: *trace-rust-log

@@ -106,6 +106,36 @@ If `link_swap.interval_secs` or the netem delta is changed,
 recalibrate. The threshold is calibrated against the values in
 `scenarios/bloom-storm.yaml` as committed and the `seed: 31` pin.
 
+### Lab-data ceiling re-tune (2026-05-24)
+
+The ceiling was bumped from 30 to 40 after a 59-rep characterization run
+under the `github-runner-equivalent` pressure profile with per-container
+CPU pinning to `cpuset=0,1` (mimicking a 2-core `ubuntu-latest` GitHub
+runner). Combined pinned distribution on n04 (the structural max-spike
+node — flap target at depth 2):
+
+| metric | value |
+| ------ | ----: |
+| mean   | 24.4  |
+| sd     |  4.7  |
+| P90    | 28    |
+| P95    | 29    |
+| P99    | 29    |
+| max    | 30    |
+
+The lab's structural ceiling at 30 corresponds to the bloom-advertise
+rate-limit token bucket's steady-state cap of ~1 send per second over the
+trailing 30 s assertion window. GHA fires at n04=34 represent transient
+release of queued bloom-sends during flap-recovery windows and do not
+reproduce on this lab host even with CPU-pinning sidecar (`cpuset=0,1`)
+applied to every chaos-spawned container.
+
+Rationale for ceiling = 40: lab max 30 + ~2σ headroom (≈ 39.4) rounds to
+40, giving 33 % margin over the observed lab maximum while still firing
+loud on a regression-class storm (the original `0caef2a` regression
+scaled mesh-wide bloom traffic ~480× above steady state, far above any
+plausible jitter band).
+
 ## Limitations
 
 - The bloom-storm regression has not been confirmed-failing here

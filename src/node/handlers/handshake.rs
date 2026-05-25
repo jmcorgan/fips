@@ -1457,6 +1457,12 @@ impl Node {
                     "Cross-connection resolved: this connection won"
                 );
 
+                // Hand the FMP recv cipher + replay window to the
+                // decrypt shard worker. (Same as normal-promotion tail
+                // below.)
+                #[cfg(unix)]
+                self.register_decrypt_worker_session(&peer_node_addr);
+
                 Ok(PromotionResult::CrossConnectionWon {
                     loser_link_id,
                     node_addr: peer_node_addr,

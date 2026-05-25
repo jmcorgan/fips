@@ -115,7 +115,7 @@ assertions:
     # observed steady-state ceiling on fixed master and well below
     # the storm-state value on the regressed binary.
     window_secs: 30
-    max_per_node: 30
+    max_per_node: 40
   min_parent_switches:
     # Sanity guard: detect a misconfigured harness where the flap
     # inducer fires but the topology never produces a real parent

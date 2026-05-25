@@ -62,7 +62,7 @@ impl Node {
     /// Frees the session index, removes pending_outbound entry, and cleans up
     /// the link and address mapping. Does not log — callers provide context-appropriate
     /// log messages.
-    fn cleanup_stale_connection(&mut self, link_id: LinkId, _now_ms: u64) {
+    pub(in crate::node) fn cleanup_stale_connection(&mut self, link_id: LinkId, _now_ms: u64) {
         let conn = match self.connections.remove(&link_id) {
             Some(c) => c,
             None => return,
