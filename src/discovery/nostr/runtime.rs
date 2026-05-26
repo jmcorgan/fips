@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use nostr::nips::nip17;
@@ -165,6 +166,13 @@ pub struct NostrDiscovery {
     /// (keyed by `TransportId.as_u32()`). Populated on demand by
     /// `learn_public_udp_addr()` and refreshed by TTL.
     public_udp_addr_cache: RwLock<HashMap<u32, CachedPublicUdpAddr>>,
+    /// Outbound-admission flag refreshed once per Node tick from
+    /// `Node::outbound_admission_check()`. Used to suppress NAT-traversal
+    /// punch initiation (initiator path) and offer acceptance (responder
+    /// path) when the Node is at `max_peers`. Loose granularity by
+    /// design: the inbound msg1 gate in `handshake.rs` remains the
+    /// authoritative cap.
+    outbound_admission: AtomicBool,
 }
 
 impl NostrDiscovery {
@@ -227,6 +235,7 @@ impl NostrDiscovery {
             advertise_task: Mutex::new(None),
             failure_state,
             public_udp_addr_cache: RwLock::new(HashMap::new()),
+            outbound_admission: AtomicBool::new(true),
         });
 
         // Subscribe to the relay-pool broadcast channel BEFORE issuing the
@@ -246,6 +255,19 @@ impl NostrDiscovery {
         *runtime.notify_task.lock().await = Some(runtime.clone().spawn_notify_loop(notifications));
 
         Ok(runtime)
+    }
+
+    /// Update the cached outbound-admission flag. Called once per Node
+    /// tick with the current value of `Node::outbound_admission_check()`.
+    /// Cheap atomic store; safe to call unconditionally.
+    pub fn set_outbound_admission(&self, allow: bool) {
+        self.outbound_admission.store(allow, Ordering::Relaxed);
+    }
+
+    /// Read the cached outbound-admission flag. Returns `true` when the
+    /// Node is below `max_peers` (or `max_peers == 0`), `false` otherwise.
+    pub(crate) fn outbound_admission_allowed(&self) -> bool {
+        self.outbound_admission.load(Ordering::Relaxed)
     }
 
     pub async fn request_connect(self: &Arc<Self>, peer_config: PeerConfig) {
@@ -981,6 +1003,13 @@ impl NostrDiscovery {
         peer_config: PeerConfig,
     ) -> Result<EstablishedTraversal, BootstrapError> {
         let peer_short = short_npub(&peer_config.npub);
+        if !self.outbound_admission_allowed() {
+            debug!(
+                peer = %peer_short,
+                "traversal: initiator suppressed, Node at capacity"
+            );
+            return Err(BootstrapError::Disabled);
+        }
         debug!(peer = %peer_short, "traversal: initiator starting");
         let target_pubkey =
             PublicKey::parse(&peer_config.npub).map_err(|e| BootstrapError::InvalidPeerNpub {
@@ -1163,6 +1192,14 @@ impl NostrDiscovery {
         sender_npub: String,
     ) -> Result<(), BootstrapError> {
         let peer_short = short_npub(&sender_npub);
+        if !self.outbound_admission_allowed() {
+            debug!(
+                peer = %peer_short,
+                session = %short_id(&offer.session_id),
+                "traversal: incoming offer dropped, Node at capacity"
+            );
+            return Ok(());
+        }
         let offer_received_at = now_ms();
         debug!(
             peer = %peer_short,
@@ -1665,6 +1702,7 @@ impl NostrDiscovery {
             advertise_task: Mutex::new(None),
             failure_state,
             public_udp_addr_cache: RwLock::new(HashMap::new()),
+            outbound_admission: AtomicBool::new(true),
         }
     }
 

@@ -446,6 +446,13 @@ impl Node {
             return;
         };
 
+        // Refresh the runtime's outbound-admission view once per tick.
+        // The runtime task lives in a separate tokio context with no Node
+        // reference, so we publish current capacity state through a
+        // cheap atomic store. One-tick lag is acceptable: the inbound
+        // msg1 gate in handshake.rs remains the authoritative cap.
+        bootstrap.set_outbound_admission(self.outbound_admission_check());
+
         if let Err(err) = self.refresh_overlay_advert(&bootstrap).await {
             debug!(error = %err, "Failed to refresh local Nostr overlay advert");
         }
@@ -453,6 +460,15 @@ impl Node {
         for event in bootstrap.drain_events().await {
             match event {
                 BootstrapEvent::Established { traversal } => {
+                    if !self.outbound_admission_check() {
+                        debug!(
+                            peer_npub = %traversal.peer_npub,
+                            peers = self.peers.len(),
+                            max_peers = self.max_peers,
+                            "Dropping established NAT traversal: at capacity"
+                        );
+                        continue;
+                    }
                     let peer_npub = traversal.peer_npub.clone();
                     if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_npub) {
                         let peer_addr = *peer_identity.node_addr();

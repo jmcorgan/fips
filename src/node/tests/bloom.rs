@@ -443,6 +443,96 @@ async fn test_bloom_filter_split_horizon() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// Regression for `compute_mesh_size` parent double-count.
+///
+/// Reproduces the stale-peer-declaration window that follows a local
+/// parent-switch: our `my_declaration().parent_id()` already names P, but
+/// the cached `peer_declaration(P)` is still the pre-switch advert in
+/// which P names US as its parent. Without the explicit parent-skip in
+/// the children loop, P would be iterated as a child and its bloom
+/// cardinality added a second time on top of the parent contribution.
+#[test]
+fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
+    use crate::bloom::BloomFilter;
+    use crate::peer::ActivePeer;
+    use crate::tree::ParentDeclaration;
+
+    let mut node = make_node();
+    let my_addr = *node.tree_state().my_node_addr();
+
+    // Generate a parent identity strictly less than my_addr so the
+    // tree_state defensive check (my_node_addr > parent_root) accepts
+    // the extension; otherwise recompute_coords would demote us back
+    // to self-root and is_root() would stay true.
+    let (parent_identity, parent_addr) = loop {
+        let candidate = make_peer_identity();
+        let addr = *candidate.node_addr();
+        if addr < my_addr {
+            break (candidate, addr);
+        }
+    };
+    let mut parent_peer = ActivePeer::new(parent_identity, LinkId::new(1), 0);
+    let mut parent_filter = BloomFilter::new();
+    for i in 0..5u8 {
+        let mut bytes = [0u8; 16];
+        bytes[0] = 0x80 | i; // distinct namespace
+        parent_filter.insert(&NodeAddr::from_bytes(bytes));
+    }
+    parent_peer.update_filter(parent_filter, 1, 0);
+    node.peers.insert(parent_addr, parent_peer);
+
+    // Inject legitimate child Q with a 3-entry inbound filter.
+    let child_identity = make_peer_identity();
+    let child_addr = *child_identity.node_addr();
+    let mut child_peer = ActivePeer::new(child_identity, LinkId::new(2), 0);
+    let mut child_filter = BloomFilter::new();
+    for i in 0..3u8 {
+        let mut bytes = [0u8; 16];
+        bytes[0] = 0xC0 | i;
+        child_filter.insert(&NodeAddr::from_bytes(bytes));
+    }
+    child_peer.update_filter(child_filter, 1, 0);
+    node.peers.insert(child_addr, child_peer);
+
+    // Seed parent ancestry first so recompute_coords can extend it and
+    // flip is_root() to false; child ancestry is for completeness.
+    let parent_ancestry = crate::tree::TreeCoordinate::root_with_meta(parent_addr, 1, 1);
+    let child_ancestry = crate::tree::TreeCoordinate::root_with_meta(child_addr, 1, 1);
+    // Inject the stale-cache scenario: peer_declaration(P) still names
+    // US (M) as P's parent (the pre-switch advert that the cache hasn't
+    // refreshed yet). Q is a legitimate child also naming M as parent.
+    let parent_decl_stale = ParentDeclaration::new(parent_addr, my_addr, 1, 1);
+    let child_decl = ParentDeclaration::new(child_addr, my_addr, 1, 1);
+    node.tree_state_mut()
+        .update_peer(parent_decl_stale, parent_ancestry);
+    node.tree_state_mut()
+        .update_peer(child_decl, child_ancestry);
+
+    // Switch our parent to P and recompute coords so root flips off self.
+    node.tree_state_mut().set_parent(parent_addr, 2, 1);
+    node.tree_state_mut().recompute_coords();
+    assert!(
+        !node.tree_state().is_root(),
+        "test setup broken: node should not be its own root after parent switch"
+    );
+
+    node.compute_mesh_size();
+
+    let estimate = node
+        .estimated_mesh_size()
+        .expect("estimator should produce a value with filter data present");
+
+    // Expected (parent counted once + child counted once): 1 + 5 + 3 = 9.
+    // Unfixed (parent double-counted via children loop): 1 + 2*5 + 3 = 14.
+    // The estimator's log-based math rounds, so allow +/-1 tolerance.
+    let diff = (estimate as i64 - 9).abs();
+    assert!(
+        diff <= 1,
+        "expected mesh-size estimate ~9 (1+5+3), got {} (double-count fingerprint is ~14)",
+        estimate
+    );
+}
+
 /// 100-node random graph: bloom filter exchange at scale.
 #[tokio::test]
 async fn test_bloom_filter_convergence_100_nodes() {

@@ -231,6 +231,16 @@ impl Node {
             return;
         }
 
+        if !self.outbound_admission_check() {
+            debug!(
+                peers = self.peers.len(),
+                max_peers = self.max_peers,
+                retry_pending = self.retry_pending.len(),
+                "Suppressing auto-reconnect retries: at capacity"
+            );
+            return;
+        }
+
         // Collect retries that are due
         let due: Vec<NodeAddr> = self
             .retry_pending
