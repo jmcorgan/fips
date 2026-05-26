@@ -1357,3 +1357,172 @@ async fn test_seed_path_mtu_noop_for_unknown_transport() {
         "Seed must be a no-op when transport_id is not registered"
     );
 }
+
+// === Outbound admission gate tests ===
+
+/// Inject `count` synthetic active peers into `node.peers` so peer_count()
+/// reflects a desired saturation level for admission-gate tests.
+fn inject_dummy_peers(node: &mut Node, count: usize) {
+    use crate::peer::ActivePeer;
+    for i in 0..count {
+        let identity = make_peer_identity();
+        let addr = *identity.node_addr();
+        let peer = ActivePeer::new(identity, LinkId::new((i + 1) as u64), 0);
+        node.peers.insert(addr, peer);
+    }
+}
+
+#[test]
+fn outbound_admission_check_direct() {
+    // max_peers cap honored: above-cap returns false, below-cap returns true.
+    let mut node = make_node();
+    node.set_max_peers(3);
+
+    assert!(node.outbound_admission_check(), "0/3 should be admissible");
+    inject_dummy_peers(&mut node, 2);
+    assert!(node.outbound_admission_check(), "2/3 should be admissible");
+    inject_dummy_peers(&mut node, 1);
+    assert!(
+        !node.outbound_admission_check(),
+        "3/3 (at cap) should suppress"
+    );
+    inject_dummy_peers(&mut node, 1);
+    assert!(
+        !node.outbound_admission_check(),
+        "4/3 (above cap) should suppress"
+    );
+
+    // No-cap sentinel: max_peers == 0 admits unconditionally.
+    let mut uncapped = make_node();
+    uncapped.set_max_peers(0);
+    assert!(uncapped.outbound_admission_check());
+    inject_dummy_peers(&mut uncapped, 50);
+    assert!(
+        uncapped.outbound_admission_check(),
+        "max_peers=0 (no cap) must always admit"
+    );
+}
+
+#[tokio::test]
+async fn process_pending_retries_gated_at_capacity() {
+    let mut node = make_node();
+    node.set_max_peers(2);
+    inject_dummy_peers(&mut node, 2);
+
+    // Queue a retry that would otherwise be due.
+    let peer_identity = Identity::generate();
+    let peer_npub = peer_identity.npub();
+    let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+    let mut state = super::super::retry::RetryState::new(crate::config::PeerConfig::new(
+        peer_npub,
+        "udp",
+        "127.0.0.1:9",
+    ));
+    state.retry_after_ms = 0;
+    state.reconnect = true;
+    node.retry_pending.insert(peer_node_addr, state);
+
+    let before_peers = node.peer_count();
+    let before_connections = node.connection_count();
+
+    node.process_pending_retries(1_000).await;
+
+    // At capacity: gate short-circuits before due-list collection. The
+    // retry entry must still be present (untouched) and no connection
+    // attempt may have been started. Without the gate, the due-list
+    // collector would pick the entry up, fire `initiate_peer_connection`
+    // (which fails without a registered transport), and the failure
+    // handler would call `schedule_retry`, bumping `retry_count` to 1.
+    let state = node
+        .retry_pending
+        .get(&peer_node_addr)
+        .expect("retry entry must be preserved when suppressed at capacity");
+    assert_eq!(
+        state.retry_count, 0,
+        "gate must short-circuit before initiate_peer_connection; \
+         a bumped retry_count is the fingerprint of the ungated path"
+    );
+    assert_eq!(
+        state.retry_after_ms, 0,
+        "gate must short-circuit before initiate_peer_connection; \
+         retry_after_ms still zero means no attempt fired"
+    );
+    assert_eq!(
+        node.peer_count(),
+        before_peers,
+        "no peer adoption while suppressed"
+    );
+    assert_eq!(
+        node.connection_count(),
+        before_connections,
+        "no connection initiated while suppressed"
+    );
+}
+
+#[tokio::test]
+async fn poll_nostr_discovery_established_gated_at_capacity() {
+    use crate::discovery::EstablishedTraversal;
+    use std::net::UdpSocket;
+
+    let mut node = make_node();
+    node.set_max_peers(2);
+    inject_dummy_peers(&mut node, 2);
+
+    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind local UDP socket");
+    let remote_addr = "127.0.0.1:9999".parse().expect("parse remote addr");
+    let peer_identity = Identity::generate();
+    bootstrap.push_event_for_test(BootstrapEvent::Established {
+        traversal: EstablishedTraversal::new(
+            "cap-test-session",
+            peer_identity.npub(),
+            remote_addr,
+            socket,
+        ),
+    });
+    node.nostr_discovery = Some(bootstrap.clone());
+
+    let before_peers = node.peer_count();
+    let before_links = node.link_count();
+    let before_connections = node.connection_count();
+
+    node.poll_nostr_discovery().await;
+
+    assert_eq!(
+        node.peer_count(),
+        before_peers,
+        "Established event must not add a peer while at capacity"
+    );
+    assert_eq!(
+        node.link_count(),
+        before_links,
+        "Established event must not allocate a link while at capacity"
+    );
+    assert_eq!(
+        node.connection_count(),
+        before_connections,
+        "Established event must not start a handshake while at capacity"
+    );
+}
+
+#[test]
+fn nostr_discovery_outbound_admission_atomic_roundtrip() {
+    // Verifies the runtime-side plumbing for the two NAT-traversal gate
+    // points: the setter mutates the atomic and the (super-visible)
+    // reader observes the value the Node-side wiring would publish.
+    let bootstrap = NostrDiscovery::new_for_test();
+    assert!(
+        bootstrap.outbound_admission_allowed(),
+        "default must allow (start unsaturated)"
+    );
+    bootstrap.set_outbound_admission(false);
+    assert!(
+        !bootstrap.outbound_admission_allowed(),
+        "after suppression store: traversal initiator/responder must see false"
+    );
+    bootstrap.set_outbound_admission(true);
+    assert!(
+        bootstrap.outbound_admission_allowed(),
+        "after recovery store: traversal initiator/responder must see true"
+    );
+}

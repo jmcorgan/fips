@@ -1239,6 +1239,9 @@ impl Node {
 
         // Children's filters: each child's subtree is disjoint
         for (peer_addr, peer) in &self.peers {
+            if peer_addr == &parent_id {
+                continue;
+            }
             if let Some(decl) = self.tree_state.peer_declaration(peer_addr)
                 && *decl.parent_id() == my_addr
             {
@@ -1396,6 +1399,18 @@ impl Node {
     /// Set the maximum number of peers (authenticated).
     pub fn set_max_peers(&mut self, max: usize) {
         self.max_peers = max;
+    }
+
+    /// Returns false when we are at or above the configured `max_peers`
+    /// cap, suppressing outbound connection-initiation. `max_peers == 0`
+    /// is the "no cap" sentinel and always returns true. The inbound
+    /// msg1 gate in `handshake.rs` is the authoritative cap; this helper
+    /// keeps the four outbound initiation paths (auto-reconnect retries,
+    /// Nostr-discovery `Established` adoption, and both sides of the
+    /// Nostr-mediated NAT-traversal punch) from doing pointless work
+    /// when saturated.
+    pub(crate) fn outbound_admission_check(&self) -> bool {
+        self.max_peers == 0 || self.peers.len() < self.max_peers
     }
 
     /// Set the maximum number of links.
