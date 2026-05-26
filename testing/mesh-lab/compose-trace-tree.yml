@@ -1,0 +1,71 @@
+# Compose override that bumps RUST_LOG to trace level on the modules
+# relevant to tree-partition / parent-re-eval investigations:
+#
+#   - fips::node::tree                  — handle_tree_announce,
+#                                          evaluate_parent decisions,
+#                                          send_tree_announce_to_all
+#                                          recipient enumeration
+#   - fips::node::handlers::mmp         — MMP receiver-report processing,
+#                                          first-RTT trigger, SRTT updates
+#   - fips::node::handlers::handshake   — peer promotion timing
+#                                          (correlate with tree-announce
+#                                          broadcast window)
+#   - fips::tree                        — TreeState::evaluate_parent
+#                                          internal predicate flow
+#
+# Distinct from compose-trace.yml (rekey-class flake) — that overlay
+# pulls in rekey / forwarding / session / encrypted at trace level
+# which would drown the tree-convergence signal. This overlay is
+# scoped to the tree-partition mechanism only.
+#
+# Service-name layout matches compose-trace.yml: per-profile services
+# named `<profile>-<node-letter>` for the three rekey-family profiles.
+# All 15 rekey-family services get the same trace RUST_LOG.
+#
+# Include this override alongside the base compose via:
+#   docker compose -f testing/static/docker-compose.yml \
+#                  -f testing/mesh-lab/compose-trace-tree.yml up -d
+#
+# The run-loop.sh harness includes it automatically when the mesh-lab
+# environment variable FIPS_MESH_LAB_TRACE_TREE=1 is set. Mutually
+# exclusive with FIPS_MESH_LAB_TRACE — set one or the other, not both.
+
+x-trace-tree-rust-log: &trace-tree-rust-log
+  RUST_LOG: "info,fips::node::tree=trace,fips::tree=trace,fips::node::handlers::mmp=trace,fips::node::handlers::handshake=trace"
+
+services:
+  # rekey profile
+  rekey-a:
+    environment: *trace-tree-rust-log
+  rekey-b:
+    environment: *trace-tree-rust-log
+  rekey-c:
+    environment: *trace-tree-rust-log
+  rekey-d:
+    environment: *trace-tree-rust-log
+  rekey-e:
+    environment: *trace-tree-rust-log
+
+  # rekey-accept-off profile
+  rekey-accept-off-a:
+    environment: *trace-tree-rust-log
+  rekey-accept-off-b:
+    environment: *trace-tree-rust-log
+  rekey-accept-off-c:
+    environment: *trace-tree-rust-log
+  rekey-accept-off-d:
+    environment: *trace-tree-rust-log
+  rekey-accept-off-e:
+    environment: *trace-tree-rust-log
+
+  # rekey-outbound-only profile
+  rekey-outbound-only-a:
+    environment: *trace-tree-rust-log
+  rekey-outbound-only-b:
+    environment: *trace-tree-rust-log
+  rekey-outbound-only-c:
+    environment: *trace-tree-rust-log
+  rekey-outbound-only-d:
+    environment: *trace-tree-rust-log
+  rekey-outbound-only-e:
+    environment: *trace-tree-rust-log

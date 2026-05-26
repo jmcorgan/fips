@@ -25,6 +25,20 @@
 #                           of the base + resource-limits stack to
 #                           bump RUST_LOG to trace on rekey/handshake/
 #                           forwarding/session/encrypted/mmp modules.
+#   FIPS_MESH_LAB_TRACE_TREE
+#                           when set, layers compose-trace-tree.yml to
+#                           bump RUST_LOG to trace on tree/mmp/handshake
+#                           modules. Targeted at tree-partition race
+#                           investigation during multi-peer startup.
+#                           Mutually exclusive with FIPS_MESH_LAB_TRACE in
+#                           practice — both apply but the second overlay
+#                           replaces the first's per-service environment.
+#   FIPS_MESH_LAB_NO_RESOURCE_LIMITS
+#                           when set, omits the compose-resource-limits.yml
+#                           overlay for rekey-family runs. Use for
+#                           unconstrained characterization (e.g. surfacing
+#                           a race without GHA-pressure shaping). Does not
+#                           affect other suites.
 #   FIPS_MESH_LAB_RUNS_DIR  Root for harness output (runs/ and any
 #                           other scratch). When unset, falls back to
 #                           an in-tree path under testing/mesh-lab/
@@ -163,6 +177,10 @@ run_rekey_family() {
     # ubuntu-latest runner imposes. Base compose is unmodified so
     # ci-local.sh stays unconstrained for day-to-day developer runs.
     #
+    # FIPS_MESH_LAB_NO_RESOURCE_LIMITS=1 omits the resource-limits overlay
+    # for unconstrained characterization runs where the goal is to expose
+    # a race or scheduling artifact rather than reproduce GHA pressure.
+    #
     # Trace-logging override: set FIPS_MESH_LAB_TRACE=1 in the environment
     # to bump RUST_LOG to trace level on the modules relevant to the
     # rekey-class flake (rekey, handshake, forwarding, session, encrypted,
@@ -170,17 +188,17 @@ run_rekey_family() {
     # primary failure-moment evidence for mechanism investigation.
     local compose_args=(
         -f testing/static/docker-compose.yml
-        -f testing/mesh-lab/compose-resource-limits.yml
-        --profile "$compose_profile"
     )
-    if [ -n "${FIPS_MESH_LAB_TRACE:-}" ]; then
-        compose_args=(
-            -f testing/static/docker-compose.yml
-            -f testing/mesh-lab/compose-resource-limits.yml
-            -f testing/mesh-lab/compose-trace.yml
-            --profile "$compose_profile"
-        )
+    if [ -z "${FIPS_MESH_LAB_NO_RESOURCE_LIMITS:-}" ]; then
+        compose_args+=(-f testing/mesh-lab/compose-resource-limits.yml)
     fi
+    if [ -n "${FIPS_MESH_LAB_TRACE:-}" ]; then
+        compose_args+=(-f testing/mesh-lab/compose-trace.yml)
+    fi
+    if [ -n "${FIPS_MESH_LAB_TRACE_TREE:-}" ]; then
+        compose_args+=(-f testing/mesh-lab/compose-trace-tree.yml)
+    fi
+    compose_args+=(--profile "$compose_profile")
 
     (
         cd "$REPO_ROOT" || exit 1
@@ -265,6 +283,34 @@ parse_rekey() {
         phase6_status="errors-observed"
     fi
 
+    # Phase 1 baseline convergence — captures the failure shape where the
+    # pre-rekey baseline never reaches 20/20 within the convergence
+    # timeout. rekey-test.sh prints the line
+    #   Best observed baseline before timeout: N/M passed
+    # on the timeout path (else-branch) and exits 1 before any later
+    # phase runs. phase1_status reports `ok` (the if-branch ran a verbose
+    # ping_all and phase_result), `timeout` (the else-branch fired), or
+    # `unknown` (neither line scraped, e.g. test never reached Phase 1).
+    local phase1_status="unknown"
+    local phase1_passed=""
+    local phase1_total=""
+    local phase1_line
+    phase1_line=$(grep -m1 'Best observed baseline before timeout:' "$log" 2>/dev/null || true)
+    if [ -n "$phase1_line" ]; then
+        phase1_status="timeout"
+        phase1_passed=$(echo "$phase1_line" | grep -oE '[0-9]+/[0-9]+' | head -1 | cut -d/ -f1)
+        phase1_total=$(echo "$phase1_line" | grep -oE '[0-9]+/[0-9]+' | head -1 | cut -d/ -f2)
+    elif grep -q '✓ Pre-rekey baseline (all 20 pairs):' "$log" 2>/dev/null; then
+        phase1_status="ok"
+        local phase1_ok
+        phase1_ok=$(grep -m1 '✓ Pre-rekey baseline (all 20 pairs):' "$log" \
+            | grep -oE '[0-9]+/[0-9]+' | head -1)
+        phase1_passed="${phase1_ok%/*}"
+        phase1_total="${phase1_ok#*/}"
+    fi
+    phase1_passed="${phase1_passed:-0}"
+    phase1_total="${phase1_total:-0}"
+
     # Late FSP K-bit cutover detection — scan node logs for cutover-
     # complete events occurring within or after the Phase 5 settle
     # window. The settle window is the 12 s before Phase 5's first
@@ -290,14 +336,26 @@ parse_rekey() {
         --arg pairs "$phase5_failures" \
         --arg phase6 "$phase6_status" \
         --arg events "$late_fsp_events" \
-        '{phase5_failing_pairs: $pairs, phase6_log_analysis: $phase6, late_fsp_events_per_node_tail: $events}' \
+        --arg p1_status "$phase1_status" \
+        --argjson p1_passed "$phase1_passed" \
+        --argjson p1_total "$phase1_total" \
+        '{phase5_failing_pairs: $pairs,
+          phase6_log_analysis: $phase6,
+          late_fsp_events_per_node_tail: $events,
+          phase1_status: $p1_status,
+          phase1_baseline_passed: $p1_passed,
+          phase1_baseline_total: $p1_total}' \
         > "$REP_DIR/signature.json"
 }
 
-# Heuristic mechanism-match check for the rekey Phase 5 flake class.
-# True iff:
-#   - At least one Phase 5 ping fails
-#   - Phase 6 log analysis is all-green (no ERROR/PANIC noise)
+# Heuristic mechanism-match check for the rekey-family flake classes.
+# True iff EITHER:
+#   - Phase 5 mechanism: at least one Phase 5 ping fails AND Phase 6 log
+#     analysis is all-green (the post-rekey reconvergence-flake shape)
+#   - Phase 1 mechanism: Phase 1 baseline timed out with the
+#     characteristic 12/20 multi-hop-only split (multi-hop routing not
+#     converging while direct-link forwarding works in the 5-node
+#     sparse mesh).
 mechanism_match_rekey() {
     local REP_DIR="$1"
     local sig="$REP_DIR/signature.json"
@@ -314,14 +372,24 @@ mechanism_match_rekey() {
         echo "false"
         return
     fi
-    local pairs phase6
+    local pairs phase6 p1_status
     pairs=$(jq -r '.phase5_failing_pairs' "$sig")
     phase6=$(jq -r '.phase6_log_analysis' "$sig")
+    p1_status=$(jq -r '.phase1_status' "$sig")
     if [ -n "$pairs" ] && [ "$phase6" = "all-green" ]; then
         echo "true"
-    else
-        echo "false"
+        return
     fi
+    # Any Phase 1 baseline-convergence timeout — the tree-partition
+    # surfaces with a variable count of failing multi-hop pairs depending
+    # on which node misses its parent re-evaluation (e.g., node-c orphan
+    # → 12/20 PASS, node-b orphan → 14/20). The exact count remains in
+    # signature.json for cross-rep analysis.
+    if [ "$p1_status" = "timeout" ]; then
+        echo "true"
+        return
+    fi
+    echo "false"
 }
 
 run_nat_lan() {
@@ -363,7 +431,7 @@ run_nat_lan() {
     # bumps RUST_LOG to trace on discovery::nostr, transport::udp,
     # node::lifecycle, handlers::handshake, handlers::forwarding —
     # the modules covering the cross-init / adoption / handshake
-    # path that ISSUE-2026-0027 exhibits. Path is repo-relative.
+    # path that the NAT-traversal flake exhibits. Path is repo-relative.
     local -a env_args=(FIPS_NAT_SKIP_FINAL_CLEANUP=1)
     if [ -n "${FIPS_MESH_LAB_TRACE:-}" ]; then
         env_args+=(FIPS_NAT_EXTRA_COMPOSE=testing/mesh-lab/compose-trace-nat.yml)
@@ -603,7 +671,7 @@ mechanism_match_nat_lan() {
 # on `stats.bloom.sent` deltas over the trailing 30s window of the
 # 180s run. The flake class tracked here is a single node spiking
 # above the ceiling while peers stay well under (asymmetric
-# distribution), seen on master CI as ISSUE-2026-0026.
+# distribution), as seen on master CI.
 #
 # Unlike rekey and nat-lan, chaos doesn't use docker-compose — the
 # python sim runner under `python3 -m sim` owns the container
@@ -747,7 +815,7 @@ EOF
 mechanism_match_bloom_storm() {
     local REP_DIR="$1"
     local log="$REP_DIR/test-output.log"
-    # The ISSUE-2026-0026 mechanism is a bloom_send_rate FAIL with
+    # The bloom-storm mechanism is a bloom_send_rate FAIL with
     # at least one named offender (i.e., not the "failed to sample
     # window endpoints" sub-failure mode, which is harness rather
     # than mechanism). The asymmetric-distribution check (one node

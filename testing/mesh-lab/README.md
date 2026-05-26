@@ -53,9 +53,9 @@ Initial target set:
 - `rekey`, `rekey-accept-off`, `rekey-outbound-only` — rekey-suite
   Phase 5 post-second-rekey connectivity flake class.
 - `nat-lan` — two-node NAT-traversal handshake-completion flake class.
-- `bloom-storm` — chaos scenario; covers the
-  [ISSUE-2026-0026](../../../prj/fips/issues/ISSUE-2026-0026.md)
-  `bloom_send_rate` per-node ceiling exceedance class. Note that
+- `bloom-storm` — chaos scenario; covers the `bloom_send_rate`
+  per-node ceiling exceedance class (single node spiking above the
+  ceiling while peers stay well under). Note that
   chaos uses its own python sim runner (not docker-compose), so the
   mesh-lab `compose-resource-limits.yml` and `compose-trace.yml`
   overrides do not apply to this suite; per-rep evidence comes from
@@ -134,6 +134,26 @@ each rep does, set them in the invoking shell:
   / `rekey-outbound-only-*`), so it does NOT constrain the nat-lan
   containers; the sidecar fills that gap. Only applies to the
   `nat-lan` suite; other suites ignore it.
+
+- **`FIPS_MESH_LAB_TRACE_TREE`** — when set to any non-empty value,
+  layers `compose-trace-tree.yml` over the rekey-family compose stack
+  to bump `RUST_LOG` to trace level on `fips::node::tree`,
+  `fips::tree`, `fips::node::handlers::mmp`, and
+  `fips::node::handlers::handshake`. Distinct from
+  `FIPS_MESH_LAB_TRACE` (rekey/forwarding/session/encrypted at trace);
+  targeted at tree-partition race investigation during multi-peer
+  startup. Mutually exclusive with `FIPS_MESH_LAB_TRACE` in practice —
+  both env vars layer their overlay, but the second one's per-service
+  environment replaces the first's. Only applies to the rekey-family
+  suites.
+
+- **`FIPS_MESH_LAB_NO_RESOURCE_LIMITS`** — when set to any non-empty
+  value, omits the `compose-resource-limits.yml` overlay for rekey-family
+  runs. Default behaviour keeps the overlay engaged so rekey-family lab
+  reps stay pressure-matched to a GHA `ubuntu-latest` runner. Set this
+  for unconstrained characterization where the goal is to surface a race
+  or scheduling artefact rather than reproduce CI pressure. Only applies
+  to the rekey-family suites; other suites ignore it.
 
 - **`FIPS_MESH_LAB_RUNS_DIR`** — root directory for harness output
   (the `runs/<timestamp>/` tree). When unset, the harness falls back
