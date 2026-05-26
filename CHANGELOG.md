@@ -60,6 +60,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Spanning-tree state distribution is now eventually-consistent.
+  Previously every `send_tree_announce_to_all` call site fired only
+  on a local state-change event (parent switch, self-root promotion,
+  ancestry change, peer promotion, parent loss). Once a partition
+  latched — for example, a parent-switch announce lost in transit
+  via the brief cross-init handshake swap window where one peer's
+  outbound session is about to become the loser session and the
+  receiver has no matching decrypt-worker entry — no node's state
+  changed again, so no node ever re-broadcast. The existing 60-second
+  `check_periodic_parent_reeval` short-circuited silently on no-change
+  (it was a re-evaluation, not a re-broadcast), and production-side
+  healing depended on incidental link churn (NAT keepalive refresh,
+  MMP timeout, peer re-promotion after a transport blip). The
+  function now ends with an unconditional `send_tree_announce_to_all`
+  on the no-change branch, alongside the existing switch and
+  self-promote arms; receivers coalesce by sequence comparison
+  (`ParentDeclaration::is_fresher_than`) and short-circuit at the
+  `if !updated` gate in `handle_tree_announce`, so same-sequence
+  repeats drop silently with no cascade. The per-peer 500 ms
+  rate-limiter is well below this 60-second cadence and does not
+  suppress the heartbeat broadcast. `BASELINE_CONVERGENCE_TIMEOUT`
+  in `testing/static/scripts/rekey-test.sh` is bumped from 60 to 65
+  so any partition healed by the periodic broadcast at T+60 lands
+  inside the convergence window; `wait_for_full_baseline` early-exits
+  on PASS, so successful reps see no extra wall-clock.
+
 - `rx_loop` tick-arm stall under convergence-phase mesh pressure
   is eliminated. Previously, the tick body's per-peer `check_*`
   loops (heartbeats, bloom announces, MMP reports, tree announces)

@@ -495,6 +495,22 @@ impl Node {
             self.send_tree_announce_to_all().await;
             let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
             self.bloom_state.mark_all_updates_needed(all_peers);
+        } else {
+            // Periodic re-broadcast on no-change: makes TreeAnnounce
+            // distribution eventually-consistent. Receivers coalesce
+            // by sequence via ParentDeclaration::is_fresher_than and
+            // short-circuit at the `if !updated` gate in
+            // handle_tree_announce; the per-peer 500 ms rate-limiter
+            // never blocks at this 60 s cadence. Closes the cross-init
+            // in-flight loss recovery gap where the swap window can
+            // strand one side's announce on a session-index the other
+            // side cannot decrypt.
+            trace!(
+                seq = self.tree_state.my_declaration().sequence(),
+                root = %self.tree_state.root(),
+                "Periodic TreeAnnounce re-broadcast (no state change)"
+            );
+            self.send_tree_announce_to_all().await;
         }
     }
 

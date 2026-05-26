@@ -145,8 +145,14 @@ fi
 # ── Full test ─────────────────────────────────────────────────────────
 trap 'echo ""; echo "Test interrupted"; exit 130' INT
 
-# Wait times derived from rekey timer
-BASELINE_CONVERGENCE_TIMEOUT=60
+# Wait times derived from rekey timer.
+# BASELINE_CONVERGENCE_TIMEOUT must cover one full daemon
+# node.tree.reeval_interval_secs (default 60) plus a small margin
+# so any partition that only heals via the periodic TreeAnnounce
+# re-broadcast lands inside the convergence window. wait_for_full_baseline
+# early-exits on PASS, so successful reps are unaffected by the
+# extra headroom.
+BASELINE_CONVERGENCE_TIMEOUT=65
 REKEY_SETTLE=12        # > DRAIN_WINDOW_SECS (10) so post-rekey samples are off the old session
 # First FMP rekey should follow shortly after the 35s interval once the mesh is
 # fully converged. Keep this bounded to preserve a meaningful scheduling check
