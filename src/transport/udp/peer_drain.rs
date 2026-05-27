@@ -187,7 +187,29 @@ fn drain_loop(
                 break;
             }
         }
-        if pfds[0].revents & libc::POLLIN == 0 {
+        let socket_revents = pfds[0].revents;
+        if socket_revents & libc::POLLNVAL != 0 {
+            warn!("fips-peer-drain: socket fd became invalid; exiting");
+            break;
+        }
+        if socket_revents & libc::POLLHUP != 0 {
+            debug!("fips-peer-drain: socket hung up; exiting");
+            break;
+        }
+        if socket_revents & libc::POLLERR != 0 {
+            match take_socket_error(socket_fd) {
+                Ok(Some(err)) => {
+                    debug!(error = %err, "fips-peer-drain: consumed socket error");
+                }
+                Ok(None) => {
+                    debug!("fips-peer-drain: poll reported socket error with SO_ERROR=0");
+                }
+                Err(err) => {
+                    debug!(error = %err, "fips-peer-drain: failed to read socket error");
+                }
+            }
+        }
+        if socket_revents & libc::POLLIN == 0 {
             continue;
         }
 
@@ -228,6 +250,28 @@ fn drain_loop(
         peer_addr = %peer_addr,
         "fips-peer-drain: stopped"
     );
+}
+
+fn take_socket_error(fd: RawFd) -> io::Result<Option<io::Error>> {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let r = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            &mut value as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if r < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if value == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(io::Error::from_raw_os_error(value)))
+    }
 }
 
 fn make_pipe() -> io::Result<(RawFd, RawFd)> {
@@ -453,5 +497,57 @@ mod tests {
         }
         // Drop the drain handle — should stop the thread within one
         // poll iteration.
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_error_is_consumed_so_poll_does_not_spin() {
+        let closed_peer = UdpSocket::bind("127.0.0.1:0").expect("bind closed peer");
+        let peer_addr = closed_peer.local_addr().expect("closed peer local_addr");
+        drop(closed_peer);
+
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind connected socket");
+        socket.connect(peer_addr).expect("connect to closed peer");
+        socket
+            .set_nonblocking(true)
+            .expect("set connected socket nonblocking");
+        socket.send(&[0xA5]).expect("send to closed peer");
+
+        let fd = socket.as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut saw_error = false;
+        for _ in 0..100 {
+            pfd.revents = 0;
+            let r = unsafe { libc::poll(&mut pfd, 1, 10) };
+            assert!(r >= 0, "poll failed: {}", io::Error::last_os_error());
+            if pfd.revents & libc::POLLERR != 0 {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error, "connected UDP socket should report POLLERR");
+        assert_eq!(
+            pfd.revents & libc::POLLIN,
+            0,
+            "regression setup expects socket error without readable data"
+        );
+
+        let err = take_socket_error(fd)
+            .expect("take socket error")
+            .expect("pending socket error");
+        assert_eq!(err.raw_os_error(), Some(libc::ECONNREFUSED));
+
+        pfd.revents = 0;
+        let r = unsafe { libc::poll(&mut pfd, 1, 0) };
+        assert!(r >= 0, "poll after SO_ERROR failed");
+        assert_eq!(
+            pfd.revents & libc::POLLERR,
+            0,
+            "SO_ERROR must be consumed so poll stops waking in a tight loop"
+        );
     }
 }
