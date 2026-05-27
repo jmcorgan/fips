@@ -248,6 +248,20 @@ with v0.3.x peers.
   `handshake.rs:1114` is unchanged. Introduces a shared
   `Node::outbound_admission_check()` helper so the invariant is
   grep-able and unit-testable.
+- Inbound `handle_msg3` now silent-drops at `node.limits.max_peers`
+  saturation *before* promotion, instead of replying with the rest
+  of the handshake-completion path and then rejecting at
+  `promote_connection`. Adds an early cap check positioned after the
+  peer's static-key + signature verification (so identity is known
+  and the reconnect / cross-connection bypass for known peers fires)
+  and before `ActivePeer` construction. The late cap check inside
+  `promote_connection` is intentionally retained as defense-in-depth.
+  On this branch's XX handshake there is no wire-bytes saving (Msg1,
+  Msg2, Msg3 have all crossed the wire by the time identity is known);
+  the value is local CPU / allocation savings (no `ActivePeer` build,
+  no `peers_by_index` insert, no link transition) and cleaner peer-
+  side semantics — no fake-promotion whose subsequent data frames
+  fail decryption on this side.
 - Mesh-size estimator (`compute_mesh_size`) no longer double-counts the
   parent's bloom cardinality during the transient cache window after a
   local parent-switch. Symptom: `fipsctl show status` / fipstop displayed

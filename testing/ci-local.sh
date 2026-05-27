@@ -57,6 +57,7 @@ ONLY_SUITE=""
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
 REKEY_SUITES=(rekey rekey-accept-off rekey-outbound-only)
+ADMISSION_SUITES=(admission-cap)
 # Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
     "smoke-10 smoke-10"
@@ -110,6 +111,9 @@ list_suites() {
     echo ""
     echo "  Rekey:"
     for s in "${REKEY_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Admission cap:"
+    for s in "${ADMISSION_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Gateway:"
     for s in "${GATEWAY_SUITES[@]}"; do echo "    $s"; done
@@ -343,6 +347,34 @@ run_mixed_profile() {
 
     docker compose -f "$compose" --profile mixed-profile down --volumes --remove-orphans 2>/dev/null
     record "mixed-profile" $rc
+}
+
+# Run the admission-cap integration test
+# Verifies the inbound max_peers early-gate silent-drops at scale by
+# lowering node.max_peers on one mesh node and asserting via tcpdump
+# that no Msg2 responses go to the sustained-retrying denied peers.
+run_admission_cap() {
+    local compose="testing/static/docker-compose.yml"
+    local rc=0
+
+    info "[admission-cap] Generating configs"
+    bash testing/static/scripts/generate-configs.sh mesh || { record "admission-cap" 1; return; }
+    bash testing/static/scripts/admission-cap-test.sh inject-config || { record "admission-cap" 1; return; }
+
+    info "[admission-cap] Starting containers (mesh profile)"
+    docker compose -f "$compose" --profile mesh up -d || { record "admission-cap" 1; return; }
+
+    info "[admission-cap] Running admission-cap test"
+    if bash testing/static/scripts/admission-cap-test.sh; then
+        rc=0
+    else
+        rc=1
+        info "[admission-cap] Collecting failure logs"
+        docker compose -f "$compose" --profile mesh logs --no-color 2>&1 | tail -100
+    fi
+
+    docker compose -f "$compose" --profile mesh down --volumes --remove-orphans 2>/dev/null
+    record "admission-cap" $rc
 }
 
 # Run a chaos scenario
@@ -596,6 +628,11 @@ run_integration() {
     # Mixed-profile (Full + NonRouting + Leaf)
     run_mixed_profile
 
+    # Admission cap (mesh profile, max_peers=1 on one node)
+    for _suite in "${ADMISSION_SUITES[@]}"; do
+        run_admission_cap
+    done
+
     # Gateway
     run_gateway
 
@@ -700,6 +737,8 @@ run_suite() {
             run_rekey_outbound_only ;;
         mixed-profile)
             run_mixed_profile ;;
+        admission-cap)
+            run_admission_cap ;;
         gateway)
             run_gateway ;;
         acl-allowlist)
