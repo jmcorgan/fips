@@ -7,6 +7,7 @@
 
 use crate::NodeAddr;
 use crate::node::Node;
+use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::build_msg1;
 use crate::noise::HandshakeState;
 use crate::protocol::{SessionDatagram, SessionSetup};
@@ -194,6 +195,8 @@ impl Node {
                     error = %e,
                     "Failed to allocate index for rekey"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -212,6 +215,8 @@ impl Node {
                     "Failed to generate rekey msg1"
                 );
                 let _ = self.index_allocator.free(our_index);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -235,6 +240,8 @@ impl Node {
                         "Failed to send rekey msg1"
                     );
                     let _ = self.index_allocator.free(our_index);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             }
@@ -546,6 +553,8 @@ impl Node {
                     error = %e,
                     "Failed to generate FSP rekey XX msg1"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -567,6 +576,8 @@ impl Node {
                 error = %e,
                 "Failed to send FSP rekey SessionSetup"
             );
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 

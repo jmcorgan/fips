@@ -7,6 +7,7 @@
 
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
+use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::node::{Node, NodeError};
 use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
@@ -86,6 +87,8 @@ impl Node {
         // deadlocks when the larger-NodeAddr side has accept_connections=false.
         if !self.should_admit_msg1(packet.transport_id, &packet.remote_addr) {
             self.msg1_rate_limiter.complete_handshake();
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -95,6 +98,8 @@ impl Node {
             None => {
                 self.msg1_rate_limiter.complete_handshake();
                 debug!("Invalid msg1 header");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -137,6 +142,9 @@ impl Node {
                             remote_addr = %packet.remote_addr,
                             "Duplicate msg1 but no stored msg2 to resend"
                         );
+                        self.stats_mut().record_reject(RejectReason::Handshake(
+                            HandshakeReject::UnknownConnection,
+                        ));
                     }
                     self.msg1_rate_limiter.complete_handshake();
                     return;
@@ -189,6 +197,8 @@ impl Node {
                     error = %e,
                     "Failed to process msg1"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -209,6 +219,8 @@ impl Node {
             Err(e) => {
                 self.msg1_rate_limiter.complete_handshake();
                 warn!(error = %e, "Failed to allocate session index for inbound");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -259,6 +271,8 @@ impl Node {
                         .remove(&(packet.transport_id, packet.remote_addr));
                     let _ = self.index_allocator.free(our_index);
                     self.msg1_rate_limiter.complete_handshake();
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             }
@@ -306,6 +320,8 @@ impl Node {
             Some(h) => h,
             None => {
                 debug!("Invalid msg2 header");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -319,6 +335,8 @@ impl Node {
                     receiver_idx = %header.receiver_idx,
                     "No pending outbound handshake for index"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                 return;
             }
         };
@@ -407,6 +425,9 @@ impl Node {
                                     }
                                     let _ = self.index_allocator.free(idx);
                                 }
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                             }
                         }
                         Err(e) => {
@@ -421,6 +442,8 @@ impl Node {
                                 }
                                 let _ = self.index_allocator.free(idx);
                             }
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                     }
                 }
@@ -429,8 +452,13 @@ impl Node {
                 return;
             }
 
-            // Not a rekey — stale pending_outbound entry
+            // Not a rekey — stale pending_outbound entry pointing at a
+            // removed connection and no rekey-in-progress peer claims the
+            // receiver_idx. State-machine inconsistency, not a fresh
+            // lookup miss.
             self.pending_outbound.remove(&key);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -438,6 +466,8 @@ impl Node {
             let Some(conn) = self.connections.get_mut(&link_id) else {
                 warn!(link_id = %link_id, "Connection removed during msg2 processing");
                 self.pending_outbound.remove(&key);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                 return;
             };
 
@@ -459,6 +489,8 @@ impl Node {
                         "Handshake completion failed"
                     );
                     conn.mark_failed();
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             };
@@ -470,6 +502,8 @@ impl Node {
                     Err(e) => {
                         warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
                         conn.mark_failed();
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 }
@@ -484,6 +518,8 @@ impl Node {
                 Some(id) => *id,
                 None => {
                     warn!(link_id = %link_id, "No identity after handshake");
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             };
@@ -509,12 +545,16 @@ impl Node {
             self.pending_outbound.remove(&key);
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
         if peer_node_addr == *self.identity.node_addr() {
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
             self.connections.remove(&link_id);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -542,6 +582,8 @@ impl Node {
                     if let Some(conn) = self.connections.get_mut(&link_id) {
                         conn.mark_failed();
                     }
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             }
@@ -576,6 +618,8 @@ impl Node {
                 Some(c) => c,
                 None => {
                     self.pending_outbound.remove(&key);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
                 }
             };
@@ -594,6 +638,8 @@ impl Node {
                     _ => {
                         warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
                         self.pending_outbound.remove(&key);
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 };
@@ -764,6 +810,8 @@ impl Node {
                     error = %e,
                     "Failed to promote connection"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             }
         }
     }
@@ -780,6 +828,8 @@ impl Node {
             Some(h) => h,
             None => {
                 debug!("Invalid msg3 header");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -789,7 +839,10 @@ impl Node {
         let link_id = match self.pending_inbound.remove(&key) {
             Some(id) => id,
             None => {
-                // Check if this is a rekey msg3 for an active peer
+                // Check if this is a rekey msg3 for an active peer.
+                // handle_rekey_msg3 records its own UnknownConnection or
+                // BadState classification depending on whether a matching
+                // rekey-responder slot is found.
                 self.handle_rekey_msg3(&packet, &header).await;
                 return;
             }
@@ -804,6 +857,8 @@ impl Node {
                         link_id = %link_id,
                         "No pending connection for msg3"
                     );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
                 }
             };
@@ -829,6 +884,8 @@ impl Node {
                         if let Some(idx) = our_idx_to_free {
                             let _ = self.index_allocator.free(idx);
                         }
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 };
@@ -841,6 +898,8 @@ impl Node {
                         warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
                         self.connections.remove(&link_id);
                         self.remove_link(&link_id);
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 }
@@ -853,6 +912,8 @@ impl Node {
                     warn!("Identity not learned from msg3");
                     self.connections.remove(&link_id);
                     self.remove_link(&link_id);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             };
@@ -904,6 +965,8 @@ impl Node {
             }
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -911,6 +974,8 @@ impl Node {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -954,6 +1019,8 @@ impl Node {
                 if let Some(idx) = our_idx_to_free {
                     let _ = self.index_allocator.free(idx);
                 }
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         }
@@ -1020,6 +1087,9 @@ impl Node {
                                 None => {
                                     self.connections.remove(&link_id);
                                     self.remove_link(&link_id);
+                                    self.stats_mut().record_reject(RejectReason::Handshake(
+                                        HandshakeReject::BadState,
+                                    ));
                                     return;
                                 }
                             };
@@ -1032,6 +1102,9 @@ impl Node {
                                 let Some(transport_id) = peer.transport_id() else {
                                     self.connections.remove(&link_id);
                                     self.remove_link(&link_id);
+                                    self.stats_mut().record_reject(RejectReason::Handshake(
+                                        HandshakeReject::BadState,
+                                    ));
                                     return;
                                 };
                                 if let Some(old_idx) = old_our_index {
@@ -1098,6 +1171,9 @@ impl Node {
                                 );
                                 self.connections.remove(&link_id);
                                 self.links.remove(&link_id);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                                 return;
                             }
                             // We lose — abandon our rekey/pending, fall through as responder.
@@ -1128,6 +1204,9 @@ impl Node {
                             let Some(conn) = self.connections.get_mut(&link_id) else {
                                 warn!(link_id = %link_id, "Connection removed during rekey msg3 processing");
                                 self.links.remove(&link_id);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::UnknownConnection,
+                                ));
                                 return;
                             };
                             conn.take_session()
@@ -1140,6 +1219,9 @@ impl Node {
                                 warn!("Rekey msg3: no session from handshake");
                                 self.connections.remove(&link_id);
                                 self.links.remove(&link_id);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                                 return;
                             }
                         };
@@ -1296,6 +1378,8 @@ impl Node {
                 // Clean up on promotion failure
                 self.remove_link(&link_id);
                 let _ = self.index_allocator.free(our_index);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             }
         }
     }
@@ -1326,6 +1410,8 @@ impl Node {
                     receiver_idx = %header.receiver_idx,
                     "No pending inbound or rekey state for msg3"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                 return;
             }
         };
@@ -1362,6 +1448,8 @@ impl Node {
                         "Rekey msg3 processing failed"
                     );
                     peer.clear_rekey_responder();
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 }
             }
         }

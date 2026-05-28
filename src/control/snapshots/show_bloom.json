@@ -16,6 +16,7 @@
       "invalid": 0,
       "nacks_received": 0,
       "nacks_sent": 0,
+      "non_v1": 0,
       "received": 0,
       "send_failed": 0,
       "sent": 0,

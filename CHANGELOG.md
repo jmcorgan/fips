@@ -110,13 +110,15 @@ with v0.3.x peers.
   existing `TreeStats`, `BloomStats`, `DiscoveryStats`, and
   `ForwardingStats`, and `TreeStats::ancestry_invalid` is now
   incremented from the `TreeAnnounce::validate_semantics` rejection
-  site that was previously silent. Several handshake, MMP, tree, and
+  site that was previously silent. The Noise XX handshake cluster
+  (msg1/msg2/msg3) and the rekey-initiator outbound sites are wired in
+  addition to the shared clusters. Several handshake, MMP, tree, and
   discovery rejection paths that had no counter at all are now counted,
   including the `send_lookup_response` no-route drop
-  (`DiscoveryStats::resp_no_route`). Existing
-  direct counters at the bloom / discovery / forwarding sites are
-  retained alongside the new dispatch while the rollout is in progress;
-  a later change collapses the duplicate increment.
+  (`DiscoveryStats::resp_no_route`). Existing direct counters at the
+  bloom / discovery / forwarding sites are retained alongside the new
+  dispatch while the rollout is in progress; a later change collapses
+  the duplicate increment.
 - `pool_inbound` and `pool_outbound` counters on the TCP and Tor
   transport stats (`TcpStats`, `TorStats`). Per-direction accounting
   is updated at every pool-insert and receive-loop-exit site, plus on

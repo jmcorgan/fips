@@ -49,10 +49,10 @@ async fn test_m1_rejects_all_ones_filter_announce() {
     node.handle_filter_announce(&peer_addr, &payload).await;
 
     let after = &node.stats().bloom;
-    // While the typed-rejection rollout is in progress the call site
-    // bumps the counter directly AND dispatches through record_reject,
-    // which hits the same counter. A later change will collapse this to
-    // a single increment by removing the legacy direct bump; for now
+    // While the typed-rejection rollout is in progress the call site bumps
+    // counter directly AND dispatches through record_reject, which
+    // hits the same counter. A later change will collapse this to a
+    // single increment by removing the legacy direct bump; for now
     // the rejection-path event yields a +2 delta.
     assert_eq!(
         after.fill_exceeded,

@@ -86,9 +86,9 @@ impl ForwardingStats {
     /// The byte-counted side of each outcome is recorded by the
     /// existing `record_*` methods at the call site (which know the
     /// payload size); `record_reject` only bumps the packet count and
-    /// is paired with the byte-aware call at the call site while the
-    /// typed-rejection rollout is in progress. A later change may
-    /// collapse the two calls into a single typed entry point.
+    /// is paired with the byte-aware call at the call site for the
+    /// duration of the typed-rejection rollout. A later change may collapse the
+    /// two calls into a single typed entry point.
     pub(super) fn record_reject(&mut self, reason: ForwardingReject) {
         match reason {
             ForwardingReject::DecodeError => self.decode_error_packets += 1,
@@ -256,6 +256,12 @@ pub struct BloomStats {
     pub received: u64,
     pub decode_error: u64,
     pub invalid: u64,
+    /// Non-v1-compliant size class. Reserved for symmetry with the
+    /// master-side BloomStats shape; the next-side handler does not
+    /// presently check `is_v1_compliant()` so the counter stays at
+    /// zero. Kept as a field so `BloomReject::NonV1` dispatches to a
+    /// real target and the cross-line enum shape is identical.
+    pub non_v1: u64,
     pub unknown_peer: u64,
     pub stale: u64,
     pub fill_exceeded: u64,
@@ -293,6 +299,7 @@ impl BloomStats {
             received: self.received,
             decode_error: self.decode_error,
             invalid: self.invalid,
+            non_v1: self.non_v1,
             unknown_peer: self.unknown_peer,
             stale: self.stale,
             fill_exceeded: self.fill_exceeded,
@@ -647,6 +654,7 @@ pub struct BloomStatsSnapshot {
     pub received: u64,
     pub decode_error: u64,
     pub invalid: u64,
+    pub non_v1: u64,
     pub unknown_peer: u64,
     pub stale: u64,
     pub fill_exceeded: u64,
