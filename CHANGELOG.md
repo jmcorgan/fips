@@ -101,6 +101,11 @@ with v0.3.x peers.
 
 ### Added
 
+- `pool_inbound` and `pool_outbound` counters on the TCP and Tor
+  transport stats (`TcpStats`, `TorStats`). Per-direction accounting
+  is updated at every pool-insert and receive-loop-exit site, plus on
+  transport stop and on send-failure-driven removal. Surfaces through
+  `TcpStatsSnapshot` and `TorStatsSnapshot` for `show_transports`.
 - [`PR-REVIEW.md`](PR-REVIEW.md) — the 13-criteria PR review checklist
   the maintainer runs against every incoming PR, published at the
   repo root so contributors can run the same pass on their own change
@@ -236,6 +241,15 @@ with v0.3.x peers.
 
 ### Fixed
 
+- TCP and Tor `max_inbound_connections` admission cap is now compared
+  against the per-direction inbound count (`pool_inbound`) rather than
+  the combined pool size. Outbound connect-on-send connections share
+  the same pool data structure but no longer consume slots against the
+  operator-facing inbound cap. The configuration field name and
+  operator semantics are preserved; only the cap-check comparison and
+  accounting change. Operators with mixed outbound + inbound
+  deployments no longer see legitimate inbound peers rejected once
+  outbound connections fill the pool past the configured cap.
 - Outbound connection initiation now honors the `node.limits.max_peers`
   cap that was previously only checked on inbound msg1 admission. Four
   paths gated: auto-reconnect retries (`process_pending_retries`),

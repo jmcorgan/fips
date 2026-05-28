@@ -111,6 +111,17 @@ fn parse_tor_addr(addr: &TransportAddr) -> Result<TorAddr, TransportError> {
 // Connection Pool
 // ============================================================================
 
+/// Direction of a pooled Tor connection, used to drive separate
+/// `pool_inbound` / `pool_outbound` accounting for the
+/// `max_inbound_connections` admission cap on the onion-service side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Direction {
+    /// Inbound — accepted by the onion service listener.
+    Inbound,
+    /// Outbound — initiated via SOCKS5 connect to a remote onion.
+    Outbound,
+}
+
 /// State for a single Tor connection to a peer.
 struct TorConnection {
     /// Write half of the split stream.
@@ -123,6 +134,8 @@ struct TorConnection {
     /// When the connection was established.
     #[allow(dead_code)]
     established_at: Instant,
+    /// Direction of the connection — drives pool-inbound/outbound accounting.
+    direction: Direction,
 }
 
 /// Shared connection pool.
@@ -516,14 +529,22 @@ impl TorTransport {
         }
         drop(connecting);
 
-        // Close all connections
+        // Close all connections. The receive-loop cleanup would
+        // normally decrement pool_inbound / pool_outbound, but
+        // aborting the task skips that path; decrement explicitly
+        // here using the direction we stored on the connection record.
         let mut pool = self.pool.lock().await;
         for (addr, conn) in pool.drain() {
             conn.recv_task.abort();
             let _ = conn.recv_task.await;
+            match conn.direction {
+                Direction::Inbound => self.stats.record_pool_inbound_removed(),
+                Direction::Outbound => self.stats.record_pool_outbound_removed(),
+            }
             debug!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
+                direction = ?conn.direction,
                 "Tor connection closed (transport stopping)"
             );
         }
@@ -690,6 +711,10 @@ impl TorTransport {
                 let mut pool = self.pool.lock().await;
                 if let Some(conn) = pool.remove(addr) {
                     conn.recv_task.abort();
+                    match conn.direction {
+                        Direction::Inbound => self.stats.record_pool_inbound_removed(),
+                        Direction::Outbound => self.stats.record_pool_outbound_removed(),
+                    }
                 }
                 Err(TransportError::SendFailed(format!("{}", e)))
             }
@@ -802,6 +827,7 @@ impl TorTransport {
                 pool,
                 mtu,
                 recv_stats,
+                Direction::Outbound,
             )
             .await;
         });
@@ -811,12 +837,14 @@ impl TorTransport {
             recv_task,
             mtu,
             established_at: Instant::now(),
+            direction: Direction::Outbound,
         };
 
         let mut pool = self.pool.lock().await;
         pool.insert(addr.clone(), conn);
 
         self.stats.record_connection_established();
+        self.stats.record_pool_outbound_added();
 
         info!(
             transport_id = %self.transport_id,
@@ -1023,6 +1051,7 @@ impl TorTransport {
                 pool,
                 mtu,
                 recv_stats,
+                Direction::Outbound,
             )
             .await;
         });
@@ -1032,6 +1061,7 @@ impl TorTransport {
             recv_task,
             mtu,
             established_at: Instant::now(),
+            direction: Direction::Outbound,
         };
 
         // Use try_lock since we're in a sync context and the pool
@@ -1039,6 +1069,7 @@ impl TorTransport {
         if let Ok(mut pool) = self.pool.try_lock() {
             pool.insert(addr.clone(), conn);
             self.stats.record_connection_established();
+            self.stats.record_pool_outbound_added();
             debug!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
@@ -1060,6 +1091,10 @@ impl TorTransport {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = pool.remove(addr) {
             conn.recv_task.abort();
+            match conn.direction {
+                Direction::Inbound => self.stats.record_pool_inbound_removed(),
+                Direction::Outbound => self.stats.record_pool_outbound_removed(),
+            }
             debug!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
@@ -1125,7 +1160,10 @@ impl Transport for TorTransport {
 ///
 /// Reads complete FMP packets using the stream reader, delivers them to
 /// the node via the packet channel. On error or EOF, removes the
-/// connection from the pool and exits.
+/// connection from the pool and exits. `direction` is captured so the
+/// cleanup path can decrement the correct `pool_inbound` /
+/// `pool_outbound` counter.
+#[allow(clippy::too_many_arguments)]
 async fn tor_receive_loop(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     transport_id: TransportId,
@@ -1134,6 +1172,7 @@ async fn tor_receive_loop(
     pool: ConnectionPool,
     mtu: u16,
     stats: Arc<TorStats>,
+    direction: Direction,
 ) {
     debug!(
         transport_id = %transport_id,
@@ -1176,13 +1215,24 @@ async fn tor_receive_loop(
         }
     }
 
-    // Clean up: remove ourselves from the pool
+    // Clean up: remove ourselves from the pool, then decrement the
+    // direction-specific pool counter. Decrement is conditional on the
+    // entry actually being removed so a double-cleanup never drives
+    // the counter below zero.
     let mut pool_guard = pool.lock().await;
-    pool_guard.remove(&remote_addr);
+    let removed = pool_guard.remove(&remote_addr).is_some();
+    drop(pool_guard);
+    if removed {
+        match direction {
+            Direction::Inbound => stats.record_pool_inbound_removed(),
+            Direction::Outbound => stats.record_pool_outbound_removed(),
+        }
+    }
 
     debug!(
         transport_id = %transport_id,
         remote_addr = %remote_addr,
+        direction = ?direction,
         "Tor receive loop stopped"
     );
 }
@@ -1254,12 +1304,11 @@ async fn tor_accept_loop(
             }
         };
 
-        // Check inbound connection limit
-        let current_count = {
-            let pool_guard = pool.lock().await;
-            pool_guard.len()
-        };
-        if current_count >= max_inbound {
+        // Check inbound connection cap. Counts only inbound (accepted)
+        // connections currently held in the pool; outbound (SOCKS5-connect)
+        // connections live in the same pool but are not subject to the
+        // operator-facing inbound cap.
+        if stats.pool_inbound_count() >= max_inbound as u64 {
             stats.record_connection_rejected();
             debug!(
                 transport_id = %transport_id,
@@ -1321,6 +1370,7 @@ async fn tor_accept_loop(
                 recv_pool,
                 mtu,
                 recv_stats,
+                Direction::Inbound,
             )
             .await;
         });
@@ -1330,6 +1380,7 @@ async fn tor_accept_loop(
             recv_task,
             mtu,
             established_at: Instant::now(),
+            direction: Direction::Inbound,
         };
 
         {
@@ -1338,6 +1389,7 @@ async fn tor_accept_loop(
         }
 
         stats.record_connection_accepted();
+        stats.record_pool_inbound_added();
 
         debug!(
             transport_id = %transport_id,

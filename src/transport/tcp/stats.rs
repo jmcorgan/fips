@@ -21,6 +21,12 @@ pub struct TcpStats {
     pub connections_rejected: AtomicU64,
     pub connect_timeouts: AtomicU64,
     pub connect_refused: AtomicU64,
+    /// Current number of inbound (accepted) connections held in the pool.
+    /// Drives the `max_inbound_connections` admission check.
+    pub pool_inbound: AtomicU64,
+    /// Current number of outbound (connect-on-send / promoted) connections
+    /// held in the pool. Independent of the inbound cap.
+    pub pool_outbound: AtomicU64,
 }
 
 impl TcpStats {
@@ -39,6 +45,8 @@ impl TcpStats {
             connections_rejected: AtomicU64::new(0),
             connect_timeouts: AtomicU64::new(0),
             connect_refused: AtomicU64::new(0),
+            pool_inbound: AtomicU64::new(0),
+            pool_outbound: AtomicU64::new(0),
         }
     }
 
@@ -94,6 +102,31 @@ impl TcpStats {
         self.connect_refused.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the inbound pool count (called on accept).
+    pub fn record_pool_inbound_added(&self) {
+        self.pool_inbound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the inbound pool count (called on inbound receive-loop exit).
+    pub fn record_pool_inbound_removed(&self) {
+        self.pool_inbound.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Increment the outbound pool count (called on connect-on-send / promote).
+    pub fn record_pool_outbound_added(&self) {
+        self.pool_outbound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the outbound pool count (called on outbound receive-loop exit).
+    pub fn record_pool_outbound_removed(&self) {
+        self.pool_outbound.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Load the current inbound pool count for the admission gate.
+    pub fn pool_inbound_count(&self) -> u64 {
+        self.pool_inbound.load(Ordering::Relaxed)
+    }
+
     /// Take a snapshot of all counters.
     pub fn snapshot(&self) -> TcpStatsSnapshot {
         TcpStatsSnapshot {
@@ -109,6 +142,8 @@ impl TcpStats {
             connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
             connect_timeouts: self.connect_timeouts.load(Ordering::Relaxed),
             connect_refused: self.connect_refused.load(Ordering::Relaxed),
+            pool_inbound: self.pool_inbound.load(Ordering::Relaxed),
+            pool_outbound: self.pool_outbound.load(Ordering::Relaxed),
         }
     }
 }
@@ -134,4 +169,6 @@ pub struct TcpStatsSnapshot {
     pub connections_rejected: u64,
     pub connect_timeouts: u64,
     pub connect_refused: u64,
+    pub pool_inbound: u64,
+    pub pool_outbound: u64,
 }
