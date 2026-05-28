@@ -23,6 +23,12 @@ pub struct TorStats {
     pub connections_accepted: AtomicU64,
     pub connections_rejected: AtomicU64,
     pub control_errors: AtomicU64,
+    /// Current number of inbound (accepted via onion service) connections
+    /// held in the pool. Drives the `max_inbound_connections` admission check.
+    pub pool_inbound: AtomicU64,
+    /// Current number of outbound (SOCKS5 connect) connections held in
+    /// the pool. Independent of the inbound cap.
+    pub pool_outbound: AtomicU64,
 }
 
 impl TorStats {
@@ -43,6 +49,8 @@ impl TorStats {
             connections_accepted: AtomicU64::new(0),
             connections_rejected: AtomicU64::new(0),
             control_errors: AtomicU64::new(0),
+            pool_inbound: AtomicU64::new(0),
+            pool_outbound: AtomicU64::new(0),
         }
     }
 
@@ -108,6 +116,31 @@ impl TorStats {
         self.control_errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the inbound pool count (called on accept).
+    pub fn record_pool_inbound_added(&self) {
+        self.pool_inbound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the inbound pool count (called on inbound receive-loop exit).
+    pub fn record_pool_inbound_removed(&self) {
+        self.pool_inbound.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Increment the outbound pool count (called on SOCKS5-connect promote).
+    pub fn record_pool_outbound_added(&self) {
+        self.pool_outbound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the outbound pool count (called on outbound receive-loop exit).
+    pub fn record_pool_outbound_removed(&self) {
+        self.pool_outbound.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Load the current inbound pool count for the admission gate.
+    pub fn pool_inbound_count(&self) -> u64 {
+        self.pool_inbound.load(Ordering::Relaxed)
+    }
+
     /// Take a snapshot of all counters.
     pub fn snapshot(&self) -> TorStatsSnapshot {
         TorStatsSnapshot {
@@ -125,6 +158,8 @@ impl TorStats {
             connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
             connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
             control_errors: self.control_errors.load(Ordering::Relaxed),
+            pool_inbound: self.pool_inbound.load(Ordering::Relaxed),
+            pool_outbound: self.pool_outbound.load(Ordering::Relaxed),
         }
     }
 }
@@ -152,4 +187,6 @@ pub struct TorStatsSnapshot {
     pub connections_accepted: u64,
     pub connections_rejected: u64,
     pub control_errors: u64,
+    pub pool_inbound: u64,
+    pub pool_outbound: u64,
 }
