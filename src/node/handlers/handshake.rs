@@ -810,25 +810,28 @@ impl Node {
 
             // Process msg3 — learns initiator's identity and epoch
             let noise_msg3 = &packet.data[header.noise_msg3_offset..];
-            let received_negotiation = match conn
-                .complete_handshake_msg3(noise_msg3, packet.timestamp_ms)
-            {
-                Ok(neg) => neg,
-                Err(e) => {
-                    warn!(
-                        link_id = %link_id,
-                        error = %e,
-                        "Msg3 processing failed"
-                    );
-                    // Clean up
-                    self.connections.remove(&link_id);
-                    self.remove_link(&link_id);
-                    if let Some(idx) = self.connections.get(&link_id).and_then(|c| c.our_index()) {
-                        let _ = self.index_allocator.free(idx);
+            let received_negotiation =
+                match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
+                    Ok(neg) => neg,
+                    Err(e) => {
+                        warn!(
+                            link_id = %link_id,
+                            error = %e,
+                            "Msg3 processing failed"
+                        );
+                        // Clean up. Capture the index before removing the
+                        // connection; reading it after the remove would always
+                        // return None and leak the allocated index.
+                        let our_idx_to_free =
+                            self.connections.get(&link_id).and_then(|c| c.our_index());
+                        self.connections.remove(&link_id);
+                        self.remove_link(&link_id);
+                        if let Some(idx) = our_idx_to_free {
+                            let _ = self.index_allocator.free(idx);
+                        }
+                        return;
                     }
-                    return;
-                }
-            };
+                };
 
             // Process peer's FMP negotiation payload from msg3
             if let Some(neg_bytes) = &received_negotiation {
