@@ -14,6 +14,7 @@ pub(crate) mod encrypt_worker;
 mod handlers;
 mod lifecycle;
 mod rate_limit;
+pub(crate) mod reject;
 mod retry;
 mod routing_error_rate_limit;
 pub(crate) mod session;

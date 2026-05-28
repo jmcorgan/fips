@@ -9,6 +9,7 @@ use crate::mmp::MmpMode;
 use crate::mmp::MmpSessionState;
 use crate::mmp::report::{ReceiverReport, SenderReport};
 use crate::node::Node;
+use crate::node::reject::{MmpReject, RejectReason, TreeReject};
 use crate::protocol::{
     LinkMessageType, PathMtuNotification, SessionMessageType, SessionReceiverReport,
     SessionSenderReport,
@@ -39,6 +40,8 @@ impl Node {
         let sr = match SenderReport::decode(payload) {
             Ok(sr) => sr,
             Err(e) => {
+                self.stats_mut()
+                    .record_reject(RejectReason::Mmp(MmpReject::DecodeError));
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed SenderReport");
                 return;
             }
@@ -47,6 +50,8 @@ impl Node {
         let peer = match self.peers.get_mut(from) {
             Some(p) => p,
             None => {
+                self.stats_mut()
+                    .record_reject(RejectReason::Mmp(MmpReject::UnknownPeer));
                 debug!(from = %self.peer_display_name(from), "SenderReport from unknown peer");
                 return;
             }
@@ -81,6 +86,8 @@ impl Node {
         let rr = match ReceiverReport::decode(payload) {
             Ok(rr) => rr,
             Err(e) => {
+                self.stats_mut()
+                    .record_reject(RejectReason::Mmp(MmpReject::DecodeError));
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed ReceiverReport");
                 return;
             }
@@ -91,6 +98,8 @@ impl Node {
         let peer = match self.peers.get_mut(from) {
             Some(p) => p,
             None => {
+                self.stats_mut()
+                    .record_reject(RejectReason::Mmp(MmpReject::UnknownPeer));
                 debug!(from = %peer_name, "ReceiverReport from unknown peer");
                 return;
             }
@@ -153,6 +162,8 @@ impl Node {
                 self.tree_state.recompute_coords();
                 if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                     warn!(error = %e, "Failed to sign declaration after first-RTT parent eval");
+                    self.stats_mut()
+                        .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                     return;
                 }
                 // Surgical invalidation — see CoordCache::invalidate_via_node doc.
@@ -180,6 +191,8 @@ impl Node {
                 self.tree_state.become_root();
                 if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                     warn!(error = %e, "Failed to sign self-root declaration after first-RTT");
+                    self.stats_mut()
+                        .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                     return;
                 }
                 // Surgical invalidation — see CoordCache::invalidate_other_roots doc.

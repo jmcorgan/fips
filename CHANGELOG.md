@@ -101,6 +101,22 @@ with v0.3.x peers.
 
 ### Added
 
+- Typed `RejectReason` classification for receive-path silent-rejection
+  sites across the node. Each rejection-and-return path now passes a
+  typed reason to `NodeStats::record_reject`, which routes it to a
+  per-subsystem counter, so operators can see what is being rejected
+  through stats counters rather than by scraping debug logs. New
+  `HandshakeStats`, `SessionStats`, and `MmpStats` sub-stats join the
+  existing `TreeStats`, `BloomStats`, `DiscoveryStats`, and
+  `ForwardingStats`, and `TreeStats::ancestry_invalid` is now
+  incremented from the `TreeAnnounce::validate_semantics` rejection
+  site that was previously silent. Several handshake, MMP, tree, and
+  discovery rejection paths that had no counter at all are now counted,
+  including the `send_lookup_response` no-route drop
+  (`DiscoveryStats::resp_no_route`). Existing
+  direct counters at the bloom / discovery / forwarding sites are
+  retained alongside the new dispatch while the rollout is in progress;
+  a later change collapses the duplicate increment.
 - `pool_inbound` and `pool_outbound` counters on the TCP and Tor
   transport stats (`TcpStats`, `TorStats`). Per-direction accounting
   is updated at every pool-insert and receive-loop-exit site, plus on

@@ -25,6 +25,7 @@
       "resp_decode_error": 0,
       "resp_forwarded": 0,
       "resp_identity_miss": 0,
+      "resp_no_route": 0,
       "resp_proof_failed": 0,
       "resp_received": 0,
       "resp_timed_out": 0

@@ -8,6 +8,7 @@ use crate::NodeAddr;
 use crate::bloom::BloomFilter;
 use crate::protocol::{FilterAnnounce, FilterNack};
 
+use super::reject::{BloomReject, RejectReason};
 use super::{Node, NodeError};
 use std::collections::HashMap;
 use tracing::{debug, trace, warn};
@@ -210,6 +211,8 @@ impl Node {
             Ok(a) => a,
             Err(e) => {
                 self.stats_mut().bloom.decode_error += 1;
+                self.stats_mut()
+                    .record_reject(RejectReason::Bloom(BloomReject::DecodeError));
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed FilterAnnounce");
                 return;
             }
@@ -218,6 +221,8 @@ impl Node {
         // Validate
         if !announce.is_valid() {
             self.stats_mut().bloom.invalid += 1;
+            self.stats_mut()
+                .record_reject(RejectReason::Bloom(BloomReject::Invalid));
             debug!(from = %self.peer_display_name(from), "FilterAnnounce filter/size_class mismatch");
             return;
         }
@@ -227,6 +232,8 @@ impl Node {
             Some(p) => p,
             None => {
                 self.stats_mut().bloom.unknown_peer += 1;
+                self.stats_mut()
+                    .record_reject(RejectReason::Bloom(BloomReject::UnknownPeer));
                 debug!(from = %self.peer_display_name(from), "FilterAnnounce from unknown peer");
                 return;
             }
@@ -236,6 +243,8 @@ impl Node {
         // Reject stale/replay
         if announce.sequence <= current_seq {
             self.stats_mut().bloom.stale += 1;
+            self.stats_mut()
+                .record_reject(RejectReason::Bloom(BloomReject::Stale));
             trace!(
                 from = %self.peer_display_name(from),
                 received_seq = announce.sequence,
@@ -316,6 +325,8 @@ impl Node {
         let fpr = fill.powi(resolved_filter.hash_count() as i32);
         if fpr > max_fpr {
             self.stats_mut().bloom.fill_exceeded += 1;
+            self.stats_mut()
+                .record_reject(RejectReason::Bloom(BloomReject::FillExceeded));
             warn!(
                 from = %self.peer_display_name(from),
                 seq = announce.sequence,

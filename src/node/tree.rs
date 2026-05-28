@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::NodeAddr;
 use crate::protocol::TreeAnnounce;
 
+use super::reject::{RejectReason, TreeReject};
 use super::{Node, NodeError};
 use tracing::{debug, info, trace, warn};
 
@@ -177,6 +178,8 @@ impl Node {
         }
 
         if let Err(e) = announce.validate_semantics() {
+            self.stats_mut()
+                .record_reject(RejectReason::Tree(TreeReject::AncestryInvalid));
             warn!(
                 from = %self.peer_display_name(from),
                 error = %e,
@@ -253,6 +256,8 @@ impl Node {
             self.tree_state.recompute_coords();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after parent switch");
+                self.stats_mut()
+                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_via_node doc.
@@ -286,6 +291,8 @@ impl Node {
             self.tree_state.become_root();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign self-root declaration");
+                self.stats_mut()
+                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
@@ -322,6 +329,8 @@ impl Node {
                 if self.tree_state.handle_parent_lost(&peer_costs) {
                     if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                         warn!(error = %e, "Failed to sign declaration after loop detection");
+                        self.stats_mut()
+                            .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                         return;
                     }
                     // handle_parent_lost may promote to root OR find new parent;
@@ -362,6 +371,8 @@ impl Node {
             self.tree_state.recompute_coords();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after parent update");
+                self.stats_mut()
+                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_via_node doc.
@@ -454,6 +465,8 @@ impl Node {
             self.tree_state.recompute_coords();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
+                self.stats_mut()
+                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_via_node doc.
@@ -485,6 +498,8 @@ impl Node {
             self.tree_state.become_root();
             if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                 warn!(error = %e, "Failed to sign self-root declaration in periodic reeval");
+                self.stats_mut()
+                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
@@ -545,6 +560,8 @@ impl Node {
                 // Re-sign the new declaration
                 if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
                     warn!(error = %e, "Failed to sign declaration after parent loss");
+                    self.stats_mut()
+                        .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
                 }
                 info!(
                     new_root = %self.tree_state.root(),
