@@ -8,6 +8,7 @@
 use crate::NodeAddr;
 use crate::mmp::report::ReceiverReport;
 use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
+use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{EndToEndState, EpochSlot, SessionEntry};
 use crate::node::session_wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
@@ -188,6 +189,8 @@ impl Node {
                 Some(e) => e,
                 None => {
                     debug!(src = %self.peer_display_name(src_addr), "Encrypted session message for unknown session");
+                    self.stats_mut()
+                        .record_reject(RejectReason::Session(SessionReject::UnknownSession));
                     return;
                 }
             };
@@ -198,6 +201,8 @@ impl Node {
                     src = %self.peer_display_name(src_addr),
                     "Encrypted message but session not established (awaiting handshake completion)"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::BadState));
                 return;
             }
         }
@@ -631,6 +636,8 @@ impl Node {
             Some(e) => e,
             None => {
                 debug!(src = %self.peer_display_name(src_addr), "SessionAck for unknown session");
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::UnknownSession));
                 return;
             }
         };
@@ -715,6 +722,8 @@ impl Node {
         if !entry.is_initiating() {
             debug!(src = %self.peer_display_name(src_addr), "SessionAck but session not in Initiating state");
             self.sessions.insert(*src_addr, entry);
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::BadState));
             return;
         }
         let mut handshake = match entry.take_state() {
@@ -802,6 +811,8 @@ impl Node {
             Some(e) => e,
             None => {
                 debug!(src = %self.peer_display_name(src_addr), "SessionMsg3 for unknown session");
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::UnknownSession));
                 return;
             }
         };
@@ -849,6 +860,8 @@ impl Node {
         if !entry.is_awaiting_msg3() {
             debug!(src = %self.peer_display_name(src_addr), "SessionMsg3 but session not in AwaitingMsg3 state");
             self.sessions.insert(*src_addr, entry);
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::BadState));
             return;
         }
         let mut handshake = match entry.take_state() {
@@ -949,6 +962,8 @@ impl Node {
             Some(e) => e,
             None => {
                 debug!(src = %peer_name, "SessionReceiverReport for unknown session");
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::UnknownSession));
                 return;
             }
         };
@@ -1016,6 +1031,8 @@ impl Node {
             Some(e) => e,
             None => {
                 debug!(src = %peer_name, "PathMtuNotification for unknown session");
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::UnknownSession));
                 return;
             }
         };

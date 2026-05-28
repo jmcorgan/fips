@@ -6,6 +6,7 @@
 //! locally, and generates error signals on routing failure.
 
 use crate::NodeAddr;
+use crate::node::reject::{ForwardingReject, RejectReason};
 use crate::node::session_wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
     FspCommonPrefix, parse_encrypted_coords,
@@ -37,6 +38,8 @@ impl Node {
                 self.stats_mut()
                     .forwarding
                     .record_decode_error(payload.len());
+                self.stats_mut()
+                    .record_reject(RejectReason::Forwarding(ForwardingReject::DecodeError));
                 debug!(error = %e, "Malformed SessionDatagram");
                 return;
             }
@@ -48,6 +51,8 @@ impl Node {
             self.stats_mut()
                 .forwarding
                 .record_ttl_exhausted(payload.len());
+            self.stats_mut()
+                .record_reject(RejectReason::Forwarding(ForwardingReject::TtlExhausted));
             debug!(
                 src = %datagram_ref.src_addr,
                 dest = %datagram_ref.dest_addr,
@@ -84,6 +89,8 @@ impl Node {
                 self.stats_mut()
                     .forwarding
                     .record_drop_no_route(payload.len());
+                self.stats_mut()
+                    .record_reject(RejectReason::Forwarding(ForwardingReject::NoRoute));
                 debug!(
                     src = %self.peer_display_name(&datagram.src_addr),
                     dest = %self.peer_display_name(&datagram.dest_addr),
@@ -134,12 +141,16 @@ impl Node {
                     self.stats_mut()
                         .forwarding
                         .record_drop_mtu_exceeded(payload.len());
+                    self.stats_mut()
+                        .record_reject(RejectReason::Forwarding(ForwardingReject::MtuExceeded));
                     self.send_mtu_exceeded_error(&datagram, mtu).await;
                 }
                 _ => {
                     self.stats_mut()
                         .forwarding
                         .record_drop_send_error(payload.len());
+                    self.stats_mut()
+                        .record_reject(RejectReason::Forwarding(ForwardingReject::SendError));
                     debug!(
                         next_hop = %next_hop_addr,
                         dest = %datagram.dest_addr,

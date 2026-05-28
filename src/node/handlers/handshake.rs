@@ -2,6 +2,7 @@
 
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
+use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::node::{Node, NodeError};
 use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
@@ -78,6 +79,8 @@ impl Node {
         // deadlocks when the larger-NodeAddr side has accept_connections=false.
         if !self.should_admit_msg1(packet.transport_id, &packet.remote_addr) {
             self.msg1_rate_limiter.complete_handshake();
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -87,6 +90,8 @@ impl Node {
             None => {
                 self.msg1_rate_limiter.complete_handshake();
                 debug!("Invalid msg1 header");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -137,6 +142,9 @@ impl Node {
                             remote_addr = %packet.remote_addr,
                             "Duplicate msg1 but no stored msg2 to resend"
                         );
+                        self.stats_mut().record_reject(RejectReason::Handshake(
+                            HandshakeReject::UnknownConnection,
+                        ));
                     }
                     self.msg1_rate_limiter.complete_handshake();
                     return;
@@ -184,6 +192,8 @@ impl Node {
                     error = %e,
                     "Failed to process msg1"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -194,6 +204,8 @@ impl Node {
             None => {
                 self.msg1_rate_limiter.complete_handshake();
                 warn!("Identity not learned from msg1");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -232,6 +244,8 @@ impl Node {
                 // (not yet inserted into self.connections / self.links /
                 // self.addr_to_link), so the local drop suffices.
                 self.msg1_rate_limiter.complete_handshake();
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         }
@@ -287,6 +301,8 @@ impl Node {
                             self.connections.remove(&link_id);
                             self.links.remove(&link_id);
                             self.msg1_rate_limiter.complete_handshake();
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
                         }
 
@@ -306,6 +322,9 @@ impl Node {
                                 self.connections.remove(&link_id);
                                 self.links.remove(&link_id);
                                 self.msg1_rate_limiter.complete_handshake();
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                                 return;
                             }
                             // We lose — abandon our rekey, become responder below.
@@ -332,6 +351,9 @@ impl Node {
                             Err(e) => {
                                 warn!(error = %e, "Failed to allocate index for rekey");
                                 self.msg1_rate_limiter.complete_handshake();
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                                 return;
                             }
                         };
@@ -342,6 +364,9 @@ impl Node {
                                 warn!("Rekey msg1: no session from handshake");
                                 let _ = self.index_allocator.free(our_new_index);
                                 self.msg1_rate_limiter.complete_handshake();
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                                 return;
                             }
                         };
@@ -366,6 +391,9 @@ impl Node {
                                     );
                                     let _ = self.index_allocator.free(our_new_index);
                                     self.msg1_rate_limiter.complete_handshake();
+                                    self.stats_mut().record_reject(RejectReason::Handshake(
+                                        HandshakeReject::BadState,
+                                    ));
                                     return;
                                 }
                             }
@@ -432,6 +460,8 @@ impl Node {
             .is_err()
         {
             self.msg1_rate_limiter.complete_handshake();
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -444,6 +474,8 @@ impl Node {
             Err(e) => {
                 self.msg1_rate_limiter.complete_handshake();
                 warn!(error = %e, "Failed to allocate session index for inbound");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -494,6 +526,8 @@ impl Node {
                         .remove(&(packet.transport_id, packet.remote_addr));
                     let _ = self.index_allocator.free(our_index);
                     self.msg1_rate_limiter.complete_handshake();
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             }
@@ -583,6 +617,8 @@ impl Node {
                 // Clean up on promotion failure
                 self.remove_link(&link_id);
                 let _ = self.index_allocator.free(our_index);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             }
         }
 
@@ -620,6 +656,8 @@ impl Node {
             Some(h) => h,
             None => {
                 debug!("Invalid msg2 header");
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -633,6 +671,8 @@ impl Node {
                     receiver_idx = %header.receiver_idx,
                     "No pending outbound handshake for index"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                 return;
             }
         };
@@ -686,6 +726,8 @@ impl Node {
                                 }
                                 let _ = self.index_allocator.free(idx);
                             }
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                     }
                 }
@@ -694,8 +736,13 @@ impl Node {
                 return;
             }
 
-            // Not a rekey — stale pending_outbound entry
+            // Not a rekey — stale pending_outbound entry pointing at a
+            // removed connection and no rekey-in-progress peer claims the
+            // receiver_idx. State-machine inconsistency, not a fresh
+            // lookup miss.
             self.pending_outbound.remove(&key);
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -710,6 +757,8 @@ impl Node {
                     "Handshake completion failed"
                 );
                 conn.mark_failed();
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
 
@@ -720,6 +769,8 @@ impl Node {
                 Some(id) => *id,
                 None => {
                     warn!(link_id = %link_id, "No identity after handshake");
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             };
@@ -749,6 +800,8 @@ impl Node {
             if let Some(idx) = our_index {
                 let _ = self.index_allocator.free(idx);
             }
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
 
@@ -783,6 +836,8 @@ impl Node {
                 Some(c) => c,
                 None => {
                     self.pending_outbound.remove(&key);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
                 }
             };
@@ -801,6 +856,8 @@ impl Node {
                     _ => {
                         warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
                         self.pending_outbound.remove(&key);
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
                 };
@@ -961,6 +1018,8 @@ impl Node {
                     error = %e,
                     "Failed to promote connection"
                 );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             }
         }
     }
