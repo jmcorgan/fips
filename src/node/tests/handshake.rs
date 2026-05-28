@@ -1152,7 +1152,7 @@ async fn test_should_admit_msg1_rejects_fresh_when_accept_off() {
     assert!(!node.should_admit_msg1(transport_id, &addr));
 }
 
-/// ISSUE-2026-0004 regression test: `should_admit_msg1` admits rekey/restart
+/// Regression test: `should_admit_msg1` admits rekey/restart
 /// msg1 from a peer with an existing link even when the transport has
 /// accept_connections=false. Without this, the dual-init tie-breaker
 /// deadlocks (the larger-NodeAddr side drops the winner's rekey msg1).
@@ -1224,7 +1224,8 @@ async fn test_should_admit_msg1_admits_rekey_when_udp_accept_off() {
 }
 
 /// Regression test for the udp.outbound_only rekey loop observed in
-/// production 2026-04-30 (parallel to ISSUE-2026-0004).
+/// production 2026-04-30 (parallel to the rekey/restart admission case
+/// above).
 ///
 /// Production scenario: nomad runs `udp.outbound_only=true` with peer
 /// core-vm configured by hostname (`core-vm.tail65015.ts.net:2121`).
