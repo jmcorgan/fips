@@ -15,6 +15,7 @@ mod handlers;
 mod lifecycle;
 mod rate_limit;
 pub(crate) mod reject;
+mod reloadable;
 mod retry;
 mod routing_error_rate_limit;
 pub(crate) mod session;
@@ -28,6 +29,7 @@ pub(crate) mod wire;
 
 use self::discovery_rate_limit::{DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use self::rate_limit::HandshakeRateLimiter;
+use self::reloadable::Reloadable;
 use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 
 /// Half-range of the symmetric jitter applied to the per-session rekey timer.
@@ -519,8 +521,9 @@ pub struct Node {
 
     // === Host Map ===
     /// Static hostname → npub mapping for DNS resolution.
-    /// Built at construction from peer aliases and /etc/fips/hosts.
-    host_map: Arc<HostMap>,
+    /// Built at construction from peer aliases and /etc/fips/hosts, and
+    /// published through a lock-free snapshot for the display path.
+    host_map: reloadable::HostMapReloadable,
 
     /// Off-task FMP-encrypt + UDP-send worker pool. Unix-only —
     /// the worker issues direct sendmmsg(2) / sendmsg+UDP_GSO calls
@@ -614,13 +617,9 @@ impl Node {
         let forward_min_interval_secs = config.node.discovery.forward_min_interval_secs;
 
         let base_host_map = HostMap::from_peer_configs(config.peers());
-        let mut host_map = base_host_map.clone();
         let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
-        let hosts_file = HostMap::load_hosts_file(std::path::Path::new(
-            crate::upper::hosts::DEFAULT_HOSTS_PATH,
-        ));
-        host_map.merge(hosts_file);
-        let host_map = Arc::new(host_map);
+        let host_map =
+            reloadable::HostMapReloadable::new(base_host_map.clone(), hosts_path.clone());
         let peer_acl = acl::PeerAclReloader::with_alias_sources(
             std::path::PathBuf::from(acl::DEFAULT_PEERS_ALLOW_PATH),
             std::path::PathBuf::from(acl::DEFAULT_PEERS_DENY_PATH),
@@ -765,16 +764,14 @@ impl Node {
         let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
 
         let base_host_map = HostMap::from_peer_configs(config.peers());
-        let mut host_map = base_host_map.clone();
-        host_map.merge(HostMap::load_hosts_file(std::path::Path::new(
-            crate::upper::hosts::DEFAULT_HOSTS_PATH,
-        )));
-        let host_map = Arc::new(host_map);
+        let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
+        let host_map =
+            reloadable::HostMapReloadable::new(base_host_map.clone(), hosts_path.clone());
         let peer_acl = acl::PeerAclReloader::with_alias_sources(
             std::path::PathBuf::from(acl::DEFAULT_PEERS_ALLOW_PATH),
             std::path::PathBuf::from(acl::DEFAULT_PEERS_DENY_PATH),
             base_host_map,
-            std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH),
+            hosts_path,
         );
 
         #[cfg(unix)]
@@ -1105,7 +1102,8 @@ impl Node {
     /// 4. Session endpoint's short npub (end-to-end, may not be direct peer)
     /// 5. Truncated NodeAddr hex (unknown address)
     pub(crate) fn peer_display_name(&self, addr: &NodeAddr) -> String {
-        if let Some(hostname) = self.host_map.lookup_hostname(addr) {
+        let hosts = self.host_map.load();
+        if let Some(hostname) = hosts.lookup_hostname(addr) {
             return hostname.to_string();
         }
         if let Some(name) = self.peer_aliases.get(addr) {

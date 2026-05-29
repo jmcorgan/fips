@@ -35,6 +35,7 @@ portable-atomic = { version = "1", features = ["std"] }
 
 nostr = { version = "0.44", features = ["std", "nip59"] }
 nostr-sdk = "0.44"
+arc-swap = "1"
 
 [target.'cfg(unix)'.dependencies]
 tun = { version = "0.8.7", features = ["async"] }
