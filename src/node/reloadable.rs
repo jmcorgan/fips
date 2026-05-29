@@ -30,6 +30,25 @@
 //! source degrades to an empty/base snapshot plus a warning), so callers have
 //! nothing to handle. The return flag reports only whether the snapshot was
 //! replaced, which is all the tick loop needs for logging.
+//!
+//! # What is and isn't `Reloadable`
+//!
+//! Two node-owned resources are deliberately *not* `Reloadable` because
+//! neither has a "re-read from a backing source" concept:
+//!
+//! - `path_mtu_lookup` is an event-driven cache (`Arc<RwLock<HashMap>>`)
+//!   populated from observed path-MTU discovery traffic, not loaded from a
+//!   file. There is nothing to poll. (Its read side could adopt the same
+//!   lock-free `ArcSwap` shape in the future, but that is an optimization, not
+//!   a reload.)
+//! - `nostr_discovery` is an async spawned subsystem, not a snapshot of disk
+//!   state.
+//!
+//! Both [`HostMapReloadable`] and the peer ACL reloader currently stat
+//! `/etc/fips/hosts` independently each tick (the ACL reloader embeds its own
+//! hosts reloader for alias resolution). A single small-file `stat` per tick
+//! is cheap, so the duplicate is left in place; collapsing the two onto a
+//! single shared mtime observation is a possible future cleanup.
 
 use std::sync::Arc;
 
@@ -50,10 +69,8 @@ pub trait Reloadable: Send {
     /// changed. I/O errors are absorbed internally (degrading to an
     /// empty/base snapshot with a warning) rather than surfaced.
     ///
-    /// Not yet driven from the node tick — the host map snapshot is still
-    /// taken once at construction and not polled. Wiring the periodic poll
-    /// into the tick is a follow-up.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Driven once per node tick from the rx loop, alongside the other
+    /// reloadable resources.
     async fn reload(&mut self) -> bool;
 
     /// Acquire a lock-free guard over the current snapshot.
@@ -73,15 +90,12 @@ pub struct HostMapReloadable {
     /// Reader-facing effective snapshot (base merged with hosts file).
     snapshot: arc_swap::ArcSwap<HostMap>,
     /// Base map from peer-config aliases (never changes). Read only by
-    /// `reload`, which is not yet driven from the node tick.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// `reload` on the tick task.
     base: HostMap,
     /// Path to the operator hosts file. Read only by `reload`.
-    #[cfg_attr(not(test), allow(dead_code))]
     path: std::path::PathBuf,
     /// Last observed modification time of the hosts file (`None` if absent).
     /// Read only by `reload`.
-    #[cfg_attr(not(test), allow(dead_code))]
     last_mtime: Option<std::time::SystemTime>,
 }
 

@@ -1093,6 +1093,13 @@ impl Node {
         self.identity.npub()
     }
 
+    /// Reload the host map if the backing `/etc/fips/hosts` file changed.
+    ///
+    /// Returns `true` if a new snapshot was published.
+    pub(crate) async fn reload_host_map(&mut self) -> bool {
+        self.host_map.reload().await
+    }
+
     /// Return a human-readable display name for a NodeAddr.
     ///
     /// Lookup order:

@@ -251,7 +251,15 @@ impl Node {
                 _ = tick.tick() => {
                     self.check_timeouts();
                     let now_ms = Self::now_ms();
-                    self.reload_peer_acl();
+                    self.reload_peer_acl().await;
+                    // The host map hot-reloads on the same tick as the ACL. It
+                    // is polled separately from `reload_peer_acl` because the
+                    // ACL's embedded alias reloader and this snapshot are
+                    // distinct resources; the `path_mtu_lookup` cache and the
+                    // `nostr_discovery` subsystem are deliberately excluded
+                    // from `Reloadable` since neither reloads from a backing
+                    // file (see `node::reloadable`).
+                    self.reload_host_map().await;
                     self.poll_pending_connects().await;
                     self.poll_nostr_discovery().await;
                     self.resend_pending_handshakes(now_ms).await;

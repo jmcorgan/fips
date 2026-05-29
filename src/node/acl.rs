@@ -9,6 +9,7 @@
 //! evaluated first, an allowlist match overrides a denylist match for the
 //! same peer.
 
+use crate::node::reloadable::Reloadable;
 use crate::node::{Node, NodeError};
 use crate::transport::{TransportAddr, TransportId};
 use crate::upper::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader, file_mtime};
@@ -17,6 +18,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
@@ -283,8 +285,16 @@ impl PeerAcl {
 }
 
 /// Tracks peer ACL files and reloads them on mtime changes.
+///
+/// Follows the canonical Arc-wrapper template from [`Reloadable`]: the
+/// reader-facing [`PeerAcl`] snapshot is published through an
+/// [`arc_swap::ArcSwap`] so the authorization hot path reads it without
+/// locking, while the reloader's change-detection state (file mtimes, the
+/// embedded hosts reloader) is touched only by [`Reloadable::reload`] on the
+/// single node tick task.
 pub struct PeerAclReloader {
-    acl: PeerAcl,
+    /// Reader-facing effective ACL snapshot.
+    acl: arc_swap::ArcSwap<PeerAcl>,
     hosts: HostMapReloader,
     allow_path: PathBuf,
     deny_path: PathBuf,
@@ -328,7 +338,7 @@ impl PeerAclReloader {
         let acl = PeerAcl::load_files_with_hosts(&allow_path, &deny_path, hosts.hosts());
 
         Self {
-            acl,
+            acl: arc_swap::ArcSwap::from(Arc::new(acl)),
             hosts,
             allow_path,
             deny_path,
@@ -337,30 +347,34 @@ impl PeerAclReloader {
         }
     }
 
-    /// Get the current ACL.
-    pub fn acl(&self) -> &PeerAcl {
-        &self.acl
+    /// Acquire a lock-free guard over the current ACL snapshot.
+    pub fn acl(&self) -> arc_swap::Guard<Arc<PeerAcl>> {
+        self.load()
     }
 
     /// Return a human-readable snapshot of the loaded ACL state.
     pub fn status(&self) -> PeerAclStatus {
+        let acl = self.acl.load();
         PeerAclStatus {
             allow_file: self.allow_path.display().to_string(),
             deny_file: self.deny_path.display().to_string(),
-            enforcement_active: !self.acl.is_empty(),
-            effective_mode: self.acl.effective_mode().to_string(),
-            default_decision: self.acl.default_decision().to_string(),
-            allow_all: self.acl.allow_all,
-            deny_all: self.acl.deny_all,
-            allow_file_entries: self.acl.allow_file_entries(),
-            deny_file_entries: self.acl.deny_file_entries(),
-            allow_entries: self.acl.allow_entries(),
-            deny_entries: self.acl.deny_entries(),
+            enforcement_active: !acl.is_empty(),
+            effective_mode: acl.effective_mode().to_string(),
+            default_decision: acl.default_decision().to_string(),
+            allow_all: acl.allow_all,
+            deny_all: acl.deny_all,
+            allow_file_entries: acl.allow_file_entries(),
+            deny_file_entries: acl.deny_file_entries(),
+            allow_entries: acl.allow_entries(),
+            deny_entries: acl.deny_entries(),
         }
     }
+}
 
-    /// Check whether ACL or hosts alias sources changed and reload if needed.
-    pub fn check_reload(&mut self) -> bool {
+impl Reloadable for PeerAclReloader {
+    type Snapshot = PeerAcl;
+
+    async fn reload(&mut self) -> bool {
         let allow_mtime = file_mtime(&self.allow_path);
         let deny_mtime = file_mtime(&self.deny_path);
         let hosts_changed = self.hosts.check_reload();
@@ -374,27 +388,32 @@ impl PeerAclReloader {
 
         self.last_allow_mtime = allow_mtime;
         self.last_deny_mtime = deny_mtime;
-        self.acl =
+        let new_acl =
             PeerAcl::load_files_with_hosts(&self.allow_path, &self.deny_path, self.hosts.hosts());
 
         info!(
             allow_file = %self.allow_path.display(),
             deny_file = %self.deny_path.display(),
-            allow_entries = self.acl.allow.len(),
-            deny_entries = self.acl.deny.len(),
+            allow_entries = new_acl.allow.len(),
+            deny_entries = new_acl.deny.len(),
             alias_entries = self.hosts.hosts().len(),
-            allow_all = self.acl.allow_all,
-            deny_all = self.acl.deny_all,
+            allow_all = new_acl.allow_all,
+            deny_all = new_acl.deny_all,
             "Reloaded peer ACL files"
         );
+        self.acl.store(Arc::new(new_acl));
         true
+    }
+
+    fn load(&self) -> arc_swap::Guard<Arc<PeerAcl>> {
+        self.acl.load()
     }
 }
 
 impl Node {
     /// Reload the peer ACL if the ACL or hosts files changed.
-    pub(crate) fn reload_peer_acl(&mut self) -> bool {
-        self.peer_acl.check_reload()
+    pub(crate) async fn reload_peer_acl(&mut self) -> bool {
+        self.peer_acl.reload().await
     }
 
     /// Return a control-plane snapshot of the current peer ACL.
@@ -747,20 +766,20 @@ mod tests {
         assert_eq!(acl.check(&test_peer(&npub)), PeerAclDecision::AllowList);
     }
 
-    #[test]
-    fn test_acl_reloader_detects_change() {
+    #[tokio::test]
+    async fn test_acl_reloader_detects_change() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
         let denied = test_npub();
 
         let mut reloader = PeerAclReloader::with_paths(allow.clone(), deny.clone());
-        assert!(!reloader.check_reload());
+        assert!(!reloader.reload().await);
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(&deny, format!("{denied}\n")).unwrap();
 
-        assert!(reloader.check_reload());
+        assert!(reloader.reload().await);
         assert_eq!(
             reloader
                 .acl()
@@ -769,8 +788,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_acl_reloader_detects_allow_file_removal() {
+    #[tokio::test]
+    async fn test_acl_reloader_detects_allow_file_removal() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
@@ -786,7 +805,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::remove_file(&allow).unwrap();
 
-        assert!(reloader.check_reload());
+        assert!(reloader.reload().await);
         assert!(reloader.acl().is_empty());
         assert_eq!(
             reloader.acl().check(&test_peer(&allowed)),
@@ -892,8 +911,8 @@ mod tests {
         assert_eq!(acl.check(&peer), PeerAclDecision::AllowList);
     }
 
-    #[test]
-    fn test_acl_reloader_detects_hosts_change_for_alias_entry() {
+    #[tokio::test]
+    async fn test_acl_reloader_detects_hosts_change_for_alias_entry() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
@@ -909,7 +928,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(&hosts, format!("node-a {npub}\n")).unwrap();
 
-        assert!(reloader.check_reload());
+        assert!(reloader.reload().await);
         assert_eq!(
             reloader.acl().allow_file_entries(),
             vec!["node-a".to_string()]
@@ -923,8 +942,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_acl_reloader_detects_hosts_removal_for_alias_entry() {
+    #[tokio::test]
+    async fn test_acl_reloader_detects_hosts_removal_for_alias_entry() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
@@ -944,7 +963,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::remove_file(&hosts).unwrap();
 
-        assert!(reloader.check_reload());
+        assert!(reloader.reload().await);
         assert!(reloader.acl().is_empty());
         assert_eq!(
             reloader.acl().check(&test_peer(&npub)),

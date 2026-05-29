@@ -1,7 +1,9 @@
 use super::*;
 use crate::ReceivedPacket;
 use crate::node::acl::PeerAclReloader;
+use crate::node::reloadable::HostMapReloadable;
 use crate::node::wire::build_msg2;
+use crate::upper::hosts::HostMap;
 use crate::utils::index::SessionIndex;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,7 +31,7 @@ async fn test_outbound_connect_denied_by_denylist() {
     let (dir, mut node) = make_acl_node();
     let denied = Identity::generate();
     std::fs::write(deny_path(&dir), format!("{}\n", denied.npub())).unwrap();
-    node.reload_peer_acl();
+    node.reload_peer_acl().await;
 
     let result = node
         .initiate_connection(
@@ -94,7 +96,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let wire_msg2 = build_msg2(our_index_b, our_index_a, &noise_msg2);
 
     std::fs::write(deny_path(&dir), format!("{}\n", node_b.npub())).unwrap();
-    assert!(node_a.reload_peer_acl());
+    assert!(node_a.reload_peer_acl().await);
 
     let packet = ReceivedPacket::with_timestamp(transport_id, remote_addr, wire_msg2, 1100);
     node_a.handle_msg2(packet).await;
@@ -141,7 +143,7 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
         format!("{}\n", node_a.npub()),
     )
     .unwrap();
-    assert!(node_b.reload_peer_acl());
+    assert!(node_b.reload_peer_acl().await);
 
     let transport_id_a = TransportId::new(1);
     let transport_id_b = TransportId::new(1);
@@ -261,12 +263,38 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
 }
 
 #[tokio::test]
+async fn test_host_map_hot_reloads_from_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let hosts_path = dir.path().join("hosts");
+
+    let mut node = Node::new(Config::new()).unwrap();
+    node.host_map = HostMapReloadable::new(HostMap::new(), hosts_path.clone());
+
+    let peer = Identity::generate();
+    let peer_addr = *PeerIdentity::from_pubkey_full(peer.pubkey_full()).node_addr();
+
+    // No hosts file yet: the display name is not the alias.
+    assert_ne!(node.peer_display_name(&peer_addr), "gateway");
+    assert!(!node.reload_host_map().await);
+
+    // Write a hosts entry and let the tick-driven reload pick it up.
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(&hosts_path, format!("gateway   {}\n", peer.npub())).unwrap();
+
+    assert!(node.reload_host_map().await);
+    assert_eq!(node.peer_display_name(&peer_addr), "gateway");
+
+    // No further change: reload reports nothing replaced.
+    assert!(!node.reload_host_map().await);
+}
+
+#[tokio::test]
 async fn test_outbound_connect_not_denied_by_allowlist_miss() {
     let (dir, mut node) = make_acl_node();
     let denied = Identity::generate();
     let allowed = Identity::generate();
     std::fs::write(allow_path(&dir), format!("{}\n", allowed.npub())).unwrap();
-    node.reload_peer_acl();
+    node.reload_peer_acl().await;
 
     let result = node
         .initiate_connection(
