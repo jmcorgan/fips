@@ -63,6 +63,8 @@ services:
     profiles: ["mesh"]
     container_name: fips-node-c
     hostname: node-c
+    environment:
+      - RUST_LOG=info,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs/mesh/node-c.yaml:/etc/fips/fips.yaml:ro

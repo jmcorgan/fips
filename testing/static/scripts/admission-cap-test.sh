@@ -1,17 +1,24 @@
 #!/bin/bash
-# Integration test for the inbound max_peers admission gate.
+# Integration test for the inbound max_peers admission cap (Noise XX / next).
 #
-# Verifies the silent-drop behavior of the early-gate in handle_msg1 at
-# scale, using the mesh topology with one node's node.max_peers lowered
-# to 1. This forces 2 of node-c's 3 configured peers (b, d, e) into a
-# sustained denied state, and asserts via tcpdump that no Msg2 responses
-# go back to those denied peers across a 60s capture window.
+# Verifies the cap holds under sustained denied-peer load, using the mesh
+# topology with one node's node.limits.max_peers lowered to 1. This forces
+# 2 of node-c's 3 configured peers (b, d, e) into a sustained denied state.
+#
+# Unlike the IK version on maint/master — which gates at handle_msg1 before
+# Msg2 and asserts "no Msg2 to denied peers" — on Noise XX the identity is
+# not known until Msg3, so Msg1/Msg2/Msg3 all cross the wire before the cap
+# can act. Moreover, because the cap'd node also dials its configured peers
+# (auto_connect), denied peers match the early handle_msg3 gate's
+# is_pending_outbound bypass and the cap is enforced by the late
+# promote_connection check. The test therefore asserts a path-agnostic
+# cap-holds invariant rather than a wire-size discriminator:
 #
 # Tested behavior:
-#   - Denied peers DO arrive at the cap'd node (inbound FMP-IK Msg1, 84 B)
-#   - Cap'd node sends NO Msg2 responses (104 B) to denied peers
+#   - Denied peers keep re-initiating handshakes (sustained inbound UDP)
+#   - No denied peer is ever promoted to an active session
+#   - The daemon actively refuses over-cap promotions (enforcement events)
 #   - Cap'd node maintains exactly max_peers active sessions
-#   - Admitted peer's session stays healthy throughout the window
 #
 # Usage:
 #   ./admission-cap-test.sh                Run the test (containers must be up)
@@ -161,26 +168,31 @@ wait $LOAD_PID 2>/dev/null || true
 captured=$(wc -l < "$CAP_FILE")
 info "captured $captured tcpdump lines → $CAP_FILE"
 
-# ── Phase 3: per-denied-peer wire-level assertion ────────────────────
-info "phase 3: per-denied-peer assertion (inbound Msg1 > 0, outbound Msg2 == 0)"
+# ── Phase 3: per-denied-peer cap-holds assertion ─────────────────────
+# Size-agnostic: the XX handshake message sizes differ from IK and may
+# change, so we only need evidence that each denied peer keeps trying and
+# is never promoted.
+info "phase 3: per-denied-peer assertion (sustained inbound retries > 0, not promoted)"
 OVERALL=0
-TOTAL_MSG1_IN=0
-TOTAL_MSG2_OUT=0
+TOTAL_IN=0
+FINAL_PEERS=$(docker exec fips-node-$CAP_NODE fipsctl show peers 2>/dev/null \
+    | grep -oE 'npub1[a-z0-9]+' | sort -u || true)
 for n in $DENIED; do
     n_ip=$(node_ip "$n")
-    # Inbound: src=n_ip:* → dst=cap_ip:2121; FMP-IK Msg1 wire size = 84 B
-    msg1_in=$(grep -cE "IP $n_ip\.[0-9]+ > $CAP_IP\.2121: UDP, length 84" "$CAP_FILE" || true)
-    # Outbound: src=cap_ip:2121 → dst=n_ip:*; FMP-IK Msg2 wire size = 104 B
-    msg2_out=$(grep -cE "IP $CAP_IP\.2121 > $n_ip\.[0-9]+: UDP, length 104" "$CAP_FILE" || true)
-    info "  node-$n ($n_ip): inbound Msg1 (len 84) = $msg1_in, outbound Msg2 (len 104) = $msg2_out"
-    TOTAL_MSG1_IN=$((TOTAL_MSG1_IN + msg1_in))
-    TOTAL_MSG2_OUT=$((TOTAL_MSG2_OUT + msg2_out))
-    if [ "$msg1_in" -eq 0 ]; then
-        info "    FAIL: expected inbound Msg1 retries from denied peer (peer not sustained-retrying?)"
+    n_npub=$(node_npub "$n")
+    # Sustained retry: any inbound UDP from the denied peer to the cap'd
+    # node, regardless of handshake message size.
+    in_count=$(grep -cE "IP $n_ip\.[0-9]+ > $CAP_IP\.2121:" "$CAP_FILE" || true)
+    promoted="no"
+    if echo "$FINAL_PEERS" | grep -q "$n_npub"; then promoted="yes"; fi
+    info "  node-$n ($n_ip): inbound packets = $in_count, promoted = $promoted"
+    TOTAL_IN=$((TOTAL_IN + in_count))
+    if [ "$in_count" -eq 0 ]; then
+        info "    FAIL: no inbound from denied peer (peer not sustained-retrying?)"
         OVERALL=1
     fi
-    if [ "$msg2_out" -gt 0 ]; then
-        info "    FAIL: silent-drop gate leaked — expected 0 outbound Msg2, got $msg2_out"
+    if [ "$promoted" = "yes" ]; then
+        info "    FAIL: denied peer was promoted to an active session — cap leaked"
         OVERALL=1
     fi
 done
@@ -189,17 +201,35 @@ done
 pc_final=$(docker exec fips-node-$CAP_NODE fipsctl show status 2>/dev/null \
     | grep -m1 peer_count | sed 's/.*: *//' | tr -d ',' || echo 0)
 info "node-$CAP_NODE final peer_count=$pc_final (expected $MAX_PEERS)"
-[ "$pc_final" = "$MAX_PEERS" ] || OVERALL=1
+[ "$pc_final" = "$MAX_PEERS" ] || { info "    FAIL: peer_count drifted from cap"; OVERALL=1; }
+
+# ── Phase 5: daemon actively refused over-cap promotions ─────────────
+# Path-agnostic enforcement evidence. The early handle_msg3 gate logs
+# "Silent-dropping Msg3 at max_peers cap" (debug); the late
+# promote_connection check logs "Failed to promote inbound connection"
+# (warn, "max peers exceeded"). In the mesh topology denied peers are
+# also dialed by the cap'd node, so the late check is the active enforcer
+# — but counting both keeps the test correct regardless of which path
+# fires (and survives a future change to the early gate).
+clogs=$(docker logs fips-node-$CAP_NODE 2>&1 || true)
+gate_drops=$(echo "$clogs" | grep -c "Silent-dropping Msg3 at max_peers cap" || true)
+late_rejects=$(echo "$clogs" | grep -c "Failed to promote inbound connection" || true)
+enforcement=$((gate_drops + late_rejects))
+info "enforcement events on node-$CAP_NODE: early-gate=$gate_drops, late-check=$late_rejects (total $enforcement)"
+[ "$enforcement" -gt 0 ] || { info "    FAIL: no cap-enforcement events observed in node-$CAP_NODE logs"; OVERALL=1; }
 
 if [ "$OVERALL" -eq 0 ]; then
-    pass "admission-cap: silent-drop gate verified at scale"
+    pass "admission-cap: cap holds under sustained denied-peer load"
     pass "  denied peers: $(echo $DENIED | wc -w), capture: ${CAPTURE_SECS}s"
-    pass "  total inbound Msg1 from denied: $TOTAL_MSG1_IN (sustained retries observed)"
-    pass "  total outbound Msg2 to denied:  $TOTAL_MSG2_OUT (silent-drop holds)"
+    pass "  total inbound from denied: $TOTAL_IN (sustained retries observed)"
+    pass "  cap enforcement events: $enforcement (early-gate $gate_drops + late-check $late_rejects)"
+    pass "  cap'd node held peer_count=$pc_final (max=$MAX_PEERS)"
     rm -f "$CAP_FILE"
     exit 0
 else
     info "--- tcpdump capture tail (last 50 lines) ---"
     tail -50 "$CAP_FILE"
+    info "--- node-$CAP_NODE log tail (last 30 lines) ---"
+    echo "$clogs" | tail -30
     fail "admission-cap: see failures above (capture preserved at $CAP_FILE)"
 fi

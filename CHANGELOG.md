@@ -323,7 +323,11 @@ with v0.3.x peers.
   the value is local CPU / allocation savings (no `ActivePeer` build,
   no `peers_by_index` insert, no link transition) and cleaner peer-
   side semantics — no fake-promotion whose subsequent data frames
-  fail decryption on this side.
+  fail decryption on this side. Note the known-peer / cross-connection
+  bypass also covers peers the node is itself dialing (e.g. configured
+  `auto_connect` peers): for those the cap is enforced by the retained
+  late check, so the early drop primarily benefits unsolicited inbound
+  peers the node is not contacting.
 - Mesh-size estimator (`compute_mesh_size`) no longer double-counts the
   parent's bloom cardinality during the transient cache window after a
   local parent-switch. Symptom: `fipsctl show status` / fipstop displayed
