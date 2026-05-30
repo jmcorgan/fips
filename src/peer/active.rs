@@ -17,6 +17,11 @@ use secp256k1::XOnlyPublicKey;
 use std::fmt;
 use std::time::Instant;
 
+/// Result of completing a rekey msg2 on the initiator (XX pattern):
+/// the XX msg3 bytes to send, the completed Noise session, and the remote
+/// peer's startup epoch (for peer-restart detection).
+type RekeyMsg2Completion = (Vec<u8>, NoiseSession, Option<[u8; 8]>);
+
 /// Draw a fresh per-session rekey jitter from `[-REKEY_JITTER_SECS, +REKEY_JITTER_SECS]`.
 fn draw_rekey_jitter() -> i64 {
     rand::rng().random_range(-REKEY_JITTER_SECS..=REKEY_JITTER_SECS)
@@ -625,6 +630,13 @@ impl ActivePeer {
         self.remote_epoch
     }
 
+    /// Update the remote peer's startup epoch after a successful in-place
+    /// rekey. Initial handshakes set this through `with_session`, but recovery
+    /// rekeys also exchange epochs and must keep restart detection current.
+    pub(crate) fn set_remote_epoch(&mut self, remote_epoch: Option<[u8; 8]>) {
+        self.remote_epoch = remote_epoch;
+    }
+
     // === Negotiated Profile ===
 
     /// Get peer's node profile.
@@ -1146,13 +1158,14 @@ impl ActivePeer {
     /// Complete the rekey by processing msg2 (initiator side, XX pattern).
     ///
     /// Takes the stored handshake state, reads XX msg2, generates XX msg3,
-    /// and returns (msg3_bytes, completed NoiseSession). Clears the
-    /// handshake-related fields but leaves rekey_our_index for
-    /// set_pending_session to use.
+    /// and returns (msg3_bytes, completed NoiseSession, remote startup epoch).
+    /// Clears the handshake-related fields but leaves rekey_our_index for
+    /// set_pending_session to use. The remote epoch is surfaced so the caller
+    /// can detect a peer restart (changed epoch) during recovery rekey.
     pub fn complete_rekey_msg2(
         &mut self,
         msg2_bytes: &[u8],
-    ) -> Result<(Vec<u8>, NoiseSession), NoiseError> {
+    ) -> Result<RekeyMsg2Completion, NoiseError> {
         let mut hs = self
             .rekey_handshake
             .take()
@@ -1171,6 +1184,10 @@ impl ActivePeer {
 
         hs.read_message_2(base_msg2)?;
 
+        // The remote static identity (and its startup epoch) is available once
+        // msg2 has been read; capture it for peer-restart detection.
+        let remote_epoch = hs.remote_epoch();
+
         // Must decrypt negotiation payload (if present) to keep hash chain
         // in sync, even though rekey doesn't use the negotiation result.
         if let Some(encrypted_neg) = extra {
@@ -1184,7 +1201,7 @@ impl ActivePeer {
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
 
-        Ok((msg3, session))
+        Ok((msg3, session, remote_epoch))
     }
 
     /// Complete the rekey by processing msg3 (responder side, XX pattern).

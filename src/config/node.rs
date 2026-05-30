@@ -219,6 +219,12 @@ pub struct DiscoveryConfig {
     /// Nostr-mediated overlay endpoint discovery.
     #[serde(default = "DiscoveryConfig::default_nostr")]
     pub nostr: NostrDiscoveryConfig,
+    /// mDNS / DNS-SD peer discovery on the local link. Identity surface
+    /// is a strict subset of what `nostr.advertise` already publishes
+    /// publicly, so there's no marginal privacy cost; the latency win
+    /// for same-LAN peers is large (sub-second pairing, no relay).
+    #[serde(default = "DiscoveryConfig::default_lan")]
+    pub lan: crate::discovery::lan::LanDiscoveryConfig,
 }
 
 impl Default for DiscoveryConfig {
@@ -231,6 +237,7 @@ impl Default for DiscoveryConfig {
             backoff_max_secs: 0,
             forward_min_interval_secs: 2,
             nostr: NostrDiscoveryConfig::default(),
+            lan: crate::discovery::lan::LanDiscoveryConfig::default(),
         }
     }
 }
@@ -256,6 +263,9 @@ impl DiscoveryConfig {
     }
     fn default_nostr() -> NostrDiscoveryConfig {
         NostrDiscoveryConfig::default()
+    }
+    fn default_lan() -> crate::discovery::lan::LanDiscoveryConfig {
+        crate::discovery::lan::LanDiscoveryConfig::default()
     }
 }
 

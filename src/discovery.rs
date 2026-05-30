@@ -6,6 +6,7 @@
 //! it hands the live socket and selected remote endpoint to FIPS so the
 //! existing Noise/FMP transport path can take over.
 
+pub mod lan;
 pub mod nostr;
 
 use crate::config::UdpConfig;

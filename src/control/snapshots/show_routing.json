@@ -11,6 +11,7 @@
       "req_backoff_suppressed": 0,
       "req_bloom_miss": 0,
       "req_decode_error": 0,
+      "req_dedup_cache_full": 0,
       "req_deduplicated": 0,
       "req_duplicate": 0,
       "req_fallback_forwarded": 0,

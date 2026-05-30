@@ -372,8 +372,18 @@ impl Node {
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
-                        Ok((msg3_bytes, session)) => {
+                        Ok((msg3_bytes, session, remote_epoch)) => {
                             let our_index = peer.rekey_our_index().unwrap_or(header.receiver_idx);
+                            // Detect a peer restart: the epoch carried in this
+                            // rekey msg2 differs from the one recorded at the
+                            // last handshake. Compute before updating the field.
+                            let remote_epoch_changed = matches!(
+                                (peer.remote_epoch(), remote_epoch),
+                                (Some(old), Some(new)) if old != new
+                            );
+                            if remote_epoch.is_some() {
+                                peer.set_remote_epoch(remote_epoch);
+                            }
 
                             // Send msg3 before setting pending session
                             let wire_msg3 = build_msg3(our_index, header.sender_idx, &msg3_bytes);
@@ -408,6 +418,26 @@ impl Node {
                                 if let Some(tid) = transport_id {
                                     self.peers_by_index
                                         .insert((tid, our_index.as_u32()), peer_node_addr);
+                                }
+
+                                // Peer restart detected during this rekey:
+                                // drop the stale FSP session-layer entry so the
+                                // session map does not linger out of sync with
+                                // the freshly rekeyed FMP link. Only after a
+                                // successful msg3 send (the rekey actually
+                                // completed); on a send failure the rekey is
+                                // abandoned above and no teardown is warranted.
+                                if remote_epoch_changed {
+                                    if self.sessions.remove(&peer_node_addr).is_some() {
+                                        debug!(
+                                            peer = %display_name,
+                                            "Cleared stale FSP session after peer restart during FMP rekey"
+                                        );
+                                    }
+                                    info!(
+                                        peer = %display_name,
+                                        "Peer restart detected during FMP rekey, replacing stale endpoint session"
+                                    );
                                 }
 
                                 debug!(
@@ -1539,9 +1569,15 @@ impl Node {
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
             let existing_link_id = existing_peer.link_id();
 
-            // Determine which connection wins
-            let this_wins =
-                cross_connection_winner(self.identity.node_addr(), &peer_node_addr, is_outbound);
+            let remote_epoch_changed = matches!((existing_peer.remote_epoch(), remote_epoch), (Some(old), Some(new)) if old != new);
+
+            // Determine which connection wins. A peer restart (different
+            // startup epoch) is not a normal cross-connection: the old link
+            // and FSP sessions are cryptographically stale, so the freshly
+            // authenticated connection must replace them regardless of the
+            // tie-breaker direction.
+            let this_wins = remote_epoch_changed
+                || cross_connection_winner(self.identity.node_addr(), &peer_node_addr, is_outbound);
 
             if this_wins {
                 // This connection wins, replace the existing peer
@@ -1567,6 +1603,21 @@ impl Node {
                     #[cfg(unix)]
                     self.unregister_decrypt_worker_session((old_tid, old_idx.as_u32()));
                     let _ = self.index_allocator.free(old_idx);
+                }
+
+                if remote_epoch_changed {
+                    if self.sessions.remove(&peer_node_addr).is_some() {
+                        debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            "Cleared stale FSP session after peer restart during promotion"
+                        );
+                    }
+                    info!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        winner_link = %link_id,
+                        loser_link = %loser_link_id,
+                        "Peer restart detected during promotion, replacing stale active peer"
+                    );
                 }
 
                 self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);

@@ -130,6 +130,7 @@ pub struct DiscoveryStats {
     pub req_received: u64,
     pub req_decode_error: u64,
     pub req_duplicate: u64,
+    pub req_dedup_cache_full: u64,
     pub req_target_is_us: u64,
     pub req_forwarded: u64,
     pub req_ttl_exhausted: u64,
@@ -156,6 +157,7 @@ impl DiscoveryStats {
         match reason {
             DiscoveryReject::ReqDecodeError => self.req_decode_error += 1,
             DiscoveryReject::ReqDuplicate => self.req_duplicate += 1,
+            DiscoveryReject::ReqDedupCacheFull => self.req_dedup_cache_full += 1,
             DiscoveryReject::ReqTtlExhausted => self.req_ttl_exhausted += 1,
             DiscoveryReject::RespDecodeError => self.resp_decode_error += 1,
             DiscoveryReject::RespIdentityMiss => self.resp_identity_miss += 1,
@@ -169,6 +171,7 @@ impl DiscoveryStats {
             req_received: self.req_received,
             req_decode_error: self.req_decode_error,
             req_duplicate: self.req_duplicate,
+            req_dedup_cache_full: self.req_dedup_cache_full,
             req_target_is_us: self.req_target_is_us,
             req_forwarded: self.req_forwarded,
             req_ttl_exhausted: self.req_ttl_exhausted,
@@ -607,6 +610,7 @@ pub struct DiscoveryStatsSnapshot {
     pub req_received: u64,
     pub req_decode_error: u64,
     pub req_duplicate: u64,
+    pub req_dedup_cache_full: u64,
     pub req_target_is_us: u64,
     pub req_forwarded: u64,
     pub req_ttl_exhausted: u64,
@@ -878,6 +882,13 @@ mod tests {
         let mut s = DiscoveryStats::default();
         s.record_reject(DiscoveryReject::ReqDuplicate);
         assert_eq!(s.req_duplicate, 1);
+    }
+
+    #[test]
+    fn discovery_stats_record_reject_req_dedup_cache_full() {
+        let mut s = DiscoveryStats::default();
+        s.record_reject(DiscoveryReject::ReqDedupCacheFull);
+        assert_eq!(s.req_dedup_cache_full, 1);
     }
 
     #[test]

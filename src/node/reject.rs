@@ -117,6 +117,10 @@ pub enum DiscoveryReject {
     /// Tracked via
     /// [`DiscoveryStats::req_duplicate`](crate::node::stats::DiscoveryStats).
     ReqDuplicate,
+    /// Request dedup cache (`recent_requests`) is at capacity, so the
+    /// `LookupRequest` is dropped without being forwarded. Tracked via
+    /// [`DiscoveryStats::req_dedup_cache_full`](crate::node::stats::DiscoveryStats).
+    ReqDedupCacheFull,
     /// Request arrived with TTL=0 — no more forwarding hops allowed.
     /// Tracked via
     /// [`DiscoveryStats::req_ttl_exhausted`](crate::node::stats::DiscoveryStats).
@@ -309,6 +313,7 @@ mod tests {
         let variants = [
             DiscoveryReject::ReqDecodeError,
             DiscoveryReject::ReqDuplicate,
+            DiscoveryReject::ReqDedupCacheFull,
             DiscoveryReject::ReqTtlExhausted,
             DiscoveryReject::RespDecodeError,
             DiscoveryReject::RespIdentityMiss,

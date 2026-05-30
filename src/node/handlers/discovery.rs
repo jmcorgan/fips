@@ -12,6 +12,8 @@ use crate::transport::{TransportAddr, TransportId};
 use crate::{NodeAddr, PeerIdentity};
 use tracing::{debug, info, trace, warn};
 
+const MAX_RECENT_DISCOVERY_REQUESTS: usize = 4096;
+
 impl Node {
     /// Handle an incoming LookupRequest from a peer.
     ///
@@ -37,6 +39,7 @@ impl Node {
         };
 
         let now_ms = Self::now_ms();
+        self.purge_expired_requests(now_ms);
 
         // Dedup: drop if we've already seen this request_id.
         // Also serves as loop protection — tree routing is loop-free,
@@ -53,12 +56,22 @@ impl Node {
             return;
         }
 
+        if self.recent_requests.len() >= MAX_RECENT_DISCOVERY_REQUESTS {
+            self.stats_mut()
+                .record_reject(RejectReason::Discovery(DiscoveryReject::ReqDedupCacheFull));
+            debug!(
+                request_id = request.request_id,
+                from = %self.peer_display_name(from),
+                recent_requests = self.recent_requests.len(),
+                max_recent_requests = MAX_RECENT_DISCOVERY_REQUESTS,
+                "Discovery request dedup cache full, dropping LookupRequest"
+            );
+            return;
+        }
+
         // Record for reverse-path forwarding and dedup
         self.recent_requests
             .insert(request.request_id, RecentRequest::new(*from, now_ms));
-
-        // Lazy purge expired entries
-        self.purge_expired_requests(now_ms);
 
         // Are we the target?
         if request.target == *self.node_addr() {

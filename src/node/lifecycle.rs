@@ -14,14 +14,185 @@ use crate::protocol::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
 use crate::{NodeAddr, PeerIdentity};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 const OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER: u64 = 2;
+const MAX_PARALLEL_PATH_CANDIDATES_PER_PEER: usize = 4;
+const MAX_DISCOVERY_CONNECTS_PER_TICK: usize = 16;
+
+fn socket_addr_families_compatible(local: SocketAddr, remote: SocketAddr) -> bool {
+    matches!(
+        (local, remote),
+        (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_))
+    )
+}
 
 impl Node {
+    /// Replace the runtime peer list.
+    ///
+    /// Newly added auto-connect peers are dialed immediately, removed peers
+    /// are dropped from retry bookkeeping, and existing peers get fresh
+    /// address hints without tearing down an active link. If an existing peer
+    /// is already connected and a new concrete candidate appears, FIPS starts
+    /// an alternate handshake in parallel; promotion switches only after that
+    /// handshake authenticates.
+    pub async fn update_peers(
+        &mut self,
+        new_peers: Vec<PeerConfig>,
+    ) -> Result<crate::node::UpdatePeersOutcome, NodeError> {
+        let mut new_by_addr: HashMap<NodeAddr, PeerConfig> =
+            HashMap::with_capacity(new_peers.len());
+        for peer in new_peers {
+            let identity =
+                PeerIdentity::from_npub(&peer.npub).map_err(|e| NodeError::InvalidPeerNpub {
+                    npub: peer.npub.clone(),
+                    reason: e.to_string(),
+                })?;
+            new_by_addr.insert(*identity.node_addr(), peer);
+        }
+
+        let current_by_addr: HashMap<NodeAddr, PeerConfig> = self
+            .config
+            .peers()
+            .iter()
+            .filter_map(|peer| {
+                PeerIdentity::from_npub(&peer.npub)
+                    .ok()
+                    .map(|identity| (*identity.node_addr(), peer.clone()))
+            })
+            .collect();
+
+        let new_addrs: HashSet<_> = new_by_addr.keys().copied().collect();
+        let current_addrs: HashSet<_> = current_by_addr.keys().copied().collect();
+
+        let removed: Vec<_> = current_addrs.difference(&new_addrs).copied().collect();
+        let added: Vec<_> = new_addrs.difference(&current_addrs).copied().collect();
+        let kept: Vec<_> = new_addrs.intersection(&current_addrs).copied().collect();
+
+        let mut outcome = crate::node::UpdatePeersOutcome::default();
+        let mut refresh_configs = Vec::new();
+
+        for node_addr in &removed {
+            if self.retry_pending.remove(node_addr).is_some() {
+                debug!(
+                    peer = %self.peer_display_name(node_addr),
+                    "Dropping retry entry for peer removed from runtime peer list"
+                );
+            }
+            self.peer_aliases.remove(node_addr);
+            outcome.removed += 1;
+        }
+
+        for node_addr in &kept {
+            let new_peer = &new_by_addr[node_addr];
+            let current_peer = &current_by_addr[node_addr];
+            let changed = new_peer.addresses != current_peer.addresses
+                || new_peer.alias != current_peer.alias
+                || new_peer.connect_policy != current_peer.connect_policy
+                || new_peer.auto_reconnect != current_peer.auto_reconnect
+                || new_peer.via_nostr != current_peer.via_nostr;
+
+            if changed {
+                outcome.updated += 1;
+                if let Some(state) = self.retry_pending.get_mut(node_addr) {
+                    state.peer_config = new_peer.clone();
+                    state.retry_after_ms = Self::now_ms();
+                }
+                if let Some(alias) = new_peer.alias.clone() {
+                    self.peer_aliases.insert(*node_addr, alias);
+                }
+            } else {
+                outcome.unchanged += 1;
+            }
+
+            if new_peer.is_auto_connect() && (!new_peer.addresses.is_empty() || new_peer.via_nostr)
+            {
+                refresh_configs.push(new_peer.clone());
+            }
+        }
+
+        let added_configs: Vec<_> = added
+            .iter()
+            .map(|node_addr| new_by_addr[node_addr].clone())
+            .collect();
+
+        self.config.peers = new_by_addr.into_values().collect();
+
+        for peer_config in added_configs {
+            outcome.added += 1;
+            let Ok(identity) = PeerIdentity::from_npub(&peer_config.npub) else {
+                continue;
+            };
+            let name = peer_config
+                .alias
+                .clone()
+                .unwrap_or_else(|| identity.short_npub());
+            self.peer_aliases.insert(*identity.node_addr(), name);
+            self.register_identity(*identity.node_addr(), identity.pubkey_full());
+
+            if peer_config.is_auto_connect()
+                && let Err(err) = self.initiate_peer_connection(&peer_config).await
+            {
+                debug!(
+                    npub = %peer_config.npub,
+                    error = %err,
+                    "Failed to initiate connection for newly added runtime peer"
+                );
+                self.schedule_retry(*identity.node_addr(), Self::now_ms());
+            }
+        }
+
+        for peer_config in refresh_configs {
+            let Ok(identity) = PeerIdentity::from_npub(&peer_config.npub) else {
+                continue;
+            };
+            let node_addr = *identity.node_addr();
+
+            if self.peers.contains_key(&node_addr) {
+                match self
+                    .try_active_peer_alternative_addresses(&peer_config, identity)
+                    .await
+                {
+                    Ok(true) => debug!(
+                        peer = %self.peer_display_name(&node_addr),
+                        "Started alternate-path handshake for active peer"
+                    ),
+                    Ok(false) => {}
+                    Err(err) => debug!(
+                        npub = %peer_config.npub,
+                        error = %err,
+                        "Active peer alternate-path refresh did not start"
+                    ),
+                }
+            } else {
+                match self.initiate_peer_connection(&peer_config).await {
+                    Ok(()) => {
+                        if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+                            state.peer_config = peer_config;
+                            state.retry_after_ms = Self::now_ms().saturating_add(
+                                self.config.node.rate_limit.handshake_timeout_secs * 1000,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        debug!(
+                            npub = %peer_config.npub,
+                            error = %err,
+                            "Refreshed peer addresses did not initiate a direct connection"
+                        );
+                        self.schedule_retry(node_addr, Self::now_ms());
+                    }
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
     /// Initiate connections to configured static peers.
     ///
     /// For each peer configured with AutoConnect policy, creates a link and
@@ -140,6 +311,53 @@ impl Node {
                 .map(|id| id.node_addr() == peer_node_addr)
                 .unwrap_or(false)
         })
+    }
+
+    fn is_connecting_to_peer_on_path(
+        &self,
+        peer_node_addr: &NodeAddr,
+        transport_id: TransportId,
+        remote_addr: &TransportAddr,
+    ) -> bool {
+        self.connections.values().any(|conn| {
+            conn.expected_identity()
+                .map(|id| id.node_addr() == peer_node_addr)
+                .unwrap_or(false)
+                && conn.transport_id() == Some(transport_id)
+                && conn.source_addr() == Some(remote_addr)
+        }) || self.pending_connects.iter().any(|pending| {
+            pending
+                .peer_identity
+                .as_ref()
+                .is_some_and(|id| id.node_addr() == peer_node_addr)
+                && pending.transport_id == transport_id
+                && pending.remote_addr == *remote_addr
+        })
+    }
+
+    /// Find a UDP transport whose bound socket can send to `remote_addr`.
+    ///
+    /// LAN discovery can surface both IPv4 and IPv6 addresses for the same
+    /// service. A wildcard IPv4 socket cannot send to an IPv6 link-local
+    /// target, and vice versa, so callers must choose by socket family rather
+    /// than by transport type alone.
+    fn find_udp_transport_for_remote_addr(
+        &self,
+        remote_addr: SocketAddr,
+    ) -> Option<(TransportId, SocketAddr)> {
+        self.transports
+            .iter()
+            .filter(|(id, handle)| {
+                handle.transport_type().name == "udp"
+                    && handle.is_operational()
+                    && !self.bootstrap_transports.contains(id)
+            })
+            .filter_map(|(id, handle)| {
+                let local_addr = handle.local_addr()?;
+                socket_addr_families_compatible(local_addr, remote_addr)
+                    .then_some((*id, local_addr))
+            })
+            .min_by_key(|(id, _)| id.as_u32())
     }
 
     /// Initiate a connection to a peer on a specific transport and address.
@@ -361,7 +579,14 @@ impl Node {
     /// newly discovered peers (if auto_connect is enabled).
     pub(super) async fn poll_transport_discovery(&mut self) {
         // Collect discoveries first to avoid borrow conflict with self
-        let mut to_connect: Vec<(TransportId, TransportAddr, Option<PeerIdentity>)> = Vec::new();
+        // Anonymous (None-identity) entries carry `active_refresh = false`:
+        // they are first-contact links learned from an unauthenticated beacon,
+        // never an active-peer path refresh.
+        let mut to_connect: Vec<(TransportId, TransportAddr, Option<PeerIdentity>, bool)> =
+            Vec::new();
+        let mut queued_per_peer: HashMap<NodeAddr, usize> = HashMap::new();
+        let mut connect_budget = self.discovery_connect_budget();
+        let mut skipped_budget = 0usize;
 
         for (transport_id, transport) in &self.transports {
             if !transport.is_operational() {
@@ -386,21 +611,72 @@ impl Node {
                     if node_addr == *self.identity.node_addr() {
                         continue;
                     }
-                    // Skip if already connected
+
+                    let candidate_transport_id = *transport_id;
+                    let remote_addr = peer.addr;
+
                     if self.peers.contains_key(&node_addr) {
-                        continue;
-                    }
-                    // Skip if connection already in progress
-                    let connecting = self.connections.values().any(|c| {
-                        c.expected_identity()
-                            .map(|id| id.node_addr() == &node_addr)
-                            .unwrap_or(false)
-                    });
-                    if connecting {
+                        // Already an active peer: this is a path-refresh
+                        // candidate, subject to freshness and per-tick budgets.
+                        let transport_name = transport.transport_type().name;
+                        let candidate = PeerAddress::new(transport_name, remote_addr.to_string());
+                        if self.active_peer_candidate_is_fresh_enough_to_skip(
+                            &node_addr,
+                            std::slice::from_ref(&candidate),
+                        ) {
+                            continue;
+                        }
+                        if self.is_connecting_to_peer_on_path(
+                            &node_addr,
+                            candidate_transport_id,
+                            &remote_addr,
+                        ) {
+                            continue;
+                        }
+                        let queued_for_peer = queued_per_peer.get(&node_addr).copied().unwrap_or(0);
+                        if connect_budget == 0
+                            || self
+                                .path_candidate_attempt_budget(&node_addr)
+                                .saturating_sub(queued_for_peer)
+                                == 0
+                        {
+                            skipped_budget = skipped_budget.saturating_add(1);
+                            continue;
+                        }
+                        to_connect.push((
+                            candidate_transport_id,
+                            remote_addr,
+                            Some(identity),
+                            true,
+                        ));
+                        *queued_per_peer.entry(node_addr).or_default() += 1;
+                        connect_budget = connect_budget.saturating_sub(1);
                         continue;
                     }
 
-                    to_connect.push((*transport_id, peer.addr, Some(identity)));
+                    // New peer: skip if a connection is already in progress on
+                    // this path, then budget the first-contact attempt.
+                    if self.is_connecting_to_peer_on_path(
+                        &node_addr,
+                        candidate_transport_id,
+                        &remote_addr,
+                    ) {
+                        continue;
+                    }
+                    let queued_for_peer = queued_per_peer.get(&node_addr).copied().unwrap_or(0);
+                    if connect_budget == 0
+                        || self
+                            .path_candidate_attempt_budget(&node_addr)
+                            .saturating_sub(queued_for_peer)
+                            == 0
+                    {
+                        skipped_budget = skipped_budget.saturating_add(1);
+                        continue;
+                    }
+
+                    to_connect.push((candidate_transport_id, remote_addr, Some(identity), false));
+                    *queued_per_peer.entry(node_addr).or_default() += 1;
+                    connect_budget = connect_budget.saturating_sub(1);
                 } else {
                     // Anonymous discovery (shared-media beacon without identity).
                     // Identity will be learned from XX handshake msg2.
@@ -412,17 +688,26 @@ impl Node {
                         continue;
                     }
 
-                    to_connect.push((*transport_id, peer.addr, None));
+                    to_connect.push((*transport_id, peer.addr, None, false));
                 }
             }
         }
 
-        for (transport_id, remote_addr, identity) in to_connect {
+        if skipped_budget > 0 {
+            debug!(
+                skipped = skipped_budget,
+                queued = to_connect.len(),
+                "Transport discovery connect budget exhausted"
+            );
+        }
+
+        for (transport_id, remote_addr, identity, active_refresh) in to_connect {
             if let Some(ref id) = identity {
                 info!(
                     peer = %self.peer_display_name(id.node_addr()),
                     transport_id = %transport_id,
                     remote_addr = %remote_addr,
+                    active_refresh,
                     "Auto-connecting to discovered peer"
                 );
             } else {
@@ -634,6 +919,90 @@ impl Node {
         self.queue_open_discovery_retries(&bootstrap).await;
     }
 
+    /// Resolve the LAN-only discovery scope. Applications with explicit
+    /// connectivity config can set `node.discovery.lan.scope` without
+    /// changing the public Nostr discovery `app` tag. The older fallback
+    /// extracts a scope from the Nostr app tag used by default scoped
+    /// discovery.
+    pub(super) fn lan_discovery_scope(&self) -> Option<String> {
+        if let Some(scope) = self.config.node.discovery.lan.scope.as_deref() {
+            let scope = scope.trim();
+            if !scope.is_empty() {
+                return Some(scope.to_string());
+            }
+        }
+
+        let app = self.config.node.discovery.nostr.app.trim();
+        if app.is_empty() {
+            return None;
+        }
+        if let Some(rest) = app.strip_prefix("fips-overlay-v1:") {
+            let scope = rest.trim();
+            if scope.is_empty() {
+                None
+            } else {
+                Some(scope.to_string())
+            }
+        } else {
+            Some(app.to_string())
+        }
+    }
+
+    /// Drain mDNS-discovered peers and initiate Noise XX handshakes.
+    /// The handshake itself is the authentication — a spoofed mDNS advert
+    /// with someone else's npub fails the XX exchange and is dropped.
+    pub(super) async fn poll_lan_discovery(&mut self) {
+        let Some(runtime) = self.lan_discovery.clone() else {
+            return;
+        };
+        let events = runtime.drain_events().await;
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let crate::discovery::lan::LanEvent::Discovered(peer) = event;
+            let Some((transport_id, local_addr)) =
+                self.find_udp_transport_for_remote_addr(peer.addr)
+            else {
+                debug!(
+                    addr = %peer.addr,
+                    "lan: skip discovered peer with no compatible UDP transport"
+                );
+                continue;
+            };
+            let identity = match crate::PeerIdentity::from_npub(&peer.npub) {
+                Ok(id) => id,
+                Err(err) => {
+                    debug!(npub = %peer.npub, error = %err, "lan: skip bad npub");
+                    continue;
+                }
+            };
+            let peer_node_addr = *identity.node_addr();
+            let remote_addr = crate::transport::TransportAddr::from_string(&peer.addr.to_string());
+            if self.peers.contains_key(&peer_node_addr)
+                || self.is_connecting_to_peer(&peer_node_addr)
+            {
+                continue;
+            }
+            info!(
+                npub = %identity.short_npub(),
+                addr = %peer.addr,
+                local_addr = %local_addr,
+                "lan: initiating handshake to discovered peer"
+            );
+            if let Err(err) = self
+                .initiate_connection(transport_id, remote_addr, Some(identity))
+                .await
+            {
+                debug!(
+                    npub = %peer.npub,
+                    error = %err,
+                    "lan: failed to initiate connection to discovered peer"
+                );
+            }
+        }
+    }
+
     /// Poll pending transport connects and initiate handshakes for ready ones.
     ///
     /// Called from the tick handler. For each pending connect, queries the
@@ -832,6 +1201,47 @@ impl Node {
                 }
                 Err(err) => {
                     warn!(error = %err, "Failed to start Nostr overlay discovery");
+                }
+            }
+        }
+
+        // mDNS / DNS-SD LAN discovery. Independent of Nostr — runs even
+        // when Nostr is disabled, since it gives us sub-second pairing
+        // on the same link without any relay or NAT-traversal roundtrip.
+        if self.config.node.discovery.lan.enabled {
+            // Advertise the port of a non-bootstrap operational UDP transport.
+            // Bootstrap transports must be excluded (they are not the node's
+            // listening data-plane socket), and a stable selector (lowest
+            // TransportId) is used so the advertised port is deterministic
+            // across restarts rather than dependent on HashMap iteration
+            // order. This mirrors find_udp_transport_for_remote_addr.
+            let advertised_udp_port = self
+                .transports
+                .iter()
+                .filter(|(id, h)| {
+                    h.transport_type().name == "udp"
+                        && h.is_operational()
+                        && !self.bootstrap_transports.contains(id)
+                })
+                .filter_map(|(id, h)| h.local_addr().map(|addr| (*id, addr.port())))
+                .min_by_key(|(id, _)| id.as_u32())
+                .map(|(_, port)| port)
+                .unwrap_or(0);
+            let scope = self.lan_discovery_scope();
+            match crate::discovery::lan::LanDiscovery::start(
+                &self.identity,
+                scope,
+                advertised_udp_port,
+                self.config.node.discovery.lan.clone(),
+            )
+            .await
+            {
+                Ok(runtime) => {
+                    self.lan_discovery = Some(runtime);
+                    info!("LAN mDNS discovery enabled");
+                }
+                Err(err) => {
+                    debug!(error = %err, "LAN mDNS discovery not started");
                 }
             }
         }
@@ -1121,6 +1531,13 @@ impl Node {
             warn!(error = %e, "Failed to shutdown Nostr overlay discovery");
         }
 
+        // Tear down LAN mDNS responder + browser. Best-effort: the
+        // OS will eventually time the advert out via its TTL even if
+        // we don't get a clean unregister out before the daemon exits.
+        if let Some(lan) = self.lan_discovery.take() {
+            lan.shutdown().await;
+        }
+
         // Shutdown transports (they're packet producers)
         let transport_ids: Vec<_> = self.transports.keys().cloned().collect();
         for transport_id in transport_ids {
@@ -1271,8 +1688,10 @@ impl Node {
             .max()
             .unwrap_or(100)
             .saturating_add(1);
+        let seen_at_ms = Self::now_ms();
         for endpoint in endpoints {
-            let Some(candidate) = Self::overlay_endpoint_to_peer_address(&endpoint, next_priority)
+            let Some(candidate) =
+                Self::overlay_endpoint_to_peer_address(&endpoint, next_priority, seen_at_ms)
             else {
                 continue;
             };
@@ -1294,17 +1713,27 @@ impl Node {
     fn overlay_endpoint_to_peer_address(
         endpoint: &OverlayEndpointAdvert,
         priority: u8,
+        seen_at_ms: u64,
     ) -> Option<PeerAddress> {
         let transport = match endpoint.transport {
             OverlayTransportKind::Udp => "udp",
             OverlayTransportKind::Tcp => "tcp",
             OverlayTransportKind::Tor => "tor",
         };
-        Some(PeerAddress::with_priority(
-            transport,
-            endpoint.addr.clone(),
-            priority,
-        ))
+        Some(
+            PeerAddress::with_priority(transport, endpoint.addr.clone(), priority)
+                .with_seen_at_ms(seen_at_ms),
+        )
+    }
+
+    async fn request_nostr_bootstrap(&self, peer_config: &PeerConfig) -> bool {
+        let Some(bootstrap) = self.nostr_discovery.clone() else {
+            debug!(npub = %peer_config.npub, "No Nostr overlay runtime for udp:nat address");
+            return false;
+        };
+        bootstrap.request_connect(peer_config.clone()).await;
+        info!(npub = %peer_config.npub, "Started Nostr UDP NAT traversal attempt");
+        true
     }
 
     async fn attempt_peer_address_list(
@@ -1314,18 +1743,28 @@ impl Node {
         allow_bootstrap_nat: bool,
         addresses: &[PeerAddress],
     ) -> Result<(), NodeError> {
+        let peer_node_addr = *peer_identity.node_addr();
+        let mut attempted = 0usize;
+        let max_attempts = self.path_candidate_attempt_budget(&peer_node_addr);
+        if max_attempts == 0 {
+            return Err(NodeError::NoTransportForType(format!(
+                "no outbound slots available for {}",
+                peer_config.npub
+            )));
+        }
+
         for addr in addresses {
+            if attempted >= max_attempts {
+                break;
+            }
             if addr.transport == "udp" && addr.addr.eq_ignore_ascii_case("nat") {
                 if !allow_bootstrap_nat {
                     continue;
                 }
-                let Some(bootstrap) = self.nostr_discovery.clone() else {
-                    debug!(npub = %peer_config.npub, "No Nostr overlay runtime for udp:nat address");
-                    continue;
-                };
-                bootstrap.request_connect(peer_config.clone()).await;
-                info!(npub = %peer_config.npub, "Started Nostr UDP NAT traversal attempt");
-                return Ok(());
+                if self.request_nostr_bootstrap(peer_config).await {
+                    attempted = attempted.saturating_add(1);
+                }
+                continue;
             }
 
             let (transport_id, remote_addr) = if addr.transport == "ethernet" {
@@ -1363,25 +1802,45 @@ impl Node {
                     continue;
                 }
             } else {
-                let tid = match self.find_transport_for_type(&addr.transport) {
-                    Some(id) => id,
-                    None => {
-                        debug!(
-                            transport = %addr.transport,
-                            addr = %addr.addr,
-                            "No operational transport for address type"
-                        );
-                        continue;
+                let tid = if addr.transport == "udp"
+                    && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
+                {
+                    match self.find_udp_transport_for_remote_addr(remote_socket_addr) {
+                        Some((id, _)) => id,
+                        None => {
+                            debug!(
+                                transport = %addr.transport,
+                                addr = %addr.addr,
+                                "No compatible operational UDP transport for address"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    match self.find_transport_for_type(&addr.transport) {
+                        Some(id) => id,
+                        None => {
+                            debug!(
+                                transport = %addr.transport,
+                                addr = %addr.addr,
+                                "No operational transport for address type"
+                            );
+                            continue;
+                        }
                     }
                 };
                 (tid, TransportAddr::from_string(&addr.addr))
             };
 
+            if self.is_connecting_to_peer_on_path(&peer_node_addr, transport_id, &remote_addr) {
+                continue;
+            }
+
             match self
                 .initiate_connection(transport_id, remote_addr, Some(peer_identity))
                 .await
             {
-                Ok(()) => return Ok(()),
+                Ok(()) => attempted = attempted.saturating_add(1),
                 Err(e @ NodeError::AccessDenied(_)) => return Err(e),
                 Err(e) => {
                     debug!(
@@ -1392,6 +1851,10 @@ impl Node {
                     );
                 }
             }
+        }
+
+        if attempted > 0 {
+            return Ok(());
         }
 
         Err(NodeError::NoTransportForType(format!(
@@ -1470,6 +1933,21 @@ impl Node {
             }
 
             if configured_npubs.contains(&npub) {
+                if let Ok(peer_identity) = PeerIdentity::from_npub(&npub) {
+                    let node_addr = *peer_identity.node_addr();
+                    if !self.peers.contains_key(&node_addr)
+                        && !self.is_connecting_to_peer(&node_addr)
+                        && let Some(state) = self.retry_pending.get_mut(&node_addr)
+                        && state.retry_after_ms > now_ms
+                    {
+                        state.retry_after_ms = now_ms;
+                        debug!(
+                            peer = %peer_identity.short_npub(),
+                            caller = %caller,
+                            "open-discovery sweep: fresh configured-peer advert expedited retry"
+                        );
+                    }
+                }
                 skipped_configured = skipped_configured.saturating_add(1);
                 continue;
             }
@@ -1510,8 +1988,10 @@ impl Node {
 
             let mut addresses = Vec::new();
             let mut priority = 120u8;
+            let seen_at_ms = Self::now_ms();
             for endpoint in endpoints {
-                let Some(candidate) = Self::overlay_endpoint_to_peer_address(&endpoint, priority)
+                let Some(candidate) =
+                    Self::overlay_endpoint_to_peer_address(&endpoint, priority, seen_at_ms)
                 else {
                     continue;
                 };
@@ -1648,6 +2128,66 @@ impl Node {
         };
 
         connection_slots.min(peer_slots)
+    }
+
+    fn outbound_handshake_slots(&self) -> usize {
+        let used = self
+            .connections
+            .len()
+            .saturating_add(self.pending_connects.len());
+        if self.max_connections == 0 {
+            usize::MAX
+        } else {
+            self.max_connections.saturating_sub(used)
+        }
+    }
+
+    fn outbound_link_slots(&self) -> usize {
+        if self.max_links == 0 {
+            usize::MAX
+        } else {
+            self.max_links.saturating_sub(self.links.len())
+        }
+    }
+
+    fn path_candidate_attempt_budget(&self, peer_node_addr: &NodeAddr) -> usize {
+        if !self.peers.contains_key(peer_node_addr)
+            && self.max_peers > 0
+            && self.peers.len() >= self.max_peers
+        {
+            return 0;
+        }
+
+        let in_flight_for_peer = self
+            .connections
+            .values()
+            .filter(|conn| {
+                conn.expected_identity()
+                    .map(|identity| identity.node_addr() == peer_node_addr)
+                    .unwrap_or(false)
+            })
+            .count()
+            .saturating_add(
+                self.pending_connects
+                    .iter()
+                    .filter(|pending| {
+                        pending
+                            .peer_identity
+                            .as_ref()
+                            .is_some_and(|id| id.node_addr() == peer_node_addr)
+                    })
+                    .count(),
+            );
+
+        self.outbound_handshake_slots()
+            .min(self.outbound_link_slots())
+            .min(MAX_PARALLEL_PATH_CANDIDATES_PER_PEER.saturating_sub(in_flight_for_peer))
+    }
+
+    fn discovery_connect_budget(&self) -> usize {
+        self.outbound_handshake_slots()
+            .min(self.outbound_link_slots())
+            .min(MAX_DISCOVERY_CONNECTS_PER_TICK)
     }
 
     fn open_discovery_enqueue_budget(&self, configured_npubs: &HashSet<String>) -> usize {
@@ -1884,45 +2424,157 @@ impl Node {
             return Ok(());
         }
 
-        // Static-first dialing: avoid delaying configured address attempts on
-        // advert fetch/network latency.
-        let static_addresses = self.static_peer_addresses(peer_config);
+        let candidates = self.peer_address_candidates(peer_config).await;
+
+        if candidates.is_empty() {
+            return Err(NodeError::NoTransportForType(format!(
+                "no addresses known for {}",
+                peer_config.npub
+            )));
+        }
+
         if self
-            .attempt_peer_address_list(
-                peer_config,
-                peer_identity,
-                allow_bootstrap_nat,
-                &static_addresses,
-            )
+            .attempt_peer_address_list(peer_config, peer_identity, allow_bootstrap_nat, &candidates)
             .await
             .is_ok()
         {
             return Ok(());
         }
 
-        {
-            let fallback = self
-                .nostr_peer_fallback_addresses(peer_config, &static_addresses)
-                .await;
-            if !fallback.is_empty()
-                && self
-                    .attempt_peer_address_list(
-                        peer_config,
-                        peer_identity,
-                        allow_bootstrap_nat,
-                        &fallback,
-                    )
-                    .await
-                    .is_ok()
-            {
-                return Ok(());
-            }
-        }
-
         Err(NodeError::NoTransportForType(format!(
             "no operational transport for any of {}'s addresses",
             peer_config.npub
         )))
+    }
+
+    async fn try_active_peer_alternative_addresses(
+        &mut self,
+        peer_config: &PeerConfig,
+        peer_identity: PeerIdentity,
+    ) -> Result<bool, NodeError> {
+        let peer_node_addr = *peer_identity.node_addr();
+        let candidates = self.peer_address_candidates(peer_config).await;
+
+        if candidates.is_empty() {
+            return Err(NodeError::NoTransportForType(format!(
+                "no addresses known for {}",
+                peer_config.npub
+            )));
+        }
+
+        let concrete: Vec<_> = candidates
+            .into_iter()
+            .filter(|addr| !(addr.transport == "udp" && addr.addr.eq_ignore_ascii_case("nat")))
+            .collect();
+        let has_alternative = concrete
+            .iter()
+            .any(|addr| !self.active_peer_matches_candidate(&peer_node_addr, addr));
+        let attempt_candidates: Vec<_> = if has_alternative {
+            concrete
+                .into_iter()
+                .filter(|addr| !self.active_peer_matches_candidate(&peer_node_addr, addr))
+                .collect()
+        } else if self.active_peer_needs_same_path_refresh(&peer_node_addr) {
+            concrete
+        } else {
+            Vec::new()
+        };
+
+        if attempt_candidates.is_empty() {
+            return Ok(false);
+        }
+
+        self.attempt_peer_address_list(peer_config, peer_identity, false, &attempt_candidates)
+            .await?;
+        Ok(true)
+    }
+
+    async fn peer_address_candidates(&self, peer_config: &PeerConfig) -> Vec<PeerAddress> {
+        let static_addresses = self.static_peer_addresses(peer_config);
+        let overlay_addresses = self
+            .nostr_peer_fallback_addresses(peer_config, &static_addresses)
+            .await;
+
+        let mut candidates = Vec::with_capacity(overlay_addresses.len() + static_addresses.len());
+        for addr in overlay_addresses.into_iter().chain(static_addresses) {
+            if !candidates.iter().any(|existing: &PeerAddress| {
+                existing.transport == addr.transport && existing.addr == addr.addr
+            }) {
+                candidates.push(addr);
+            }
+        }
+
+        candidates.sort_by(|a, b| match (a.seen_at_ms, b.seen_at_ms) {
+            (Some(a_ts), Some(b_ts)) => b_ts.cmp(&a_ts),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        candidates
+    }
+
+    pub(in crate::node) fn active_peer_candidate_is_fresh_enough_to_skip(
+        &self,
+        peer_node_addr: &NodeAddr,
+        candidates: &[PeerAddress],
+    ) -> bool {
+        if !self.active_peer_matches_any_candidate(peer_node_addr, candidates) {
+            return false;
+        }
+        !self.active_peer_needs_same_path_refresh(peer_node_addr)
+    }
+
+    fn active_peer_needs_same_path_refresh(&self, peer_node_addr: &NodeAddr) -> bool {
+        let Some(peer) = self.peers.get(peer_node_addr) else {
+            return false;
+        };
+        let stale_after_ms = self
+            .config
+            .node
+            .heartbeat_interval_secs
+            .saturating_mul(1000)
+            .max(1000);
+        peer.idle_time(Self::now_ms()) > stale_after_ms
+    }
+
+    fn active_peer_matches_any_candidate(
+        &self,
+        peer_node_addr: &NodeAddr,
+        candidates: &[PeerAddress],
+    ) -> bool {
+        candidates
+            .iter()
+            .any(|candidate| self.active_peer_matches_candidate(peer_node_addr, candidate))
+    }
+
+    fn active_peer_matches_candidate(
+        &self,
+        peer_node_addr: &NodeAddr,
+        candidate: &PeerAddress,
+    ) -> bool {
+        let Some(peer) = self.peers.get(peer_node_addr) else {
+            return false;
+        };
+        let Some(current_addr) = peer.current_addr() else {
+            return false;
+        };
+        if peer
+            .transport_id()
+            .map(|id| self.bootstrap_transports.contains(&id))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let current_addr = current_addr.to_string();
+        let current_transport = peer
+            .transport_id()
+            .and_then(|id| self.transports.get(&id))
+            .map(|transport| transport.transport_type().name);
+
+        candidate.addr == current_addr
+            && current_transport
+                .map(|transport| transport == candidate.transport)
+                .unwrap_or(true)
     }
 
     // === Control API methods ===

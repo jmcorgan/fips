@@ -211,6 +211,19 @@ impl fmt::Display for NodeState {
     }
 }
 
+/// Reports what changed when replacing the runtime peer list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdatePeersOutcome {
+    /// Peers present in the new list but not the previous list.
+    pub added: usize,
+    /// Peers removed from the previous list.
+    pub removed: usize,
+    /// Existing peers whose configured behavior changed.
+    pub updated: usize,
+    /// Existing peers whose comparable config did not change.
+    pub unchanged: usize,
+}
+
 /// Recent request tracking for dedup and reverse-path forwarding.
 ///
 /// When a LookupRequest is forwarded through a node, the node stores the
@@ -471,6 +484,11 @@ pub struct Node {
 
     /// Optional Nostr/STUN overlay discovery coordinator for `udp:nat` peers.
     nostr_discovery: Option<Arc<crate::discovery::nostr::NostrDiscovery>>,
+    /// mDNS / DNS-SD responder + browser for local-link peer discovery.
+    /// Identity is unverified at this layer — the Noise XX handshake
+    /// initiated against an mDNS-observed endpoint is what proves the
+    /// peer holds the matching private key.
+    lan_discovery: Option<Arc<crate::discovery::lan::LanDiscovery>>,
     /// Wall-clock ms when Nostr discovery successfully started, used to
     /// schedule the one-shot startup advert sweep after a settle delay.
     /// `None` until discovery comes up; remains `None` if discovery is
@@ -690,6 +708,7 @@ impl Node {
             retry_pending: HashMap::new(),
             nostr_discovery: None,
             nostr_discovery_started_at_ms: None,
+            lan_discovery: None,
             startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             bootstrap_transport_npubs: HashMap::new(),
@@ -835,6 +854,7 @@ impl Node {
             retry_pending: HashMap::new(),
             nostr_discovery: None,
             nostr_discovery_started_at_ms: None,
+            lan_discovery: None,
             startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             bootstrap_transport_npubs: HashMap::new(),
