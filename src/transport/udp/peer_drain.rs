@@ -118,11 +118,20 @@ impl Drop for PeerRecvDrain {
         //    POLLIN, observe the stop flag, and exit.
         let byte = 1u8;
         let _ = unsafe { libc::write(self.stop_pipe_tx, &byte as *const _ as *const _, 1) };
-        // 3. Join — bounded wait, the thread exits within one
-        //    poll-iteration of seeing the stop flag.
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
+        // 3. Detach the std::thread (drop the JoinHandle without joining).
+        //    The drain loop sends inbound packets via
+        //    `packet_tx.blocking_send(...)` on a tokio mpsc Sender, which
+        //    internally parks the worker thread in `tokio::block_on` on
+        //    the *same* current_thread runtime that drives `rx_loop`.
+        //    `rx_loop` is the sole runtime driver. Calling `join()` here
+        //    blocks the runtime thread in libc futex — and the worker
+        //    being joined can only make progress (to observe the stop
+        //    flag + exit its loop) by being polled by that same runtime.
+        //    Circular wait; full daemon wedge. Dropping the JoinHandle
+        //    detaches the thread; the kernel-level libc::poll() sees the
+        //    self-pipe wake, the drain loop checks the stop flag, exits,
+        //    and the OS reclaims the thread state independently.
+        drop(self.join.take());
         // 4. Close the write end of the pipe.
         unsafe { libc::close(self.stop_pipe_tx) };
     }

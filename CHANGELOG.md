@@ -298,6 +298,25 @@ with v0.3.x peers.
   accounting change. Operators with mixed outbound + inbound
   deployments no longer see legitimate inbound peers rejected once
   outbound connections fill the pool past the configured cap.
+- `PeerRecvDrain::drop` no longer calls `std::thread::join` on the
+  worker thread. The drain worker uses `packet_tx.blocking_send(...)`
+  on a tokio mpsc Sender, which internally parks the worker in
+  `tokio::block_on` on the same `current_thread` runtime that drives
+  `rx_loop`. Joining synchronously from inside `remove_active_peer`
+  (which runs on the runtime thread, the runtime's sole driver)
+  produced a circular wait: rx_loop blocked in libc futex via
+  `Thread::join`, the worker unable to observe the stop flag because
+  the runtime that polls it is the very thread now blocked joining
+  it, and all other peer-drain workers parked on the same runtime
+  via `block_on`. Full daemon wedge, fipsctl unresponsive, SIGTERM
+  ignored. Trigger was peer-removal via the 30-s link-dead-timeout
+  cleanup path with any in-flight worker, with statistical likelihood
+  amplified by aggressive multi-npub-from-one-NAT reconnect patterns
+  but not bounded to them. Fix: detach the std::thread (drop the
+  `JoinHandle` without joining); the stop flag + self-pipe write
+  already signal the worker to exit; the kernel-level `libc::poll()`
+  inside the drain loop sees the wake, checks the flag, exits, and
+  the OS reclaims the thread state independently.
 - Outbound connection initiation now honors the `node.limits.max_peers`
   cap that was previously only checked on inbound msg1 admission. Four
   paths gated: auto-reconnect retries (`process_pending_retries`),
