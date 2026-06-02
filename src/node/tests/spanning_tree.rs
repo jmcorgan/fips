@@ -830,7 +830,7 @@ async fn test_rejects_tree_announce_with_inconsistent_root() {
         .coords()
         .unwrap()
         .clone();
-    let accepted_before = nodes[1].node.stats().tree.accepted;
+    let accepted_before = nodes[1].node.metrics().tree.accepted.get();
 
     // Use two fixed synthetic ancestors so the forged path is explicit:
     // - fake_parent = 00000000000000000000000000000000
@@ -875,7 +875,7 @@ async fn test_rejects_tree_announce_with_inconsistent_root() {
         nodes[1].node.tree_state().my_coords().depth(),
         current_depth
     );
-    assert_eq!(nodes[1].node.stats().tree.accepted, accepted_before);
+    assert_eq!(nodes[1].node.metrics().tree.accepted.get(), accepted_before);
     assert_eq!(
         nodes[1].node.get_peer(&a_addr).unwrap().coords().unwrap(),
         &peer_coords_before

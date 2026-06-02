@@ -66,7 +66,7 @@ impl Node {
     /// indefinitely). Does nothing if the peer is already connected or has
     /// a connection in progress.
     pub(super) fn schedule_retry(&mut self, node_addr: NodeAddr, now_ms: u64) {
-        let retry_cfg = &self.config.node.retry;
+        let retry_cfg = &self.config().node.retry;
         let max_retries = retry_cfg.max_retries;
         if max_retries == 0 {
             return;
@@ -105,7 +105,7 @@ impl Node {
         } else {
             // First failure — find the matching PeerConfig
             let peer_config = self
-                .config
+                .config()
                 .auto_connect_peers()
                 .find(|pc| {
                     PeerIdentity::from_npub(&pc.npub)
@@ -144,7 +144,7 @@ impl Node {
     pub(super) fn schedule_reconnect(&mut self, node_addr: NodeAddr, now_ms: u64) {
         // Find peer in auto-connect config
         let peer_config = self
-            .config
+            .config()
             .auto_connect_peers()
             .find(|pc| {
                 PeerIdentity::from_npub(&pc.npub)
@@ -165,8 +165,8 @@ impl Node {
             return;
         }
 
-        let base_interval_ms = self.config.node.retry.base_interval_secs * 1000;
-        let max_backoff_ms = self.config.node.retry.max_backoff_secs * 1000;
+        let base_interval_ms = self.config().node.retry.base_interval_secs * 1000;
+        let max_backoff_ms = self.config().node.retry.max_backoff_secs * 1000;
         let peer_name = self.peer_display_name(&node_addr);
 
         // If we already have accumulated backoff from previous failed attempts,
@@ -305,14 +305,14 @@ impl Node {
                     // succeeds, promote_connection() clears retry_pending. If
                     // it times out, check_timeouts() calls schedule_retry()
                     // which bumps the counter and applies proper backoff.
-                    let hs_timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
+                    let hs_timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
                     if let Some(state) = self.retry_pending.get_mut(&node_addr) {
                         state.retry_after_ms = now_ms + hs_timeout_ms;
                     }
                     debug!(
                         peer = %self.peer_display_name(&node_addr),
                         "Retry connection initiated, suppressing re-fire for {}s",
-                        self.config.node.rate_limit.handshake_timeout_secs,
+                        self.config().node.rate_limit.handshake_timeout_secs,
                     );
                 }
                 Err(e) => {

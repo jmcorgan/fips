@@ -17,7 +17,7 @@ impl Node {
         }
 
         let now_ms = Self::now_ms();
-        let timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
+        let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
 
         let stale: Vec<LinkId> = self
             .connections
@@ -93,9 +93,9 @@ impl Node {
             return;
         }
 
-        let max_resends = self.config.node.rate_limit.handshake_max_resends;
-        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config.node.rate_limit.handshake_resend_backoff;
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
+        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
 
         // Collect resend candidates: outbound, in SentMsg1, with stored msg1,
         // under max resends, and past the scheduled time.
@@ -165,11 +165,11 @@ impl Node {
             return;
         }
 
-        let timeout_ms = self.config.node.rate_limit.handshake_timeout_secs * 1000;
-        let max_resends = self.config.node.rate_limit.handshake_max_resends;
-        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config.node.rate_limit.handshake_resend_backoff;
-        let ttl = self.config.node.session.default_ttl;
+        let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
+        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
+        let ttl = self.config().node.session.default_ttl;
 
         // First pass: find timed-out sessions to remove
         let timed_out: Vec<crate::NodeAddr> = self
@@ -237,7 +237,7 @@ impl Node {
     /// Only targets sessions in the Established state. Initiating/AwaitingMsg3
     /// sessions are handled by the handshake timeout.
     pub(in crate::node) fn purge_idle_sessions(&mut self, now_ms: u64) {
-        let timeout_ms = self.config.node.session.idle_timeout_secs * 1000;
+        let timeout_ms = self.config().node.session.idle_timeout_secs * 1000;
         if timeout_ms == 0 {
             return; // disabled
         }

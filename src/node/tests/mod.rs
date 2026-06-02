@@ -24,7 +24,14 @@ mod tcp;
 mod unit;
 
 pub(super) fn make_node() -> Node {
-    let config = Config::new();
+    make_node_with(Config::new())
+}
+
+/// Build a test node from an explicit `Config`. Prefer this over poking
+/// `node.config.*` after construction: immutable fields are mirrored into the
+/// shared `NodeContext` at build time, so a post-construction field poke is
+/// invisible to any reader that has migrated onto the `config()` accessor.
+pub(super) fn make_node_with(config: Config) -> Node {
     Node::new(config).unwrap()
 }
 

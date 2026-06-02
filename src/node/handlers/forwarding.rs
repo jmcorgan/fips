@@ -6,7 +6,7 @@
 //! locally, and generates error signals on routing failure.
 
 use crate::NodeAddr;
-use crate::node::reject::{ForwardingReject, RejectReason};
+use crate::node::reject::ForwardingReject;
 use crate::node::session_wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
     FspCommonPrefix, parse_encrypted_coords,
@@ -30,16 +30,14 @@ impl Node {
         payload: &[u8],
         incoming_ce: bool,
     ) {
-        self.stats_mut().forwarding.record_received(payload.len());
+        self.metrics().forwarding.record_received(payload.len());
 
         let datagram_ref = match SessionDatagramRef::decode(payload) {
             Ok(dg) => dg,
             Err(e) => {
-                self.stats_mut()
+                self.metrics()
                     .forwarding
-                    .record_decode_error(payload.len());
-                self.stats_mut()
-                    .record_reject(RejectReason::Forwarding(ForwardingReject::DecodeError));
+                    .record_reject_bytes(ForwardingReject::DecodeError, payload.len());
                 debug!(error = %e, "Malformed SessionDatagram");
                 return;
             }
@@ -48,11 +46,9 @@ impl Node {
         // TTL enforcement: decrement for forwarding and drop only if the
         // received datagram was already exhausted.
         if datagram_ref.ttl == 0 {
-            self.stats_mut()
+            self.metrics()
                 .forwarding
-                .record_ttl_exhausted(payload.len());
-            self.stats_mut()
-                .record_reject(RejectReason::Forwarding(ForwardingReject::TtlExhausted));
+                .record_reject_bytes(ForwardingReject::TtlExhausted, payload.len());
             debug!(
                 src = %datagram_ref.src_addr,
                 dest = %datagram_ref.dest_addr,
@@ -68,7 +64,7 @@ impl Node {
         // Local delivery: dispatch to session layer handlers without
         // materializing an owned SessionDatagram payload Vec.
         if datagram_ref.dest_addr == *self.node_addr() {
-            self.stats_mut().forwarding.record_delivered(payload.len());
+            self.metrics().forwarding.record_delivered(payload.len());
             self.handle_session_payload(
                 &datagram_ref.src_addr,
                 datagram_ref.payload,
@@ -86,11 +82,9 @@ impl Node {
         let next_hop_addr = match self.find_next_hop(&datagram.dest_addr) {
             Some(peer) => *peer.node_addr(),
             None => {
-                self.stats_mut()
+                self.metrics()
                     .forwarding
-                    .record_drop_no_route(payload.len());
-                self.stats_mut()
-                    .record_reject(RejectReason::Forwarding(ForwardingReject::NoRoute));
+                    .record_reject_bytes(ForwardingReject::NoRoute, payload.len());
                 debug!(
                     src = %self.peer_display_name(&datagram.src_addr),
                     dest = %self.peer_display_name(&datagram.dest_addr),
@@ -118,7 +112,7 @@ impl Node {
         let local_congestion = self.detect_congestion(&next_hop_addr);
         let outgoing_ce = incoming_ce || local_congestion;
         if local_congestion {
-            self.stats_mut().congestion.record_congestion_detected();
+            self.metrics().congestion.congestion_detected.inc();
             let now = Instant::now();
             let should_log = self
                 .last_congestion_log
@@ -138,19 +132,15 @@ impl Node {
         {
             match e {
                 NodeError::MtuExceeded { mtu, .. } => {
-                    self.stats_mut()
+                    self.metrics()
                         .forwarding
-                        .record_drop_mtu_exceeded(payload.len());
-                    self.stats_mut()
-                        .record_reject(RejectReason::Forwarding(ForwardingReject::MtuExceeded));
+                        .record_reject_bytes(ForwardingReject::MtuExceeded, payload.len());
                     self.send_mtu_exceeded_error(&datagram, mtu).await;
                 }
                 _ => {
-                    self.stats_mut()
+                    self.metrics()
                         .forwarding
-                        .record_drop_send_error(payload.len());
-                    self.stats_mut()
-                        .record_reject(RejectReason::Forwarding(ForwardingReject::SendError));
+                        .record_reject_bytes(ForwardingReject::SendError, payload.len());
                     debug!(
                         next_hop = %next_hop_addr,
                         dest = %datagram.dest_addr,
@@ -160,9 +150,9 @@ impl Node {
                 }
             }
         } else {
-            self.stats_mut().forwarding.record_forwarded(encoded.len());
+            self.metrics().forwarding.record_forwarded(encoded.len());
             if outgoing_ce {
-                self.stats_mut().congestion.record_ce_forwarded();
+                self.metrics().congestion.ce_forwarded.inc();
             }
         }
     }
@@ -291,7 +281,7 @@ impl Node {
             };
 
         let error_dg = SessionDatagram::new(my_addr, original.src_addr, error_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         let next_hop_addr = match self.find_next_hop(&original.src_addr) {
             Some(peer) => *peer.node_addr(),
@@ -343,7 +333,7 @@ impl Node {
         let error_payload = MtuExceeded::new(original.dest_addr, my_addr, bottleneck_mtu).encode();
 
         let error_dg = SessionDatagram::new(my_addr, original.src_addr, error_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         let next_hop_addr = match self.find_next_hop(&original.src_addr) {
             Some(peer) => *peer.node_addr(),
@@ -385,7 +375,7 @@ impl Node {
     ///
     /// Returns `true` if any signal indicates congestion.
     pub(in crate::node) fn detect_congestion(&self, next_hop: &NodeAddr) -> bool {
-        if !self.config.node.ecn.enabled {
+        if !self.config().node.ecn.enabled {
             return false;
         }
         // Outgoing link MMP metrics
@@ -393,8 +383,8 @@ impl Node {
             && let Some(mmp) = peer.mmp()
         {
             let metrics = &mmp.metrics;
-            if metrics.loss_rate() >= self.config.node.ecn.loss_threshold
-                || metrics.etx >= self.config.node.ecn.etx_threshold
+            if metrics.loss_rate() >= self.config().node.ecn.loss_threshold
+                || metrics.etx >= self.config().node.ecn.etx_threshold
             {
                 return true;
             }
@@ -423,7 +413,7 @@ impl Node {
             }
         }
         for tid in new_drop_events {
-            self.stats_mut().congestion.record_kernel_drop_event();
+            self.metrics().congestion.kernel_drop_events.inc();
             warn!(
                 transport_id = tid.as_u32(),
                 "Kernel recv drops first observed on transport"

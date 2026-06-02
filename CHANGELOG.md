@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct counters at the bloom / discovery / forwarding sites are
   retained alongside the new dispatch while the rollout is in progress;
   a later change collapses the duplicate increment.
+- Internal atomic metric registry (`Arc<MetricsRegistry>`) that shadows
+  the plain-`u64` `NodeStats` counters, written alongside them and
+  validated by a whole-struct debug-build parity check. Covers the
+  forwarding receive counters, the full discovery counter family, and the
+  tree, bloom, congestion, and error-signal counter families so far, with
+  the hottest counters cache-line padded. Behavior-neutral:
+  `NodeStats` remains the serving path. Groundwork for sampling metrics
+  without contending the receive loop.
 - `Node::update_peers` for runtime peer-list refresh, returning an
   `UpdatePeersOutcome` summarizing added, removed, and retained peers.
   Re-derives active peer connections from a new peer configuration
@@ -179,6 +187,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Six discovery counters (`req_decode_error`, `req_duplicate`,
+  `req_ttl_exhausted`, `resp_decode_error`, `resp_identity_miss`,
+  `resp_proof_failed`) no longer double-count. Each was incremented both
+  by a direct bump and again through the typed reject dispatch; the
+  redundant direct increment is removed, so each counts once per event.
+- Six bloom counters (`decode_error`, `invalid`, `non_v1`,
+  `unknown_peer`, `stale`, `fill_exceeded`) no longer double-count. Each
+  was incremented both by a direct bump and again through the typed
+  reject dispatch; the redundant direct increment is removed, so each
+  counts once per event.
+- Five forwarding reject packet counters (`decode_error_packets`,
+  `ttl_exhausted_packets`, `drop_no_route_packets`,
+  `drop_mtu_exceeded_packets`, `drop_send_error_packets`) no longer
+  double-count. Each was incremented both by the byte-aware outcome
+  recorder and again through the typed reject dispatch; the two calls are
+  collapsed into a single byte-aware reject entry point, so packets and
+  bytes each count once per event.
 - A stale FSP (session-layer) session is now cleared when a peer
   restart is detected during FMP rekey or cross-connection promotion.
   Previously the old session could linger after the peer came back

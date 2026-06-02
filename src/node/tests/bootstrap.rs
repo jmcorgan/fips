@@ -292,11 +292,12 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
 
 #[tokio::test]
 async fn test_adopted_udp_inherits_mtu_from_single_primary_config() {
-    let mut node = make_node();
-    node.config.transports.udp = TransportInstances::Single(UdpConfig {
+    let mut config = Config::new();
+    config.transports.udp = TransportInstances::Single(UdpConfig {
         mtu: Some(1500),
         ..Default::default()
     });
+    let mut node = make_node_with(config);
 
     let (packet_tx, packet_rx) = packet_channel(64);
     node.packet_tx = Some(packet_tx);
@@ -329,7 +330,6 @@ async fn test_adopted_udp_inherits_mtu_from_single_primary_config() {
 
 #[tokio::test]
 async fn test_adopted_udp_inherits_mtu_from_named_primary_config() {
-    let mut node = make_node();
     let mut named = HashMap::new();
     named.insert(
         "primary".to_string(),
@@ -345,7 +345,9 @@ async fn test_adopted_udp_inherits_mtu_from_named_primary_config() {
             ..Default::default()
         },
     );
-    node.config.transports.udp = TransportInstances::Named(named);
+    let mut config = Config::new();
+    config.transports.udp = TransportInstances::Named(named);
+    let mut node = make_node_with(config);
 
     let (packet_tx, packet_rx) = packet_channel(64);
     node.packet_tx = Some(packet_tx);

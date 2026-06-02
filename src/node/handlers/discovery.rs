@@ -5,7 +5,7 @@
 //! bloom filter contains the target. TTL and request_id dedup provide
 //! safety bounds.
 
-use crate::node::reject::{DiscoveryReject, RejectReason};
+use crate::node::reject::DiscoveryReject;
 use crate::node::{Node, RecentRequest};
 use crate::protocol::{LookupRequest, LookupResponse};
 use crate::transport::{TransportAddr, TransportId};
@@ -25,14 +25,14 @@ impl Node {
     /// 5. If we're the target, generate and send response
     /// 6. If TTL > 0, forward to tree peers whose bloom filter matches
     pub(in crate::node) async fn handle_lookup_request(&mut self, from: &NodeAddr, payload: &[u8]) {
-        self.stats_mut().discovery.req_received += 1;
+        self.metrics().discovery.req_received.inc();
 
         let request = match LookupRequest::decode(payload) {
             Ok(req) => req,
             Err(e) => {
-                self.stats_mut().discovery.req_decode_error += 1;
-                self.stats_mut()
-                    .record_reject(RejectReason::Discovery(DiscoveryReject::ReqDecodeError));
+                self.metrics()
+                    .discovery
+                    .record_reject(DiscoveryReject::ReqDecodeError);
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupRequest");
                 return;
             }
@@ -45,9 +45,9 @@ impl Node {
         // Also serves as loop protection — tree routing is loop-free,
         // but request_id dedup catches edge cases during tree restructuring.
         if self.recent_requests.contains_key(&request.request_id) {
-            self.stats_mut().discovery.req_duplicate += 1;
-            self.stats_mut()
-                .record_reject(RejectReason::Discovery(DiscoveryReject::ReqDuplicate));
+            self.metrics()
+                .discovery
+                .record_reject(DiscoveryReject::ReqDuplicate);
             debug!(
                 request_id = request.request_id,
                 from = %self.peer_display_name(from),
@@ -57,8 +57,9 @@ impl Node {
         }
 
         if self.recent_requests.len() >= MAX_RECENT_DISCOVERY_REQUESTS {
-            self.stats_mut()
-                .record_reject(RejectReason::Discovery(DiscoveryReject::ReqDedupCacheFull));
+            self.metrics()
+                .discovery
+                .record_reject(DiscoveryReject::ReqDedupCacheFull);
             debug!(
                 request_id = request.request_id,
                 from = %self.peer_display_name(from),
@@ -75,7 +76,7 @@ impl Node {
 
         // Are we the target?
         if request.target == *self.node_addr() {
-            self.stats_mut().discovery.req_target_is_us += 1;
+            self.metrics().discovery.req_target_is_us.inc();
             debug!(
                 request_id = request.request_id,
                 origin = %self.peer_display_name(&request.origin),
@@ -93,7 +94,7 @@ impl Node {
                 .discovery_forward_limiter
                 .should_forward(&request.target)
             {
-                self.stats_mut().discovery.req_forward_rate_limited += 1;
+                self.metrics().discovery.req_forward_rate_limited.inc();
                 debug!(
                     request_id = request.request_id,
                     target = %self.peer_display_name(&request.target),
@@ -101,12 +102,12 @@ impl Node {
                 );
                 return;
             }
-            self.stats_mut().discovery.req_forwarded += 1;
+            self.metrics().discovery.req_forwarded.inc();
             self.forward_lookup_request(request).await;
         } else {
-            self.stats_mut().discovery.req_ttl_exhausted += 1;
-            self.stats_mut()
-                .record_reject(RejectReason::Discovery(DiscoveryReject::ReqTtlExhausted));
+            self.metrics()
+                .discovery
+                .record_reject(DiscoveryReject::ReqTtlExhausted);
             debug!(
                 request_id = request.request_id,
                 target = %self.peer_display_name(&request.target),
@@ -127,14 +128,14 @@ impl Node {
         from: &NodeAddr,
         payload: &[u8],
     ) {
-        self.stats_mut().discovery.resp_received += 1;
+        self.metrics().discovery.resp_received.inc();
 
         let mut response = match LookupResponse::decode(payload) {
             Ok(resp) => resp,
             Err(e) => {
-                self.stats_mut().discovery.resp_decode_error += 1;
-                self.stats_mut()
-                    .record_reject(RejectReason::Discovery(DiscoveryReject::RespDecodeError));
+                self.metrics()
+                    .discovery
+                    .record_reject(DiscoveryReject::RespDecodeError);
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupResponse");
                 return;
             }
@@ -158,7 +159,7 @@ impl Node {
 
             // Transit node: reverse-path forward
             let from_peer = recent.from_peer;
-            self.stats_mut().discovery.resp_forwarded += 1;
+            self.metrics().discovery.resp_forwarded.inc();
 
             // Apply path_mtu min() from the outgoing link's transport MTU
             self.apply_outgoing_link_mtu_to_response(&mut response, &from_peer);
@@ -190,9 +191,9 @@ impl Node {
             let target_pubkey = match self.lookup_by_fips_prefix(&prefix) {
                 Some((_addr, pubkey)) => pubkey,
                 None => {
-                    self.stats_mut().discovery.resp_identity_miss += 1;
-                    self.stats_mut()
-                        .record_reject(RejectReason::Discovery(DiscoveryReject::RespIdentityMiss));
+                    self.metrics()
+                        .discovery
+                        .record_reject(DiscoveryReject::RespIdentityMiss);
                     warn!(
                         request_id = response.request_id,
                         target = %self.peer_display_name(&target),
@@ -208,9 +209,9 @@ impl Node {
             let proof_data =
                 LookupResponse::proof_bytes(response.request_id, &target, &response.target_coords);
             if !peer_id.verify(&proof_data, &response.proof) {
-                self.stats_mut().discovery.resp_proof_failed += 1;
-                self.stats_mut()
-                    .record_reject(RejectReason::Discovery(DiscoveryReject::RespProofFailed));
+                self.metrics()
+                    .discovery
+                    .record_reject(DiscoveryReject::RespProofFailed);
                 warn!(
                     request_id = response.request_id,
                     target = %self.peer_display_name(&target),
@@ -219,7 +220,7 @@ impl Node {
                 return;
             }
 
-            self.stats_mut().discovery.resp_accepted += 1;
+            self.metrics().discovery.resp_accepted.inc();
 
             // Clear backoff on success — target is reachable
             self.discovery_backoff.record_success(&target);
@@ -265,10 +266,10 @@ impl Node {
             self.pending_lookups.remove(&target);
 
             // If an established session exists, reset the warmup counter.
+            let n = self.config().node.session.coords_warmup_packets;
             if let Some(entry) = self.sessions.get_mut(&target)
                 && entry.is_established()
             {
-                let n = self.config.node.session.coords_warmup_packets;
                 entry.set_coords_warmup_remaining(n);
                 debug!(
                     dest = %self.peer_display_name(&target),
@@ -315,8 +316,9 @@ impl Node {
                         origin = %self.peer_display_name(&request.origin),
                         "Cannot route LookupResponse: no reverse path or tree route to origin"
                     );
-                    self.stats_mut()
-                        .record_reject(RejectReason::Discovery(DiscoveryReject::RespNoRoute));
+                    self.metrics()
+                        .discovery
+                        .record_reject(DiscoveryReject::RespNoRoute);
                     return;
                 }
             }
@@ -380,7 +382,7 @@ impl Node {
                 .map(|(addr, _)| *addr)
                 .collect();
             if fallback.is_empty() {
-                self.stats_mut().discovery.req_no_tree_peer += 1;
+                self.metrics().discovery.req_no_tree_peer.inc();
                 trace!(
                     request_id = request.request_id,
                     "No eligible peers to forward LookupRequest"
@@ -393,7 +395,7 @@ impl Node {
         };
 
         if used_fallback {
-            self.stats_mut().discovery.req_fallback_forwarded += 1;
+            self.metrics().discovery.req_fallback_forwarded.inc();
             debug!(
                 request_id = request.request_id,
                 target = %self.peer_display_name(&request.target),
@@ -431,7 +433,7 @@ impl Node {
     /// The originator does NOT record the request_id in recent_requests,
     /// so when the response arrives, it's recognized as "our request".
     pub(in crate::node) async fn initiate_lookup(&mut self, target: &NodeAddr, ttl: u8) -> usize {
-        self.stats_mut().discovery.req_initiated += 1;
+        self.metrics().discovery.req_initiated.inc();
 
         let origin = *self.node_addr();
         let origin_coords = self.tree_state().my_coords().clone();
@@ -487,7 +489,7 @@ impl Node {
 
         // Dedup: any pending lookup means we are already trying.
         if self.pending_lookups.contains_key(dest) {
-            self.stats_mut().discovery.req_deduplicated += 1;
+            self.metrics().discovery.req_deduplicated.inc();
             debug!(
                 target_node = %self.peer_display_name(dest),
                 "Discovery lookup deduplicated, already pending"
@@ -498,7 +500,7 @@ impl Node {
         // Optional post-failure suppression. Defaults are 0/0 (inert);
         // operators can opt in by setting `node.discovery.backoff_*_secs`.
         if self.discovery_backoff.is_suppressed(dest) {
-            self.stats_mut().discovery.req_backoff_suppressed += 1;
+            self.metrics().discovery.req_backoff_suppressed.inc();
             debug!(
                 target_node = %self.peer_display_name(dest),
                 failures = self.discovery_backoff.failure_count(dest),
@@ -511,7 +513,7 @@ impl Node {
         // it's not in the mesh — skip the lookup and record as failure.
         let reachable = self.peers.values().any(|peer| peer.may_reach(dest));
         if !reachable {
-            self.stats_mut().discovery.req_bloom_miss += 1;
+            self.metrics().discovery.req_bloom_miss.inc();
             self.discovery_backoff.record_failure(dest);
             debug!(
                 target_node = %self.peer_display_name(dest),
@@ -522,7 +524,7 @@ impl Node {
 
         self.pending_lookups
             .insert(*dest, PendingLookup::new(now_ms));
-        let ttl = self.config.node.discovery.ttl;
+        let ttl = self.config().node.discovery.ttl;
         let sent = self.initiate_lookup(dest, ttl).await;
 
         // If no tree peers had the target, fail immediately
@@ -547,7 +549,7 @@ impl Node {
     /// - Otherwise: declare the destination unreachable, drop queued packets,
     ///   and emit ICMPv6 destination-unreachable for each.
     pub(in crate::node) async fn check_pending_lookups(&mut self, now_ms: u64) {
-        let timeouts = self.config.node.discovery.attempt_timeouts_secs.clone();
+        let timeouts = self.config().node.discovery.attempt_timeouts_secs.clone();
         let max_attempts = timeouts.len() as u8;
 
         // Collect targets needing action
@@ -573,7 +575,7 @@ impl Node {
                 entry.last_sent_ms = now_ms;
                 let attempt = entry.attempt;
 
-                let ttl = self.config.node.discovery.ttl;
+                let ttl = self.config().node.discovery.ttl;
                 let sent = self.initiate_lookup(&target, ttl).await;
                 if sent > 0 {
                     debug!(
@@ -587,7 +589,7 @@ impl Node {
 
         // Process timeouts
         for addr in to_timeout {
-            self.stats_mut().discovery.resp_timed_out += 1;
+            self.metrics().discovery.resp_timed_out.inc();
             self.pending_lookups.remove(&addr);
 
             // Record failure for optional backoff
@@ -623,7 +625,7 @@ impl Node {
 
     /// Remove expired entries from the recent_requests cache.
     fn purge_expired_requests(&mut self, current_time_ms: u64) {
-        let expiry_ms = self.config.node.discovery.recent_expiry_secs * 1000;
+        let expiry_ms = self.config().node.discovery.recent_expiry_secs * 1000;
         self.recent_requests
             .retain(|_, entry| !entry.is_expired(current_time_ms, expiry_ms));
     }

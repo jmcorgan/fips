@@ -7,7 +7,7 @@ use crate::NodeAddr;
 use crate::bloom::BloomFilter;
 use crate::protocol::FilterAnnounce;
 
-use super::reject::{BloomReject, RejectReason};
+use super::reject::BloomReject;
 use super::{Node, NodeError};
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -58,7 +58,7 @@ impl Node {
 
         // Check debounce
         if !self.bloom_state.should_send_update(peer_addr, now_ms) {
-            self.stats_mut().bloom.debounce_suppressed += 1;
+            self.metrics().bloom.debounce_suppressed.inc();
             // Either not pending or rate-limited; will retry on tick
             return Ok(());
         }
@@ -73,11 +73,11 @@ impl Node {
 
         // Send
         if let Err(e) = self.send_encrypted_link_message(peer_addr, &encoded).await {
-            self.stats_mut().bloom.send_failed += 1;
+            self.metrics().bloom.send_failed.inc();
             return Err(e);
         }
 
-        self.stats_mut().bloom.sent += 1;
+        self.metrics().bloom.sent.inc();
 
         // Self-plausibility check: WARN if our own outgoing filter is
         // above the antipoison cap. Independent detection signal if
@@ -85,7 +85,7 @@ impl Node {
         // despite M1. Rate-limited to once per 60s globally — outgoing
         // cadence can be per-tick during churn, and we want the
         // operator to see one clear message, not spam.
-        let max_fpr = self.config.node.bloom.max_inbound_fpr;
+        let max_fpr = self.config().node.bloom.max_inbound_fpr;
         let out_fill = sent_filter.fill_ratio();
         let out_fpr = out_fill.powi(sent_filter.hash_count() as i32);
         if out_fpr > max_fpr {
@@ -160,14 +160,12 @@ impl Node {
     /// 3. Store the filter on the peer
     /// 4. Mark other peers for outgoing filter update
     pub(super) async fn handle_filter_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
-        self.stats_mut().bloom.received += 1;
+        self.metrics().bloom.received.inc();
 
         let announce = match FilterAnnounce::decode(payload) {
             Ok(a) => a,
             Err(e) => {
-                self.stats_mut().bloom.decode_error += 1;
-                self.stats_mut()
-                    .record_reject(RejectReason::Bloom(BloomReject::DecodeError));
+                self.metrics().bloom.record_reject(BloomReject::DecodeError);
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed FilterAnnounce");
                 return;
             }
@@ -175,16 +173,12 @@ impl Node {
 
         // Validate
         if !announce.is_valid() {
-            self.stats_mut().bloom.invalid += 1;
-            self.stats_mut()
-                .record_reject(RejectReason::Bloom(BloomReject::Invalid));
+            self.metrics().bloom.record_reject(BloomReject::Invalid);
             debug!(from = %self.peer_display_name(from), "FilterAnnounce filter/size_class mismatch");
             return;
         }
         if !announce.is_v1_compliant() {
-            self.stats_mut().bloom.non_v1 += 1;
-            self.stats_mut()
-                .record_reject(RejectReason::Bloom(BloomReject::NonV1));
+            self.metrics().bloom.record_reject(BloomReject::NonV1);
             debug!(from = %self.peer_display_name(from), size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
             return;
         }
@@ -193,9 +187,7 @@ impl Node {
         let current_seq = match self.peers.get(from) {
             Some(peer) => peer.filter_sequence(),
             None => {
-                self.stats_mut().bloom.unknown_peer += 1;
-                self.stats_mut()
-                    .record_reject(RejectReason::Bloom(BloomReject::UnknownPeer));
+                self.metrics().bloom.record_reject(BloomReject::UnknownPeer);
                 debug!(from = %self.peer_display_name(from), "FilterAnnounce from unknown peer");
                 return;
             }
@@ -203,9 +195,7 @@ impl Node {
 
         // Reject stale/replay
         if announce.sequence <= current_seq {
-            self.stats_mut().bloom.stale += 1;
-            self.stats_mut()
-                .record_reject(RejectReason::Bloom(BloomReject::Stale));
+            self.metrics().bloom.record_reject(BloomReject::Stale);
             debug!(
                 from = %self.peer_display_name(from),
                 received_seq = announce.sequence,
@@ -221,13 +211,13 @@ impl Node {
         // untouched so the peer is not permanently silenced and an
         // on-path attacker cannot weaponize a single corrupted frame
         // to wipe a victim's contribution to aggregation.
-        let max_fpr = self.config.node.bloom.max_inbound_fpr;
+        let max_fpr = self.config().node.bloom.max_inbound_fpr;
         let fill = announce.filter.fill_ratio();
         let fpr = fill.powi(announce.filter.hash_count() as i32);
         if fpr > max_fpr {
-            self.stats_mut().bloom.fill_exceeded += 1;
-            self.stats_mut()
-                .record_reject(RejectReason::Bloom(BloomReject::FillExceeded));
+            self.metrics()
+                .bloom
+                .record_reject(BloomReject::FillExceeded);
             warn!(
                 from = %self.peer_display_name(from),
                 seq = announce.sequence,
@@ -239,7 +229,7 @@ impl Node {
             return;
         }
 
-        self.stats_mut().bloom.accepted += 1;
+        self.metrics().bloom.accepted.inc();
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

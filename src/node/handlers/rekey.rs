@@ -37,12 +37,12 @@ impl Node {
     /// - If the drain window has expired, clean up the previous session
     /// - If the rekey timer/counter fires, initiate a new handshake
     pub(in crate::node) async fn check_rekey(&mut self) {
-        if !self.config.node.rekey.enabled {
+        if !self.config().node.rekey.enabled {
             return;
         }
 
-        let rekey_after_secs = self.config.node.rekey.after_secs;
-        let rekey_after_messages = self.config.node.rekey.after_messages;
+        let rekey_after_secs = self.config().node.rekey.after_secs;
+        let rekey_after_messages = self.config().node.rekey.after_messages;
 
         // Collect peers that need action (to avoid borrow conflicts)
         let mut peers_to_cutover: Vec<NodeAddr> = Vec::new();
@@ -194,7 +194,7 @@ impl Node {
         };
 
         // Create IK initiator handshake directly (no PeerConnection)
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let mut hs = HandshakeState::new_initiator(our_keypair, peer_pubkey);
         hs.set_local_epoch(self.startup_epoch);
 
@@ -236,7 +236,7 @@ impl Node {
         }
 
         // Store handshake state on the ActivePeer (not a separate PeerConnection)
-        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let now_ms = Self::now_ms();
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.set_rekey_state(hs, our_index, wire_msg1, now_ms + resend_interval);
@@ -252,11 +252,11 @@ impl Node {
     /// Called from the tick loop. Uses the same resend interval and max
     /// resend count as initial handshakes.
     pub(in crate::node) async fn resend_pending_rekeys(&mut self, now_ms: u64) {
-        if !self.config.node.rekey.enabled {
+        if !self.config().node.rekey.enabled {
             return;
         }
 
-        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
 
         // Collect peers needing action
         let mut to_resend: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
@@ -323,14 +323,14 @@ impl Node {
     /// is safe — an abandoned cycle never leaves a divergent unsafe
     /// state.
     pub(in crate::node) async fn resend_pending_session_msg3(&mut self, now_ms: u64) {
-        if !self.config.node.rekey.enabled || self.sessions.is_empty() {
+        if !self.config().node.rekey.enabled || self.sessions.is_empty() {
             return;
         }
 
-        let interval_ms = self.config.node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config.node.rate_limit.handshake_resend_backoff;
-        let max_resends = self.config.node.rate_limit.handshake_max_resends;
-        let ttl = self.config.node.session.default_ttl;
+        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
+        let ttl = self.config().node.session.default_ttl;
         let my_addr = *self.node_addr();
 
         // Collect rekey initiators whose msg3 retransmission is due.
@@ -406,12 +406,12 @@ impl Node {
     /// `resend_pending_session_msg3`; its lifetime is tied to the
     /// responder receiving msg3, not to this initiator's cutover.
     pub(in crate::node) async fn check_session_rekey(&mut self) {
-        if !self.config.node.rekey.enabled {
+        if !self.config().node.rekey.enabled {
             return;
         }
 
-        let rekey_after_secs = self.config.node.rekey.after_secs;
-        let rekey_after_messages = self.config.node.rekey.after_messages;
+        let rekey_after_secs = self.config().node.rekey.after_secs;
+        let rekey_after_messages = self.config().node.rekey.after_messages;
         let now_ms = Self::now_ms();
         let drain_ms = DRAIN_WINDOW_SECS * 1000;
         let dampening_ms = REKEY_DAMPENING_SECS * 1000;
@@ -527,7 +527,7 @@ impl Node {
         let dest_pubkey = *entry.remote_pubkey();
 
         // Create Noise XK initiator handshake
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_xk_initiator(our_keypair, dest_pubkey);
         handshake.set_local_epoch(self.startup_epoch);
 
@@ -552,7 +552,7 @@ impl Node {
         // Send through the mesh
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, setup_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         if let Err(e) = self.send_session_datagram(&mut datagram).await {
             debug!(

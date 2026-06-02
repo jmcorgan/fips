@@ -6,6 +6,7 @@
 
 mod acl;
 mod bloom;
+mod context;
 #[cfg(unix)]
 pub(crate) mod decrypt_worker;
 mod discovery_rate_limit;
@@ -13,6 +14,7 @@ mod discovery_rate_limit;
 pub(crate) mod encrypt_worker;
 mod handlers;
 mod lifecycle;
+pub(crate) mod metrics;
 mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
@@ -308,6 +310,13 @@ pub struct Node {
     /// Loaded configuration.
     config: Config,
 
+    /// Shared immutable context bundle. A parallel, authoritative copy of the
+    /// effectively-immutable fields (config/identity/startup_epoch/started_at/
+    /// is_leaf_only/max_*), kept in lockstep with the `Node` fields via
+    /// `rebuild_context`. Readers migrate onto it in later sub-PRs; the
+    /// duplicated `Node` fields are removed once the last reader has moved.
+    context: Arc<context::NodeContext>,
+
     // === State ===
     /// Node operational state.
     state: NodeState,
@@ -398,6 +407,10 @@ pub struct Node {
     // === Node Statistics ===
     /// Routing, forwarding, discovery, and error signal counters.
     stats: stats::NodeStats,
+
+    /// Lock-free atomic metric counters. Shadows `stats` during the
+    /// counter migration; bumped alongside it with a parity check.
+    metrics: std::sync::Arc<metrics::MetricsRegistry>,
 
     /// Time-series history of node-level metrics (1s/1m rings).
     stats_history: stats_history::StatsHistory,
@@ -630,11 +643,24 @@ impl Node {
         let (decrypt_fallback_tx, decrypt_fallback_rx) =
             tokio::sync::mpsc::unbounded_channel::<decrypt_worker::DecryptWorkerEvent>();
 
+        let started_at = std::time::Instant::now();
+        let context = Arc::new(context::NodeContext::new(
+            Arc::new(config.clone()),
+            identity.clone(),
+            startup_epoch,
+            started_at,
+            is_leaf_only,
+            max_connections,
+            max_peers,
+            max_links,
+        ));
+
         Ok(Self {
             identity,
             startup_epoch,
-            started_at: std::time::Instant::now(),
+            started_at,
             config,
+            context,
             state: NodeState::Created,
             is_leaf_only,
             tree_state,
@@ -659,6 +685,7 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
+            metrics: std::sync::Arc::new(metrics::MetricsRegistry::new()),
             stats_history: stats_history::StatsHistory::new(),
             tun_state,
             tun_name: None,
@@ -776,11 +803,24 @@ impl Node {
         let (decrypt_fallback_tx, decrypt_fallback_rx) =
             tokio::sync::mpsc::unbounded_channel::<decrypt_worker::DecryptWorkerEvent>();
 
+        let started_at = std::time::Instant::now();
+        let context = Arc::new(context::NodeContext::new(
+            Arc::new(config.clone()),
+            identity.clone(),
+            startup_epoch,
+            started_at,
+            false,
+            max_connections,
+            max_peers,
+            max_links,
+        ));
+
         Ok(Self {
             identity,
             startup_epoch,
-            started_at: std::time::Instant::now(),
+            started_at,
             config,
+            context,
             state: NodeState::Created,
             is_leaf_only: false,
             tree_state,
@@ -805,6 +845,7 @@ impl Node {
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
+            metrics: std::sync::Arc::new(metrics::MetricsRegistry::new()),
             stats_history: stats_history::StatsHistory::new(),
             tun_state,
             tun_name: None,
@@ -862,6 +903,7 @@ impl Node {
         let mut node = Self::new(config)?;
         node.is_leaf_only = true;
         node.bloom_state = BloomState::leaf_only(*node.identity.node_addr());
+        node.rebuild_context();
         Ok(node)
     }
 
@@ -1079,7 +1121,7 @@ impl Node {
 
     /// Get this node's identity.
     pub fn identity(&self) -> &Identity {
-        &self.identity
+        &self.context.identity
     }
 
     /// Get this node's NodeAddr.
@@ -1129,7 +1171,25 @@ impl Node {
 
     /// Get the configuration.
     pub fn config(&self) -> &Config {
-        &self.config
+        self.context.config.as_ref()
+    }
+
+    /// Rebuild the shared [`context::NodeContext`] from the current `Node`
+    /// fields. Called after any mutation of a bundled field (`update_peers`,
+    /// the `set_max_*` setters) so `self.context` stays equal to the `Node`
+    /// fields it mirrors. Cheap — the only deep copy is the (rare) `Config`
+    /// clone.
+    fn rebuild_context(&mut self) {
+        self.context = Arc::new(context::NodeContext::new(
+            Arc::new(self.config.clone()),
+            self.identity.clone(),
+            self.startup_epoch,
+            self.started_at,
+            self.is_leaf_only,
+            self.max_connections,
+            self.max_peers,
+            self.max_links,
+        ));
     }
 
     /// Calculate the effective IPv6 MTU that can be sent over FIPS.
@@ -1183,7 +1243,7 @@ impl Node {
 
     /// Get the node uptime.
     pub fn uptime(&self) -> std::time::Duration {
-        self.started_at.elapsed()
+        self.context.started_at.elapsed()
     }
 
     /// Check if node is operational.
@@ -1193,7 +1253,7 @@ impl Node {
 
     /// Check if this is a leaf-only node.
     pub fn is_leaf_only(&self) -> bool {
-        self.is_leaf_only
+        self.context.is_leaf_only
     }
 
     // === Tree State ===
@@ -1339,6 +1399,11 @@ impl Node {
         &mut self.stats
     }
 
+    /// Get the atomic metric registry.
+    pub(crate) fn metrics(&self) -> &metrics::MetricsRegistry {
+        &self.metrics
+    }
+
     /// Get the stats history collector.
     pub fn stats_history(&self) -> &stats_history::StatsHistory {
         &self.stats_history
@@ -1347,7 +1412,7 @@ impl Node {
     /// Sample the current node state into the stats history ring.
     /// Called once per tick from the RX loop.
     pub(crate) fn record_stats_history(&mut self) {
-        let fwd = &self.stats.forwarding;
+        let fwd = &self.metrics.forwarding;
         let peers_with_mmp: Vec<f64> = self
             .peers
             .values()
@@ -1363,11 +1428,11 @@ impl Node {
             mesh_size: self.estimated_mesh_size,
             tree_depth: self.tree_state.my_coords().depth() as u32,
             peer_count: self.peers.len() as u64,
-            parent_switches_total: self.stats.tree.parent_switches,
-            bytes_in_total: fwd.received_bytes,
-            bytes_out_total: fwd.forwarded_bytes + fwd.originated_bytes,
-            packets_in_total: fwd.received_packets,
-            packets_out_total: fwd.forwarded_packets + fwd.originated_packets,
+            parent_switches_total: self.metrics.tree.parent_switches.get(),
+            bytes_in_total: fwd.received_bytes.get(),
+            bytes_out_total: fwd.forwarded_bytes.get() + fwd.originated_bytes.get(),
+            packets_in_total: fwd.received_packets.get(),
+            packets_out_total: fwd.forwarded_packets.get() + fwd.originated_packets.get(),
             loss_rate,
             active_sessions: self.sessions.len() as u64,
         };
@@ -1420,11 +1485,13 @@ impl Node {
     /// Set the maximum number of connections (handshake phase).
     pub fn set_max_connections(&mut self, max: usize) {
         self.max_connections = max;
+        self.rebuild_context();
     }
 
     /// Set the maximum number of peers (authenticated).
     pub fn set_max_peers(&mut self, max: usize) {
         self.max_peers = max;
+        self.rebuild_context();
     }
 
     /// Returns false when we are at or above the configured `max_peers`
@@ -1442,6 +1509,7 @@ impl Node {
     /// Set the maximum number of links.
     pub fn set_max_links(&mut self, max: usize) {
         self.max_links = max;
+        self.rebuild_context();
     }
 
     // === Counts ===

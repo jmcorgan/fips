@@ -1004,6 +1004,38 @@ fn active_peer_same_path_discovery_refreshes_stale_peer() {
 }
 
 #[tokio::test]
+async fn node_context_mirrors_config_and_immutable_facades() {
+    let mut node = make_node();
+
+    // The immutable facades read the shared NodeContext.
+    let expected_addr = *node.identity().node_addr();
+    assert_eq!(node.node_addr(), &expected_addr);
+    assert!(!node.is_leaf_only());
+    let _ = node.uptime();
+    assert_eq!(node.config().peers().len(), 0);
+
+    // update_peers must rebuild the context so config() — which now reads the
+    // context — reflects the new peer list. Guards the copy-on-write sync.
+    let peer = Identity::generate();
+    let new_peer = crate::config::PeerConfig {
+        npub: peer.npub(),
+        alias: None,
+        addresses: vec![],
+        connect_policy: crate::config::ConnectPolicy::OnDemand,
+        auto_reconnect: false,
+        via_nostr: false,
+    };
+    node.update_peers(vec![new_peer]).await.unwrap();
+
+    assert_eq!(
+        node.config().peers().len(),
+        1,
+        "config() must reflect update_peers through the rebuilt context"
+    );
+    assert_eq!(node.config().peers()[0].npub, peer.npub());
+}
+
+#[tokio::test]
 async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);

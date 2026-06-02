@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::NodeAddr;
 use crate::protocol::TreeAnnounce;
 
-use super::reject::{RejectReason, TreeReject};
+use super::reject::TreeReject;
 use super::{Node, NodeError};
 use tracing::{debug, info, trace, warn};
 
@@ -20,7 +20,7 @@ impl Node {
 
         if !decl.is_signed() {
             return Err(NodeError::SendFailed {
-                node_addr: *self.identity.node_addr(),
+                node_addr: *self.identity().node_addr(),
                 reason: "declaration not signed".into(),
             });
         }
@@ -49,7 +49,7 @@ impl Node {
 
         if !peer.can_send_tree_announce(now_ms) {
             peer.mark_tree_announce_pending();
-            self.stats_mut().tree.rate_limited += 1;
+            self.metrics().tree.rate_limited.inc();
             debug!(
                 peer = %self.peer_display_name(peer_addr),
                 "TreeAnnounce rate-limited, marking pending"
@@ -66,11 +66,11 @@ impl Node {
 
         // Send
         if let Err(e) = self.send_encrypted_link_message(peer_addr, &encoded).await {
-            self.stats_mut().tree.send_failed += 1;
+            self.metrics().tree.send_failed.inc();
             return Err(e);
         }
 
-        self.stats_mut().tree.sent += 1;
+        self.metrics().tree.sent.inc();
 
         // Record send time
         if let Some(peer) = self.peers.get_mut(peer_addr) {
@@ -131,12 +131,12 @@ impl Node {
     /// 4. Re-evaluate parent selection
     /// 5. If parent changed: increment seq, sign, recompute coords, announce to all
     pub(super) async fn handle_tree_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
-        self.stats_mut().tree.received += 1;
+        self.metrics().tree.received.inc();
 
         let announce = match TreeAnnounce::decode(payload) {
             Ok(a) => a,
             Err(e) => {
-                self.stats_mut().tree.decode_error += 1;
+                self.metrics().tree.decode_error.inc();
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed TreeAnnounce");
                 return;
             }
@@ -146,7 +146,7 @@ impl Node {
         let pubkey = match self.peers.get(from) {
             Some(peer) => peer.pubkey(),
             None => {
-                self.stats_mut().tree.unknown_peer += 1;
+                self.metrics().tree.unknown_peer.inc();
                 debug!(from = %self.peer_display_name(from), "TreeAnnounce from unknown peer");
                 return;
             }
@@ -154,7 +154,7 @@ impl Node {
 
         // The declaring node_addr in the announce should match the sender
         if announce.declaration.node_addr() != from {
-            self.stats_mut().tree.addr_mismatch += 1;
+            self.metrics().tree.addr_mismatch.inc();
             debug!(
                 from = %self.peer_display_name(from),
                 declared = %announce.declaration.node_addr(),
@@ -164,7 +164,7 @@ impl Node {
         }
 
         if let Err(e) = announce.declaration.verify(&pubkey) {
-            self.stats_mut().tree.sig_failed += 1;
+            self.metrics().tree.sig_failed.inc();
             warn!(
                 from = %self.peer_display_name(from),
                 error = %e,
@@ -174,8 +174,9 @@ impl Node {
         }
 
         if let Err(e) = announce.validate_semantics() {
-            self.stats_mut()
-                .record_reject(RejectReason::Tree(TreeReject::AncestryInvalid));
+            self.metrics()
+                .tree
+                .record_reject(TreeReject::AncestryInvalid);
             warn!(
                 from = %self.peer_display_name(from),
                 error = %e,
@@ -204,12 +205,12 @@ impl Node {
             .update_peer(announce.declaration.clone(), announce.ancestry.clone());
 
         if !updated {
-            self.stats_mut().tree.stale += 1;
+            self.metrics().tree.stale.inc();
             debug!(from = %self.peer_display_name(from), "TreeAnnounce not fresher than existing, ignored");
             return;
         }
 
-        self.stats_mut().tree.accepted += 1;
+        self.metrics().tree.accepted.inc();
 
         debug!(
             from = %self.peer_display_name(from),
@@ -244,24 +245,28 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
+            // Clone identity up front to avoid a split borrow against the
+            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+            let our_identity = self.identity().clone();
             let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
             // recompute_coords may demote to self_root if the new path would be
             // invalid; sign AFTER recompute so the signature covers the final
             // declaration.
             self.tree_state.recompute_coords();
-            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                 warn!(error = %e, "Failed to sign declaration after parent switch");
-                self.stats_mut()
-                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                self.metrics()
+                    .tree
+                    .record_reject(TreeReject::OutboundSignFailed);
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_via_node doc.
             self.coord_cache
-                .invalidate_via_node(self.identity.node_addr());
+                .invalidate_via_node(our_identity.node_addr());
             self.reset_discovery_backoff();
 
-            self.stats_mut().tree.parent_switched += 1;
-            self.stats_mut().tree.parent_switches += 1;
+            self.metrics().tree.parent_switched.inc();
+            self.metrics().tree.parent_switches.inc();
 
             info!(
                 new_parent = %self.peer_display_name(&new_parent),
@@ -271,7 +276,7 @@ impl Node {
                 "Parent switched, invalidated downstream coord cache entries, announcing to all peers"
             );
             if flap_dampened {
-                self.stats_mut().tree.flap_dampened += 1;
+                self.metrics().tree.flap_dampened.inc();
                 warn!("Flap dampening engaged: excessive parent switches detected");
             }
 
@@ -283,19 +288,23 @@ impl Node {
         } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
             // Self is the smallest visible NodeAddr — promote to root rather
             // than continuing to advertise a stale ancestry rooted elsewhere.
+            // Clone identity up front to avoid a split borrow against the
+            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+            let our_identity = self.identity().clone();
             self.tree_state.become_root();
-            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                 warn!(error = %e, "Failed to sign self-root declaration");
-                self.stats_mut()
-                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                self.metrics()
+                    .tree
+                    .record_reject(TreeReject::OutboundSignFailed);
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
             self.coord_cache
-                .invalidate_other_roots(self.identity.node_addr());
+                .invalidate_other_roots(our_identity.node_addr());
             self.reset_discovery_backoff();
-            self.stats_mut().tree.parent_switched += 1;
-            self.stats_mut().tree.parent_switches += 1;
+            self.metrics().tree.parent_switched.inc();
+            self.metrics().tree.parent_switches.inc();
             info!(
                 new_root = %self.tree_state.root(),
                 "Self-promoted to root: smallest visible NodeAddr"
@@ -308,9 +317,9 @@ impl Node {
         {
             // Check for loop: if parent's ancestry now contains us, drop parent
             if let Some(parent_coords) = self.tree_state.peer_coords(from)
-                && parent_coords.contains(self.identity.node_addr())
+                && parent_coords.contains(self.identity().node_addr())
             {
-                self.stats_mut().tree.loop_detected += 1;
+                self.metrics().tree.loop_detected.inc();
                 warn!(
                     parent = %self.peer_display_name(from),
                     "Parent ancestry contains us — loop detected, dropping parent"
@@ -322,16 +331,20 @@ impl Node {
                     .map(|(addr, peer)| (*addr, peer.link_cost()))
                     .collect();
                 if self.tree_state.handle_parent_lost(&peer_costs) {
-                    if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                    // Clone identity up front to avoid a split borrow against the
+                    // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+                    let our_identity = self.identity().clone();
+                    if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                         warn!(error = %e, "Failed to sign declaration after loop detection");
-                        self.stats_mut()
-                            .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                        self.metrics()
+                            .tree
+                            .record_reject(TreeReject::OutboundSignFailed);
                         return;
                     }
                     // handle_parent_lost may promote to root OR find new parent;
                     // cover both invalidation classes.
                     self.coord_cache
-                        .invalidate_via_node(self.identity.node_addr());
+                        .invalidate_via_node(our_identity.node_addr());
                     self.coord_cache
                         .invalidate_other_roots(self.tree_state.root());
                     self.reset_discovery_backoff();
@@ -362,24 +375,28 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
+            // Clone identity up front to avoid a split borrow against the
+            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+            let our_identity = self.identity().clone();
             self.tree_state.set_parent(*from, new_seq, timestamp);
             self.tree_state.recompute_coords();
-            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                 warn!(error = %e, "Failed to sign declaration after parent update");
-                self.stats_mut()
-                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                self.metrics()
+                    .tree
+                    .record_reject(TreeReject::OutboundSignFailed);
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_via_node doc.
             self.coord_cache
-                .invalidate_via_node(self.identity.node_addr());
+                .invalidate_via_node(our_identity.node_addr());
             self.reset_discovery_backoff();
 
             let new_addrs: Vec<NodeAddr> =
                 self.tree_state.my_coords().node_addrs().copied().collect();
 
             if old_addrs != new_addrs {
-                self.stats_mut().tree.ancestry_changed += 1;
+                self.metrics().tree.ancestry_changed.inc();
                 info!(
                     parent = %self.peer_display_name(from),
                     old_root = %old_root,
@@ -420,7 +437,7 @@ impl Node {
     /// `reeval_interval_secs`. When a better parent is found, follows
     /// the same switch flow as TreeAnnounce-triggered switches.
     async fn check_periodic_parent_reeval(&mut self) {
-        let interval_secs = self.config.node.tree.reeval_interval_secs;
+        let interval_secs = self.config().node.tree.reeval_interval_secs;
         if interval_secs == 0 {
             return;
         }
@@ -455,21 +472,25 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
+            // Clone identity up front to avoid a split borrow against the
+            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+            let our_identity = self.identity().clone();
             let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
             self.tree_state.recompute_coords();
-            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                 warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
-                self.stats_mut()
-                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                self.metrics()
+                    .tree
+                    .record_reject(TreeReject::OutboundSignFailed);
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_via_node doc.
             self.coord_cache
-                .invalidate_via_node(self.identity.node_addr());
+                .invalidate_via_node(our_identity.node_addr());
             self.reset_discovery_backoff();
 
-            self.stats_mut().tree.parent_switched += 1;
-            self.stats_mut().tree.parent_switches += 1;
+            self.metrics().tree.parent_switched.inc();
+            self.metrics().tree.parent_switches.inc();
 
             info!(
                 new_parent = %self.peer_display_name(&new_parent),
@@ -480,7 +501,7 @@ impl Node {
                 "Parent switched via periodic cost re-evaluation"
             );
             if flap_dampened {
-                self.stats_mut().tree.flap_dampened += 1;
+                self.metrics().tree.flap_dampened.inc();
                 warn!("Flap dampening engaged: excessive parent switches detected");
             }
 
@@ -489,19 +510,23 @@ impl Node {
             let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
             self.bloom_state.mark_all_updates_needed(all_peers);
         } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
+            // Clone identity up front to avoid a split borrow against the
+            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+            let our_identity = self.identity().clone();
             self.tree_state.become_root();
-            if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                 warn!(error = %e, "Failed to sign self-root declaration in periodic reeval");
-                self.stats_mut()
-                    .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                self.metrics()
+                    .tree
+                    .record_reject(TreeReject::OutboundSignFailed);
                 return;
             }
             // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
             self.coord_cache
-                .invalidate_other_roots(self.identity.node_addr());
+                .invalidate_other_roots(our_identity.node_addr());
             self.reset_discovery_backoff();
-            self.stats_mut().tree.parent_switched += 1;
-            self.stats_mut().tree.parent_switches += 1;
+            self.metrics().tree.parent_switched.inc();
+            self.metrics().tree.parent_switches.inc();
             info!(
                 new_root = %self.tree_state.root(),
                 trigger = "periodic",
@@ -542,7 +567,7 @@ impl Node {
         self.tree_state.remove_peer(node_addr);
 
         if was_parent {
-            self.stats_mut().tree.parent_losses += 1;
+            self.metrics().tree.parent_losses.inc();
             let peer_costs: HashMap<NodeAddr, f64> = self
                 .peers
                 .iter()
@@ -551,11 +576,14 @@ impl Node {
                 .collect();
             let changed = self.tree_state.handle_parent_lost(&peer_costs);
             if changed {
-                // Re-sign the new declaration
-                if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                // Re-sign the new declaration. Clone identity to avoid a split
+                // borrow against the &mut self.tree_state receiver (cold path).
+                let our_identity = self.identity().clone();
+                if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                     warn!(error = %e, "Failed to sign declaration after parent loss");
-                    self.stats_mut()
-                        .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
                 }
                 info!(
                     new_root = %self.tree_state.root(),

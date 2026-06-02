@@ -158,18 +158,23 @@ impl Node {
                     .unwrap_or(0);
                 let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
                 self.tree_state.recompute_coords();
-                if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                // Clone identity once: sign_declaration borrows &mut tree_state while
+                // the identity() accessor borrows all of &self, so an owned copy avoids
+                // the split-borrow conflict on this infrequent parent-switch path.
+                let our_identity = self.identity().clone();
+                if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                     warn!(error = %e, "Failed to sign declaration after first-RTT parent eval");
-                    self.stats_mut()
-                        .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
                     return;
                 }
                 // Surgical invalidation — see CoordCache::invalidate_via_node doc.
                 self.coord_cache
-                    .invalidate_via_node(self.identity.node_addr());
+                    .invalidate_via_node(our_identity.node_addr());
                 self.reset_discovery_backoff();
-                self.stats_mut().tree.parent_switched += 1;
-                self.stats_mut().tree.parent_switches += 1;
+                self.metrics().tree.parent_switched.inc();
+                self.metrics().tree.parent_switches.inc();
                 info!(
                     new_parent = %self.peer_display_name(&new_parent),
                     new_seq = new_seq,
@@ -179,7 +184,7 @@ impl Node {
                     "Parent switched after first RTT measurement"
                 );
                 if flap_dampened {
-                    self.stats_mut().tree.flap_dampened += 1;
+                    self.metrics().tree.flap_dampened.inc();
                     warn!("Flap dampening engaged: excessive parent switches detected");
                 }
                 self.send_tree_announce_to_all().await;
@@ -187,18 +192,21 @@ impl Node {
                 self.bloom_state.mark_all_updates_needed(all_peers);
             } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
                 self.tree_state.become_root();
-                if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                // Clone identity once (see the parent-switch branch above for why).
+                let our_identity = self.identity().clone();
+                if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
                     warn!(error = %e, "Failed to sign self-root declaration after first-RTT");
-                    self.stats_mut()
-                        .record_reject(RejectReason::Tree(TreeReject::OutboundSignFailed));
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
                     return;
                 }
                 // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
                 self.coord_cache
-                    .invalidate_other_roots(self.identity.node_addr());
+                    .invalidate_other_roots(our_identity.node_addr());
                 self.reset_discovery_backoff();
-                self.stats_mut().tree.parent_switched += 1;
-                self.stats_mut().tree.parent_switches += 1;
+                self.metrics().tree.parent_switched.inc();
+                self.metrics().tree.parent_switches.inc();
                 info!(
                     new_root = %self.tree_state.root(),
                     trigger = "first-rtt",
@@ -532,8 +540,8 @@ impl Node {
     /// hasn't sent us a frame within the link dead timeout.
     pub(in crate::node) async fn check_link_heartbeats(&mut self) {
         let now = Instant::now();
-        let heartbeat_interval = Duration::from_secs(self.config.node.heartbeat_interval_secs);
-        let dead_timeout = Duration::from_secs(self.config.node.link_dead_timeout_secs);
+        let heartbeat_interval = Duration::from_secs(self.config().node.heartbeat_interval_secs);
+        let dead_timeout = Duration::from_secs(self.config().node.link_dead_timeout_secs);
         let heartbeat_msg = [LinkMessageType::Heartbeat.to_byte()];
 
         // Collect heartbeats to send and dead peers to remove
@@ -576,7 +584,7 @@ impl Node {
         for addr in &dead_peers {
             warn!(
                 peer = %self.peer_display_name(addr),
-                timeout_secs = self.config.node.link_dead_timeout_secs,
+                timeout_secs = self.config().node.link_dead_timeout_secs,
                 "Removing peer: link dead timeout"
             );
             self.remove_active_peer(addr);

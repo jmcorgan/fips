@@ -177,7 +177,7 @@ impl Node {
             packet.timestamp_ms,
         );
 
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
         let msg2_response = match conn.receive_handshake_init(
             our_keypair,
@@ -285,7 +285,7 @@ impl Node {
                     // immediately — a genuine rekey can't fire that fast.
                     let session_age_secs =
                         existing_peer.session_established_at().elapsed().as_secs();
-                    if self.config.node.rekey.enabled
+                    if self.config().node.rekey.enabled
                         && existing_peer.has_session()
                         && existing_peer.is_healthy()
                         && session_age_secs >= 30
@@ -310,7 +310,7 @@ impl Node {
                         // simultaneously. Apply tie-breaker — smaller NodeAddr
                         // wins as initiator (same as cross-connection resolution).
                         if existing_peer.rekey_in_progress() {
-                            let our_addr = self.identity.node_addr();
+                            let our_addr = self.identity().node_addr();
                             if our_addr < &peer_node_addr {
                                 // We win as initiator — drop their msg1.
                                 // Our msg2 will arrive at peer, who completes
@@ -489,7 +489,7 @@ impl Node {
             packet.transport_id,
             packet.remote_addr.clone(),
             LinkDirection::Inbound,
-            Duration::from_millis(self.config.node.base_rtt_ms),
+            Duration::from_millis(self.config().node.base_rtt_ms),
         );
 
         self.links.insert(link_id, link);
@@ -846,7 +846,7 @@ impl Node {
         // outbound = the loser's inbound).
         if self.peers.contains_key(&peer_node_addr) {
             let our_outbound_wins = cross_connection_winner(
-                self.identity.node_addr(),
+                self.identity().node_addr(),
                 &peer_node_addr,
                 true, // this IS our outbound
             );
@@ -1111,7 +1111,11 @@ impl Node {
             // authenticated connection must replace them regardless of the
             // tie-breaker direction.
             let this_wins = remote_epoch_changed
-                || cross_connection_winner(self.identity.node_addr(), &peer_node_addr, is_outbound);
+                || cross_connection_winner(
+                    self.identity().node_addr(),
+                    &peer_node_addr,
+                    is_outbound,
+                );
 
             if this_wins {
                 // This connection wins, replace the existing peer
@@ -1165,11 +1169,11 @@ impl Node {
                     current_addr,
                     link_stats,
                     is_outbound,
-                    &self.config.node.mmp,
+                    &self.config().node.mmp,
                     remote_epoch,
                 );
                 new_peer.set_tree_announce_min_interval_ms(
-                    self.config.node.tree.announce_min_interval_ms,
+                    self.config().node.tree.announce_min_interval_ms,
                 );
 
                 self.peers.insert(peer_node_addr, new_peer);
@@ -1268,11 +1272,12 @@ impl Node {
                 current_addr,
                 link_stats,
                 is_outbound,
-                &self.config.node.mmp,
+                &self.config().node.mmp,
                 remote_epoch,
             );
-            new_peer
-                .set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
+            new_peer.set_tree_announce_min_interval_ms(
+                self.config().node.tree.announce_min_interval_ms,
+            );
             if let Some(ts) = old_announce_ts {
                 new_peer.set_last_tree_announce_sent_ms(ts);
             }
