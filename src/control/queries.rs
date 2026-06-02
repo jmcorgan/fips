@@ -47,7 +47,7 @@ pub fn show_status(node: &Node) -> Value {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "-".into());
     let uptime_secs = node.uptime().as_secs();
-    let fwd = node.stats().snapshot().forwarding;
+    let fwd = node.metrics().forwarding.snapshot();
 
     // Inline last-N-second sparklines for dashboard rendering. Kept
     // short so the status payload stays compact; longer windows use
@@ -336,7 +336,7 @@ pub fn show_tree(node: &Node) -> Value {
     let parent_hex = hex::encode(parent_addr.as_bytes());
     let parent_display = node.peer_display_name(parent_addr);
 
-    let tree_stats = node.stats().snapshot().tree;
+    let tree_stats = node.metrics().tree.snapshot();
 
     json!({
         "my_node_addr": hex::encode(tree.my_node_addr().as_bytes()),
@@ -469,7 +469,7 @@ pub fn show_bloom(node: &Node) -> Value {
         })
         .collect();
 
-    let bloom_stats = node.stats().snapshot().bloom;
+    let bloom_stats = node.metrics().bloom.snapshot();
 
     json!({
         "own_node_addr": hex::encode(node.node_addr().as_bytes()),
@@ -706,7 +706,7 @@ pub fn show_routing(node: &Node) -> Value {
     let cache = node.coord_cache();
     let now = now_ms();
     let cache_stats = cache.stats(now);
-    let node_stats = node.stats().snapshot();
+    let metrics = node.metrics();
 
     // Pending discovery lookups (individual targets)
     let lookups: Vec<Value> = node
@@ -745,10 +745,10 @@ pub fn show_routing(node: &Node) -> Value {
         "pending_tun_packets": node.pending_tun_total_packets(),
         "recent_requests": node.recent_request_count(),
         "retries": retries,
-        "forwarding": serde_json::to_value(&node_stats.forwarding).unwrap_or_default(),
-        "discovery": serde_json::to_value(&node_stats.discovery).unwrap_or_default(),
-        "error_signals": serde_json::to_value(&node_stats.errors).unwrap_or_default(),
-        "congestion": serde_json::to_value(&node_stats.congestion).unwrap_or_default(),
+        "forwarding": serde_json::to_value(metrics.forwarding.snapshot()).unwrap_or_default(),
+        "discovery": serde_json::to_value(metrics.discovery.snapshot()).unwrap_or_default(),
+        "error_signals": serde_json::to_value(metrics.errors.snapshot()).unwrap_or_default(),
+        "congestion": serde_json::to_value(metrics.congestion.snapshot()).unwrap_or_default(),
     })
 }
 

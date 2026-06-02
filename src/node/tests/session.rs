@@ -1468,8 +1468,9 @@ fn test_purge_idle_sessions_cleans_pending_packets() {
 
 #[test]
 fn test_purge_idle_sessions_disabled_when_zero() {
-    let mut node = make_node();
-    node.config.node.session.idle_timeout_secs = 0;
+    let mut config = Config::new();
+    config.node.session.idle_timeout_secs = 0;
+    let mut node = make_node_with(config);
 
     let remote = Identity::generate();
     let remote_addr = *remote.node_addr();

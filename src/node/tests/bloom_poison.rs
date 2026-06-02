@@ -43,24 +43,22 @@ async fn test_m1_rejects_all_ones_filter_announce() {
     let announce = FilterAnnounce::full(all_ones, 1, 1);
     let payload = encode_payload(&announce);
 
-    let before_fill_exceeded = node.stats().bloom.fill_exceeded;
-    let before_accepted = node.stats().bloom.accepted;
+    let before_fill_exceeded = node.metrics().bloom.fill_exceeded.get();
+    let before_accepted = node.metrics().bloom.accepted.get();
 
     node.handle_filter_announce(&peer_addr, &payload).await;
 
-    let after = &node.stats().bloom;
-    // While the typed-rejection rollout is in progress the call site bumps
-    // counter directly AND dispatches through record_reject, which
-    // hits the same counter. A later change will collapse this to a
-    // single increment by removing the legacy direct bump; for now
-    // the rejection-path event yields a +2 delta.
+    // The rejection path bumps the counter once, through the typed
+    // record_reject dispatch. The legacy direct bump has been removed,
+    // so the rejection-path event yields a +1 delta.
     assert_eq!(
-        after.fill_exceeded,
-        before_fill_exceeded + 2,
+        node.metrics().bloom.fill_exceeded.get(),
+        before_fill_exceeded + 1,
         "fill_exceeded counter must increment on all-ones rejection"
     );
     assert_eq!(
-        after.accepted, before_accepted,
+        node.metrics().bloom.accepted.get(),
+        before_accepted,
         "accepted counter must NOT increment on rejection"
     );
 
@@ -93,18 +91,18 @@ async fn test_m1_accepts_sub_cap_filter() {
     let announce = FilterAnnounce::full(filter, 1, 1);
     let payload = encode_payload(&announce);
 
-    let before_fill_exceeded = node.stats().bloom.fill_exceeded;
-    let before_accepted = node.stats().bloom.accepted;
+    let before_fill_exceeded = node.metrics().bloom.fill_exceeded.get();
+    let before_accepted = node.metrics().bloom.accepted.get();
 
     node.handle_filter_announce(&peer_addr, &payload).await;
 
-    let after = &node.stats().bloom;
     assert_eq!(
-        after.fill_exceeded, before_fill_exceeded,
+        node.metrics().bloom.fill_exceeded.get(),
+        before_fill_exceeded,
         "fill_exceeded must NOT increment on legitimate sub-cap filter"
     );
     assert_eq!(
-        after.accepted,
+        node.metrics().bloom.accepted.get(),
         before_accepted + 1,
         "accepted must increment on legitimate filter"
     );
@@ -164,9 +162,8 @@ async fn test_m1_sequence_not_advanced_allows_recovery() {
         "compliant announce at same seq must be accepted after rejection"
     );
     assert_eq!(peer.filter_sequence(), 1);
-    // Direct bump + record_reject dispatch both increment the same
-    // counter while the typed-rejection rollout is in progress. A later
-    // change collapses these back to a single increment.
-    assert_eq!(node.stats().bloom.fill_exceeded, 2);
-    assert_eq!(node.stats().bloom.accepted, 1);
+    // The typed record_reject dispatch increments the counter once; the
+    // legacy direct bump has been removed.
+    assert_eq!(node.metrics().bloom.fill_exceeded.get(), 1);
+    assert_eq!(node.metrics().bloom.accepted.get(), 1);
 }

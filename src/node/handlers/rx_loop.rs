@@ -69,14 +69,14 @@ impl Node {
         };
 
         let mut tick =
-            tokio::time::interval(Duration::from_secs(self.config.node.tick_interval_secs));
+            tokio::time::interval(Duration::from_secs(self.config().node.tick_interval_secs));
 
         // Set up control socket channel
         let (control_tx, mut control_rx) =
             tokio::sync::mpsc::channel::<crate::control::ControlMessage>(32);
 
-        if self.config.node.control.enabled {
-            let config = self.config.node.control.clone();
+        if self.config().node.control.enabled {
+            let config = self.config().node.control.clone();
             let tx = control_tx.clone();
             tokio::spawn(async move {
                 match ControlSocket::bind(&config) {

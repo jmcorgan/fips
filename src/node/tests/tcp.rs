@@ -6,7 +6,7 @@
 //! All tests use 127.0.0.1:0 (ephemeral ports) and need no privileges.
 
 use super::*;
-use crate::config::TcpConfig;
+use crate::config::{Config, TcpConfig};
 use crate::transport::tcp::TcpTransport;
 use crate::transport::{TransportAddr, TransportHandle, TransportId, packet_channel};
 use spanning_tree::{
@@ -20,7 +20,14 @@ use std::time::Duration;
 /// TcpTransport instead of UDP. Binds to 127.0.0.1:0 for an
 /// ephemeral port.
 async fn make_test_node_tcp() -> TestNode {
-    let mut node = make_node();
+    make_test_node_tcp_with(Config::new()).await
+}
+
+/// Like `make_test_node_tcp` but builds the node from an explicit `Config`,
+/// so immutable fields (e.g. heartbeat/link-dead timeouts) are set before the
+/// `NodeContext` is built rather than poked afterward.
+async fn make_test_node_tcp_with(config: Config) -> TestNode {
+    let mut node = make_node_with(config);
     let transport_id = TransportId::new(1);
 
     let config = TcpConfig {
@@ -166,13 +173,14 @@ async fn test_tcp_mixed_transport_coexistence() {
 /// link-dead timeout fires.
 #[tokio::test]
 async fn test_tcp_connection_loss_detection() {
-    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
-
     // Short heartbeat/link-dead timeouts for faster test execution
-    for tn in nodes.iter_mut() {
-        tn.node.config.node.heartbeat_interval_secs = 1;
-        tn.node.config.node.link_dead_timeout_secs = 3;
-    }
+    let mut config = Config::new();
+    config.node.heartbeat_interval_secs = 1;
+    config.node.link_dead_timeout_secs = 3;
+    let mut nodes = vec![
+        make_test_node_tcp_with(config.clone()).await,
+        make_test_node_tcp_with(config).await,
+    ];
 
     // Establish peering
     initiate_handshake(&mut nodes, 0, 1).await;
@@ -215,13 +223,14 @@ async fn test_tcp_connection_loss_detection() {
 /// Verifies that bidirectional peering is restored.
 #[tokio::test]
 async fn test_tcp_reconnection_after_link_death() {
-    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
-
     // Short timeouts
-    for tn in nodes.iter_mut() {
-        tn.node.config.node.heartbeat_interval_secs = 1;
-        tn.node.config.node.link_dead_timeout_secs = 3;
-    }
+    let mut config = Config::new();
+    config.node.heartbeat_interval_secs = 1;
+    config.node.link_dead_timeout_secs = 3;
+    let mut nodes = vec![
+        make_test_node_tcp_with(config.clone()).await,
+        make_test_node_tcp_with(config).await,
+    ];
 
     // Establish initial peering
     initiate_handshake(&mut nodes, 0, 1).await;

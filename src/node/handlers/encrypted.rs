@@ -64,7 +64,7 @@ impl Node {
                 let pending_their = peer.pending_their_index();
                 info!(
                     peer = %display_name,
-                    our_addr = %self.identity.node_addr(),
+                    our_addr = %self.identity().node_addr(),
                     their_addr = %node_addr,
                     pending_our_index = ?pending_our,
                     pending_their_index = ?pending_their,

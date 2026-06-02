@@ -55,6 +55,10 @@ impl Node {
             new_by_addr.insert(*identity.node_addr(), peer);
         }
 
+        // Read the current peer set directly from the field: update_peers is the
+        // config-source mutation owner (it writes self.config.peers below and then
+        // rebuilds the context), so it manages config.peers directly rather than
+        // through the context accessor — same rationale as the write at line ~124.
         let current_by_addr: HashMap<NodeAddr, PeerConfig> = self
             .config
             .peers()
@@ -121,6 +125,7 @@ impl Node {
             .collect();
 
         self.config.peers = new_by_addr.into_values().collect();
+        self.rebuild_context();
 
         for peer_config in added_configs {
             outcome.added += 1;
@@ -171,11 +176,12 @@ impl Node {
             } else {
                 match self.initiate_peer_connection(&peer_config).await {
                     Ok(()) => {
+                        let handshake_timeout_secs =
+                            self.config().node.rate_limit.handshake_timeout_secs;
                         if let Some(state) = self.retry_pending.get_mut(&node_addr) {
                             state.peer_config = peer_config;
-                            state.retry_after_ms = Self::now_ms().saturating_add(
-                                self.config.node.rate_limit.handshake_timeout_secs * 1000,
-                            );
+                            state.retry_after_ms =
+                                Self::now_ms().saturating_add(handshake_timeout_secs * 1000);
                         }
                     }
                     Err(err) => {
@@ -204,7 +210,7 @@ impl Node {
         // initiation) immediately on startup — without waiting for the link-layer
         // handshake to complete first.
         let peer_identities: Vec<(PeerIdentity, Option<String>)> = self
-            .config
+            .config()
             .peers()
             .iter()
             .filter_map(|pc| {
@@ -224,7 +230,7 @@ impl Node {
         }
 
         // Collect peer configs to avoid borrow conflicts
-        let peer_configs: Vec<_> = self.config.auto_connect_peers().cloned().collect();
+        let peer_configs: Vec<_> = self.config().auto_connect_peers().cloned().collect();
 
         if peer_configs.is_empty() {
             debug!("No static peers configured");
@@ -400,7 +406,7 @@ impl Node {
                 transport_id,
                 remote_addr.clone(),
                 LinkDirection::Outbound,
-                Duration::from_millis(self.config.node.base_rtt_ms),
+                Duration::from_millis(self.config().node.base_rtt_ms),
             )
         } else {
             Link::connectionless(
@@ -408,7 +414,7 @@ impl Node {
                 transport_id,
                 remote_addr.clone(),
                 LinkDirection::Outbound,
-                Duration::from_millis(self.config.node.base_rtt_ms),
+                Duration::from_millis(self.config().node.base_rtt_ms),
             )
         };
 
@@ -494,7 +500,7 @@ impl Node {
         };
 
         // Start the Noise handshake and get message 1
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let noise_msg1 =
             match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
                 Ok(msg) => msg,
@@ -535,7 +541,7 @@ impl Node {
         }
 
         // Store msg1 for resend and schedule first resend
-        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
 
         // Track in pending_outbound for msg2 dispatch
@@ -608,7 +614,7 @@ impl Node {
                     let node_addr = *identity.node_addr();
 
                     // Skip self
-                    if node_addr == *self.identity.node_addr() {
+                    if node_addr == *self.identity().node_addr() {
                         continue;
                     }
 
@@ -777,7 +783,7 @@ impl Node {
                             // semantics, and its existing cross-connection
                             // logic in handle_msg1 reconciles when the winner's
                             // fresh msg1 arrives over the adopted socket.
-                            let our_addr = self.identity.node_addr();
+                            let our_addr = self.identity().node_addr();
                             if our_addr >= &peer_addr {
                                 debug!(
                                     peer_npub = %peer_npub,
@@ -925,14 +931,14 @@ impl Node {
     /// extracts a scope from the Nostr app tag used by default scoped
     /// discovery.
     pub(super) fn lan_discovery_scope(&self) -> Option<String> {
-        if let Some(scope) = self.config.node.discovery.lan.scope.as_deref() {
+        if let Some(scope) = self.config().node.discovery.lan.scope.as_deref() {
             let scope = scope.trim();
             if !scope.is_empty() {
                 return Some(scope.to_string());
             }
         }
 
-        let app = self.config.node.discovery.nostr.app.trim();
+        let app = self.config().node.discovery.nostr.app.trim();
         if app.is_empty() {
             return None;
         }
@@ -1110,7 +1116,7 @@ impl Node {
         self.state = NodeState::Starting;
 
         // Create packet channel for transport -> Node communication
-        let packet_buffer_size = self.config.node.buffers.packet_channel;
+        let packet_buffer_size = self.config().node.buffers.packet_channel;
         let (packet_tx, packet_rx) = packet_channel(packet_buffer_size);
         self.packet_tx = Some(packet_tx.clone());
         self.packet_rx = Some(packet_rx);
@@ -1187,8 +1193,8 @@ impl Node {
             }
         }
 
-        if self.config.node.discovery.nostr.enabled {
-            match NostrDiscovery::start(&self.identity, self.config.node.discovery.nostr.clone())
+        if self.config().node.discovery.nostr.enabled {
+            match NostrDiscovery::start(self.identity(), self.config().node.discovery.nostr.clone())
                 .await
             {
                 Ok(runtime) => {
@@ -1208,7 +1214,7 @@ impl Node {
         // mDNS / DNS-SD LAN discovery. Independent of Nostr — runs even
         // when Nostr is disabled, since it gives us sub-second pairing
         // on the same link without any relay or NAT-traversal roundtrip.
-        if self.config.node.discovery.lan.enabled {
+        if self.config().node.discovery.lan.enabled {
             // Advertise the port of a non-bootstrap operational UDP transport.
             // Bootstrap transports must be excluded (they are not the node's
             // listening data-plane socket), and a stable selector (lowest
@@ -1229,10 +1235,10 @@ impl Node {
                 .unwrap_or(0);
             let scope = self.lan_discovery_scope();
             match crate::discovery::lan::LanDiscovery::start(
-                &self.identity,
+                self.identity(),
                 scope,
                 advertised_udp_port,
-                self.config.node.discovery.lan.clone(),
+                self.config().node.discovery.lan.clone(),
             )
             .await
             {
@@ -1251,9 +1257,9 @@ impl Node {
         self.initiate_peer_connections().await;
 
         // Initialize TUN interface last, after transports and peers are ready
-        if self.config.tun.enabled {
-            let address = *self.identity.address();
-            match TunDevice::create(&self.config.tun, address).await {
+        if self.config().tun.enabled {
+            let address = *self.identity().address();
+            match TunDevice::create(&self.config().tun, address).await {
                 Ok(device) => {
                     let mtu = device.mtu();
                     let name = device.name().to_string();
@@ -1300,7 +1306,7 @@ impl Node {
                     let reader_tun_tx = tun_tx.clone();
 
                     // Create outbound channel for TUN reader → Node
-                    let tun_channel_size = self.config.node.buffers.tun_channel;
+                    let tun_channel_size = self.config().node.buffers.tun_channel;
                     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
 
                     // Spawn reader thread
@@ -1366,19 +1372,19 @@ impl Node {
         // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
         // 127.0.0.1 still reach us regardless of kernel sysctl
         // defaults — but only when bind is on a wildcard / IPv6 path.
-        if self.config.dns.enabled {
-            let addr_str = self.config.dns.bind_addr();
+        if self.config().dns.enabled {
+            let addr_str = self.config().dns.bind_addr();
             match addr_str.parse::<std::net::IpAddr>() {
                 Ok(ip) => {
-                    let bind = std::net::SocketAddr::new(ip, self.config.dns.port());
+                    let bind = std::net::SocketAddr::new(ip, self.config().dns.port());
                     match Self::bind_dns_socket(bind) {
                         Ok(socket) => {
-                            let dns_channel_size = self.config.node.buffers.dns_channel;
+                            let dns_channel_size = self.config().node.buffers.dns_channel;
                             let (identity_tx, identity_rx) =
                                 tokio::sync::mpsc::channel(dns_channel_size);
-                            let dns_ttl = self.config.dns.ttl();
+                            let dns_ttl = self.config().dns.ttl();
                             let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(
-                                self.config.peers(),
+                                self.config().peers(),
                             );
                             let hosts_path =
                                 std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
@@ -1391,7 +1397,7 @@ impl Node {
                             // When TUN isn't enabled or the name can't be
                             // resolved, `None` disables the filter (there
                             // is no mesh surface to defend anyway).
-                            let mesh_ifindex = Self::lookup_mesh_ifindex(self.config.tun.name());
+                            let mesh_ifindex = Self::lookup_mesh_ifindex(self.config().tun.name());
                             info!(
                                 bind = %bind,
                                 hosts = reloader.hosts().len(),
@@ -1658,9 +1664,9 @@ impl Node {
         peer_config: &PeerConfig,
         existing: &[PeerAddress],
     ) -> Vec<PeerAddress> {
-        if !self.config.node.discovery.nostr.enabled
+        if !self.config().node.discovery.nostr.enabled
             || !peer_config.via_nostr
-            || self.config.node.discovery.nostr.policy
+            || self.config().node.discovery.nostr.policy
                 == crate::config::NostrDiscoveryPolicy::Disabled
         {
             return Vec::new();
@@ -1884,14 +1890,15 @@ impl Node {
         max_age_secs: Option<u64>,
         caller: &'static str,
     ) {
-        if !self.config.node.discovery.nostr.enabled
-            || self.config.node.discovery.nostr.policy != crate::config::NostrDiscoveryPolicy::Open
+        if !self.config().node.discovery.nostr.enabled
+            || self.config().node.discovery.nostr.policy
+                != crate::config::NostrDiscoveryPolicy::Open
         {
             return;
         }
 
         let configured_npubs = self
-            .config
+            .config()
             .peers()
             .iter()
             .map(|peer| peer.npub.clone())
@@ -1960,7 +1967,7 @@ impl Node {
                 }
             };
             let node_addr = *peer_identity.node_addr();
-            if node_addr == *self.identity.node_addr() {
+            if node_addr == *self.identity().node_addr() {
                 skipped_self = skipped_self.saturating_add(1);
                 continue;
             }
@@ -2082,8 +2089,9 @@ impl Node {
         if self.startup_open_discovery_sweep_done {
             return;
         }
-        if !self.config.node.discovery.nostr.enabled
-            || self.config.node.discovery.nostr.policy != crate::config::NostrDiscoveryPolicy::Open
+        if !self.config().node.discovery.nostr.enabled
+            || self.config().node.discovery.nostr.policy
+                != crate::config::NostrDiscoveryPolicy::Open
         {
             // Mark done so we don't keep re-checking on every tick.
             self.startup_open_discovery_sweep_done = true;
@@ -2094,7 +2102,7 @@ impl Node {
         };
         let now_ms = Self::now_ms();
         let delay_ms = self
-            .config
+            .config()
             .node
             .discovery
             .nostr
@@ -2104,7 +2112,12 @@ impl Node {
             return;
         }
 
-        let max_age_secs = self.config.node.discovery.nostr.startup_sweep_max_age_secs;
+        let max_age_secs = self
+            .config()
+            .node
+            .discovery
+            .nostr
+            .startup_sweep_max_age_secs;
         self.run_open_discovery_sweep(bootstrap, Some(max_age_secs), "startup")
             .await;
         self.startup_open_discovery_sweep_done = true;
@@ -2198,7 +2211,7 @@ impl Node {
             .count();
 
         let cap_remaining = self
-            .config
+            .config()
             .node
             .discovery
             .nostr
@@ -2210,7 +2223,7 @@ impl Node {
 
     fn open_discovery_retry_expires_at_ms(&self, now_ms: u64) -> u64 {
         now_ms.saturating_add(
-            self.config
+            self.config()
                 .node
                 .discovery
                 .nostr
@@ -2224,7 +2237,7 @@ impl Node {
         &self,
         bootstrap: &std::sync::Arc<NostrDiscovery>,
     ) -> Option<OverlayAdvert> {
-        if !self.config.node.discovery.nostr.enabled {
+        if !self.config().node.discovery.nostr.enabled {
             return None;
         }
 
@@ -2364,9 +2377,10 @@ impl Node {
             identifier: ADVERT_IDENTIFIER.to_string(),
             version: ADVERT_VERSION,
             endpoints,
-            signal_relays: has_udp_nat.then(|| self.config.node.discovery.nostr.dm_relays.clone()),
+            signal_relays: has_udp_nat
+                .then(|| self.config().node.discovery.nostr.dm_relays.clone()),
             stun_servers: has_udp_nat
-                .then(|| self.config.node.discovery.nostr.stun_servers.clone()),
+                .then(|| self.config().node.discovery.nostr.stun_servers.clone()),
         })
     }
 
@@ -2379,7 +2393,7 @@ impl Node {
     }
 
     fn lookup_udp_config(&self, transport_name: Option<&str>) -> Option<&crate::config::UdpConfig> {
-        match (&self.config.transports.udp, transport_name) {
+        match (&self.config().transports.udp, transport_name) {
             (crate::config::TransportInstances::Single(cfg), None) => Some(cfg),
             (crate::config::TransportInstances::Named(configs), Some(name)) => configs.get(name),
             _ => None,
@@ -2387,7 +2401,7 @@ impl Node {
     }
 
     fn lookup_tcp_config(&self, transport_name: Option<&str>) -> Option<&crate::config::TcpConfig> {
-        match (&self.config.transports.tcp, transport_name) {
+        match (&self.config().transports.tcp, transport_name) {
             (crate::config::TransportInstances::Single(cfg), None) => Some(cfg),
             (crate::config::TransportInstances::Named(configs), Some(name)) => configs.get(name),
             _ => None,
@@ -2395,7 +2409,7 @@ impl Node {
     }
 
     fn lookup_tor_config(&self, transport_name: Option<&str>) -> Option<&crate::config::TorConfig> {
-        match (&self.config.transports.tor, transport_name) {
+        match (&self.config().transports.tor, transport_name) {
             (crate::config::TransportInstances::Single(cfg), None) => Some(cfg),
             (crate::config::TransportInstances::Named(configs), Some(name)) => configs.get(name),
             _ => None,
@@ -2529,7 +2543,7 @@ impl Node {
             return false;
         };
         let stale_after_ms = self
-            .config
+            .config()
             .node
             .heartbeat_interval_secs
             .saturating_mul(1000)

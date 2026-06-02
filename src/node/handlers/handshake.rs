@@ -181,7 +181,7 @@ impl Node {
         // Create FMP negotiation payload for msg2 (includes profile, MMP bits, bloom TLV)
         let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
 
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
         let msg2_response = match conn.receive_handshake_init(
             our_keypair,
@@ -234,7 +234,7 @@ impl Node {
             packet.transport_id,
             packet.remote_addr.clone(),
             LinkDirection::Inbound,
-            Duration::from_millis(self.config.node.base_rtt_ms),
+            Duration::from_millis(self.config().node.base_rtt_ms),
         );
 
         self.links.insert(link_id, link);
@@ -442,7 +442,7 @@ impl Node {
 
                                 debug!(
                                     peer = %display_name,
-                                    our_addr = %self.identity.node_addr(),
+                                    our_addr = %self.identity().node_addr(),
                                     new_our_index = %our_index,
                                     new_their_index = %header.sender_idx,
                                     "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
@@ -580,7 +580,7 @@ impl Node {
             return;
         }
 
-        if peer_node_addr == *self.identity.node_addr() {
+        if peer_node_addr == *self.identity().node_addr() {
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
             self.connections.remove(&link_id);
             self.stats_mut()
@@ -638,7 +638,7 @@ impl Node {
         // outbound = the loser's inbound).
         if self.peers.contains_key(&peer_node_addr) {
             let our_outbound_wins = cross_connection_winner(
-                self.identity.node_addr(),
+                self.identity().node_addr(),
                 &peer_node_addr,
                 true, // this IS our outbound
             );
@@ -1000,7 +1000,7 @@ impl Node {
             return;
         }
 
-        if peer_node_addr == *self.identity.node_addr() {
+        if peer_node_addr == *self.identity().node_addr() {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
@@ -1100,7 +1100,7 @@ impl Node {
                     // both sides converge on a single Noise session pair.
                     if existing_peer.link_id() != link_id && session_age_secs < 30 {
                         let our_inbound_wins = cross_connection_winner(
-                            self.identity.node_addr(),
+                            self.identity().node_addr(),
                             &peer_node_addr,
                             false, // this connection is inbound
                         );
@@ -1168,7 +1168,7 @@ impl Node {
                     }
 
                     // Check for rekey: session must be at least 30s old.
-                    if self.config.node.rekey.enabled
+                    if self.config().node.rekey.enabled
                         && existing_peer.has_session()
                         && existing_peer.is_healthy()
                         && session_age_secs >= 30
@@ -1188,7 +1188,7 @@ impl Node {
                         if existing_peer.rekey_in_progress()
                             || existing_peer.pending_new_session().is_some()
                         {
-                            let our_addr = self.identity.node_addr();
+                            let our_addr = self.identity().node_addr();
                             if our_addr < &peer_node_addr {
                                 // We win — keep our session, drop their msg3.
                                 info!(
@@ -1280,7 +1280,7 @@ impl Node {
 
                         debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
-                            our_addr = %self.identity.node_addr(),
+                            our_addr = %self.identity().node_addr(),
                             new_our_index = %our_new_index,
                             new_their_index = %header.sender_idx,
                             "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
@@ -1465,7 +1465,7 @@ impl Node {
 
                     debug!(
                         peer = %display_name,
-                        our_addr = %self.identity.node_addr(),
+                        our_addr = %self.identity().node_addr(),
                         new_our_index = %our_index,
                         new_their_index = %header.sender_idx,
                         "rekey-msg3 responder (existing link): pending session set, awaiting K-bit cutover"
@@ -1577,7 +1577,11 @@ impl Node {
             // authenticated connection must replace them regardless of the
             // tie-breaker direction.
             let this_wins = remote_epoch_changed
-                || cross_connection_winner(self.identity.node_addr(), &peer_node_addr, is_outbound);
+                || cross_connection_winner(
+                    self.identity().node_addr(),
+                    &peer_node_addr,
+                    is_outbound,
+                );
 
             if this_wins {
                 // This connection wins, replace the existing peer
@@ -1633,13 +1637,13 @@ impl Node {
                     current_addr,
                     link_stats,
                     is_outbound,
-                    &self.config.node.mmp,
+                    &self.config().node.mmp,
                     remote_epoch,
                     self.node_profile,
                     peer_profile,
                 );
                 new_peer.set_tree_announce_min_interval_ms(
-                    self.config.node.tree.announce_min_interval_ms,
+                    self.config().node.tree.announce_min_interval_ms,
                 );
 
                 self.peers.insert(peer_node_addr, new_peer);
@@ -1744,13 +1748,14 @@ impl Node {
                 current_addr,
                 link_stats,
                 is_outbound,
-                &self.config.node.mmp,
+                &self.config().node.mmp,
                 remote_epoch,
                 self.node_profile,
                 peer_profile,
             );
-            new_peer
-                .set_tree_announce_min_interval_ms(self.config.node.tree.announce_min_interval_ms);
+            new_peer.set_tree_announce_min_interval_ms(
+                self.config().node.tree.announce_min_interval_ms,
+            );
             if let Some(ts) = old_announce_ts {
                 new_peer.set_last_tree_announce_sent_ms(ts);
             }

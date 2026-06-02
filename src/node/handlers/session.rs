@@ -344,7 +344,7 @@ impl Node {
                             Some(mut packet) => {
                                 if ce_flag {
                                     mark_ipv6_ecn_ce(&mut packet);
-                                    self.stats_mut().congestion.record_ce_received();
+                                    self.metrics().congestion.ce_received.inc();
                                 }
                                 if let Some(tun_tx) = &self.tun_tx {
                                     if let Err(e) = tun_tx.send(packet) {
@@ -435,7 +435,7 @@ impl Node {
         if let Some(existing) = self.sessions.get(src_addr) {
             if existing.is_initiating() {
                 // Simultaneous initiation: smaller NodeAddr wins as initiator
-                if self.identity.node_addr() < src_addr {
+                if self.identity().node_addr() < src_addr {
                     // We win — drop their setup, they'll process ours
                     debug!(
                         src = %self.peer_display_name(src_addr),
@@ -454,7 +454,7 @@ impl Node {
                     debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, resending SessionAck");
                     let my_addr = *self.node_addr();
                     let mut datagram = SessionDatagram::new(my_addr, *src_addr, payload.to_vec())
-                        .with_ttl(self.config.node.session.default_ttl);
+                        .with_ttl(self.config().node.session.default_ttl);
                     if let Err(e) = self.send_session_datagram(&mut datagram).await {
                         debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to resend SessionAck");
                     }
@@ -465,7 +465,7 @@ impl Node {
             } else if existing.is_established() {
                 // Rekey: if rekey enabled, treat as rekey for key rotation.
                 // The existing established session remains active for traffic.
-                if self.config.node.rekey.enabled {
+                if self.config().node.rekey.enabled {
                     let rekey_in_progress = existing.has_rekey_in_progress();
                     let has_pending = existing.pending_new_session().is_some();
 
@@ -480,11 +480,11 @@ impl Node {
                     // Apply the smaller-NodeAddr tie-breaker uniformly so
                     // both sides converge on a single Noise session.
                     if rekey_in_progress || has_pending {
-                        if self.identity.node_addr() < src_addr {
+                        if self.identity().node_addr() < src_addr {
                             // We win — keep our session, drop their msg1.
                             info!(
                                 src = %self.peer_display_name(src_addr),
-                                our_addr = %self.identity.node_addr(),
+                                our_addr = %self.identity().node_addr(),
                                 their_addr = %src_addr,
                                 rekey_in_progress = rekey_in_progress,
                                 pending_new_session = has_pending,
@@ -495,7 +495,7 @@ impl Node {
                         // We lose — abandon our rekey/pending, fall through as responder.
                         info!(
                             src = %self.peer_display_name(src_addr),
-                            our_addr = %self.identity.node_addr(),
+                            our_addr = %self.identity().node_addr(),
                             their_addr = %src_addr,
                             rekey_in_progress = rekey_in_progress,
                             pending_new_session = has_pending,
@@ -505,7 +505,7 @@ impl Node {
                             entry.abandon_rekey();
                         }
                     }
-                    let our_keypair = self.identity.keypair();
+                    let our_keypair = self.identity().keypair();
                     let mut handshake = HandshakeState::new_responder(our_keypair);
                     handshake.set_local_epoch(self.startup_epoch);
 
@@ -529,7 +529,7 @@ impl Node {
                     let ack_payload = ack.encode();
                     let my_addr = *self.node_addr();
                     let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack_payload)
-                        .with_ttl(self.config.node.session.default_ttl);
+                        .with_ttl(self.config().node.session.default_ttl);
 
                     if let Err(e) = self.send_session_datagram(&mut datagram).await {
                         debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send rekey SessionAck");
@@ -556,7 +556,7 @@ impl Node {
         }
 
         // Create XX responder handshake and process msg1
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_responder(our_keypair);
         handshake.set_local_epoch(self.startup_epoch);
 
@@ -594,7 +594,7 @@ impl Node {
         let ack_payload = ack.encode();
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack_payload.clone())
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         // Route the ack back to the initiator
         if let Err(e) = self.send_session_datagram(&mut datagram).await {
@@ -605,9 +605,9 @@ impl Node {
         // Store session entry in AwaitingMsg3 state with ack payload for potential resend.
         // Use a dummy pubkey since we don't know the initiator's identity yet.
         // We use our own pubkey as placeholder; it will be replaced in handle_session_msg3.
-        let placeholder_pubkey = self.identity.keypair().public_key();
+        let placeholder_pubkey = self.identity().keypair().public_key();
         let now_ms = Self::now_ms();
-        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let mut entry = SessionEntry::new(
             *src_addr,
             placeholder_pubkey,
@@ -687,7 +687,7 @@ impl Node {
             let msg3_payload = msg3_wire.encode();
             let my_addr = *self.node_addr();
             let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload.clone())
-                .with_ttl(self.config.node.session.default_ttl);
+                .with_ttl(self.config().node.session.default_ttl);
 
             if let Err(e) = self.send_session_datagram(&mut datagram).await {
                 debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send rekey SessionMsg3");
@@ -716,7 +716,7 @@ impl Node {
             // before the responder receives msg3; overlapping-epoch
             // decrypt keeps both directions safe meanwhile.
             let now_ms = Self::now_ms();
-            let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+            let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
             entry.set_pending_session(session);
             entry.set_rekey_completed_ms(now_ms);
             entry.set_rekey_msg3_payload(msg3_payload, now_ms + resend_interval);
@@ -724,7 +724,7 @@ impl Node {
 
             debug!(
                 src = %self.peer_display_name(src_addr),
-                our_addr = %self.identity.node_addr(),
+                our_addr = %self.identity().node_addr(),
                 their_addr = %src_addr,
                 "FSP rekey: completed XX as initiator, msg3 sent, pending cutover"
             );
@@ -811,7 +811,7 @@ impl Node {
         let msg3_payload = msg3_wire.encode();
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         if let Err(e) = self.send_session_datagram(&mut datagram).await {
             debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send SessionMsg3");
@@ -829,9 +829,9 @@ impl Node {
 
         let now_ms = Self::now_ms();
         entry.set_state(EndToEndState::Established(session));
-        entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
+        entry.set_coords_warmup_remaining(self.config().node.session.coords_warmup_packets);
         entry.mark_established(now_ms);
-        entry.init_mmp(&self.config.node.session_mmp);
+        entry.init_mmp(&self.config().node.session_mmp);
         entry.clear_handshake_payload();
         entry.touch(now_ms);
         self.sessions.insert(*src_addr, entry);
@@ -911,7 +911,7 @@ impl Node {
 
             debug!(
                 src = %self.peer_display_name(src_addr),
-                our_addr = %self.identity.node_addr(),
+                our_addr = %self.identity().node_addr(),
                 their_addr = %src_addr,
                 "FSP rekey: completed XX as responder, pending cutover"
             );
@@ -990,9 +990,9 @@ impl Node {
             now_ms,
             false,
         );
-        new_entry.set_coords_warmup_remaining(self.config.node.session.coords_warmup_packets);
+        new_entry.set_coords_warmup_remaining(self.config().node.session.coords_warmup_packets);
         new_entry.mark_established(now_ms);
-        new_entry.init_mmp(&self.config.node.session_mmp);
+        new_entry.init_mmp(&self.config().node.session_mmp);
         new_entry.touch(now_ms);
         self.sessions.insert(*src_addr, new_entry);
 
@@ -1192,7 +1192,7 @@ impl Node {
     /// immediately (rate-limited), trigger discovery, and reset the
     /// warmup counter for subsequent data packets.
     async fn handle_coords_required(&mut self, inner: &[u8]) {
-        self.stats_mut().errors.coords_required += 1;
+        self.metrics().errors.coords_required.inc();
 
         let msg = match CoordsRequired::decode(inner) {
             Ok(m) => m,
@@ -1236,8 +1236,8 @@ impl Node {
 
         // Reset coords warmup counter so the next N packets also include
         // COORDS_PRESENT, re-warming transit caches along the path.
+        let n = self.config().node.session.coords_warmup_packets;
         if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
-            let n = self.config.node.session.coords_warmup_packets;
             entry.set_coords_warmup_remaining(n);
             debug!(
                 dest = %msg.dest_addr,
@@ -1253,7 +1253,7 @@ impl Node {
     /// Send a standalone CoordsWarmup immediately (rate-limited), invalidate
     /// cached coordinates, trigger re-discovery, and reset the warmup counter.
     async fn handle_path_broken(&mut self, inner: &[u8]) {
-        self.stats_mut().errors.path_broken += 1;
+        self.metrics().errors.path_broken.inc();
 
         let msg = match PathBroken::decode(inner) {
             Ok(m) => m,
@@ -1302,8 +1302,8 @@ impl Node {
 
         // Reset coords warmup counter so the next N packets include
         // COORDS_PRESENT, re-warming transit caches along the new path.
+        let n = self.config().node.session.coords_warmup_packets;
         if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
-            let n = self.config.node.session.coords_warmup_packets;
             entry.set_coords_warmup_remaining(n);
             debug!(
                 dest = %msg.dest_addr,
@@ -1319,7 +1319,7 @@ impl Node {
     /// next-hop transport MTU. Apply the reported bottleneck MTU to our
     /// PathMtuState for the affected session, causing an immediate decrease.
     pub(in crate::node) async fn handle_mtu_exceeded(&mut self, inner: &[u8]) {
-        self.stats_mut().errors.mtu_exceeded += 1;
+        self.metrics().errors.mtu_exceeded.inc();
 
         let msg = match MtuExceeded::decode(inner) {
             Ok(m) => m,
@@ -1417,7 +1417,7 @@ impl Node {
         }
 
         // Create Noise XX initiator handshake
-        let our_keypair = self.identity.keypair();
+        let our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_initiator(our_keypair);
         handshake.set_local_epoch(self.startup_epoch);
         let msg1 = handshake
@@ -1436,7 +1436,7 @@ impl Node {
         // Wrap in SessionDatagram
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, dest_addr, setup_payload.clone())
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         // Route toward destination
         self.send_session_datagram(&mut datagram).await?;
@@ -1446,7 +1446,7 @@ impl Node {
 
         // Store session entry with handshake payload for potential resend
         let now_ms = Self::now_ms();
-        let resend_interval = self.config.node.rate_limit.handshake_resend_interval_ms;
+        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let mut entry = SessionEntry::new(
             dest_addr,
             dest_pubkey,
@@ -1608,7 +1608,7 @@ impl Node {
 
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         self.send_session_datagram(&mut datagram).await?;
 
@@ -1836,7 +1836,7 @@ impl Node {
         wire_buf.extend_from_slice(&timestamp_ms.to_le_bytes());
         // SessionDatagram-encoded layout (matches `SessionDatagram::encode`):
         wire_buf.push(LinkMessageType::SessionDatagram.to_byte());
-        wire_buf.push(self.config.node.session.default_ttl);
+        wire_buf.push(self.config().node.session.default_ttl);
         wire_buf.extend_from_slice(&path_mtu.to_le_bytes());
         wire_buf.extend_from_slice(self.node_addr().as_bytes());
         wire_buf.extend_from_slice(dest_addr.as_bytes());
@@ -1860,7 +1860,7 @@ impl Node {
                     .record_sent(fmp_counter, timestamp_ms, predicted_bytes);
             }
         }
-        self.stats_mut()
+        self.metrics()
             .forwarding
             .record_originated(link_plaintext_len + crate::noise::TAG_SIZE);
 
@@ -1996,7 +1996,7 @@ impl Node {
 
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         self.send_session_datagram(&mut datagram).await?;
 
@@ -2080,7 +2080,7 @@ impl Node {
 
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
-            .with_ttl(self.config.node.session.default_ttl);
+            .with_ttl(self.config().node.session.default_ttl);
 
         self.send_session_datagram(&mut datagram).await?;
 
@@ -2137,7 +2137,7 @@ impl Node {
         let encoded = datagram.encode();
         self.send_encrypted_link_message(&next_hop_addr, &encoded)
             .await?;
-        self.stats_mut().forwarding.record_originated(encoded.len());
+        self.metrics().forwarding.record_originated(encoded.len());
         Ok(())
     }
 
@@ -2308,15 +2308,16 @@ impl Node {
     /// Queue a packet while waiting for session establishment.
     fn queue_pending_packet(&mut self, dest_addr: NodeAddr, packet: Vec<u8>) {
         // Reject if we already have too many pending destinations
-        let max_dests = self.config.node.session.pending_max_destinations;
+        let max_dests = self.config().node.session.pending_max_destinations;
         if !self.pending_tun_packets.contains_key(&dest_addr)
             && self.pending_tun_packets.len() >= max_dests
         {
             return;
         }
 
+        let per_dest = self.config().node.session.pending_packets_per_dest;
         let queue = self.pending_tun_packets.entry(dest_addr).or_default();
-        if queue.len() >= self.config.node.session.pending_packets_per_dest {
+        if queue.len() >= per_dest {
             queue.pop_front(); // Drop oldest
         }
         queue.push_back(packet);

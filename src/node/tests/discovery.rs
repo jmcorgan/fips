@@ -1232,8 +1232,8 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     node.pending_lookups
         .insert(target_addr, PendingLookup::new(0));
 
-    let baseline_initiated = node.stats().discovery.req_initiated;
-    let baseline_timed_out = node.stats().discovery.resp_timed_out;
+    let baseline_initiated = node.metrics().discovery.req_initiated.get();
+    let baseline_timed_out = node.metrics().discovery.resp_timed_out.get();
 
     // --- t = 1100ms: first retry deadline (1*1000) ---
     node.check_pending_lookups(1100).await;
@@ -1246,7 +1246,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         assert_eq!(entry.last_sent_ms, 1100);
     }
     assert_eq!(
-        node.stats().discovery.req_initiated,
+        node.metrics().discovery.req_initiated.get(),
         baseline_initiated + 1,
         "retry #1 must invoke initiate_lookup exactly once"
     );
@@ -1262,7 +1262,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         assert_eq!(entry.last_sent_ms, 3100);
     }
     assert_eq!(
-        node.stats().discovery.req_initiated,
+        node.metrics().discovery.req_initiated.get(),
         baseline_initiated + 2,
         "retry #2 must invoke initiate_lookup exactly once more"
     );
@@ -1278,7 +1278,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         assert_eq!(entry.last_sent_ms, 7100);
     }
     assert_eq!(
-        node.stats().discovery.req_initiated,
+        node.metrics().discovery.req_initiated.get(),
         baseline_initiated + 3,
         "retry #3 must invoke initiate_lookup exactly once more"
     );
@@ -1290,12 +1290,12 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         "8s window not yet expired: pending_lookup must persist"
     );
     assert_eq!(
-        node.stats().discovery.req_initiated,
+        node.metrics().discovery.req_initiated.get(),
         baseline_initiated + 3,
         "no new attempt before final deadline"
     );
     assert_eq!(
-        node.stats().discovery.resp_timed_out,
+        node.metrics().discovery.resp_timed_out.get(),
         baseline_timed_out,
         "no timeout before final deadline"
     );
@@ -1314,13 +1314,13 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     );
     // resp_timed_out counter ticked.
     assert_eq!(
-        node.stats().discovery.resp_timed_out,
+        node.metrics().discovery.resp_timed_out.get(),
         baseline_timed_out + 1,
         "final timeout must increment discovery.resp_timed_out"
     );
     // No additional initiate_lookup on the timeout step.
     assert_eq!(
-        node.stats().discovery.req_initiated,
+        node.metrics().discovery.req_initiated.get(),
         baseline_initiated + 3,
         "the final-timeout step must NOT call initiate_lookup"
     );

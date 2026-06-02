@@ -11,6 +11,7 @@ use super::{FipsAddress, IdentityError, NodeAddr, sha256};
 ///
 /// The identity holds the secp256k1 keypair and provides methods for signing
 /// and verifying protocol messages.
+#[derive(Clone)]
 pub struct Identity {
     keypair: Keypair,
     node_addr: NodeAddr,
