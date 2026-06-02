@@ -179,13 +179,13 @@ impl Node {
         );
 
         // Create FMP negotiation payload for msg2 (includes profile, MMP bits, bloom TLV)
-        let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
+        let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile()).encode();
 
         let our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
         let msg2_response = match conn.receive_handshake_init(
             our_keypair,
-            self.startup_epoch,
+            self.startup_epoch(),
             noise_msg1,
             Some(&neg_payload),
             packet.timestamp_ms,
@@ -492,6 +492,7 @@ impl Node {
             return;
         }
 
+        let our_profile = self.node_profile();
         let (peer_identity, msg3_bytes, our_index) = {
             let Some(conn) = self.connections.get_mut(&link_id) else {
                 warn!(link_id = %link_id, "Connection removed during msg2 processing");
@@ -502,7 +503,7 @@ impl Node {
             };
 
             // Create FMP negotiation payload for msg3 (includes profile, MMP bits, bloom TLV)
-            let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile).encode();
+            let neg_payload = NegotiationPayload::fmp(1, 1, our_profile).encode();
 
             // Process Noise msg2 and generate msg3
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
@@ -527,10 +528,10 @@ impl Node {
 
             // Process peer's FMP negotiation payload from msg2
             if let Some(neg_bytes) = &received_negotiation {
-                match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
+                match process_fmp_negotiation(our_profile, conn, neg_bytes) {
                     Ok(()) => {}
                     Err(e) => {
-                        warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
+                        warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
                         conn.mark_failed();
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -878,6 +879,7 @@ impl Node {
             }
         };
 
+        let our_profile = self.node_profile();
         let (peer_identity, our_index, remote_epoch) = {
             // Get the pending connection
             let conn = match self.connections.get_mut(&link_id) {
@@ -922,10 +924,10 @@ impl Node {
 
             // Process peer's FMP negotiation payload from msg3
             if let Some(neg_bytes) = &received_negotiation {
-                match process_fmp_negotiation(self.node_profile, conn, neg_bytes) {
+                match process_fmp_negotiation(our_profile, conn, neg_bytes) {
                     Ok(()) => {}
                     Err(e) => {
-                        warn!(link_id = %link_id, our_profile = %self.node_profile, error = %e, "FMP negotiation failed");
+                        warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
                         self.connections.remove(&link_id);
                         self.remove_link(&link_id);
                         self.stats_mut()
@@ -1025,7 +1027,7 @@ impl Node {
         // admitting them doesn't grow peers.len(). The late cap check
         // inside promote_connection() is intentionally left in place
         // as defense-in-depth.
-        if self.max_peers > 0 && self.peers.len() >= self.max_peers {
+        if self.max_peers() > 0 && self.peers.len() >= self.max_peers() {
             let is_known_active = self.peers.contains_key(&peer_node_addr);
             let is_pending_outbound = self.connections.iter().any(|(_, conn)| {
                 conn.expected_identity()
@@ -1035,7 +1037,7 @@ impl Node {
             if !is_known_active && !is_pending_outbound {
                 debug!(
                     peer = %self.peer_display_name(&peer_node_addr),
-                    max = self.max_peers,
+                    max = self.max_peers(),
                     "Silent-dropping Msg3 at max_peers cap (early gate; no promotion)"
                 );
                 // Capture our_index before removing the connection so
@@ -1497,7 +1499,7 @@ impl Node {
     ) -> Result<PromotionResult, NodeError> {
         // Leaf nodes: reject if we already have a peer (single-peer enforcement)
         let peer_node_addr_check = *verified_identity.node_addr();
-        if self.node_profile == crate::protocol::NodeProfile::Leaf
+        if self.node_profile() == crate::protocol::NodeProfile::Leaf
             && !self.peers.is_empty()
             && !self.peers.contains_key(&peer_node_addr_check)
         {
@@ -1639,7 +1641,7 @@ impl Node {
                     is_outbound,
                     &self.config().node.mmp,
                     remote_epoch,
-                    self.node_profile,
+                    self.node_profile(),
                     peer_profile,
                 );
                 new_peer.set_tree_announce_min_interval_ms(
@@ -1720,10 +1722,10 @@ impl Node {
             }
 
             // Normal promotion
-            if self.max_peers > 0 && self.peers.len() >= self.max_peers {
+            if self.max_peers() > 0 && self.peers.len() >= self.max_peers() {
                 let _ = self.index_allocator.free(our_index);
                 return Err(NodeError::MaxPeersExceeded {
-                    max: self.max_peers,
+                    max: self.max_peers(),
                 });
             }
 
@@ -1750,7 +1752,7 @@ impl Node {
                 is_outbound,
                 &self.config().node.mmp,
                 remote_epoch,
-                self.node_profile,
+                self.node_profile(),
                 peer_profile,
             );
             new_peer.set_tree_announce_min_interval_ms(

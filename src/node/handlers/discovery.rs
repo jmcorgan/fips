@@ -366,7 +366,7 @@ impl Node {
         }
 
         // Leaf nodes don't forward discovery requests
-        if self.node_profile == crate::protocol::NodeProfile::Leaf {
+        if self.node_profile() == crate::protocol::NodeProfile::Leaf {
             return;
         }
 

@@ -55,11 +55,14 @@ impl Node {
             new_by_addr.insert(*identity.node_addr(), peer);
         }
 
-        // Read the current peer set directly from the field: update_peers is the
-        // config-source mutation owner (it writes self.config.peers below and then
-        // rebuilds the context), so it manages config.peers directly rather than
-        // through the context accessor — same rationale as the write at line ~124.
+        // Read the current peer set from the context *before* the swap below:
+        // update_peers is the config-source mutation owner. It reads the current
+        // (pre-update) peer set here, builds a fresh Config + context, then swaps
+        // the whole Arc. Reading the live context Arc before the swap yields the
+        // pre-update set the diff needs (the `update_peers_races_*` canary depends
+        // on this ordering).
         let current_by_addr: HashMap<NodeAddr, PeerConfig> = self
+            .context
             .config
             .peers()
             .iter()
@@ -124,8 +127,9 @@ impl Node {
             .map(|node_addr| new_by_addr[node_addr].clone())
             .collect();
 
-        self.config.peers = new_by_addr.into_values().collect();
-        self.rebuild_context();
+        let mut new_config = (*self.context.config).clone();
+        new_config.peers = new_by_addr.into_values().collect();
+        self.replace_context(|ctx| ctx.config = std::sync::Arc::new(new_config));
 
         for peer_config in added_configs {
             outcome.added += 1;
@@ -502,7 +506,7 @@ impl Node {
         // Start the Noise handshake and get message 1
         let our_keypair = self.identity().keypair();
         let noise_msg1 =
-            match connection.start_handshake(our_keypair, self.startup_epoch, current_time_ms) {
+            match connection.start_handshake(our_keypair, self.startup_epoch(), current_time_ms) {
                 Ok(msg) => msg,
                 Err(e) => {
                     // Clean up the index and link
@@ -755,7 +759,7 @@ impl Node {
                         debug!(
                             peer_npub = %traversal.peer_npub,
                             peers = self.peers.len(),
-                            max_peers = self.max_peers,
+                            max_peers = self.max_peers(),
                             "Dropping established NAT traversal: at capacity"
                         );
                         continue;
@@ -2128,16 +2132,16 @@ impl Node {
             .connections
             .len()
             .saturating_add(self.pending_connects.len());
-        let connection_slots = if self.max_connections == 0 {
+        let connection_slots = if self.max_connections() == 0 {
             usize::MAX
         } else {
-            self.max_connections.saturating_sub(connection_used)
+            self.max_connections().saturating_sub(connection_used)
         };
 
-        let peer_slots = if self.max_peers == 0 {
+        let peer_slots = if self.max_peers() == 0 {
             usize::MAX
         } else {
-            self.max_peers.saturating_sub(self.peers.len())
+            self.max_peers().saturating_sub(self.peers.len())
         };
 
         connection_slots.min(peer_slots)
@@ -2148,25 +2152,25 @@ impl Node {
             .connections
             .len()
             .saturating_add(self.pending_connects.len());
-        if self.max_connections == 0 {
+        if self.max_connections() == 0 {
             usize::MAX
         } else {
-            self.max_connections.saturating_sub(used)
+            self.max_connections().saturating_sub(used)
         }
     }
 
     fn outbound_link_slots(&self) -> usize {
-        if self.max_links == 0 {
+        if self.max_links() == 0 {
             usize::MAX
         } else {
-            self.max_links.saturating_sub(self.links.len())
+            self.max_links().saturating_sub(self.links.len())
         }
     }
 
     fn path_candidate_attempt_budget(&self, peer_node_addr: &NodeAddr) -> usize {
         if !self.peers.contains_key(peer_node_addr)
-            && self.max_peers > 0
-            && self.peers.len() >= self.max_peers
+            && self.max_peers() > 0
+            && self.peers.len() >= self.max_peers()
         {
             return 0;
         }

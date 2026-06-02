@@ -306,37 +306,17 @@ struct PendingConnect {
 /// connection before authentication completes.
 // Discovery lookup constants moved to config: node.discovery.attempt_timeouts_secs, node.discovery.ttl
 pub struct Node {
-    // === Identity ===
-    /// This node's cryptographic identity.
-    identity: Identity,
-
-    /// Random epoch generated at startup for peer restart detection.
-    /// Exchanged inside Noise handshake messages so peers can detect restarts.
-    startup_epoch: [u8; 8],
-
-    /// Instant when the node was created, for uptime reporting.
-    started_at: std::time::Instant,
-
-    // === Configuration ===
-    /// Loaded configuration.
-    config: Config,
-
-    /// Shared immutable context bundle. A parallel, authoritative copy of the
-    /// effectively-immutable fields (config/identity/startup_epoch/started_at/
-    /// is_leaf_only/max_*), kept in lockstep with the `Node` fields via
-    /// `rebuild_context`. Readers migrate onto it in later sub-PRs; the
-    /// duplicated `Node` fields are removed once the last reader has moved.
+    // === Immutable Context ===
+    /// Shared immutable context bundle: the single source of truth for the
+    /// node's effectively-immutable state (config/identity/startup_epoch/
+    /// started_at/is_leaf_only/max_*). Mutated only by whole-`Arc` replacement
+    /// via `replace_context` at the constructors, `leaf_only`, and
+    /// `update_peers`; readers reach it through the accessors.
     context: Arc<context::NodeContext>,
 
     // === State ===
     /// Node operational state.
     state: NodeState,
-
-    /// Whether this is a leaf-only node.
-    is_leaf_only: bool,
-
-    /// Node profile derived from config (Full, NonRouting, Leaf).
-    node_profile: NodeProfile,
 
     // === Spanning Tree ===
     /// Local spanning tree state.
@@ -403,14 +383,6 @@ pub struct Node {
     /// Tracks in-flight discovery lookups. Maps target NodeAddr to the
     /// initiation timestamp (Unix ms). Prevents duplicate flood queries.
     pending_lookups: HashMap<NodeAddr, handlers::discovery::PendingLookup>,
-
-    // === Resource Limits ===
-    /// Maximum connections (0 = unlimited).
-    max_connections: usize,
-    /// Maximum peers (0 = unlimited).
-    max_peers: usize,
-    /// Maximum links (0 = unlimited).
-    max_links: usize,
 
     // === Counters ===
     /// Next link ID to allocate.
@@ -676,14 +648,8 @@ impl Node {
         ));
 
         Ok(Self {
-            identity,
-            startup_epoch,
-            started_at,
-            config,
             context,
             state: NodeState::Created,
-            is_leaf_only,
-            node_profile,
             tree_state,
             bloom_state,
             coord_cache,
@@ -700,9 +666,6 @@ impl Node {
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
             pending_lookups: HashMap::new(),
-            max_connections,
-            max_peers,
-            max_links,
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
@@ -839,14 +802,8 @@ impl Node {
         ));
 
         Ok(Self {
-            identity,
-            startup_epoch,
-            started_at,
-            config,
             context,
             state: NodeState::Created,
-            is_leaf_only: false,
-            node_profile: NodeProfile::Full,
             tree_state,
             bloom_state,
             coord_cache,
@@ -863,9 +820,6 @@ impl Node {
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
             pending_lookups: HashMap::new(),
-            max_connections,
-            max_peers,
-            max_links,
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
@@ -926,10 +880,11 @@ impl Node {
     /// Create a leaf-only node (simplified state).
     pub fn leaf_only(config: Config) -> Result<Self, NodeError> {
         let mut node = Self::new(config)?;
-        node.is_leaf_only = true;
-        node.node_profile = NodeProfile::Leaf;
-        node.bloom_state = BloomState::leaf_only(*node.identity.node_addr());
-        node.rebuild_context();
+        node.bloom_state = BloomState::leaf_only(*node.node_addr());
+        node.replace_context(|ctx| {
+            ctx.is_leaf_only = true;
+            ctx.node_profile = NodeProfile::Leaf;
+        });
         Ok(node)
     }
 
@@ -941,7 +896,7 @@ impl Node {
 
         // Collect UDP configs with optional names to avoid borrow conflicts
         let udp_instances: Vec<_> = self
-            .config
+            .config()
             .transports
             .udp
             .iter()
@@ -959,13 +914,12 @@ impl Node {
         #[cfg(unix)]
         {
             let eth_instances: Vec<_> = self
-                .config
+                .config()
                 .transports
                 .ethernet
                 .iter()
                 .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
                 .collect();
-
             for (name, eth_config) in eth_instances {
                 let transport_id = self.allocate_transport_id();
                 let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
@@ -975,7 +929,7 @@ impl Node {
 
         // Create TCP transport instances
         let tcp_instances: Vec<_> = self
-            .config
+            .config()
             .transports
             .tcp
             .iter()
@@ -990,7 +944,7 @@ impl Node {
 
         // Create Tor transport instances
         let tor_instances: Vec<_> = self
-            .config
+            .config()
             .transports
             .tor
             .iter()
@@ -1007,7 +961,7 @@ impl Node {
         #[cfg(bluer_available)]
         {
             let ble_instances: Vec<_> = self
-                .config
+                .config()
                 .transports
                 .ble
                 .iter()
@@ -1149,12 +1103,17 @@ impl Node {
 
     /// Get this node's NodeAddr.
     pub fn node_addr(&self) -> &NodeAddr {
-        self.identity.node_addr()
+        self.context.identity.node_addr()
     }
 
     /// Get this node's npub.
     pub fn npub(&self) -> String {
-        self.identity.npub()
+        self.context.identity.npub()
+    }
+
+    /// Get this node's startup epoch (random per-boot tag for restart detection).
+    pub fn startup_epoch(&self) -> [u8; 8] {
+        self.context.startup_epoch
     }
 
     /// Reload the host map if the backing `/etc/fips/hosts` file changed.
@@ -1197,23 +1156,16 @@ impl Node {
         self.context.config.as_ref()
     }
 
-    /// Rebuild the shared [`context::NodeContext`] from the current `Node`
-    /// fields. Called after any mutation of a bundled field (`update_peers`,
-    /// the `set_max_*` setters) so `self.context` stays equal to the `Node`
-    /// fields it mirrors. Cheap — the only deep copy is the (rare) `Config`
-    /// clone.
-    fn rebuild_context(&mut self) {
-        self.context = Arc::new(context::NodeContext::new(
-            Arc::new(self.config.clone()),
-            self.identity.clone(),
-            self.startup_epoch,
-            self.started_at,
-            self.is_leaf_only,
-            self.node_profile,
-            self.max_connections,
-            self.max_peers,
-            self.max_links,
-        ));
+    /// Mutate the shared immutable context by building a fresh
+    /// [`context::NodeContext`] and swapping the whole `Arc`. The per-instance
+    /// context is never interior-mutated; this clone-edit-swap is the sole
+    /// runtime mutation path for the bundle (the constructors,
+    /// [`leaf_only`](Self::leaf_only), and [`update_peers`](Self::update_peers)).
+    /// Cheap — the only deep copy is the (rare) `Config` clone behind its `Arc`.
+    fn replace_context(&mut self, f: impl FnOnce(&mut context::NodeContext)) {
+        let mut ctx = (*self.context).clone();
+        f(&mut ctx);
+        self.context = Arc::new(ctx);
     }
 
     /// Calculate the effective IPv6 MTU that can be sent over FIPS.
@@ -1252,7 +1204,7 @@ impl Node {
             return mtu;
         }
         // Fallback to config: try UDP first, then Ethernet
-        if let Some((_, cfg)) = self.config.transports.udp.iter().next() {
+        if let Some((_, cfg)) = self.config().transports.udp.iter().next() {
             return cfg.mtu();
         }
         1280
@@ -1337,7 +1289,7 @@ impl Node {
         let parent_id = *self.tree_state.my_declaration().parent_id();
         let is_root = self.tree_state.is_root();
 
-        let max_fpr = self.config.node.bloom.max_inbound_fpr;
+        let max_fpr = self.config().node.bloom.max_inbound_fpr;
         let mut total: f64 = 1.0; // count self
         let mut child_count: u32 = 0;
         let mut has_data = false;
@@ -1401,7 +1353,7 @@ impl Node {
             None => true,
             Some(last) => {
                 now.duration_since(last)
-                    >= std::time::Duration::from_secs(self.config.node.mmp.log_interval_secs)
+                    >= std::time::Duration::from_secs(self.config().node.mmp.log_interval_secs)
             }
         };
         if should_log {
@@ -1522,16 +1474,19 @@ impl Node {
 
     // === Resource Limits ===
 
-    /// Set the maximum number of connections (handshake phase).
-    pub fn set_max_connections(&mut self, max: usize) {
-        self.max_connections = max;
-        self.rebuild_context();
+    /// Maximum connections (handshake phase); 0 = unlimited.
+    pub fn max_connections(&self) -> usize {
+        self.context.max_connections
     }
 
-    /// Set the maximum number of peers (authenticated).
-    pub fn set_max_peers(&mut self, max: usize) {
-        self.max_peers = max;
-        self.rebuild_context();
+    /// Maximum authenticated peers; 0 = unlimited.
+    pub fn max_peers(&self) -> usize {
+        self.context.max_peers
+    }
+
+    /// Maximum links; 0 = unlimited.
+    pub fn max_links(&self) -> usize {
+        self.context.max_links
     }
 
     /// Returns false when we are at or above the configured `max_peers`
@@ -1543,13 +1498,8 @@ impl Node {
     /// Nostr-mediated NAT-traversal punch) from doing pointless work
     /// when saturated.
     pub(crate) fn outbound_admission_check(&self) -> bool {
-        self.max_peers == 0 || self.peers.len() < self.max_peers
-    }
-
-    /// Set the maximum number of links.
-    pub fn set_max_links(&mut self, max: usize) {
-        self.max_links = max;
-        self.rebuild_context();
+        let max_peers = self.context.max_peers;
+        max_peers == 0 || self.peers.len() < max_peers
     }
 
     // === Counts ===
@@ -1614,9 +1564,9 @@ impl Node {
 
     /// Add a link.
     pub fn add_link(&mut self, link: Link) -> Result<(), NodeError> {
-        if self.max_links > 0 && self.links.len() >= self.max_links {
+        if self.max_links() > 0 && self.links.len() >= self.max_links() {
             return Err(NodeError::MaxLinksExceeded {
-                max: self.max_links,
+                max: self.max_links(),
             });
         }
         let link_id = link.link_id();
@@ -1720,9 +1670,9 @@ impl Node {
             return Err(NodeError::ConnectionAlreadyExists(link_id));
         }
 
-        if self.max_connections > 0 && self.connections.len() >= self.max_connections {
+        if self.max_connections() > 0 && self.connections.len() >= self.max_connections() {
             return Err(NodeError::MaxConnectionsExceeded {
-                max: self.max_connections,
+                max: self.max_connections(),
             });
         }
 
@@ -1857,7 +1807,7 @@ impl Node {
         self.identity_cache
             .insert(prefix, (node_addr, pubkey, Self::now_ms()));
         // LRU eviction
-        let max = self.config.node.cache.identity_size;
+        let max = self.config().node.cache.identity_size;
         if self.identity_cache.len() > max
             && let Some(oldest_key) = self
                 .identity_cache
@@ -1908,7 +1858,7 @@ impl Node {
 
     /// Configured maximum identity cache size.
     pub fn identity_cache_max(&self) -> usize {
-        self.config.node.cache.identity_size
+        self.config().node.cache.identity_size
     }
 
     /// Number of pending discovery lookups.
@@ -2389,7 +2339,7 @@ impl fmt::Debug for Node {
         f.debug_struct("Node")
             .field("node_addr", self.node_addr())
             .field("state", &self.state)
-            .field("is_leaf_only", &self.is_leaf_only)
+            .field("is_leaf_only", &self.is_leaf_only())
             .field("connections", &self.connection_count())
             .field("peers", &self.peer_count())
             .field("links", &self.link_count())

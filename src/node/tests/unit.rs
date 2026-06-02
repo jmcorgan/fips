@@ -250,8 +250,7 @@ fn test_node_link_management() {
 
 #[test]
 fn test_node_link_limit() {
-    let mut node = make_node();
-    node.set_max_links(2);
+    let mut node = make_node_with_max_links(2);
 
     for i in 0..2 {
         let link_id = node.allocate_link_id();
@@ -383,9 +382,8 @@ fn test_node_cross_connection_resolution() {
 
 #[test]
 fn test_node_peer_limit() {
-    let mut node = make_node();
+    let mut node = make_node_with_max_peers(2);
     let transport_id = TransportId::new(1);
-    node.set_max_peers(2);
 
     // Add two peers via promotion
     for i in 0..2 {
@@ -601,9 +599,9 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let mut pending_conn =
         PeerConnection::outbound(pending_link_id, peer_b_identity, pending_time_ms);
 
-    let our_keypair = node.identity.keypair();
+    let our_keypair = node.identity().keypair();
     let _msg1 = pending_conn
-        .start_handshake(our_keypair, node.startup_epoch, pending_time_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), pending_time_ms)
         .unwrap();
 
     let pending_index = node.index_allocator.allocate().unwrap();
@@ -640,9 +638,9 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let mut completing_conn =
         PeerConnection::outbound(completing_link_id, peer_b_identity, completing_time_ms);
 
-    let our_keypair = node.identity.keypair();
+    let our_keypair = node.identity().keypair();
     let msg1 = completing_conn
-        .start_handshake(our_keypair, node.startup_epoch, completing_time_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), completing_time_ms)
         .unwrap();
 
     // B responds
@@ -989,7 +987,7 @@ fn active_peer_same_path_discovery_refreshes_stale_peer() {
     let transport_id = TransportId::new(1);
     let current_addr = TransportAddr::from_string("127.0.0.1:9");
     let stale_at = Node::now_ms().saturating_sub(
-        node.config
+        node.config()
             .node
             .heartbeat_interval_secs
             .saturating_add(1)
@@ -1040,7 +1038,20 @@ async fn node_context_mirrors_config_and_immutable_facades() {
 
 #[tokio::test]
 async fn update_peers_races_new_alternative_without_dropping_active_peer() {
-    let mut node = make_node();
+    // The node's *current* (pre-update) peer set must contain `old_peer`, so it
+    // is baked into the Config at construction (immutable context = sole store).
+    let peer_full = Identity::generate();
+    let old_peer = crate::config::PeerConfig {
+        npub: peer_full.npub(),
+        alias: None,
+        addresses: vec![crate::config::PeerAddress::new("udp", "127.0.0.1:9")],
+        connect_policy: crate::config::ConnectPolicy::AutoConnect,
+        auto_reconnect: true,
+        via_nostr: false,
+    };
+    let mut config = Config::new();
+    config.peers = vec![old_peer.clone()];
+    let mut node = make_node_with(config);
     let (packet_tx, packet_rx) = packet_channel(64);
     node.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
@@ -1059,7 +1070,6 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     node.transports
         .insert(transport_id, TransportHandle::Udp(udp));
 
-    let peer_full = Identity::generate();
     let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
     let peer_node_addr = *peer_identity.node_addr();
     let current_addr = TransportAddr::from_string("127.0.0.1:9");
@@ -1079,14 +1089,6 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
         ),
     );
 
-    let old_peer = crate::config::PeerConfig {
-        npub: peer_full.npub(),
-        alias: None,
-        addresses: vec![crate::config::PeerAddress::new("udp", "127.0.0.1:9")],
-        connect_policy: crate::config::ConnectPolicy::AutoConnect,
-        auto_reconnect: true,
-        via_nostr: false,
-    };
     let new_peer = crate::config::PeerConfig {
         addresses: vec![
             crate::config::PeerAddress::new("udp", "127.0.0.1:9"),
@@ -1094,7 +1096,6 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
         ],
         ..old_peer.clone()
     };
-    node.config.peers = vec![old_peer];
 
     let outcome = node.update_peers(vec![new_peer]).await.unwrap();
 
@@ -1260,8 +1261,8 @@ fn test_schedule_reconnect_preserves_backoff() {
     );
 
     // With count=3, backoff should be 5s * 2^3 = 40s.
-    let base_ms = node.config.node.retry.base_interval_secs * 1000;
-    let max_ms = node.config.node.retry.max_backoff_secs * 1000;
+    let base_ms = node.config().node.retry.base_interval_secs * 1000;
+    let max_ms = node.config().node.retry.max_backoff_secs * 1000;
     let expected_delay = state.backoff_ms(base_ms, max_ms);
     assert_eq!(
         state.retry_after_ms,
@@ -1296,8 +1297,8 @@ fn test_schedule_reconnect_fresh_state() {
         "Fresh reconnect should start at count=0"
     );
     // Base delay: 5s * 2^0 = 5s
-    let base_ms = node.config.node.retry.base_interval_secs * 1000;
-    let max_ms = node.config.node.retry.max_backoff_secs * 1000;
+    let base_ms = node.config().node.retry.base_interval_secs * 1000;
+    let max_ms = node.config().node.retry.max_backoff_secs * 1000;
     let expected_delay = state.backoff_ms(base_ms, max_ms);
     assert_eq!(state.retry_after_ms, 1_000 + expected_delay);
 }
@@ -1628,8 +1629,7 @@ fn inject_dummy_peers(node: &mut Node, count: usize) {
 #[test]
 fn outbound_admission_check_direct() {
     // max_peers cap honored: above-cap returns false, below-cap returns true.
-    let mut node = make_node();
-    node.set_max_peers(3);
+    let mut node = make_node_with_max_peers(3);
 
     assert!(node.outbound_admission_check(), "0/3 should be admissible");
     inject_dummy_peers(&mut node, 2);
@@ -1646,8 +1646,7 @@ fn outbound_admission_check_direct() {
     );
 
     // No-cap sentinel: max_peers == 0 admits unconditionally.
-    let mut uncapped = make_node();
-    uncapped.set_max_peers(0);
+    let mut uncapped = make_node_with_max_peers(0);
     assert!(uncapped.outbound_admission_check());
     inject_dummy_peers(&mut uncapped, 50);
     assert!(
@@ -1658,8 +1657,7 @@ fn outbound_admission_check_direct() {
 
 #[tokio::test]
 async fn process_pending_retries_gated_at_capacity() {
-    let mut node = make_node();
-    node.set_max_peers(2);
+    let mut node = make_node_with_max_peers(2);
     inject_dummy_peers(&mut node, 2);
 
     // Queue a retry that would otherwise be due.
@@ -1717,8 +1715,7 @@ async fn poll_nostr_discovery_established_gated_at_capacity() {
     use crate::discovery::EstablishedTraversal;
     use std::net::UdpSocket;
 
-    let mut node = make_node();
-    node.set_max_peers(2);
+    let mut node = make_node_with_max_peers(2);
     inject_dummy_peers(&mut node, 2);
 
     let bootstrap = Arc::new(NostrDiscovery::new_for_test());
@@ -1797,7 +1794,7 @@ async fn craft_and_send_msg1(
     use crate::node::wire::build_msg1;
     use crate::utils::index::SessionIndex;
 
-    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let sender_pubkey_id = PeerIdentity::from_pubkey_full(sender_identity.pubkey_full());
     let sender_node_addr = *sender_pubkey_id.node_addr();
 
@@ -1859,8 +1856,7 @@ async fn handle_msg1_silent_drops_at_cap_for_new_peer() {
     use crate::config::UdpConfig;
     use tokio::time::{Duration, timeout};
 
-    let mut node = make_node();
-    node.set_max_peers(2);
+    let mut node = make_node_with_max_peers(2);
     inject_dummy_peers(&mut node, 2);
     assert_eq!(node.peer_count(), 2, "precondition: at cap");
 
@@ -1941,8 +1937,7 @@ async fn handle_msg1_silent_drops_at_cap_for_new_peer() {
 async fn handle_msg1_admits_existing_peer_at_cap() {
     use crate::config::UdpConfig;
 
-    let mut node = make_node();
-    node.set_max_peers(2);
+    let mut node = make_node_with_max_peers(2);
 
     inject_dummy_peers(&mut node, 1);
 

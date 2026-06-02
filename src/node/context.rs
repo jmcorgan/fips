@@ -1,16 +1,17 @@
 //! Shared immutable context bundle.
 //!
 //! [`NodeContext`] groups the [`Node`](super::Node)'s effectively-immutable
-//! fields behind a single `Arc` so that handlers can eventually borrow a
-//! cheap `&NodeContext` clone instead of `&self`.
+//! fields behind a single `Arc` so that handlers can borrow a cheap
+//! `&NodeContext` clone instead of `&self`.
 //!
-//! During the migration it is a *parallel, authoritative* copy of the
-//! corresponding `Node` fields: both are kept in lockstep at the only three
-//! mutation points — the constructor, [`update_peers`](super::Node::update_peers),
-//! and the test-only `set_max_*` setters — via
-//! [`Node::rebuild_context`](super::Node::rebuild_context). Readers migrate
-//! onto the bundle incrementally; the duplicated `Node` fields are removed
-//! once the last reader has moved over.
+//! It is the **sole store** of these fields: the `Node` no longer keeps
+//! duplicate copies. The bundle itself is immutable; the rare mutation of a
+//! bundled field (the constructors, [`leaf_only`](super::Node::leaf_only),
+//! and [`update_peers`](super::Node::update_peers)) is done by building a fresh
+//! `NodeContext` and swapping the whole `Arc` via
+//! [`Node::replace_context`](super::Node::replace_context). Readers reach the
+//! fields through the `Node` accessors (`config()`, `identity()`,
+//! `startup_epoch()`, `is_leaf_only()`, `max_*()`, `uptime()`).
 
 use std::sync::Arc;
 
@@ -28,8 +29,6 @@ pub(crate) struct NodeContext {
     pub identity: Identity,
 
     /// Random epoch generated at startup for peer restart detection.
-    // Consumed by readers migrating in a later sub-PR.
-    #[allow(dead_code)]
     pub startup_epoch: [u8; 8],
 
     /// Instant when the node was created, for uptime reporting.
@@ -42,18 +41,12 @@ pub(crate) struct NodeContext {
     pub node_profile: NodeProfile,
 
     /// Maximum connections (0 = unlimited).
-    // Consumed by readers migrating in a later sub-PR.
-    #[allow(dead_code)]
     pub max_connections: usize,
 
     /// Maximum peers (0 = unlimited).
-    // Consumed by readers migrating in a later sub-PR.
-    #[allow(dead_code)]
     pub max_peers: usize,
 
     /// Maximum links (0 = unlimited).
-    // Consumed by readers migrating in a later sub-PR.
-    #[allow(dead_code)]
     pub max_links: usize,
 }
 

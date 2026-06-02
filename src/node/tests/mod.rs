@@ -28,12 +28,27 @@ pub(super) fn make_node() -> Node {
     make_node_with(Config::new())
 }
 
-/// Build a test node from an explicit `Config`. Prefer this over poking
-/// `node.config.*` after construction: immutable fields are mirrored into the
-/// shared `NodeContext` at build time, so a post-construction field poke is
-/// invisible to any reader that has migrated onto the `config()` accessor.
+/// Build a test node from an explicit `Config`. Immutable state lives solely in
+/// the shared `NodeContext`, built once at construction — there is no
+/// post-construction field to poke, so set limits/config on the `Config` here.
 pub(super) fn make_node_with(config: Config) -> Node {
     Node::new(config).unwrap()
+}
+
+/// Build a test node with an explicit `max_peers` limit (replaces the removed
+/// `set_max_peers` setter; resource limits are immutable post-construction).
+pub(super) fn make_node_with_max_peers(max_peers: usize) -> Node {
+    let mut config = Config::new();
+    config.node.limits.max_peers = max_peers;
+    make_node_with(config)
+}
+
+/// Build a test node with an explicit `max_links` limit (replaces the removed
+/// `set_max_links` setter; resource limits are immutable post-construction).
+pub(super) fn make_node_with_max_links(max_links: usize) -> Node {
+    let mut config = Config::new();
+    config.node.limits.max_links = max_links;
+    make_node_with(config)
 }
 
 #[allow(dead_code)]
@@ -66,9 +81,9 @@ pub(super) fn make_completed_connection(
     let mut conn = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
 
     // Run initiator side of handshake
-    let our_keypair = node.identity.keypair();
+    let our_keypair = node.identity().keypair();
     let msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch, current_time_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), current_time_ms)
         .unwrap();
 
     // Run responder side to generate msg2

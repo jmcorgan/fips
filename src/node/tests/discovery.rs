@@ -1170,7 +1170,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     // Default attempt_timeouts_secs is [1, 2, 4, 8]. Confirm so the test
     // cannot silently drift if the default changes.
     assert_eq!(
-        node.config.node.discovery.attempt_timeouts_secs,
+        node.config().node.discovery.attempt_timeouts_secs,
         vec![1, 2, 4, 8],
         "test pins the [1,2,4,8] default; update the test if the default changes"
     );

@@ -1628,8 +1628,9 @@ fn test_coords_warmup_config_default() {
 
 #[test]
 fn test_identity_cache_lru_eviction() {
-    let mut node = make_node();
-    node.config.node.cache.identity_size = 2;
+    let mut config = crate::Config::new();
+    config.node.cache.identity_size = 2;
+    let mut node = make_node_with(config);
 
     let id1 = Identity::generate();
     let id2 = Identity::generate();
@@ -1791,7 +1792,7 @@ async fn test_session_handshake_timeout() {
     let mut node = make_node();
 
     let identity_b = Identity::generate();
-    let handshake = HandshakeState::new_initiator(node.identity.keypair());
+    let handshake = HandshakeState::new_initiator(node.identity().keypair());
 
     let dest_addr = *identity_b.node_addr();
 
@@ -1808,7 +1809,7 @@ async fn test_session_handshake_timeout() {
     assert!(node.sessions.contains_key(&dest_addr));
 
     // Before timeout: session should remain
-    let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
+    let timeout_secs = node.config().node.rate_limit.handshake_timeout_secs;
     let before_timeout = 1000 + timeout_secs * 1000 - 1;
     node.resend_pending_session_handshakes(before_timeout).await;
     assert!(
@@ -1852,7 +1853,7 @@ async fn test_session_awaiting_msg3_timeout() {
     assert!(node.sessions.contains_key(&src_addr));
 
     // After timeout: session should be removed
-    let timeout_secs = node.config.node.rate_limit.handshake_timeout_secs;
+    let timeout_secs = node.config().node.rate_limit.handshake_timeout_secs;
     let after_timeout = 1000 + timeout_secs * 1000 + 1;
     node.resend_pending_session_handshakes(after_timeout).await;
     assert!(
@@ -2298,7 +2299,7 @@ fn install_established_session_with_mmp(node: &mut Node, remote: &Identity) {
         1000,
         true,
     );
-    entry.init_mmp(&node.config.node.session_mmp);
+    entry.init_mmp(&node.config().node.session_mmp);
     node.sessions.insert(remote_addr, entry);
 }
 

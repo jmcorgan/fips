@@ -53,13 +53,13 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let node_b = make_node();
     let transport_id = TransportId::new(1);
     let remote_addr = TransportAddr::from_string("127.0.0.1:5001");
-    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
 
     let link_id_a = node_a.allocate_link_id();
     let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let noise_msg1 = conn_a
-        .start_handshake(node_a.identity.keypair(), node_a.startup_epoch, 1000)
+        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
         .unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id);
@@ -85,7 +85,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let responder_epoch = [0x11; 8];
     let noise_msg2 = conn_b
         .receive_handshake_init(
-            node_b.identity.keypair(),
+            node_b.identity().keypair(),
             responder_epoch,
             &noise_msg1,
             None,
@@ -173,12 +173,12 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
 
     // === A initiates the handshake ===
 
-    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let link_id_a = node_a.allocate_link_id();
     let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
     let noise_msg1 = conn_a
-        .start_handshake(node_a.identity.keypair(), node_a.startup_epoch, 1000)
+        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
         .unwrap();
     conn_a.set_our_index(our_index_a);
     conn_a.set_transport_id(transport_id_a);

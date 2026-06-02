@@ -30,10 +30,29 @@ pub(super) async fn make_test_node() -> TestNode {
 
 /// Create a test node with a specific transport MTU.
 pub(super) async fn make_test_node_with_mtu(mtu: u16) -> TestNode {
+    make_test_node_inner(Config::new(), mtu).await
+}
+
+/// Create a test node with a specific routing profile. Profile is immutable
+/// (lives in the shared context), so it is set via the `Config` flags that
+/// `Config::node_profile()` reads rather than poked post-construction.
+pub(super) async fn make_test_node_with_profile(profile: crate::protocol::NodeProfile) -> TestNode {
+    use crate::protocol::NodeProfile;
+    let mut config = Config::new();
+    match profile {
+        NodeProfile::Leaf => config.node.leaf_only = true,
+        NodeProfile::NonRouting => config.node.disable_routing = true,
+        NodeProfile::Full => {}
+    }
+    make_test_node_inner(config, 1280).await
+}
+
+/// Shared builder: a test node from an explicit `Config` and transport MTU.
+async fn make_test_node_inner(config: Config, mtu: u16) -> TestNode {
     use crate::config::UdpConfig;
     use crate::transport::udp::UdpTransport;
 
-    let mut node = make_node();
+    let mut node = make_node_with(config);
     let transport_id = TransportId::new(1);
 
     // recv_buf_size and packet_channel are sized for large-network harness
@@ -90,7 +109,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
     let our_index = initiator.node.index_allocator.allocate().unwrap();
     let our_keypair = initiator.node.identity().keypair();
     let noise_msg1 = conn
-        .start_handshake(our_keypair, initiator.node.startup_epoch, 1000)
+        .start_handshake(our_keypair, initiator.node.startup_epoch(), 1000)
         .unwrap();
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);

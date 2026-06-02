@@ -204,7 +204,7 @@ impl Node {
         // Create XX initiator handshake directly (no PeerConnection)
         let our_keypair = self.identity().keypair();
         let mut hs = HandshakeState::new_initiator(our_keypair);
-        hs.set_local_epoch(self.startup_epoch);
+        hs.set_local_epoch(self.startup_epoch());
 
         let noise_msg1 = match hs.write_message_1() {
             Ok(msg) => msg,
@@ -543,7 +543,7 @@ impl Node {
         // Create Noise XX initiator handshake (rekey: no negotiation payload)
         let our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_initiator(our_keypair);
-        handshake.set_local_epoch(self.startup_epoch);
+        handshake.set_local_epoch(self.startup_epoch());
 
         let msg1 = match handshake.write_message_1() {
             Ok(m) => m,

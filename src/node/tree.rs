@@ -37,7 +37,7 @@ impl Node {
         &mut self,
         peer_addr: &NodeAddr,
     ) -> Result<(), NodeError> {
-        if self.node_profile == crate::protocol::NodeProfile::Leaf {
+        if self.node_profile() == crate::protocol::NodeProfile::Leaf {
             return Ok(());
         }
         let now_ms = std::time::SystemTime::now()

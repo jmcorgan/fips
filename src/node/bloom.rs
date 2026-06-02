@@ -179,7 +179,7 @@ impl Node {
     /// Non-routing nodes do not send filters (they receive only).
     pub(super) async fn send_pending_filter_announces(&mut self) {
         // Non-routing and leaf nodes don't send bloom filters
-        if self.node_profile != crate::protocol::NodeProfile::Full {
+        if self.node_profile() != crate::protocol::NodeProfile::Full {
             return;
         }
 
@@ -402,7 +402,7 @@ impl Node {
     /// and marks all peers for update.
     fn check_adaptive_sizing(&mut self) {
         // Only Full nodes participate in filter sizing
-        if self.node_profile != crate::protocol::NodeProfile::Full {
+        if self.node_profile() != crate::protocol::NodeProfile::Full {
             return;
         }
 

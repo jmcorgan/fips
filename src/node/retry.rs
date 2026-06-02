@@ -235,7 +235,7 @@ impl Node {
         if !self.outbound_admission_check() {
             debug!(
                 peers = self.peers.len(),
-                max_peers = self.max_peers,
+                max_peers = self.max_peers(),
                 retry_pending = self.retry_pending.len(),
                 "Suppressing auto-reconnect retries: at capacity"
             );

@@ -78,9 +78,9 @@ async fn test_adopted_udp_traversal_completes_handshake() {
     node_b.handle_msg3(pkt_at_b).await;
 
     let peer_a_node_addr =
-        *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full()).node_addr();
+        *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();
     let peer_b_node_addr =
-        *PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full()).node_addr();
+        *PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full()).node_addr();
 
     assert_eq!(
         node_a.peer_count(),
@@ -248,7 +248,7 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
     assert_eq!(pkt_at_a.data[0] & 0x0f, PHASE_MSG3);
     node_a.handle_msg3(pkt_at_a).await;
 
-    let node_a_addr = *PeerIdentity::from_pubkey_full(node_a.identity.pubkey_full()).node_addr();
+    let node_a_addr = *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();
     assert!(
         node_b.get_peer(&node_a_addr).is_some(),
         "node_b should first be connected to node_a via adopted transport"
@@ -262,7 +262,7 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
         .transports
         .insert(transport_id_c, TransportHandle::Udp(transport_c));
 
-    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity.pubkey_full());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let adopted_addr = TransportAddr::from_string(&handoff_result.local_addr.to_string());
     node_c
         .initiate_connection(transport_id_c, adopted_addr, Some(peer_b_identity))
@@ -314,7 +314,7 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
     };
     node_b.handle_msg3(pkt_at_b).await;
 
-    let node_c_addr = *PeerIdentity::from_pubkey_full(node_c.identity.pubkey_full()).node_addr();
+    let node_c_addr = *PeerIdentity::from_pubkey_full(node_c.identity().pubkey_full()).node_addr();
     assert!(
         node_b.get_peer(&node_c_addr).is_some(),
         "node_b should promote node_c when node_c handshakes via adopted socket"

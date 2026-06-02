@@ -233,6 +233,21 @@ run_build() {
         record "clippy" 1
         return 1
     fi
+
+    # Guard: the effectively-immutable state lives solely in NodeContext. The
+    # Node struct must not re-declare a bundled field (config/identity/
+    # startup_epoch/started_at/is_leaf_only/node_profile/max_*) — a shadow field
+    # would silently reopen dual-store divergence between the struct and the
+    # context. Checks the struct *declaration*, so it is wrap-insensitive.
+    info "node-context single-store guard"
+    if awk '/^pub struct Node \{/,/^\}/' src/node/mod.rs \
+        | grep -qE '^[[:space:]]+(config|identity|startup_epoch|started_at|is_leaf_only|node_profile|max_connections|max_peers|max_links):'; then
+        fail "Node struct re-declares a bundled immutable field; it must live solely in NodeContext"
+        record "node-context-guard" 1
+        return 1
+    else
+        record "node-context-guard" 0
+    fi
 }
 
 # ── Stage 2: Unit Tests ───────────────────────────────────────────────────

@@ -507,7 +507,7 @@ impl Node {
                     }
                     let our_keypair = self.identity().keypair();
                     let mut handshake = HandshakeState::new_responder(our_keypair);
-                    handshake.set_local_epoch(self.startup_epoch);
+                    handshake.set_local_epoch(self.startup_epoch());
 
                     if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
                         debug!(error = %e, "Failed to process rekey XX msg1");
@@ -558,7 +558,7 @@ impl Node {
         // Create XX responder handshake and process msg1
         let our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_responder(our_keypair);
-        handshake.set_local_epoch(self.startup_epoch);
+        handshake.set_local_epoch(self.startup_epoch());
 
         if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
             debug!(error = %e, "Failed to process Noise XX msg1 in SessionSetup");
@@ -1419,7 +1419,7 @@ impl Node {
         // Create Noise XX initiator handshake
         let our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_initiator(our_keypair);
-        handshake.set_local_epoch(self.startup_epoch);
+        handshake.set_local_epoch(self.startup_epoch());
         let msg1 = handshake
             .write_message_1()
             .map_err(|e| NodeError::SendFailed {
