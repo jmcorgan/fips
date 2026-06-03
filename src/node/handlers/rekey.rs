@@ -71,6 +71,19 @@ impl Node {
             if peer.rekey_in_progress() {
                 continue;
             }
+            if peer.pending_new_session().is_some() {
+                // Completed rekey awaiting cutover; don't stack another.
+                continue;
+            }
+            if peer.rekey_msg3_payload().is_some() {
+                // Initiator already cut over on its timer but is still
+                // retransmitting msg3 to a responder not yet confirmed on
+                // the new epoch. Don't start another rekey (which would
+                // overwrite the retained payload) until this cycle's msg3
+                // is delivered or its budget exhausted. Mirrors FSP
+                // check_session_rekey.
+                continue;
+            }
             if peer.is_rekey_dampened(REKEY_DAMPENING_SECS) {
                 continue;
             }
@@ -306,6 +319,93 @@ impl Node {
                 trace!(
                     peer = %self.peer_display_name(&node_addr),
                     "Resent rekey msg1"
+                );
+            }
+        }
+    }
+
+    /// Retransmit FMP rekey msg3 until the responder is confirmed on the
+    /// new epoch.
+    ///
+    /// FMP sends the rekey msg3 exactly once (in `handle_msg2`). If that
+    /// single datagram is lost, the responder never derives the new
+    /// session: when the initiator later cuts over on its own timer, its
+    /// new-epoch frames land on a `peers_by_index` index the responder
+    /// never built a session for, so they silently miss and the link dies
+    /// at the 30s heartbeat timeout. This driver retransmits the retained
+    /// msg3 over the existing link until the responder confirms.
+    ///
+    /// Liveness only — overlapping-epoch / pending-authenticated decrypt
+    /// covers cutover skew. The retained payload is cleared (confirmed)
+    /// when an inbound peer frame authenticates against `pending` (peer cut
+    /// over first, in `handle_encrypted_frame`) or against the post-cutover
+    /// `current` session (initiator already cut over, responder reached the
+    /// new epoch, in `process_authentic_fmp_plaintext`). After
+    /// `handshake_max_resends` with no confirmation the cycle is abandoned.
+    pub(in crate::node) async fn resend_pending_fmp_rekey_msg3(&mut self, now_ms: u64) {
+        if !self.config().node.rekey.enabled {
+            return;
+        }
+
+        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
+
+        let mut to_resend: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
+        let mut to_abandon: Vec<NodeAddr> = Vec::new();
+
+        for (node_addr, peer) in &self.peers {
+            let payload = match peer.rekey_msg3_payload() {
+                Some(p) => p,
+                None => continue,
+            };
+            if peer.rekey_msg3_next_resend_ms() == 0 || now_ms < peer.rekey_msg3_next_resend_ms() {
+                continue;
+            }
+            if peer.rekey_msg3_resend_count() >= max_resends {
+                to_abandon.push(*node_addr);
+                continue;
+            }
+            to_resend.push((*node_addr, payload.to_vec()));
+        }
+
+        // Clear retained payload on cycles that exhausted their budget.
+        // The new session may still cut over via the normal path; the
+        // responder will recover on its own next rekey if it never got
+        // msg3. Stopping retransmission just bounds the effort.
+        for node_addr in to_abandon {
+            if let Some(peer) = self.peers.get_mut(&node_addr) {
+                peer.clear_rekey_msg3_payload();
+            }
+            trace!(
+                peer = %self.peer_display_name(&node_addr),
+                "FMP rekey msg3 unconfirmed after max retransmissions, stopping resend"
+            );
+        }
+
+        for (node_addr, payload) in to_resend {
+            let (transport_id, remote_addr) = match self.peers.get(&node_addr) {
+                Some(p) => match (p.transport_id(), p.current_addr()) {
+                    (Some(tid), Some(addr)) => (tid, addr.clone()),
+                    _ => continue,
+                },
+                None => continue,
+            };
+
+            let sent = if let Some(transport) = self.transports.get(&transport_id) {
+                transport.send(&remote_addr, &payload).await.is_ok()
+            } else {
+                false
+            };
+
+            if sent && let Some(peer) = self.peers.get_mut(&node_addr) {
+                let count = peer.rekey_msg3_resend_count() + 1;
+                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                peer.record_rekey_msg3_resend(next);
+                trace!(
+                    peer = %self.peer_display_name(&node_addr),
+                    resend = count,
+                    "Resent FMP rekey msg3"
                 );
             }
         }

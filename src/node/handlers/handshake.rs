@@ -369,6 +369,9 @@ impl Node {
                     .peers
                     .get(&peer_node_addr)
                     .and_then(|p| p.current_addr().cloned());
+                let msg3_resend_interval =
+                    self.config().node.rate_limit.handshake_resend_interval_ms;
+                let msg3_now_ms = Self::now_ms();
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
@@ -414,6 +417,19 @@ impl Node {
 
                             if msg3_sent {
                                 peer.set_pending_session(session, our_index, header.sender_idx);
+
+                                // Retain msg3 for retransmission until the
+                                // responder is confirmed on the new epoch.
+                                // FMP sends msg3 exactly once otherwise; a
+                                // lost datagram leaves the responder without
+                                // the new session, so when the initiator cuts
+                                // over its new-epoch frames silently miss at
+                                // the peer → 30s link-dead. Mirrors FSP's
+                                // resend_pending_session_msg3 liveness path.
+                                peer.set_rekey_msg3_payload(
+                                    wire_msg3.clone(),
+                                    msg3_now_ms + msg3_resend_interval,
+                                );
 
                                 if let Some(tid) = transport_id {
                                     self.peers_by_index
@@ -1087,6 +1103,24 @@ impl Node {
                     let session_age_secs =
                         existing_peer.session_established_at().elapsed().as_secs();
 
+                    // The minimum plausible age for an inbound XX handshake to
+                    // be a scheduled REKEY rather than an initial-handshake
+                    // cross-connection. Derived from the configured interval
+                    // and jitter so it tracks the real minimum rekey spacing
+                    // (see the rekey-responder gate below, which uses the same
+                    // value). A session at least this old that receives an
+                    // inbound msg3 on a different link is a rekey, NOT an
+                    // initial cross-connection.
+                    let rekey_age_floor_secs = {
+                        let min_interval = self
+                            .config()
+                            .node
+                            .rekey
+                            .after_secs
+                            .saturating_sub(crate::node::REKEY_JITTER_SECS.unsigned_abs());
+                        min_interval.saturating_sub(5).max(5)
+                    };
+
                     // Simultaneous-init cross-connection (msg2-then-msg3 ordering).
                     //
                     // When both sides initiate XX in parallel (typical in
@@ -1100,7 +1134,26 @@ impl Node {
                     // already promoted at the same epoch — apply the same
                     // tie-breaker handle_msg2 uses for the inverse ordering, so
                     // both sides converge on a single Noise session pair.
-                    if existing_peer.link_id() != link_id && session_age_secs < 30 {
+                    //
+                    // CRITICAL (jitter × XX rekey): the upper age bound MUST sit
+                    // below the rekey floor. An initial cross-connection always
+                    // resolves within ~1 RTT of promotion (both handshakes race
+                    // in the same sub-second burst); a session old enough to be
+                    // rekeying that receives a concurrent rekey msg3 must NOT be
+                    // routed here. The old fixed `< 30` bound overlapped the
+                    // jittered rekey floor (as low as 15s): under jitter a recent
+                    // cutover resets `session_established_at`, so a concurrent
+                    // rekey msg3 (always on a different temp link_id) landed in
+                    // this branch and, on the "our outbound wins" side, the
+                    // peer's rekey session was DISCARDED (index freed, no pending
+                    // slot) — yet the peer cut over to it regardless, leaving the
+                    // discarding node unable to decrypt the peer until the 30s
+                    // dead-timer fired (Phase-5 link death, green crypto). Gating
+                    // on the rekey floor makes any rekey-aged msg3 fall through to
+                    // the rekey-responder path below, which converges both sides
+                    // (dual-init tie-break) AND installs a `pending` slot.
+                    if existing_peer.link_id() != link_id && session_age_secs < rekey_age_floor_secs
+                    {
                         let our_inbound_wins = cross_connection_winner(
                             self.identity().node_addr(),
                             &peer_node_addr,
@@ -1169,11 +1222,26 @@ impl Node {
                         return;
                     }
 
-                    // Check for rekey: session must be at least 30s old.
+                    // Check for rekey: session must be old enough that an
+                    // inbound XX handshake is plausibly a scheduled rekey
+                    // rather than a fresh duplicate/restart.
+                    //
+                    // The floor (`rekey_age_floor_secs`, computed above) sits
+                    // BELOW the minimum possible rekey interval, or jittered
+                    // rekeys are wrongly rejected. The initiator's effective
+                    // interval is `after_secs - REKEY_JITTER_SECS` at its lowest
+                    // (20s for 35s ± 15s). A fixed 30s floor exceeds that 20s
+                    // minimum, so under jitter the responder rejects a legitimate
+                    // rekey as a "duplicate handshake" (resends msg2), the
+                    // initiator cuts over anyway, and the endpoints diverge by
+                    // one epoch → receiver starves → 30s link-dead. The same
+                    // floor also bounds the cross-connection branch above, so the
+                    // two paths partition cleanly: `< floor` → initial
+                    // cross-connection, `>= floor` → rekey responder.
                     if self.config().node.rekey.enabled
                         && existing_peer.has_session()
                         && existing_peer.is_healthy()
-                        && session_age_secs >= 30
+                        && session_age_secs >= rekey_age_floor_secs
                     {
                         // Dual-initiation detection: both sides initiated rekey
                         // simultaneously. Two states can reach this point:

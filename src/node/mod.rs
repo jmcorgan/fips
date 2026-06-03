@@ -40,14 +40,19 @@ use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 /// dual-initiation in symmetric-start meshes; the configured
 /// `node.rekey.after_secs` remains the nominal interval (mean preserved).
 ///
-/// Disabled (set to 0) on next pending investigation: the jitter mechanism
-/// was authored against the IK FMP rekey path on maint/master and works
-/// cleanly there, but on next's XX FMP rekey path it produces reproducible
-/// post-cutover routing-convergence failures (~50% Phase 5 ping loss in
-/// the `rekey` integration suite). Restoring jitter on next requires
-/// understanding why the XX cutover state cleanup doesn't absorb
-/// variable-interval rekeys the way the IK path does. See CHANGELOG.
-pub(crate) const REKEY_JITTER_SECS: i64 = 0;
+/// Re-enabled on next after the jitter × XX rekey interaction was closed.
+/// The jitter was previously disabled (set to 0) on next because applying it
+/// to the XX FMP rekey path produced reproducible post-cutover
+/// routing-convergence failures (~50% Phase 5 ping loss in the `rekey`
+/// integration suite). Root cause: under jitter a recent cutover resets the
+/// session-age clock, so a concurrent rekey msg3 (always on a temp link) was
+/// caught by the initial-handshake cross-connection tie-breaker in
+/// `handle_msg3` and, on the "our outbound wins" side, the peer's rekey
+/// session was discarded with no `pending` slot — yet the peer cut over to it
+/// regardless, starving the discarding node until the 30s dead-timer. Fixed by
+/// bounding that cross-connection branch below the rekey age floor so a
+/// rekey-aged msg3 falls through to the rekey-responder path. See CHANGELOG.
+pub(crate) const REKEY_JITTER_SECS: i64 = 15;
 use self::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
     prepend_inner_header,

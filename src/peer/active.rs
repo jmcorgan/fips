@@ -215,6 +215,19 @@ pub struct ActivePeer {
     /// In-progress rekey responder: our new session index.
     rekey_responder_our_index: Option<SessionIndex>,
 
+    // === Rekey msg3 retransmission (initiator liveness) ===
+    /// Retained wire-format rekey msg3, resent until the responder is
+    /// confirmed on the new epoch. Mirrors the FSP
+    /// `rekey_msg3_payload` mechanism (node/session.rs). Liveness only:
+    /// overlapping-epoch decrypt covers cutover skew; retransmission
+    /// guarantees the responder eventually derives the new session even
+    /// if the first msg3 datagram is lost.
+    rekey_msg3_payload: Option<Vec<u8>>,
+    /// Next msg3 resend timestamp (Unix ms; 0 = none retained).
+    rekey_msg3_next_resend_ms: u64,
+    /// Number of msg3 retransmissions performed this rekey cycle.
+    rekey_msg3_resend_count: u32,
+
     /// Unix UDP fast-path: per-peer `connect()`-ed socket (paired with
     /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
     /// the connected 5-tuple, so inbound packets land here; the
@@ -288,6 +301,9 @@ impl ActivePeer {
             rekey_msg1_next_resend: 0,
             rekey_responder_handshake: None,
             rekey_responder_our_index: None,
+            rekey_msg3_payload: None,
+            rekey_msg3_next_resend_ms: 0,
+            rekey_msg3_resend_count: 0,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_udp: None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -386,6 +402,9 @@ impl ActivePeer {
             rekey_msg1_next_resend: 0,
             rekey_responder_handshake: None,
             rekey_responder_our_index: None,
+            rekey_msg3_payload: None,
+            rekey_msg3_next_resend_ms: 0,
+            rekey_msg3_resend_count: 0,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_udp: None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -998,6 +1017,12 @@ impl ActivePeer {
         self.pending_new_session.as_ref()
     }
 
+    /// Mutable access to the pending new session, for trial-decrypt of an
+    /// inbound frame before promoting it on a peer K-bit flip.
+    pub fn pending_new_session_mut(&mut self) -> Option<&mut NoiseSession> {
+        self.pending_new_session.as_mut()
+    }
+
     /// Store a completed rekey session and its indices.
     ///
     /// Called when the rekey handshake completes. The session is held
@@ -1125,6 +1150,7 @@ impl ActivePeer {
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
         self.rekey_in_progress = false;
+        self.clear_rekey_msg3_payload();
         // Return whichever index needs freeing
         self.rekey_our_index.take().or_else(|| {
             self.pending_new_session = None;
@@ -1238,6 +1264,47 @@ impl ActivePeer {
         self.rekey_responder_our_index = None;
 
         Ok(session)
+    }
+
+    // === Rekey msg3 retransmission (initiator liveness) ===
+
+    /// Retain the rekey msg3 wire payload for retransmission until the
+    /// responder is confirmed on the new epoch. Called by the initiator
+    /// right after the first successful msg3 send. Mirrors the FSP
+    /// `SessionEntry::set_rekey_msg3_payload`.
+    pub fn set_rekey_msg3_payload(&mut self, payload: Vec<u8>, next_resend_at_ms: u64) {
+        self.rekey_msg3_payload = Some(payload);
+        self.rekey_msg3_next_resend_ms = next_resend_at_ms;
+        self.rekey_msg3_resend_count = 0;
+    }
+
+    /// Get the retained rekey msg3 payload for retransmission.
+    pub fn rekey_msg3_payload(&self) -> Option<&[u8]> {
+        self.rekey_msg3_payload.as_deref()
+    }
+
+    /// Get the next msg3 resend timestamp (Unix ms; 0 = none retained).
+    pub fn rekey_msg3_next_resend_ms(&self) -> u64 {
+        self.rekey_msg3_next_resend_ms
+    }
+
+    /// Get the number of msg3 retransmissions this cycle.
+    pub fn rekey_msg3_resend_count(&self) -> u32 {
+        self.rekey_msg3_resend_count
+    }
+
+    /// Record a msg3 retransmission and schedule the next one.
+    pub fn record_rekey_msg3_resend(&mut self, next_resend_at_ms: u64) {
+        self.rekey_msg3_resend_count += 1;
+        self.rekey_msg3_next_resend_ms = next_resend_at_ms;
+    }
+
+    /// Clear the retained rekey msg3 payload (responder confirmed on the
+    /// new epoch, or the rekey cycle was abandoned).
+    pub fn clear_rekey_msg3_payload(&mut self) {
+        self.rekey_msg3_payload = None;
+        self.rekey_msg3_next_resend_ms = 0;
+        self.rekey_msg3_resend_count = 0;
     }
 
     /// Check if msg1 needs resending.

@@ -50,7 +50,19 @@ impl Node {
         let received_k_bit = header.flags & FLAG_KEY_EPOCH != 0;
 
         // K-bit flip detection: peer has cut over to the new session.
-        // Check and perform cutover in a scoped borrow.
+        //
+        // The header K-bit is NOT a sufficient gating event on its own.
+        // Under jitter the FMP rekey interval shrinks and the two
+        // directions' rekeys interleave, so a node can hold a `pending`
+        // session from rekey N while the peer's observed K-bit flip
+        // actually belongs to rekey N+1. Promoting on the bare bit then
+        // installs the WRONG Noise session as current — the two endpoints
+        // diverge, every subsequent frame fails AEAD on the far side, the
+        // receiver starves, and the link is declared dead at the 30s
+        // heartbeat timeout (Phase-5 routing failure, green crypto). This
+        // mirrors the FSP fix (node/session.rs): the authenticated decrypt,
+        // not the header bit, is the cutover signal. Trial-decrypt the
+        // frame against `pending` first; only promote if it authenticates.
         {
             let Some(peer) = self.peers.get(&node_addr) else {
                 return;
@@ -59,45 +71,84 @@ impl Node {
                 received_k_bit != peer.current_k_bit() && peer.pending_new_session().is_some();
 
             if k_bit_flipped {
+                let ciphertext = &packet.data[header.ciphertext_offset()..];
                 let display_name = self.peer_display_name(&node_addr);
-                let pending_our = peer.pending_our_index();
-                let pending_their = peer.pending_their_index();
-                info!(
-                    peer = %display_name,
-                    our_addr = %self.identity().node_addr(),
-                    their_addr = %node_addr,
-                    pending_our_index = ?pending_our,
-                    pending_their_index = ?pending_their,
-                    "Peer K-bit flip detected, promoting new session"
-                );
-
+                let our_addr = *self.identity().node_addr();
                 let Some(peer) = self.peers.get_mut(&node_addr) else {
                     return;
                 };
-                let did_flip = peer.handle_peer_kbit_flip().is_some();
-                if did_flip {
-                    // New index was pre-registered in peers_by_index during
-                    // msg1 handling (handshake.rs). Verify, don't duplicate.
-                    debug_assert!(
-                        peer.transport_id().is_some()
-                            && peer.our_index().is_some()
-                            && self.peers_by_index.contains_key(&(
-                                peer.transport_id().unwrap(),
-                                peer.our_index().unwrap().as_u32()
-                            )),
-                        "peers_by_index should contain pre-registered new index after K-bit flip"
+                // Authenticate the frame against the pending session.
+                let pending_plaintext = peer.pending_new_session_mut().and_then(|pending| {
+                    pending
+                        .decrypt_with_replay_check_and_aad(
+                            ciphertext,
+                            header.counter,
+                            &header.header_bytes,
+                        )
+                        .ok()
+                });
+
+                if let Some(plaintext) = pending_plaintext {
+                    let pending_our = peer.pending_our_index();
+                    let pending_their = peer.pending_their_index();
+                    info!(
+                        peer = %display_name,
+                        our_addr = %our_addr,
+                        their_addr = %node_addr,
+                        pending_our_index = ?pending_our,
+                        pending_their_index = ?pending_their,
+                        "Peer new-epoch frame authenticated, K-bit flip promoting new session"
                     );
+                    // The peer authenticated a frame on the new epoch, so it
+                    // derived the new session (it received our rekey msg3).
+                    // If we are the rekey initiator still retransmitting msg3,
+                    // stop — the responder is confirmed. (No-op for the
+                    // responder side, which never retained a msg3 payload.)
+                    peer.clear_rekey_msg3_payload();
+                    // The trial-decrypt already advanced the pending
+                    // session's replay window; handle_peer_kbit_flip moves
+                    // that same session object to current, so no re-decrypt.
+                    let did_flip = peer.handle_peer_kbit_flip().is_some();
+                    if did_flip {
+                        debug_assert!(
+                            peer.transport_id().is_some()
+                                && peer.our_index().is_some()
+                                && self.peers_by_index.contains_key(&(
+                                    peer.transport_id().unwrap(),
+                                    peer.our_index().unwrap().as_u32()
+                                )),
+                            "peers_by_index should contain pre-registered new index after K-bit flip"
+                        );
+                    }
+                    // Re-register the promoted session with the decrypt
+                    // worker (cache_key changed at the flip).
+                    #[cfg(unix)]
+                    if did_flip {
+                        self.register_decrypt_worker_session(&node_addr);
+                    }
+
+                    // Deliver the frame we just authenticated via the
+                    // canonical post-decrypt path, then return — it must
+                    // not fall through to a second decrypt attempt.
+                    let ce_flag = header.flags & FLAG_CE != 0;
+                    self.process_authentic_fmp_plaintext(
+                        &node_addr,
+                        packet.transport_id,
+                        &packet.remote_addr,
+                        packet.timestamp_ms,
+                        packet.data.len(),
+                        header.counter,
+                        ce_flag,
+                        &plaintext,
+                    )
+                    .await;
+                    return;
                 }
-                // Re-register the (now-promoted) session with the decrypt
-                // worker: cache_key = (transport_id, our_index) changed at
-                // the flip, so the old worker entry is stranded and every
-                // packet on the new session would miss the worker's
-                // HashMap lookup. Without this, throughput drops back to
-                // the inline-decrypt path after each rekey.
-                #[cfg(unix)]
-                if did_flip {
-                    self.register_decrypt_worker_session(&node_addr);
-                }
+                // Pending did NOT authenticate this frame: the flip belongs
+                // to a different rekey epoch (stale pending). Do not
+                // promote. Fall through to the normal current/previous
+                // decrypt; the genuine cutover is recognized when a frame
+                // that authenticates against `pending` arrives.
             }
         }
 
@@ -210,6 +261,13 @@ impl Node {
         let ce_flag = header.flags & FLAG_CE != 0;
 
         if let Some(peer) = self.peers.get_mut(&node_addr) {
+            // Initiator-side msg3 confirm (see process_authentic_fmp_plaintext):
+            // a frame authenticated against post-cutover `current` (no pending)
+            // proves the responder reached the new epoch. Inline-decrypt path
+            // mirror of the worker-bounce confirm.
+            if peer.rekey_msg3_payload().is_some() && peer.pending_new_session().is_none() {
+                peer.clear_rekey_msg3_payload();
+            }
             if let Some(mmp) = peer.mmp_mut() {
                 mmp.receiver.record_recv(
                     header.counter,
@@ -303,6 +361,18 @@ impl Node {
         let mut address_changed = false;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.reset_decrypt_failures();
+            // If we are the rekey initiator that already cut over on its
+            // own timer (no `pending`, `current` is the new session) but
+            // still retain a msg3 retransmission payload, an authenticated
+            // peer frame here decrypts against the post-cutover `current`
+            // session — proof the responder reached the new epoch. Stop
+            // retransmitting. Mirrors the FSP Current-slot confirm in
+            // handle_encrypted_session_msg. Works in both the inline and
+            // worker-bounce paths since both funnel through here, and the
+            // only session registered for the new index is the new one.
+            if peer.rekey_msg3_payload().is_some() && peer.pending_new_session().is_none() {
+                peer.clear_rekey_msg3_payload();
+            }
             address_changed = peer.set_current_addr(transport_id, remote_addr.clone());
             peer.link_stats_mut()
                 .record_recv(packet_len, packet_timestamp_ms);

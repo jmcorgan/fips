@@ -265,6 +265,7 @@ impl Node {
                     self.poll_lan_discovery().await;
                     self.resend_pending_handshakes(now_ms).await;
                     self.resend_pending_rekeys(now_ms).await;
+                    self.resend_pending_fmp_rekey_msg3(now_ms).await;
                     self.resend_pending_session_handshakes(now_ms).await;
                     self.resend_pending_session_msg3(now_ms).await;
                     self.purge_idle_sessions(now_ms);
