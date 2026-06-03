@@ -17,6 +17,7 @@ mod discovery;
 mod ethernet;
 mod forwarding;
 mod handshake;
+mod heartbeat;
 mod routing;
 mod session;
 mod spanning_tree;

@@ -195,6 +195,8 @@ pub struct ActivePeer {
     rekey_msg1: Option<Vec<u8>>,
     /// In-progress rekey: next resend timestamp (Unix ms).
     rekey_msg1_next_resend: u64,
+    /// In-progress rekey: number of msg1 retransmissions performed so far.
+    rekey_msg1_resend_count: u32,
 }
 
 impl ActivePeer {
@@ -247,6 +249,7 @@ impl ActivePeer {
             rekey_our_index: None,
             rekey_msg1: None,
             rekey_msg1_next_resend: 0,
+            rekey_msg1_resend_count: 0,
         }
     }
 
@@ -328,6 +331,7 @@ impl ActivePeer {
             rekey_our_index: None,
             rekey_msg1: None,
             rekey_msg1_next_resend: 0,
+            rekey_msg1_resend_count: 0,
         }
     }
 
@@ -885,6 +889,7 @@ impl ActivePeer {
         self.rekey_handshake = None;
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
+        self.rekey_msg1_resend_count = 0;
     }
 
     /// Cut over to the pending new session (initiator side).
@@ -912,6 +917,7 @@ impl ActivePeer {
         self.session_established_at = Instant::now();
         self.session_start = Instant::now();
         self.rekey_in_progress = false;
+        self.rekey_msg1_resend_count = 0;
         self.rekey_jitter_secs = draw_rekey_jitter();
         self.reset_replay_suppressed();
 
@@ -948,6 +954,7 @@ impl ActivePeer {
         self.session_established_at = Instant::now();
         self.session_start = Instant::now();
         self.rekey_in_progress = false;
+        self.rekey_msg1_resend_count = 0;
         self.rekey_jitter_secs = draw_rekey_jitter();
         self.reset_replay_suppressed();
 
@@ -992,6 +999,7 @@ impl ActivePeer {
         self.rekey_handshake = None;
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
+        self.rekey_msg1_resend_count = 0;
         self.rekey_in_progress = false;
         // Return whichever index needs freeing
         self.rekey_our_index.take().or_else(|| {
@@ -1015,6 +1023,7 @@ impl ActivePeer {
         self.rekey_our_index = Some(our_index);
         self.rekey_msg1 = Some(wire_msg1);
         self.rekey_msg1_next_resend = next_resend_ms;
+        self.rekey_msg1_resend_count = 0;
         self.rekey_in_progress = true;
     }
 
@@ -1043,6 +1052,7 @@ impl ActivePeer {
         // Clear msg1 resend state
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
+        self.rekey_msg1_resend_count = 0;
 
         Ok(session)
     }
@@ -1059,6 +1069,17 @@ impl ActivePeer {
 
     /// Update next resend timestamp.
     pub fn set_msg1_next_resend(&mut self, next_ms: u64) {
+        self.rekey_msg1_next_resend = next_ms;
+    }
+
+    /// Number of rekey msg1 retransmissions performed so far.
+    pub fn rekey_msg1_resend_count(&self) -> u32 {
+        self.rekey_msg1_resend_count
+    }
+
+    /// Record a rekey msg1 retransmission and schedule the next one.
+    pub fn record_rekey_msg1_resend(&mut self, next_ms: u64) {
+        self.rekey_msg1_resend_count += 1;
         self.rekey_msg1_next_resend = next_ms;
     }
 }
@@ -1318,5 +1339,53 @@ mod tests {
             mean,
             n
         );
+    }
+
+    /// Put a peer into a rekey-in-progress state with a real (initiator)
+    /// handshake so the msg1 resend budget can be exercised.
+    fn arm_rekey(peer: &mut ActivePeer) {
+        let remote = Identity::generate();
+        let local = Identity::generate();
+        let hs = NoiseHandshakeState::new_initiator(local.keypair(), remote.pubkey_full());
+        peer.set_rekey_state(hs, SessionIndex::new(7), vec![0xAB; 64], 0);
+    }
+
+    #[test]
+    fn rekey_msg1_resend_count_increments_and_caps() {
+        let identity = make_peer_identity();
+        let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+        arm_rekey(&mut peer);
+
+        assert!(peer.rekey_in_progress());
+        assert_eq!(peer.rekey_msg1_resend_count(), 0);
+        assert!(peer.rekey_msg1().is_some());
+
+        // The driver records one resend per call; the count tracks them.
+        let max_resends: u32 = 5;
+        for i in 0..max_resends {
+            peer.record_rekey_msg1_resend(1000 + i as u64 * 100);
+            assert_eq!(peer.rekey_msg1_resend_count(), i + 1);
+        }
+        assert_eq!(peer.rekey_msg1_resend_count(), max_resends);
+    }
+
+    #[test]
+    fn rekey_msg1_budget_exhaustion_abandons_cleanly() {
+        let identity = make_peer_identity();
+        let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+        arm_rekey(&mut peer);
+
+        // Simulate the driver exhausting its budget.
+        let max_resends: u32 = 5;
+        for i in 0..max_resends {
+            peer.record_rekey_msg1_resend(1000 + i as u64 * 100);
+        }
+        assert_eq!(peer.rekey_msg1_resend_count(), max_resends);
+
+        // Budget exhausted -> abandon: state clears and the counter resets.
+        peer.abandon_rekey();
+        assert!(!peer.rekey_in_progress());
+        assert!(peer.rekey_msg1().is_none());
+        assert_eq!(peer.rekey_msg1_resend_count(), 0);
     }
 }
