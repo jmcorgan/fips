@@ -49,8 +49,27 @@ impl Node {
         // Extract K-bit from flags
         let received_k_bit = header.flags & FLAG_KEY_EPOCH != 0;
 
+        let ciphertext = &packet.data[header.ciphertext_offset()..];
+
         // K-bit flip detection: peer has cut over to the new session.
-        // Check and perform cutover in a scoped borrow.
+        //
+        // The header K-bit is NOT a sufficient gating event on its own.
+        // Under jitter the FMP rekey interval shrinks and the two
+        // directions' rekeys interleave, so a node can hold a `pending`
+        // session from rekey N while the peer's observed K-bit flip
+        // actually belongs to rekey N+1. Promoting on the bare bit then
+        // installs the WRONG Noise session as current — the two endpoints
+        // diverge, every subsequent frame fails AEAD on the far side, the
+        // receiver starves, and the link is declared dead at the heartbeat
+        // timeout (routing failure, green crypto). This mirrors the FSP
+        // fix (node/session.rs / node/handlers/session.rs): the
+        // authenticated decrypt, not the header bit, is the cutover signal.
+        // Trial-decrypt the frame against `pending` first; only promote if
+        // it authenticates. On success the same frame is delivered via
+        // `promoted_plaintext` and the normal current/previous decrypt
+        // below is skipped — the trial-decrypt already advanced `pending`'s
+        // replay window, so re-decrypting would be rejected as a replay.
+        let mut promoted_plaintext: Option<Vec<u8>> = None;
         {
             let peer = self.peers.get(&node_addr).unwrap();
             let k_bit_flipped =
@@ -58,31 +77,64 @@ impl Node {
 
             if k_bit_flipped {
                 let display_name = self.peer_display_name(&node_addr);
-                info!(
-                    peer = %display_name,
-                    "Peer K-bit flip detected, promoting new session"
-                );
-
                 let peer = self.peers.get_mut(&node_addr).unwrap();
-                if let Some(_old_our_index) = peer.handle_peer_kbit_flip() {
-                    // New index was pre-registered in peers_by_index during
-                    // msg1 handling (handshake.rs). Verify, don't duplicate.
-                    debug_assert!(
-                        peer.transport_id().is_some()
-                            && peer.our_index().is_some()
-                            && self.peers_by_index.contains_key(&(
-                                peer.transport_id().unwrap(),
-                                peer.our_index().unwrap().as_u32()
-                            )),
-                        "peers_by_index should contain pre-registered new index after K-bit flip"
+
+                // Authenticate the frame against the pending session before
+                // promoting. Trial-decrypt mutates `pending`'s replay
+                // window only on success, so a failed trial leaves it
+                // untouched.
+                let pending_plaintext = peer.pending_new_session_mut().and_then(|pending| {
+                    pending
+                        .decrypt_with_replay_check_and_aad(
+                            ciphertext,
+                            header.counter,
+                            &header.header_bytes,
+                        )
+                        .ok()
+                });
+
+                if let Some(plaintext) = pending_plaintext {
+                    info!(
+                        peer = %display_name,
+                        "Peer new-epoch frame authenticated, K-bit flip promoting new session"
                     );
+                    peer.reset_decrypt_failures();
+                    if let Some(_old_our_index) = peer.handle_peer_kbit_flip() {
+                        // New index was pre-registered in peers_by_index
+                        // during msg1 handling (handshake.rs). Verify,
+                        // don't duplicate.
+                        debug_assert!(
+                            peer.transport_id().is_some()
+                                && peer.our_index().is_some()
+                                && self.peers_by_index.contains_key(&(
+                                    peer.transport_id().unwrap(),
+                                    peer.our_index().unwrap().as_u32()
+                                )),
+                            "peers_by_index should contain pre-registered new index after K-bit flip"
+                        );
+                    }
+                    // The trial-decrypt already advanced the pending
+                    // session's replay window; `handle_peer_kbit_flip`
+                    // moved that same session object to `current`. Deliver
+                    // this plaintext and skip the inline decrypt below — a
+                    // re-decrypt of the same counter would be rejected as a
+                    // replay.
+                    promoted_plaintext = Some(plaintext);
                 }
+                // Pending did NOT authenticate this frame: the flip belongs
+                // to a different rekey epoch (stale pending). Do not
+                // promote. Fall through to the normal current/previous
+                // decrypt; the genuine cutover is recognized when a frame
+                // that authenticates against `pending` arrives.
             }
         }
 
-        // Decrypt: try current session first, then previous (drain fallback)
-        let ciphertext = &packet.data[header.ciphertext_offset()..];
-        let plaintext = {
+        // Decrypt: deliver the just-promoted plaintext if the K-bit flip
+        // authenticated above; otherwise try current session first, then
+        // previous (drain fallback).
+        let plaintext = if let Some(plaintext) = promoted_plaintext {
+            plaintext
+        } else {
             let peer = self.peers.get_mut(&node_addr).unwrap();
             let session = match peer.noise_session_mut() {
                 Some(s) => s,
