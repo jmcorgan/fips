@@ -547,6 +547,7 @@ impl Node {
         let now = Instant::now();
         let heartbeat_interval = Duration::from_secs(self.config().node.heartbeat_interval_secs);
         let dead_timeout = Duration::from_secs(self.config().node.link_dead_timeout_secs);
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
         let heartbeat_msg = [LinkMessageType::Heartbeat.to_byte()];
 
         // Collect heartbeats to send and dead peers to remove
@@ -556,7 +557,7 @@ impl Node {
         for (node_addr, peer) in self.peers.iter() {
             // Check liveness via MMP receiver last_recv_time.
             // Fall back to session_start for peers that never sent data.
-            let is_dead = if let Some(mmp) = peer.mmp() {
+            let time_dead = if let Some(mmp) = peer.mmp() {
                 let reference_time = mmp
                     .receiver
                     .last_recv_time()
@@ -565,6 +566,19 @@ impl Node {
             } else {
                 false
             };
+
+            // Suppress teardown while an FMP rekey is genuinely in flight with
+            // budget left: a rekey-handshake link is not silent. The msg1
+            // resend cap guarantees this terminates (abandon on exhaustion or
+            // cutover on completion clears `rekey_in_progress`), so a truly
+            // dead link is reaped on the next cycle.
+            let rekey_active = peer.rekey_in_progress()
+                && peer.rekey_msg1_resend_count() < max_resends
+                && peer.rekey_msg1().is_some()
+                || (peer.rekey_msg3_payload().is_some()
+                    && peer.rekey_msg3_resend_count() < max_resends);
+
+            let is_dead = time_dead && !rekey_active;
             if is_dead {
                 dead_peers.push(*node_addr);
                 continue;

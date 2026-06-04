@@ -282,12 +282,19 @@ impl Node {
         }
 
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
 
         // Collect peers needing action
         let mut to_resend: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
+        let mut to_abandon: Vec<NodeAddr> = Vec::new();
 
         for (node_addr, peer) in &self.peers {
             if !peer.rekey_in_progress() || peer.rekey_msg1().is_none() {
+                continue;
+            }
+            if peer.rekey_msg1_resend_count() >= max_resends {
+                to_abandon.push(*node_addr);
                 continue;
             }
             if peer.needs_msg1_resend(now_ms)
@@ -295,6 +302,17 @@ impl Node {
             {
                 to_resend.push((*node_addr, msg1.to_vec()));
             }
+        }
+
+        // Abandon rekey cycles that exhausted their retransmission budget.
+        for node_addr in to_abandon {
+            if let Some(peer) = self.peers.get_mut(&node_addr) {
+                peer.abandon_rekey();
+            }
+            warn!(
+                peer = %self.peer_display_name(&node_addr),
+                "FMP rekey aborted: msg1 unconfirmed after max retransmissions, abandoning cycle"
+            );
         }
 
         for (node_addr, msg1_bytes) in to_resend {
@@ -312,12 +330,13 @@ impl Node {
                 false
             };
 
-            if sent {
-                if let Some(peer) = self.peers.get_mut(&node_addr) {
-                    peer.set_msg1_next_resend(now_ms + interval_ms);
-                }
+            if sent && let Some(peer) = self.peers.get_mut(&node_addr) {
+                let count = peer.rekey_msg1_resend_count() + 1;
+                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                peer.record_rekey_msg1_resend(next);
                 trace!(
                     peer = %self.peer_display_name(&node_addr),
+                    resend = count,
                     "Resent rekey msg1"
                 );
             }
