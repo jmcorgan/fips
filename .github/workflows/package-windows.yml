@@ -63,7 +63,10 @@ jobs:
           echo "SOURCE_DATE_EPOCH=$epoch" >> $env:GITHUB_ENV
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
 
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
