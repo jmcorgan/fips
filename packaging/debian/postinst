@@ -9,6 +9,16 @@ case "$1" in
             groupadd --system fips
         fi
 
+        # Seed /etc/fips/fips.yaml from the shipped example only if it
+        # does not already exist. The live config is no longer a dpkg
+        # conf-file; this copy-if-absent yields to any operator- or
+        # configuration-management-rendered file and never clobbers it.
+        if [ ! -e /etc/fips/fips.yaml ]; then
+            install -m 600 -o root -g root \
+                /usr/share/fips/fips.yaml.example \
+                /etc/fips/fips.yaml
+        fi
+
         # Drop-in directory for operator nftables rules included by
         # /etc/fips/fips.nft. Empty by default; the include glob matches
         # nothing cleanly out of the box.

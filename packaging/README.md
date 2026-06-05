@@ -33,9 +33,19 @@ packaging/
 ### Debian/Ubuntu (`.deb`)
 
 Built with [cargo-deb](https://github.com/kornelski/cargo-deb). Installs
-`fips`, `fipsctl`, and `fipstop` to `/usr/bin/`, places config at
-`/etc/fips/fips.yaml` (preserved on upgrade), and enables the systemd
+`fips`, `fipsctl`, and `fipstop` to `/usr/bin/`, and enables the systemd
 service.
+
+The default configuration ships as an example at
+`/usr/share/fips/fips.yaml.example` and is **not** a dpkg conf-file.
+(It is deliberately **not** under `/usr/share/doc`, which minimal and
+container installs path-exclude, since the postinst reads it at install
+time.)
+On install, `postinst` seeds `/etc/fips/fips.yaml` (mode 600) from the
+example **only if it does not already exist**, so a configuration that
+was rendered by configuration management or edited by an operator is
+never prompted for or clobbered on upgrade. To reset to defaults, remove
+`/etc/fips/fips.yaml` and reinstall, or copy the example back manually.
 
 ```sh
 # Build

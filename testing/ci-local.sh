@@ -12,6 +12,8 @@
 #   --only <suite>       Run a single integration suite
 #   -j, --jobs <N>       Max parallel chaos scenarios (default: 4)
 #   --list               List available integration suites
+#   --check-parity       Verify this suite set matches ci.yml's integration
+#                        matrix (see testing/check-ci-parity.sh), then exit
 #   -h, --help           Show this help
 #
 # Integration suites (default coverage):
@@ -32,6 +34,25 @@
 # Exit codes:
 #   0 — all stages passed
 #   1 — one or more stages failed
+#
+# ── CI parity invariant ─────────────────────────────────────────────────────
+# This local default suite set and the GitHub integration matrix
+# (.github/workflows/ci.yml) MUST run the same integration suites, EXCEPT for
+# the deliberate local-only entries below. Adding a suite to one runner
+# without the other means "local green" and "GitHub green" stop being
+# equivalent. testing/check-ci-parity.sh enforces this and fails on drift.
+#
+# Deliberate local-only (NOT on the GitHub gate), with reason:
+#   tor-socks5     — requires live Tor network; opt-in via --with-tor,
+#                    unreliable on GitHub-hosted runners.
+#   tor-directory  — same; live Tor dependency.
+#
+# Granularity-only differences (same coverage, different matrix shape —
+# NOT a divergence):
+#   deb-install    — local runs all distros sequentially in one suite; GitHub
+#                    splits into per-distro legs (debian12/ubuntu24/ubuntu26).
+#   dns-resolver   — single suite both sides; runs all scenarios.
+# ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -170,6 +191,7 @@ while [[ $# -gt 0 ]]; do
         --only)             ONLY_SUITE="$2"; shift 2 ;;
         -j|--jobs)          PARALLEL_JOBS="$2"; shift 2 ;;
         --list)             list_suites ;;
+        --check-parity)     exec "$SCRIPT_DIR/check-ci-parity.sh" ;;
         -h|--help)          usage ;;
         *)                  echo "Unknown option: $1"; usage ;;
     esac

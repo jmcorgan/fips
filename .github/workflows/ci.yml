@@ -25,6 +25,28 @@ env:
   SOURCE_DATE_EPOCH: 0  # overridden per-step after checkout
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CI parity invariant
+#
+# This GitHub integration matrix and the local default suite set
+# (testing/ci-local.sh) MUST run the same integration suites, EXCEPT for the
+# deliberate local-only entries below. Adding a suite to one runner without
+# the other means "local green" and "GitHub green" stop being equivalent.
+# testing/check-ci-parity.sh enforces this and fails on unexpected drift.
+#
+# Deliberate local-only (NOT on the GitHub gate), with reason:
+#   tor-socks5     — requires live Tor network; opt-in via --with-tor,
+#                    unreliable on GitHub-hosted runners.
+#   tor-directory  — same; live Tor dependency.
+#
+# Granularity-only differences (same coverage, different matrix shape —
+# NOT a divergence):
+#   deb-install    — split here into per-distro legs (debian12/ubuntu24/
+#                    ubuntu26) for parallelism; local runs all distros in one
+#                    suite.
+#   dns-resolver   — single leg here; runs all scenarios (same as local).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Job 1 – Build matrix
 #
 # Builds on Linux x86_64, Linux aarch64, and macOS.
@@ -35,9 +57,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
+          cache: false
+          rustflags: ''
       - run: cargo fmt --check
 
   clippy:
@@ -47,9 +71,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
+          cache: false
+          rustflags: ''
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
         with:
@@ -98,7 +124,10 @@ jobs:
         run: sudo nft -c -f packaging/common/fips.nft
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
 
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
@@ -160,7 +189,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
 
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
@@ -210,7 +242,10 @@ jobs:
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
 
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
@@ -239,7 +274,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
 
       - name: Cache Cargo registry + build
         uses: actions/cache@v4
@@ -323,6 +361,10 @@ jobs:
           - suite: rekey-outbound-only
             type: rekey-outbound-only
             topology: rekey-outbound-only
+          # ── Inbound max_peers admission-cap test ───────────────────────
+          - suite: admission-cap
+            type: admission-cap
+            topology: mesh
           - suite: acl-allowlist
             type: acl-allowlist
           # ── Firewall baseline (fips0 nftables default-deny) ────────────
@@ -722,6 +764,42 @@ jobs:
         run: |
           docker compose -f testing/static/docker-compose.yml \
             --profile gateway down --volumes --remove-orphans
+
+      # ── Inbound max_peers admission-cap integration test ────────────────
+      # Lowers node.max_peers on one mesh node and asserts the inbound cap
+      # holds under sustained retry pressure: denied peers keep retrying but
+      # are never promoted to an active session. The admission-cap-test.sh
+      # assertions are tailored per link-layer handshake variant; the leg
+      # itself is uniform. Static-style harness on the shared mesh profile.
+      - name: Generate configs (admission-cap)
+        if: matrix.type == 'admission-cap'
+        run: bash testing/static/scripts/generate-configs.sh mesh
+
+      - name: Inject admission-cap config (admission-cap)
+        if: matrix.type == 'admission-cap'
+        run: bash testing/static/scripts/admission-cap-test.sh inject-config
+
+      - name: Start containers (admission-cap)
+        if: matrix.type == 'admission-cap'
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile mesh up -d
+
+      - name: Run admission-cap test
+        if: matrix.type == 'admission-cap'
+        run: bash testing/static/scripts/admission-cap-test.sh
+
+      - name: Collect logs on failure (admission-cap)
+        if: matrix.type == 'admission-cap' && failure()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile mesh logs --no-color | tail -300
+
+      - name: Stop containers (admission-cap)
+        if: matrix.type == 'admission-cap' && always()
+        run: |
+          docker compose -f testing/static/docker-compose.yml \
+            --profile mesh down --volumes --remove-orphans
 
       # ── Real-deb install integration ────────────────────────────────────
       # The deb-install harness builds its own .deb from source in a

@@ -3,6 +3,11 @@ Description=FIPS Mesh Network Daemon
 After=network-online.target
 Wants=network-online.target
 
+# The config file is no longer a packaged conf-file; postinst seeds it
+# if absent. Skip the unit (inactive, not failed) rather than crash-loop
+# if it is ever missing.
+ConditionPathExists=/etc/fips/fips.yaml
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/fips --config /etc/fips/fips.yaml

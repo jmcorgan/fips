@@ -74,7 +74,7 @@ assets = [
     ["target/release/fips", "/usr/bin/", "755"],
     ["target/release/fipsctl", "/usr/bin/", "755"],
     ["target/release/fipstop", "/usr/bin/", "755"],
-    ["packaging/common/fips.yaml", "/etc/fips/fips.yaml", "600"],
+    ["packaging/common/fips.yaml", "/usr/share/fips/fips.yaml.example", "644"],
     ["packaging/common/hosts", "/etc/fips/hosts", "644"],
     ["packaging/common/fips.nft", "/etc/fips/fips.nft", "644"],
     ["packaging/debian/fips.service", "/lib/systemd/system/fips.service", "644"],
@@ -87,7 +87,7 @@ assets = [
     ["packaging/debian/fips-gateway.service", "/lib/systemd/system/fips-gateway.service", "644"],
     ["docs/design/fips-security.md", "/usr/share/doc/fips/fips-security.md", "644"],
 ]
-conf-files = ["/etc/fips/fips.yaml", "/etc/fips/hosts", "/etc/fips/fips.nft"]
+conf-files = ["/etc/fips/hosts", "/etc/fips/fips.nft"]
 
 [dev-dependencies]
 tempfile = "3.15"

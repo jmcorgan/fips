@@ -185,6 +185,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RTT +0.11–0.19 ms from the worker queue handoff. Windows
   continues on the existing tokio-based send/recv path.
 
+- The Debian package no longer ships `/etc/fips/fips.yaml` as a dpkg
+  conf-file. The default configuration is installed as an example at
+  `/usr/share/fips/fips.yaml.example`, and `postinst` seeds
+  `/etc/fips/fips.yaml` (mode 600) from it only when the file does not
+  already exist — so a configuration-management-rendered or
+  operator-edited config is never prompted for or clobbered on
+  upgrade, removing the need for a `dpkg-divert` workaround.
+  `fips.service` gains `ConditionPathExists=/etc/fips/fips.yaml`. The
+  example is placed under `/usr/share/fips`, deliberately outside
+  `/usr/share/doc`, which minimal and container installs path-exclude
+  (so the install-time seed source is never dropped).
+- Local and GitHub CI integration coverage brought into parity, and
+  the Rust toolchain selection given a single source of truth:
+  - The `admission-cap` integration suite, previously run only by
+    `ci-local.sh`, now also runs as a GitHub `ci.yml` matrix leg, so a
+    regression in it turns the GitHub gate red rather than depending on
+    a developer remembering to run local CI. A new
+    `testing/check-ci-parity.sh` (wired as `ci-local.sh
+    --check-parity`) diffs the two runners' integration-suite sets and
+    fails on unexpected drift; the deliberate local-only (live-Tor)
+    and granularity-only differences are documented in a comment block
+    atop both runners.
+  - CI and packaging jobs now select the toolchain with
+    `actions-rust-lang/setup-rust-toolchain` (which reads
+    `rust-toolchain.toml`) instead of `dtolnay/rust-toolchain@stable`.
+    The pinned channel already overrode the installed stable, so each
+    job downloaded an unused toolchain and logged a misleading `rustc`
+    version; the single-source action removes the waste and the
+    confusion. Existing cache steps are kept (`cache: false` on the
+    new action) and `RUSTFLAGS` is left untouched so no global
+    `-D warnings` is newly imposed. The OpenWrt nightly Tier-3 leg
+    keeps `@nightly`.
+
 ### Fixed
 
 - Six discovery counters (`req_decode_error`, `req_duplicate`,
@@ -209,6 +242,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously the old session could linger after the peer came back
   with a new startup epoch, leaving the session-layer map out of sync
   with the freshly promoted peer.
+
+- Two nodes that each `auto_connect` to the other no longer stall their
+  Nostr-mediated NAT-traversal handshake. Each side ran both an
+  initiator and a responder traversal session, binding a separate UDP
+  socket per session, and adopted only the first `Established` event; if
+  the two sides adopted mismatched sessions, each sent its Noise msg1 to
+  a peer port the peer had already stopped draining and both handshakes
+  hung until the adoption budget expired. The responder now elects a
+  single session deterministically — it declines an incoming offer only
+  when it also has an in-flight outbound initiator for the same peer and
+  its own NodeAddr is smaller — so one matching socket pair survives on
+  both ends and the peer's redundant initiator times out harmlessly.
+  One-sided (asymmetric) `auto_connect` has no co-active initiator and is
+  never suppressed, so connectivity is preserved. (Distinct from the
+  cross-init adoption tie-breaker below, which dedups two simultaneous
+  punches but does not stop each node from running redundant
+  initiator + responder sessions.)
+- FMP link-layer rekey is now reliable under packet loss, bringing it up
+  to the FSP session layer's rekey discipline:
+  - The rekey msg1 retransmission driver was uncapped and never
+    abandoned, so a rekey that never completed resent msg1 forever. It
+    now uses a bounded retransmission budget (`handshake_max_resends`
+    with exponential backoff) and abandons the rekey cycle cleanly once
+    the budget is exhausted, mirroring the FSP rekey msg3 driver. With
+    the cap in place the link-dead heartbeat is rekey-aware:
+    `check_link_heartbeats` no longer reaps a link that is still
+    actively carrying rekey-handshake traffic, while a genuinely dead
+    link is still reaped once the budget abandons.
+  - At the K-bit cutover the receiver now authenticates an inbound frame
+    against the pending session before promoting it, instead of
+    promoting on the bare header K-bit. Under jitter a node could
+    otherwise promote a stale pending session, leaving the two endpoints
+    on different keys and silently dropping traffic until the link died
+    — the same failure class already closed on FSP, now closed on FMP.
+- Node-level multi-node tests no longer flake under parallel CPU load.
+  They previously delivered handshake packets over real localhost UDP,
+  whose kernel receive buffer could overflow and drop a packet when many
+  tests ran concurrently, panicking the large-network convergence tests.
+  A `cfg(test)`-only loopback `TransportHandle` variant now delivers
+  packets directly between nodes over an unbounded in-process channel, so
+  there is no socket buffer to overflow, and the previously-quarantined
+  large-network tests run in the default suite again. The shipping daemon
+  build is unaffected (the variant is test-gated).
+- Integration suites that wait for the mesh to converge no longer
+  false-fail under concurrent CI load. The rekey, static-mesh, and
+  sidecar suites replace a fixed wall-clock baseline timeout (and a blind
+  sleep) with a progress-aware wait that polls the suite's own pairwise
+  pings, returns as soon as every pair is reachable, extends its deadline
+  while the reachable-pair count is still climbing, and gives up only
+  when progress stalls.
 - TCP and Tor `max_inbound_connections` admission cap is now compared
   against the per-direction inbound count (`pool_inbound`) rather than
   the combined pool size. Outbound connect-on-send connections share

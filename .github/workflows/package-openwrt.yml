@@ -110,9 +110,11 @@ jobs:
 
       - name: Install Rust toolchain (stable)
         if: matrix.rust_channel == 'stable'
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.rust_target }}
+          target: ${{ matrix.rust_target }}
+          cache: false
+          rustflags: ''
 
       - name: Install Rust toolchain (nightly, Tier 3)
         if: matrix.rust_channel == 'nightly'
