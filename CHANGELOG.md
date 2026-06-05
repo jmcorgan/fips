@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requests" and "Further reading". Running the checklist before
   opening surfaces problems that would otherwise come back as review
   comments, saving a round trip.
+- [`docs/how-to/tune-file-descriptors.md`](docs/how-to/tune-file-descriptors.md)
+  — an operator how-to for raising `RLIMIT_NOFILE`. A busy node opens
+  roughly three file descriptors per established UDP peer (a
+  `connect()`-ed socket plus a 2-FD drain self-pipe), so the default
+  1024 soft limit is exhausted near 320 peers, after which further
+  admission, handshakes, and discovery fail with `EMFILE`. The guide
+  documents the per-peer FD budget and symptom, the systemd
+  (`LimitNOFILE` drop-in) and OpenWrt (procd `nofile`) procedures to
+  raise the limit, and how to verify the per-peer ratio stays bounded.
+  Linked from the how-to index.
 
 ### Changed
 
