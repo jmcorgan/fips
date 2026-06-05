@@ -32,6 +32,7 @@ use super::types::{
 };
 use crate::config::{NostrDiscoveryConfig, PeerConfig};
 use crate::discovery::EstablishedTraversal;
+use crate::{NodeAddr, PeerIdentity};
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
 
@@ -48,6 +49,42 @@ fn short_id(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+/// Decide whether an incoming-offer responder session should be suppressed
+/// in favour of our own already-running outbound initiator session.
+///
+/// Two peers that each have the other as `auto_connect` simultaneously run an
+/// initiator traversal *and* a responder traversal for the same peer, binding a
+/// separate UDP socket per session. Each node then emits two
+/// `BootstrapEvent::Established` events and `adopt_established_traversal` keeps
+/// only the first on a non-deterministic race; when the two nodes' independent
+/// races resolve to mismatched sessions, each side's Noise msg1 lands on a peer
+/// port the peer already stopped draining and both handshakes stall (root cause
+/// of ISSUE-2026-0031).
+///
+/// To collapse the four-socket dance to a single, guaranteed-matching socket
+/// pair, both nodes deterministically keep the session **initiated by the
+/// smaller `NodeAddr`** — reusing the project's existing NodeAddr tie-breaker
+/// convention (`cross_connection_winner`, the rekey dual-init resolution, and
+/// the dual-cross-init adopt path in `lifecycle.rs`).
+///
+/// This is evaluated on the responder path, where the session being handled is
+/// *peer-initiated*. It returns `true` (suppress this responder session) only
+/// when genuine duplication exists — i.e. we also have an in-flight outbound
+/// initiator for this same peer (`have_active_initiator`) — and our own
+/// initiator session is the preferred one (`our_addr < peer_addr`). When there
+/// is no co-active initiator (the asymmetric / one-sided `auto_connect` case,
+/// where only one session exists at all) it never suppresses, so connectivity
+/// is preserved. The `our_addr == peer_addr` case (self / loopback) and any
+/// caller that cannot derive a peer `NodeAddr` likewise fall through to "do not
+/// suppress".
+pub(super) fn suppress_responder_for_own_initiator(
+    our_addr: &NodeAddr,
+    peer_addr: &NodeAddr,
+    have_active_initiator: bool,
+) -> bool {
+    have_active_initiator && our_addr < peer_addr
 }
 
 fn endpoint_summary(endpoints: &[OverlayEndpointAdvert]) -> String {
@@ -1224,6 +1261,45 @@ impl NostrDiscovery {
                 "traversal: offer accepted within clock-skew tolerance"
             );
         }
+        // Collapse the dual-`auto_connect` four-socket dance to a single
+        // session. When we also have an in-flight outbound initiator for this
+        // same peer (genuine symmetric duplication), both nodes deterministically
+        // keep the session initiated by the smaller NodeAddr. If our own
+        // initiator session is the preferred one, decline to answer this offer:
+        // not answering lets the peer's redundant initiator time out, so only the
+        // single matching socket pair survives on both sides. Asymmetric /
+        // one-sided `auto_connect` (no co-active initiator) is never suppressed,
+        // preserving connectivity. See `suppress_responder_for_own_initiator`.
+        if self.active_initiators.lock().await.contains(&sender_npub) {
+            match (
+                PeerIdentity::from_npub(&self.npub),
+                PeerIdentity::from_npub(&sender_npub),
+            ) {
+                (Ok(ours), Ok(theirs)) => {
+                    if suppress_responder_for_own_initiator(
+                        ours.node_addr(),
+                        theirs.node_addr(),
+                        true,
+                    ) {
+                        debug!(
+                            peer = %peer_short,
+                            session = %short_id(&offer.session_id),
+                            "traversal: responder session suppressed, our outbound initiator wins (smaller addr)"
+                        );
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    // Could not derive a NodeAddr for one side; fall through and
+                    // answer rather than risk suppressing the only session.
+                    trace!(
+                        peer = %peer_short,
+                        "traversal: could not derive NodeAddr for dedup, answering offer"
+                    );
+                }
+            }
+        }
+
         self.mark_session_seen(&offer.session_id).await?;
 
         let base_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))?;
