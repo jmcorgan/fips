@@ -14,6 +14,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SIDECAR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../../lib/wait-converge.sh
+source "$SCRIPT_DIR/../../lib/wait-converge.sh"
 
 # Deterministic keys derived from: derive-keys.py sidecar-test node-{a,b,c}
 NODE_A_NSEC="9e688d0879fa9cd025fea0487ac23495080e3de626070fdb9b78dc1f619dd453"
@@ -127,8 +129,17 @@ else
     exit 1
 fi
 
-# Allow a few more seconds for tree convergence and coordinate propagation
-sleep 3
+# Wait for end-to-end multi-hop connectivity (the same app-to-app pings
+# the test asserts on) with a progress-aware deadline, instead of a
+# blind fixed sleep that can fire before coordinates propagate across the
+# chain. The directed pings below remain the actual assertions.
+_sidecar_converged() {
+    PASSED=0; FAILED=0
+    if docker exec sidecar-b-app-1 ping6 -c1 -W2 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    if docker exec sidecar-c-app-1 ping6 -c1 -W2 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    if docker exec sidecar-a-app-1 ping6 -c1 -W2 "${NODE_C_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+}
+wait_until_connected _sidecar_converged "$CONVERGE_TIMEOUT" 10 || true
 
 # ── Link verification ─────────────────────────────────────────────────────
 

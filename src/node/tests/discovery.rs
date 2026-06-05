@@ -766,7 +766,6 @@ async fn test_apply_outgoing_link_mtu_to_response_unknown_peer_noop() {
 }
 
 #[tokio::test]
-#[ignore = "parallel-load flake class — re-enable when fixed (run solo with --ignored or --test-threads=1 in the meantime)"]
 async fn test_response_path_mtu_three_node_chain() {
     // Topology: node0 — node1 — node2
     // Node0 initiates lookup for node2. The response travels node2→node1→node0.

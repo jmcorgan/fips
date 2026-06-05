@@ -535,7 +535,6 @@ fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
 
 /// 100-node random graph: bloom filter exchange at scale.
 #[tokio::test]
-#[ignore = "parallel-load flake class — re-enable when fixed (run solo with --ignored or --test-threads=1 in the meantime)"]
 async fn test_bloom_filter_convergence_100_nodes() {
     let _guard = lock_large_network_test().await;
 

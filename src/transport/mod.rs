@@ -4,6 +4,8 @@
 //! underlying communication mechanisms (UDP, Ethernet, Tor, etc.) over
 //! which FIPS links are established.
 
+#[cfg(test)]
+pub mod loopback;
 pub mod tcp;
 pub mod tor;
 pub mod udp;
@@ -18,6 +20,8 @@ pub mod ble;
 use ble::DefaultBleTransport;
 #[cfg(unix)]
 use ethernet::EthernetTransport;
+#[cfg(test)]
+use loopback::LoopbackTransport;
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
 use std::net::SocketAddr;
@@ -245,6 +249,14 @@ impl TransportType {
         name: "ble",
         connection_oriented: true,
         reliable: true, // L2CAP SeqPacket guarantees delivery
+    };
+
+    /// In-process loopback transport (test harness only).
+    #[cfg(test)]
+    pub const LOOPBACK: TransportType = TransportType {
+        name: "loopback",
+        connection_oriented: false,
+        reliable: true, // in-process channel delivery is lossless
     };
 
     /// Check if the transport is connectionless.
@@ -870,6 +882,9 @@ pub enum TransportHandle {
     /// BLE L2CAP transport.
     #[cfg(target_os = "linux")]
     Ble(DefaultBleTransport),
+    /// In-process loopback transport (test harness only).
+    #[cfg(test)]
+    Loopback(LoopbackTransport),
 }
 
 impl TransportHandle {
@@ -883,6 +898,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.start_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.start_async().await,
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.start_async().await,
         }
     }
 
@@ -896,6 +913,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.stop_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.stop_async().await,
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.stop_async().await,
         }
     }
 
@@ -909,6 +928,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.send_async(addr, data).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.send_async(addr, data).await,
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.send_async(addr, data).await,
         }
     }
 
@@ -922,6 +943,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.transport_id(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.transport_id(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.transport_id(),
         }
     }
 
@@ -935,6 +958,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.name(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.name(),
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => None,
         }
     }
 
@@ -948,6 +973,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.transport_type(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.transport_type(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.transport_type(),
         }
     }
 
@@ -961,6 +988,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.state(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.state(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.state(),
         }
     }
 
@@ -974,6 +1003,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.mtu(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.mtu(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.mtu(),
         }
     }
 
@@ -990,6 +1021,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.link_mtu(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.link_mtu(addr),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.link_mtu(addr),
         }
     }
 
@@ -1003,6 +1036,8 @@ impl TransportHandle {
             TransportHandle::Tor(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => None,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => None,
         }
     }
 
@@ -1016,6 +1051,8 @@ impl TransportHandle {
             TransportHandle::Tor(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => None,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => None,
         }
     }
 
@@ -1053,6 +1090,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.discover(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.discover(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.discover(),
         }
     }
 
@@ -1066,6 +1105,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.auto_connect(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.auto_connect(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.auto_connect(),
         }
     }
 
@@ -1079,6 +1120,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.accept_connections(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.accept_connections(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.accept_connections(),
         }
     }
 
@@ -1098,6 +1141,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.connect_async(addr).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.connect_async(addr).await,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => Ok(()), // connectionless
         }
     }
 
@@ -1115,6 +1160,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.connection_state_sync(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.connection_state_sync(addr),
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => ConnectionState::Connected,
         }
     }
 
@@ -1131,6 +1178,8 @@ impl TransportHandle {
             TransportHandle::Tor(t) => t.close_connection_async(addr).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => {} // connectionless no-op
         }
     }
 
@@ -1153,6 +1202,8 @@ impl TransportHandle {
             TransportHandle::Tor(_) => TransportCongestion::default(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => TransportCongestion::default(),
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => TransportCongestion::default(),
         }
     }
 
@@ -1190,6 +1241,8 @@ impl TransportHandle {
             TransportHandle::Ble(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => serde_json::json!({}),
         }
     }
 }

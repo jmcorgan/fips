@@ -1,6 +1,6 @@
 use super::*;
 use crate::PeerIdentity;
-use crate::transport::{LinkDirection, TransportAddr, packet_channel};
+use crate::transport::{LinkDirection, ReceivedPacket, TransportAddr, packet_channel};
 use crate::utils::index::SessionIndex;
 use std::time::Duration;
 

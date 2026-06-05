@@ -63,7 +63,7 @@ async fn make_test_node_ble(node_num: u8) -> TestNode {
     TestNode {
         node,
         transport_id,
-        packet_rx,
+        packet_rx: spanning_tree::bridge_to_unbounded(packet_rx),
         addr: ta,
     }
 }
@@ -309,7 +309,7 @@ async fn test_ble_discovery() {
     let mut nodes = vec![TestNode {
         node,
         transport_id,
-        packet_rx,
+        packet_rx: spanning_tree::bridge_to_unbounded(packet_rx),
         addr: ta,
     }];
     cleanup_nodes(&mut nodes).await;

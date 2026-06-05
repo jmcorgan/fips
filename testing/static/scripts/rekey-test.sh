@@ -149,8 +149,8 @@ trap 'echo ""; echo "Test interrupted"; exit 130' INT
 # BASELINE_CONVERGENCE_TIMEOUT must cover one full daemon
 # node.tree.reeval_interval_secs (default 60) plus a small margin
 # so any partition that only heals via the periodic TreeAnnounce
-# re-broadcast lands inside the convergence window. wait_for_full_baseline
-# early-exits on PASS, so successful reps are unaffected by the
+# re-broadcast lands inside the convergence window. The Phase-1 baseline
+# wait early-exits on PASS, so successful reps are unaffected by the
 # extra headroom.
 BASELINE_CONVERGENCE_TIMEOUT=65
 REKEY_SETTLE=12        # > DRAIN_WINDOW_SECS (10) so post-rekey samples are off the old session
@@ -173,8 +173,8 @@ CONVERGENCE_PING_TIMEOUT=1
 # attempts drops the loss-math floor to ~(0.02)^MAX_PING_ATTEMPTS per
 # pair, making any residual failure attributable to a non-loss
 # mechanism rather than ICMP noise. Applied to Phase 1 (final strict
-# ping_all after wait_for_full_baseline converges) and Phase 3 / Phase
-# 5 (post-rekey strict asserts). The wait_for_full_baseline convergence
+# ping_all after the Phase-1 baseline wait converges) and Phase 3 / Phase
+# 5 (post-rekey strict asserts). The Phase-1 baseline wait's convergence
 # loop itself stays single-shot — its job is to detect when the mesh
 # first sees a fully clean 20-pair batch, and retries inside the loop
 # would conflate "transient ping loss" with "still converging."
@@ -255,27 +255,11 @@ ping_all() {
     done
 }
 
-wait_for_full_baseline() {
-    local timeout="${1:-30}"
-    local start_secs=$SECONDS
-    local best_passed=0
-    local best_failed=20
-
-    while (( SECONDS - start_secs < timeout )); do
-        ping_all quiet "$CONVERGENCE_PING_TIMEOUT"
-        if [ "$PASSED" -gt "$best_passed" ]; then
-            best_passed="$PASSED"
-            best_failed="$FAILED"
-        fi
-        if [ "$FAILED" -eq 0 ]; then
-            return 0
-        fi
-        sleep 1
-    done
-
-    PASSED="$best_passed"
-    FAILED="$best_failed"
-    return 1
+# Connectivity probe for the progress-aware baseline wait: one full
+# all-pairs ping sweep, setting PASSED/FAILED (consumed by
+# wait_until_connected).
+_baseline_ping() {
+    ping_all quiet "$CONVERGENCE_PING_TIMEOUT"
 }
 
 phase_result() {
@@ -370,13 +354,24 @@ echo "Config: rekey.after_secs=$REKEY_AFTER_SECS"
 echo ""
 
 # ── Phase 1: Pre-rekey baseline ───────────────────────────────────────
+# Wait for full pre-rekey connectivity with a progress-aware deadline:
+# the all-pairs ping sweep is the convergence signal, the window extends
+# while more pairs come up, and it gives up only if progress stalls — so
+# it no longer false-times-out under concurrent CI load. The strict
+# ping_all below is the actual assertion, run only after convergence.
 echo "Phase 1: Pre-rekey connectivity (waiting for convergence)"
-wait_for_peers fips-node-a 2 "$BASELINE_CONVERGENCE_TIMEOUT" || true
-if wait_for_full_baseline "$BASELINE_CONVERGENCE_TIMEOUT"; then
+if wait_until_connected _baseline_ping "$BASELINE_CONVERGENCE_TIMEOUT" 20; then
     ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
     phase_result "Pre-rekey baseline (all 20 pairs)"
+    if [ "$FAILED" -ne 0 ]; then
+        echo ""
+        dump_peer_connectivity
+        echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
+        exit 1
+    fi
 else
-    echo "  Best observed baseline before timeout: $PASSED/$((PASSED + FAILED)) passed"
+    echo "  Mesh did not reach a converged tree before timeout"
+    ping_all quiet "$CONVERGENCE_PING_TIMEOUT"
     phase_result "Pre-rekey baseline (all 20 pairs)"
     echo ""
     dump_peer_connectivity

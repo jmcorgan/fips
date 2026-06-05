@@ -6,10 +6,50 @@
 
 use super::*;
 use crate::protocol::TreeAnnounce;
+use crate::transport::loopback::{LoopbackRegistry, LoopbackTransport, new_registry};
 use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
 
 static LARGE_NETWORK_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Process-wide shared loopback registry for node-level mesh tests.
+///
+/// All loopback test nodes register here so they can locate each other by
+/// address. Each node gets a unique synthetic address (`loopback:{n}`) from
+/// `LOOPBACK_ADDR_COUNTER`, so addresses never collide across concurrently
+/// running tests and stale entries from finished tests are harmless.
+static LOOPBACK_REGISTRY: std::sync::LazyLock<LoopbackRegistry> =
+    std::sync::LazyLock::new(new_registry);
+
+static LOOPBACK_ADDR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Allocate the next globally-unique loopback address.
+fn next_loopback_addr() -> TransportAddr {
+    let n = LOOPBACK_ADDR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    TransportAddr::from_string(&format!("loopback:{}", n))
+}
+
+/// Bridge a transport's bounded receive channel into the unbounded channel
+/// that `TestNode` holds.
+///
+/// Real transports (TCP, Ethernet, BLE) drain their kernel socket into a
+/// bounded `PacketRx` via a background receive task, so a bounded channel
+/// does not deadlock for them. `TestNode.packet_rx` is unbounded (required
+/// by the loopback path, which has no background reader); this spawns a
+/// forwarding task so non-loopback factories can still produce a `TestNode`.
+pub(super) fn bridge_to_unbounded(
+    mut bounded_rx: PacketRx,
+) -> tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(packet) = bounded_rx.recv().await {
+            if tx.send(packet).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
 
 pub(super) async fn lock_large_network_test() -> tokio::sync::MutexGuard<'static, ()> {
     LARGE_NETWORK_TEST_LOCK.lock().await
@@ -19,16 +59,24 @@ pub(super) async fn lock_large_network_test() -> tokio::sync::MutexGuard<'static
 pub(super) struct TestNode {
     pub(super) node: Node,
     pub(super) transport_id: TransportId,
-    pub(super) packet_rx: PacketRx,
+    pub(super) packet_rx: tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
     pub(super) addr: TransportAddr,
 }
 
-/// Create a test node with a live UDP transport on localhost.
+/// Create a test node with an in-process loopback transport.
 pub(super) async fn make_test_node() -> TestNode {
     make_test_node_with_mtu(1280).await
 }
 
 /// Create a test node with a specific transport MTU.
+///
+/// Uses the in-process loopback transport (not real UDP): packets are
+/// delivered directly to the destination node's unbounded receive channel
+/// via the shared registry. This avoids the kernel UDP receive-buffer
+/// overflow that drops handshake packets when many tests run in parallel
+/// under CPU contention. The `mtu` is enforced on send (MtuExceeded),
+/// mirroring UDP, so heterogeneous-MTU / PMTUD tests still exercise the
+/// forward-path bottleneck.
 pub(super) async fn make_test_node_with_mtu(mtu: u16) -> TestNode {
     make_test_node_inner(Config::new(), mtu).await
 }
@@ -49,41 +97,23 @@ pub(super) async fn make_test_node_with_profile(profile: crate::protocol::NodePr
 
 /// Shared builder: a test node from an explicit `Config` and transport MTU.
 async fn make_test_node_inner(config: Config, mtu: u16) -> TestNode {
-    use crate::config::UdpConfig;
-    use crate::transport::udp::UdpTransport;
-
     let mut node = make_node_with(config);
     let transport_id = TransportId::new(1);
 
-    // recv_buf_size and packet_channel are sized for large-network harness
-    // tests (100-node burst patterns) under parallel-CPU load via
-    // `cargo test --lib`. The daemon's 2 MB recv default is already
-    // requested via UdpConfig; we ask for 8 MB so hosts with tuned
-    // net.core.rmem_max get the larger budget (the kernel clamps to
-    // rmem_max otherwise and the transport emits a warn). The
-    // packet_channel(8192) is the actually-effective bump on hosts with
-    // the typical 2 MB rmem_max — under parallel-test scheduler
-    // contention the in-process channel between recv loop and the test's
-    // packet_rx fills well before the kernel rcvbuf would.
-    let udp_config = UdpConfig {
-        bind_addr: Some("127.0.0.1:0".to_string()),
-        mtu: Some(mtu),
-        recv_buf_size: Some(8 * 1024 * 1024),
-        ..Default::default()
-    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
+    let addr = next_loopback_addr();
 
-    let (packet_tx, packet_rx) = packet_channel(8192);
-    let mut transport = UdpTransport::new(transport_id, None, udp_config, packet_tx);
-    transport.start_async().await.unwrap();
+    LOOPBACK_REGISTRY.lock().unwrap().insert(addr.clone(), tx);
 
-    let addr = TransportAddr::from_string(&transport.local_addr().unwrap().to_string());
+    let loopback =
+        LoopbackTransport::with_mtu(transport_id, addr.clone(), mtu, LOOPBACK_REGISTRY.clone());
     node.transports
-        .insert(transport_id, TransportHandle::Udp(transport));
+        .insert(transport_id, TransportHandle::Loopback(loopback));
 
     TestNode {
         node,
         transport_id,
-        packet_rx,
+        packet_rx: rx,
         addr,
     }
 }
@@ -260,9 +290,21 @@ pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
         PHASE_MSG3,
     };
 
+    // Snapshot the number of packets queued at every node at the start of the
+    // pass, before processing any node. Loopback delivery is synchronous, so a
+    // packet sent during this pass would otherwise land in another node's
+    // channel and be drained in the *same* pass. Real UDP defers such packets
+    // to the next pass (socket round-trip + recv task), and several tests
+    // depend on that one-hop-per-pass cadence. Bounding each node's drain to
+    // its start-of-pass count preserves it regardless of iteration order.
+    let queued: Vec<usize> = nodes.iter().map(|n| n.packet_rx.len()).collect();
+
     let mut count = 0;
-    for node in nodes.iter_mut() {
-        while let Ok(packet) = node.packet_rx.try_recv() {
+    for (node, &queued) in nodes.iter_mut().zip(queued.iter()) {
+        for _ in 0..queued {
+            let Ok(packet) = node.packet_rx.try_recv() else {
+                break;
+            };
             if packet.data.len() < COMMON_PREFIX_SIZE {
                 continue;
             }
@@ -777,7 +819,6 @@ pub(super) async fn cleanup_nodes(nodes: &mut [TestNode]) {
 /// Integration test: 100 nodes with random connectivity converge to a
 /// consistent spanning tree with the correct root.
 #[tokio::test]
-#[ignore = "parallel-load flake class — re-enable when fixed (run solo with --ignored or --test-threads=1 in the meantime)"]
 async fn test_spanning_tree_convergence_100_nodes() {
     let _guard = lock_large_network_test().await;
 

@@ -51,7 +51,7 @@ async fn make_test_node_tcp_with(config: Config) -> TestNode {
     TestNode {
         node,
         transport_id,
-        packet_rx,
+        packet_rx: spanning_tree::bridge_to_unbounded(packet_rx),
         addr,
     }
 }
