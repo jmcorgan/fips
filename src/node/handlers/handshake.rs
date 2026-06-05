@@ -1027,52 +1027,16 @@ impl Node {
             return;
         }
 
-        // Early cap check: at max_peers and this is a net-new identity?
-        //
-        // On IK (maint/master) the equivalent gate fires at handle_msg1
-        // before Msg2 is built, saving the wire bytes of Msg2 and the
-        // responder crypto. On XX (here) identity isn't known until
-        // msg3 has been received, by which point Msg1+Msg2+Msg3 have
-        // all crossed the wire — so this gate saves no wire bytes. Its
-        // value is local CPU + allocation savings (no ActivePeer
-        // build, no peers_by_index insert, no link transition) and
-        // cleaner peer-side semantics (no fake-promotion-then-tear-
-        // down).
-        //
-        // Bypass for known peers (reconnect / cross-connection) —
-        // admitting them doesn't grow peers.len(). The late cap check
-        // inside promote_connection() is intentionally left in place
-        // as defense-in-depth.
-        if self.max_peers() > 0 && self.peers.len() >= self.max_peers() {
-            let is_known_active = self.peers.contains_key(&peer_node_addr);
-            let is_pending_outbound = self.connections.iter().any(|(_, conn)| {
-                conn.expected_identity()
-                    .map(|id| *id.node_addr() == peer_node_addr)
-                    .unwrap_or(false)
-            });
-            if !is_known_active && !is_pending_outbound {
-                debug!(
-                    peer = %self.peer_display_name(&peer_node_addr),
-                    max = self.max_peers(),
-                    "Silent-dropping Msg3 at max_peers cap (early gate; no promotion)"
-                );
-                // Capture our_index before removing the connection so
-                // we can return the allocator slot — mirrors the
-                // failure-cleanup intent of the msg3-processing-
-                // failure path above, with the get-then-remove
-                // ordering corrected.
-                let our_idx_to_free = self.connections.get(&link_id).and_then(|c| c.our_index());
-                self.connections.remove(&link_id);
-                self.remove_link(&link_id);
-                if let Some(idx) = our_idx_to_free {
-                    let _ = self.index_allocator.free(idx);
-                }
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                return;
-            }
-        }
-
+        // The inbound max_peers cap is enforced solely by the late check
+        // inside promote_connection() (the "Normal promotion" branch). On
+        // XX, identity isn't known until msg3 has been received, by which
+        // point Msg1+Msg2+Msg3 have all crossed the wire, so an early gate
+        // here would save no wire bytes; and the late check already governs
+        // exactly the same peer set (net-new, not-known, not-pending-
+        // outbound — known/pending-outbound peers return earlier via the
+        // cross-connection paths). Over-cap inbound rejections surface as
+        // NodeError::MaxPeersExceeded in the Err arm below and are logged at
+        // debug rather than warn (expected policy rejection, not a fault).
         let our_index = our_index.unwrap_or(header.receiver_idx);
 
         // Identity-based restart/rekey detection.
@@ -1470,12 +1434,27 @@ impl Node {
                 }
             }
             Err(e) => {
-                warn!(
-                    link_id = %link_id,
-                    error = %e,
-                    "Failed to promote inbound connection"
-                );
-                // Clean up on promotion failure
+                // A max_peers rejection is expected policy, not a fault —
+                // log it at debug to avoid WARN spam when a cap'd node is
+                // under sustained inbound pressure. Other promotion failures
+                // remain at warn.
+                if matches!(e, NodeError::MaxPeersExceeded { .. }) {
+                    debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        max = self.max_peers(),
+                        "Rejecting inbound connection at max_peers cap (no promotion)"
+                    );
+                } else {
+                    warn!(
+                        link_id = %link_id,
+                        error = %e,
+                        "Failed to promote inbound connection"
+                    );
+                }
+                // Clean up on promotion failure. promote_connection already
+                // freed our_index in its MaxPeersExceeded path; freeing again
+                // here is benign (IndexAllocator::free is a HashSet::remove,
+                // the second call returns Err(NotFound) and is ignored).
                 self.remove_link(&link_id);
                 let _ = self.index_allocator.free(our_index);
                 self.stats_mut()

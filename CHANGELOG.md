@@ -292,6 +292,15 @@ with v0.3.x peers.
 
 ### Fixed
 
+- Inbound connections that arrive while a node is already at its
+  `max_peers` cap are now rejected solely by the promotion check on the
+  XX FMP handshake, and the rejection is logged at debug rather than
+  warn. A redundant early gate in `handle_msg3` was removed: on XX the
+  peer's identity is not known until the third handshake message, by
+  which point all three messages have already crossed the wire, so the
+  early gate saved no bytes and merely duplicated the promotion check's
+  peer set. A cap'd node under sustained inbound pressure no longer
+  emits WARN spam for these expected policy rejections.
 - Six discovery counters (`req_decode_error`, `req_duplicate`,
   `req_ttl_exhausted`, `resp_decode_error`, `resp_identity_miss`,
   `resp_proof_failed`) no longer double-count. Each was incremented both

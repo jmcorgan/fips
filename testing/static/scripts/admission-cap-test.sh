@@ -204,25 +204,24 @@ info "node-$CAP_NODE final peer_count=$pc_final (expected $MAX_PEERS)"
 [ "$pc_final" = "$MAX_PEERS" ] || { info "    FAIL: peer_count drifted from cap"; OVERALL=1; }
 
 # ── Phase 5: daemon actively refused over-cap promotions ─────────────
-# Path-agnostic enforcement evidence. The early handle_msg3 gate logs
-# "Silent-dropping Msg3 at max_peers cap" (debug); the late
-# promote_connection check logs "Failed to promote inbound connection"
-# (warn, "max peers exceeded"). In the mesh topology denied peers are
-# also dialed by the cap'd node, so the late check is the active enforcer
-# — but counting both keeps the test correct regardless of which path
-# fires (and survives a future change to the early gate).
+# Enforcement evidence. The inbound max_peers cap is enforced by the late
+# promote_connection check, which logs "Rejecting inbound connection at
+# max_peers cap" at debug (node-$CAP_NODE runs
+# fips::node::handlers::handshake at debug in the mesh profile). In the
+# mesh topology denied peers are also dialed by the cap'd node, so the
+# cross-connection path handles them and the late check is the active
+# enforcer.
 clogs=$(docker logs fips-node-$CAP_NODE 2>&1 || true)
-gate_drops=$(echo "$clogs" | grep -c "Silent-dropping Msg3 at max_peers cap" || true)
-late_rejects=$(echo "$clogs" | grep -c "Failed to promote inbound connection" || true)
-enforcement=$((gate_drops + late_rejects))
-info "enforcement events on node-$CAP_NODE: early-gate=$gate_drops, late-check=$late_rejects (total $enforcement)"
+late_rejects=$(echo "$clogs" | grep -c "Rejecting inbound connection at max_peers cap" || true)
+enforcement=$late_rejects
+info "enforcement events on node-$CAP_NODE: late-check=$late_rejects (total $enforcement)"
 [ "$enforcement" -gt 0 ] || { info "    FAIL: no cap-enforcement events observed in node-$CAP_NODE logs"; OVERALL=1; }
 
 if [ "$OVERALL" -eq 0 ]; then
     pass "admission-cap: cap holds under sustained denied-peer load"
     pass "  denied peers: $(echo $DENIED | wc -w), capture: ${CAPTURE_SECS}s"
     pass "  total inbound from denied: $TOTAL_IN (sustained retries observed)"
-    pass "  cap enforcement events: $enforcement (early-gate $gate_drops + late-check $late_rejects)"
+    pass "  cap enforcement events: $enforcement (late-check $late_rejects)"
     pass "  cap'd node held peer_count=$pc_final (max=$MAX_PEERS)"
     rm -f "$CAP_FILE"
     exit 0

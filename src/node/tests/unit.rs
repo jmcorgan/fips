@@ -1777,220 +1777,239 @@ fn nostr_discovery_outbound_admission_atomic_roundtrip() {
     );
 }
 
-/// Sender-side helper: build a wire-format Msg1 from a fresh peer
-/// identity targeting `node_b`, *and* send it on the wire over `socket_a`
-/// to `addr_b`. Returns the sender's NodeAddr so the test can assert on
-/// identity-keyed maps.
+/// Two-node UDP scaffold for driving a full Noise XX handshake
+/// (Msg1 -> Msg2 -> Msg3) from `node_a` (initiator) into `node_b`
+/// (responder, the unit under test). Mirrors `test_two_node_handshake_udp`
+/// in `handshake.rs`, condensed for the cap-check tests.
 ///
-/// Uses the same outbound-PeerConnection->Noise IK pattern as the
-/// integration handshake tests, but inlined and unit-scoped.
-async fn craft_and_send_msg1(
-    node_b: &Node,
-    sender_identity: &Identity,
-    socket_a: &tokio::net::UdpSocket,
+/// `node_a` and `node_b` must already have a UDP transport under
+/// `TransportId::new(1)`; the test passes in the bound local addrs and the
+/// two receive channels. After this returns, `node_b` has processed the
+/// initiator's Msg3 and the cap-enforcement decision has been made. Returns
+/// the initiator's `NodeAddr`.
+///
+/// Critically for the silent-drop test: `node_a` is the only initiator —
+/// `node_b` never dials `node_a`, so there is no pending-outbound connection
+/// to bypass the cap. The inbound peer is therefore truly unsolicited.
+async fn drive_xx_handshake(
+    node_a: &mut Node,
+    node_b: &mut Node,
+    transport_id: TransportId,
     addr_b: std::net::SocketAddr,
-    timestamp_ms: u64,
+    packet_rx_a: &mut crate::transport::PacketRx,
+    packet_rx_b: &mut crate::transport::PacketRx,
 ) -> NodeAddr {
     use crate::node::wire::build_msg1;
-    use crate::utils::index::SessionIndex;
+    use tokio::time::{Duration, timeout};
+
+    let remote_addr_b = TransportAddr::from_string(&addr_b.to_string());
 
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
-    let sender_pubkey_id = PeerIdentity::from_pubkey_full(sender_identity.pubkey_full());
-    let sender_node_addr = *sender_pubkey_id.node_addr();
 
-    let link_id = LinkId::new(0xDEAD_BEEF);
-    let mut conn = PeerConnection::outbound(link_id, peer_b_identity, timestamp_ms);
+    // node_a initiates the outbound handshake.
+    let link_id_a = node_a.allocate_link_id();
+    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
+    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_keypair_a = node_a.identity().keypair();
+    let noise_msg1 = conn_a
+        .start_handshake(our_keypair_a, node_a.startup_epoch(), 1000)
+        .unwrap();
+    conn_a.set_our_index(our_index_a);
+    conn_a.set_transport_id(transport_id);
+    conn_a.set_source_addr(remote_addr_b.clone());
+    let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
 
-    let sender_keypair = sender_identity.keypair();
-    let mut startup_epoch = [0u8; 8];
-    rand::Rng::fill_bytes(&mut rand::rng(), &mut startup_epoch);
-    let noise_msg1 = conn
-        .start_handshake(sender_keypair, startup_epoch, timestamp_ms)
-        .expect("start_handshake should produce noise msg1");
+    let link_a = Link::connectionless(
+        link_id_a,
+        transport_id,
+        remote_addr_b.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    node_a.links.insert(link_id_a, link_a);
+    node_a.connections.insert(link_id_a, conn_a);
+    node_a
+        .pending_outbound
+        .insert((transport_id, our_index_a.as_u32()), link_id_a);
 
-    let sender_index = SessionIndex::new(0x5151);
-    let wire_msg1 = build_msg1(sender_index, &noise_msg1);
-
-    socket_a
-        .send_to(&wire_msg1, addr_b)
+    let transport = node_a.transports.get(&transport_id).unwrap();
+    transport
+        .send(&remote_addr_b, &wire_msg1)
         .await
-        .expect("sender_socket.send_to");
-    sender_node_addr
+        .expect("Failed to send msg1");
+
+    // node_b receives Msg1, replies Msg2 (XX: no promotion yet).
+    let packet_b = timeout(Duration::from_secs(1), packet_rx_b.recv())
+        .await
+        .expect("Timeout waiting for msg1")
+        .expect("Channel closed");
+    node_b.handle_msg1(packet_b).await;
+
+    // node_a receives Msg2, sends Msg3, promotes locally.
+    let packet_a = timeout(Duration::from_secs(1), packet_rx_a.recv())
+        .await
+        .expect("Timeout waiting for msg2")
+        .expect("Channel closed");
+    node_a.handle_msg2(packet_a).await;
+
+    // node_b receives Msg3 — the cap-enforcement decision happens here.
+    let packet_b_msg3 = timeout(Duration::from_secs(1), packet_rx_b.recv())
+        .await
+        .expect("Timeout waiting for msg3")
+        .expect("Channel closed");
+    node_b.handle_msg3(packet_b_msg3).await;
+
+    *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr()
 }
 
-/// Helper: deliver a packet from `node`'s registered UDP transport to
-/// `node.handle_msg1`. Returns Ok(()) on success or Err if the packet
-/// was not received within `timeout`.
-async fn pump_one_msg1_into_node(
+/// Register a UDP transport on `node` under `TransportId::new(1)`, returning
+/// the bound local address and the packet receive channel.
+async fn register_udp_transport(
     node: &mut Node,
-    packet_rx: &mut crate::transport::PacketRx,
-    timeout_ms: u64,
-) -> Result<(), &'static str> {
-    use tokio::time::{Duration, timeout};
-    let packet = timeout(Duration::from_millis(timeout_ms), packet_rx.recv())
-        .await
-        .map_err(|_| "timed out waiting for msg1 on packet_rx")?
-        .ok_or("packet channel closed")?;
-    node.handle_msg1(packet).await;
-    Ok(())
-}
-
-// Two IK-protocol-specific unit tests for the inbound-msg1 cap-check
-// landed on maint+master with the IK-side admission-gate fix. They
-// don't apply on this branch's XX handshake: the equivalent gate
-// here lives in handle_msg3 (peer identity isn't known until then),
-// and the wire-bytes discriminator that the IK tests rely on
-// ("Msg2 must NOT be sent at cap") is structurally false on XX
-// because Msg2 is the responder's ephemeral exchange and is sent
-// unconditionally before identity is known.
-//
-// XX-equivalent tests (handle_msg3_silent_drops_at_cap_for_new_peer
-// and handle_msg3_admits_existing_peer_at_cap) need a full
-// XX three-message handshake pump rather than the single-Msg1 pump
-// the IK tests use, plus an assertion shape based on promotion-or-not
-// rather than wire-bytes presence. Authoring deferred to follow-up
-// alongside the rest of the XX-adapted gate hardening work.
-#[tokio::test]
-#[ignore = "IK-specific assertion shape; XX equivalent at handle_msg3 deferred"]
-async fn handle_msg1_silent_drops_at_cap_for_new_peer() {
+) -> (std::net::SocketAddr, crate::transport::PacketRx) {
     use crate::config::UdpConfig;
-    use tokio::time::{Duration, timeout};
 
-    let mut node = make_node_with_max_peers(2);
-    inject_dummy_peers(&mut node, 2);
-    assert_eq!(node.peer_count(), 2, "precondition: at cap");
-
-    // === UDP transport setup for node_b (the unit under test) ===
-    let transport_id_b = TransportId::new(1);
+    let transport_id = TransportId::new(1);
     let udp_config = UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
         mtu: Some(1280),
         ..Default::default()
     };
-    let (packet_tx_b, mut packet_rx_b) = packet_channel(64);
-    let mut transport_b = UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
-    transport_b.start_async().await.unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    let mut transport = UdpTransport::new(transport_id, None, udp_config, packet_tx);
+    transport.start_async().await.unwrap();
+    let addr = transport.local_addr().unwrap();
     node.transports
-        .insert(transport_id_b, TransportHandle::Udp(transport_b));
+        .insert(transport_id, TransportHandle::Udp(transport));
+    (addr, packet_rx)
+}
 
-    // === Sender-side socket ===
-    let socket_a = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("bind sender socket");
+// The inbound max_peers cap on the XX FMP handshake is enforced solely by
+// the late `promote_connection` check (the early `handle_msg3` gate was
+// removed: on XX, identity isn't known until Msg3, by which point all three
+// messages have crossed the wire, so an early gate saved no bytes and
+// duplicated the late check's peer set). These two tests assert the
+// path-agnostic invariant — no promotion over cap, peer count unchanged, no
+// index-allocator/connection leak — driven through the full XX three-message
+// pump. They do NOT assert the IK "no Msg2 on the wire" discriminator
+// (false on XX: Msg2 is the responder ephemeral, sent before identity is
+// known), nor the IK rate-limiter rebalance (the msg3 cap-reject path does
+// not touch `msg1_rate_limiter`).
+#[tokio::test]
+async fn handle_msg3_silent_drops_at_cap_for_new_peer() {
+    let transport_id = TransportId::new(1);
 
-    let before_peers = node.peer_count();
-    let before_pending = node.msg1_rate_limiter.pending_count();
+    // node_b is the cap'd unit under test: max_peers=1, already at cap.
+    let mut node_b = make_node_with_max_peers(1);
+    inject_dummy_peers(&mut node_b, 1);
+    assert_eq!(node_b.peer_count(), 1, "precondition: node_b at cap");
 
-    // Fresh sender identity — never seen by `node`.
-    let sender = Identity::generate();
-    let sender_node_addr = craft_and_send_msg1(&node, &sender, &socket_a, addr_b, 1000).await;
+    // node_a is a truly-unsolicited inbound initiator. node_b never dials
+    // node_a, so `is_pending_outbound` is false and the cap (not the
+    // cross-connection path) governs.
+    let mut node_a = make_node();
 
-    // Sanity: new identity is not currently a peer.
-    assert!(
-        !node.peers.contains_key(&sender_node_addr),
-        "precondition: new sender not yet a peer"
-    );
+    let (addr_b, mut packet_rx_b) = register_udp_transport(&mut node_b).await;
+    let (_addr_a, mut packet_rx_a) = register_udp_transport(&mut node_a).await;
 
-    // Pump the wire-arrived Msg1 into the node's handler.
-    pump_one_msg1_into_node(&mut node, &mut packet_rx_b, 1000)
-        .await
-        .expect("msg1 must reach packet_rx_b");
+    // Snapshot node_b resource state before the over-cap handshake.
+    let before_peers = node_b.peer_count();
+    let before_connections = node_b.connection_count();
+    let before_links = node_b.link_count();
+    let before_index_count = node_b.index_allocator.count();
 
-    // Post-call state checks.
+    let peer_a_node_addr = drive_xx_handshake(
+        &mut node_a,
+        &mut node_b,
+        transport_id,
+        addr_b,
+        &mut packet_rx_a,
+        &mut packet_rx_b,
+    )
+    .await;
+
+    // Path-agnostic invariant: no promotion over cap.
     assert_eq!(
-        node.peer_count(),
+        node_b.peer_count(),
         before_peers,
-        "early cap gate must not adopt a new peer at saturation"
+        "cap'd node must not promote a net-new peer over max_peers"
     );
     assert!(
-        !node.peers.contains_key(&sender_node_addr),
-        "new sender must not appear in peers map"
-    );
-    assert_eq!(
-        node.msg1_rate_limiter.pending_count(),
-        before_pending,
-        "rate limiter must rebalance: start_handshake() then \
-         complete_handshake() before silent-drop return"
+        !node_b.peers.contains_key(&peer_a_node_addr),
+        "denied peer must not appear in node_b's peers map"
     );
 
-    // Wire-observable discriminator: with the early gate in place, no
-    // Msg2 should come back. With the gate removed, Msg2 IS sent
-    // before promote_connection rejects.
-    let mut buf = [0u8; 2048];
-    let recv = timeout(Duration::from_millis(300), socket_a.recv_from(&mut buf)).await;
-    let received_bytes = recv.ok().and_then(|inner| inner.ok()).map(|(n, _)| n);
-    assert!(
-        received_bytes.is_none(),
-        "Msg2 must NOT be sent in response when at max_peers cap; \
-         observed {received_bytes:?} wire bytes — the fingerprint of \
-         the late-gate path replying with Msg2 before rejecting"
+    // Resource non-leak: the rejected handshake's connection, link, and
+    // allocated index must all be released, returning node_b to its
+    // pre-handshake bookkeeping baseline.
+    assert_eq!(
+        node_b.connection_count(),
+        before_connections,
+        "rejected handshake's pending connection must be cleaned up"
+    );
+    assert_eq!(
+        node_b.link_count(),
+        before_links,
+        "rejected handshake's link must be removed"
+    );
+    assert_eq!(
+        node_b.index_allocator.count(),
+        before_index_count,
+        "rejected handshake's allocated session index must be freed"
     );
 }
 
-/// IK-specific bypass-admit regression check; on this branch's XX
-/// handshake the equivalent semantic lives in handle_msg3 (identity
-/// not known until then). Ignored alongside its sibling above;
-/// XX-shaped equivalent deferred to follow-up.
+/// Regression guard: a full XX handshake from a KNOWN-identity peer at cap
+/// must be admitted (reconnect/cross-connection bypass), not evicted. The
+/// existing peer's key must remain present and the peer count must hold.
 #[tokio::test]
-#[ignore = "IK-specific assertion shape; XX equivalent at handle_msg3 deferred"]
-async fn handle_msg1_admits_existing_peer_at_cap() {
-    use crate::config::UdpConfig;
+async fn handle_msg3_admits_existing_peer_at_cap() {
+    let transport_id = TransportId::new(1);
 
-    let mut node = make_node_with_max_peers(2);
+    // node_a is the initiator whose identity we pre-insert as node_b's
+    // existing peer, so node_b is at cap WITH the incoming peer already known.
+    let mut node_a = make_node();
+    let mut node_b = make_node_with_max_peers(1);
 
-    inject_dummy_peers(&mut node, 1);
-
-    let existing_sender = Identity::generate();
-    let existing_pid = PeerIdentity::from_pubkey_full(existing_sender.pubkey_full());
+    let existing_pid = PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full());
     let existing_node_addr = *existing_pid.node_addr();
-    let existing_link_id = LinkId::new(7777);
     {
         use crate::peer::ActivePeer;
-        let peer = ActivePeer::new(existing_pid, existing_link_id, 0);
-        node.peers.insert(existing_node_addr, peer);
+        let peer = ActivePeer::new(existing_pid, LinkId::new(7777), 0);
+        node_b.peers.insert(existing_node_addr, peer);
     }
-    assert_eq!(node.peer_count(), 2, "precondition: at cap");
-
-    let transport_id_b = TransportId::new(1);
-    let udp_config = UdpConfig {
-        bind_addr: Some("127.0.0.1:0".to_string()),
-        mtu: Some(1280),
-        ..Default::default()
-    };
-    let (packet_tx_b, mut packet_rx_b) = packet_channel(64);
-    let mut transport_b = UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b);
-    transport_b.start_async().await.unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
-    node.transports
-        .insert(transport_id_b, TransportHandle::Udp(transport_b));
-
-    let socket_a = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("bind sender socket");
-
-    let before_pending = node.msg1_rate_limiter.pending_count();
-
-    let sender_node_addr =
-        craft_and_send_msg1(&node, &existing_sender, &socket_a, addr_b, 2000).await;
     assert_eq!(
-        sender_node_addr, existing_node_addr,
-        "sanity: crafted msg1 carries the existing peer's NodeAddr"
+        node_b.peer_count(),
+        1,
+        "precondition: node_b at cap with node_a already known"
     );
 
-    pump_one_msg1_into_node(&mut node, &mut packet_rx_b, 1000)
-        .await
-        .expect("msg1 must reach packet_rx_b");
+    let (addr_b, mut packet_rx_b) = register_udp_transport(&mut node_b).await;
+    let (_addr_a, mut packet_rx_a) = register_udp_transport(&mut node_a).await;
 
-    // Bypass must not evict the existing peer or grow peer count.
-    assert_eq!(node.peer_count(), 2, "peer count unchanged");
+    let peer_a_node_addr = drive_xx_handshake(
+        &mut node_a,
+        &mut node_b,
+        transport_id,
+        addr_b,
+        &mut packet_rx_a,
+        &mut packet_rx_b,
+    )
+    .await;
+    assert_eq!(
+        peer_a_node_addr, existing_node_addr,
+        "sanity: initiator carries the existing peer's NodeAddr"
+    );
+
+    // The known peer is admitted (session replaced cleanly), not evicted,
+    // and the cap is not breached.
+    assert_eq!(
+        node_b.peer_count(),
+        1,
+        "peer count must hold at cap (known peer admitted, not double-counted)"
+    );
     assert!(
-        node.peers.contains_key(&existing_node_addr),
-        "existing peer must still be present after bypass-admitted msg1"
-    );
-    assert_eq!(
-        node.msg1_rate_limiter.pending_count(),
-        before_pending,
-        "rate limiter must rebalance after the (bypass-admitted) handler returns"
+        node_b.peers.contains_key(&existing_node_addr),
+        "existing peer must still be present after a known-peer reconnect"
     );
 }
