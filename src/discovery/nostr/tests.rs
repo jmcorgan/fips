@@ -1,6 +1,6 @@
 use nostr::prelude::{EventBuilder, Kind, Tag, Timestamp};
 
-use super::runtime::NostrDiscovery;
+use super::runtime::{NostrDiscovery, suppress_responder_for_own_initiator};
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
     estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
@@ -14,6 +14,7 @@ use super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert,
     OverlayTransportKind, PunchHint, PunchPacketKind, TraversalAddress,
 };
+use crate::NodeAddr;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NatType {
@@ -627,4 +628,45 @@ async fn signal_events_use_current_timestamps() {
 
     assert!(created_at >= before);
     assert!(created_at <= after);
+}
+
+fn node_addr(first_byte: u8) -> NodeAddr {
+    let mut bytes = [0u8; 16];
+    bytes[0] = first_byte;
+    NodeAddr::from_bytes(bytes)
+}
+
+#[test]
+fn responder_suppression_election() {
+    let smaller = node_addr(0x01);
+    let larger = node_addr(0x02);
+
+    // Symmetric dual-auto_connect (co-active initiator on both sides):
+    // both nodes must keep the session initiated by the smaller NodeAddr.
+
+    // Smaller-addr node handling the larger node's offer: our own outbound
+    // initiator (smaller) is preferred, so suppress this responder session.
+    assert!(suppress_responder_for_own_initiator(
+        &smaller, &larger, true
+    ));
+
+    // Larger-addr node handling the smaller node's offer: the smaller node's
+    // session is preferred, so do NOT suppress — answer it.
+    assert!(!suppress_responder_for_own_initiator(
+        &larger, &smaller, true
+    ));
+
+    // Asymmetric / one-sided auto_connect: no co-active initiator means only
+    // one session exists; never suppress, regardless of address ordering.
+    assert!(!suppress_responder_for_own_initiator(
+        &smaller, &larger, false
+    ));
+    assert!(!suppress_responder_for_own_initiator(
+        &larger, &smaller, false
+    ));
+
+    // Self / loopback (equal addresses): never suppress.
+    assert!(!suppress_responder_for_own_initiator(
+        &smaller, &smaller, true
+    ));
 }
