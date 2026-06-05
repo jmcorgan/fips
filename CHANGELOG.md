@@ -223,17 +223,15 @@ with v0.3.x peers.
     is not tied to release tags.
   - Tag-triggered `package-*` release-build workflows remain
     untouched.
-- Rekey timer jitter disabled on next (`REKEY_JITTER_SECS = 0` at
-  `src/node/mod.rs`). The jitter mechanism added on maint/master
-  (per-session signed jitter `[-15, +15]` seconds) works cleanly on
-  the IK FMP rekey path on those branches, but on next's XX FMP
-  rekey path it produces reproducible post-cutover routing-convergence
-  failures: ~50% Phase 5 per-pair-ping loss in the `rekey` integration
-  suite, with all crypto/transport/link-state log assertions still
-  green (Phase 6 all-green). With the const set to 0 the same suite
-  passes 70/70. The constant and surrounding draw/redraw machinery
-  are kept in place pending diagnosis of why XX cutover state cleanup
-  doesn't absorb variable-interval rekeys the way IK does.
+- Rekey timer jitter is enabled on next's XX FMP rekey path
+  (`REKEY_JITTER_SECS = 15` at `src/node/mod.rs`), matching the
+  IK-line behavior on maint/master. It had been temporarily set to
+  `0` on next because variable-interval rekeys exposed three XX
+  rekey-path defects that left the two endpoints on divergent Noise
+  sessions; those defects are fixed (see `### Fixed`), so the
+  per-session signed jitter over `[-15, +15]` seconds is restored.
+  `node.rekey.after_secs` is the nominal interval rather than a floor;
+  mean is preserved.
 - macOS UDP receive path now batches up to 32 datagrams per kernel
   wakeup via `recvmsg_x(2)`, matching the Linux `recvmmsg(2)`
   amortization shape introduced in v0.3.0. Previously macOS fell
@@ -335,15 +333,19 @@ with v0.3.x peers.
 
 ### Fixed
 
-- Inbound connections that arrive while a node is already at its
-  `max_peers` cap are now rejected solely by the promotion check on the
-  XX FMP handshake, and the rejection is logged at debug rather than
-  warn. A redundant early gate in `handle_msg3` was removed: on XX the
-  peer's identity is not known until the third handshake message, by
-  which point all three messages have already crossed the wire, so the
-  early gate saved no bytes and merely duplicated the promotion check's
-  peer set. A cap'd node under sustained inbound pressure no longer
-  emits WARN spam for these expected policy rejections.
+- On the XX FMP handshake, an over-cap inbound connection is rejected
+  solely by the late `promote_connection` check, and the resulting
+  `MaxPeersExceeded` rejection is logged at debug rather than warn so a
+  saturated node under sustained inbound pressure does not emit WARN
+  spam for these expected policy rejections. There is no early cap gate:
+  on XX the peer's identity is not known until the third handshake
+  message, by which point Msg1, Msg2, and Msg3 have all crossed the
+  wire, so an early gate would save no wire bytes and would govern
+  exactly the same net-new-peer set as the late check. The known-peer /
+  cross-connection bypass — which also covers peers the node is itself
+  dialing, e.g. configured `auto_connect` peers — is handled by that
+  late check, since those peers return earlier via the cross-connection
+  paths and are not subject to the cap.
 - Six discovery counters (`req_decode_error`, `req_duplicate`,
   `req_ttl_exhausted`, `resp_decode_error`, `resp_identity_miss`,
   `resp_proof_failed`) no longer double-count. Each was incremented both
@@ -400,6 +402,41 @@ with v0.3.x peers.
     otherwise promote a stale pending session, leaving the two endpoints
     on different keys and silently dropping traffic until the link died
     — the same failure class already closed on FSP, now closed on FMP.
+- XX FMP rekey no longer diverges under timer jitter, which unblocked
+  re-enabling the rekey jitter on next (`REKEY_JITTER_SECS = 15`; see
+  `### Changed`). With jitter the two directions of a link rekey close
+  together in time, and three defects specific to the XX three-message
+  rekey state machine could each leave the endpoints committed to
+  different Noise sessions — silent session divergence that starved the
+  receiver into ~50% post-rekey ping loss and a 30-second heartbeat
+  link-dead teardown (tree parent loss, routing failure) while every
+  crypto, transport, and link-state gate stayed green. All three are
+  fixed:
+  - The K-bit-flip handler promoted whatever pending session existed the
+    instant the header bit flipped, which under interleaved rekeys could
+    be a stale pending from an earlier epoch. It now trial-decrypts the
+    inbound frame against the pending session and promotes only on an
+    authenticated decrypt, delivering that plaintext through the
+    canonical path and leaving the pending untouched otherwise — the
+    same cutover discipline used on FSP.
+  - The FMP rekey msg3 was sent once, so a lost datagram left the
+    responder without the new session. The msg3 payload is now retained
+    and retransmitted over the existing link until a peer frame
+    authenticates against the pending or post-cutover current session,
+    abandoning after the configured handshake-resend budget. Per-link
+    rekeys are also serialized: a new rekey does not start while one
+    awaits cutover or is still retransmitting msg3.
+  - The `handle_msg3` cross-connection and rekey-responder paths were
+    partitioned by a fixed 30-second session-age threshold, but a rekey
+    resets the session-age clock, so under jitter a rekey-aged msg3 was
+    frequently under 30 seconds and got swallowed by the
+    initial-handshake cross-connection branch, which discarded the
+    peer's rekey session with no pending slot while the peer cut over to
+    it anyway. The cross-connection branch is now bounded by the same
+    jitter-aware session-age floor the rekey responder uses, so the two
+    paths partition with no overlap. At zero jitter the floor equals the
+    previous 30-second constant, so default-cadence behavior is
+    unchanged.
 - Node-level multi-node tests no longer flake under parallel CPU load.
   They previously delivered handshake packets over real localhost UDP,
   whose kernel receive buffer could overflow and drop a packet when many
@@ -456,24 +493,6 @@ with v0.3.x peers.
   `handshake.rs:1114` is unchanged. Introduces a shared
   `Node::outbound_admission_check()` helper so the invariant is
   grep-able and unit-testable.
-- Inbound `handle_msg3` now silent-drops at `node.limits.max_peers`
-  saturation *before* promotion, instead of replying with the rest
-  of the handshake-completion path and then rejecting at
-  `promote_connection`. Adds an early cap check positioned after the
-  peer's static-key + signature verification (so identity is known
-  and the reconnect / cross-connection bypass for known peers fires)
-  and before `ActivePeer` construction. The late cap check inside
-  `promote_connection` is intentionally retained as defense-in-depth.
-  On this branch's XX handshake there is no wire-bytes saving (Msg1,
-  Msg2, Msg3 have all crossed the wire by the time identity is known);
-  the value is local CPU / allocation savings (no `ActivePeer` build,
-  no `peers_by_index` insert, no link transition) and cleaner peer-
-  side semantics — no fake-promotion whose subsequent data frames
-  fail decryption on this side. Note the known-peer / cross-connection
-  bypass also covers peers the node is itself dialing (e.g. configured
-  `auto_connect` peers): for those the cap is enforced by the retained
-  late check, so the early drop primarily benefits unsolicited inbound
-  peers the node is not contacting.
 - Mesh-size estimator (`compute_mesh_size`) no longer double-counts the
   parent's bloom cardinality during the transient cache window after a
   local parent-switch. Symptom: `fipsctl show status` / fipstop displayed
