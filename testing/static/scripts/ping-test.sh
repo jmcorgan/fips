@@ -71,23 +71,6 @@ ping_all_quiet() {
     done
 }
 
-# Wait until all ping pairs succeed or timeout.
-wait_for_full_connectivity() {
-    local timeout="${1:-30}"
-    local start_secs=$SECONDS
-
-    while (( SECONDS - start_secs < timeout )); do
-        ping_all_quiet
-        if [ "$FAILED" -eq 0 ]; then
-            echo "  All $PASSED pairs reachable after $((SECONDS - start_secs))s"
-            return 0
-        fi
-        sleep 1
-    done
-    echo "  TIMEOUT: $PASSED passed, $FAILED failed after ${timeout}s"
-    return 1
-}
-
 echo "=== FIPS Ping Test ($PROFILE topology) ==="
 echo ""
 
@@ -108,8 +91,12 @@ elif [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     wait_for_peers fips-node-d 3 20 || true
     wait_for_peers fips-node-e 3 20 || true
 fi
-# Wait for FSP-level connectivity (discovery + session establishment)
-wait_for_full_connectivity 30 || true
+# Wait for full pairwise connectivity, progress-aware: the actual pings
+# are the convergence signal, the deadline extends while more pairs come
+# up, and it only gives up if progress stalls — so it does not
+# false-time-out under load while routing is still converging. The
+# directed-pair ping assertions below remain the actual test.
+wait_until_connected ping_all_quiet 45 15 || true
 
 # Reset counters for the actual test
 PASSED=0
