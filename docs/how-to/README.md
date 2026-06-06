@@ -19,6 +19,7 @@ X" to "X is done".
 | [deploy-tor-onion.md](deploy-tor-onion.md) | Run a Tor onion service for inbound FIPS connections |
 | [tune-udp-buffers.md](tune-udp-buffers.md) | Set host sysctls so FIPS UDP sockets don't get clamped |
 | [tune-file-descriptors.md](tune-file-descriptors.md) | Raise `RLIMIT_NOFILE` so a busy node doesn't exhaust file descriptors (`EMFILE`) as peer count grows |
+| [tune-worker-pools.md](tune-worker-pools.md) | Tune the data-plane encrypt/decrypt worker pools, per-peer connected UDP, send-path backpressure, and macOS send knobs via runtime environment variables |
 | [run-as-unprivileged-user.md](run-as-unprivileged-user.md) | Run the daemon under a dedicated unprivileged service account (drops the default-root posture) |
 | [deploy-gateway.md](deploy-gateway.md) | Manually deploy `fips-gateway` on a non-OpenWrt Linux host (LAN-to-mesh outbound + mesh-to-LAN inbound port-forwards). For the OpenWrt path, see the gateway tutorial. |
 | [troubleshoot-gateway.md](troubleshoot-gateway.md) | Diagnostic recipes for the gateway, organised by half (outbound, inbound, common) |
