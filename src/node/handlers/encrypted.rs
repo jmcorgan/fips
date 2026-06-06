@@ -5,7 +5,7 @@ use crate::node::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, strip
 use crate::noise::NoiseError;
 use crate::transport::ReceivedPacket;
 use std::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// Force-remove a peer after this many consecutive decryption failures.
 const DECRYPT_FAILURE_THRESHOLD: u32 = 20;
@@ -94,7 +94,7 @@ impl Node {
                 });
 
                 if let Some(plaintext) = pending_plaintext {
-                    info!(
+                    debug!(
                         peer = %display_name,
                         "Peer new-epoch frame authenticated, K-bit flip promoting new session"
                     );

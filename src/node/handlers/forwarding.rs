@@ -106,7 +106,7 @@ impl Node {
                 .unwrap_or(true);
             if should_log {
                 self.last_congestion_log = Some(now);
-                warn!(next_hop = %next_hop_addr, "Congestion detected, CE flag set on forwarded packet");
+                debug!(next_hop = %next_hop_addr, "Congestion detected, CE flag set on forwarded packet");
             }
         }
 

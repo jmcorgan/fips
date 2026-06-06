@@ -194,7 +194,7 @@ impl Node {
         let remaining_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
         self.bloom_state.mark_all_updates_needed(remaining_peers);
 
-        info!(
+        debug!(
             peer = %self.peer_display_name(node_addr),
             link_id = %link_id,
             tree_changed = tree_changed,
