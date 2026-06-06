@@ -533,6 +533,110 @@ fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
     );
 }
 
+/// Overlapping parent and child inbound filters must be OR-unioned, not
+/// summed. The parent and the child here share several NodeAddrs (plus a
+/// few distinct ones each). The naive sum of per-filter cardinalities
+/// would over-count the shared entries; the union estimate must instead
+/// approximate the number of *distinct* addresses across both filters
+/// (plus self). This asserts the over-count fingerprint of the old
+/// summing code is gone, and the assertion holds on the union result
+/// (which is what estimated_mesh_size carries), so it survives removal
+/// of the temporary dual-estimator instrumentation.
+#[test]
+fn compute_mesh_size_unions_overlapping_filters() {
+    use crate::bloom::BloomFilter;
+    use crate::peer::ActivePeer;
+    use crate::tree::ParentDeclaration;
+
+    let mut node = make_node();
+    let my_addr = *node.tree_state().my_node_addr();
+
+    // Build the set of addresses. SHARED appear in both filters; the
+    // distinct sets appear in only one each.
+    let mk = |hi: u8, lo: u8| {
+        let mut bytes = [0u8; 16];
+        bytes[0] = hi;
+        bytes[1] = lo;
+        NodeAddr::from_bytes(bytes)
+    };
+    let shared: Vec<NodeAddr> = (0..6u8).map(|i| mk(0x10, i)).collect();
+    let parent_only: Vec<NodeAddr> = (0..3u8).map(|i| mk(0x20, i)).collect();
+    let child_only: Vec<NodeAddr> = (0..3u8).map(|i| mk(0x30, i)).collect();
+
+    // Distinct addresses across the union: shared + parent_only +
+    // child_only + self = 6 + 3 + 3 + 1 = 13. The naive sum of the two
+    // filters' cardinalities would be (6+3) + (6+3) + 1 = 19.
+    let distinct = shared.len() + parent_only.len() + child_only.len() + 1; // 13
+    let naive_sum = (shared.len() + parent_only.len()) + (shared.len() + child_only.len()) + 1; // 19
+
+    // Generate a parent identity strictly less than my_addr so the
+    // tree_state defensive check accepts the extension.
+    let (parent_identity, parent_addr) = loop {
+        let candidate = make_peer_identity();
+        let addr = *candidate.node_addr();
+        if addr < my_addr {
+            break (candidate, addr);
+        }
+    };
+    let mut parent_peer = ActivePeer::new(parent_identity, LinkId::new(1), 0);
+    let mut parent_filter = BloomFilter::new();
+    for addr in shared.iter().chain(parent_only.iter()) {
+        parent_filter.insert(addr);
+    }
+    parent_peer.update_filter(parent_filter, 1, 0);
+    node.peers.insert(parent_addr, parent_peer);
+
+    // Child Q with a filter that overlaps the parent's on `shared`.
+    let child_identity = make_peer_identity();
+    let child_addr = *child_identity.node_addr();
+    let mut child_peer = ActivePeer::new(child_identity, LinkId::new(2), 0);
+    let mut child_filter = BloomFilter::new();
+    for addr in shared.iter().chain(child_only.iter()) {
+        child_filter.insert(addr);
+    }
+    child_peer.update_filter(child_filter, 1, 0);
+    node.peers.insert(child_addr, child_peer);
+
+    // Wire up the tree so the child names us as parent and our parent is P.
+    let parent_ancestry = crate::tree::TreeCoordinate::root_with_meta(parent_addr, 1, 1);
+    let child_ancestry = crate::tree::TreeCoordinate::root_with_meta(child_addr, 1, 1);
+    let parent_decl = ParentDeclaration::new(parent_addr, my_addr, 1, 1);
+    let child_decl = ParentDeclaration::new(child_addr, my_addr, 1, 1);
+    node.tree_state_mut()
+        .update_peer(parent_decl, parent_ancestry);
+    node.tree_state_mut()
+        .update_peer(child_decl, child_ancestry);
+    node.tree_state_mut().set_parent(parent_addr, 2, 1);
+    node.tree_state_mut().recompute_coords();
+    assert!(
+        !node.tree_state().is_root(),
+        "test setup broken: node should not be its own root after parent switch"
+    );
+
+    node.compute_mesh_size();
+
+    let estimate =
+        node.estimated_mesh_size()
+            .expect("estimator should produce a value with filter data present") as i64;
+
+    // The union estimate should approximate the distinct count (13), not
+    // the naive sum (19). Bloom cardinality estimation rounds, so allow a
+    // small absolute tolerance, and require we are clearly below the sum.
+    let diff = (estimate - distinct as i64).abs();
+    assert!(
+        diff <= 2,
+        "expected union mesh-size estimate ~{} (distinct addrs), got {}",
+        distinct,
+        estimate
+    );
+    assert!(
+        estimate < naive_sum as i64,
+        "estimate {} must be below the naive sum {} (overlap should be deduplicated)",
+        estimate,
+        naive_sum
+    );
+}
+
 /// 100-node random graph: bloom filter exchange at scale.
 #[tokio::test]
 async fn test_bloom_filter_convergence_100_nodes() {

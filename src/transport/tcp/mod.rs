@@ -801,7 +801,7 @@ async fn accept_loop(
                 // operator-facing inbound cap.
                 if stats.pool_inbound_count() >= max_inbound as u64 {
                     stats.record_connection_rejected();
-                    warn!(
+                    debug!(
                         transport_id = %transport_id,
                         peer_addr = %peer_addr,
                         max = max_inbound,

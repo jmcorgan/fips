@@ -44,7 +44,7 @@ use self::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, build_encrypted,
     build_established_header, prepend_inner_header,
 };
-use crate::bloom::BloomState;
+use crate::bloom::{BloomFilter, BloomState};
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
@@ -1255,32 +1255,36 @@ impl Node {
         let is_root = self.tree_state.is_root();
 
         let max_fpr = self.config().node.bloom.max_inbound_fpr;
-        let mut total: f64 = 1.0; // count self
         let mut child_count: u32 = 0;
-        let mut has_data = false;
+
+        // OR-union of the contributing filters. Summing per-filter
+        // cardinalities over-counts whenever the filters overlap (a stale
+        // or oversized parent filter, a topology loop); OR is idempotent,
+        // so unioning and estimating once deduplicates the overlap.
+        // Membership is exactly: self + parent + each child inbound_filter.
+        let mut union: Option<BloomFilter> = None;
+
+        // Helper: fold a contributing filter into the union, starting it
+        // from a clone of the first filter (already the right size class).
+        // BloomFilter::new() uses default size params that may not match
+        // the stored peer filters, so we must not seed from a fresh filter.
+        let add_to_union = |union: &mut Option<BloomFilter>, filter: &BloomFilter| match union {
+            None => *union = Some(filter.clone()),
+            Some(existing) => {
+                // Size-class mismatch is skipped rather than fatal.
+                let _ = existing.merge(filter);
+            }
+        };
 
         // Parent's filter: nodes reachable upward through the tree.
-        // If any contributing filter is above the FPR cap, we refuse to
-        // estimate rather than substitute a partial/biased aggregate —
-        // Node.estimated_mesh_size is already Option<u64> and consumers
-        // (control socket, fipstop, periodic debug log) handle None.
         if !is_root
             && let Some(parent) = self.peers.get(&parent_id)
             && let Some(filter) = parent.inbound_filter()
         {
-            match filter.estimated_count(max_fpr) {
-                Some(n) => {
-                    total += n;
-                    has_data = true;
-                }
-                None => {
-                    self.estimated_mesh_size = None;
-                    return;
-                }
-            }
+            add_to_union(&mut union, filter);
         }
 
-        // Children's filters: each child's subtree is disjoint
+        // Children's filters: each child's subtree is (ideally) disjoint.
         for (peer_addr, peer) in &self.peers {
             if peer_addr == &parent_id {
                 continue;
@@ -1290,27 +1294,32 @@ impl Node {
             {
                 child_count += 1;
                 if let Some(filter) = peer.inbound_filter() {
-                    match filter.estimated_count(max_fpr) {
-                        Some(n) => {
-                            total += n;
-                            has_data = true;
-                        }
-                        None => {
-                            self.estimated_mesh_size = None;
-                            return;
-                        }
-                    }
+                    add_to_union(&mut union, filter);
                 }
             }
         }
 
-        if !has_data {
+        // No contributing filter at all -> refuse to estimate (matches
+        // the prior `!has_data` early return).
+        let Some(mut union) = union else {
             self.estimated_mesh_size = None;
             return;
-        }
+        };
 
-        let size = total.round() as u64;
-        self.estimated_mesh_size = Some(size);
+        // Count self in the union (idempotent).
+        union.insert(&my_addr);
+
+        // Estimate once. If the union is saturated or above the FPR cap,
+        // refuse to estimate (matches the prior per-filter None behavior).
+        // Node.estimated_mesh_size is already Option<u64> and consumers
+        // (control socket, fipstop, periodic debug log) handle None.
+        let Some(union_estimate) = union.estimated_count(max_fpr) else {
+            self.estimated_mesh_size = None;
+            return;
+        };
+
+        let union_size = union_estimate.round() as u64;
+        self.estimated_mesh_size = Some(union_size);
 
         // Periodic logging (reuse MMP default interval: 30s)
         let now = std::time::Instant::now();
@@ -1323,7 +1332,7 @@ impl Node {
         };
         if should_log {
             tracing::debug!(
-                estimated_mesh_size = size,
+                estimated_mesh_size = union_size,
                 peers = self.peers.len(),
                 children = child_count,
                 "Mesh size estimate"

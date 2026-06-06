@@ -262,7 +262,7 @@ impl Node {
             match (existing_epoch, new_epoch) {
                 (Some(existing), Some(new)) if existing != new => {
                     // Epoch mismatch — peer restarted. Tear down stale session.
-                    info!(
+                    debug!(
                         peer = %self.peer_display_name(&peer_node_addr),
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
@@ -544,12 +544,9 @@ impl Node {
                         if let Some(peer) = self.peers.get_mut(&node_addr) {
                             peer.set_handshake_msg2(wire_msg2.clone());
                         }
-                        debug!(
-                            peer = %self.peer_display_name(&node_addr),
-                            link_id = %link_id,
-                            our_index = %our_index,
-                            "Inbound peer promoted to active"
-                        );
+                        // Promotion is logged once by `promote_connection`
+                        // ("Connection promoted to active peer"); no separate
+                        // inbound-path line.
                         // Send initial tree announce to new peer
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                             debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
@@ -1288,7 +1285,7 @@ impl Node {
             self.retry_pending.remove(&peer_node_addr);
             self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
-            info!(
+            debug!(
                 peer = %self.peer_display_name(&peer_node_addr),
                 link_id = %link_id,
                 our_index = %our_index,
