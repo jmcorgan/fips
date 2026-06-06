@@ -450,7 +450,7 @@ impl Node {
                                             "Cleared stale FSP session after peer restart during FMP rekey"
                                         );
                                     }
-                                    info!(
+                                    debug!(
                                         peer = %display_name,
                                         "Peer restart detected during FMP rekey, replacing stale endpoint session"
                                     );
@@ -1050,7 +1050,7 @@ impl Node {
             match (existing_epoch, new_epoch) {
                 (Some(existing), Some(new)) if existing != new => {
                     // Epoch mismatch — peer restarted. Tear down stale session.
-                    info!(
+                    debug!(
                         peer = %self.peer_display_name(&peer_node_addr),
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
@@ -1369,12 +1369,9 @@ impl Node {
                         {
                             peer.set_handshake_msg2(msg2);
                         }
-                        debug!(
-                            peer = %self.peer_display_name(&node_addr),
-                            link_id = %link_id,
-                            our_index = %our_index,
-                            "Inbound peer promoted to active"
-                        );
+                        // Promotion is logged once by `promote_connection`
+                        // ("Connection promoted to active peer"); no separate
+                        // inbound-path line.
                         // Send initial tree announce to new peer
                         if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                             debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
@@ -1665,7 +1662,7 @@ impl Node {
                             "Cleared stale FSP session after peer restart during promotion"
                         );
                     }
-                    info!(
+                    debug!(
                         peer = %self.peer_display_name(&peer_node_addr),
                         winner_link = %link_id,
                         loser_link = %loser_link_id,
@@ -1821,7 +1818,7 @@ impl Node {
                 self.bloom_state.add_leaf_dependent(peer_node_addr);
             }
 
-            info!(
+            debug!(
                 peer = %self.peer_display_name(&peer_node_addr),
                 link_id = %link_id,
                 our_index = %our_index,

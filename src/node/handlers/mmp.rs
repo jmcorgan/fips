@@ -601,7 +601,7 @@ impl Node {
             .unwrap_or(0);
 
         for addr in &dead_peers {
-            warn!(
+            debug!(
                 peer = %self.peer_display_name(addr),
                 timeout_secs = self.config().node.link_dead_timeout_secs,
                 "Removing peer: link dead timeout"

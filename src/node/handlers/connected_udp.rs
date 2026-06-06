@@ -36,7 +36,7 @@ use crate::transport::TransportHandle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 impl Node {
     /// Tick-driven activation of per-peer connected UDP sockets.
@@ -174,7 +174,7 @@ impl Node {
             }
             peer.set_connected_udp(socket, drain);
             crate::perf_profile::record_event(crate::perf_profile::Event::ConnectedUdpInstalled);
-            info!(
+            debug!(
                 peer = %self.peer_display_name(node_addr),
                 peer_addr = %peer_socket_addr,
                 "connected UDP socket installed"

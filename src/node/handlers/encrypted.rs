@@ -5,7 +5,7 @@ use crate::node::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, strip_inner_he
 use crate::noise::NoiseError;
 use crate::transport::ReceivedPacket;
 use std::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// Force-remove a peer after this many consecutive decryption failures.
 const DECRYPT_FAILURE_THRESHOLD: u32 = 20;
@@ -91,7 +91,7 @@ impl Node {
                 if let Some(plaintext) = pending_plaintext {
                     let pending_our = peer.pending_our_index();
                     let pending_their = peer.pending_their_index();
-                    info!(
+                    debug!(
                         peer = %display_name,
                         our_addr = %our_addr,
                         their_addr = %node_addr,
