@@ -34,7 +34,7 @@ impl DiscoveryBuffer {
     pub fn add_peer(&self, addr: &BleAddr) {
         let ta = addr.to_transport_addr();
         let peer = DiscoveredPeer::new(self.transport_id, ta.clone());
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         // Deduplicate by address string
         let addr_str = addr.to_string_repr();
         peers.retain(|p| p.addr.as_str() != Some(addr_str.as_str()));
@@ -49,7 +49,7 @@ impl DiscoveryBuffer {
     pub fn add_peer_with_pubkey(&self, addr: &BleAddr, pubkey: XOnlyPublicKey) {
         let ta = addr.to_transport_addr();
         let peer = DiscoveredPeer::with_hint(self.transport_id, ta.clone(), pubkey);
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         let addr_str = addr.to_string_repr();
         peers.retain(|p| p.addr.as_str() != Some(addr_str.as_str()));
         peers.push(peer);
@@ -57,7 +57,7 @@ impl DiscoveryBuffer {
 
     /// Drain all discovered peers since the last call.
     pub fn take(&self) -> Vec<DiscoveredPeer> {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *peers)
     }
 }
