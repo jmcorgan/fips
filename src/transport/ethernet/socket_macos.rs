@@ -214,7 +214,7 @@ impl PacketSocket {
     /// parses the next frame from the internal buffer, stripping the
     /// Ethernet header. Returns `(payload_bytes, source_mac)`.
     pub fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, [u8; 6])> {
-        let mut state = self.read_state.lock().unwrap();
+        let mut state = self.read_state.lock().unwrap_or_else(|e| e.into_inner());
         let state = &mut *state;
         loop {
             // Try to parse the next frame from the read buffer

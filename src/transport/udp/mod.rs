@@ -144,7 +144,7 @@ impl UdpTransport {
 
         // Check cache
         {
-            let cache = self.dns_cache.lock().unwrap();
+            let cache = self.dns_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((resolved, cached_at)) = cache.get(addr)
                 && cached_at.elapsed() < DNS_CACHE_TTL
             {
@@ -157,7 +157,7 @@ impl UdpTransport {
 
         // Store in cache
         {
-            let mut cache = self.dns_cache.lock().unwrap();
+            let mut cache = self.dns_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.insert(addr.clone(), (resolved, Instant::now()));
         }
 
@@ -230,14 +230,14 @@ impl UdpTransport {
         if let Some(ref name) = self.name {
             info!(
                 name = %name,
-                local_addr = %self.local_addr.unwrap(),
+                local_addr = %self.local_addr.map_or_else(|| "<unbound>".to_string(), |a| a.to_string()),
                 recv_buf = actual_recv,
                 send_buf = actual_send,
                 "UDP transport started"
             );
         } else {
             info!(
-                local_addr = %self.local_addr.unwrap(),
+                local_addr = %self.local_addr.map_or_else(|| "<unbound>".to_string(), |a| a.to_string()),
                 recv_buf = actual_recv,
                 send_buf = actual_send,
                 "UDP transport started"
@@ -289,14 +289,14 @@ impl UdpTransport {
         if let Some(ref name) = self.name {
             info!(
                 name = %name,
-                local_addr = %self.local_addr.unwrap(),
+                local_addr = %self.local_addr.map_or_else(|| "<unbound>".to_string(), |a| a.to_string()),
                 recv_buf = actual_recv,
                 send_buf = actual_send,
                 "UDP transport adopted existing socket"
             );
         } else {
             info!(
-                local_addr = %self.local_addr.unwrap(),
+                local_addr = %self.local_addr.map_or_else(|| "<unbound>".to_string(), |a| a.to_string()),
                 recv_buf = actual_recv,
                 send_buf = actual_send,
                 "UDP transport adopted existing socket"
