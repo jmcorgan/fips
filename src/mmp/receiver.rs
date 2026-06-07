@@ -323,11 +323,20 @@ impl ReceiverState {
             return None;
         }
 
-        // Dwell time: ms between last frame reception and report generation
-        let dwell_time = self
+        // Dwell time: ms between last frame reception and report generation.
+        // If it no longer fits on the wire, the timestamp echo cannot produce
+        // a valid RTT sample. Preserve the counters but suppress the echo.
+        let (timestamp_echo, dwell_time) = self
             .last_recv_time
-            .map(|t| now.duration_since(t).as_millis() as u16)
-            .unwrap_or(0);
+            .map(|t| {
+                let dwell_ms = now.duration_since(t).as_millis();
+                if dwell_ms > u128::from(u16::MAX) {
+                    (0, u16::MAX)
+                } else {
+                    (self.last_sender_timestamp, dwell_ms as u16)
+                }
+            })
+            .unwrap_or((0, 0));
 
         let (burst_count, max_burst, mean_burst) = self.gap_tracker.take_interval_stats();
 
@@ -335,7 +344,7 @@ impl ReceiverState {
             highest_counter: self.highest_counter,
             cumulative_packets_recv: self.cumulative_packets_recv,
             cumulative_bytes_recv: self.cumulative_bytes_recv,
-            timestamp_echo: self.last_sender_timestamp,
+            timestamp_echo,
             dwell_time,
             max_burst_loss: max_burst,
             mean_burst_loss: mean_burst,
@@ -503,6 +512,21 @@ mod tests {
         assert_eq!(report.timestamp_echo, 200); // last sender timestamp
         assert_eq!(report.interval_packets_recv, 2);
         assert_eq!(report.interval_bytes_recv, 1100);
+    }
+
+    #[test]
+    fn test_build_report_suppresses_rtt_echo_when_dwell_overflows() {
+        let mut r = ReceiverState::new(32);
+        let t0 = Instant::now();
+        r.record_recv(1, 100, 500, false, t0);
+
+        let report = r
+            .build_report(t0 + Duration::from_millis(u64::from(u16::MAX) + 1))
+            .unwrap();
+
+        assert_eq!(report.timestamp_echo, 0);
+        assert_eq!(report.dwell_time, u16::MAX);
+        assert_eq!(report.cumulative_packets_recv, 1);
     }
 
     #[test]
