@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MMP sender metrics now ignore duplicate or regressed receiver reports
+  before updating RTT, loss, goodput, or ETX. Receiver reports also
+  suppress timestamp echo when dwell time overflows, so stale reports
+  cannot inflate SRTT.
+
 ### Added
 
 - `pool_inbound` and `pool_outbound` counters on the TCP and Tor

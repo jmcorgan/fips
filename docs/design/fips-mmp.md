@@ -100,6 +100,11 @@ inter-frame processing delays inflate spin bit RTT measurements
 unpredictably. Timestamp-echo from ReceiverReports (with dwell-time
 compensation) is the sole SRTT source.
 
+Duplicate or regressed ReceiverReports are ignored before any RTT, loss,
+goodput, or ETX update. If receiver-side dwell time exceeds the wire
+field, the report keeps its counters but sends a zero timestamp echo so
+the sender cannot form an invalid RTT sample.
+
 The spin bit lives in the link-layer FMP inner header, so this
 mechanism applies to link-layer MMP only. Session-layer MMP carries
 its spin bit in the FSP encrypted inner header but uses it the same
