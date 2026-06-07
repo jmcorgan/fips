@@ -18,7 +18,9 @@
 #   - IPv4 = 172.30.0.1<index>, index = 0-based position in the spec
 #     (10, 11, 12, 13, ...).
 #
-# Topology is a FULL MESH: every node auto-connects to every other node.
+# Topology is a FULL MESH by default: every node auto-connects to every
+# other node. Set FIPS_INTEROP_EDGES (see Environment) to an explicit
+# undirected edge list for a multi-hop / leaf topology instead.
 # Node identities are derived deterministically via the shared
 # derive_keys.py helper, keyed by a unique per-node string so that two
 # nodes of the same slot (a1, a2) still get DISTINCT identities.
@@ -41,6 +43,13 @@
 # Environment:
 #   REKEY_AFTER_SECS       FSP/FMP rekey interval (default 35, matching
 #                          the static rekey suite).
+#   FIPS_INTEROP_EDGES     Optional undirected edge list (space/comma
+#                          separated `nid-nid` tokens, e.g.
+#                          "a1-b1 a1-c1 b1-a2"). Unset ⇒ full mesh. When
+#                          set, each node peers only with its listed
+#                          neighbors; the graph must be connected with no
+#                          isolated node. Enables multi-hop forwarding /
+#                          leaf-node topologies.
 #   FIPS_INTEROP_RUNS_DIR  Root for harness scratch dirs (.build/,
 #                          .stress-runs/, generated-configs/). When
 #                          unset, falls back to in-tree paths under
@@ -124,6 +133,79 @@ for slot in "${SPEC[@]}"; do
     index=$(( index + 1 ))
 done
 
+# ── Topology: adjacency (full mesh by default, or explicit edges) ─────
+#
+# FIPS_INTEROP_EDGES, when set, is a space/comma list of `nid-nid` tokens
+# describing UNDIRECTED edges (direct FMP peer links), e.g.
+# "a1-b1 a1-c1 b1-a2". Empty ⇒ FULL MESH (every node peers with every
+# other, the historical behavior). Edges are symmetric: `x-y` makes x and
+# y each other's auto_connect peer.
+
+declare -A ADJ                 # ADJ[nid] = space-separated neighbor ids
+declare -A _ADJ_SEEN           # "x|y" dedup guard
+TOPOLOGY="full-mesh"
+EDGES_LIST=()
+
+add_edge() {
+    local x="$1" y="$2"
+    if [ "$x" = "$y" ]; then
+        echo "ERROR: self-edge '$x-$x' not allowed" >&2; exit 1
+    fi
+    if [ -z "${NODE_SLOT[$x]:-}" ]; then
+        echo "ERROR: edge references unknown node '$x'" >&2; exit 1
+    fi
+    if [ -z "${NODE_SLOT[$y]:-}" ]; then
+        echo "ERROR: edge references unknown node '$y'" >&2; exit 1
+    fi
+    if [ -z "${_ADJ_SEEN[$x|$y]:-}" ]; then
+        ADJ[$x]="${ADJ[$x]:+${ADJ[$x]} }$y"; _ADJ_SEEN[$x|$y]=1
+    fi
+    if [ -z "${_ADJ_SEEN[$y|$x]:-}" ]; then
+        ADJ[$y]="${ADJ[$y]:+${ADJ[$y]} }$x"; _ADJ_SEEN[$y|$x]=1
+    fi
+}
+
+if [ -n "${FIPS_INTEROP_EDGES:-}" ]; then
+    TOPOLOGY="custom"
+    for tok in ${FIPS_INTEROP_EDGES//,/ }; do
+        x="${tok%%-*}"; y="${tok#*-}"
+        if [ "$x" = "$tok" ] || [ -z "$x" ] || [ -z "$y" ] || [[ "$y" == *-* ]]; then
+            echo "ERROR: malformed edge token '$tok' (want nid-nid)" >&2; exit 1
+        fi
+        add_edge "$x" "$y"
+        EDGES_LIST+=("$x-$y")
+    done
+    # Validate: no isolated node, graph connected (BFS from node 0).
+    for nid in "${NODE_IDS[@]}"; do
+        if [ -z "${ADJ[$nid]:-}" ]; then
+            echo "ERROR: node '$nid' has no edges (isolated)" >&2; exit 1
+        fi
+    done
+    declare -A _BFS_SEEN=()
+    bfs_queue=("${NODE_IDS[0]}"); _BFS_SEEN[${NODE_IDS[0]}]=1; bfs_reached=1
+    while [ "${#bfs_queue[@]}" -gt 0 ]; do
+        cur="${bfs_queue[0]}"; bfs_queue=("${bfs_queue[@]:1}")
+        for nb in ${ADJ[$cur]}; do
+            if [ -z "${_BFS_SEEN[$nb]:-}" ]; then
+                _BFS_SEEN[$nb]=1; bfs_reached=$(( bfs_reached + 1 ))
+                bfs_queue+=("$nb")
+            fi
+        done
+    done
+    if [ "$bfs_reached" -ne "${#NODE_IDS[@]}" ]; then
+        echo "ERROR: topology is disconnected ($bfs_reached/${#NODE_IDS[@]} reachable from ${NODE_IDS[0]})" >&2
+        exit 1
+    fi
+else
+    # Full mesh: every node adjacent to every other, in spec order.
+    for a in "${NODE_IDS[@]}"; do
+        for b in "${NODE_IDS[@]}"; do
+            [ "$a" = "$b" ] && continue
+            ADJ[$a]="${ADJ[$a]:+${ADJ[$a]} }$b"
+        done
+    done
+fi
+
 mkdir -p "$OUT_DIR"
 
 # Clear stale per-node configs from a previous (differently-shaped) spec
@@ -186,8 +268,7 @@ for nid in "${NODE_IDS[@]}"; do
         echo "    mtu: 1472"
         echo ""
         echo "peers:"
-        for pid in "${NODE_IDS[@]}"; do
-            [ "$pid" = "$nid" ] && continue
+        for pid in ${ADJ[$nid]}; do
             emit_peer_block "$pid"
         done
     } > "$cfg"
@@ -259,6 +340,19 @@ MANIFEST="$OUT_DIR/nodes.env"
     echo "# Node-spec: ${SPEC[*]}"
     echo "INTEROP_SPEC=\"${SPEC[*]}\""
     echo "INTEROP_NODE_IDS=\"${NODE_IDS[*]}\""
+    echo "INTEROP_TOPOLOGY=\"$TOPOLOGY\""
+    echo "INTEROP_TOPOLOGY_EDGES=\"${EDGES_LIST[*]:-}\""
+    # Per-node expected DIRECT-peer count (adjacency degree). The driver
+    # uses this for the per-node peer-convergence check instead of N-1.
+    {
+        printf 'INTEROP_NODE_DEGREE="'
+        for nid in "${NODE_IDS[@]}"; do
+            d=0
+            for _nb in ${ADJ[$nid]}; do d=$(( d + 1 )); done
+            printf '%s:%s ' "$nid" "$d"
+        done
+        printf '"\n'
+    }
     # Per-node maps, one var each, space-separated 'nodeid:value' tokens.
     {
         printf 'INTEROP_NODE_SLOTS="'
@@ -297,7 +391,11 @@ ENV_FILE="$OUT_DIR/npubs.env"
 echo "  generated $ENV_FILE"
 
 echo ""
-echo "Mesh configs ready (spec='${SPEC[*]}', rekey.after_secs=$REKEY_AFTER_SECS):"
+echo "Mesh configs ready (spec='${SPEC[*]}', topology=$TOPOLOGY, rekey.after_secs=$REKEY_AFTER_SECS):"
 for nid in "${NODE_IDS[@]}"; do
-    echo "  $nid  slot ${NODE_SLOT[$nid]}  ${NODE_IP[$nid]}  ${NPUB[$nid]}"
+    d=0; for _nb in ${ADJ[$nid]}; do d=$(( d + 1 )); done
+    echo "  $nid  slot ${NODE_SLOT[$nid]}  ${NODE_IP[$nid]}  deg=$d  ${NPUB[$nid]}"
 done
+if [ "$TOPOLOGY" = "custom" ]; then
+    echo "  edges: ${EDGES_LIST[*]}"
+fi
