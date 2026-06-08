@@ -224,6 +224,41 @@ impl Node {
             "Processed TreeAnnounce"
         );
 
+        // Re-push our current position when the announcing peer advertises a
+        // strictly worse (higher NodeAddr) root than ours. Root election is
+        // smallest-NodeAddr-wins, so a peer on a higher root has a stale or
+        // pre-attachment view and can attach to (or re-attach through) us;
+        // reply with our current declaration so it does so without waiting
+        // for the next periodic re-broadcast cadence.
+        //
+        // Only the better-rooted side echoes. If the peer's root is lower
+        // (better) than ours, WE are the stale side: the peer would ignore
+        // our worse root anyway, and we converge via the parent re-evaluation
+        // below, so echoing back is pure waste — and during a root change or
+        // partition merge it would double announce traffic in the learning
+        // direction. Equal roots are already converged. Restricting to `>`
+        // keeps the echo to the one direction that helps.
+        //
+        // This closes a convergence wedge on a single-uplink node: its only
+        // peer pushes the attaching announce once at promotion time, and if
+        // that datagram is lost the single-uplink node cannot self-correct
+        // (its own periodic parent re-evaluation is disabled below two peers)
+        // and is stranded as a self-root until the parent's next periodic
+        // re-broadcast (~reeval_interval_secs later). Echoing on root
+        // disagreement makes tree-position exchange self-healing on the
+        // receive path and is naturally bounded by the per-peer 500 ms
+        // tree-announce rate limiter, so it does not storm during normal
+        // convergence (it stops as soon as the peer adopts our root).
+        if *announce.ancestry.root_id() > *self.tree_state.root()
+            && let Err(e) = self.send_tree_announce_to_peer(from).await
+        {
+            debug!(
+                peer = %self.peer_display_name(from),
+                error = %e,
+                "Failed to re-push TreeAnnounce on root disagreement"
+            );
+        }
+
         // Bloom filter exchange initiation is handled at handshake completion
         // ([handshake.rs] mark_update_needed on the new peer) and on actual
         // content changes via [bloom.rs::handle_filter_announce]'s

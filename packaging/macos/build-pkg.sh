@@ -121,9 +121,9 @@ cp "${PACKAGING_DIR}/common/hosts" "${STAGING_DIR}/usr/local/etc/fips/hosts.defa
 # LaunchDaemon plist
 cp "${SCRIPT_DIR}/com.fips.daemon.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
 
-# DNS resolver
+# DNS resolver. Must match the daemon's dns.bind_addr (defaults to ::1).
 cat > "${STAGING_DIR}/etc/resolver/fips" <<EOF
-nameserver 127.0.0.1
+nameserver ::1
 port 5354
 EOF
 
