@@ -924,3 +924,108 @@ async fn test_rejects_tree_announce_with_inconsistent_root() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// A peer whose TreeAnnounce advertises a root worse (higher NodeAddr) than
+/// ours must be answered with our own current TreeAnnounce, so a node that has
+/// fallen back to self-root (e.g. because its parent's attaching announce was
+/// lost) can re-attach without waiting for the parent's slow periodic
+/// re-broadcast.
+///
+/// This reproduces, at the unit level, the single-uplink-leaf convergence
+/// wedge: a node with exactly one peer has its periodic parent re-evaluation
+/// disabled, so if it misses its parent's attaching announce it is stranded as
+/// a self-root until the parent's next periodic re-broadcast. The receive-path
+/// re-push makes recovery event-driven: the stranded node's self-root announce
+/// provokes its better-rooted parent to echo its real position straight back.
+#[tokio::test]
+async fn test_tree_announce_repushed_on_root_disagreement() {
+    // Converge a 2-node tree: one node is root, the other its child.
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+
+    // Identify which index is the root (smallest NodeAddr) and which is the
+    // attached child — the topology is address-order dependent.
+    let root_idx = if nodes[0].node.tree_state().is_root() {
+        0
+    } else {
+        1
+    };
+    let child_idx = 1 - root_idx;
+
+    let root_addr = *nodes[root_idx].node.node_addr();
+    let child_addr = *nodes[child_idx].node.node_addr();
+
+    // Sanity: before the disturbance the child is attached to the root.
+    assert_eq!(
+        nodes[child_idx].node.tree_state().root(),
+        &root_addr,
+        "child should start attached to the root"
+    );
+    assert!(
+        !nodes[child_idx].node.tree_state().is_root(),
+        "child should not start as its own root"
+    );
+
+    // Simulate the lost attaching announce: force the child back to self-root
+    // AND drop its cached view of the root's tree position, as it would be if
+    // it had never processed the root's attaching announce. The child's
+    // advertised root is now itself, disagreeing with the root's view, and its
+    // own periodic re-evaluation cannot recover it (single peer).
+    nodes[child_idx].node.tree_state_mut().become_root();
+    nodes[child_idx]
+        .node
+        .tree_state_mut()
+        .remove_peer(&root_addr);
+    {
+        let identity = nodes[child_idx].node.identity().clone();
+        nodes[child_idx]
+            .node
+            .tree_state_mut()
+            .sign_declaration(&identity)
+            .unwrap();
+    }
+    assert!(nodes[child_idx].node.tree_state().is_root());
+
+    // Drain any packets the disturbance may have queued so the counters below
+    // isolate the re-push.
+    let _ = drain_all_packets(&mut nodes, false).await;
+
+    // The stranded child announces its (self-root) position to its only peer,
+    // the root. The root's advertised root differs from the child's, so the
+    // root must re-push its current announce back.
+    let root_sent_before = nodes[root_idx].node.metrics().tree.sent.get();
+    nodes[child_idx]
+        .node
+        .send_tree_announce_to_peer(&root_addr)
+        .await
+        .unwrap();
+
+    // Deliver the child's announce to the root and let the resulting re-push
+    // (and the child's processing of it) settle.
+    let _ = drain_all_packets(&mut nodes, false).await;
+
+    // The root emitted at least one TreeAnnounce in response to the child's
+    // root-disagreeing announce (the receive-path re-push).
+    let root_sent_after = nodes[root_idx].node.metrics().tree.sent.get();
+    assert!(
+        root_sent_after > root_sent_before,
+        "root should re-push its TreeAnnounce when a peer advertises a worse root \
+         (sent before={}, after={})",
+        root_sent_before,
+        root_sent_after
+    );
+
+    // End state: the child has re-attached to the root rather than remaining a
+    // stranded self-root.
+    assert!(
+        !nodes[child_idx].node.tree_state().is_root(),
+        "child should have re-attached, not remained a self-root"
+    );
+    assert_eq!(
+        nodes[child_idx].node.tree_state().root(),
+        &root_addr,
+        "child should have re-converged to the root"
+    );
+    let _ = child_addr;
+
+    cleanup_nodes(&mut nodes).await;
+}
