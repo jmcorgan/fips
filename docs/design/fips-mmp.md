@@ -95,6 +95,11 @@ with dwell-time compensation, applied via the Jacobson/Karels
 algorithm (RFC 6298, α = 1/8). This is the sole SRTT source at both
 layers.
 
+Duplicate or regressed ReceiverReports are ignored before any RTT, loss,
+goodput, or ETX update. If receiver-side dwell time exceeds the wire
+field, the report keeps its counters but sends a zero timestamp echo so
+the sender cannot form an invalid RTT sample.
+
 ## ECN Congestion Signaling
 
 The CE (Congestion Experienced) flag (bit 1 in the FMP flags byte)

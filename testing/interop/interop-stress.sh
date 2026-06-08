@@ -26,9 +26,13 @@
 # fixed Docker network, so two reps must never overlap.
 #
 # Usage:
-#   ./interop-stress.sh [--reps N] [node-spec...]
+#   ./interop-stress.sh [--reps N] [--topology <name> | node-spec...]
 #
 #   --reps N    repetitions (default 10).
+#   --topology  built-in multi-hop topology forwarded to interop-test.sh
+#               (e.g. multihop-3v-cycle). Mutually exclusive with a
+#               positional node-spec. Adds multi-hop forwarding,
+#               data-plane continuity, and mesh-size checks to each rep.
 #   node-spec   slot letters (a/b/c), default `a a b c` (the control
 #               topology — one same-version pair + five mixed pairs).
 #
@@ -81,8 +85,17 @@ RUNS_BASE="$INTEROP_RUNS_BASE/.stress-runs"
 
 REPS=10
 SPEC=()
+TOPOLOGY_ARG=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --topology)
+            TOPOLOGY_ARG="${2:-}"
+            shift 2
+            ;;
+        --topology=*)
+            TOPOLOGY_ARG="${1#--topology=}"
+            shift
+            ;;
         --reps)
             REPS="${2:-}"
             if ! [[ "$REPS" =~ ^[0-9]+$ ]] || [ "$REPS" -lt 1 ]; then
@@ -119,10 +132,23 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "${#SPEC[@]}" -eq 0 ]; then
-    SPEC=(a a b c)
+# A --topology selects spec + edges inside the driver; otherwise use the
+# positional node-spec (default the control-arm topology `a a b c`).
+DRIVER_ARGS=()
+if [ -n "$TOPOLOGY_ARG" ]; then
+    if [ "${#SPEC[@]}" -gt 0 ]; then
+        echo "ERROR: pass either --topology or a node-spec, not both" >&2
+        exit 1
+    fi
+    DRIVER_ARGS=(--topology "$TOPOLOGY_ARG")
+    SPEC_STR="(topology: $TOPOLOGY_ARG)"
+else
+    if [ "${#SPEC[@]}" -eq 0 ]; then
+        SPEC=(a a b c)
+    fi
+    DRIVER_ARGS=("${SPEC[@]}")
+    SPEC_STR="${SPEC[*]}"
 fi
-SPEC_STR="${SPEC[*]}"
 
 # ── Preflight ────────────────────────────────────────────────────────
 
@@ -175,7 +201,7 @@ for ((rep = 1; rep <= REPS; rep++)); do
     # Run the driver, capturing full output and exit code. Netem is
     # passed through the environment; interop-test.sh applies it.
     FIPS_INTEROP_NETEM="${FIPS_INTEROP_NETEM:-}" \
-        bash "$DRIVER" "${SPEC[@]}" >"$driver_log" 2>&1
+        bash "$DRIVER" "${DRIVER_ARGS[@]}" >"$driver_log" 2>&1
     rc=$?
 
     if [ "$rc" -eq 0 ]; then

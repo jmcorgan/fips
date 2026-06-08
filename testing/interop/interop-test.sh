@@ -24,18 +24,39 @@
 #   2. configs are (re)generated automatically below for the given spec.
 #
 # Usage:
-#   ./interop-test.sh [node-spec...]
+#   ./interop-test.sh [--topology <name>] [node-spec...]
 #
+#   --topology  built-in multi-hop topology selecting a node-spec + edge
+#               set + default data-plane streams. Known: multihop-3v-cycle
+#               (6 nodes, 2 of each version, one cycle, two leaves —
+#               exercises cross-version forwarding + mesh-size). Without
+#               it the mesh is a full mesh from the positional node-spec.
 #   node-spec   space-separated slot letters (a/b/c), default `a b c`.
 #               e.g. `a a b c` (4-node, one same-version control pair),
 #                    `a a a`   (3-node same-version flake rig).
+#
+# Beyond FMP/FSP rekey survival, a --topology run also verifies multi-hop
+# FORWARDING (all-pairs ping over non-adjacent pairs), DATA-PLANE
+# CONTINUITY across rekey (control-differential ping-loss stream,
+# Phase 5b), and MESH-SIZE estimate convergence across versions
+# (Phase 7).
 #
 # Environment:
 #   FIPS_INTEROP_NETEM     tc-netem arg string applied to every container's
 #                          eth0, e.g. "delay 10ms 5ms 25% loss 1%". Unset =
 #                          no impairment.
+#   FIPS_INTEROP_EDGES     explicit undirected edge list (overrides the
+#                          full mesh) — see generate-configs.sh. Usually
+#                          set for you by --topology.
+#   FIPS_INTEROP_STREAMS   data-plane stream pairs (`nid-nid` tokens, both
+#                          directions streamed). Enables Phase 1b/5b. Set
+#                          by --topology; empty = streams off.
+#   STREAM_LOSS_MARGIN_PCT rekey-vs-control loss margin (default 1).
+#   CONTROL_STREAM_SECS    quiet control-window length (default 12).
+#   MESH_SIZE_TIMEOUT      Phase 7 convergence poll budget (default 180).
 #   FIPS_INTEROP_KEEP_UP   1 = leave containers running after the test (debug).
-#   REKEY_AFTER_SECS       rekey interval to generate configs with (default 35).
+#   REKEY_AFTER_SECS       rekey interval to generate configs with (default
+#                          35; multihop-3v-cycle defaults it to 50).
 #   FIPS_INTEROP_RUNS_DIR  Root for harness scratch dirs (.build/,
 #                          .stress-runs/, generated-configs/). When
 #                          unset, falls back to in-tree paths under
@@ -74,6 +95,48 @@ COMPOSE_FILE="$GEN_DIR/docker-compose.generated.yml"
 NODES_ENV="$GEN_DIR/nodes.env"
 REFS_ENV="$RUNS_BASE/.build/refs.env"
 
+# ── Built-in topology selection ──────────────────────────────────────
+#
+# --topology <name> selects a node-spec + an explicit edge set (a
+# multi-hop, mixed-version, leaf-bearing graph) + a default data-plane
+# stream set, exercising forwarding / routing / mesh-size convergence
+# across versions. Without it, positional args are the node-spec and the
+# mesh is a full mesh (historical behavior).
+TOPOLOGY_NAME=""
+_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --topology)   TOPOLOGY_NAME="${2:-}"; shift 2 ;;
+        --topology=*) TOPOLOGY_NAME="${1#--topology=}"; shift ;;
+        *)            _ARGS+=("$1"); shift ;;
+    esac
+done
+set -- ${_ARGS[@]+"${_ARGS[@]}"}
+
+if [ -n "$TOPOLOGY_NAME" ]; then
+    case "$TOPOLOGY_NAME" in
+        multihop-3v-cycle)
+            # 6 nodes (2 of each version), one cycle, two leaves.
+            #         a1
+            #        /  \         leaves: a2, c2
+            #      b1    c1       cycle:  b1-a1-c1-b2-b1
+            #     / \      \
+            #   a2  b2------c2-edge(b2-c1)
+            set -- a a b b c c
+            export FIPS_INTEROP_EDGES="a1-b1 a1-c1 b1-a2 b1-b2 c1-c2 b2-c1"
+            : "${FIPS_INTEROP_STREAMS:=a2-c2 a1-b1}"
+            export FIPS_INTEROP_STREAMS
+            # Multi-hop convergence + a clean pre-rekey control window
+            # want more headroom than the 35s full-mesh default.
+            : "${REKEY_AFTER_SECS:=50}"
+            ;;
+        *)
+            echo "ERROR: unknown --topology '$TOPOLOGY_NAME' (known: multihop-3v-cycle)" >&2
+            exit 2
+            ;;
+    esac
+fi
+
 REKEY_AFTER_SECS="${REKEY_AFTER_SECS:-35}"
 
 # ── Node-spec ────────────────────────────────────────────────────────
@@ -86,7 +149,7 @@ SPEC_STR="${SPEC[*]}"
 
 # ── Timing ───────────────────────────────────────────────────────────
 
-CONVERGENCE_TIMEOUT=60          # wait for full mesh + clean ping baseline
+CONVERGENCE_TIMEOUT="${CONVERGENCE_TIMEOUT:-90}"  # detector settle budget (env-overridable; larger meshes under loss converge slower)
 PING_TIMEOUT=5
 MAX_PING_ATTEMPTS=4             # strict-ping retry (mirrors rekey-test.sh)
 PING_RETRY_DELAY=1
@@ -100,6 +163,19 @@ REKEY_SETTLE=12                 # FSP-cutover settle budget (Phase 6)
 # poll times out and the recording sweep captures it.
 POST_REKEY_TIMEOUT=45
 LOG_POLL_INTERVAL=2
+
+# Data-plane continuity stream (control-differential). Streams run a
+# sustained ping6 over the overlay across the rekey window vs a quiet
+# control window; loss is compared to prove rekey is hitless.
+STREAM_RATE_HZ=5                                 # ping6 -i 0.2
+CONTROL_STREAM_SECS="${CONTROL_STREAM_SECS:-12}" # quiet pre-rekey window
+STREAM_LOSS_MARGIN_PCT="${STREAM_LOSS_MARGIN_PCT:-1}"
+# The rekey-window stream must span Phases 2-5 (both cutovers + reconverge).
+REKEY_STREAM_SECS=$(( FIRST_REKEY_TIMEOUT + SECOND_REKEY_WAIT + POST_REKEY_TIMEOUT + 15 ))
+
+# Mesh-size estimate convergence (strict ±25% of true N). Generous poll
+# budget — the bloom-union estimate converges over minutes.
+MESH_SIZE_TIMEOUT="${MESH_SIZE_TIMEOUT:-180}"
 
 # ── Counters ─────────────────────────────────────────────────────────
 
@@ -140,7 +216,9 @@ done
 need_regen=1
 if [ -f "$NODES_ENV" ]; then
     existing_spec="$(sed -n 's/^INTEROP_SPEC="\(.*\)"$/\1/p' "$NODES_ENV")"
-    if [ "$existing_spec" = "$SPEC_STR" ]; then
+    existing_edges="$(sed -n 's/^INTEROP_TOPOLOGY_EDGES="\(.*\)"$/\1/p' "$NODES_ENV")"
+    if [ "$existing_spec" = "$SPEC_STR" ] \
+        && [ "$existing_edges" = "${FIPS_INTEROP_EDGES:-}" ]; then
         need_regen=0
     fi
 fi
@@ -178,6 +256,41 @@ parse_map SLOT_OF       "$INTEROP_NODE_SLOTS"
 parse_map CONTAINER     "$INTEROP_NODE_CONTAINERS"
 parse_map NODE_IP_OF    "$INTEROP_NODE_IPS"
 parse_map NPUB_OF       "$INTEROP_NODE_NPUBS"
+
+# Topology metadata: per-node expected direct-peer degree, and the
+# undirected direct-edge set (for direct-vs-routed pair labeling).
+TOPOLOGY_KIND="${INTEROP_TOPOLOGY:-full-mesh}"
+declare -A DEGREE_OF
+parse_map DEGREE_OF     "${INTEROP_NODE_DEGREE:-}"
+
+declare -A IS_DIRECT_EDGE
+if [ -n "${INTEROP_TOPOLOGY_EDGES:-}" ]; then
+    for _e in $INTEROP_TOPOLOGY_EDGES; do
+        _x="${_e%%-*}"; _y="${_e#*-}"
+        IS_DIRECT_EDGE["$_x|$_y"]=1
+        IS_DIRECT_EDGE["$_y|$_x"]=1
+    done
+else
+    # Full mesh: every ordered pair is a direct edge.
+    for _a in "${NODES[@]}"; do
+        for _b in "${NODES[@]}"; do
+            [ "$_a" = "$_b" ] && continue
+            IS_DIRECT_EDGE["$_a|$_b"]=1
+        done
+    done
+fi
+
+pair_is_direct() { [ -n "${IS_DIRECT_EDGE[$1|$2]:-}" ]; }
+hop_label()      { if pair_is_direct "$1" "$2"; then echo "direct"; else echo "routed"; fi; }
+
+# Data-plane stream directed pairs (both directions of each token).
+STREAM_PAIRS=()
+if [ -n "${FIPS_INTEROP_STREAMS:-}" ]; then
+    for _tok in ${FIPS_INTEROP_STREAMS//,/ }; do
+        _x="${_tok%%-*}"; _y="${_tok#*-}"
+        STREAM_PAIRS+=("$_x $_y" "$_y $_x")
+    done
+fi
 
 # Unordered pairs of the mesh.
 PAIRS=()
@@ -309,9 +422,12 @@ ping_all_pairs() {
                 # every rep that takes a moment to converge. Only the
                 # strict assertion sweeps (baseline / post-rekey-*) record.
                 if [ "$context" != "convergence" ]; then
-                    local kind
+                    local kind hop
                     kind="$(pair_kind "$i" "$j")"
-                    INTEROP_FAILURES+=("[$context] $kind pair $(pair_label "$i" "$j"): ping $i->$j FAILED")
+                    hop="$(hop_label "$i" "$j")"
+                    # NOTE: keep "$kind pair" contiguous — interop-stress.sh
+                    # greps "MIXED pair"/"same pair". The [hop] tag is additive.
+                    INTEROP_FAILURES+=("[$context] $kind pair $(pair_label "$i" "$j") [$hop]: ping $i->$j FAILED")
                 fi
             fi
         done
@@ -376,6 +492,66 @@ wait_for_log_pattern_count() {
     [ "$(count_log_pattern "$pattern")" -ge "$min_count" ]
 }
 
+# ── Data-plane continuity streams ────────────────────────────────────
+#
+# A sustained ping6 stream over the overlay (<npub>.fips) is data-plane
+# traffic: it traverses TUN → FSP session → FMP link → forwarding, the
+# same path application packets take. We run streams across the rekey
+# window and across a quiet control window, then compare loss — a rekey
+# that drops data shows up as rekey-window loss above the control.
+
+declare -A STREAM_TX STREAM_RX
+_STREAM_PIDS=()
+_STREAM_FILES=()        # "label:from->to:resultfile"
+_STREAM_TMP=""
+
+# One directed ping6 stream of <dur>s at STREAM_RATE_HZ; writes "tx rx".
+_stream_one() {
+    local from="$1" to="$2" dur="$3" outfile="$4"
+    local from_ctr="${CONTAINER[$from]}" to_npub="${NPUB_OF[$to]}"
+    local count=$(( dur * STREAM_RATE_HZ ))
+    local out tx rx
+    out=$(docker exec "$from_ctr" ping6 -i 0.2 -c "$count" -W "$PING_TIMEOUT" \
+        "${to_npub}.fips" 2>&1)
+    tx=$(echo "$out" | grep -oE '[0-9]+ packets transmitted' | grep -oE '^[0-9]+')
+    rx=$(echo "$out" | grep -oE '[0-9]+ received' | grep -oE '^[0-9]+')
+    echo "${tx:-0} ${rx:-0}" > "$outfile"
+}
+
+# Launch all stream pairs in the background for <label> over <dur>s.
+launch_streams() {
+    local label="$1" dur="$2"
+    _STREAM_TMP="$(mktemp -d)"
+    _STREAM_PIDS=(); _STREAM_FILES=()
+    local sp from to
+    for sp in "${STREAM_PAIRS[@]}"; do
+        read -r from to <<< "$sp"
+        _stream_one "$from" "$to" "$dur" "$_STREAM_TMP/$label-$from-$to" &
+        _STREAM_PIDS+=("$!")
+        _STREAM_FILES+=("$label:$from->$to:$_STREAM_TMP/$label-$from-$to")
+    done
+}
+
+# Wait for the launched streams and read tx/rx into STREAM_TX/STREAM_RX.
+collect_streams() {
+    [ "${#_STREAM_PIDS[@]}" -gt 0 ] && wait "${_STREAM_PIDS[@]}" 2>/dev/null || true
+    local entry label rest key f tx rx
+    for entry in "${_STREAM_FILES[@]}"; do
+        label="${entry%%:*}"; rest="${entry#*:}"; key="${rest%%:*}"; f="${rest#*:}"
+        if read -r tx rx < "$f" 2>/dev/null; then :; else tx=0; rx=0; fi
+        STREAM_TX["$label:$key"]="${tx:-0}"
+        STREAM_RX["$label:$key"]="${rx:-0}"
+    done
+    [ -n "$_STREAM_TMP" ] && rm -rf "$_STREAM_TMP"
+    _STREAM_TMP=""
+}
+
+# loss% from tx/rx (one decimal), or "NA" when tx==0.
+_loss_pct() {
+    awk -v t="${1:-0}" -v r="${2:-0}" \
+        'BEGIN{ if (t>0) printf "%.1f", (t-r)*100/t; else print "NA" }'
+}
+
 dump_diagnostics() {
     echo ""
     echo "=== Peer / link snapshot ==="
@@ -402,6 +578,8 @@ compose() {
 }
 
 cleanup() {
+    # Reap any in-flight stream tmpdir (e.g. on interrupt mid-window).
+    [ -n "${_STREAM_TMP:-}" ] && rm -rf "$_STREAM_TMP" 2>/dev/null
     if [ "${FIPS_INTEROP_KEEP_UP:-}" = "1" ]; then
         echo ""
         echo "FIPS_INTEROP_KEEP_UP=1 — leaving mesh running. Tear down with:"
@@ -422,19 +600,31 @@ echo " FIPS Mixed-Version Interop Test"
 echo "=============================================================="
 echo ""
 echo "Node-spec: $SPEC_STR   ($NUM_NODES nodes, $NUM_PAIRS pairs, $NUM_DIRECTED directed)"
+echo "Topology : $TOPOLOGY_KIND${TOPOLOGY_NAME:+ ($TOPOLOGY_NAME)}"
+if [ "$TOPOLOGY_KIND" != "full-mesh" ]; then
+    echo "  edges: ${INTEROP_TOPOLOGY_EDGES:-}"
+fi
 echo ""
 echo "Mesh nodes:"
 for n in "${NODES[@]}"; do
     s="${SLOT_OF[$n]}"
     u="$(echo "$s" | tr '[:lower:]' '[:upper:]')"
-    echo "  $n  slot $u  ${SLOT_REF[$s]} @ ${SLOT_SHA[$s]}  (${NODE_IP_OF[$n]})"
+    echo "  $n  slot $u  ${SLOT_REF[$s]} @ ${SLOT_SHA[$s]}  deg=${DEGREE_OF[$n]:-?}  (${NODE_IP_OF[$n]})"
 done
 echo ""
 echo "Mesh pairs:"
 for p in "${PAIRS[@]}"; do
     read -r n1 n2 <<< "$p"
-    echo "  $(pair_kind "$n1" "$n2")  $(pair_label "$n1" "$n2")"
+    echo "  $(pair_kind "$n1" "$n2")  $(pair_label "$n1" "$n2")  [$(hop_label "$n1" "$n2")]"
 done
+if [ "${#STREAM_PAIRS[@]}" -gt 0 ]; then
+    echo ""
+    echo "Data-plane streams (continuity across rekey):"
+    for sp in "${STREAM_PAIRS[@]}"; do
+        read -r sf st <<< "$sp"
+        echo "  $sf -> $st  [$(hop_label "$sf" "$st")]"
+    done
+fi
 echo ""
 if [ -n "${FIPS_INTEROP_NETEM:-}" ]; then
     echo "Netem impairment: $FIPS_INTEROP_NETEM"
@@ -474,24 +664,32 @@ echo ""
 echo "Phase 1: Link/session establishment + connectivity baseline"
 PASSED=0; FAILED=0
 
-# Every node must reach N-1 authenticated peers. A peer in `show peers`
-# is an authenticated FMP-link peer.
+# Every node must reach its DIRECT-peer degree of authenticated peers (a
+# peer in `show peers` is an authenticated FMP-link peer). In a full mesh
+# that degree is N-1; in a multi-hop topology it is the node's adjacency.
 for n in "${NODES[@]}"; do
-    if ! wait_for_peers "${CONTAINER[$n]}" "$PEERS_EXPECTED" "$CONVERGENCE_TIMEOUT"; then
-        echo "  $n did not reach $PEERS_EXPECTED authenticated peers"
+    exp="${DEGREE_OF[$n]:-$PEERS_EXPECTED}"
+    if ! wait_for_peers "${CONTAINER[$n]}" "$exp" "$CONVERGENCE_TIMEOUT"; then
+        echo "  $n did not reach $exp authenticated direct peer(s)"
     fi
 done
 
-# The all-pairs ping over fips0 is the definitive FSP-session check: in
-# a full mesh every pair is a direct neighbor, so a successful ping
-# proves that pair's FSP session carries traffic in that direction.
-if wait_for_full_baseline "$CONVERGENCE_TIMEOUT"; then
-    ping_all_pairs "" "$MAX_PING_ATTEMPTS" "baseline"
-    phase_result "Establishment baseline (all $NUM_DIRECTED directed pairs)"
-else
-    echo "  Best baseline before timeout: $PASSED/$((PASSED + FAILED))"
-    ping_all_pairs "" "$MAX_PING_ATTEMPTS" "baseline"
-    phase_result "Establishment baseline (all $NUM_DIRECTED directed pairs)"
+# The all-pairs ping over fips0 is the definitive reachability check.
+# Direct-neighbor pairs prove their FSP session; NON-adjacent pairs in a
+# multi-hop topology can only succeed via forwarding, so all-pairs ping
+# is also the cross-version FORWARDING test (we keep pinging every pair).
+# The convergence detector is an ADVISORY settle-wait, not the assertion.
+# It needs one fully-clean, no-retry sweep of every directed pair; under
+# packet loss that is statistically unlikely on a large mesh even when the
+# mesh is perfectly healthy (e.g. 30 pairs at 2% loss => ~55% of sweeps
+# are clean), so its timeout must NOT be fatal. The strict, retrying ping
+# below is the real baseline assertion — it decides pass/fail.
+if ! wait_for_full_baseline "$CONVERGENCE_TIMEOUT"; then
+    echo "  detector saw no fully-clean sweep within ${CONVERGENCE_TIMEOUT}s (best $PASSED/$NUM_DIRECTED); strict re-ping decides"
+fi
+ping_all_pairs "" "$MAX_PING_ATTEMPTS" "baseline"
+phase_result "Establishment baseline (all $NUM_DIRECTED directed pairs)"
+if [ "$FAILED" -ne 0 ]; then
     dump_diagnostics
     echo ""
     echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
@@ -499,6 +697,34 @@ else
     exit 1
 fi
 echo ""
+
+# ── Phase 1b: data-plane control window (quiet, pre-rekey) ───────────
+#
+# Measure stream loss over a window with NO rekey cutover, as the control
+# baseline for the differential. Validated cutover-free by confirming the
+# FMP cutover count did not advance during the window. Then launch the
+# rekey-window streams, which run in the background across Phases 2-5 and
+# are collected/asserted in Phase 5b.
+control_contaminated=0
+if [ "${#STREAM_PAIRS[@]}" -gt 0 ]; then
+    echo "Phase 1b: Data-plane control stream (${CONTROL_STREAM_SECS}s quiet window)"
+    pre_cut="$(count_log_pattern 'Rekey cutover complete \(initiator\), K-bit flipped')"
+    launch_streams CONTROL "$CONTROL_STREAM_SECS"
+    collect_streams
+    post_cut="$(count_log_pattern 'Rekey cutover complete \(initiator\), K-bit flipped')"
+    if [ "$post_cut" -ne "$pre_cut" ]; then
+        control_contaminated=1
+        echo "  WARN  a rekey cutover occurred during the control window — control loss may be contaminated"
+    fi
+    for sp in "${STREAM_PAIRS[@]}"; do
+        read -r sf st <<< "$sp"
+        key="$sf->$st"
+        echo "    control $key: tx=${STREAM_TX[CONTROL:$key]:-0} rx=${STREAM_RX[CONTROL:$key]:-0} loss=$(_loss_pct "${STREAM_TX[CONTROL:$key]:-0}" "${STREAM_RX[CONTROL:$key]:-0}")%"
+    done
+    echo "  Launching rekey-window streams (${REKEY_STREAM_SECS}s, spanning Phases 2-5)"
+    launch_streams REKEY "$REKEY_STREAM_SECS"
+    echo ""
+fi
 
 # ── Phase 2: first rekey cycle ───────────────────────────────────────
 
@@ -543,6 +769,41 @@ wait_for_full_baseline "$POST_REKEY_TIMEOUT" || true
 ping_all_pairs "" "$MAX_PING_ATTEMPTS" "post-rekey-2"
 phase_result "Post-second-rekey (all $NUM_DIRECTED directed pairs)"
 echo ""
+
+# ── Phase 5b: data-plane continuity across rekey (control-differential)
+#
+# Collect the rekey-window streams launched in Phase 1b and compare their
+# loss to the control window. A hitless rekey keeps rekey-window loss at
+# or below the control (plus a small margin); excess loss is data the
+# rekey dropped — the failure the cutover fixes (4af3730/6e5cb89) and the
+# pipelined wire layout are supposed to prevent.
+if [ "${#STREAM_PAIRS[@]}" -gt 0 ]; then
+    echo "Phase 5b: Data-plane continuity across rekey (control-differential, margin ${STREAM_LOSS_MARGIN_PCT}%)"
+    PASSED=0; FAILED=0
+    collect_streams
+    printf '    %-16s %11s %11s %8s  %s\n' "stream" "ctrl-loss%" "rekey-loss%" "delta" "verdict"
+    for sp in "${STREAM_PAIRS[@]}"; do
+        read -r sf st <<< "$sp"
+        key="$sf->$st"
+        cpct="$(_loss_pct "${STREAM_TX[CONTROL:$key]:-0}" "${STREAM_RX[CONTROL:$key]:-0}")"
+        rpct="$(_loss_pct "${STREAM_TX[REKEY:$key]:-0}" "${STREAM_RX[REKEY:$key]:-0}")"
+        verdict="$(awk -v c="$cpct" -v k="$rpct" -v m="$STREAM_LOSS_MARGIN_PCT" 'BEGIN{
+            if (c=="NA" || k=="NA") { print "NODATA"; exit }
+            if (k <= c + m) print "PASS"; else print "FAIL"
+        }')"
+        delta="$(awk -v c="$cpct" -v k="$rpct" 'BEGIN{ if(c=="NA"||k=="NA") print "NA"; else printf "%+.1f", k-c }')"
+        printf '    %-16s %11s %11s %8s  %s\n' "$key" "$cpct" "$rpct" "$delta" "$verdict"
+        if [ "$verdict" = "PASS" ]; then
+            PASSED=$((PASSED + 1))
+        else
+            FAILED=$((FAILED + 1))
+            INTEROP_FAILURES+=("[stream] $key ($(hop_label "$sf" "$st")): rekey-window loss ${rpct}% vs control ${cpct}% (+${STREAM_LOSS_MARGIN_PCT}% margin) -> $verdict")
+        fi
+    done
+    [ "${control_contaminated:-0}" -eq 1 ] && echo "    NOTE: control window saw a cutover; differential may understate rekey loss."
+    phase_result "Data-plane continuity across rekey"
+    echo ""
+fi
 
 # ── Phase 6: per-node, per-pair interop log analysis ─────────────────
 #
@@ -627,7 +888,7 @@ echo "  -- Per-pair interop summary --"
 for p in "${PAIRS[@]}"; do
     read -r n1 n2 <<< "$p"
     kind="$(pair_kind "$n1" "$n2")"
-    label="$(pair_label "$n1" "$n2")"
+    label="$(pair_label "$n1" "$n2") [$(hop_label "$n1" "$n2")]"
     pair_failed=0
     if [ "${#INTEROP_FAILURES[@]}" -gt 0 ]; then
         for f in "${INTEROP_FAILURES[@]}"; do
@@ -647,6 +908,52 @@ for p in "${PAIRS[@]}"; do
 done
 
 phase_result "Interop log analysis"
+echo ""
+
+# ── Phase 7: mesh-size estimate convergence (strict ±25%) ────────────
+#
+# Each node's bloom-union mesh-size estimate (fipsctl show status
+# .estimated_mesh_size) should converge to the true node count across
+# versions. A mixed-version bloom/tree-encoding divergence shows up as a
+# node that never produces an in-band estimate (or returns null). Strict
+# band = [0.75N, 1.25N]; polled up to MESH_SIZE_TIMEOUT (the estimate
+# converges over minutes — see ISSUE-2026-0046 on its transient jitter).
+echo "Phase 7: Mesh-size estimate convergence (strict ±25% of true N=$NUM_NODES)"
+PASSED=0; FAILED=0
+ms_lo="$(awk -v n="$NUM_NODES" 'BEGIN{printf "%.2f", 0.75*n}')"
+ms_hi="$(awk -v n="$NUM_NODES" 'BEGIN{printf "%.2f", 1.25*n}')"
+echo "  band [$ms_lo, $ms_hi], poll up to ${MESH_SIZE_TIMEOUT}s"
+declare -A MS_EST MS_OK
+ms_deadline=$(( SECONDS + MESH_SIZE_TIMEOUT ))
+while :; do
+    all_ok=1
+    for n in "${NODES[@]}"; do
+        [ "${MS_OK[$n]:-0}" = "1" ] && continue
+        est="$(docker exec "${CONTAINER[$n]}" fipsctl show status 2>/dev/null \
+            | python3 -c "import sys,json; v=json.load(sys.stdin).get('estimated_mesh_size'); print(v if v is not None else 'null')" 2>/dev/null || echo null)"
+        MS_EST[$n]="$est"
+        if [ "$est" != "null" ] && awk "BEGIN{exit !($est>=$ms_lo && $est<=$ms_hi)}"; then
+            MS_OK[$n]=1
+        else
+            all_ok=0
+        fi
+    done
+    [ "$all_ok" = "1" ] && break
+    [ "$SECONDS" -ge "$ms_deadline" ] && break
+    sleep 3
+done
+for n in "${NODES[@]}"; do
+    s="${SLOT_OF[$n]}"; u="$(echo "$s" | tr '[:lower:]' '[:upper:]')"
+    if [ "${MS_OK[$n]:-0}" = "1" ]; then
+        echo "    PASS  $n [$u]: estimated_mesh_size=${MS_EST[$n]}"
+        PASSED=$((PASSED + 1))
+    else
+        echo "    FAIL  $n [$u]: estimated_mesh_size=${MS_EST[$n]:-null} (outside [$ms_lo,$ms_hi] after ${MESH_SIZE_TIMEOUT}s)"
+        FAILED=$((FAILED + 1))
+        INTEROP_FAILURES+=("[mesh-size] node $n ($u ${SLOT_REF[$s]}@${SLOT_SHA[$s]}): estimate=${MS_EST[$n]:-null} outside [$ms_lo,$ms_hi]")
+    fi
+done
+phase_result "Mesh-size estimate convergence"
 echo ""
 
 # ── Summary ──────────────────────────────────────────────────────────

@@ -99,6 +99,13 @@ with v0.3.x peers.
 
 ## [Unreleased]
 
+### Fixed
+
+- MMP sender metrics now ignore duplicate or regressed receiver reports
+  before updating RTT, loss, goodput, or ETX. Receiver reports also
+  suppress timestamp echo when dwell time overflows, so stale reports
+  cannot inflate SRTT.
+
 ### Added
 
 - Typed `RejectReason` classification for receive-path silent-rejection
