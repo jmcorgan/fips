@@ -74,7 +74,13 @@ fi
 #   node-c: peers with B (end node)
 
 log "Starting node-a (no peers, creates network)..."
+# node-a is the root: explicitly clear FIPS_PEER_* so it does not inherit the
+# external peer default from .env (which points at a real public mesh node).
+# Without this, node-a auto-connects to the live mesh and the chain attaches
+# under an external root, inflating tree depth and breaking isolation.
 FIPS_NSEC="$NODE_A_NSEC" \
+FIPS_PEER_NPUB="" \
+FIPS_PEER_ADDR="" \
 FIPS_NETWORK="$NETWORK_NAME" \
 FIPS_SUBNET="$SUBNET" \
 FIPS_IPV4="$NODE_A_IP" \
