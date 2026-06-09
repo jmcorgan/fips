@@ -832,9 +832,15 @@ impl Node {
             .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
             .collect();
 
+        // Node-wide connection budget — used as the TCP inbound-cap fallback
+        // when a TCP instance has no explicit `max_inbound_connections`, so
+        // raising `node.limits.max_connections` actually raises the inbound
+        // ceiling rather than being silently capped at the transport default.
+        let node_max_connections = self.config.node.limits.max_connections;
         for (name, tcp_config) in tcp_instances {
             let transport_id = self.allocate_transport_id();
-            let tcp = TcpTransport::new(transport_id, name, tcp_config, packet_tx.clone());
+            let mut tcp = TcpTransport::new(transport_id, name, tcp_config, packet_tx.clone());
+            tcp.set_node_max_connections(node_max_connections);
             transports.push(TransportHandle::Tcp(tcp));
         }
 
