@@ -193,6 +193,14 @@ with v0.3.x peers.
   Subscribe retries with exponential backoff (2 s base, 60 s cap),
   publish attempts time out at 10 s, and the new tasks are aborted
   cleanly on `Node::stop`.
+- `node.bloom.max_inbound_fpr` default raised from `0.05` to `0.10`. The
+  cap rejects inbound `FilterAnnounce` whose FPR (`fill^k`) exceeds it. On
+  the fixed 1 KB / k=5 filter, `0.05` corresponds to fill 0.549 (~1,300
+  reachable entries) and had begun rejecting the busiest nodes' aggregates
+  as the mesh approached that size. `0.10` (fill 0.631, ~1,630 entries)
+  restores headroom toward the fixed-filter capacity limit without
+  materially weakening the antipoison gate: a saturated or poisoned filter
+  is ~100% FPR and still rejected.
 - Sidecar example (`examples/sidecar-nostr-relay`): `udp.mtu` is now
   overridable via the `FIPS_UDP_MTU` environment variable, defaulting to
   1472 (preserving prior behavior). Plumbed through `docker-compose.yml`
