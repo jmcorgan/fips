@@ -1,0 +1,7 @@
+target/
+target-*/
+.git/
+.github/
+testing/
+examples/
+!examples/sidecar-nostr-mixnet-relay/
