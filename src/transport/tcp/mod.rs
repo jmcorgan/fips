@@ -122,6 +122,10 @@ pub struct TcpTransport {
     accept_task: Option<JoinHandle<()>>,
     /// Local listener address (after start, if bind_addr configured).
     local_addr: Option<SocketAddr>,
+    /// Node-wide `node.limits.max_connections`, used as the inbound cap
+    /// fallback when this transport has no explicit `max_inbound_connections`.
+    /// `None` means "not provided" — fall through to the built-in default.
+    node_max_connections: Option<usize>,
     /// Transport statistics.
     stats: Arc<TcpStats>,
 }
@@ -144,7 +148,42 @@ impl TcpTransport {
             packet_tx,
             accept_task: None,
             local_addr: None,
+            node_max_connections: None,
             stats: Arc::new(TcpStats::new()),
+        }
+    }
+
+    /// Set the node-wide `node.limits.max_connections` value.
+    ///
+    /// Used as the inbound-cap fallback when this transport instance has no
+    /// explicit `transports.tcp.*.max_inbound_connections` set, so raising
+    /// `node.limits.max_connections` actually raises the per-transport TCP
+    /// accept ceiling instead of silently capping at the built-in default.
+    pub fn set_node_max_connections(&mut self, max: usize) {
+        self.node_max_connections = Some(max);
+    }
+
+    /// Resolve the effective inbound connection cap for the accept loop.
+    ///
+    /// Precedence: explicit per-transport `max_inbound_connections` >
+    /// node-wide `node.limits.max_connections` > built-in default. This is a
+    /// per-transport *raw-accept* ceiling; the true node-wide peer budget is
+    /// still enforced downstream by the handshake-phase `max_connections`
+    /// admission check (`Node::add_connection`), so deriving this ceiling
+    /// from `max_connections` does not let multiple transports exceed the
+    /// node-wide total — it only stops the transport from rejecting inbound
+    /// below the configured node budget.
+    fn effective_max_inbound(&self) -> usize {
+        match (
+            self.config.max_inbound_connections,
+            self.node_max_connections,
+        ) {
+            // Explicit per-transport key always wins.
+            (Some(explicit), _) => explicit,
+            // No per-transport key: fall back to the node-wide budget.
+            (None, Some(node_max)) => node_max,
+            // Neither set: the transport's built-in default (256).
+            (None, None) => self.config.max_inbound_connections(),
         }
     }
 
@@ -197,7 +236,7 @@ impl TcpTransport {
             let stats = self.stats.clone();
             let cfg = AcceptConfig {
                 mtu: self.config.mtu(),
-                max_inbound: self.config.max_inbound_connections(),
+                max_inbound: self.effective_max_inbound(),
                 nodelay: self.config.nodelay(),
                 keepalive_secs: self.config.keepalive_secs(),
                 recv_buf: self.config.recv_buf_size(),
@@ -1154,6 +1193,30 @@ mod tests {
         assert!(transport.local_addr().is_none());
 
         transport.stop_async().await.unwrap();
+    }
+
+    #[test]
+    fn effective_max_inbound_precedence() {
+        let (tx, _rx) = packet_channel(100);
+
+        // Neither set: built-in transport default (256).
+        let t = TcpTransport::new(TransportId::new(1), None, make_config(), tx.clone());
+        assert_eq!(t.effective_max_inbound(), 256);
+
+        // Node-wide max_connections drives the cap when no per-transport key.
+        let mut t = TcpTransport::new(TransportId::new(1), None, make_config(), tx.clone());
+        t.set_node_max_connections(512);
+        assert_eq!(t.effective_max_inbound(), 512);
+
+        // Explicit per-transport key wins over the node-wide value.
+        let cfg = TcpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            max_inbound_connections: Some(64),
+            ..Default::default()
+        };
+        let mut t = TcpTransport::new(TransportId::new(1), None, cfg, tx);
+        t.set_node_max_connections(512);
+        assert_eq!(t.effective_max_inbound(), 64);
     }
 
     #[tokio::test]

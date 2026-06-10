@@ -443,16 +443,18 @@ async fn test_bloom_filter_split_horizon() {
     cleanup_nodes(&mut nodes).await;
 }
 
-/// Regression for `compute_mesh_size` parent double-count.
+/// Each peer's inbound filter contributes exactly once, independent of
+/// tree-declaration state.
 ///
-/// Reproduces the stale-peer-declaration window that follows a local
-/// parent-switch: our `my_declaration().parent_id()` already names P, but
-/// the cached `peer_declaration(P)` is still the pre-switch advert in
-/// which P names US as its parent. Without the explicit parent-skip in
-/// the children loop, P would be iterated as a child and its bloom
-/// cardinality added a second time on top of the parent contribution.
+/// Under all-peers union semantics there is no parent/child gating and no
+/// `peer_declaration` lookup, so a stale or contradictory declaration
+/// cache cannot cause a peer's bloom cardinality to be folded twice. This
+/// retains the spirit of the old parent-double-count regression: we set up
+/// the same stale-cache scenario (the cached `peer_declaration(P)` still
+/// names US as P's parent) and assert the estimate reflects each filter
+/// counted once, not the double-count fingerprint.
 #[test]
-fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
+fn compute_mesh_size_counts_each_peer_filter_once() {
     use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
     use crate::tree::ParentDeclaration;
@@ -501,6 +503,8 @@ fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
     // Inject the stale-cache scenario: peer_declaration(P) still names
     // US (M) as P's parent (the pre-switch advert that the cache hasn't
     // refreshed yet). Q is a legitimate child also naming M as parent.
+    // Under all-peers semantics these declarations no longer affect the
+    // estimate at all.
     let parent_decl_stale = ParentDeclaration::new(parent_addr, my_addr, 1, 1);
     let child_decl = ParentDeclaration::new(child_addr, my_addr, 1, 1);
     node.tree_state_mut()
@@ -522,8 +526,9 @@ fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
         .estimated_mesh_size()
         .expect("estimator should produce a value with filter data present");
 
-    // Expected (parent counted once + child counted once): 1 + 5 + 3 = 9.
-    // Unfixed (parent double-counted via children loop): 1 + 2*5 + 3 = 14.
+    // Each filter counted once: 1 (self) + 5 (P) + 3 (Q) = 9.
+    // A double-count of P (the old declaration-cache bug fingerprint)
+    // would land near 1 + 2*5 + 3 = 14.
     // The estimator's log-based math rounds, so allow +/-1 tolerance.
     let diff = (estimate as i64 - 9).abs();
     assert!(
@@ -533,23 +538,22 @@ fn compute_mesh_size_skips_parent_under_stale_peer_declaration() {
     );
 }
 
-/// Overlapping parent and child inbound filters must be OR-unioned, not
-/// summed. The parent and the child here share several NodeAddrs (plus a
-/// few distinct ones each). The naive sum of per-filter cardinalities
-/// would over-count the shared entries; the union estimate must instead
-/// approximate the number of *distinct* addresses across both filters
-/// (plus self). This asserts the over-count fingerprint of the old
-/// summing code is gone, and the assertion holds on the union result
-/// (which is what estimated_mesh_size carries), so it survives removal
-/// of the temporary dual-estimator instrumentation.
+/// Overlapping peer inbound filters must be OR-unioned, not summed.
+///
+/// Two connected peers share several NodeAddrs (plus a few distinct ones
+/// each). The naive sum of per-filter cardinalities would over-count the
+/// shared entries; the union estimate must instead approximate the number
+/// of *distinct* addresses across both filters (plus self). Under all-peers
+/// semantics the union folds in every connected peer regardless of tree
+/// role, so no parent/child wiring is needed — this asserts the
+/// overlap-dedup property directly on the union result that
+/// `estimated_mesh_size` carries.
 #[test]
 fn compute_mesh_size_unions_overlapping_filters() {
     use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
-    use crate::tree::ParentDeclaration;
 
     let mut node = make_node();
-    let my_addr = *node.tree_state().my_node_addr();
 
     // Build the set of addresses. SHARED appear in both filters; the
     // distinct sets appear in only one each.
@@ -560,58 +564,36 @@ fn compute_mesh_size_unions_overlapping_filters() {
         NodeAddr::from_bytes(bytes)
     };
     let shared: Vec<NodeAddr> = (0..6u8).map(|i| mk(0x10, i)).collect();
-    let parent_only: Vec<NodeAddr> = (0..3u8).map(|i| mk(0x20, i)).collect();
-    let child_only: Vec<NodeAddr> = (0..3u8).map(|i| mk(0x30, i)).collect();
+    let peer_a_only: Vec<NodeAddr> = (0..3u8).map(|i| mk(0x20, i)).collect();
+    let peer_b_only: Vec<NodeAddr> = (0..3u8).map(|i| mk(0x30, i)).collect();
 
-    // Distinct addresses across the union: shared + parent_only +
-    // child_only + self = 6 + 3 + 3 + 1 = 13. The naive sum of the two
+    // Distinct addresses across the union: shared + peer_a_only +
+    // peer_b_only + self = 6 + 3 + 3 + 1 = 13. The naive sum of the two
     // filters' cardinalities would be (6+3) + (6+3) + 1 = 19.
-    let distinct = shared.len() + parent_only.len() + child_only.len() + 1; // 13
-    let naive_sum = (shared.len() + parent_only.len()) + (shared.len() + child_only.len()) + 1; // 19
+    let distinct = shared.len() + peer_a_only.len() + peer_b_only.len() + 1; // 13
+    let naive_sum = (shared.len() + peer_a_only.len()) + (shared.len() + peer_b_only.len()) + 1; // 19
 
-    // Generate a parent identity strictly less than my_addr so the
-    // tree_state defensive check accepts the extension.
-    let (parent_identity, parent_addr) = loop {
-        let candidate = make_peer_identity();
-        let addr = *candidate.node_addr();
-        if addr < my_addr {
-            break (candidate, addr);
-        }
-    };
-    let mut parent_peer = ActivePeer::new(parent_identity, LinkId::new(1), 0);
-    let mut parent_filter = BloomFilter::new();
-    for addr in shared.iter().chain(parent_only.iter()) {
-        parent_filter.insert(addr);
+    // Peer A with shared + peer_a_only.
+    let peer_a_identity = make_peer_identity();
+    let peer_a_addr = *peer_a_identity.node_addr();
+    let mut peer_a = ActivePeer::new(peer_a_identity, LinkId::new(1), 0);
+    let mut filter_a = BloomFilter::new();
+    for addr in shared.iter().chain(peer_a_only.iter()) {
+        filter_a.insert(addr);
     }
-    parent_peer.update_filter(parent_filter, 1, 0);
-    node.peers.insert(parent_addr, parent_peer);
+    peer_a.update_filter(filter_a, 1, 0);
+    node.peers.insert(peer_a_addr, peer_a);
 
-    // Child Q with a filter that overlaps the parent's on `shared`.
-    let child_identity = make_peer_identity();
-    let child_addr = *child_identity.node_addr();
-    let mut child_peer = ActivePeer::new(child_identity, LinkId::new(2), 0);
-    let mut child_filter = BloomFilter::new();
-    for addr in shared.iter().chain(child_only.iter()) {
-        child_filter.insert(addr);
+    // Peer B with a filter that overlaps A's on `shared`.
+    let peer_b_identity = make_peer_identity();
+    let peer_b_addr = *peer_b_identity.node_addr();
+    let mut peer_b = ActivePeer::new(peer_b_identity, LinkId::new(2), 0);
+    let mut filter_b = BloomFilter::new();
+    for addr in shared.iter().chain(peer_b_only.iter()) {
+        filter_b.insert(addr);
     }
-    child_peer.update_filter(child_filter, 1, 0);
-    node.peers.insert(child_addr, child_peer);
-
-    // Wire up the tree so the child names us as parent and our parent is P.
-    let parent_ancestry = crate::tree::TreeCoordinate::root_with_meta(parent_addr, 1, 1);
-    let child_ancestry = crate::tree::TreeCoordinate::root_with_meta(child_addr, 1, 1);
-    let parent_decl = ParentDeclaration::new(parent_addr, my_addr, 1, 1);
-    let child_decl = ParentDeclaration::new(child_addr, my_addr, 1, 1);
-    node.tree_state_mut()
-        .update_peer(parent_decl, parent_ancestry);
-    node.tree_state_mut()
-        .update_peer(child_decl, child_ancestry);
-    node.tree_state_mut().set_parent(parent_addr, 2, 1);
-    node.tree_state_mut().recompute_coords();
-    assert!(
-        !node.tree_state().is_root(),
-        "test setup broken: node should not be its own root after parent switch"
-    );
+    peer_b.update_filter(filter_b, 1, 0);
+    node.peers.insert(peer_b_addr, peer_b);
 
     node.compute_mesh_size();
 
@@ -634,6 +616,87 @@ fn compute_mesh_size_unions_overlapping_filters() {
         "estimate {} must be below the naive sum {} (overlap should be deduplicated)",
         estimate,
         naive_sum
+    );
+}
+
+/// Flap-damping: the estimate survives a parent switch when a healthy
+/// cross-link carries the upward coverage.
+///
+/// Under the old tree-only union, the upward leg of the estimate hinged
+/// entirely on the current parent's filter; dropping the parent (a parent
+/// switch transient, before the new parent's filter converges) collapsed
+/// the estimate to self + children. Under all-peers semantics a cross-link
+/// peer whose split-horizon `inbound_filter` carries the same upward
+/// coverage keeps the union nearly intact across the drop. This builds a
+/// node with a parent and one healthy cross-link, records the estimate,
+/// removes the parent, and asserts the estimate does not collapse.
+#[test]
+fn compute_mesh_size_stable_across_parent_drop_with_cross_link() {
+    use crate::bloom::BloomFilter;
+    use crate::peer::ActivePeer;
+
+    let mut node = make_node();
+
+    let mk = |hi: u8, lo: u8| {
+        let mut bytes = [0u8; 16];
+        bytes[0] = hi;
+        bytes[1] = lo;
+        NodeAddr::from_bytes(bytes)
+    };
+
+    // Upward coverage: the set of addresses reachable through the rest of
+    // the mesh (everything outside our local subtree). Both the parent and
+    // a healthy cross-link advertise this under split-horizon propagation.
+    let upward: Vec<NodeAddr> = (0..12u8).map(|i| mk(0x40, i)).collect();
+    // The cross-link additionally knows a couple of addresses of its own.
+    let cross_extra: Vec<NodeAddr> = (0..2u8).map(|i| mk(0x50, i)).collect();
+
+    // Parent P: carries the upward coverage.
+    let parent_identity = make_peer_identity();
+    let parent_addr = *parent_identity.node_addr();
+    let mut parent_peer = ActivePeer::new(parent_identity, LinkId::new(1), 0);
+    let mut parent_filter = BloomFilter::new();
+    for addr in &upward {
+        parent_filter.insert(addr);
+    }
+    parent_peer.update_filter(parent_filter, 1, 0);
+    node.peers.insert(parent_addr, parent_peer);
+
+    // Cross-link X: a non-tree peer whose split-horizon filter also carries
+    // the upward coverage (plus a little of its own).
+    let cross_identity = make_peer_identity();
+    let cross_addr = *cross_identity.node_addr();
+    let mut cross_peer = ActivePeer::new(cross_identity, LinkId::new(2), 0);
+    let mut cross_filter = BloomFilter::new();
+    for addr in upward.iter().chain(cross_extra.iter()) {
+        cross_filter.insert(addr);
+    }
+    cross_peer.update_filter(cross_filter, 1, 0);
+    node.peers.insert(cross_addr, cross_peer);
+
+    // Baseline estimate with both peers present.
+    node.compute_mesh_size();
+    let before =
+        node.estimated_mesh_size()
+            .expect("estimator should produce a value with filter data present") as i64;
+
+    // Simulate a parent switch transient: the old parent is dropped before
+    // the new parent's filter has converged. The cross-link remains.
+    node.peers.remove(&parent_addr);
+    node.compute_mesh_size();
+    let after = node
+        .estimated_mesh_size()
+        .expect("estimator should still produce a value via the cross-link") as i64;
+
+    // The estimate must not collapse: the cross-link still holds the upward
+    // coverage. Old tree-only behavior would have lost the entire upward
+    // leg (~12 addrs) and dropped to roughly self alone. Allow a small
+    // tolerance for bloom rounding and the cross-link's couple extra bits.
+    let diff = (before - after).abs();
+    assert!(
+        diff <= 2,
+        "mesh-size estimate collapsed across parent drop: before={before}, after={after} \
+         (cross-link should preserve upward coverage)"
     );
 }
 

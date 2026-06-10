@@ -916,9 +916,15 @@ impl Node {
             .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
             .collect();
 
+        // Node-wide connection budget — used as the TCP inbound-cap fallback
+        // when a TCP instance has no explicit `max_inbound_connections`, so
+        // raising `node.limits.max_connections` actually raises the inbound
+        // ceiling rather than being silently capped at the transport default.
+        let node_max_connections = self.config().node.limits.max_connections;
         for (name, tcp_config) in tcp_instances {
             let transport_id = self.allocate_transport_id();
-            let tcp = TcpTransport::new(transport_id, name, tcp_config, packet_tx.clone());
+            let mut tcp = TcpTransport::new(transport_id, name, tcp_config, packet_tx.clone());
+            tcp.set_node_max_connections(node_max_connections);
             transports.push(TransportHandle::Tcp(tcp));
         }
 
@@ -1251,17 +1257,27 @@ impl Node {
     /// of estimated entry counts plus one (self) approximates total network size.
     pub(crate) fn compute_mesh_size(&mut self) {
         let my_addr = *self.tree_state.my_node_addr();
-        let parent_id = *self.tree_state.my_declaration().parent_id();
-        let is_root = self.tree_state.is_root();
 
         let max_fpr = self.config().node.bloom.max_inbound_fpr;
-        let mut child_count: u32 = 0;
+        let mut contributor_count: u32 = 0;
 
         // OR-union of the contributing filters. Summing per-filter
         // cardinalities over-counts whenever the filters overlap (a stale
         // or oversized parent filter, a topology loop); OR is idempotent,
         // so unioning and estimating once deduplicates the overlap.
-        // Membership is exactly: self + parent + each child inbound_filter.
+        //
+        // Membership is self + every connected peer's inbound_filter. We
+        // deliberately fold in *all* peers, not just the spanning-tree
+        // neighborhood (parent + children). Filter propagation is
+        // split-horizon (BloomState::compute_outgoing_filter excludes the
+        // peer it routes back to), so every routing peer — including
+        // cross-links — advertises a near-complete "whole mesh minus my
+        // subtree" view. Unioning all of them yields the same set as the
+        // tree-only union in steady state (OR-union dedups overlap, and
+        // each filter is a subset of the mesh so it cannot over-count) while
+        // damping the node-count flap on a parent switch: dropping the
+        // parent leaves the cross-links still carrying the upward coverage.
+        // It also removes the dependency on tree-declaration cache freshness.
         let mut union: Option<BloomFilter> = None;
 
         // Helper: fold a contributing filter into the union, starting it
@@ -1276,26 +1292,13 @@ impl Node {
             }
         };
 
-        // Parent's filter: nodes reachable upward through the tree.
-        if !is_root
-            && let Some(parent) = self.peers.get(&parent_id)
-            && let Some(filter) = parent.inbound_filter()
-        {
-            add_to_union(&mut union, filter);
-        }
-
-        // Children's filters: each child's subtree is (ideally) disjoint.
-        for (peer_addr, peer) in &self.peers {
-            if peer_addr == &parent_id {
-                continue;
-            }
-            if let Some(decl) = self.tree_state.peer_declaration(peer_addr)
-                && *decl.parent_id() == my_addr
-            {
-                child_count += 1;
-                if let Some(filter) = peer.inbound_filter() {
-                    add_to_union(&mut union, filter);
-                }
+        // Every connected peer's filter contributes. Honest peers are pure
+        // redundancy (overlapping bits dedup under OR); cross-links carry
+        // the upward coverage that would otherwise hinge on the parent alone.
+        for peer in self.peers.values() {
+            if let Some(filter) = peer.inbound_filter() {
+                contributor_count += 1;
+                add_to_union(&mut union, filter);
             }
         }
 
@@ -1334,7 +1337,7 @@ impl Node {
             tracing::debug!(
                 estimated_mesh_size = union_size,
                 peers = self.peers.len(),
-                children = child_count,
+                contributors = contributor_count,
                 "Mesh size estimate"
             );
             self.last_mesh_size_log = Some(now);
