@@ -26,7 +26,7 @@ fn now_ms() -> u64 {
 }
 
 /// Classify a DualEwma trend as "rising", "falling", or "stable".
-fn trend_label(short: f64, long: f64) -> &'static str {
+pub(crate) fn trend_label(short: f64, long: f64) -> &'static str {
     if !short.is_finite() || !long.is_finite() || long == 0.0 {
         return "stable";
     }
@@ -143,6 +143,29 @@ pub(crate) fn show_status_from_handle(handle: &super::read_handle::ControlReadHa
 /// `show_acl` — Loaded peer ACL state.
 pub fn show_acl(node: &Node) -> Value {
     let status = node.peer_acl_status();
+
+    json!({
+        "allow_file": status.allow_file,
+        "deny_file": status.deny_file,
+        "enforcement_active": status.enforcement_active,
+        "effective_mode": status.effective_mode,
+        "default_decision": status.default_decision,
+        "allow_all": status.allow_all,
+        "deny_all": status.deny_all,
+        "allow_file_entries": status.allow_file_entries,
+        "deny_file_entries": status.deny_file_entries,
+        "allow_entries": status.allow_entries,
+        "deny_entries": status.deny_entries,
+    })
+}
+
+/// Off-loop variant of [`show_acl`]: renders from the tick-published
+/// [`StatsSnapshot`](super::snapshot::StatsSnapshot) ACL status. The ACL is an
+/// `arc_swap::ArcSwap<PeerAcl>` reloaded only on the tick, and the status is a
+/// cheap projection of it captured at the same tick, so this renders entirely
+/// off the rx_loop. Output is byte-identical to [`show_acl`].
+pub(crate) fn show_acl_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let status = &handle.stats().acl_status;
 
     json!({
         "allow_file": status.allow_file,
@@ -320,6 +343,159 @@ pub fn show_peers(node: &Node) -> Value {
     json!({ "peers": peers })
 }
 
+/// Render a snapshot [`EntityMmp`](super::snapshot::EntityMmp) into the inline
+/// MMP JSON block, with the quality-index key named `quality_key` (`lqi` for
+/// peers, `sqi` for sessions). Reproduces the on-loop key insertion order
+/// exactly. `path_mtu` is emitted (inside the leading literal) only when
+/// present (session-layer); for peers it is `None` and omitted.
+fn render_entity_mmp(mmp: &super::snapshot::EntityMmp, quality_key: &str) -> Value {
+    // The on-loop `show_sessions` block places loss_rate/etx/goodput_bps/
+    // delivery ratios/path_mtu in the leading json! literal, while `show_peers`
+    // emits mode first then loss_rate/etx/goodput_bps/delivery ratios after the
+    // conditional srtt_ms. Both orderings are reproduced by branching on whether
+    // a session path_mtu is present.
+    if let Some(path_mtu) = mmp.path_mtu {
+        // Session-layer ordering (show_sessions).
+        let mut j = json!({
+            "mode": mmp.mode,
+            "loss_rate": mmp.loss_rate,
+            "etx": mmp.etx,
+            "goodput_bps": mmp.goodput_bps,
+            "delivery_ratio_forward": mmp.delivery_ratio_forward,
+            "delivery_ratio_reverse": mmp.delivery_ratio_reverse,
+            "path_mtu": path_mtu,
+        });
+        if let Some(srtt) = mmp.srtt_ms {
+            j["srtt_ms"] = json!(srtt);
+        }
+        if let Some(smoothed_loss) = mmp.smoothed_loss {
+            j["smoothed_loss"] = json!(smoothed_loss);
+        }
+        if let Some(smoothed_etx) = mmp.smoothed_etx {
+            j["smoothed_etx"] = json!(smoothed_etx);
+        }
+        if let Some(qi) = mmp.quality_index {
+            j[quality_key] = json!(qi);
+        }
+        j
+    } else {
+        // Link-layer ordering (show_peers).
+        let mut j = json!({
+            "mode": mmp.mode,
+        });
+        if let Some(srtt) = mmp.srtt_ms {
+            j["srtt_ms"] = json!(srtt);
+        }
+        j["loss_rate"] = json!(mmp.loss_rate);
+        j["etx"] = json!(mmp.etx);
+        j["goodput_bps"] = json!(mmp.goodput_bps);
+        j["delivery_ratio_forward"] = json!(mmp.delivery_ratio_forward);
+        j["delivery_ratio_reverse"] = json!(mmp.delivery_ratio_reverse);
+        if let Some(smoothed_loss) = mmp.smoothed_loss {
+            j["smoothed_loss"] = json!(smoothed_loss);
+        }
+        if let Some(smoothed_etx) = mmp.smoothed_etx {
+            j["smoothed_etx"] = json!(smoothed_etx);
+        }
+        if let Some(qi) = mmp.quality_index {
+            j[quality_key] = json!(qi);
+        }
+        j
+    }
+}
+
+/// Off-loop variant of [`show_peers`]: renders from the tick-published
+/// [`EntitySnapshot`](super::snapshot::EntitySnapshot) peer table (display
+/// names, tree-relationship flags, Nostr-traversal state resolved at publish
+/// time). Output is byte-identical to [`show_peers`].
+pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let entities = handle.entities();
+    let peers: Vec<Value> = entities
+        .peers
+        .iter()
+        .map(|peer| {
+            let mut peer_json = json!({
+                "node_addr": hex::encode(peer.node_addr.as_bytes()),
+                "npub": peer.npub,
+                "display_name": peer.display_name,
+                "ipv6_addr": peer.ipv6_addr,
+                "connectivity": peer.connectivity,
+                "link_id": peer.link_id,
+                "authenticated_at_ms": peer.authenticated_at_ms,
+                "last_seen_ms": peer.last_seen_ms,
+                "has_tree_position": peer.has_tree_position,
+                "has_bloom_filter": peer.has_bloom_filter,
+                "filter_sequence": peer.filter_sequence,
+                "is_parent": peer.is_parent,
+                "is_child": peer.is_child,
+            });
+
+            if let Some(addr) = &peer.transport_addr {
+                peer_json["transport_addr"] = json!(addr);
+            }
+
+            if let Some(link) = &peer.link_info {
+                peer_json["direction"] = json!(link.direction);
+                if let Some(tt) = &link.transport_type {
+                    peer_json["transport_type"] = json!(tt);
+                }
+            }
+
+            if let Some(depth) = peer.tree_depth {
+                peer_json["tree_depth"] = json!(depth);
+            }
+
+            peer_json["stats"] = json!({
+                "packets_sent": peer.stats.packets_sent,
+                "packets_recv": peer.stats.packets_recv,
+                "bytes_sent": peer.stats.bytes_sent,
+                "bytes_recv": peer.stats.bytes_recv,
+            });
+
+            peer_json["replay_suppressed"] = json!(peer.replay_suppressed);
+            peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures);
+
+            let nostr = &peer.nostr_traversal;
+            peer_json["nostr_traversal"] = json!({
+                "consecutive_failures": nostr.consecutive_failures,
+                "in_cooldown": nostr.cooldown_until_ms.is_some(),
+                "cooldown_until_ms": nostr.cooldown_until_ms.map(|t| json!(t)).unwrap_or(Value::Null),
+                "last_observed_skew_ms": nostr
+                    .last_observed_skew_ms
+                    .map(|s| json!(s))
+                    .unwrap_or(Value::Null),
+            });
+
+            if let Some(noise) = &peer.noise {
+                peer_json["noise"] = json!({
+                    "send_counter": noise.send_counter,
+                    "highest_recv_counter": noise.highest_recv_counter,
+                });
+            }
+
+            if let Some(idx) = peer.our_session_index {
+                peer_json["our_session_index"] = json!(format!("{:08x}", idx));
+            }
+
+            if peer.rekey_in_progress {
+                peer_json["rekey_in_progress"] = json!(true);
+            }
+            if peer.rekey_draining {
+                peer_json["rekey_draining"] = json!(true);
+            }
+            peer_json["current_k_bit"] = json!(peer.current_k_bit);
+
+            if let Some(mmp) = &peer.mmp {
+                peer_json["mmp"] = render_entity_mmp(mmp, "lqi");
+            }
+
+            peer_json
+        })
+        .collect();
+
+    json!({ "peers": peers })
+}
+
 /// `show_links` — Active links.
 pub fn show_links(node: &Node) -> Value {
     let links: Vec<Value> = node
@@ -339,6 +515,36 @@ pub fn show_links(node: &Node) -> Value {
                     "bytes_sent": stats.bytes_sent,
                     "bytes_recv": stats.bytes_recv,
                     "last_recv_ms": stats.last_recv_ms,
+                },
+            })
+        })
+        .collect();
+
+    json!({ "links": links })
+}
+
+/// Off-loop variant of [`show_links`]: renders from the tick-published
+/// [`EntitySnapshot`](super::snapshot::EntitySnapshot) link table. Output is
+/// byte-identical to [`show_links`].
+pub(crate) fn show_links_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let entities = handle.entities();
+    let links: Vec<Value> = entities
+        .links
+        .iter()
+        .map(|link| {
+            json!({
+                "link_id": link.link_id,
+                "transport_id": link.transport_id,
+                "remote_addr": link.remote_addr,
+                "direction": link.direction,
+                "state": link.state,
+                "created_at_ms": link.created_at_ms,
+                "stats": {
+                    "packets_sent": link.stats.packets_sent,
+                    "packets_recv": link.stats.packets_recv,
+                    "bytes_sent": link.stats.bytes_sent,
+                    "bytes_recv": link.stats.bytes_recv,
+                    "last_recv_ms": link.stats.last_recv_ms,
                 },
             })
         })
@@ -401,6 +607,61 @@ pub fn show_tree(node: &Node) -> Value {
         "declaration_sequence": decl.sequence(),
         "declaration_signed": decl.is_signed(),
         "peer_tree_count": tree.peer_count(),
+        "peers": peers,
+        "stats": serde_json::to_value(&tree_stats).unwrap_or_default(),
+    })
+}
+
+/// Off-loop variant of [`show_tree`]: renders from the tick-published
+/// [`RoutingSnapshot`](super::snapshot::RoutingSnapshot) tree view (display
+/// names resolved at publish time) plus the `tree` counter family from the
+/// `MetricsRegistry`. Output is byte-identical to [`show_tree`].
+pub(crate) fn show_tree_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let routing = handle.routing();
+    let tree = &routing.tree;
+
+    let coords: Vec<String> = tree
+        .my_coords
+        .iter()
+        .map(|a| hex::encode(a.as_bytes()))
+        .collect();
+
+    let peers: Vec<Value> = tree
+        .peers
+        .iter()
+        .map(|peer| {
+            let mut peer_json = json!({
+                "node_addr": hex::encode(peer.node_addr.as_bytes()),
+                "display_name": peer.display_name,
+            });
+            if let Some(coords) = &peer.coords {
+                let coord_path: Vec<String> = coords
+                    .coord_path
+                    .iter()
+                    .map(|a| hex::encode(a.as_bytes()))
+                    .collect();
+                peer_json["depth"] = json!(coords.depth);
+                peer_json["root"] = json!(hex::encode(coords.root.as_bytes()));
+                peer_json["coords"] = json!(coord_path);
+                peer_json["distance_to_us"] = json!(coords.distance_to_us);
+            }
+            peer_json
+        })
+        .collect();
+
+    let tree_stats = handle.metrics().tree.snapshot();
+
+    json!({
+        "my_node_addr": hex::encode(tree.my_node_addr.as_bytes()),
+        "root": hex::encode(tree.root.as_bytes()),
+        "is_root": tree.is_root,
+        "depth": tree.depth,
+        "my_coords": coords,
+        "parent": hex::encode(tree.parent.as_bytes()),
+        "parent_display_name": tree.parent_display_name,
+        "declaration_sequence": tree.declaration_sequence,
+        "declaration_signed": tree.declaration_signed,
+        "peer_tree_count": tree.peer_tree_count,
         "peers": peers,
         "stats": serde_json::to_value(&tree_stats).unwrap_or_default(),
     })
@@ -490,6 +751,55 @@ pub fn show_sessions(node: &Node) -> Value {
     json!({ "sessions": sessions })
 }
 
+/// Off-loop variant of [`show_sessions`]: renders from the tick-published
+/// [`EntitySnapshot`](super::snapshot::EntitySnapshot) session table (display
+/// name, npub, established/handshake state resolved at publish time). Output is
+/// byte-identical to [`show_sessions`].
+pub(crate) fn show_sessions_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let entities = handle.entities();
+    let sessions: Vec<Value> = entities
+        .sessions
+        .iter()
+        .map(|session| {
+            let mut session_json = json!({
+                "remote_addr": hex::encode(session.remote_addr.as_bytes()),
+                "display_name": session.display_name,
+                "state": session.state,
+                "is_initiator": session.is_initiator,
+                "last_activity_ms": session.last_activity_ms,
+            });
+
+            session_json["npub"] = json!(session.npub);
+
+            session_json["stats"] = json!({
+                "packets_sent": session.stats.packets_sent,
+                "packets_recv": session.stats.packets_recv,
+                "bytes_sent": session.stats.bytes_sent,
+                "bytes_recv": session.stats.bytes_recv,
+            });
+
+            if let Some(resend) = session.resend_count {
+                session_json["resend_count"] = json!(resend);
+            }
+
+            if let Some(est) = &session.established {
+                session_json["session_start_ms"] = json!(est.session_start_ms);
+                session_json["current_k_bit"] = json!(est.current_k_bit);
+                session_json["coords_warmup_remaining"] = json!(est.coords_warmup_remaining);
+                session_json["is_draining"] = json!(est.is_draining);
+            }
+
+            if let Some(mmp) = &session.mmp {
+                session_json["mmp"] = render_entity_mmp(mmp, "sqi");
+            }
+
+            session_json
+        })
+        .collect();
+
+    json!({ "sessions": sessions })
+}
+
 /// `show_bloom` — Bloom filter state.
 pub fn show_bloom(node: &Node) -> Value {
     let bloom = node.bloom_state();
@@ -528,6 +838,52 @@ pub fn show_bloom(node: &Node) -> Value {
         "is_leaf_only": node.is_leaf_only(),
         "sequence": bloom.sequence(),
         "leaf_dependent_count": bloom.leaf_dependents().len(),
+        "leaf_dependents": leaf_deps,
+        "peer_filters": peer_filters,
+        "stats": serde_json::to_value(&bloom_stats).unwrap_or_default(),
+    })
+}
+
+/// Off-loop variant of [`show_bloom`]: renders from the tick-published
+/// [`RoutingSnapshot`](super::snapshot::RoutingSnapshot) bloom view (display
+/// names resolved at publish time) plus the `bloom` counter family from the
+/// `MetricsRegistry`. Output is byte-identical to [`show_bloom`].
+pub(crate) fn show_bloom_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let routing = handle.routing();
+    let bloom = &routing.bloom;
+
+    let leaf_deps: Vec<String> = bloom
+        .leaf_dependents
+        .iter()
+        .map(|addr| hex::encode(addr.as_bytes()))
+        .collect();
+
+    let peer_filters: Vec<Value> = bloom
+        .peer_filters
+        .iter()
+        .map(|peer| {
+            let mut pf = json!({
+                "peer": hex::encode(peer.peer.as_bytes()),
+                "display_name": peer.display_name,
+                "has_filter": peer.has_filter,
+                "filter_sequence": peer.filter_sequence,
+            });
+            if let Some(filter) = &peer.filter {
+                pf["estimated_count"] = json!(filter.estimated_count);
+                pf["set_bits"] = json!(filter.set_bits);
+                pf["fill_ratio"] = json!(filter.fill_ratio);
+            }
+            pf
+        })
+        .collect();
+
+    let bloom_stats = handle.metrics().bloom.snapshot();
+
+    json!({
+        "own_node_addr": hex::encode(bloom.own_node_addr.as_bytes()),
+        "is_leaf_only": bloom.is_leaf_only,
+        "sequence": bloom.sequence,
+        "leaf_dependent_count": bloom.leaf_dependents.len(),
         "leaf_dependents": leaf_deps,
         "peer_filters": peer_filters,
         "stats": serde_json::to_value(&bloom_stats).unwrap_or_default(),
@@ -643,6 +999,100 @@ pub fn show_mmp(node: &Node) -> Value {
     })
 }
 
+/// Off-loop variant of [`show_mmp`]: renders from the tick-published
+/// [`EntitySnapshot`](super::snapshot::EntitySnapshot) mmp tables (display
+/// names and trend labels resolved at publish time). Output is byte-identical
+/// to [`show_mmp`].
+pub(crate) fn show_mmp_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let entities = handle.entities();
+
+    let peers: Vec<Value> = entities
+        .mmp_peers
+        .iter()
+        .map(|peer| {
+            let mut link_layer = json!({
+                "loss_rate": peer.loss_rate,
+                "etx": peer.etx,
+                "goodput_bps": peer.goodput_bps,
+            });
+
+            if let Some(smoothed_loss) = peer.smoothed_loss {
+                link_layer["smoothed_loss"] = json!(smoothed_loss);
+            }
+            if let Some(smoothed_etx) = peer.smoothed_etx {
+                link_layer["smoothed_etx"] = json!(smoothed_etx);
+            }
+            if let Some(srtt) = peer.srtt_ms {
+                link_layer["srtt_ms"] = json!(srtt);
+                if let Some(lqi) = peer.lqi {
+                    link_layer["lqi"] = json!(lqi);
+                }
+            }
+
+            if let Some(t) = peer.trends.rtt_trend {
+                link_layer["rtt_trend"] = json!(t);
+            }
+            if let Some(t) = peer.trends.loss_trend {
+                link_layer["loss_trend"] = json!(t);
+            }
+            if let Some(t) = peer.trends.goodput_trend {
+                link_layer["goodput_trend"] = json!(t);
+            }
+            if let Some(t) = peer.trends.jitter_trend {
+                link_layer["jitter_trend"] = json!(t);
+            }
+
+            link_layer["delivery_ratio_forward"] = json!(peer.delivery_ratio_forward);
+            link_layer["delivery_ratio_reverse"] = json!(peer.delivery_ratio_reverse);
+            link_layer["ecn_ce_count"] = json!(peer.ecn_ce_count);
+
+            json!({
+                "peer": hex::encode(peer.peer.as_bytes()),
+                "display_name": peer.display_name,
+                "mode": peer.mode,
+                "link_layer": link_layer,
+            })
+        })
+        .collect();
+
+    let sessions: Vec<Value> = entities
+        .mmp_sessions
+        .iter()
+        .map(|session| {
+            let mut session_layer = json!({
+                "loss_rate": session.loss_rate,
+                "etx": session.etx,
+                "path_mtu": session.path_mtu,
+            });
+
+            if let Some(smoothed_loss) = session.smoothed_loss {
+                session_layer["smoothed_loss"] = json!(smoothed_loss);
+            }
+            if let Some(smoothed_etx) = session.smoothed_etx {
+                session_layer["smoothed_etx"] = json!(smoothed_etx);
+            }
+            if let Some(srtt) = session.srtt_ms {
+                session_layer["srtt_ms"] = json!(srtt);
+                if let Some(sqi) = session.sqi {
+                    session_layer["sqi"] = json!(sqi);
+                }
+            }
+
+            json!({
+                "remote": hex::encode(session.remote.as_bytes()),
+                "display_name": session.display_name,
+                "mode": session.mode,
+                "session_layer": session_layer,
+            })
+        })
+        .collect();
+
+    json!({
+        "peers": peers,
+        "sessions": sessions,
+    })
+}
+
 /// `show_cache` — Coordinate cache stats and entries.
 pub fn show_cache(node: &Node) -> Value {
     let cache = node.coord_cache();
@@ -687,6 +1137,54 @@ pub fn show_cache(node: &Node) -> Value {
     })
 }
 
+/// Off-loop variant of [`show_cache`]: renders from the tick-published
+/// [`RoutingSnapshot`](super::snapshot::RoutingSnapshot) coord-cache view
+/// (display names resolved at publish time). `age_ms` is derived at render
+/// time from the captured `created_at`, exactly as [`show_cache`] computed it,
+/// so the rendered age stays fresh relative to the read. Output is
+/// byte-identical to [`show_cache`].
+pub(crate) fn show_cache_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let routing = handle.routing();
+    let cache = &routing.cache;
+    let now = now_ms();
+
+    let entries: Vec<Value> = cache
+        .entries
+        .iter()
+        .map(|entry| {
+            let fips_addr = crate::identity::FipsAddress::from_node_addr(&entry.node_addr);
+            let coord_path: Vec<String> = entry
+                .coord_path
+                .iter()
+                .map(|a| hex::encode(a.as_bytes()))
+                .collect();
+            let mut entry_json = json!({
+                "node_addr": hex::encode(entry.node_addr.as_bytes()),
+                "display_name": entry.display_name,
+                "ipv6_addr": format!("{}", fips_addr),
+                "depth": entry.depth,
+                "coords": coord_path,
+                "age_ms": now.saturating_sub(entry.created_at),
+                "last_used_ms": entry.last_used_ms,
+            });
+            if let Some(mtu) = entry.path_mtu {
+                entry_json["path_mtu"] = json!(mtu);
+            }
+            entry_json
+        })
+        .collect();
+
+    json!({
+        "count": cache.count,
+        "max_entries": cache.max_entries,
+        "fill_ratio": cache.fill_ratio,
+        "default_ttl_ms": cache.default_ttl_ms,
+        "expired": cache.expired,
+        "avg_age_ms": cache.avg_age_ms,
+        "entries": entries,
+    })
+}
+
 /// `show_connections` — Pending handshakes.
 pub fn show_connections(node: &Node) -> Value {
     let now = now_ms();
@@ -704,6 +1202,40 @@ pub fn show_connections(node: &Node) -> Value {
 
             if let Some(identity) = conn.expected_identity() {
                 conn_json["expected_peer"] = json!(identity.npub());
+            }
+
+            conn_json
+        })
+        .collect();
+
+    json!({ "connections": connections })
+}
+
+/// Off-loop variant of [`show_connections`]: renders from the tick-published
+/// [`EntitySnapshot`](super::snapshot::EntitySnapshot) connection table.
+/// `idle_ms` is derived at render time from the captured `last_activity_ms`,
+/// exactly as [`show_connections`] computed it. Output is byte-identical to
+/// [`show_connections`].
+pub(crate) fn show_connections_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+) -> Value {
+    let entities = handle.entities();
+    let now = now_ms();
+    let connections: Vec<Value> = entities
+        .connections
+        .iter()
+        .map(|conn| {
+            let mut conn_json = json!({
+                "link_id": conn.link_id,
+                "direction": conn.direction,
+                "handshake_state": conn.handshake_state,
+                "started_at_ms": conn.started_at_ms,
+                "idle_ms": now.saturating_sub(conn.last_activity_ms),
+                "resend_count": conn.resend_count,
+            });
+
+            if let Some(expected) = &conn.expected_peer {
+                conn_json["expected_peer"] = json!(expected);
             }
 
             conn_json
@@ -745,6 +1277,50 @@ pub fn show_transports(node: &Node) -> Value {
             }
 
             t_json["stats"] = handle.transport_stats();
+
+            t_json
+        })
+        .collect();
+
+    json!({ "transports": transports })
+}
+
+/// Off-loop variant of [`show_transports`]: renders from the tick-published
+/// [`EntitySnapshot`](super::snapshot::EntitySnapshot) transport table. The
+/// `stats` and `tor_monitoring` blocks are already-projected `serde_json::Value`
+/// data captured at publish time. Output is byte-identical to
+/// [`show_transports`].
+pub(crate) fn show_transports_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let entities = handle.entities();
+    let transports: Vec<Value> = entities
+        .transports
+        .iter()
+        .map(|t| {
+            let mut t_json = json!({
+                "transport_id": t.transport_id,
+                "type": t.transport_type,
+                "state": t.state,
+                "mtu": t.mtu,
+            });
+
+            if let Some(name) = &t.name {
+                t_json["name"] = json!(name);
+            }
+            if let Some(addr) = &t.local_addr {
+                t_json["local_addr"] = json!(addr);
+            }
+
+            if let Some(mode) = &t.tor_mode {
+                t_json["tor_mode"] = json!(mode);
+            }
+            if let Some(onion) = &t.onion_address {
+                t_json["onion_address"] = json!(onion);
+            }
+            if let Some(monitoring) = &t.tor_monitoring {
+                t_json["tor_monitoring"] = monitoring.clone();
+            }
+
+            t_json["stats"] = t.stats.clone();
 
             t_json
         })
@@ -804,6 +1380,62 @@ pub fn show_routing(node: &Node) -> Value {
     })
 }
 
+/// Off-loop variant of [`show_routing`]: renders from the tick-published
+/// [`RoutingSnapshot`](super::snapshot::RoutingSnapshot) (coord-cache count,
+/// identity-cache count, F-queue scalars, pending lookups, retries — display
+/// names resolved at publish time) plus the forwarding / discovery / error /
+/// congestion counter families from the `MetricsRegistry`. `age_ms` is derived
+/// at render time. Output is byte-identical to [`show_routing`].
+pub(crate) fn show_routing_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let routing = handle.routing();
+    let view = &routing.routing;
+    let now = now_ms();
+    let metrics = handle.metrics();
+
+    let lookups: Vec<Value> = view
+        .pending_lookups
+        .iter()
+        .map(|lookup| {
+            json!({
+                "target": hex::encode(lookup.target.as_bytes()),
+                "display_name": lookup.display_name,
+                "initiated_ms": lookup.initiated_ms,
+                "last_sent_ms": lookup.last_sent_ms,
+                "attempt": lookup.attempt,
+                "age_ms": now.saturating_sub(lookup.initiated_ms),
+            })
+        })
+        .collect();
+
+    let retries: Vec<Value> = view
+        .retries
+        .iter()
+        .map(|state| {
+            json!({
+                "node_addr": hex::encode(state.node_addr.as_bytes()),
+                "display_name": state.display_name,
+                "retry_count": state.retry_count,
+                "retry_after_ms": state.retry_after_ms,
+                "auto_reconnect": state.auto_reconnect,
+            })
+        })
+        .collect();
+
+    json!({
+        "coord_cache_entries": routing.cache.count,
+        "identity_cache_entries": routing.identity.entries.len(),
+        "pending_lookups": lookups,
+        "pending_tun_destinations": view.pending_tun_destinations,
+        "pending_tun_packets": view.pending_tun_packets,
+        "recent_requests": view.recent_requests,
+        "retries": retries,
+        "forwarding": serde_json::to_value(metrics.forwarding.snapshot()).unwrap_or_default(),
+        "discovery": serde_json::to_value(metrics.discovery.snapshot()).unwrap_or_default(),
+        "error_signals": serde_json::to_value(metrics.errors.snapshot()).unwrap_or_default(),
+        "congestion": serde_json::to_value(metrics.congestion.snapshot()).unwrap_or_default(),
+    })
+}
+
 /// `show_identity_cache` — Known node identities.
 ///
 /// Lists every node whose public key has been cached by this daemon.
@@ -833,6 +1465,41 @@ pub fn show_identity_cache(node: &Node) -> Value {
         "entries": entries,
         "count": count,
         "max_entries": node.identity_cache_max(),
+    })
+}
+
+/// Off-loop variant of [`show_identity_cache`]: renders from the tick-published
+/// [`RoutingSnapshot`](super::snapshot::RoutingSnapshot) identity view (npub /
+/// ipv6 / display name resolved at publish time). `age_ms` is derived at render
+/// time from the captured `last_seen_ms`, exactly as [`show_identity_cache`]
+/// computed it. Output is byte-identical to [`show_identity_cache`].
+pub(crate) fn show_identity_cache_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+) -> Value {
+    let routing = handle.routing();
+    let identity = &routing.identity;
+    let now = now_ms();
+
+    let entries: Vec<Value> = identity
+        .entries
+        .iter()
+        .map(|entry| {
+            json!({
+                "node_addr": hex::encode(entry.node_addr.as_bytes()),
+                "npub": entry.npub,
+                "display_name": entry.display_name,
+                "ipv6_addr": entry.ipv6_addr,
+                "last_seen_ms": entry.last_seen_ms,
+                "age_ms": now.saturating_sub(entry.last_seen_ms),
+            })
+        })
+        .collect();
+    let count = entries.len();
+
+    json!({
+        "entries": entries,
+        "count": count,
+        "max_entries": identity.max_entries,
     })
 }
 
@@ -1242,6 +1909,66 @@ pub fn show_stats_peers(node: &Node) -> Value {
     json!({ "peers": peers, "count": peers.len() })
 }
 
+/// Off-loop variant of [`show_stats_peers`]: renders from the tick-published
+/// [`StatsSnapshot`](super::snapshot::StatsSnapshot). The lifecycle timestamps
+/// (`first_seen` / `last_contact`) and the tracked-peer set come from the
+/// snapshot's `history` rings; the cross-subsystem fields (`is_active`, npub,
+/// display name) come from the per-peer `peer_meta` resolved at publish time.
+/// The `*_secs_ago` deltas are derived at render time from the captured
+/// `Instant`s, exactly as [`show_stats_peers`] computed them. Output is
+/// byte-identical to [`show_stats_peers`].
+pub(crate) fn show_stats_peers_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+) -> Value {
+    let stats = handle.stats();
+    let hist = &stats.history;
+    let meta = &stats.peer_meta;
+    let now = std::time::Instant::now();
+
+    let mut peers: Vec<Value> = hist
+        .peers()
+        .map(|(addr, rings)| {
+            let last_contact_secs = now.duration_since(rings.last_contact()).as_secs();
+            let first_seen_secs = now.duration_since(rings.first_seen()).as_secs();
+            let (is_active, npub, display_name) = match meta.get(addr) {
+                Some(m) => (m.is_active, m.npub.clone(), m.display_name.clone()),
+                None => (false, hex::encode(addr.as_bytes()), addr.short_hex()),
+            };
+            json!({
+                "npub": npub,
+                "node_addr": hex::encode(addr.as_bytes()),
+                "display_name": display_name,
+                "is_active": is_active,
+                "first_seen_secs_ago": first_seen_secs,
+                "last_contact_secs_ago": last_contact_secs,
+            })
+        })
+        .collect();
+
+    // Stable display order: active peers first, then by display name.
+    peers.sort_by(|a, b| {
+        let a_active = a
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let b_active = b
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match (b_active, a_active) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => a
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("display_name").and_then(|v| v.as_str()).unwrap_or("")),
+        }
+    });
+
+    json!({ "peers": peers, "count": peers.len() })
+}
+
 /// `show_stats_history_all_peers` — One metric across every tracked
 /// peer in one round trip. Backs the fipstop MetricByPeer grid view.
 ///
@@ -1294,6 +2021,100 @@ pub fn show_stats_history_all_peers(
             Some(json!({
                 "node_addr": hex::encode(addr.as_bytes()),
                 "display_name": node.peer_display_name(addr),
+                "is_active": is_active,
+                "values": serde_json::to_value(&s.values).unwrap_or(Value::Null),
+            }))
+        })
+        .collect();
+
+    // Active peers first, then by display name.
+    peers.sort_by(|a, b| {
+        let a_active = a
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let b_active = b
+            .get("is_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match (b_active, a_active) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => a
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("display_name").and_then(|v| v.as_str()).unwrap_or("")),
+        }
+    });
+
+    Response::ok(json!({
+        "metric": metric.name(),
+        "unit": metric.unit(),
+        "granularity_seconds": granularity.seconds(),
+        "window_seconds": window.as_secs(),
+        "peers": peers,
+    }))
+}
+
+/// Off-loop variant of [`show_stats_history_all_peers`]: serves one per-peer
+/// metric across every tracked peer from the tick-published
+/// [`StatsSnapshot`](super::snapshot::StatsSnapshot). The per-peer rings and
+/// tracked-peer set come from the snapshot's `history`; `is_active` and the
+/// display name come from the per-peer `peer_meta` resolved at publish time.
+/// Output is byte-identical to [`show_stats_history_all_peers`].
+pub(crate) fn show_stats_history_all_peers_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+    params: Option<&Value>,
+) -> super::protocol::Response {
+    use super::protocol::Response;
+    let Some(params) = params else {
+        return Response::error("missing params for show_stats_history_all_peers");
+    };
+
+    let metric_name = match params.get("metric").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return Response::error("missing 'metric' parameter"),
+    };
+    let metric = match PeerMetric::from_str(metric_name) {
+        Ok(m) => m,
+        Err(e) => return Response::error(e),
+    };
+
+    let window_str = params
+        .get("window")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10m");
+    let window = match parse_duration(window_str) {
+        Ok(d) => d,
+        Err(e) => return Response::error(e),
+    };
+
+    let granularity_str = params
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1s");
+    let granularity = match Granularity::from_str(granularity_str) {
+        Ok(g) => g,
+        Err(e) => return Response::error(e),
+    };
+
+    let stats = handle.stats();
+    let hist = &stats.history;
+    let meta = &stats.peer_meta;
+    let peer_addrs: Vec<NodeAddr> = hist.peer_addrs().copied().collect();
+
+    let mut peers: Vec<Value> = peer_addrs
+        .iter()
+        .filter_map(|addr| {
+            let s = hist.peer_query(addr, metric, window, granularity)?;
+            let (is_active, display_name) = match meta.get(addr) {
+                Some(m) => (m.is_active, m.display_name.clone()),
+                None => (false, addr.short_hex()),
+            };
+            Some(json!({
+                "node_addr": hex::encode(addr.as_bytes()),
+                "display_name": display_name,
                 "is_active": is_active,
                 "values": serde_json::to_value(&s.values).unwrap_or(Value::Null),
             }))
@@ -1402,31 +2223,14 @@ pub(crate) fn show_metrics_from_handle(handle: &super::read_handle::ControlReadH
     })
 }
 
-/// Dispatch a command string to the appropriate query function.
-pub fn dispatch(node: &Node, command: &str, params: Option<&Value>) -> super::protocol::Response {
-    match command {
-        "show_acl" => super::protocol::Response::ok(show_acl(node)),
-        "show_status" => super::protocol::Response::ok(show_status(node)),
-        "show_peers" => super::protocol::Response::ok(show_peers(node)),
-        "show_links" => super::protocol::Response::ok(show_links(node)),
-        "show_tree" => super::protocol::Response::ok(show_tree(node)),
-        "show_sessions" => super::protocol::Response::ok(show_sessions(node)),
-        "show_bloom" => super::protocol::Response::ok(show_bloom(node)),
-        "show_mmp" => super::protocol::Response::ok(show_mmp(node)),
-        "show_cache" => super::protocol::Response::ok(show_cache(node)),
-        "show_connections" => super::protocol::Response::ok(show_connections(node)),
-        "show_transports" => super::protocol::Response::ok(show_transports(node)),
-        "show_routing" => super::protocol::Response::ok(show_routing(node)),
-        "show_identity_cache" => super::protocol::Response::ok(show_identity_cache(node)),
-        "show_listening_sockets" => super::protocol::Response::ok(show_listening_sockets(node)),
-        "show_stats_list" => super::protocol::Response::ok(show_stats_list()),
-        "show_stats_history" => show_stats_history(node, params),
-        "show_stats_all_history" => show_stats_all_history(node, params),
-        "show_stats_peers" => super::protocol::Response::ok(show_stats_peers(node)),
-        "show_stats_history_all_peers" => show_stats_history_all_peers(node, params),
-        _ => super::protocol::Response::error(format!("unknown command: {}", command)),
-    }
-}
+// No on-loop `show_*` dispatcher remains: every pure-read query is served
+// off-loop from the read handle via
+// [`snapshot_dispatch`](super::read_handle::snapshot_dispatch) in the control
+// accept task, and the rx_loop's control path now carries only the mutating
+// COMMAND handlers (`connect` / `disconnect`) in
+// [`crate::control::commands::dispatch`]. The on-loop `show_*` functions above
+// are retained as the byte-identity oracle the snapshot tests compare each
+// off-loop renderer against.
 
 #[cfg(test)]
 mod tests {
@@ -1748,54 +2552,116 @@ mod tests {
         assert_snapshot("show_stats_history_all_peers", &render_response(resp));
     }
 
-    /// Sanity check: every handler advertised in `dispatch` is also
-    /// covered by a snapshot test above. If a new handler is added
-    /// without a matching snapshot, this test fails.
+    /// The five Category-D queries cut over to off-loop serving in R3. Served
+    /// via `snapshot_dispatch`; coverage asserted in
+    /// `snapshot_dispatch_serves_category_d_queries` below.
+    const OFF_LOOP_CATEGORY_D: &[&str] = &[
+        "show_tree",
+        "show_bloom",
+        "show_cache",
+        "show_routing",
+        "show_identity_cache",
+    ];
+
+    /// The six Category-E queries cut over to off-loop serving in R4. Served via
+    /// `snapshot_dispatch`; coverage asserted in
+    /// `snapshot_dispatch_serves_category_e_queries`.
+    const OFF_LOOP_CATEGORY_E: &[&str] = &[
+        "show_peers",
+        "show_sessions",
+        "show_links",
+        "show_connections",
+        "show_transports",
+        "show_mmp",
+    ];
+
+    /// Milestone-completion contract: every pure-read `show_*` query is served
+    /// off-loop via `snapshot_dispatch`, and the rx_loop control path carries no
+    /// `show_*` arm at all — only the mutating COMMAND handlers (`connect` /
+    /// `disconnect`) reach it. This test enumerates the full read surface and
+    /// asserts each renders off-loop, then asserts the mutations do NOT.
     #[test]
-    fn dispatch_covers_all_snapshotted_handlers() {
-        let expected = [
-            "show_status",
-            "show_acl",
-            "show_peers",
-            "show_links",
-            "show_tree",
-            "show_sessions",
-            "show_bloom",
-            "show_mmp",
-            "show_cache",
-            "show_connections",
-            "show_transports",
-            "show_routing",
-            "show_identity_cache",
-            "show_listening_sockets",
-            "show_stats_list",
-            "show_stats_history",
-            "show_stats_all_history",
-            "show_stats_peers",
-            "show_stats_history_all_peers",
+    fn snapshot_dispatch_serves_every_read_query() {
+        use super::super::protocol::Request;
+        use super::super::read_handle::snapshot_dispatch;
+
+        let mut node = build_test_node();
+        // Publish every snapshot from the tick before reading.
+        node.record_stats_history();
+        let handle = node.control_read_handle();
+
+        // The complete pure-read `show_*` surface, with params where required.
+        let read_queries: &[(&str, Option<Value>)] = &[
+            ("show_status", None),
+            ("show_acl", None),
+            ("show_listening_sockets", None),
+            ("show_metrics", None),
+            ("show_stats_list", None),
+            (
+                "show_stats_history",
+                Some(json!({ "metric": "mesh_size", "window": "10s", "granularity": "1s" })),
+            ),
+            (
+                "show_stats_all_history",
+                Some(json!({ "window": "10s", "granularity": "1s" })),
+            ),
+            ("show_stats_peers", None),
+            (
+                "show_stats_history_all_peers",
+                Some(json!({ "metric": "srtt_ms", "window": "10s", "granularity": "1s" })),
+            ),
+            ("show_tree", None),
+            ("show_bloom", None),
+            ("show_cache", None),
+            ("show_routing", None),
+            ("show_identity_cache", None),
+            ("show_peers", None),
+            ("show_sessions", None),
+            ("show_links", None),
+            ("show_connections", None),
+            ("show_transports", None),
+            ("show_mmp", None),
         ];
-        assert_eq!(expected.len(), 19, "expected exactly 19 query handlers");
-        let node = build_test_node();
-        for cmd in expected {
-            // Each must dispatch successfully (status == "ok") with
-            // minimal params. Handlers requiring params get them.
-            let params = match cmd {
-                "show_stats_history" => Some(json!({
-                    "metric": "mesh_size", "window": "10s", "granularity": "1s"
-                })),
-                "show_stats_all_history" => Some(json!({ "window": "10s", "granularity": "1s" })),
-                "show_stats_history_all_peers" => Some(json!({
-                    "metric": "srtt_ms", "window": "10s", "granularity": "1s"
-                })),
-                _ => None,
+        for (cmd, params) in read_queries {
+            let req = Request {
+                command: cmd.to_string(),
+                params: params.clone(),
             };
-            let resp = dispatch(&node, cmd, params.as_ref());
-            assert_eq!(
-                resp.status, "ok",
-                "dispatch({cmd}) returned status={} message={:?}",
-                resp.status, resp.message
+            let resp = snapshot_dispatch(&req, &handle)
+                .unwrap_or_else(|| panic!("{cmd} must be served off-loop"));
+            assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
+        }
+
+        // Mutations are NOT served off-loop; they take the rx_loop COMMAND path.
+        for cmd in ["connect", "disconnect"] {
+            let req = Request {
+                command: cmd.to_string(),
+                params: None,
+            };
+            assert!(
+                snapshot_dispatch(&req, &handle).is_none(),
+                "{cmd} must fall through to the rx_loop command path"
             );
         }
+    }
+
+    /// Structural confirmation that the rx_loop no longer dispatches `show_*`:
+    /// the rx_loop source carries no `queries::dispatch` call and no
+    /// `starts_with("show_")` routing branch. Reads the committed source of
+    /// `src/node/handlers/rx_loop.rs` and asserts both markers are absent. This
+    /// is the milestone's "remove `show_*` from the data-plane dispatch path"
+    /// invariant, guarded against regression.
+    #[test]
+    fn rx_loop_has_no_show_dispatch() {
+        let src = include_str!("../node/handlers/rx_loop.rs");
+        assert!(
+            !src.contains("queries::dispatch"),
+            "rx_loop must not call queries::dispatch (show_* served off-loop)"
+        );
+        assert!(
+            !src.contains("starts_with(\"show_\")"),
+            "rx_loop must not branch on a show_* command prefix"
+        );
     }
 
     // ---- off-loop (snapshot_dispatch) coverage ---------------------------
@@ -1847,11 +2713,13 @@ mod tests {
         }
     }
 
-    /// The three R1 cutover queries are served off-loop via
-    /// `snapshot_dispatch`; everything else (state-bearing queries,
-    /// mutations) returns `None` and falls through to the rx_loop path.
+    /// The R1/R2 scalar-and-series queries are served off-loop via
+    /// `snapshot_dispatch`; mutations return `None` and take the rx_loop COMMAND
+    /// path. (`show_stats_peers` / `show_stats_history_all_peers`, formerly
+    /// asserted on-loop here, were cut over in R5 — see
+    /// `snapshot_dispatch_serves_every_read_query` for the full read surface.)
     #[test]
-    fn snapshot_dispatch_serves_only_cutover_queries() {
+    fn snapshot_dispatch_serves_scalar_and_series_queries() {
         use super::super::protocol::Request;
         use super::super::read_handle::snapshot_dispatch;
 
@@ -1883,6 +2751,12 @@ mod tests {
                 "show_stats_all_history",
                 Some(json!({ "window": "10s", "granularity": "1s" })),
             ),
+            // R3 Category-D cutover.
+            ("show_tree", None),
+            ("show_bloom", None),
+            ("show_cache", None),
+            ("show_routing", None),
+            ("show_identity_cache", None),
         ];
         for (cmd, params) in off_loop {
             let resp = snapshot_dispatch(&req_params(cmd, params), &handle)
@@ -1890,20 +2764,67 @@ mod tests {
             assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
         }
 
-        // Still on the rx_loop path: state-bearing queries that need live
-        // peer membership / npub, and all mutations.
-        for cmd in [
-            "show_peers",
-            "show_stats_peers",
-            "show_stats_history_all_peers",
-            "connect",
-            "disconnect",
-        ] {
+        // Mutations take the rx_loop COMMAND path.
+        for cmd in ["connect", "disconnect"] {
             assert!(
                 snapshot_dispatch(&req(cmd), &handle).is_none(),
-                "{cmd} must fall through to the rx_loop path"
+                "{cmd} must fall through to the rx_loop command path"
             );
         }
+    }
+
+    /// R5 cutover + byte-identity: after a `record_stats_history()` tick the
+    /// off-loop `show_acl` / `show_stats_peers` / `show_stats_history_all_peers`
+    /// renders each equal their on-loop oracle byte-for-byte, and all three are
+    /// served off-loop via `snapshot_dispatch`.
+    #[test]
+    fn snapshot_dispatch_serves_r5_queries() {
+        use super::super::protocol::Request;
+        use super::super::read_handle::snapshot_dispatch;
+
+        let mut node = build_test_node();
+        node.record_stats_history();
+        let handle = node.control_read_handle();
+
+        // All three served off-loop (return Some, status ok).
+        let cases: &[(&str, Option<Value>)] = &[
+            ("show_acl", None),
+            ("show_stats_peers", None),
+            (
+                "show_stats_history_all_peers",
+                Some(json!({ "metric": "srtt_ms", "window": "10s", "granularity": "1s" })),
+            ),
+        ];
+        for (cmd, params) in cases {
+            let req = Request {
+                command: cmd.to_string(),
+                params: params.clone(),
+            };
+            let resp = snapshot_dispatch(&req, &handle)
+                .unwrap_or_else(|| panic!("{cmd} must be served off-loop"));
+            assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
+        }
+
+        // Byte-identity vs the on-loop oracle.
+        assert_eq!(
+            render(show_acl(&node)),
+            render(show_acl_from_handle(&handle)),
+            "off-loop show_acl must match on-loop output"
+        );
+        assert_eq!(
+            render(show_stats_peers(&node)),
+            render(show_stats_peers_from_handle(&handle)),
+            "off-loop show_stats_peers must match on-loop output"
+        );
+        let params = json!({ "metric": "srtt_ms", "window": "10s", "granularity": "1s" });
+        assert_eq!(
+            render_response(show_stats_history_all_peers(&node, Some(&params))),
+            render_response(show_stats_history_all_peers_from_handle(
+                &handle,
+                Some(&params)
+            )),
+            "off-loop show_stats_history_all_peers must match on-loop output"
+        );
     }
 
     /// The tick-published `StatsSnapshot` reflects node state: after a
@@ -1938,6 +2859,8 @@ mod tests {
         assert_eq!(snap.connection_count, node.connection_count());
         assert_eq!(snap.estimated_mesh_size, node.estimated_mesh_size());
         assert_eq!(snap.effective_ipv6_mtu, node.effective_ipv6_mtu());
+        // R5: the ACL status projection matches the node's live ACL status.
+        assert_eq!(snap.acl_status, node.peer_acl_status());
 
         // Off-loop render must equal the on-loop render byte-for-byte.
         let on_loop = render(show_status(&node));
@@ -1945,6 +2868,241 @@ mod tests {
         assert_eq!(
             on_loop, off_loop,
             "off-loop show_status must match on-loop output"
+        );
+    }
+
+    /// The five Category-D queries are served off-loop via `snapshot_dispatch`
+    /// (return `Some` with status ok); everything not cut over stays on the
+    /// rx_loop path (`None`).
+    #[test]
+    fn snapshot_dispatch_serves_category_d_queries() {
+        use super::super::protocol::Request;
+        use super::super::read_handle::snapshot_dispatch;
+
+        let mut node = build_test_node();
+        // Publish the routing snapshot from its tick before reading it.
+        node.record_stats_history();
+        let handle = node.control_read_handle();
+
+        let req = |command: &str| Request {
+            command: command.to_string(),
+            params: None,
+        };
+
+        for cmd in OFF_LOOP_CATEGORY_D {
+            let resp = snapshot_dispatch(&req(cmd), &handle)
+                .unwrap_or_else(|| panic!("{cmd} must be served off-loop"));
+            assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
+        }
+
+        // Mutations take the rx_loop COMMAND path. (Every read query, including
+        // the per-peer stats-series queries, is served off-loop as of R5.)
+        for cmd in ["connect", "disconnect"] {
+            assert!(
+                snapshot_dispatch(&req(cmd), &handle).is_none(),
+                "{cmd} must fall through to the rx_loop command path"
+            );
+        }
+    }
+
+    /// The tick-published `RoutingSnapshot` reflects node state, and each
+    /// off-loop Category-D render equals its on-loop render byte-for-byte
+    /// (modulo the volatile-key redaction the wire-schema tests already apply).
+    #[test]
+    fn routing_snapshot_matches_on_loop_after_tick() {
+        let mut node = build_test_node();
+
+        // Before any tick the seeded routing snapshot is empty.
+        let handle = node.control_read_handle();
+        assert!(
+            handle.routing().tree.peers.is_empty(),
+            "seed routing snapshot has no tree peers before first tick"
+        );
+
+        // Advance one tick (the publisher site).
+        node.record_stats_history();
+        let handle = node.control_read_handle();
+
+        // Snapshot reflects the node's own tree identity.
+        let routing = handle.routing();
+        assert_eq!(
+            routing.tree.my_node_addr,
+            *node.node_addr(),
+            "routing snapshot tree identity reflects the node"
+        );
+        assert_eq!(
+            routing.identity.max_entries,
+            node.identity_cache_max(),
+            "routing snapshot carries the identity-cache capacity"
+        );
+        drop(routing);
+
+        // Each off-loop render must equal the on-loop render byte-for-byte.
+        assert_eq!(
+            render(show_tree(&node)),
+            render(show_tree_from_handle(&handle)),
+            "off-loop show_tree must match on-loop output"
+        );
+        assert_eq!(
+            render(show_bloom(&node)),
+            render(show_bloom_from_handle(&handle)),
+            "off-loop show_bloom must match on-loop output"
+        );
+        assert_eq!(
+            render(show_cache(&node)),
+            render(show_cache_from_handle(&handle)),
+            "off-loop show_cache must match on-loop output"
+        );
+        assert_eq!(
+            render(show_routing(&node)),
+            render(show_routing_from_handle(&handle)),
+            "off-loop show_routing must match on-loop output"
+        );
+        assert_eq!(
+            render(show_identity_cache(&node)),
+            render(show_identity_cache_from_handle(&handle)),
+            "off-loop show_identity_cache must match on-loop output"
+        );
+    }
+
+    // ---- R4 Category-E coverage ------------------------------------------
+
+    /// The six Category-E queries are served off-loop via `snapshot_dispatch`
+    /// (return `Some` with status ok); mutations take the rx_loop COMMAND path.
+    #[test]
+    fn snapshot_dispatch_serves_category_e_queries() {
+        use super::super::protocol::Request;
+        use super::super::read_handle::snapshot_dispatch;
+
+        let mut node = build_test_node();
+        // Publish the entity snapshot from its tick before reading it.
+        node.record_stats_history();
+        let handle = node.control_read_handle();
+
+        let req = |command: &str| Request {
+            command: command.to_string(),
+            params: None,
+        };
+
+        for cmd in OFF_LOOP_CATEGORY_E {
+            let resp = snapshot_dispatch(&req(cmd), &handle)
+                .unwrap_or_else(|| panic!("{cmd} must be served off-loop"));
+            assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
+        }
+
+        // Mutations take the rx_loop COMMAND path. (Every read query is served
+        // off-loop as of R5.)
+        for cmd in ["connect", "disconnect"] {
+            assert!(
+                snapshot_dispatch(&req(cmd), &handle).is_none(),
+                "{cmd} must fall through to the rx_loop command path"
+            );
+        }
+    }
+
+    /// Freshness + fidelity: after a `record_stats_history()` tick (the entity
+    /// publisher site) each off-loop Category-E render equals its on-loop render
+    /// byte-for-byte, and the seeded snapshot is empty before the first tick.
+    #[test]
+    fn entity_snapshot_matches_on_loop_after_tick() {
+        let mut node = build_test_node();
+
+        // Before any tick the seeded entity snapshot is empty.
+        let handle = node.control_read_handle();
+        assert!(
+            handle.entities().peers.is_empty(),
+            "seed entity snapshot has no peers before first tick"
+        );
+
+        // Advance one tick (the publisher site).
+        node.record_stats_history();
+        let handle = node.control_read_handle();
+
+        // Each off-loop render must equal the on-loop render byte-for-byte.
+        assert_eq!(
+            render(show_peers(&node)),
+            render(show_peers_from_handle(&handle)),
+            "off-loop show_peers must match on-loop output"
+        );
+        assert_eq!(
+            render(show_sessions(&node)),
+            render(show_sessions_from_handle(&handle)),
+            "off-loop show_sessions must match on-loop output"
+        );
+        assert_eq!(
+            render(show_links(&node)),
+            render(show_links_from_handle(&handle)),
+            "off-loop show_links must match on-loop output"
+        );
+        assert_eq!(
+            render(show_connections(&node)),
+            render(show_connections_from_handle(&handle)),
+            "off-loop show_connections must match on-loop output"
+        );
+        assert_eq!(
+            render(show_transports(&node)),
+            render(show_transports_from_handle(&handle)),
+            "off-loop show_transports must match on-loop output"
+        );
+        assert_eq!(
+            render(show_mmp(&node)),
+            render(show_mmp_from_handle(&handle)),
+            "off-loop show_mmp must match on-loop output"
+        );
+    }
+
+    /// Structural sharing (the R4 umbrella mandate): a republish in which only
+    /// one row changed re-allocates only that one `Arc<Row>` — every unchanged
+    /// row is reused by pointer (`Arc::ptr_eq`). Exercises
+    /// [`reconcile_rows`](super::super::snapshot::reconcile_rows), the
+    /// `Vec<Arc<Row>>` reconciliation the per-tick publisher uses for every
+    /// entity table.
+    #[test]
+    fn entity_snapshot_structural_sharing() {
+        use super::super::snapshot::{LinkRow, LinkStats, reconcile_rows};
+
+        let mk = |link_id: u64, bytes_recv: u64| LinkRow {
+            link_id,
+            transport_id: 1,
+            remote_addr: "0.0.0.0:0".to_string(),
+            direction: "outbound".to_string(),
+            state: "up".to_string(),
+            created_at_ms: 1000,
+            stats: LinkStats {
+                packets_sent: 0,
+                packets_recv: 0,
+                bytes_sent: 0,
+                bytes_recv,
+                last_recv_ms: 0,
+            },
+        };
+
+        // First publish: two distinct rows, both freshly allocated.
+        let prev = reconcile_rows::<LinkRow, _, _>(&[], vec![mk(1, 10), mk(2, 20)], |r| r.link_id);
+        assert_eq!(prev.len(), 2);
+
+        // Second publish: row 1 unchanged, row 2 changed (bytes_recv differs).
+        let next = reconcile_rows(&prev, vec![mk(1, 10), mk(2, 999)], |r| r.link_id);
+        assert_eq!(next.len(), 2);
+
+        // The unchanged row is the SAME Arc (reused by pointer).
+        assert!(
+            std::sync::Arc::ptr_eq(&prev[0], &next[0]),
+            "unchanged row must be reused by pointer (structural sharing)"
+        );
+        // The changed row is a fresh allocation.
+        assert!(
+            !std::sync::Arc::ptr_eq(&prev[1], &next[1]),
+            "changed row must be re-allocated"
+        );
+        assert_eq!(next[1].stats.bytes_recv, 999);
+
+        // A republish with no changes reuses every row.
+        let again = reconcile_rows(&next, vec![mk(1, 10), mk(2, 999)], |r| r.link_id);
+        assert!(
+            std::sync::Arc::ptr_eq(&next[0], &again[0])
+                && std::sync::Arc::ptr_eq(&next[1], &again[1]),
+            "an unchanged republish must reuse every row Arc"
         );
     }
 }

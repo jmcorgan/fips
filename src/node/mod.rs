@@ -4,7 +4,7 @@
 //! holds all state required for mesh routing: identity, tree state,
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
-mod acl;
+pub(crate) mod acl;
 mod bloom;
 pub(crate) mod context;
 #[cfg(unix)]
@@ -412,6 +412,21 @@ pub struct Node {
     /// live mutable `stats_history` above stays on the tick.
     stats_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::StatsSnapshot>>,
 
+    /// Read-side snapshot of the Category-D derived/routing/cache subsystems
+    /// (tree / bloom / coord cache / identity cache + F-queue scalars) that the
+    /// `show_tree` / `show_bloom` / `show_cache` / `show_routing` /
+    /// `show_identity_cache` queries render off the rx_loop. Published from the
+    /// tick (see [`Self::publish_routing_snapshot`] for the Q1 rationale).
+    routing_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::RoutingSnapshot>>,
+
+    /// Read-side snapshot of the Category-E per-entity tables (peers / sessions
+    /// / links / connections / transports + mmp) that the `show_peers` /
+    /// `show_sessions` / `show_links` / `show_connections` / `show_transports`
+    /// / `show_mmp` queries render off the rx_loop. Published from the tick with
+    /// `Vec<Arc<Row>>` structural sharing (unchanged rows reused by pointer);
+    /// see [`Self::publish_entities_snapshot`] for the Q1 rationale.
+    entities_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::EntitySnapshot>>,
+
     // === TUN Interface ===
     /// TUN device state.
     tun_state: TunState,
@@ -685,6 +700,12 @@ impl Node {
             stats_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::control::snapshot::StatsSnapshot::empty(),
             )),
+            routing_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::RoutingSnapshot::empty(),
+            )),
+            entities_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::EntitySnapshot::empty(),
+            )),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -841,6 +862,12 @@ impl Node {
             stats_history: stats_history::StatsHistory::new(),
             stats_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::control::snapshot::StatsSnapshot::empty(),
+            )),
+            routing_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::RoutingSnapshot::empty(),
+            )),
+            entities_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::EntitySnapshot::empty(),
             )),
             tun_state,
             tun_name: None,
@@ -1435,6 +1462,8 @@ impl Node {
             self.context.clone(),
             self.metrics.clone(),
             self.stats_snapshot.clone(),
+            self.routing_snapshot.clone(),
+            self.entities_snapshot.clone(),
         )
     }
 
@@ -1508,6 +1537,30 @@ impl Node {
         // it is published only here, not in a monolithic per-tick rebuild of
         // every query (Q1-c). It also is not gated behind any slow I/O on the
         // tick the way the abandoned 2edc8a1 republish was.
+        // Per-stats-history-peer metadata (R5). `show_stats_peers` /
+        // `show_stats_history_all_peers` need each tracked peer's live
+        // membership (`is_active`), resolved npub, and display name — all
+        // cross-subsystem reads against the live peer table and host map,
+        // available only here with `&self`. The lifecycle timestamps and
+        // metric rings the renderers also read live in `history` (the dual-ring
+        // read copy above), so this map carries only the resolved fields.
+        let peer_meta: HashMap<NodeAddr, crate::control::snapshot::StatsPeerMeta> = self
+            .stats_history
+            .peer_addrs()
+            .copied()
+            .map(|addr| {
+                let live = self.peers.get(&addr);
+                let meta = crate::control::snapshot::StatsPeerMeta {
+                    is_active: live.is_some(),
+                    npub: live
+                        .map(|p| p.npub())
+                        .unwrap_or_else(|| hex::encode(addr.as_bytes())),
+                    display_name: self.peer_display_name(&addr),
+                };
+                (addr, meta)
+            })
+            .collect();
+
         let snapshot = crate::control::snapshot::StatsSnapshot {
             history: std::sync::Arc::new(self.stats_history.clone()),
             estimated_mesh_size: self.estimated_mesh_size,
@@ -1521,8 +1574,511 @@ impl Node {
             transport_count: self.transports.len(),
             session_count: self.sessions.len(),
             peer_aliases: std::sync::Arc::new(self.peer_aliases.clone()),
+            acl_status: self.peer_acl_status(),
+            peer_meta: std::sync::Arc::new(peer_meta),
         };
         self.stats_snapshot.store(std::sync::Arc::new(snapshot));
+
+        // Publish the Category-D routing read view alongside the stats
+        // snapshot, from the same tick.
+        self.publish_routing_snapshot();
+
+        // Publish the Category-E per-entity read view from the same tick, with
+        // `Vec<Arc<Row>>` structural sharing against the previous snapshot.
+        self.publish_entities_snapshot();
+    }
+
+    /// Project the Category-D derived/routing/cache state into a
+    /// [`RoutingSnapshot`](crate::control::snapshot::RoutingSnapshot) and
+    /// publish it via `ArcSwap`, so `show_tree` / `show_bloom` / `show_cache`
+    /// / `show_routing` / `show_identity_cache` render off the rx_loop.
+    ///
+    /// **Q1 publisher placement.** The four projected subsystems (tree / bloom
+    /// / coord cache / identity cache) mutate at dozens of scattered handler
+    /// sites, and every projected row carries a *display name* resolved against
+    /// the live peer/session tables and host map — state reachable only with
+    /// `&Node`. Per-mutator on-change publication (Q1-a) would therefore be
+    /// large, error-prone surgery, and each call would still need `&Node` to
+    /// resolve names across subsystem boundaries. So this projection is
+    /// published from the tick — the documented acceptable interim (the spec's
+    /// "publish from the tick" allowance, mirroring R2's stats publish). The
+    /// tick is the one site with coherent `&Node` access to resolve every
+    /// display name together. A single combined cell is the natural shape
+    /// because there is exactly one publisher, so the multi-mutator
+    /// whole-snapshot-rebuild hazard Q1-c warns against does not arise.
+    ///
+    /// The snapshot holds typed rows + scalars (Q1-d data, not rendered
+    /// responses); the counter-family `stats` blocks the queries also emit are
+    /// served from the `MetricsRegistry` (already `Arc`-shared) at render time.
+    fn publish_routing_snapshot(&self) {
+        use crate::control::snapshot as snap;
+
+        let now = Self::now_ms();
+
+        // --- tree (show_tree) ---
+        let tree = self.tree_state();
+        let my_coords = tree.my_coords();
+        let tree_peers: Vec<snap::TreePeerRow> = tree
+            .peer_ids()
+            .map(|peer_id| {
+                let coords = tree
+                    .peer_coords(peer_id)
+                    .map(|coords| snap::TreePeerCoords {
+                        depth: coords.depth(),
+                        root: *coords.root_id(),
+                        coord_path: coords.entries().iter().map(|e| e.node_addr).collect(),
+                        distance_to_us: my_coords.distance_to(coords),
+                    });
+                snap::TreePeerRow {
+                    node_addr: *peer_id,
+                    display_name: self.peer_display_name(peer_id),
+                    coords,
+                }
+            })
+            .collect();
+        let parent_addr = my_coords.parent_id();
+        let tree_view = snap::TreeView {
+            my_node_addr: *tree.my_node_addr(),
+            root: *tree.root(),
+            is_root: tree.is_root(),
+            depth: my_coords.depth(),
+            my_coords: my_coords.entries().iter().map(|e| e.node_addr).collect(),
+            parent: *parent_addr,
+            parent_display_name: self.peer_display_name(parent_addr),
+            declaration_sequence: tree.my_declaration().sequence(),
+            declaration_signed: tree.my_declaration().is_signed(),
+            peer_tree_count: tree.peer_count(),
+            peers: tree_peers,
+        };
+
+        // --- bloom (show_bloom) ---
+        let bloom = self.bloom_state();
+        let max_inbound_fpr = self.config().node.bloom.max_inbound_fpr;
+        let bloom_peers: Vec<snap::BloomPeerRow> = self
+            .peers()
+            .map(|peer| {
+                let addr = *peer.node_addr();
+                let filter = peer.inbound_filter().map(|f| snap::BloomPeerFilter {
+                    estimated_count: f.estimated_count(max_inbound_fpr),
+                    set_bits: f.count_ones(),
+                    fill_ratio: f.fill_ratio(),
+                });
+                snap::BloomPeerRow {
+                    peer: addr,
+                    display_name: self.peer_display_name(&addr),
+                    has_filter: peer.filter_sequence() > 0,
+                    filter_sequence: peer.filter_sequence(),
+                    filter,
+                }
+            })
+            .collect();
+        let bloom_view = snap::BloomView {
+            own_node_addr: *self.node_addr(),
+            is_leaf_only: self.is_leaf_only(),
+            sequence: bloom.sequence(),
+            leaf_dependents: bloom.leaf_dependents().iter().copied().collect(),
+            peer_filters: bloom_peers,
+        };
+
+        // --- coord cache (show_cache, show_routing) ---
+        let cache = self.coord_cache();
+        let cache_stats = cache.stats(now);
+        let cache_entries: Vec<snap::CacheEntryRow> = cache
+            .iter(now)
+            .map(|(addr, entry)| snap::CacheEntryRow {
+                node_addr: *addr,
+                display_name: self.peer_display_name(addr),
+                depth: entry.coords().depth(),
+                coord_path: entry
+                    .coords()
+                    .entries()
+                    .iter()
+                    .map(|e| e.node_addr)
+                    .collect(),
+                created_at: entry.created_at(),
+                last_used_ms: entry.last_used(),
+                path_mtu: entry.path_mtu(),
+            })
+            .collect();
+        let cache_view = snap::CacheView {
+            count: cache_stats.entries,
+            max_entries: cache_stats.max_entries,
+            fill_ratio: cache_stats.fill_ratio(),
+            default_ttl_ms: cache.default_ttl_ms(),
+            expired: cache_stats.expired,
+            avg_age_ms: cache_stats.avg_age_ms,
+            entries: cache_entries,
+        };
+
+        // --- F-queue / discovery routing scalars (show_routing) ---
+        let pending_lookups: Vec<snap::PendingLookupRow> = self
+            .pending_lookups_iter()
+            .map(|(addr, lookup)| snap::PendingLookupRow {
+                target: *addr,
+                display_name: self.peer_display_name(addr),
+                initiated_ms: lookup.initiated_ms,
+                last_sent_ms: lookup.last_sent_ms,
+                attempt: lookup.attempt,
+            })
+            .collect();
+        let retries: Vec<snap::RetryRow> = self
+            .retry_state_iter()
+            .map(|(addr, state)| snap::RetryRow {
+                node_addr: *addr,
+                display_name: self.peer_display_name(addr),
+                retry_count: state.retry_count,
+                retry_after_ms: state.retry_after_ms,
+                auto_reconnect: state.reconnect,
+            })
+            .collect();
+        let routing_view = snap::RoutingView {
+            pending_lookups,
+            pending_tun_destinations: self.pending_tun_destinations(),
+            pending_tun_packets: self.pending_tun_total_packets(),
+            recent_requests: self.recent_request_count(),
+            retries,
+        };
+
+        // --- identity cache (show_identity_cache, show_routing) ---
+        let identity_entries: Vec<snap::IdentityRow> = self
+            .identity_cache_iter()
+            .map(|(node_addr, pubkey, last_seen_ms)| {
+                let (xonly, _parity) = pubkey.x_only_public_key();
+                let fips_addr = crate::identity::FipsAddress::from_node_addr(node_addr);
+                snap::IdentityRow {
+                    node_addr: *node_addr,
+                    npub: crate::identity::encode_npub(&xonly),
+                    display_name: self.peer_display_name(node_addr),
+                    ipv6_addr: format!("{}", fips_addr),
+                    last_seen_ms,
+                }
+            })
+            .collect();
+        let identity_view = snap::IdentityView {
+            entries: identity_entries,
+            max_entries: self.identity_cache_max(),
+        };
+
+        let snapshot = snap::RoutingSnapshot {
+            tree: tree_view,
+            bloom: bloom_view,
+            cache: cache_view,
+            routing: routing_view,
+            identity: identity_view,
+        };
+        self.routing_snapshot.store(std::sync::Arc::new(snapshot));
+    }
+
+    /// Project the Category-E per-entity tables (peers / sessions / links /
+    /// connections / transports + mmp) into an
+    /// [`EntitySnapshot`](crate::control::snapshot::EntitySnapshot) and publish
+    /// it via `ArcSwap`, so `show_peers` / `show_sessions` / `show_links` /
+    /// `show_connections` / `show_transports` / `show_mmp` render off the
+    /// rx_loop.
+    ///
+    /// **Q1 publisher placement (tick, like R3).** Every projected row needs a
+    /// display name resolved against the live peer/session tables and host map
+    /// (`&Node`); `show_peers` additionally needs the live tree state to derive
+    /// `is_parent` / `is_child` plus the Nostr-discovery failure-state map —
+    /// cross-subsystem reads available only with `&Node`. And most fields
+    /// (link/session traffic counters, MMP metrics, `last_seen`, noise counters)
+    /// mutate continuously on the data plane, not at the discrete entity
+    /// lifecycle mutators, so per-lifecycle-mutator publication (Q1-a) would not
+    /// capture their freshness anyway. The tick is the natural cadence with
+    /// coherent `&Node` access.
+    ///
+    /// **Structural sharing (the R4 umbrella mandate).** Each table is a
+    /// `Vec<Arc<Row>>`. The freshly-projected rows are reconciled against the
+    /// previously published snapshot via
+    /// [`reconcile_rows`](crate::control::snapshot::reconcile_rows): a row's
+    /// `Arc` is reused (kept by pointer) whenever it matches the prior row by
+    /// identity and compares equal by value, so a tick in which only one
+    /// peer/session changed re-allocates only that one row, not the whole table.
+    /// This is what keeps the publish cost off the hot path at scale (the exact
+    /// thing the umbrella warns a naive per-tick rebuild would violate).
+    fn publish_entities_snapshot(&self) {
+        use crate::control::snapshot as snap;
+
+        let prev = self.entities_snapshot.load();
+
+        // --- peers (show_peers) ---
+        let tree = self.tree_state();
+        let my_addr = *tree.my_node_addr();
+        let parent_id = *tree.my_declaration().parent_id();
+        let is_root = tree.is_root();
+
+        // Per-npub Nostr-traversal failure-state, indexed by npub for O(1)
+        // per-peer lookup (empty when Nostr discovery is disabled).
+        let nostr_state: std::collections::HashMap<String, _> = self
+            .nostr_discovery_handle()
+            .map(|d| {
+                d.failure_state_snapshot()
+                    .into_iter()
+                    .map(|view| (view.npub.clone(), view))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let peer_rows: Vec<snap::PeerRow> = self
+            .peers()
+            .map(|peer| {
+                let node_addr = *peer.node_addr();
+                let is_parent = !is_root && node_addr == parent_id;
+                let is_child = tree
+                    .peer_declaration(&node_addr)
+                    .is_some_and(|decl| *decl.parent_id() == my_addr);
+
+                let link_info = self.get_link(&peer.link_id()).map(|link| {
+                    let transport_type = self
+                        .get_transport(&link.transport_id())
+                        .map(|h| h.transport_type().name.to_string());
+                    snap::PeerLinkInfo {
+                        direction: format!("{}", link.direction()),
+                        transport_type,
+                    }
+                });
+
+                let stats = peer.link_stats();
+                let nostr = nostr_state.get(&peer.npub());
+                let nostr_traversal = snap::PeerNostrState {
+                    consecutive_failures: nostr.map(|s| s.consecutive_failures).unwrap_or(0),
+                    cooldown_until_ms: nostr.and_then(|s| s.cooldown_until_ms),
+                    last_observed_skew_ms: nostr.and_then(|s| s.last_observed_skew_ms),
+                };
+
+                let noise = peer.noise_session().map(|session| snap::PeerNoiseCounters {
+                    send_counter: session.current_send_counter(),
+                    highest_recv_counter: session.highest_received_counter(),
+                });
+
+                let mmp = peer
+                    .mmp()
+                    .map(|mmp| project_entity_mmp(&mmp.metrics, format!("{}", mmp.mode()), None));
+
+                snap::PeerRow {
+                    node_addr,
+                    npub: peer.npub(),
+                    display_name: self.peer_display_name(&node_addr),
+                    ipv6_addr: format!("{}", peer.address()),
+                    connectivity: format!("{}", peer.connectivity()),
+                    link_id: peer.link_id().as_u64(),
+                    authenticated_at_ms: peer.authenticated_at(),
+                    last_seen_ms: peer.last_seen(),
+                    has_tree_position: peer.has_tree_position(),
+                    has_bloom_filter: peer.filter_sequence() > 0,
+                    filter_sequence: peer.filter_sequence(),
+                    is_parent,
+                    is_child,
+                    transport_addr: peer.current_addr().map(|a| format!("{}", a)),
+                    link_info,
+                    tree_depth: peer.coords().map(|c| c.depth()),
+                    stats: snap::PeerLinkStats {
+                        packets_sent: stats.packets_sent,
+                        packets_recv: stats.packets_recv,
+                        bytes_sent: stats.bytes_sent,
+                        bytes_recv: stats.bytes_recv,
+                    },
+                    replay_suppressed: peer.replay_suppressed_count(),
+                    consecutive_decrypt_failures: peer.consecutive_decrypt_failures(),
+                    nostr_traversal,
+                    noise,
+                    our_session_index: peer.our_index().map(|idx| idx.as_u32()),
+                    rekey_in_progress: peer.rekey_in_progress(),
+                    rekey_draining: peer.is_draining(),
+                    current_k_bit: peer.current_k_bit(),
+                    mmp,
+                }
+            })
+            .collect();
+
+        // --- sessions (show_sessions) ---
+        let session_rows: Vec<snap::SessionRow> = self
+            .session_entries()
+            .map(|(addr, entry)| {
+                let state = if entry.is_established() {
+                    "established"
+                } else if entry.is_initiating() {
+                    "initiating"
+                } else if entry.is_awaiting_msg3() {
+                    "awaiting_msg3"
+                } else {
+                    "unknown"
+                };
+                let (xonly, _parity) = entry.remote_pubkey().x_only_public_key();
+                let (pkts_tx, pkts_rx, bytes_tx, bytes_rx) = entry.traffic_counters();
+
+                let resend_count = (!entry.is_established()).then(|| entry.resend_count());
+                let established = entry.is_established().then(|| snap::SessionEstablished {
+                    session_start_ms: entry.session_start_ms(),
+                    current_k_bit: entry.current_k_bit(),
+                    coords_warmup_remaining: entry.coords_warmup_remaining(),
+                    is_draining: entry.is_draining(),
+                });
+                let mmp = entry.mmp().map(|mmp| {
+                    project_entity_mmp(
+                        &mmp.metrics,
+                        format!("{}", mmp.mode()),
+                        Some(mmp.path_mtu.current_mtu()),
+                    )
+                });
+
+                snap::SessionRow {
+                    remote_addr: *addr,
+                    display_name: self.peer_display_name(addr),
+                    state,
+                    is_initiator: entry.is_initiator(),
+                    last_activity_ms: entry.last_activity(),
+                    npub: crate::identity::encode_npub(&xonly),
+                    stats: snap::SessionStats {
+                        packets_sent: pkts_tx,
+                        packets_recv: pkts_rx,
+                        bytes_sent: bytes_tx,
+                        bytes_recv: bytes_rx,
+                    },
+                    resend_count,
+                    established,
+                    mmp,
+                }
+            })
+            .collect();
+
+        // --- links (show_links) ---
+        let link_rows: Vec<snap::LinkRow> = self
+            .links()
+            .map(|link| {
+                let stats = link.stats();
+                snap::LinkRow {
+                    link_id: link.link_id().as_u64(),
+                    transport_id: link.transport_id().as_u32(),
+                    remote_addr: format!("{}", link.remote_addr()),
+                    direction: format!("{}", link.direction()),
+                    state: format!("{}", link.state()),
+                    created_at_ms: link.created_at(),
+                    stats: snap::LinkStats {
+                        packets_sent: stats.packets_sent,
+                        packets_recv: stats.packets_recv,
+                        bytes_sent: stats.bytes_sent,
+                        bytes_recv: stats.bytes_recv,
+                        last_recv_ms: stats.last_recv_ms,
+                    },
+                }
+            })
+            .collect();
+
+        // --- connections (show_connections) ---
+        let connection_rows: Vec<snap::ConnectionRow> = self
+            .connections()
+            .map(|conn| snap::ConnectionRow {
+                link_id: conn.link_id().as_u64(),
+                direction: format!("{}", conn.direction()),
+                handshake_state: format!("{}", conn.handshake_state()),
+                started_at_ms: conn.started_at(),
+                last_activity_ms: conn.last_activity(),
+                resend_count: conn.resend_count(),
+                expected_peer: conn.expected_identity().map(|id| id.npub()),
+            })
+            .collect();
+
+        // --- transports (show_transports) ---
+        let transport_rows: Vec<snap::TransportRow> = self
+            .transport_ids()
+            .map(|id| {
+                let handle = self.get_transport(id).unwrap();
+                snap::TransportRow {
+                    transport_id: id.as_u32(),
+                    transport_type: handle.transport_type().name.to_string(),
+                    state: format!("{}", handle.state()),
+                    mtu: handle.mtu(),
+                    name: handle.name().map(|s| s.to_string()),
+                    local_addr: handle.local_addr().map(|a| format!("{}", a)),
+                    tor_mode: handle.tor_mode().map(|s| s.to_string()),
+                    onion_address: handle.onion_address().map(|s| s.to_string()),
+                    tor_monitoring: handle
+                        .tor_monitoring()
+                        .map(|m| serde_json::to_value(&m).unwrap_or_default()),
+                    stats: handle.transport_stats(),
+                }
+            })
+            .collect();
+
+        // --- mmp peers (show_mmp link-layer) ---
+        let mmp_peer_rows: Vec<snap::MmpPeerRow> = self
+            .peers()
+            .filter_map(|peer| {
+                let mmp = peer.mmp()?;
+                let addr = *peer.node_addr();
+                let metrics = &mmp.metrics;
+                let srtt_ms = metrics.srtt_ms();
+                let smoothed_etx = metrics.smoothed_etx();
+                let lqi = match (srtt_ms, smoothed_etx) {
+                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
+                    _ => None,
+                };
+                let trend = |dual: &crate::mmp::algorithms::DualEwma| {
+                    dual.initialized()
+                        .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
+                };
+                Some(snap::MmpPeerRow {
+                    peer: addr,
+                    display_name: self.peer_display_name(&addr),
+                    mode: format!("{}", mmp.mode()),
+                    loss_rate: metrics.loss_rate(),
+                    etx: metrics.etx,
+                    goodput_bps: metrics.goodput_bps,
+                    smoothed_loss: metrics.smoothed_loss(),
+                    smoothed_etx,
+                    srtt_ms,
+                    lqi,
+                    trends: snap::MmpTrends {
+                        rtt_trend: trend(&metrics.rtt_trend),
+                        loss_trend: trend(&metrics.loss_trend),
+                        goodput_trend: trend(&metrics.goodput_trend),
+                        jitter_trend: trend(&metrics.jitter_trend),
+                    },
+                    delivery_ratio_forward: metrics.delivery_ratio_forward,
+                    delivery_ratio_reverse: metrics.delivery_ratio_reverse,
+                    ecn_ce_count: metrics.last_ecn_ce_count(),
+                })
+            })
+            .collect();
+
+        // --- mmp sessions (show_mmp session-layer) ---
+        let mmp_session_rows: Vec<snap::MmpSessionRow> = self
+            .session_entries()
+            .filter_map(|(addr, entry)| {
+                let mmp = entry.mmp()?;
+                let metrics = &mmp.metrics;
+                let srtt_ms = metrics.srtt_ms();
+                let smoothed_etx = metrics.smoothed_etx();
+                let sqi = match (srtt_ms, smoothed_etx) {
+                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
+                    _ => None,
+                };
+                Some(snap::MmpSessionRow {
+                    remote: *addr,
+                    display_name: self.peer_display_name(addr),
+                    mode: format!("{}", mmp.mode()),
+                    loss_rate: metrics.loss_rate(),
+                    etx: metrics.etx,
+                    path_mtu: mmp.path_mtu.current_mtu(),
+                    smoothed_loss: metrics.smoothed_loss(),
+                    smoothed_etx,
+                    srtt_ms,
+                    sqi,
+                })
+            })
+            .collect();
+
+        let snapshot = snap::EntitySnapshot {
+            peers: snap::reconcile_rows(&prev.peers, peer_rows, |r| r.node_addr),
+            sessions: snap::reconcile_rows(&prev.sessions, session_rows, |r| r.remote_addr),
+            links: snap::reconcile_rows(&prev.links, link_rows, |r| r.link_id),
+            connections: snap::reconcile_rows(&prev.connections, connection_rows, |r| r.link_id),
+            transports: snap::reconcile_rows(&prev.transports, transport_rows, |r| r.transport_id),
+            mmp_peers: snap::reconcile_rows(&prev.mmp_peers, mmp_peer_rows, |r| r.peer),
+            mmp_sessions: snap::reconcile_rows(&prev.mmp_sessions, mmp_session_rows, |r| r.remote),
+        };
+        self.entities_snapshot.store(std::sync::Arc::new(snapshot));
     }
 
     // === TUN Interface ===
@@ -2396,6 +2952,38 @@ impl Node {
                     reason: format!("transport send: {}", other),
                 },
             })
+    }
+}
+
+/// Project an MMP metrics block into the snapshot
+/// [`EntityMmp`](crate::control::snapshot::EntityMmp) shared by `show_peers`
+/// (link-layer, `path_mtu = None`) and `show_sessions` (session-layer,
+/// `path_mtu = Some`). `quality_index` (`lqi` for peers / `sqi` for sessions)
+/// is precomputed here exactly as the on-loop queries do, so the render is a
+/// plain field emit.
+fn project_entity_mmp(
+    metrics: &crate::mmp::metrics::MmpMetrics,
+    mode: String,
+    path_mtu: Option<u16>,
+) -> crate::control::snapshot::EntityMmp {
+    let srtt_ms = metrics.srtt_ms();
+    let smoothed_etx = metrics.smoothed_etx();
+    let quality_index = match (srtt_ms, smoothed_etx) {
+        (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
+        _ => None,
+    };
+    crate::control::snapshot::EntityMmp {
+        mode,
+        srtt_ms,
+        loss_rate: metrics.loss_rate(),
+        etx: metrics.etx,
+        goodput_bps: metrics.goodput_bps,
+        delivery_ratio_forward: metrics.delivery_ratio_forward,
+        delivery_ratio_reverse: metrics.delivery_ratio_reverse,
+        smoothed_loss: metrics.smoothed_loss(),
+        smoothed_etx,
+        quality_index,
+        path_mtu,
     }
 }
 

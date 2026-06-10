@@ -32,7 +32,7 @@ use crate::node::context::NodeContext;
 use crate::node::metrics::MetricsRegistry;
 
 use super::protocol::{Request, Response};
-use super::snapshot::StatsSnapshot;
+use super::snapshot::{EntitySnapshot, RoutingSnapshot, StatsSnapshot};
 
 /// Cloneable read-only view of node state for off-loop control serving.
 ///
@@ -49,6 +49,13 @@ pub(crate) struct ControlReadHandle {
     /// stats_history dual-ring read copy + the scalar gauges/counts
     /// `show_status` needs, published from the tick (R2, Q1-b).
     stats: Arc<ArcSwap<StatsSnapshot>>,
+    /// Category-D derived/routing/cache read view (tree / bloom / coord /
+    /// identity + F-queue scalars), published from the tick (R3).
+    routing: Arc<ArcSwap<RoutingSnapshot>>,
+    /// Category-E per-entity table read view (peers / sessions / links /
+    /// connections / transports + mmp), published from the tick with
+    /// `Vec<Arc<Row>>` structural sharing (R4).
+    entities: Arc<ArcSwap<EntitySnapshot>>,
 }
 
 impl ControlReadHandle {
@@ -60,11 +67,15 @@ impl ControlReadHandle {
         context: Arc<NodeContext>,
         metrics: Arc<MetricsRegistry>,
         stats: Arc<ArcSwap<StatsSnapshot>>,
+        routing: Arc<ArcSwap<RoutingSnapshot>>,
+        entities: Arc<ArcSwap<EntitySnapshot>>,
     ) -> Self {
         Self {
             context,
             metrics,
             stats,
+            routing,
+            entities,
         }
     }
 
@@ -82,6 +93,18 @@ impl ControlReadHandle {
     /// construction; no IO_TIMEOUT staleness gate, per Q1-e).
     pub(crate) fn stats(&self) -> arc_swap::Guard<Arc<StatsSnapshot>> {
         self.stats.load()
+    }
+
+    /// Load the latest published Category-D routing snapshot (freshest
+    /// available by construction; no staleness gate, per Q1-e).
+    pub(crate) fn routing(&self) -> arc_swap::Guard<Arc<RoutingSnapshot>> {
+        self.routing.load()
+    }
+
+    /// Load the latest published Category-E entity snapshot (freshest available
+    /// by construction; no staleness gate, per Q1-e).
+    pub(crate) fn entities(&self) -> arc_swap::Guard<Arc<EntitySnapshot>> {
+        self.entities.load()
     }
 }
 
@@ -104,15 +127,22 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
         )),
         "show_stats_list" => Some(Response::ok(queries::show_stats_list())),
         "show_metrics" => Some(Response::ok(queries::show_metrics_from_handle(handle))),
+        // R5: peer-ACL status, served from the tick-published `StatsSnapshot`.
+        // The ACL is an `arc_swap::ArcSwap<PeerAcl>` reloaded only on the tick;
+        // its status projection is captured at the same tick.
+        "show_acl" => Some(Response::ok(queries::show_acl_from_handle(handle))),
         // R2: served from the tick-published `StatsSnapshot` (rings + scalar
         // gauges/counts). `show_status` and the two node-level/per-peer series
         // queries carry enough data in the snapshot to render faithfully
         // off-loop, including the parameterized series selectors (the snapshot
         // holds the full rings, so any metric / window / granularity is
-        // satisfiable). `show_stats_peers` and `show_stats_history_all_peers`
-        // stay on the rx_loop path: they need live peer membership
-        // (`is_active`) and per-peer npub, which are Category-E state not yet
-        // in the snapshot.
+        // satisfiable).
+        //
+        // R5 closes out the per-peer stats queries: `show_stats_peers` and
+        // `show_stats_history_all_peers` now read the snapshot's per-peer
+        // `peer_meta` (live `is_active`, resolved npub / display name, captured
+        // at publish time) joined against the `history` rings, so they no longer
+        // need live `&Node` and render off-loop too.
         "show_status" => Some(Response::ok(queries::show_status_from_handle(handle))),
         "show_stats_history" => Some(queries::show_stats_history_from_handle(
             handle,
@@ -122,6 +152,34 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
             handle,
             request.params.as_ref(),
         )),
+        "show_stats_peers" => Some(Response::ok(queries::show_stats_peers_from_handle(handle))),
+        "show_stats_history_all_peers" => Some(queries::show_stats_history_all_peers_from_handle(
+            handle,
+            request.params.as_ref(),
+        )),
+        // R3: served from the tick-published `RoutingSnapshot` (tree / bloom /
+        // coord cache / identity cache + F-queue scalars). Display names are
+        // resolved at publish time, so these render entirely off-loop. The
+        // counter-family `stats` blocks come from the `MetricsRegistry` (also
+        // in the handle). All five are parameterless.
+        "show_tree" => Some(Response::ok(queries::show_tree_from_handle(handle))),
+        "show_bloom" => Some(Response::ok(queries::show_bloom_from_handle(handle))),
+        "show_cache" => Some(Response::ok(queries::show_cache_from_handle(handle))),
+        "show_routing" => Some(Response::ok(queries::show_routing_from_handle(handle))),
+        "show_identity_cache" => Some(Response::ok(queries::show_identity_cache_from_handle(
+            handle,
+        ))),
+        // R4: served from the tick-published `EntitySnapshot` (per-entity
+        // `Vec<Arc<Row>>` tables with structural sharing). Display names,
+        // tree-relationship flags, and Nostr-traversal state are resolved at
+        // publish time, so these render entirely off-loop. All six are
+        // parameterless.
+        "show_peers" => Some(Response::ok(queries::show_peers_from_handle(handle))),
+        "show_sessions" => Some(Response::ok(queries::show_sessions_from_handle(handle))),
+        "show_links" => Some(Response::ok(queries::show_links_from_handle(handle))),
+        "show_connections" => Some(Response::ok(queries::show_connections_from_handle(handle))),
+        "show_transports" => Some(Response::ok(queries::show_transports_from_handle(handle))),
+        "show_mmp" => Some(Response::ok(queries::show_mmp_from_handle(handle))),
         _ => None,
     }
 }

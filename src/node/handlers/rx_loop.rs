@@ -1,6 +1,5 @@
 //! RX event loop and packet dispatch.
 
-use crate::control::queries;
 use crate::control::{ControlSocket, commands};
 use crate::node::wire::{
     COMMON_PREFIX_SIZE, CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2,
@@ -238,15 +237,18 @@ impl Node {
                     self.register_identity(identity.node_addr, identity.pubkey);
                 }
                 Some((request, response_tx)) = control_rx.recv() => {
-                    let response = if request.command.starts_with("show_") {
-                        queries::dispatch(self, &request.command, request.params.as_ref())
-                    } else {
-                        commands::dispatch(
-                            self,
-                            &request.command,
-                            request.params.as_ref(),
-                        ).await
-                    };
+                    // Only mutating COMMAND requests (`connect` / `disconnect`)
+                    // reach the rx_loop now. Every pure-read `show_*` query is
+                    // served off-loop from the read handle in the control accept
+                    // task (`snapshot_dispatch`), so it never round-trips here —
+                    // the data-plane dispatch path carries no `show_*` arm. A
+                    // `show_*` that somehow arrives (none does) falls through to
+                    // `commands::dispatch`, which returns "unknown command".
+                    let response = commands::dispatch(
+                        self,
+                        &request.command,
+                        request.params.as_ref(),
+                    ).await;
                     let _ = response_tx.send(response);
                 }
                 _ = tick.tick() => {
