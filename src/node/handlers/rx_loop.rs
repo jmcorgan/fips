@@ -78,10 +78,11 @@ impl Node {
         if self.config().node.control.enabled {
             let config = self.config().node.control.clone();
             let tx = control_tx.clone();
+            let read_handle = self.control_read_handle();
             tokio::spawn(async move {
                 match ControlSocket::bind(&config) {
                     Ok(socket) => {
-                        socket.accept_loop(tx).await;
+                        socket.accept_loop(tx, read_handle).await;
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to bind control socket");

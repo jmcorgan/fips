@@ -6,7 +6,7 @@
 
 mod acl;
 mod bloom;
-mod context;
+pub(crate) mod context;
 #[cfg(unix)]
 pub(crate) mod decrypt_worker;
 mod discovery_rate_limit;
@@ -406,6 +406,12 @@ pub struct Node {
     /// Time-series history of node-level metrics (1s/1m rings).
     stats_history: stats_history::StatsHistory,
 
+    /// Read-side snapshot of `stats_history` plus the scalar gauges/counts
+    /// `show_status` reports, published from the tick (the natural mutator)
+    /// so those queries serve off the rx_loop. The dual-ring read copy: the
+    /// live mutable `stats_history` above stays on the tick.
+    stats_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::StatsSnapshot>>,
+
     // === TUN Interface ===
     /// TUN device state.
     tun_state: TunState,
@@ -676,6 +682,9 @@ impl Node {
             stats: stats::NodeStats::new(),
             metrics: std::sync::Arc::new(metrics::MetricsRegistry::new()),
             stats_history: stats_history::StatsHistory::new(),
+            stats_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::StatsSnapshot::empty(),
+            )),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -830,6 +839,9 @@ impl Node {
             stats: stats::NodeStats::new(),
             metrics: std::sync::Arc::new(metrics::MetricsRegistry::new()),
             stats_history: stats_history::StatsHistory::new(),
+            stats_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::StatsSnapshot::empty(),
+            )),
             tun_state,
             tun_name: None,
             tun_tx: None,
@@ -1413,6 +1425,19 @@ impl Node {
         &self.metrics
     }
 
+    /// Build a [`ControlReadHandle`](crate::control::read_handle::ControlReadHandle)
+    /// over this node's already-shared `NodeContext` and `MetricsRegistry`.
+    ///
+    /// Used at control-socket spawn time so pure-snapshot `show_*` queries
+    /// render off the rx_loop. Cloneable; cheap (all `Arc` clones).
+    pub(crate) fn control_read_handle(&self) -> crate::control::read_handle::ControlReadHandle {
+        crate::control::read_handle::ControlReadHandle::new(
+            self.context.clone(),
+            self.metrics.clone(),
+            self.stats_snapshot.clone(),
+        )
+    }
+
     /// Get the stats history collector.
     pub fn stats_history(&self) -> &stats_history::StatsHistory {
         &self.stats_history
@@ -1475,6 +1500,29 @@ impl Node {
             .collect();
 
         self.stats_history.tick(now, &snap, &peer_snaps);
+
+        // Publish the read-side snapshot (R2 dual-ring, Q1-b). The tick is the
+        // natural and sole mutator of `stats_history`, so publishing here can
+        // never produce false staleness: the snapshot and the underlying data
+        // advance together. This is data, not a rendered response (Q1-d), and
+        // it is published only here, not in a monolithic per-tick rebuild of
+        // every query (Q1-c). It also is not gated behind any slow I/O on the
+        // tick the way the abandoned 2edc8a1 republish was.
+        let snapshot = crate::control::snapshot::StatsSnapshot {
+            history: std::sync::Arc::new(self.stats_history.clone()),
+            estimated_mesh_size: self.estimated_mesh_size,
+            state: self.state,
+            tun_state: self.tun_state,
+            tun_name: self.tun_name.clone(),
+            effective_ipv6_mtu: self.effective_ipv6_mtu(),
+            connection_count: self.connections.len(),
+            peer_count: self.peers.len(),
+            link_count: self.links.len(),
+            transport_count: self.transports.len(),
+            session_count: self.sessions.len(),
+            peer_aliases: std::sync::Arc::new(self.peer_aliases.clone()),
+        };
+        self.stats_snapshot.store(std::sync::Arc::new(snapshot));
     }
 
     // === TUN Interface ===

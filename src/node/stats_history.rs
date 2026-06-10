@@ -292,6 +292,7 @@ impl FromStr for Granularity {
 }
 
 /// One metric's dual-tier ring.
+#[derive(Clone)]
 struct Ring {
     fast: VecDeque<f64>,
     slow: VecDeque<f64>,
@@ -306,6 +307,7 @@ struct Ring {
 /// Running accumulator over up to `DOWNSAMPLE_FACTOR` fast samples.
 /// NaN samples are skipped from all statistics; `total` still tracks
 /// them so we know whether ANY sample arrived this window.
+#[derive(Clone)]
 struct DownsampleAccum {
     sum: f64,
     /// Count of non-NaN samples.
@@ -425,6 +427,7 @@ pub struct Series {
 }
 
 /// One peer's per-metric rings plus lifecycle metadata.
+#[derive(Clone)]
 pub struct PeerStatsRings {
     rings: Vec<Ring>,
     first_seen: Instant,
@@ -516,6 +519,7 @@ impl PeerStatsRings {
 
 /// Per-metric ring storage for node-level metrics plus a map of
 /// per-peer rings keyed by `NodeAddr`.
+#[derive(Clone)]
 pub struct StatsHistory {
     rings: Vec<Ring>,
     peers: HashMap<NodeAddr, PeerStatsRings>,

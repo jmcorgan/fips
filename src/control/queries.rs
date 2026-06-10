@@ -88,6 +88,58 @@ pub fn show_status(node: &Node) -> Value {
     })
 }
 
+/// Off-loop variant of [`show_status`]: renders from the
+/// [`ControlReadHandle`](super::read_handle::ControlReadHandle) in the control
+/// task. Reads the effectively-immutable `NodeContext`, the `MetricsRegistry`
+/// counters, and the tick-published [`StatsSnapshot`](super::snapshot::StatsSnapshot)
+/// (rings + scalar gauges/counts), with no `Node` state, so it never
+/// round-trips the rx_loop. Output is byte-identical to [`show_status`].
+pub(crate) fn show_status_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let ctx = handle.context();
+    let stats = handle.stats();
+    let pid = std::process::id();
+    let exe_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "-".into());
+    let uptime_secs = ctx.started_at.elapsed().as_secs();
+    let fwd = handle.metrics().forwarding.snapshot();
+
+    const SPARK_N: usize = 30;
+    let hist = &stats.history;
+    let sparklines = json!({
+        "mesh_size": hist.recent(Metric::MeshSize, SPARK_N),
+        "tree_depth": hist.recent(Metric::TreeDepth, SPARK_N),
+        "peer_count": hist.recent(Metric::PeerCount, SPARK_N),
+        "bytes_in": hist.recent(Metric::BytesIn, SPARK_N),
+        "bytes_out": hist.recent(Metric::BytesOut, SPARK_N),
+        "loss_rate": hist.recent(Metric::LossRate, SPARK_N),
+    });
+
+    json!({
+        "version": crate::version::short_version(),
+        "npub": ctx.identity.npub(),
+        "node_addr": hex::encode(ctx.identity.node_addr().as_bytes()),
+        "ipv6_addr": format!("{}", ctx.identity.address()),
+        "state": format!("{}", stats.state),
+        "is_leaf_only": ctx.is_leaf_only,
+        "peer_count": stats.peer_count,
+        "session_count": stats.session_count,
+        "link_count": stats.link_count,
+        "transport_count": stats.transport_count,
+        "connection_count": stats.connection_count,
+        "tun_state": format!("{}", stats.tun_state),
+        "tun_name": stats.tun_name.as_deref().unwrap_or("-"),
+        "effective_ipv6_mtu": stats.effective_ipv6_mtu,
+        "control_socket": &ctx.config.node.control.socket_path,
+        "pid": pid,
+        "exe_path": exe_path,
+        "uptime_secs": uptime_secs,
+        "estimated_mesh_size": stats.estimated_mesh_size,
+        "forwarding": serde_json::to_value(&fwd).unwrap_or_default(),
+        "sparklines": sparklines,
+    })
+}
+
 /// `show_acl` — Loaded peer ACL state.
 pub fn show_acl(node: &Node) -> Value {
     let status = node.peer_acl_status();
@@ -977,6 +1029,166 @@ pub fn show_stats_all_history(node: &Node, params: Option<&Value>) -> super::pro
     }))
 }
 
+/// Off-loop display name for the stats-history error paths. The full
+/// [`Node::peer_display_name`](crate::node::Node) lookup also consults the
+/// host map and live peer/session tables, which are not in the snapshot;
+/// off-loop we resolve a configured alias, else fall back to truncated hex.
+/// Only reached on the "peer not tracked" error branch, never on the golden
+/// happy path.
+fn snapshot_display_name(
+    aliases: &std::collections::HashMap<NodeAddr, String>,
+    addr: &NodeAddr,
+) -> String {
+    match aliases.get(addr) {
+        Some(name) => name.clone(),
+        None => addr.short_hex(),
+    }
+}
+
+/// Off-loop variant of [`show_stats_history`]: serves one metric's series from
+/// the tick-published [`StatsSnapshot`](super::snapshot::StatsSnapshot) rings
+/// (node-level or per-peer) in the control task, off the rx_loop. Output is
+/// byte-identical to [`show_stats_history`] for the series; the "peer not
+/// tracked" error message uses [`snapshot_display_name`] (alias-or-hex).
+pub(crate) fn show_stats_history_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+    params: Option<&Value>,
+) -> super::protocol::Response {
+    use super::protocol::Response;
+    let Some(params) = params else {
+        return Response::error("missing params for show_stats_history");
+    };
+
+    let metric_name = match params.get("metric").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return Response::error("missing 'metric' parameter"),
+    };
+
+    let window_str = params
+        .get("window")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10m");
+    let window = match parse_duration(window_str) {
+        Ok(d) => d,
+        Err(e) => return Response::error(e),
+    };
+
+    let granularity_str = params
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1s");
+    let granularity = match Granularity::from_str(granularity_str) {
+        Ok(g) => g,
+        Err(e) => return Response::error(e),
+    };
+
+    let peer_npub = params.get("peer").and_then(|v| v.as_str());
+    let stats = handle.stats();
+    let hist = &stats.history;
+
+    if let Some(npub) = peer_npub {
+        let addr = match parse_peer_npub(npub) {
+            Ok(a) => a,
+            Err(e) => return Response::error(e),
+        };
+        let peer_metric = match PeerMetric::from_str(metric_name) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
+        match hist.peer_query(&addr, peer_metric, window, granularity) {
+            Some(series) => Response::ok(serde_json::to_value(&series).unwrap_or(Value::Null)),
+            None => Response::error(format!(
+                "peer not tracked in stats history: {}",
+                snapshot_display_name(&stats.peer_aliases, &addr)
+            )),
+        }
+    } else {
+        let metric = match Metric::from_str(metric_name) {
+            Ok(m) => m,
+            Err(e) => return Response::error(e),
+        };
+        let series = hist.query(metric, window, granularity);
+        Response::ok(serde_json::to_value(&series).unwrap_or(Value::Null))
+    }
+}
+
+/// Off-loop variant of [`show_stats_all_history`]: serves every node-level
+/// (or per-peer) series from the tick-published
+/// [`StatsSnapshot`](super::snapshot::StatsSnapshot) rings, off the rx_loop.
+/// Output is byte-identical to [`show_stats_all_history`]; the "peer not
+/// tracked" error message uses [`snapshot_display_name`] (alias-or-hex).
+pub(crate) fn show_stats_all_history_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+    params: Option<&Value>,
+) -> super::protocol::Response {
+    use super::protocol::Response;
+    let params = params.cloned().unwrap_or_else(|| json!({}));
+
+    let window_str = params
+        .get("window")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10m");
+    let window = match parse_duration(window_str) {
+        Ok(d) => d,
+        Err(e) => return Response::error(e),
+    };
+
+    let granularity_str = params
+        .get("granularity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1s");
+    let granularity = match Granularity::from_str(granularity_str) {
+        Ok(g) => g,
+        Err(e) => return Response::error(e),
+    };
+
+    let peer_npub = params.get("peer").and_then(|v| v.as_str());
+    let stats = handle.stats();
+    let hist = &stats.history;
+
+    let series: Vec<Value> = if let Some(npub) = peer_npub {
+        let addr = match parse_peer_npub(npub) {
+            Ok(a) => a,
+            Err(e) => return Response::error(e),
+        };
+        if !hist.has_peer(&addr) {
+            return Response::error(format!(
+                "peer not tracked in stats history: {}",
+                snapshot_display_name(&stats.peer_aliases, &addr)
+            ));
+        }
+        ALL_PEER_METRICS
+            .iter()
+            .map(|m| {
+                let s = hist
+                    .peer_query(&addr, *m, window, granularity)
+                    .unwrap_or_else(|| crate::node::stats_history::Series {
+                        metric: m.name(),
+                        unit: m.unit(),
+                        granularity_seconds: granularity.seconds(),
+                        values: Vec::new(),
+                    });
+                serde_json::to_value(&s).unwrap_or(Value::Null)
+            })
+            .collect()
+    } else {
+        ALL_METRICS
+            .iter()
+            .map(|m| {
+                let s = hist.query(*m, window, granularity);
+                serde_json::to_value(&s).unwrap_or(Value::Null)
+            })
+            .collect()
+    };
+
+    Response::ok(json!({
+        "granularity_seconds": granularity.seconds(),
+        "window_seconds": window.as_secs(),
+        "peer": peer_npub,
+        "series": series,
+    }))
+}
+
 /// `show_stats_peers` — Enumerate peers tracked in the stats history
 /// with their lifecycle metadata. Used by operator tools to populate
 /// peer selectors and to confirm a peer is in the retention window.
@@ -1125,7 +1337,25 @@ pub fn show_stats_history_all_peers(
 /// [`crate::control::listening`] and [`crate::control::firewall_state`]
 /// for the per-half implementations.
 pub fn show_listening_sockets(node: &Node) -> Value {
-    let fips0 = crate::FipsAddress::from_node_addr(node.identity().node_addr()).to_ipv6();
+    render_listening_sockets(node.identity().node_addr())
+}
+
+/// Off-loop variant of [`show_listening_sockets`]: renders from the
+/// [`ControlReadHandle`](super::read_handle::ControlReadHandle) in the control
+/// task. Reads only the node identity (from `NodeContext`) plus host-OS facts
+/// (`/proc` socket enumeration, nftables firewall classification) — no `Node`
+/// state — so it never round-trips the rx_loop.
+pub(crate) fn show_listening_sockets_from_handle(
+    handle: &super::read_handle::ControlReadHandle,
+) -> Value {
+    render_listening_sockets(handle.context().identity.node_addr())
+}
+
+/// Shared renderer for the listening-sockets panel. Given the node's
+/// `NodeAddr` it derives the fips0 address, enumerates listening sockets, and
+/// classifies each against the shipped firewall baseline.
+fn render_listening_sockets(node_addr: &NodeAddr) -> Value {
+    let fips0 = crate::FipsAddress::from_node_addr(node_addr).to_ipv6();
     let sockets = super::listening::enumerate(fips0);
     let classifier = super::firewall_state::FilterClassifier::query();
 
@@ -1149,6 +1379,26 @@ pub fn show_listening_sockets(node: &Node) -> Value {
         "fips0_addr": fips0.to_string(),
         "firewall_active": classifier.is_active(),
         "sockets": rows,
+    })
+}
+
+/// `show_metrics` — Counter-family snapshot served off the rx_loop.
+///
+/// Renders every counter family in the [`MetricsRegistry`] as a flat JSON
+/// object keyed by family name. Each family's value is its
+/// `*StatsSnapshot` (a `u64`-per-counter struct). Counter-only by design:
+/// gauges and histograms that need live `Node` state are out of scope and
+/// stay on the rx_loop path. This is the Prometheus-exporter enabler — an
+/// automated scraper reads this without ever touching the hot path.
+pub(crate) fn show_metrics_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
+    let m = handle.metrics();
+    json!({
+        "forwarding": m.forwarding.snapshot(),
+        "discovery": m.discovery.snapshot(),
+        "tree": m.tree.snapshot(),
+        "bloom": m.bloom.snapshot(),
+        "congestion": m.congestion.snapshot(),
+        "errors": m.errors.snapshot(),
     })
 }
 
@@ -1546,5 +1796,155 @@ mod tests {
                 resp.status, resp.message
             );
         }
+    }
+
+    // ---- off-loop (snapshot_dispatch) coverage ---------------------------
+
+    /// `show_metrics` is counter-only and served off the rx_loop. Raw
+    /// counter values are runtime-varying, so instead of a value-exact
+    /// golden fixture this pins the *shape*: every counter family appears
+    /// as a key, each maps to an object, and a representative counter key
+    /// is present in each family. This catches family renames / drops
+    /// without flaking on live values.
+    #[test]
+    fn show_metrics_shape_covers_all_families() {
+        let node = build_test_node();
+        let handle = node.control_read_handle();
+        let value = show_metrics_from_handle(&handle);
+        let obj = value.as_object().expect("show_metrics renders an object");
+
+        let expected_families = [
+            ("forwarding", "received_packets"),
+            ("discovery", "req_received"),
+            ("tree", "accepted"),
+            ("bloom", "accepted"),
+            ("congestion", "ce_forwarded"),
+            ("errors", "coords_required"),
+        ];
+        assert_eq!(
+            obj.len(),
+            expected_families.len(),
+            "show_metrics has exactly {} counter families, got keys {:?}",
+            expected_families.len(),
+            obj.keys().collect::<Vec<_>>()
+        );
+        for (family, sample_key) in expected_families {
+            let fam = obj
+                .get(family)
+                .unwrap_or_else(|| panic!("missing counter family {family}"))
+                .as_object()
+                .unwrap_or_else(|| panic!("family {family} is not an object"));
+            assert!(
+                fam.contains_key(sample_key),
+                "family {family} missing expected counter {sample_key}"
+            );
+            // On a fresh node every counter is zero.
+            assert_eq!(
+                fam.get(sample_key).and_then(Value::as_u64),
+                Some(0),
+                "fresh-node counter {family}.{sample_key} should be 0"
+            );
+        }
+    }
+
+    /// The three R1 cutover queries are served off-loop via
+    /// `snapshot_dispatch`; everything else (state-bearing queries,
+    /// mutations) returns `None` and falls through to the rx_loop path.
+    #[test]
+    fn snapshot_dispatch_serves_only_cutover_queries() {
+        use super::super::protocol::Request;
+        use super::super::read_handle::snapshot_dispatch;
+
+        let node = build_test_node();
+        let handle = node.control_read_handle();
+
+        let req = |command: &str| Request {
+            command: command.to_string(),
+            params: None,
+        };
+
+        // Cut over to off-loop serving. The parameterized stats-series
+        // queries need their params to render; everything else is
+        // parameterless.
+        let req_params = |command: &str, params: Option<Value>| Request {
+            command: command.to_string(),
+            params,
+        };
+        let off_loop = [
+            ("show_listening_sockets", None),
+            ("show_stats_list", None),
+            ("show_metrics", None),
+            ("show_status", None),
+            (
+                "show_stats_history",
+                Some(json!({ "metric": "mesh_size", "window": "10s", "granularity": "1s" })),
+            ),
+            (
+                "show_stats_all_history",
+                Some(json!({ "window": "10s", "granularity": "1s" })),
+            ),
+        ];
+        for (cmd, params) in off_loop {
+            let resp = snapshot_dispatch(&req_params(cmd, params), &handle)
+                .unwrap_or_else(|| panic!("{cmd} must be served off-loop"));
+            assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
+        }
+
+        // Still on the rx_loop path: state-bearing queries that need live
+        // peer membership / npub, and all mutations.
+        for cmd in [
+            "show_peers",
+            "show_stats_peers",
+            "show_stats_history_all_peers",
+            "connect",
+            "disconnect",
+        ] {
+            assert!(
+                snapshot_dispatch(&req(cmd), &handle).is_none(),
+                "{cmd} must fall through to the rx_loop path"
+            );
+        }
+    }
+
+    /// The tick-published `StatsSnapshot` reflects node state: after a
+    /// simulated `record_stats_history()` tick, the snapshot's counts and
+    /// scalar gauges match the node, and the off-loop `show_status` render
+    /// equals the on-loop `show_status` render byte-for-byte.
+    #[test]
+    fn stats_snapshot_reflects_state_after_tick() {
+        let mut node = build_test_node();
+
+        // Before any tick the seeded snapshot is empty.
+        let handle = node.control_read_handle();
+        assert!(
+            !handle.stats().history.has_data(),
+            "seed snapshot has no history before first tick"
+        );
+
+        // Advance one tick (the natural publisher site).
+        node.record_stats_history();
+
+        let handle = node.control_read_handle();
+        let snap = handle.stats();
+        assert!(
+            snap.history.has_data(),
+            "snapshot history reflects the tick"
+        );
+        // Scalar gauges / counts match the node's live accessors.
+        assert_eq!(snap.peer_count, node.peer_count());
+        assert_eq!(snap.session_count, node.session_count());
+        assert_eq!(snap.link_count, node.link_count());
+        assert_eq!(snap.transport_count, node.transport_count());
+        assert_eq!(snap.connection_count, node.connection_count());
+        assert_eq!(snap.estimated_mesh_size, node.estimated_mesh_size());
+        assert_eq!(snap.effective_ipv6_mtu, node.effective_ipv6_mtu());
+
+        // Off-loop render must equal the on-loop render byte-for-byte.
+        let on_loop = render(show_status(&node));
+        let off_loop = render(show_status_from_handle(&handle));
+        assert_eq!(
+            on_loop, off_loop,
+            "off-loop show_status must match on-loop output"
+        );
     }
 }

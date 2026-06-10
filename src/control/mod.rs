@@ -13,9 +13,12 @@ pub mod firewall_state;
 pub mod listening;
 pub mod protocol;
 pub mod queries;
+pub mod read_handle;
+pub mod snapshot;
 
 use crate::config::ControlConfig;
 use protocol::{Request, Response};
+use read_handle::{ControlReadHandle, snapshot_dispatch};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -36,6 +39,7 @@ pub type ControlMessage = (Request, oneshot::Sender<Response>);
 async fn handle_connection_generic<S>(
     stream: S,
     control_tx: mpsc::Sender<ControlMessage>,
+    read_handle: ControlReadHandle,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -73,15 +77,23 @@ where
             // Parse the request
             match serde_json::from_str::<Request>(line.trim()) {
                 Ok(request) => {
-                    // Send to main loop and wait for response
-                    let (resp_tx, resp_rx) = oneshot::channel();
-                    if control_tx.send((request, resp_tx)).await.is_err() {
-                        Response::error("node shutting down")
-                    } else {
-                        match tokio::time::timeout(IO_TIMEOUT, resp_rx).await {
-                            Ok(Ok(resp)) => resp,
-                            Ok(Err(_)) => Response::error("response channel closed"),
-                            Err(_) => Response::error("query timeout"),
+                    // First try to serve the request entirely off-loop from the
+                    // read handle. In R0 this always returns None (no query is
+                    // cut over yet); R1+ adds the per-command snapshot branches.
+                    match snapshot_dispatch(&request, &read_handle) {
+                        Some(resp) => resp,
+                        None => {
+                            // Send to main loop and wait for response
+                            let (resp_tx, resp_rx) = oneshot::channel();
+                            if control_tx.send((request, resp_tx)).await.is_err() {
+                                Response::error("node shutting down")
+                            } else {
+                                match tokio::time::timeout(IO_TIMEOUT, resp_rx).await {
+                                    Ok(Ok(resp)) => resp,
+                                    Ok(Err(_)) => Response::error("response channel closed"),
+                                    Err(_) => Response::error("query timeout"),
+                                }
+                            }
                         }
                     }
                 }
@@ -229,7 +241,11 @@ mod unix_impl {
         /// 3. Wait for the response via oneshot
         /// 4. Write the response as one line of JSON
         /// 5. Close the connection
-        pub async fn accept_loop(self, control_tx: mpsc::Sender<ControlMessage>) {
+        pub(crate) async fn accept_loop(
+            self,
+            control_tx: mpsc::Sender<ControlMessage>,
+            read_handle: ControlReadHandle,
+        ) {
             loop {
                 let (stream, _addr) = match self.listener.accept().await {
                     Ok(conn) => conn,
@@ -240,8 +256,9 @@ mod unix_impl {
                 };
 
                 let tx = control_tx.clone();
+                let handle = read_handle.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection_generic(stream, tx).await {
+                    if let Err(e) = handle_connection_generic(stream, tx, handle).await {
                         debug!(error = %e, "Control connection error");
                     }
                 });
@@ -341,7 +358,11 @@ mod windows_impl {
         ///
         /// Each accepted connection is handled in a spawned task using the
         /// shared `handle_connection_generic` protocol handler.
-        pub async fn accept_loop(self, control_tx: mpsc::Sender<ControlMessage>) {
+        pub(crate) async fn accept_loop(
+            self,
+            control_tx: mpsc::Sender<ControlMessage>,
+            read_handle: ControlReadHandle,
+        ) {
             loop {
                 let (stream, addr) = match self.listener.accept().await {
                     Ok(conn) => conn,
@@ -358,8 +379,9 @@ mod windows_impl {
                 }
 
                 let tx = control_tx.clone();
+                let handle = read_handle.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection_generic(stream, tx).await {
+                    if let Err(e) = handle_connection_generic(stream, tx, handle).await {
                         debug!(error = %e, "Control connection error");
                     }
                 });

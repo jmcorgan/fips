@@ -82,6 +82,8 @@ enum Commands {
 enum StatsCommands {
     /// List available history metrics
     List,
+    /// Dump current counter values for every protocol metric family
+    Metrics,
     /// List peers tracked in the stats history
     Peers,
     /// Fetch a time-series window for a metric
@@ -448,6 +450,7 @@ fn main() {
         }
         Commands::Stats { what } => match what {
             StatsCommands::List => build_query("show_stats_list"),
+            StatsCommands::Metrics => build_query("show_metrics"),
             StatsCommands::Peers => build_query("show_stats_peers"),
             StatsCommands::History {
                 metric,
