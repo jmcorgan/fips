@@ -211,7 +211,10 @@ fn draw_table(
                     "Inbound" => "In",
                     other => other,
                 };
-                let addr = helpers::truncate_hex(helpers::str_field(link, "remote_addr"), 16);
+                // Wide enough to render a full MAC (~17) or `hci0/MAC`
+                // (~22) without chopping mid-octet; the link detail view
+                // shows the untruncated address.
+                let addr = helpers::truncate_hex(helpers::str_field(link, "remote_addr"), 24);
                 let label = format!("  {tree_char} {dir_short} {addr}");
 
                 let state = helpers::str_field(link, "state");

@@ -1616,9 +1616,6 @@ impl Node {
     /// Best-effort: send failures are logged and ignored since the transport
     /// may already be degraded. This runs before transports are shut down.
     async fn send_disconnect_to_all_peers(&mut self, reason: DisconnectReason) {
-        let disconnect = Disconnect::new(reason);
-        let plaintext = disconnect.encode();
-
         // Collect node_addrs to avoid borrow conflict with send helper
         let peer_addrs: Vec<NodeAddr> = self
             .peers
@@ -1637,22 +1634,39 @@ impl Node {
 
         let mut sent = 0usize;
         for node_addr in &peer_addrs {
-            match self
-                .send_encrypted_link_message(node_addr, &plaintext)
-                .await
-            {
-                Ok(()) => sent += 1,
-                Err(e) => {
-                    debug!(
-                        peer = %self.peer_display_name(node_addr),
-                        error = %e,
-                        "Failed to send disconnect (transport may be down)"
-                    );
-                }
+            if self.send_disconnect_to_peer(node_addr, reason).await {
+                sent += 1;
             }
         }
 
         info!(sent, total = peer_addrs.len(), reason = %reason, "Sent disconnect notifications");
+    }
+
+    /// Send a Disconnect notification to a single peer.
+    ///
+    /// Best-effort: a send failure (peer already gone, transport down) is
+    /// logged and swallowed so callers can proceed with teardown regardless.
+    /// Returns `true` if the message was sent successfully.
+    async fn send_disconnect_to_peer(
+        &mut self,
+        node_addr: &NodeAddr,
+        reason: DisconnectReason,
+    ) -> bool {
+        let plaintext = Disconnect::new(reason).encode();
+        match self
+            .send_encrypted_link_message(node_addr, &plaintext)
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                debug!(
+                    peer = %self.peer_display_name(node_addr),
+                    error = %e,
+                    "Failed to send disconnect (transport may be down)"
+                );
+                false
+            }
+        }
     }
 
     fn static_peer_addresses(&self, peer_config: &PeerConfig) -> Vec<PeerAddress> {
@@ -2644,8 +2658,8 @@ impl Node {
 
     /// Disconnect a peer via the control API.
     ///
-    /// Removes the peer and suppresses auto-reconnect.
-    pub(crate) fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
+    /// Notifies the peer, removes it locally, and suppresses auto-reconnect.
+    pub(crate) async fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
         let peer_identity =
             PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
         let node_addr = *peer_identity.node_addr();
@@ -2653,6 +2667,14 @@ impl Node {
         if !self.peers.contains_key(&node_addr) {
             return Err(format!("peer not found: {npub}"));
         }
+
+        // Notify the peer before we tear down the link, so it drops its own
+        // session and re-handshakes symmetrically rather than holding a stale
+        // session that never re-emits its tree/filter announcements. The link
+        // must still exist for the send, so this runs before removal.
+        // Best-effort: a send failure must not block the local teardown.
+        self.send_disconnect_to_peer(&node_addr, DisconnectReason::ConfigurationChange)
+            .await;
 
         // Remove the peer (full cleanup: sessions, indices, links, tree, bloom)
         self.remove_active_peer(&node_addr);

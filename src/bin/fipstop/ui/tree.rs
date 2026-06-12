@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Tab};
 
@@ -26,12 +26,44 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
-    draw_position(frame, data, chunks[0]);
-    draw_stats(frame, data, chunks[1]);
-    draw_peers(frame, data, chunks[2]);
+    let focused = app.focused_pane();
+    draw_position(frame, data, app.pane_scroll(0), focused == 0, chunks[0]);
+    draw_stats(frame, data, app.pane_scroll(1), focused == 1, chunks[1]);
+    draw_peers(
+        frame,
+        app,
+        data,
+        app.pane_scroll(2),
+        focused == 2,
+        chunks[2],
+    );
 }
 
-fn draw_position(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
+/// Look up a peer's daemon-computed `effective_depth` from the Peers tab data
+/// by node_addr, formatted, or an em-dash when unavailable/unmeasured. The
+/// value is a single daemon derivation (`show_peers`); the Tree tab reads it
+/// back rather than recomputing, so the surfaces cannot drift.
+fn peer_effective_depth(app: &App, node_addr: &str) -> String {
+    app.data
+        .get(&Tab::Peers)
+        .and_then(|v| v.get("peers"))
+        .and_then(|v| v.as_array())
+        .and_then(|peers| {
+            peers
+                .iter()
+                .find(|p| p.get("node_addr").and_then(|v| v.as_str()) == Some(node_addr))
+        })
+        .map(|p| helpers::opt_f64_field(p, "effective_depth", 2))
+        .unwrap_or_else(|| "\u{2014}".into())
+}
+
+fn draw_position(
+    frame: &mut Frame,
+    data: &serde_json::Value,
+    scroll: u16,
+    focused: bool,
+    area: Rect,
+) {
     let root_hex = helpers::str_field(data, "root");
     let is_root = data
         .get("is_root")
@@ -42,10 +74,18 @@ fn draw_position(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let decl_seq = helpers::u64_field(data, "declaration_sequence");
     let decl_signed = helpers::bool_field(data, "declaration_signed");
 
+    // Full root hex (no truncation) so it can be correlated against logs and
+    // configs; the npub line below resolves the root's identity when known.
     let root_display = if is_root {
-        format!("{} (self)", helpers::truncate_hex(root_hex, 16))
+        format!("{root_hex} (self)")
     } else {
-        helpers::truncate_hex(root_hex, 16)
+        root_hex.to_string()
+    };
+    let root_npub = helpers::str_field(data, "root_npub");
+    let npub_display = if root_npub == "-" {
+        "<unknown>".to_string()
+    } else {
+        root_npub.to_string()
     };
 
     let parent_display = if is_root {
@@ -56,6 +96,7 @@ fn draw_position(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
 
     let mut lines = vec![
         helpers::kv_line("Root", &root_display),
+        helpers::kv_line("Npub", &npub_display),
         helpers::kv_line("Depth", &depth),
         helpers::kv_line("Parent", &parent_display),
         helpers::kv_line("Declaration", &format!("seq {decl_seq}, {decl_signed}")),
@@ -100,22 +141,19 @@ fn draw_position(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         lines.push(Line::from(path_parts));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Tree Position ");
+    let block = helpers::pane_block(" Tree Position ", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines), inner);
+    let scroll = helpers::clamp_scroll(scroll, lines.len(), inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
-fn draw_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Tree Announce Stats ");
+fn draw_stats(frame: &mut Frame, data: &serde_json::Value, scroll: u16, focused: bool, area: Rect) {
+    let block = helpers::pane_block(" Tree Announce Stats ", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines = vec![
+    let lines = vec![
         helpers::section_header("Inbound"),
         helpers::kv_line("Received", &helpers::nested_u64(data, "stats", "received")),
         helpers::kv_line("Accepted", &helpers::nested_u64(data, "stats", "accepted")),
@@ -175,25 +213,29 @@ fn draw_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         ),
     ];
 
-    // Trim to fit available height
-    let max_lines = inner.height as usize;
-    lines.truncate(max_lines);
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Apply the focused-pane scroll instead of truncating, so over-full stats
+    // can be revealed by scrolling.
+    let scroll = helpers::clamp_scroll(scroll, lines.len(), inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
-fn draw_peers(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
+fn draw_peers(
+    frame: &mut Frame,
+    app: &App,
+    data: &serde_json::Value,
+    scroll: u16,
+    focused: bool,
+    area: Rect,
+) {
     let peers = data
         .get("peers")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let my_root = helpers::str_field(data, "root");
+    let my_root = helpers::str_field(data, "root").to_string();
 
     let count = peers.len();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Tree Peers ({count}) "));
+    let block = helpers::pane_block(&format!(" Tree Peers ({count}) "), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -203,44 +245,62 @@ fn draw_peers(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         return;
     }
 
-    let lines: Vec<Line> = peers
-        .iter()
-        .map(|p| {
-            let name = helpers::str_field(p, "display_name");
-            let has_depth = p.get("depth").is_some();
-
-            if !has_depth {
-                return Line::from(vec![
-                    Span::styled(
-                        format!("    {name:<16}"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled("(no position)", Style::default().fg(Color::DarkGray)),
-                ]);
-            }
-
-            let depth = helpers::u64_field(p, "depth");
-            let dist = helpers::u64_field(p, "distance_to_us");
-            let peer_root = helpers::str_field(p, "root");
-            let (root_ind, root_color) = if peer_root == my_root {
-                ("same root", Color::Green)
-            } else {
-                ("diff root", Color::Red)
-            };
-
-            Line::from(vec![
-                Span::styled(
-                    format!("    {name:<16}"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("depth: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{depth:<4}")),
-                Span::styled("dist: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{dist:<4}")),
-                Span::styled(root_ind, Style::default().fg(root_color)),
-            ])
-        })
+    // The tree response carries no role flags; recover them from the peers view
+    // (cross-fetched on this tab) by joining on the hex node address, then group
+    // by tree role (parent -> STP children -> other) like the Peers tab so the
+    // same peer sits under the same heading on every surface.
+    let role_map = helpers::peer_role_map(app.data.get(&Tab::Peers));
+    let mut peers: Vec<serde_json::Value> = peers
+        .into_iter()
+        .map(|p| helpers::enrich_role(p, &role_map, "node_addr"))
         .collect();
+    helpers::sort_by_group(&mut peers);
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let lines = helpers::grouped_peer_lines(&peers, |p| tree_peer_line(app, &my_root, p));
+
+    let scroll = helpers::clamp_scroll(scroll, lines.len(), inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// Render one Tree-tab peer line: name plus depth/dist/eff columns and a
+/// same-root/diff-root indicator, or a "(no position)" note for a peer with no
+/// tree depth yet.
+fn tree_peer_line(app: &App, my_root: &str, p: &serde_json::Value) -> Line<'static> {
+    let name = helpers::str_field(p, "display_name");
+    let has_depth = p.get("depth").is_some();
+
+    if !has_depth {
+        return Line::from(vec![
+            Span::styled(
+                format!("    {} ", helpers::truncate_name(name, 16)),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("(no position)", Style::default().fg(Color::DarkGray)),
+        ]);
+    }
+
+    let depth = helpers::u64_field(p, "depth");
+    let dist = helpers::u64_field(p, "distance_to_us");
+    let peer_root = helpers::str_field(p, "root");
+    let node_addr = helpers::str_field(p, "node_addr");
+    let eff = peer_effective_depth(app, node_addr);
+    let (root_ind, root_color) = if peer_root == my_root {
+        ("same root", Color::Green)
+    } else {
+        ("diff root", Color::Red)
+    };
+
+    Line::from(vec![
+        Span::styled(
+            format!("    {} ", helpers::truncate_name(name, 16)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("depth: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{depth:<4}")),
+        Span::styled("dist: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{dist:<4}")),
+        Span::styled("eff: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{eff:<7}")),
+        Span::styled(root_ind, Style::default().fg(root_color)),
+    ])
 }

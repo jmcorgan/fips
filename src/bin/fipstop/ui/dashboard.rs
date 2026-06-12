@@ -23,7 +23,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(7), // Runtime
         Constraint::Length(7), // Identity
-        Constraint::Length(6), // State (sparkline row adds one line)
+        Constraint::Length(8), // State (root egg + transports + sparkline rows)
         Constraint::Length(9), // Traffic + Listening on fips0 (side-by-side)
         Constraint::Min(0),    // remaining
     ])
@@ -95,6 +95,12 @@ fn draw_identity(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let npub = helpers::str_field(data, "npub");
     let node_addr = helpers::str_field(data, "node_addr");
     let ipv6_addr = helpers::str_field(data, "ipv6_addr");
+    // Effective persistence: whether this identity survives a restart.
+    let mode = match data.get("persistent").and_then(|v| v.as_bool()) {
+        Some(true) => "persistent",
+        Some(false) => "ephemeral",
+        None => "-",
+    };
 
     let label = Style::default().fg(Color::DarkGray);
 
@@ -110,6 +116,10 @@ fn draw_identity(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         Line::from(vec![
             Span::styled(" ipv6:      ", label),
             Span::raw(ipv6_addr.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled(" identity:  ", label),
+            Span::raw(mode.to_string()),
         ]),
     ];
 
@@ -148,6 +158,24 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         helpers::sparkline(&helpers::nested_f64_array(data, "sparklines", "peer_count"));
     let spark_style = Style::default().fg(Color::DarkGray);
 
+    // Root: an Easter-egg marker when this node IS the root, otherwise the
+    // truncated root hex. The full root address + npub live on the Tree tab.
+    let is_root = data
+        .get("is_root")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let root_display = if is_root {
+        "I am the one who roots".to_string()
+    } else {
+        let root_hex = helpers::str_field(data, "root");
+        let head: String = root_hex.chars().take(16).collect();
+        format!("{head}\u{2026}")
+    };
+
+    // Configured transport types each with their peer count, e.g.
+    // "udp (5), tcp (2), tor (0)". Idle-but-configured types stay visible at 0.
+    let transports_by_type = format_transport_peer_counts(data);
+
     let lines = vec![
         Line::from(vec![
             Span::styled(" state: ", label),
@@ -170,8 +198,21 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
             Span::styled(transports, count),
             Span::styled("  connections: ", label),
             Span::styled(connections, count),
-            Span::styled("  mesh: ", label),
+        ]),
+        // The mesh size is a bloom-cardinality estimate, not an exact count;
+        // it gets its own line so the longer "approx. mesh estimate:" label
+        // does not overflow the counts line at narrow widths.
+        Line::from(vec![
+            Span::styled(" approx. mesh estimate: ", label),
             Span::styled(mesh_size, count),
+        ]),
+        Line::from(vec![
+            Span::styled(" root: ", label),
+            Span::raw(root_display),
+        ]),
+        Line::from(vec![
+            Span::styled(" transports: ", label),
+            Span::raw(transports_by_type),
         ]),
         Line::from(vec![
             Span::styled(" peers:  ", label),
@@ -182,6 +223,25 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Format the `transport_peer_counts` map as `type (count)` joined with
+/// commas, e.g. `udp (5), tcp (2), tor (0)`. Keys are rendered in sorted
+/// order (the daemon emits a sorted map). Returns `-` when absent or empty.
+fn format_transport_peer_counts(data: &serde_json::Value) -> String {
+    let Some(map) = data
+        .get("transport_peer_counts")
+        .and_then(|v| v.as_object())
+    else {
+        return "-".into();
+    };
+    if map.is_empty() {
+        return "-".into();
+    }
+    map.iter()
+        .map(|(ty, count)| format!("{ty} ({})", count.as_u64().unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn draw_node_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {

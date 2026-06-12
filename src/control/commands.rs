@@ -12,7 +12,7 @@ use tracing::debug;
 pub async fn dispatch(node: &mut Node, command: &str, params: Option<&Value>) -> Response {
     match command {
         "connect" => connect(node, params).await,
-        "disconnect" => disconnect(node, params),
+        "disconnect" => disconnect(node, params).await,
         _ => Response::error(format!("unknown command: {command}")),
     }
 }
@@ -49,7 +49,7 @@ async fn connect(node: &mut Node, params: Option<&Value>) -> Response {
 /// Disconnect a peer.
 ///
 /// Params: `{"npub": "npub1..."}`
-fn disconnect(node: &mut Node, params: Option<&Value>) -> Response {
+async fn disconnect(node: &mut Node, params: Option<&Value>) -> Response {
     let Some(params) = params else {
         return Response::error("missing params for disconnect");
     };
@@ -61,7 +61,7 @@ fn disconnect(node: &mut Node, params: Option<&Value>) -> Response {
 
     debug!(npub = %npub, "API disconnect requested");
 
-    match node.api_disconnect(npub) {
+    match node.api_disconnect(npub).await {
         Ok(data) => Response::ok(data),
         Err(msg) => Response::error(msg),
     }

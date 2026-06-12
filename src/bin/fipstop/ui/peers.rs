@@ -4,6 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    TableState,
 };
 
 use crate::app::{App, Tab};
@@ -26,7 +27,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Get peers sorted by LQI ascending (best first). Peers without LQI sort last.
+/// Get peers grouped by role (parent -> STP children -> other), and within
+/// each group sorted by LQI ascending (best first). Peers without LQI sort
+/// last within their group.
 fn get_peers_sorted(app: &App) -> Vec<serde_json::Value> {
     let mut peers = app
         .data
@@ -37,20 +40,25 @@ fn get_peers_sorted(app: &App) -> Vec<serde_json::Value> {
         .unwrap_or_default();
 
     peers.sort_by(|a, b| {
-        let lqi_a = a
-            .get("mmp")
-            .and_then(|m| m.get("lqi"))
-            .and_then(|v| v.as_f64());
-        let lqi_b = b
-            .get("mmp")
-            .and_then(|m| m.get("lqi"))
-            .and_then(|v| v.as_f64());
-        match (lqi_a, lqi_b) {
-            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
+        // Primary key: role group. Secondary key: LQI ascending.
+        helpers::group_rank(a)
+            .cmp(&helpers::group_rank(b))
+            .then_with(|| {
+                let lqi_a = a
+                    .get("mmp")
+                    .and_then(|m| m.get("lqi"))
+                    .and_then(|v| v.as_f64());
+                let lqi_b = b
+                    .get("mmp")
+                    .and_then(|m| m.get("lqi"))
+                    .and_then(|v| v.as_f64());
+                match (lqi_a, lqi_b) {
+                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            })
     });
 
     peers
@@ -71,6 +79,7 @@ fn draw_table(
         Cell::from("SRTT"),
         Cell::from("Loss"),
         Cell::from("LQI"),
+        Cell::from("EffD"),
         Cell::from("Goodput"),
         Cell::from("Pkts Tx"),
         Cell::from("Pkts Rx"),
@@ -81,90 +90,114 @@ fn draw_table(
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = peers
-        .iter()
-        .map(|peer| {
-            let name = helpers::str_field(peer, "display_name");
-            let npub = helpers::str_field(peer, "npub");
-            let is_parent = peer
-                .get("is_parent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let is_child = peer
-                .get("is_child")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+    // Build the grouped display: a styled label row before each non-empty
+    // group, the group's peer rows, and a blank separator before the next
+    // group. `peer_display_idx[p]` is the display-row index of sorted peer `p`,
+    // so the stored peer-index selection (used by detail + navigation) can be
+    // translated to the display row to highlight, and the cursor only ever
+    // lands on peer rows.
+    let mut rows: Vec<Row> = Vec::new();
+    let mut peer_display_idx: Vec<usize> = Vec::with_capacity(peers.len());
+    let mut last_group: Option<u8> = None;
+    let group_label_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    for peer in peers.iter() {
+        let g = helpers::group_rank(peer);
+        if last_group != Some(g) {
+            if last_group.is_some() {
+                rows.push(Row::new(vec![Cell::from("")]));
+            }
+            rows.push(Row::new(vec![Cell::from(helpers::group_label(g))]).style(group_label_style));
+            last_group = Some(g);
+        }
 
-            // Transport: "type addr" (e.g., "udp 1.2.3.4:2121")
-            let transport = {
-                let t_type = peer
-                    .get("transport_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let t_addr = peer
-                    .get("transport_addr")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if t_type.is_empty() && t_addr.is_empty() {
-                    "-".to_string()
-                } else if t_type.is_empty() {
-                    t_addr.to_string()
-                } else if t_addr.is_empty() {
-                    t_type.to_string()
-                } else {
-                    format!("{t_type}/{t_addr}")
-                }
-            };
+        let name = helpers::str_field(peer, "display_name");
+        let npub = helpers::str_field(peer, "npub");
+        let is_parent = peer
+            .get("is_parent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_child = peer
+            .get("is_child")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-            let dir = peer
-                .get("direction")
+        // Transport: "type addr" (e.g., "udp 1.2.3.4:2121")
+        let transport = {
+            let t_type = peer
+                .get("transport_type")
                 .and_then(|v| v.as_str())
-                .map(|d| match d {
-                    "inbound" => "in",
-                    "outbound" => "out",
-                    other => other,
-                })
-                .unwrap_or("-");
-            let srtt = helpers::nested_f64(peer, "mmp", "srtt_ms", 1);
-            let loss = helpers::nested_f64_prefer(peer, "mmp", "smoothed_loss", "loss_rate", 3);
-            let lqi = helpers::nested_f64(peer, "mmp", "lqi", 2);
-            let goodput = helpers::nested_throughput(peer, "mmp", "goodput_bps");
-            let pkts_tx = helpers::nested_u64(peer, "stats", "packets_sent");
-            let pkts_rx = helpers::nested_u64(peer, "stats", "packets_recv");
-
-            // Tree role colorization
-            let row_style = if is_parent {
-                Style::default().fg(Color::Magenta)
-            } else if is_child {
-                Style::default().fg(Color::Cyan)
+                .unwrap_or("");
+            let t_addr = peer
+                .get("transport_addr")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if t_type.is_empty() && t_addr.is_empty() {
+                "-".to_string()
+            } else if t_type.is_empty() {
+                t_addr.to_string()
+            } else if t_addr.is_empty() {
+                t_type.to_string()
             } else {
-                Style::default()
-            };
+                format!("{t_type}/{t_addr}")
+            }
+        };
 
+        let dir = peer
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .map(|d| match d {
+                "inbound" => "in",
+                "outbound" => "out",
+                other => other,
+            })
+            .unwrap_or("-");
+        let srtt = helpers::nested_f64(peer, "mmp", "srtt_ms", 1);
+        let loss = helpers::nested_f64_prefer(peer, "mmp", "smoothed_loss", "loss_rate", 3);
+        let lqi = helpers::nested_f64(peer, "mmp", "lqi", 2);
+        let eff_depth = helpers::opt_f64_field(peer, "effective_depth", 2);
+        let goodput = helpers::nested_throughput(peer, "mmp", "goodput_bps");
+        let pkts_tx = helpers::nested_u64(peer, "stats", "packets_sent");
+        let pkts_rx = helpers::nested_u64(peer, "stats", "packets_recv");
+
+        // Tree role colorization
+        let row_style = if is_parent {
+            Style::default().fg(Color::Magenta)
+        } else if is_child {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        peer_display_idx.push(rows.len());
+        rows.push(
             Row::new(vec![
                 Cell::from(name.to_string()),
-                Cell::from(npub.to_string()),
+                Cell::from(helpers::truncate_hex(npub, 18)),
                 Cell::from(transport),
                 Cell::from(dir.to_string()),
                 Cell::from(srtt),
                 Cell::from(loss),
                 Cell::from(lqi),
+                Cell::from(eff_depth),
                 Cell::from(goodput),
                 Cell::from(pkts_tx),
                 Cell::from(pkts_rx),
             ])
-            .style(row_style)
-        })
-        .collect();
+            .style(row_style),
+        );
+    }
 
     let widths = [
-        Constraint::Min(12),    // Name
-        Constraint::Length(67), // Npub (full bech32)
+        Constraint::Min(20),    // Name (wide enough for the group labels)
+        Constraint::Length(20), // Npub (truncated; full form in the detail view)
         Constraint::Min(20),    // Transport
         Constraint::Length(4),  // Dir
         Constraint::Length(8),  // SRTT
         Constraint::Length(7),  // Loss
         Constraint::Length(6),  // LQI
+        Constraint::Length(6),  // EffD
         Constraint::Length(10), // Goodput
         Constraint::Length(9),  // Pkts Tx
         Constraint::Length(9),  // Pkts Rx
@@ -184,12 +217,21 @@ fn draw_table(
         )
         .highlight_symbol("▶ ");
 
-    let state = app.table_states.entry(Tab::Peers).or_default();
-    frame.render_stateful_widget(table, area, state);
+    // The stored selection is the *peer* index (used by detail + navigation);
+    // translate it to the display row so the highlight lands on the peer's row
+    // and the cursor never sits on a label or blank separator.
+    let peer_sel = app.table_states.get(&Tab::Peers).and_then(|s| s.selected());
+    let mut display_state = TableState::default();
+    if let Some(p) = peer_sel
+        && let Some(&disp) = peer_display_idx.get(p)
+    {
+        display_state.select(Some(disp));
+    }
+    frame.render_stateful_widget(table, area, &mut display_state);
 
-    // Scrollbar
+    // Scrollbar tracks the peer position within the peer count.
     if row_count > 0 {
-        let selected = state.selected().unwrap_or(0);
+        let selected = peer_sel.unwrap_or(0);
         let mut scrollbar_state = ScrollbarState::new(row_count).position(selected);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -329,6 +371,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Va
     if let Some(depth) = peer.get("tree_depth").and_then(|v| v.as_u64()) {
         lines.push(helpers::kv_line("Tree Depth", &depth.to_string()));
     }
+    lines.push(helpers::kv_line(
+        "Effective Depth",
+        &helpers::opt_f64_field(peer, "effective_depth", 2),
+    ));
     lines.extend([
         helpers::kv_line("Bloom Filter", if has_bloom { "yes" } else { "no" }),
         helpers::kv_line("Filter Seq", &helpers::u64_field(peer, "filter_sequence")),

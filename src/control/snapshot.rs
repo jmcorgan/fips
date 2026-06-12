@@ -53,6 +53,14 @@ pub(crate) struct StatsSnapshot {
     pub transport_count: usize,
     /// Number of active sessions.
     pub session_count: usize,
+    /// Current spanning-tree root `NodeAddr` (rendered as hex by `show_status`).
+    pub root: NodeAddr,
+    /// Whether this node is the spanning-tree root.
+    pub is_root: bool,
+    /// Per-configured-transport-type count of peers whose active link rides that
+    /// transport type. Configured-but-idle types appear with a zero count.
+    /// Keyed by the transport type name (`"udp"`, `"tcp"`, `"tor"`, ...).
+    pub transport_peer_counts: std::collections::BTreeMap<String, usize>,
     /// Configured peer aliases, keyed by `NodeAddr`. Effectively immutable
     /// after construction; shared to avoid a per-tick map clone.
     pub peer_aliases: Arc<HashMap<NodeAddr, String>>,
@@ -100,6 +108,9 @@ impl StatsSnapshot {
             link_count: 0,
             transport_count: 0,
             session_count: 0,
+            root: zero_addr(),
+            is_root: false,
+            transport_peer_counts: std::collections::BTreeMap::new(),
             peer_aliases: Arc::new(HashMap::new()),
             acl_status: empty_acl_status(),
             peer_meta: Arc::new(HashMap::new()),
@@ -204,6 +215,9 @@ fn zero_addr() -> NodeAddr {
 pub(crate) struct TreeView {
     pub my_node_addr: NodeAddr,
     pub root: NodeAddr,
+    /// Resolved npub of the root node, when discoverable (self when root, a live
+    /// peer's attested npub, or an identity-cache hit); `None` otherwise.
+    pub root_npub: Option<String>,
     pub is_root: bool,
     pub depth: usize,
     /// `my_coords` entries as `NodeAddr`s (rendered as hex).
@@ -221,6 +235,7 @@ impl Default for TreeView {
         Self {
             my_node_addr: zero_addr(),
             root: zero_addr(),
+            root_npub: None,
             is_root: false,
             depth: 0,
             my_coords: Vec::new(),
@@ -260,6 +275,15 @@ pub(crate) struct BloomView {
     pub sequence: u64,
     pub leaf_dependents: Vec<NodeAddr>,
     pub peer_filters: Vec<BloomPeerRow>,
+    /// Fill ratio of the last filter actually sent uptree (to the tree parent).
+    /// `None` for a root node (nothing sent uptree) or before the first
+    /// announce has been sent.
+    pub uptree_fill_ratio: Option<f64>,
+    /// Estimated cardinality of the last filter sent uptree — this node's whole
+    /// subtree (self + tree-descendants, parent excluded), since bloom is
+    /// split-horizon. `None` for root, pre-first-announce, or when the estimate
+    /// is undefined for the saturation.
+    pub uptree_estimated_count: Option<f64>,
 }
 
 impl Default for BloomView {
@@ -270,6 +294,8 @@ impl Default for BloomView {
             sequence: 0,
             leaf_dependents: Vec::new(),
             peer_filters: Vec::new(),
+            uptree_fill_ratio: None,
+            uptree_estimated_count: None,
         }
     }
 }
@@ -536,6 +562,12 @@ pub(crate) struct PeerRow {
     pub transport_addr: Option<String>,
     pub link_info: Option<PeerLinkInfo>,
     pub tree_depth: Option<usize>,
+    /// `effective_depth = tree_depth + link_cost` — the same quantity
+    /// `evaluate_parent` ranks parent candidates on. `None` when the peer is
+    /// unmeasured (no SRTT while other peers have it) or has no coords,
+    /// mirroring the candidacy/cold-start rules. Pre-computed daemon-side so
+    /// fipstop never recomputes it.
+    pub effective_depth: Option<f64>,
     pub stats: PeerLinkStats,
     pub replay_suppressed: u32,
     pub consecutive_decrypt_failures: u32,
@@ -671,6 +703,17 @@ pub(crate) struct MmpPeerRow {
     pub ecn_ce_count: u32,
 }
 
+/// MMP trend labels for a session's session-layer block in `show_mmp` (each
+/// present only when the corresponding trend is initialized). Mirrors the
+/// link-layer [`MmpTrends`] arrow semantics on the session columns: srtt
+/// (`rtt_trend`), loss (`loss_trend`), etx (`etx_trend`).
+#[derive(Clone, PartialEq)]
+pub(crate) struct MmpSessionTrends {
+    pub rtt_trend: Option<&'static str>,
+    pub loss_trend: Option<&'static str>,
+    pub etx_trend: Option<&'static str>,
+}
+
 /// One session's session-layer MMP block in `show_mmp`.
 #[derive(Clone, PartialEq)]
 pub(crate) struct MmpSessionRow {
@@ -685,6 +728,7 @@ pub(crate) struct MmpSessionRow {
     pub srtt_ms: Option<f64>,
     /// `sqi`: present only when both `srtt_ms` and `smoothed_etx` are present.
     pub sqi: Option<f64>,
+    pub trends: MmpSessionTrends,
 }
 
 /// Reconcile a freshly-projected entity table against the previously published

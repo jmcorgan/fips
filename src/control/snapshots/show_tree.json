@@ -13,6 +13,7 @@
     "peer_tree_count": 0,
     "peers": [],
     "root": "1b4788b7ab7a436a611fc59fb1e34c6e",
+    "root_npub": "npub1sx42mj99aql52aklsg70y2jmr95u7uz2p40k769aw46ppjv302kqkhmu5r",
     "stats": {
       "accepted": 0,
       "addr_mismatch": 0,

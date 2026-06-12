@@ -2,12 +2,17 @@ mod bloom;
 mod dashboard;
 mod gateway;
 mod graphs;
+pub(crate) mod help;
 mod helpers;
 pub(crate) mod listening;
 mod mmp;
 mod peers;
 mod routing;
 mod sessions;
+#[cfg(test)]
+mod snapshots;
+#[cfg(test)]
+mod testkit;
 mod transports;
 mod tree;
 
@@ -30,6 +35,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_tab_bar(frame, app, chunks[0]);
     draw_content(frame, app, chunks[1]);
     draw_status_bar(frame, app, chunks[2]);
+
+    // The `?` help overlay draws over everything when toggled on.
+    if app.show_help {
+        help::draw_overlay(frame, app, chunks[1]);
+    }
+    // The Del-disconnect confirmation modal draws over the content.
+    if app.confirm_disconnect.is_some() {
+        help::draw_disconnect_modal(frame, app, chunks[1]);
+    }
 }
 
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -101,9 +115,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         elapsed.as_secs_f64()
     ));
 
-    let help = Span::styled("[?] Help ", Style::default().fg(Color::DarkGray));
+    // Context-aware hints fill the remaining width after the connection and
+    // timing spans, sourced from the shared keybinding registry so they can't
+    // drift from the `?` overlay.
+    let fixed_w = conn.width() + timing.width();
+    let budget = (area.width as usize).saturating_sub(fixed_w);
+    let mode = help::UiMode::of(app);
+    let hint_spans = help::footer_hint_spans(app.active_tab, mode, budget);
 
-    let line = Line::from(vec![conn, timing, help]);
+    let mut spans = vec![conn, timing];
+    spans.extend(hint_spans);
+    let line = Line::from(spans);
     let bar = Paragraph::new(line);
     frame.render_widget(bar, area);
 }

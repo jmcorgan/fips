@@ -325,6 +325,64 @@ async fn test_disconnect_clears_session() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// A manual (control-API) disconnect must notify the peer, not just tear
+/// down the local side.
+///
+/// Regression test: `api_disconnect` previously removed the peer locally but
+/// sent it no Disconnect message. The peer kept its session and never
+/// re-emitted its tree/filter announcements, so on reconnect it was never
+/// re-adopted as a child and its bloom filter was never recorded. The fix
+/// sends the disconnected peer a scoped Disconnect so both sides tear down
+/// symmetrically. This test drives `api_disconnect` on node 0 and verifies
+/// node 1 receives the notification and removes node 0.
+#[tokio::test]
+async fn test_api_disconnect_notifies_peer() {
+    // Two-node topology: 0 -- 1.
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_npub = nodes[1].node.npub();
+
+    // Both sides start with each other as a peer.
+    assert!(
+        nodes[0].node.get_peer(&node1_addr).is_some(),
+        "Node 0 should have node 1 before disconnect"
+    );
+    assert!(
+        nodes[1].node.get_peer(&node0_addr).is_some(),
+        "Node 1 should have node 0 before disconnect"
+    );
+
+    // Operator disconnects node 1 via the control API on node 0.
+    nodes[0]
+        .node
+        .api_disconnect(&node1_npub)
+        .await
+        .expect("api_disconnect should succeed");
+
+    // Node 0 tore down its side immediately.
+    assert!(
+        nodes[0].node.get_peer(&node1_addr).is_none(),
+        "Node 0 should have removed node 1 after api_disconnect"
+    );
+
+    // The Disconnect notification must reach node 1.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    process_available_packets(&mut nodes).await;
+
+    // Node 1 must have torn down its side in response — proving the
+    // notification was actually emitted and received.
+    assert!(
+        nodes[1].node.get_peer(&node0_addr).is_none(),
+        "Node 1 should have removed node 0 after receiving the disconnect notification"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// Verify that different disconnect reasons are handled correctly.
 ///
 /// Sends each reason code and verifies the peer is removed regardless.

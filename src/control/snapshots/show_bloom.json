@@ -25,7 +25,9 @@
       "total_compressed_bytes": 0,
       "total_raw_bytes": 0,
       "unknown_peer": 0
-    }
+    },
+    "uptree_estimated_count": null,
+    "uptree_fill_ratio": null
   },
   "status": "ok"
 }

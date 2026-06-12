@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Tab};
 
@@ -20,47 +20,99 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let chunks = Layout::vertical([
-        Constraint::Length(7),  // Bloom Filter State
+        Constraint::Length(8),  // Bloom Filter State
         Constraint::Length(15), // Bloom Announce Stats
         Constraint::Min(3),     // Peer Filters
     ])
     .split(area);
 
-    draw_state(frame, data, chunks[0]);
-    draw_stats(frame, data, chunks[1]);
-    draw_peer_filters(frame, data, chunks[2]);
+    let focused = app.focused_pane();
+    draw_state(
+        frame,
+        app,
+        data,
+        app.pane_scroll(0),
+        focused == 0,
+        chunks[0],
+    );
+    draw_stats(frame, data, app.pane_scroll(1), focused == 1, chunks[1]);
+    draw_peer_filters(
+        frame,
+        app,
+        data,
+        app.pane_scroll(2),
+        focused == 2,
+        chunks[2],
+    );
 }
 
-fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let lines = vec![
-        helpers::kv_line(
+fn draw_state(
+    frame: &mut Frame,
+    app: &App,
+    data: &serde_json::Value,
+    scroll: u16,
+    focused: bool,
+    area: Rect,
+) {
+    // is_root determines whether the uptree filter renders as "n/a (root)";
+    // read it from the dashboard (State) surface, which carries it.
+    let is_root = app
+        .data
+        .get(&Tab::Node)
+        .and_then(|d| d.get("is_root"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Uptree filter (what we last sent to the tree parent): "n/a (root)" for a
+    // root node, an em-dash before the first announce, else the value.
+    let uptree_fill = if is_root {
+        "n/a (root)".to_string()
+    } else {
+        match data.get("uptree_fill_ratio").and_then(|v| v.as_f64()) {
+            Some(r) => format!("{:.1}%", r * 100.0),
+            None => "\u{2014}".into(),
+        }
+    };
+    let subtree_est = if is_root {
+        "n/a (root)".to_string()
+    } else {
+        match data.get("uptree_estimated_count").and_then(|v| v.as_f64()) {
+            Some(n) => format!("{:.0}", n),
+            None => "\u{2014}".into(),
+        }
+    };
+
+    let lines = helpers::kv_lines(&[
+        (
             "Node Addr",
-            &helpers::truncate_hex(helpers::str_field(data, "own_node_addr"), 16),
+            helpers::truncate_hex(helpers::str_field(data, "own_node_addr"), 16),
         ),
-        helpers::kv_line("Leaf Only", helpers::bool_field(data, "is_leaf_only")),
-        helpers::kv_line("Sequence", &helpers::u64_field(data, "sequence")),
-        helpers::kv_line(
+        (
+            "Leaf Only",
+            helpers::bool_field(data, "is_leaf_only").into(),
+        ),
+        ("Sequence", helpers::u64_field(data, "sequence")),
+        (
             "Leaf Deps",
-            &helpers::u64_field(data, "leaf_dependent_count"),
+            helpers::u64_field(data, "leaf_dependent_count"),
         ),
-    ];
+        ("Fill (sent uptree)", uptree_fill),
+        ("Subtree est", subtree_est),
+    ]);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Bloom Filter State ");
+    let block = helpers::pane_block(" Bloom Filter State ", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines), inner);
+    let scroll = helpers::clamp_scroll(scroll, lines.len(), inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
-fn draw_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Bloom Announce Stats ");
+fn draw_stats(frame: &mut Frame, data: &serde_json::Value, scroll: u16, focused: bool, area: Rect) {
+    let block = helpers::pane_block(" Bloom Announce Stats ", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines = vec![
+    let lines = vec![
         helpers::section_header("Inbound"),
         helpers::kv_line("Received", &helpers::nested_u64(data, "stats", "received")),
         helpers::kv_line("Accepted", &helpers::nested_u64(data, "stats", "accepted")),
@@ -107,13 +159,18 @@ fn draw_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         ),
     ];
 
-    let max_lines = inner.height as usize;
-    lines.truncate(max_lines);
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    let scroll = helpers::clamp_scroll(scroll, lines.len(), inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
-fn draw_peer_filters(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
+fn draw_peer_filters(
+    frame: &mut Frame,
+    app: &App,
+    data: &serde_json::Value,
+    scroll: u16,
+    focused: bool,
+    area: Rect,
+) {
     let filters = data
         .get("peer_filters")
         .and_then(|v| v.as_array())
@@ -121,9 +178,7 @@ fn draw_peer_filters(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         .unwrap_or_default();
 
     let count = filters.len();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Peer Filters ({count}) "));
+    let block = helpers::pane_block(&format!(" Peer Filters ({count}) "), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -133,48 +188,65 @@ fn draw_peer_filters(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         return;
     }
 
-    let lines: Vec<Line> = filters
-        .iter()
-        .map(|f| {
-            let name = helpers::str_field(f, "display_name");
-            let seq = helpers::u64_field(f, "filter_sequence");
-            let has = f
-                .get("has_filter")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let mut spans = vec![
-                Span::styled(
-                    format!("    {name:<16}"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("seq: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{seq:<6}")),
-            ];
-
-            if has {
-                let fill = f
-                    .get("fill_ratio")
-                    .and_then(|v| v.as_f64())
-                    .map(|r| format!("{:.1}%", r * 100.0))
-                    .unwrap_or_else(|| "-".into());
-                let est = f
-                    .get("estimated_count")
-                    .and_then(|v| v.as_f64())
-                    .map(|n| format!("{:.0}", n))
-                    .unwrap_or_else(|| "-".into());
-                spans.push(Span::styled("fill: ", Style::default().fg(Color::DarkGray)));
-                spans.push(Span::raw(format!("{fill:<8}")));
-                spans.push(Span::styled("est: ", Style::default().fg(Color::DarkGray)));
-                spans.push(Span::raw(format!("{est:<6}")));
-                spans.push(Span::styled("ok", Style::default().fg(Color::Green)));
-            } else {
-                spans.push(Span::styled("none", Style::default().fg(Color::Red)));
-            }
-
-            Line::from(spans)
-        })
+    // The bloom response carries no role flags; recover them from the peers view
+    // (cross-fetched on this tab) by joining each filter's `peer` hex address,
+    // then group by tree role (parent -> STP children -> other) to match the
+    // Peers and Tree tabs so the same peer sits under the same heading.
+    let role_map = helpers::peer_role_map(app.data.get(&Tab::Peers));
+    let mut filters: Vec<serde_json::Value> = filters
+        .into_iter()
+        .map(|f| helpers::enrich_role(f, &role_map, "peer"))
         .collect();
+    helpers::sort_by_group(&mut filters);
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let lines = helpers::grouped_peer_lines(&filters, peer_filter_line);
+
+    let scroll = helpers::clamp_scroll(scroll, lines.len(), inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// Render one Bloom-tab peer-filter line: name, filter sequence, and either the
+/// fill/estimate columns (when the peer has a filter) or a "none" marker.
+fn peer_filter_line(f: &serde_json::Value) -> Line<'static> {
+    let name = helpers::str_field(f, "display_name");
+    let seq = helpers::u64_field(f, "filter_sequence");
+    let has = f
+        .get("has_filter")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Right-justify each numeric into a fixed field wide enough for
+    // realistic data, with a guaranteed trailing separator so a
+    // wider-than-expected value can never touch the next label, and
+    // the digit columns line up across rows.
+    let mut spans = vec![
+        Span::styled(
+            format!("    {} ", helpers::truncate_name(name, 16)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("seq: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{seq:>9}  ")),
+    ];
+
+    if has {
+        let fill = f
+            .get("fill_ratio")
+            .and_then(|v| v.as_f64())
+            .map(|r| format!("{:.1}%", r * 100.0))
+            .unwrap_or_else(|| "-".into());
+        let est = f
+            .get("estimated_count")
+            .and_then(|v| v.as_f64())
+            .map(|n| format!("{:.0}", n))
+            .unwrap_or_else(|| "-".into());
+        spans.push(Span::styled("fill: ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw(format!("{fill:>6}  ")));
+        spans.push(Span::styled("est: ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw(format!("{est:>6}  ")));
+        spans.push(Span::styled("ok", Style::default().fg(Color::Green)));
+    } else {
+        spans.push(Span::styled("none", Style::default().fg(Color::Red)));
+    }
+
+    Line::from(spans)
 }
