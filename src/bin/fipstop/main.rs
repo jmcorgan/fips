@@ -223,8 +223,37 @@ fn fetch_data(
     {
         app.data.insert(Tab::Cache, data);
     }
+    // The Tree and Filters views carry no parent/child role flags in their own
+    // daemon responses, so cross-fetch the peers view and join by node address
+    // to group their peer lists the same way the Peers tab does. Non-fatal: on
+    // error the grouping falls back to placing every peer under Other.
+    if (app.active_tab == Tab::Tree || app.active_tab == Tab::Bloom)
+        && let Ok(data) = rt.block_on(client.query("show_peers"))
+    {
+        app.data.insert(Tab::Peers, data);
+    }
 
     app.last_fetch = std::time::Instant::now();
+}
+
+/// Down-arrow behaviour on the Graphs tab. The by-peer detail follows the
+/// selection (next peer); the by-peer list moves its cursor; the stacked
+/// node/peer modes scroll the content.
+fn graphs_down(app: &mut App) {
+    match app.graphs_mode {
+        crate::app::GraphsMode::MetricByPeer => app.graphs_peer_select_next(),
+        _ if app.detail_view.is_some() => app.scroll_detail_down(),
+        _ => app.graphs_scroll_down(),
+    }
+}
+
+/// Up-arrow behaviour on the Graphs tab (mirror of `graphs_down`).
+fn graphs_up(app: &mut App) {
+    match app.graphs_mode {
+        crate::app::GraphsMode::MetricByPeer => app.graphs_peer_select_prev(),
+        _ if app.detail_view.is_some() => app.scroll_detail_up(),
+        _ => app.graphs_scroll_up(),
+    }
 }
 
 fn main() {
@@ -272,9 +301,64 @@ fn main() {
                 if key.kind != ratatui::crossterm::event::KeyEventKind::Press {
                     continue;
                 }
+                // The disconnect confirmation is modal: while open, only Y
+                // (confirm), N/Esc (cancel), and quit are honored.
+                if app.confirm_disconnect.is_some() {
+                    match (key.code, key.modifiers) {
+                        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            app.should_quit = true;
+                        }
+                        (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
+                            if let Some(npub) = app.take_disconnect_target() {
+                                let params = serde_json::json!({ "npub": npub });
+                                if let Err(e) =
+                                    rt.block_on(client.query_with_params("disconnect", params))
+                                {
+                                    app.last_error = Some((std::time::Instant::now(), e));
+                                }
+                                fetch_data(&rt, &client, &gateway_client, &mut app);
+                            }
+                        }
+                        (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) | (KeyCode::Esc, _) => {
+                            app.cancel_disconnect();
+                        }
+                        _ => {}
+                    }
+                    if app.should_quit {
+                        break;
+                    }
+                    continue;
+                }
+                // The `?` overlay is modal: while open, only `?`/Esc (close)
+                // and quit are honored, so navigation keys don't act behind it.
+                if app.show_help {
+                    match (key.code, key.modifiers) {
+                        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            app.should_quit = true;
+                        }
+                        (KeyCode::Char('?'), _) | (KeyCode::Esc, _) => {
+                            app.show_help = false;
+                        }
+                        _ => {}
+                    }
+                    if app.should_quit {
+                        break;
+                    }
+                    continue;
+                }
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         app.should_quit = true;
+                    }
+                    (KeyCode::Char('?'), _) => {
+                        app.toggle_help();
+                    }
+                    (KeyCode::Delete, _) => {
+                        // Del on a selected Peers row opens the disconnect
+                        // confirmation (the only state-mutating action).
+                        if app.active_tab == Tab::Peers && app.detail_view.is_none() {
+                            app.request_disconnect_confirm();
+                        }
                     }
                     (KeyCode::Tab, KeyModifiers::NONE) => {
                         app.close_detail();
@@ -287,25 +371,64 @@ fn main() {
                         fetch_data(&rt, &client, &gateway_client, &mut app);
                     }
                     (KeyCode::Down, _) => {
-                        if app.detail_view.is_some() {
+                        if app.active_tab == Tab::Graphs {
+                            graphs_down(&mut app);
+                        } else if app.detail_view.is_some() {
                             app.scroll_detail_down();
-                        } else if app.active_tab == Tab::Graphs {
-                            app.graphs_scroll_down();
                         } else if app.active_tab.has_table() {
                             app.select_next();
+                        } else if app.active_tab.scroll_pane_count() > 0 {
+                            app.scroll_focused_pane(1);
                         }
                     }
                     (KeyCode::Up, _) => {
-                        if app.detail_view.is_some() {
+                        if app.active_tab == Tab::Graphs {
+                            graphs_up(&mut app);
+                        } else if app.detail_view.is_some() {
                             app.scroll_detail_up();
-                        } else if app.active_tab == Tab::Graphs {
-                            app.graphs_scroll_up();
                         } else if app.active_tab.has_table() {
                             app.select_prev();
+                        } else if app.active_tab.scroll_pane_count() > 0 {
+                            app.scroll_focused_pane(-1);
+                        }
+                    }
+                    (KeyCode::PageDown, _) => {
+                        if app.active_tab.scroll_pane_count() > 0 {
+                            app.scroll_focused_pane(10);
+                        }
+                    }
+                    (KeyCode::PageUp, _) => {
+                        if app.active_tab.scroll_pane_count() > 0 {
+                            app.scroll_focused_pane(-10);
+                        }
+                    }
+                    (KeyCode::Home, _) => {
+                        if app.active_tab.scroll_pane_count() > 0 {
+                            app.set_focused_pane_scroll(0);
+                        }
+                    }
+                    (KeyCode::End, _) => {
+                        if app.active_tab.scroll_pane_count() > 0 {
+                            // A large offset the renderer clamps to content.
+                            app.set_focused_pane_scroll(u16::MAX);
+                        }
+                    }
+                    (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                        // Cycle pane focus on the multi-pane scrollable tabs.
+                        let panes = app.active_tab.scroll_pane_count();
+                        if panes > 0 {
+                            app.focus_next_pane(panes);
                         }
                     }
                     (KeyCode::Enter, _) => {
-                        if app.active_tab.has_table() && app.detail_view.is_none() {
+                        if app.active_tab == Tab::Graphs
+                            && app.detail_view.is_none()
+                            && app.graphs_mode == crate::app::GraphsMode::MetricByPeer
+                        {
+                            // Expand the selected by-peer summary line into a
+                            // full-pane btop plot.
+                            app.graphs_open_peer_detail();
+                        } else if app.active_tab.has_table() && app.detail_view.is_none() {
                             app.open_detail();
                         }
                     }
@@ -324,21 +447,20 @@ fn main() {
                             }
                         }
                     }
-                    (KeyCode::Char('m'), KeyModifiers::NONE)
-                        if app.active_tab == Tab::Graphs && app.detail_view.is_none() =>
-                    {
+                    (KeyCode::Char('m'), KeyModifiers::NONE) if app.active_tab == Tab::Graphs => {
+                        // `m` cycles the broader Graphs mode, even from inside
+                        // the by-peer detail (which then closes, since the
+                        // detail only applies to the by-peer mode).
                         app.graphs_next_mode();
                         fetch_data(&rt, &client, &gateway_client, &mut app);
                     }
-                    (KeyCode::Char('n'), KeyModifiers::NONE)
-                        if app.active_tab == Tab::Graphs && app.detail_view.is_none() =>
-                    {
+                    (KeyCode::Char('n'), KeyModifiers::NONE) if app.active_tab == Tab::Graphs => {
+                        // `n` switches the statistic, for both the by-peer list
+                        // and the open by-peer detail (which re-renders).
                         app.graphs_next_selector();
                         fetch_data(&rt, &client, &gateway_client, &mut app);
                     }
-                    (KeyCode::Char('N'), KeyModifiers::SHIFT)
-                        if app.active_tab == Tab::Graphs && app.detail_view.is_none() =>
-                    {
+                    (KeyCode::Char('N'), KeyModifiers::SHIFT) if app.active_tab == Tab::Graphs => {
                         app.graphs_prev_selector();
                         fetch_data(&rt, &client, &gateway_client, &mut app);
                     }
@@ -354,8 +476,12 @@ fn main() {
                         }
                     }
                     (KeyCode::Esc, _) => {
+                        // Priority: close an open detail first, otherwise
+                        // deselect the active table row (return to overview).
                         if app.detail_view.is_some() {
                             app.close_detail();
+                        } else if app.active_tab.has_table() {
+                            app.deselect_row();
                         }
                     }
                     (KeyCode::Char('e'), KeyModifiers::NONE) => {
@@ -380,6 +506,15 @@ fn main() {
                         app.active_tab = Tab::Graphs;
                         app.graphs_scroll = 0;
                         fetch_data(&rt, &client, &gateway_client, &mut app);
+                    }
+                    (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                        // `s` cycles the active sort column on the MMP and
+                        // Graphs by-peer tables (no-op on other tabs).
+                        app.cycle_sort_col();
+                    }
+                    (KeyCode::Char('S'), _) => {
+                        // `S` toggles the sort direction on those same tables.
+                        app.toggle_sort_dir();
                     }
                     _ => {}
                 }

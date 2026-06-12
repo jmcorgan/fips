@@ -144,6 +144,16 @@ impl BloomState {
         self.last_sent_filters.insert(peer_id, filter);
     }
 
+    /// Read back the last outgoing filter actually sent to a peer, if any.
+    ///
+    /// Returns the filter recorded by [`record_sent_filter`](Self::record_sent_filter)
+    /// — i.e. what the peer currently holds for us — or `None` when no announce
+    /// has been sent to that peer yet (or the node is root, with no parent to
+    /// send to).
+    pub fn last_sent_filter(&self, peer_id: &NodeAddr) -> Option<&BloomFilter> {
+        self.last_sent_filters.get(peer_id)
+    }
+
     /// Remove stored filter state for a peer that was removed.
     pub fn remove_peer_state(&mut self, peer_id: &NodeAddr) {
         self.last_sent_filters.remove(peer_id);

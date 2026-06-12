@@ -1,6 +1,36 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders};
 use serde_json::Value;
+
+/// A bordered pane block with a title that highlights its border (cyan, bold
+/// title) when `focused`, so the multi-pane focus model has a clear visual
+/// indicator of which pane the scroll keys act on.
+pub fn pane_block(title: &str, focused: bool) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title.to_string());
+    if focused {
+        block
+            .border_style(Style::default().fg(Color::Cyan))
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+    } else {
+        block
+    }
+}
+
+/// Clamp a desired scroll offset to a pane's content so an over-scroll (e.g.
+/// from End, which passes `u16::MAX`) rests at the last full screen rather than
+/// scrolling past the content. `content_rows` is the total rendered line count
+/// and `visible_rows` the pane's inner height.
+pub fn clamp_scroll(offset: u16, content_rows: usize, visible_rows: usize) -> u16 {
+    let max = content_rows.saturating_sub(visible_rows) as u16;
+    offset.min(max)
+}
 
 /// Extract a string field from JSON, returning "-" if missing.
 pub fn str_field<'a>(data: &'a Value, key: &str) -> &'a str {
@@ -21,6 +51,23 @@ pub fn truncate_hex(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+/// Truncate a display name to a fixed visible width, appending an ellipsis when
+/// it overflows, then pad to exactly `width` columns. Unlike a bare `{:<width}`
+/// format this guarantees the field never exceeds `width`, so a long npub-style
+/// name can't push past its column and butt against the next label. Counts and
+/// pads by `char`, which is correct for the ASCII/BMP names the daemon emits.
+pub fn truncate_name(s: &str, width: usize) -> String {
+    let len = s.chars().count();
+    if len <= width {
+        format!("{s:<width$}")
+    } else if width <= 1 {
+        "\u{2026}".chars().take(width).collect()
+    } else {
+        let head: String = s.chars().take(width - 1).collect();
+        format!("{head}\u{2026}")
     }
 }
 
@@ -133,6 +180,17 @@ pub fn nested_f64_prefer(
         .unwrap_or_else(|| "-".into())
 }
 
+/// Format an optional numeric field as a fixed-precision number, or an em-dash
+/// placeholder when the value is JSON `null` or the key is absent. Used for
+/// daemon-emitted `Option<f64>` fields (e.g. `effective_depth`) so an
+/// unmeasured value renders distinctly from a real zero.
+pub fn opt_f64_field(data: &Value, key: &str, decimals: usize) -> String {
+    match data.get(key).and_then(|v| v.as_f64()) {
+        Some(n) => format!("{:.prec$}", n, prec = decimals),
+        None => "\u{2014}".into(),
+    }
+}
+
 /// Extract a bool field from JSON, returning "yes"/"no" or "-" if missing.
 pub fn bool_field(data: &Value, key: &str) -> &'static str {
     data.get(key)
@@ -170,6 +228,148 @@ pub fn kv_line(key: &str, value: &str) -> Line<'static> {
         Span::styled(format!("    {key}: "), Style::default().fg(Color::DarkGray)),
         Span::raw(value.to_string()),
     ])
+}
+
+/// Render a group of key-value pairs with the keys padded to a common
+/// width so the values share a single left edge. Alignment is computed
+/// once over the whole group rather than padded per call site, keeping
+/// the convention (one aligned value column per stack) in one place.
+pub fn kv_lines(pairs: &[(&str, String)]) -> Vec<Line<'static>> {
+    let key_width = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    pairs
+        .iter()
+        .map(|(key, value)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("    {key:<key_width$}: "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(value.clone()),
+            ])
+        })
+        .collect()
+}
+
+/// Build a node-address -> (is_parent, is_child) map from the peers view's
+/// `peers` array. Only the peers view carries the tree-role flags, so the Tree
+/// and Bloom surfaces join their own peer lists against this map by node address
+/// to recover each peer's role. A missing or malformed payload yields an empty
+/// map (every peer then falls back to the Other group).
+pub fn peer_role_map(
+    peers_data: Option<&Value>,
+) -> std::collections::HashMap<String, (bool, bool)> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(arr) = peers_data
+        .and_then(|d| d.get("peers"))
+        .and_then(|v| v.as_array())
+    {
+        for p in arr {
+            if let Some(addr) = p.get("node_addr").and_then(|v| v.as_str()) {
+                let is_parent = p
+                    .get("is_parent")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let is_child = p.get("is_child").and_then(|v| v.as_bool()).unwrap_or(false);
+                map.insert(addr.to_string(), (is_parent, is_child));
+            }
+        }
+    }
+    map
+}
+
+/// Enrich a tree/bloom peer Value with `is_parent`/`is_child` looked up in the
+/// peers role map by `addr_key` (the peer's node-address field, which differs
+/// per surface: `node_addr` on Tree, `peer` on Bloom). A peer not found in the
+/// map is left without role flags, so `group_rank` places it under Other.
+pub fn enrich_role(
+    mut peer: Value,
+    role_map: &std::collections::HashMap<String, (bool, bool)>,
+    addr_key: &str,
+) -> Value {
+    let addr = peer
+        .get(addr_key)
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(addr) = addr
+        && let Some(&(is_parent, is_child)) = role_map.get(&addr)
+        && let Some(obj) = peer.as_object_mut()
+    {
+        obj.insert("is_parent".into(), Value::Bool(is_parent));
+        obj.insert("is_child".into(), Value::Bool(is_child));
+    }
+    peer
+}
+
+/// Tree-role group rank for a peer JSON object: parent first (0), then STP
+/// children (1), then everything else (2). A node with no parent simply has
+/// an empty group 0; a leaf with no children an empty group 1. Shared by the
+/// Peers, Tree, and Bloom surfaces so they group peers identically.
+pub fn group_rank(peer: &Value) -> u8 {
+    let is_parent = peer
+        .get("is_parent")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_child = peer
+        .get("is_child")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if is_parent {
+        0
+    } else if is_child {
+        1
+    } else {
+        2
+    }
+}
+
+/// The section label for a tree-role group rank, matching the Peers tab's
+/// box-drawing labels so all three surfaces read consistently.
+pub fn group_label(rank: u8) -> &'static str {
+    match rank {
+        0 => "\u{2500}\u{2500} Parent \u{2500}\u{2500}",
+        1 => "\u{2500}\u{2500} STP Children \u{2500}\u{2500}",
+        _ => "\u{2500}\u{2500} Other \u{2500}\u{2500}",
+    }
+}
+
+/// Stable-sort `peers` in place by tree-role group rank, preserving the input
+/// order within each group. Callers that want a finer secondary key (e.g. LQI)
+/// should sort by that key first, then call this for the group partition, or
+/// supply their own comparator keyed off `group_rank`.
+pub fn sort_by_group(peers: &mut [Value]) {
+    peers.sort_by_key(group_rank);
+}
+
+/// Render a group of peers as `Paragraph` lines: a styled section label before
+/// each non-empty group (in parent -> children -> other order), a blank
+/// separator between groups, and each peer rendered by `render_peer`. Empty
+/// groups are omitted (no label). `peers` is expected to already be grouped by
+/// `group_rank` (callers sort first). This is the Paragraph-of-Lines analogue
+/// of the Peers tab's grouped table, shared by the Tree and Bloom peer lists.
+pub fn grouped_peer_lines<F>(peers: &[Value], render_peer: F) -> Vec<Line<'static>>
+where
+    F: Fn(&Value) -> Line<'static>,
+{
+    let label_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut last_group: Option<u8> = None;
+    for peer in peers {
+        let g = group_rank(peer);
+        if last_group != Some(g) {
+            if last_group.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {}", group_label(g)),
+                label_style,
+            )));
+            last_group = Some(g);
+        }
+        lines.push(render_peer(peer));
+    }
+    lines
 }
 
 /// Render a sequence of values as Unicode block characters.

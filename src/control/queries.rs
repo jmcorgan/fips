@@ -63,6 +63,9 @@ pub fn show_status(node: &Node) -> Value {
         "loss_rate": hist.recent(Metric::LossRate, SPARK_N),
     });
 
+    let tree = node.tree_state();
+    let transport_peer_counts = status_transport_peer_counts(node);
+
     json!({
         "version": crate::version::short_version(),
         "npub": node.npub(),
@@ -83,9 +86,46 @@ pub fn show_status(node: &Node) -> Value {
         "exe_path": exe_path,
         "uptime_secs": uptime_secs,
         "estimated_mesh_size": node.estimated_mesh_size(),
+        "persistent": effective_persistent(&node.config().node.identity),
+        "root": hex::encode(tree.root().as_bytes()),
+        "is_root": tree.is_root(),
+        "transport_peer_counts": transport_peer_counts,
         "forwarding": serde_json::to_value(&fwd).unwrap_or_default(),
         "sparklines": sparklines,
     })
+}
+
+/// Effective identity persistence: an explicit `nsec` behaves as persistent
+/// regardless of the `persistent` flag, so the honest "survives a restart"
+/// signal is `persistent || nsec.is_some()`.
+fn effective_persistent(identity: &crate::config::IdentityConfig) -> bool {
+    identity.persistent || identity.nsec.is_some()
+}
+
+/// Per-configured-transport-type peer counts for `show_status`. Seeds every
+/// configured transport type at 0 (so an idle-but-configured type stays
+/// visible), then tallies peers by their active link's transport type. Returns
+/// a sorted-key JSON object (via `BTreeMap`) so the on-loop and off-loop
+/// outputs match.
+fn status_transport_peer_counts(node: &Node) -> Value {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for id in node.transport_ids() {
+        if let Some(handle) = node.get_transport(id) {
+            counts
+                .entry(handle.transport_type().name.to_string())
+                .or_insert(0);
+        }
+    }
+    for peer in node.peers() {
+        if let Some(link) = node.get_link(&peer.link_id())
+            && let Some(handle) = node.get_transport(&link.transport_id())
+        {
+            *counts
+                .entry(handle.transport_type().name.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+    serde_json::to_value(&counts).unwrap_or_default()
 }
 
 /// Off-loop variant of [`show_status`]: renders from the
@@ -135,6 +175,10 @@ pub(crate) fn show_status_from_handle(handle: &super::read_handle::ControlReadHa
         "exe_path": exe_path,
         "uptime_secs": uptime_secs,
         "estimated_mesh_size": stats.estimated_mesh_size,
+        "persistent": effective_persistent(&ctx.config.node.identity),
+        "root": hex::encode(stats.root.as_bytes()),
+        "is_root": stats.is_root,
+        "transport_peer_counts": serde_json::to_value(&stats.transport_peer_counts).unwrap_or_default(),
         "forwarding": serde_json::to_value(&fwd).unwrap_or_default(),
         "sparklines": sparklines,
     })
@@ -201,6 +245,11 @@ pub fn show_peers(node: &Node) -> Value {
         })
         .unwrap_or_default();
 
+    // Cold-start gate for effective_depth, mirroring `evaluate_parent`: when any
+    // peer has an SRTT measurement, unmeasured peers are excluded; during cold
+    // start (no peer has SRTT) every peer uses the default link cost of 1.0.
+    let any_peer_has_srtt = node.peers().any(|p| p.has_srtt());
+
     let peers: Vec<Value> = node
         .peers()
         .map(|peer| {
@@ -248,6 +297,21 @@ pub fn show_peers(node: &Node) -> Value {
             if let Some(coords) = peer.coords() {
                 peer_json["tree_depth"] = json!(coords.depth());
             }
+
+            // effective_depth = tree_depth + link_cost, the value
+            // `evaluate_parent` ranks on. `null` when the peer has no coords or
+            // is unmeasured while other peers have SRTT (cold-start gate).
+            let effective_depth: Option<f64> = peer.coords().and_then(|coords| {
+                if any_peer_has_srtt && !peer.has_srtt() {
+                    None
+                } else {
+                    Some(coords.depth() as f64 + peer.link_cost())
+                }
+            });
+            peer_json["effective_depth"] = match effective_depth {
+                Some(v) => json!(v),
+                None => Value::Null,
+            };
 
             // Add link stats
             let stats = peer.link_stats();
@@ -445,6 +509,11 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
                 peer_json["tree_depth"] = json!(depth);
             }
 
+            peer_json["effective_depth"] = match peer.effective_depth {
+                Some(v) => json!(v),
+                None => Value::Null,
+            };
+
             peer_json["stats"] = json!({
                 "packets_sent": peer.stats.packets_sent,
                 "packets_recv": peer.stats.packets_recv,
@@ -595,10 +664,12 @@ pub fn show_tree(node: &Node) -> Value {
     let parent_display = node.peer_display_name(parent_addr);
 
     let tree_stats = node.metrics().tree.snapshot();
+    let root_npub = node.resolve_root_npub(tree);
 
     json!({
         "my_node_addr": hex::encode(tree.my_node_addr().as_bytes()),
         "root": hex::encode(tree.root().as_bytes()),
+        "root_npub": root_npub,
         "is_root": tree.is_root(),
         "depth": my_coords.depth(),
         "my_coords": coords,
@@ -654,6 +725,7 @@ pub(crate) fn show_tree_from_handle(handle: &super::read_handle::ControlReadHand
     json!({
         "my_node_addr": hex::encode(tree.my_node_addr.as_bytes()),
         "root": hex::encode(tree.root.as_bytes()),
+        "root_npub": tree.root_npub,
         "is_root": tree.is_root,
         "depth": tree.depth,
         "my_coords": coords,
@@ -833,6 +905,25 @@ pub fn show_bloom(node: &Node) -> Value {
 
     let bloom_stats = node.metrics().bloom.snapshot();
 
+    // Uptree filter metrics: the last filter actually sent to the tree parent
+    // (`record_sent_filter`). `null` for a root node or before the first
+    // announce. The estimate is this node's whole subtree (split-horizon), not
+    // the mesh.
+    let tree = node.tree_state();
+    let (uptree_fill_ratio, uptree_estimated_count): (Option<f64>, Option<f64>) = if tree.is_root()
+    {
+        (None, None)
+    } else {
+        let parent = tree.my_coords().parent_id();
+        match bloom.last_sent_filter(parent) {
+            Some(filter) => {
+                let max_fpr = node.config().node.bloom.max_inbound_fpr;
+                (Some(filter.fill_ratio()), filter.estimated_count(max_fpr))
+            }
+            None => (None, None),
+        }
+    };
+
     json!({
         "own_node_addr": hex::encode(node.node_addr().as_bytes()),
         "is_leaf_only": node.is_leaf_only(),
@@ -840,6 +931,8 @@ pub fn show_bloom(node: &Node) -> Value {
         "leaf_dependent_count": bloom.leaf_dependents().len(),
         "leaf_dependents": leaf_deps,
         "peer_filters": peer_filters,
+        "uptree_fill_ratio": uptree_fill_ratio,
+        "uptree_estimated_count": uptree_estimated_count,
         "stats": serde_json::to_value(&bloom_stats).unwrap_or_default(),
     })
 }
@@ -886,6 +979,8 @@ pub(crate) fn show_bloom_from_handle(handle: &super::read_handle::ControlReadHan
         "leaf_dependent_count": bloom.leaf_dependents.len(),
         "leaf_dependents": leaf_deps,
         "peer_filters": peer_filters,
+        "uptree_fill_ratio": bloom.uptree_fill_ratio,
+        "uptree_estimated_count": bloom.uptree_estimated_count,
         "stats": serde_json::to_value(&bloom_stats).unwrap_or_default(),
     })
 }
@@ -968,6 +1063,27 @@ pub fn show_mmp(node: &Node) -> Value {
                 if let Some(setx) = metrics.smoothed_etx() {
                     session_layer["sqi"] = json!(setx * (1.0 + srtt / 100.0));
                 }
+            }
+
+            // Session-layer trend indicators (srtt / loss / etx), mirroring the
+            // link-layer arrow semantics on the session columns.
+            if metrics.rtt_trend.initialized() {
+                session_layer["rtt_trend"] = json!(trend_label(
+                    metrics.rtt_trend.short(),
+                    metrics.rtt_trend.long()
+                ));
+            }
+            if metrics.loss_trend.initialized() {
+                session_layer["loss_trend"] = json!(trend_label(
+                    metrics.loss_trend.short(),
+                    metrics.loss_trend.long()
+                ));
+            }
+            if metrics.etx_trend.initialized() {
+                session_layer["etx_trend"] = json!(trend_label(
+                    metrics.etx_trend.short(),
+                    metrics.etx_trend.long()
+                ));
             }
 
             Some(json!({
@@ -1063,6 +1179,16 @@ pub(crate) fn show_mmp_from_handle(handle: &super::read_handle::ControlReadHandl
                 if let Some(sqi) = session.sqi {
                     session_layer["sqi"] = json!(sqi);
                 }
+            }
+
+            if let Some(t) = session.trends.rtt_trend {
+                session_layer["rtt_trend"] = json!(t);
+            }
+            if let Some(t) = session.trends.loss_trend {
+                session_layer["loss_trend"] = json!(t);
+            }
+            if let Some(t) = session.trends.etx_trend {
+                session_layer["etx_trend"] = json!(t);
             }
 
             json!({

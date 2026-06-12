@@ -18,7 +18,9 @@
       "sent": 0,
       "stale": 0,
       "unknown_peer": 0
-    }
+    },
+    "uptree_estimated_count": null,
+    "uptree_fill_ratio": null
   },
   "status": "ok"
 }

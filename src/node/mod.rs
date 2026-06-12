@@ -1521,6 +1521,29 @@ impl Node {
             })
             .collect();
 
+        // Per-configured-transport-type peer counts (`show_status`). Seed every
+        // configured transport type at 0 so an idle-but-configured type stays
+        // visible, then tally the peers whose active link rides that type.
+        let mut transport_peer_counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for id in self.transport_ids() {
+            if let Some(handle) = self.get_transport(id) {
+                transport_peer_counts
+                    .entry(handle.transport_type().name.to_string())
+                    .or_insert(0);
+            }
+        }
+        for peer in self.peers() {
+            if let Some(link) = self.get_link(&peer.link_id())
+                && let Some(handle) = self.get_transport(&link.transport_id())
+            {
+                *transport_peer_counts
+                    .entry(handle.transport_type().name.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        let tree = self.tree_state();
         let snapshot = crate::control::snapshot::StatsSnapshot {
             history: std::sync::Arc::new(self.stats_history.clone()),
             estimated_mesh_size: self.estimated_mesh_size,
@@ -1533,6 +1556,9 @@ impl Node {
             link_count: self.links.len(),
             transport_count: self.transports.len(),
             session_count: self.sessions.len(),
+            root: *tree.root(),
+            is_root: tree.is_root(),
+            transport_peer_counts,
             peer_aliases: std::sync::Arc::new(self.peer_aliases.clone()),
             acl_status: self.peer_acl_status(),
             peer_meta: std::sync::Arc::new(peer_meta),
@@ -1546,6 +1572,28 @@ impl Node {
         // Publish the Category-E per-entity read view from the same tick, with
         // `Vec<Arc<Row>>` structural sharing against the previous snapshot.
         self.publish_entities_snapshot();
+    }
+
+    /// Resolve the npub of the spanning-tree root for `show_tree`'s `root_npub`.
+    ///
+    /// Resolution order: this node when it is root, then the root as a live
+    /// authenticated peer (cryptographically attested npub), then the
+    /// identity-cache, else `None`.
+    pub(crate) fn resolve_root_npub(&self, tree: &crate::tree::TreeState) -> Option<String> {
+        if tree.is_root() {
+            return Some(self.npub());
+        }
+        let root_addr = tree.root();
+        if let Some(peer) = self.get_peer(root_addr) {
+            return Some(peer.npub());
+        }
+        for (addr, pubkey, _last_seen) in self.identity_cache_iter() {
+            if addr == root_addr {
+                let (xonly, _parity) = pubkey.x_only_public_key();
+                return Some(crate::identity::encode_npub(&xonly));
+            }
+        }
+        None
     }
 
     /// Project the Category-D derived/routing/cache state into a
@@ -1597,9 +1645,11 @@ impl Node {
             })
             .collect();
         let parent_addr = my_coords.parent_id();
+        let root_npub = self.resolve_root_npub(tree);
         let tree_view = snap::TreeView {
             my_node_addr: *tree.my_node_addr(),
             root: *tree.root(),
+            root_npub,
             is_root: tree.is_root(),
             depth: my_coords.depth(),
             my_coords: my_coords.entries().iter().map(|e| e.node_addr).collect(),
@@ -1632,12 +1682,30 @@ impl Node {
                 }
             })
             .collect();
+        // Uptree filter metrics: the last filter actually sent to the tree
+        // parent (`record_sent_filter`), which is what the parent currently
+        // holds for us. `None` for a root node (nothing sent uptree) or before
+        // the first announce. The estimate is this node's whole subtree
+        // (split-horizon), not the mesh.
+        let (uptree_fill_ratio, uptree_estimated_count) = if tree.is_root() {
+            (None, None)
+        } else {
+            match bloom.last_sent_filter(parent_addr) {
+                Some(filter) => (
+                    Some(filter.fill_ratio()),
+                    filter.estimated_count(max_inbound_fpr),
+                ),
+                None => (None, None),
+            }
+        };
         let bloom_view = snap::BloomView {
             own_node_addr: *self.node_addr(),
             is_leaf_only: self.is_leaf_only(),
             sequence: bloom.sequence(),
             leaf_dependents: bloom.leaf_dependents().iter().copied().collect(),
             peer_filters: bloom_peers,
+            uptree_fill_ratio,
+            uptree_estimated_count,
         };
 
         // --- coord cache (show_cache, show_routing) ---
@@ -1779,6 +1847,12 @@ impl Node {
             })
             .unwrap_or_default();
 
+        // Cold-start gate for effective_depth, mirroring `evaluate_parent`:
+        // if any peer has an SRTT measurement, unmeasured peers are excluded
+        // (their effective_depth is `None`); during cold start (no peer has
+        // SRTT) every peer falls back to the default link cost of 1.0.
+        let any_peer_has_srtt = self.peers().any(|p| p.has_srtt());
+
         let peer_rows: Vec<snap::PeerRow> = self
             .peers()
             .map(|peer| {
@@ -1815,6 +1889,17 @@ impl Node {
                     .mmp()
                     .map(|mmp| project_entity_mmp(&mmp.metrics, format!("{}", mmp.mode()), None));
 
+                // effective_depth = tree_depth + link_cost, the value
+                // `evaluate_parent` ranks on. Computed only when the peer has
+                // coords and passes the cold-start measurement gate.
+                let effective_depth = peer.coords().and_then(|coords| {
+                    if any_peer_has_srtt && !peer.has_srtt() {
+                        None
+                    } else {
+                        Some(coords.depth() as f64 + peer.link_cost())
+                    }
+                });
+
                 snap::PeerRow {
                     node_addr,
                     npub: peer.npub(),
@@ -1832,6 +1917,7 @@ impl Node {
                     transport_addr: peer.current_addr().map(|a| format!("{}", a)),
                     link_info,
                     tree_depth: peer.coords().map(|c| c.depth()),
+                    effective_depth,
                     stats: snap::PeerLinkStats {
                         packets_sent: stats.packets_sent,
                         packets_recv: stats.packets_recv,
@@ -2015,6 +2101,10 @@ impl Node {
                     (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
                     _ => None,
                 };
+                let trend = |dual: &crate::mmp::algorithms::DualEwma| {
+                    dual.initialized()
+                        .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
+                };
                 Some(snap::MmpSessionRow {
                     remote: *addr,
                     display_name: self.peer_display_name(addr),
@@ -2026,6 +2116,11 @@ impl Node {
                     smoothed_etx,
                     srtt_ms,
                     sqi,
+                    trends: snap::MmpSessionTrends {
+                        rtt_trend: trend(&metrics.rtt_trend),
+                        loss_trend: trend(&metrics.loss_trend),
+                        etx_trend: trend(&metrics.etx_trend),
+                    },
                 })
             })
             .collect();

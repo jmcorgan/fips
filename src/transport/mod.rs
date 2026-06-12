@@ -451,9 +451,21 @@ impl fmt::Debug for TransportAddr {
 
 impl fmt::Display for TransportAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Best-effort display as string if valid UTF-8, else hex
+        // Best-effort display as string if valid UTF-8. Otherwise render a
+        // 6-byte payload as a colon-separated MAC (standard Unix notation,
+        // matching BLE addrs, `ip link`/`ip neigh`, and packet logs), and
+        // any other non-UTF-8 byte string as bare hex.
         match self.as_str() {
             Some(s) => write!(f, "{}", s),
+            None if self.0.len() == 6 => {
+                for (i, byte) in self.0.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ":")?;
+                    }
+                    write!(f, "{:02x}", byte)?;
+                }
+                Ok(())
+            }
             None => {
                 for byte in &self.0 {
                     write!(f, "{:02x}", byte)?;
@@ -1356,11 +1368,28 @@ mod tests {
 
     #[test]
     fn test_transport_addr_binary() {
-        // Binary address with invalid UTF-8 bytes (0xff, 0x80 are invalid UTF-8)
+        // A 6-byte non-UTF-8 address renders as a colon-separated MAC.
         let binary = TransportAddr::new(vec![0xff, 0x80, 0x2b, 0x3c, 0x4d, 0x5e]);
-        assert_eq!(format!("{}", binary), "ff802b3c4d5e");
+        assert_eq!(format!("{}", binary), "ff:80:2b:3c:4d:5e");
         assert!(binary.as_str().is_none());
         assert_eq!(binary.len(), 6);
+    }
+
+    #[test]
+    fn test_transport_addr_mac_display() {
+        // Raw 6-byte MACs (as Ethernet stores via from_bytes) display in
+        // standard colon-separated notation, not bare hex.
+        let mac = TransportAddr::from_bytes(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert_eq!(format!("{}", mac), "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[test]
+    fn test_transport_addr_non_mac_binary_is_bare_hex() {
+        // Non-6-byte non-UTF-8 payloads stay bare hex (no separators).
+        let three = TransportAddr::new(vec![0xff, 0x80, 0x2b]);
+        assert_eq!(format!("{}", three), "ff802b");
+        let seven = TransportAddr::new(vec![0xff, 0x80, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f]);
+        assert_eq!(format!("{}", seven), "ff802b3c4d5e6f");
     }
 
     #[test]

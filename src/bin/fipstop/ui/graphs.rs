@@ -18,7 +18,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use crate::app::{App, GRAPHS_METRICS, GraphsMode, PEER_GRAPHS_METRICS, Tab};
+use crate::app::{
+    App, GRAPHS_METRICS, GRAPHS_PEER_SORT_LABELS, GraphsMode, PEER_GRAPHS_METRICS, SortState, Tab,
+};
 
 /// 5×5 braille lookup table indexed by (left fill 0..=4, right fill
 /// 0..=4). Direct transcription of btop's `braille_up` glyph set.
@@ -78,10 +80,16 @@ fn draw_selector(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("   scroll: ", label),
         Span::styled(format!("{}", app.graphs_scroll), dim),
     ]);
-    let line2 = Line::from(Span::styled(
-        "  [↑/↓] scroll   [←/→] window   [m] mode   [n/N] cycle   [g] graphs   [q] quit",
-        label,
-    ));
+    // The full keybinding reference lives in the status-bar footer (registry)
+    // and the `?` overlay; this in-pane line is a brief mode-specific reminder.
+    let line2_text = match app.graphs_mode {
+        GraphsMode::MetricByPeer if app.detail_view.is_some() => {
+            "  [↑/↓] peer   [n/N] stat   [m] mode   [Esc] back"
+        }
+        GraphsMode::MetricByPeer => "  [↑/↓] select   [Enter] expand   [n/N] stat   [m] mode",
+        _ => "  [↑/↓] scroll   [←/→] window   [m] mode   [n/N] cycle",
+    };
+    let line2 = Line::from(Span::styled(line2_text, label));
 
     frame.render_widget(Paragraph::new(vec![line1, line2]), area);
 }
@@ -187,21 +195,11 @@ fn draw_stacked(frame: &mut Frame, app: &mut App, inner: Rect) {
     frame.render_widget(paragraph, inner);
 }
 
-fn draw_metric_by_peer(frame: &mut Frame, app: &mut App, inner: Rect) {
-    let data = match app.data.get(&Tab::Graphs) {
-        Some(d) => d,
-        None => {
-            frame.render_widget(
-                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray)),
-                inner,
-            );
-            return;
-        }
-    };
-
-    let metric_name = app.graphs_selected_peer_metric();
-    let peers = data.get("peers").and_then(|v| v.as_array());
-    let peer_series: Vec<(String, Vec<f64>)> = peers
+/// Parse the by-peer payload (`peers` array of `{display_name, values}`) into
+/// `[(name, values)]`, in payload order.
+fn peer_series_from_data(data: &serde_json::Value) -> Vec<(String, Vec<f64>)> {
+    data.get("peers")
+        .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .map(|p| {
@@ -219,7 +217,28 @@ fn draw_metric_by_peer(frame: &mut Frame, app: &mut App, inner: Rect) {
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// By-peer mode: a scrollable summary list (one line per peer, with
+/// min/max/last/n for the selected metric). Selecting a peer (Enter) swaps to a
+/// full-pane btop plot via `draw_metric_by_peer_detail`. The cursor follows
+/// `graphs_peer_idx`; Up/Down move it and the focus/scroll model keeps the
+/// selection visible.
+fn draw_metric_by_peer(frame: &mut Frame, app: &mut App, inner: Rect) {
+    let data = match app.data.get(&Tab::Graphs) {
+        Some(d) => d,
+        None => {
+            frame.render_widget(
+                Paragraph::new("  Waiting for data...").style(Style::default().fg(Color::DarkGray)),
+                inner,
+            );
+            return;
+        }
+    };
+
+    let metric_name = app.graphs_selected_peer_metric();
+    let peer_series = peer_series_from_data(data);
 
     if peer_series.is_empty() {
         frame.render_widget(
@@ -230,94 +249,133 @@ fn draw_metric_by_peer(frame: &mut Frame, app: &mut App, inner: Rect) {
         return;
     }
 
-    // Pick a column count that keeps each cell wide enough for a
-    // readable braille plot. Each cell needs ~30 columns minimum.
-    let cols = if inner.width < 40 {
-        1
-    } else if inner.width < 100 {
-        2
-    } else {
-        3
-    };
-    let rows = peer_series.len().div_ceil(cols);
-
-    // Stack of cell-rows; each row is a horizontal split of cell cells.
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Length(METRIC_BLOCK_ROWS))
-        .collect();
-    let row_areas = Layout::vertical(row_constraints).split(inner);
-
-    for row_idx in 0..rows {
-        let col_constraints: Vec<Constraint> = (0..cols)
-            .map(|_| Constraint::Ratio(1, cols as u32))
-            .collect();
-        let col_areas = Layout::horizontal(col_constraints).split(row_areas[row_idx]);
-
-        for col_idx in 0..cols {
-            let peer_idx = row_idx * cols + col_idx;
-            if peer_idx >= peer_series.len() {
-                break;
-            }
-            let (peer_name, values) = &peer_series[peer_idx];
-            let cell_lines = render_metric_block_labeled(
-                metric_name,
-                peer_name,
-                values,
-                col_areas[col_idx].width,
-            );
-            frame.render_widget(Paragraph::new(cell_lines), col_areas[col_idx]);
-        }
+    // An open detail view swaps the whole pane for a full-width btop plot of
+    // the selected peer; Up/Down then flip peers rather than scroll the list.
+    if app.detail_view.is_some() {
+        draw_metric_by_peer_detail(frame, app, inner, metric_name, &peer_series);
+        return;
     }
+
+    // The cursor tracks a payload-order peer index; build a display-order
+    // permutation per the active sort so re-sorting reorders the list while the
+    // cursor stays on the same logical peer (mapped to its new display row).
+    let order = sorted_order(&peer_series, app.graphs_peer_sort);
+    let sel_payload = app.graphs_peer_idx.min(peer_series.len() - 1);
+    let display_selected = order.iter().position(|&i| i == sel_payload).unwrap_or(0);
+
+    let unit = metric_unit(metric_name);
+    let cursor = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let label = Style::default().fg(Color::DarkGray);
+    let name_style = Style::default().fg(Color::White);
+
+    let mut lines: Vec<Line<'static>> = vec![sort_header(app.graphs_peer_sort)];
+    for (display_row, &payload_idx) in order.iter().enumerate() {
+        let (peer_name, values) = &peer_series[payload_idx];
+        let (min, max, last, n) = summarize(values);
+        let is_sel = display_row == display_selected;
+        let marker = if is_sel { "\u{25b6} " } else { "  " };
+        let nm = name_style;
+        // Right-justify the numeric columns into fixed-width fields so the
+        // min/max/last values and the sample count line up down the list
+        // regardless of magnitude.
+        let row = Line::from(vec![
+            Span::styled(
+                format!("{marker}{peer_name:<18}"),
+                if is_sel { cursor } else { nm },
+            ),
+            Span::styled(format!(" [{unit}]"), label),
+            Span::styled("  min ", label),
+            Span::raw(format!("{:>8}", format_value(min))),
+            Span::styled("  max ", label),
+            Span::raw(format!("{:>8}", format_value(max))),
+            Span::styled("  last ", label),
+            Span::raw(format!("{:>8}", format_value(last))),
+            Span::styled("  n=", label),
+            Span::raw(format!("{n:>5}")),
+        ]);
+        lines.push(row);
+    }
+
+    // Keep the selected row visible using the shared per-pane scroll model
+    // (Graphs by-peer list is pane 0). The +1 accounts for the sort header row.
+    let visible = inner.height as usize;
+    let selected = display_selected + 1;
+    let mut offset = app.pane_scroll(0) as usize;
+    if selected < offset {
+        offset = selected;
+    } else if visible > 0 && selected >= offset + visible {
+        offset = selected + 1 - visible;
+    }
+    let max_offset = lines.len().saturating_sub(visible);
+    offset = offset.min(max_offset);
+    app.scroll_offsets.insert((Tab::Graphs, 0), offset as u16);
+
+    let paragraph = Paragraph::new(lines).scroll((offset as u16, 0));
+    frame.render_widget(paragraph, inner);
 }
 
-/// Variant of `render_metric_block` that labels the block with the
-/// peer name in addition to the metric. Used by the metric-by-peer grid.
-fn render_metric_block_labeled(
+/// Full-pane btop plot for the selected by-peer peer. The detail follows the
+/// selection (Up/Down flip peers, n/N switch the statistic), re-rendering this
+/// plot for the current `(peer, metric)`.
+fn draw_metric_by_peer_detail(
+    frame: &mut Frame,
+    app: &App,
+    inner: Rect,
     metric: &str,
-    peer_name: &str,
-    values: &[f64],
-    width: u16,
-) -> Vec<Line<'static>> {
+    peer_series: &[(String, Vec<f64>)],
+) {
+    let idx = app.graphs_peer_idx.min(peer_series.len() - 1);
+    let (peer_name, values) = &peer_series[idx];
     let unit = metric_unit(metric);
-    let mut out: Vec<Line<'static>> = Vec::with_capacity(METRIC_BLOCK_ROWS as usize);
 
-    let (min, max, last, n) = summarize(values);
     let title_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
     let label = Style::default().fg(Color::DarkGray);
-    let title = Line::from(vec![
+
+    let (min, max, last, n) = summarize(values);
+    let header = Line::from(vec![
         Span::styled(format!("  {peer_name}"), title_style),
-        Span::styled(format!("  [{unit}]"), label),
-        Span::styled("    max ", label),
+        Span::styled(format!("  {metric} [{unit}]"), label),
+        Span::styled("    min ", label),
+        Span::raw(format_value(min)),
+        Span::styled("   max ", label),
         Span::raw(format_value(max)),
         Span::styled("   last ", label),
         Span::raw(format_value(last)),
-        Span::styled("   n=", label),
+        Span::styled("   samples ", label),
         Span::raw(format!("{n}")),
     ]);
-    out.push(title);
+
+    let mut lines: Vec<Line<'static>> = vec![header, Line::from("")];
 
     let gutter = 2u16;
-    let plot_cols = width.saturating_sub(gutter) as usize;
+    let plot_cols = inner.width.saturating_sub(gutter) as usize;
+    // Reserve the header (1) + blank (1) + a footer hint line; the rest is plot.
+    let plot_rows = (inner.height as usize).saturating_sub(3).max(1);
 
     if plot_cols == 0 || values.is_empty() {
-        for _ in 0..METRIC_PLOT_ROWS {
-            out.push(Line::from(Span::styled(
+        for _ in 0..plot_rows {
+            lines.push(Line::from(Span::styled(
                 "  (no samples)",
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        out.push(Line::from(""));
-        return out;
+    } else {
+        let sampled = resample(values, plot_cols * 2);
+        lines.extend(render_btop_graph(
+            &sampled,
+            plot_rows,
+            min,
+            max,
+            gutter as usize,
+        ));
     }
 
-    let sampled = resample(values, plot_cols * 2);
-    let rows = METRIC_PLOT_ROWS as usize;
-    let plot_lines = render_btop_graph(&sampled, rows, min, max, gutter as usize);
-    out.extend(plot_lines);
-    out.push(Line::from(""));
-    out
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Render a single metric's mini block: one title row, four plot rows,
@@ -337,7 +395,9 @@ fn render_metric_block(metric: &str, values: &[f64], width: u16) -> Vec<Line<'st
     let title = Line::from(vec![
         Span::styled(format!("  {metric}"), title_style),
         Span::styled(format!("  [{unit}]"), label),
-        Span::styled("    max ", label),
+        Span::styled("    min ", label),
+        Span::raw(format_value(min)),
+        Span::styled("   max ", label),
         Span::raw(format_value(max)),
         Span::styled("   last ", label),
         Span::raw(format_value(last)),
@@ -370,6 +430,69 @@ fn render_metric_block(metric: &str, values: &[f64], width: u16) -> Vec<Line<'st
     // Blank separator.
     out.push(Line::from(""));
     out
+}
+
+/// Build a display-order permutation of `peer_series` indices per the sort
+/// state. Column 0 sorts by name; columns 1..=4 sort by the corresponding
+/// summary scalar (min/max/last/n). Descending reverses the order.
+fn sorted_order(peer_series: &[(String, Vec<f64>)], sort: SortState) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..peer_series.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (na, va) = &peer_series[a];
+        let (nb, vb) = &peer_series[b];
+        let ord = if sort.col == 0 {
+            na.cmp(nb)
+        } else {
+            let key = |v: &[f64]| -> f64 {
+                let (min, max, last, n) = summarize(v);
+                match sort.col {
+                    1 => min,
+                    2 => max,
+                    3 => last,
+                    _ => n as f64,
+                }
+            };
+            let ka = key(va);
+            let kb = key(vb);
+            // NaN keys (e.g. an empty series' last) sort last under ascending.
+            match (ka.is_nan(), kb.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal),
+            }
+        };
+        if sort.descending { ord.reverse() } else { ord }
+    });
+    order
+}
+
+/// Render the Graphs by-peer sort-column header: each column label with the
+/// active sort column highlighted and carrying a direction arrow.
+fn sort_header(sort: SortState) -> Line<'static> {
+    let active = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let idle = Style::default().fg(Color::DarkGray);
+    // Solid triangles mark the sort direction, distinct from the cursor and
+    // any plot glyphs.
+    let arrow = if sort.descending {
+        "\u{25bc}"
+    } else {
+        "\u{25b2}"
+    };
+    let mut spans: Vec<Span<'static>> = vec![Span::styled("  sort: ", idle)];
+    for (i, lbl) in GRAPHS_PEER_SORT_LABELS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", idle));
+        }
+        if i == sort.col {
+            spans.push(Span::styled(format!("{lbl}{arrow}"), active));
+        } else {
+            spans.push(Span::styled(lbl.to_string(), idle));
+        }
+    }
+    Line::from(spans)
 }
 
 fn summarize(values: &[f64]) -> (f64, f64, f64, usize) {
@@ -444,15 +567,23 @@ fn render_btop_graph(
     }
 
     let range = max - min;
-    // NaN samples pass through normalize as NaN so the cell loop below
-    // can blank them. Non-NaN samples are clamped into 0..=100.
+    // Flat series (range <= 0) carry no scale, so map them by their level:
+    // a genuine zero reading renders as an empty plot (NaN blanks every
+    // cell), while a steady non-zero reading rests on the baseline (0.0)
+    // rather than floating at mid-height. NaN samples always blank.
+    let flat = !range.is_finite() || range <= 0.0;
+    let flat_zero = flat && max == 0.0;
     let normalized: Vec<f64> = values
         .iter()
         .map(|&v| {
-            if v.is_nan() {
+            if v.is_nan() || flat_zero {
+                // Blank cells: a NaN sample, or a genuine flat-zero series
+                // (rendered as an empty plot).
                 f64::NAN
-            } else if !range.is_finite() || range <= 0.0 {
-                50.0
+            } else if flat {
+                // A small positive level so the steady value rests as a
+                // row of dots on the baseline rather than an empty plot.
+                8.0
             } else {
                 ((v - min) / range * 100.0).clamp(0.0, 100.0)
             }
@@ -616,6 +747,66 @@ mod tests {
     fn metric_block_handles_empty() {
         let lines = render_metric_block("mesh_size", &[], 40);
         assert_eq!(lines.len(), METRIC_BLOCK_ROWS as usize);
+    }
+
+    /// Collect the rendered braille plot rows (excluding the gutter) of a
+    /// metric block into one concatenated string for inspection.
+    fn plot_text(lines: &[Line<'static>]) -> String {
+        // The block is: title, METRIC_PLOT_ROWS plot rows, blank separator.
+        lines
+            .iter()
+            .skip(1)
+            .take(METRIC_PLOT_ROWS as usize)
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.to_string())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn flat_zero_renders_empty_plot() {
+        // All-zero flat series: empty plot (no braille dots).
+        let lines = render_metric_block("loss_rate", &[0.0, 0.0, 0.0, 0.0], 40);
+        let plot = plot_text(&lines);
+        assert!(
+            plot.trim().is_empty(),
+            "flat-zero plot should have no dots, got {plot:?}"
+        );
+    }
+
+    #[test]
+    fn flat_nonzero_renders_baseline_dots() {
+        // Steady non-zero flat series: a baseline row of dots, not an empty
+        // plot and not floating at mid-height.
+        let lines = render_metric_block("mesh_size", &[7.0, 7.0, 7.0, 7.0], 40);
+        let plot = plot_text(&lines);
+        assert!(
+            !plot.trim().is_empty(),
+            "flat non-zero plot should rest on the baseline as dots"
+        );
+    }
+
+    #[test]
+    fn no_data_has_distinct_placeholder() {
+        // Empty input must be visibly distinct from a flat-zero empty plot.
+        let lines = render_metric_block("mesh_size", &[], 40);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(joined.contains("no samples"));
+    }
+
+    #[test]
+    fn title_row_includes_min() {
+        let lines = render_metric_block("mesh_size", &[2.0, 5.0, 9.0], 60);
+        let title: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(title.contains("min "), "title should label a min field");
+        assert!(title.contains("max "), "title should still show max");
     }
 
     #[test]
