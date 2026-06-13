@@ -802,6 +802,77 @@ impl BleConfig {
 }
 
 // ============================================================================
+// Nym Transport Configuration
+// ============================================================================
+
+/// Default Nym SOCKS5 proxy address (nym-socks5-client).
+const DEFAULT_NYM_SOCKS5_ADDR: &str = "127.0.0.1:1080";
+
+/// Default Nym connect timeout in milliseconds (300s — Nym mixnet
+/// SOCKS5 connections require multiple round-trips through 3 mix nodes
+/// with timing obfuscation, which can take several minutes).
+const DEFAULT_NYM_CONNECT_TIMEOUT_MS: u64 = 300_000;
+
+/// Default Nym MTU (same as TCP).
+const DEFAULT_NYM_MTU: u16 = 1400;
+
+/// Default Nym startup timeout in seconds (time to wait for
+/// nym-socks5-client to become ready before giving up).
+const DEFAULT_NYM_STARTUP_TIMEOUT_SECS: u64 = 120;
+
+/// Nym transport instance configuration.
+///
+/// Outbound-only connections through a nym-socks5-client SOCKS5 proxy.
+/// The nym-socks5-client must be running separately (e.g., as a sidecar
+/// process or container).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NymConfig {
+    /// SOCKS5 proxy address (host:port). Defaults to "127.0.0.1:1080".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_addr: Option<String>,
+
+    /// Outbound connect timeout in milliseconds. Defaults to 300000 (300s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+
+    /// Default MTU for Nym connections. Defaults to 1400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+
+    /// Seconds to wait for nym-socks5-client to become ready at startup.
+    /// Defaults to 120.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_secs: Option<u64>,
+}
+
+impl NymConfig {
+    /// Get the SOCKS5 proxy address. Default: "127.0.0.1:1080".
+    pub fn socks5_addr(&self) -> &str {
+        self.socks5_addr
+            .as_deref()
+            .unwrap_or(DEFAULT_NYM_SOCKS5_ADDR)
+    }
+
+    /// Get the connect timeout in milliseconds. Default: 300000.
+    pub fn connect_timeout_ms(&self) -> u64 {
+        self.connect_timeout_ms
+            .unwrap_or(DEFAULT_NYM_CONNECT_TIMEOUT_MS)
+    }
+
+    /// Get the default MTU. Default: 1400.
+    pub fn mtu(&self) -> u16 {
+        self.mtu.unwrap_or(DEFAULT_NYM_MTU)
+    }
+
+    /// Get the startup timeout in seconds. Default: 120.
+    pub fn startup_timeout_secs(&self) -> u64 {
+        self.startup_timeout_secs
+            .unwrap_or(DEFAULT_NYM_STARTUP_TIMEOUT_SECS)
+    }
+}
+
+// ============================================================================
 // TransportsConfig
 // ============================================================================
 
@@ -827,6 +898,10 @@ pub struct TransportsConfig {
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub tor: TransportInstances<TorConfig>,
 
+    /// Nym transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub nym: TransportInstances<NymConfig>,
+
     /// BLE transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub ble: TransportInstances<BleConfig>,
@@ -844,6 +919,7 @@ impl TransportsConfig {
             && self.ethernet.is_empty()
             && self.tcp.is_empty()
             && self.tor.is_empty()
+            && self.nym.is_empty()
             && self.ble.is_empty()
     }
 
@@ -862,6 +938,9 @@ impl TransportsConfig {
         }
         if !other.tor.is_empty() {
             self.tor = other.tor;
+        }
+        if !other.nym.is_empty() {
+            self.nym = other.nym;
         }
         if !other.ble.is_empty() {
             self.ble = other.ble;

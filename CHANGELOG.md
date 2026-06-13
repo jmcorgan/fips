@@ -108,6 +108,13 @@ with v0.3.x peers.
 
 ### Added
 
+- Nym mixnet transport (`transports.nym`) for outbound peer links
+  tunneled through a local `nym-socks5-client` SOCKS5 proxy into the
+  Nym mixnet, as a privacy transport alongside Tor. Outbound-only and
+  not platform-gated, it reuses the existing FMP framing and adds no new
+  crate dependencies. A single-container example
+  (`examples/sidecar-nostr-mixnet-relay/`) demonstrates FIPS peering
+  across the mixnet end to end.
 - Typed `RejectReason` classification for receive-path silent-rejection
   sites across the node. Each rejection-and-return path now passes a
   typed reason to `NodeStats::record_reject`, which routes it to a

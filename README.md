@@ -169,6 +169,12 @@ and [testing/README.md](testing/README.md).
   reachable exclusively over the FIPS mesh. The relay container
   shares the FIPS sidecar's network namespace and is isolated from
   the host network.
+- **[examples/sidecar-nostr-mixnet-relay/](examples/sidecar-nostr-mixnet-relay/)** —
+  Single-container demo of FIPS peering through a **mixnet**
+  (implemented with [Nym](https://nym.com/)): the FIPS daemon, the mixnet
+  proxy, and a strfry Nostr relay all in one isolated container, with
+  the direct route to the peer firewalled off so traffic provably
+  crosses the mixnet.
 - **[examples/k8s-sidecar/](examples/k8s-sidecar/)** — Run FIPS as
   a Kubernetes Pod sidecar. The sidecar creates `fips0` in the
   Pod's shared network namespace so every other container in the
