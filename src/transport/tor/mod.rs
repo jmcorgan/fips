@@ -775,7 +775,14 @@ impl TorTransport {
         let stream = match socks_result {
             Ok(Ok(socks_stream)) => socks_stream.into_inner(),
             Ok(Err(e)) => {
-                self.stats.record_socks5_error();
+                // A SOCKS5 REP=0x05 reply is a genuine connection refusal;
+                // every other failure mode (unreachable proxy, ruleset,
+                // protocol/parse, I/O) is a generic SOCKS5 error.
+                if matches!(e, tokio_socks::Error::ConnectionRefused) {
+                    self.stats.record_connect_refused();
+                } else {
+                    self.stats.record_socks5_error();
+                }
                 warn!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
@@ -891,6 +898,7 @@ impl TorTransport {
         let transport_id = self.transport_id;
         let remote_addr = addr.clone();
         let config = self.config.clone();
+        let stats = self.stats.clone();
 
         debug!(
             transport_id = %transport_id,
@@ -932,6 +940,13 @@ impl TorTransport {
             let stream = match socks_result {
                 Ok(Ok(socks_stream)) => socks_stream.into_inner(),
                 Ok(Err(e)) => {
+                    // Mirror the synchronous path: count a genuine REP=0x05
+                    // refusal precisely, everything else as a SOCKS5 error.
+                    if matches!(e, tokio_socks::Error::ConnectionRefused) {
+                        stats.record_connect_refused();
+                    } else {
+                        stats.record_socks5_error();
+                    }
                     debug!(
                         transport_id = %transport_id,
                         remote_addr = %remote_addr,
@@ -1716,6 +1731,68 @@ mod tests {
         let addr = TransportAddr::from_string("192.168.1.1:2121");
         let result = transport.send_async(&addr, &build_msg1_frame()).await;
         assert!(result.is_err());
+    }
+
+    /// A SOCKS5 server that actively refuses the CONNECT (REP=0x05) must
+    /// increment `connect_refused`, not `socks5_errors`. Drives the
+    /// synchronous connect path via `send_async`.
+    #[tokio::test]
+    async fn test_connect_refused_increments_refused_counter() {
+        // The mock never proxies on the refusal path, so the target addr is
+        // unused; any well-formed address suffices.
+        let dummy_target: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mock = MockSocks5Server::with_reply_code(dummy_target, 0x05)
+            .await
+            .unwrap();
+        let proxy_addr = mock.addr();
+        let _proxy_handle = mock.spawn();
+
+        let (tx, _rx) = packet_channel(32);
+        let config = TorConfig {
+            socks5_addr: Some(proxy_addr.to_string()),
+            connect_timeout_ms: Some(2000),
+            ..Default::default()
+        };
+        let mut transport = TorTransport::new(TransportId::new(1), None, config, tx);
+        transport.start_async().await.unwrap();
+
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
+        let result = transport.send_async(&addr, &build_msg1_frame()).await;
+        assert!(result.is_err(), "refused connect should fail");
+
+        let snap = transport.stats().snapshot();
+        assert_eq!(snap.connect_refused, 1, "connect_refused should be 1");
+        assert_eq!(snap.socks5_errors, 0, "socks5_errors should be 0");
+    }
+
+    /// A non-refusal SOCKS5 error reply (e.g. REP=0x01 general failure) must
+    /// still be counted as a generic `socks5_errors`, leaving `connect_refused`
+    /// untouched.
+    #[tokio::test]
+    async fn test_socks5_general_failure_increments_error_counter() {
+        let dummy_target: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mock = MockSocks5Server::with_reply_code(dummy_target, 0x01)
+            .await
+            .unwrap();
+        let proxy_addr = mock.addr();
+        let _proxy_handle = mock.spawn();
+
+        let (tx, _rx) = packet_channel(32);
+        let config = TorConfig {
+            socks5_addr: Some(proxy_addr.to_string()),
+            connect_timeout_ms: Some(2000),
+            ..Default::default()
+        };
+        let mut transport = TorTransport::new(TransportId::new(1), None, config, tx);
+        transport.start_async().await.unwrap();
+
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
+        let result = transport.send_async(&addr, &build_msg1_frame()).await;
+        assert!(result.is_err(), "failed connect should fail");
+
+        let snap = transport.stats().snapshot();
+        assert_eq!(snap.socks5_errors, 1, "socks5_errors should be 1");
+        assert_eq!(snap.connect_refused, 0, "connect_refused should be 0");
     }
 
     #[tokio::test]

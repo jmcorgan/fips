@@ -33,6 +33,11 @@ pub struct MockSocks5Server {
     addr: SocketAddr,
     /// The real target address to connect to (ignores SOCKS5 requested target).
     target_addr: SocketAddr,
+    /// SOCKS5 reply code (REP field) to send in the CONNECT reply. When this
+    /// is `REP_SUCCESS` (0x00) the server proxies to `target_addr`; any other
+    /// value is sent as an error reply and the connection is closed without
+    /// proxying. Use `0x05` (Connection refused) to drive the refused path.
+    reply_code: u8,
     /// Listener handle.
     listener: Option<TcpListener>,
 }
@@ -40,13 +45,23 @@ pub struct MockSocks5Server {
 impl MockSocks5Server {
     /// Create a new mock SOCKS5 server that forwards to the given target.
     ///
-    /// Binds to `127.0.0.1:0` (OS-assigned port).
+    /// Binds to `127.0.0.1:0` (OS-assigned port). Replies with success and
+    /// proxies bytes bidirectionally.
     pub async fn new(target_addr: SocketAddr) -> std::io::Result<Self> {
+        Self::with_reply_code(target_addr, REP_SUCCESS).await
+    }
+
+    /// Create a mock SOCKS5 server that replies to the CONNECT request with
+    /// the given REP code. A non-success code (e.g. `0x05` Connection refused)
+    /// causes the server to send the error reply and close the connection
+    /// without proxying, exercising the client's connect-error path.
+    pub async fn with_reply_code(target_addr: SocketAddr, reply_code: u8) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         Ok(Self {
             addr,
             target_addr,
+            reply_code,
             listener: Some(listener),
         })
     }
@@ -62,6 +77,7 @@ impl MockSocks5Server {
     pub fn spawn(mut self) -> JoinHandle<()> {
         let listener = self.listener.take().expect("listener already consumed");
         let target_addr = self.target_addr;
+        let reply_code = self.reply_code;
 
         tokio::spawn(async move {
             // Accept one SOCKS5 client
@@ -158,6 +174,28 @@ impl MockSocks5Server {
                         .expect("read domain addr");
                 }
                 other => panic!("unsupported ATYP: {}", other),
+            }
+
+            // Error path: reply with the configured REP code and close without
+            // proxying (the client maps the REP code to a tokio_socks::Error).
+            if reply_code != REP_SUCCESS {
+                let reply = [
+                    SOCKS_VERSION,
+                    reply_code,
+                    0x00, // RSV
+                    ATYP_IPV4,
+                    0,
+                    0,
+                    0,
+                    0, // bind addr
+                    0,
+                    0, // bind port
+                ];
+                client
+                    .write_all(&reply)
+                    .await
+                    .expect("write error connect reply");
+                return;
             }
 
             // Connect to the real target

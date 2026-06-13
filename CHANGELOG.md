@@ -101,6 +101,10 @@ with v0.3.x peers.
 
 ### Fixed
 
+- The Tor transport now increments its `connect_refused` statistic (the
+  "Refused" line in fipstop) when a SOCKS5 connection is actively
+  refused, instead of recording every connect failure as a generic
+  SOCKS5 error. The counter previously stayed at zero.
 - MMP sender metrics now ignore duplicate or regressed receiver reports
   before updating RTT, loss, goodput, or ETX. Receiver reports also
   suppress timestamp echo when dwell time overflows, so stale reports
