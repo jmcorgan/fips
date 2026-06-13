@@ -260,7 +260,7 @@ impl Node {
             if let Some(peer) = self.peers.get_mut(&node_addr) {
                 peer.abandon_rekey();
             }
-            warn!(
+            debug!(
                 peer = %self.peer_display_name(&node_addr),
                 "FMP rekey aborted: msg1 unconfirmed after max retransmissions, abandoning cycle"
             );
@@ -356,7 +356,7 @@ impl Node {
             if let Some(entry) = self.sessions.get_mut(&node_addr) {
                 entry.abandon_rekey();
             }
-            warn!(
+            debug!(
                 peer = %self.peer_display_name(&node_addr),
                 "FSP rekey aborted: msg3 unconfirmed after max retransmissions, abandoning cycle"
             );
