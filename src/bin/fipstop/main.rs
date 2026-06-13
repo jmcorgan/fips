@@ -283,8 +283,14 @@ fn main() {
         eprintln!("fipstop: failed to initialize terminal: {e}");
         std::process::exit(1);
     });
+    // Force a full repaint of a known-blank screen before the first draw.
+    // try_init enters the alternate screen but does not clear it, and the
+    // first draw only emits cells that differ from an assumed-blank buffer;
+    // on terminals that don't hand back a cleared alternate buffer (notably
+    // tmux, and over SSH) that leaves stale content showing through.
+    let _ = terminal.clear();
     let mut app = App::new(refresh);
-    let events = EventHandler::new(refresh);
+    let mut events = EventHandler::new(refresh);
 
     // Initial fetch
     fetch_data(&rt, &client, &gateway_client, &mut app);
@@ -535,5 +541,9 @@ fn main() {
         }
     }
 
+    // Stop the input thread before restoring the terminal so it is not
+    // still reading stdin once raw mode is disabled (stray bytes would
+    // otherwise echo onto the restored screen).
+    events.stop();
     restore_terminal();
 }
