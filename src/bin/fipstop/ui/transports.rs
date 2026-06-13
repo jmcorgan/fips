@@ -497,10 +497,6 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
                     "Timeouts",
                     &helpers::nested_u64(t, "stats", "connect_timeouts"),
                 ));
-                lines.push(helpers::kv_line(
-                    "Refused",
-                    &helpers::nested_u64(t, "stats", "connect_refused"),
-                ));
             }
             "ethernet" => {
                 lines.push(Line::from(""));

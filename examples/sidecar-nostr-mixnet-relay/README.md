@@ -106,9 +106,18 @@ docker compose exec fips iptables -L OUTPUT -v -n   # DROP rule for peer IP
 # Mixnet activity (Sphinx packet flow) in the nym client output:
 docker compose logs fips | grep -i nym
 
-# End-to-end data plane over the mesh (avg RTT in the seconds range —
-# that's the 3-hop Sphinx path; a direct connection would be ~30 ms):
-docker compose exec fips ping6 -c3 test-us03.fips
+# End-to-end data plane across the mesh. FIPS addresses every node by its
+# key as <npub>.fips (each npub maps into fd00::/8); short names like
+# `test-us03` are only local aliases for the peer you configured. Pick a
+# node you are NOT directly linked to — grab a current npub from
+# https://join.fips.network/ — so the ICMPv6 echo routes over the mixnet
+# to your peer and then hop-by-hop across the mesh to the target:
+docker compose exec fips ping6 -c3 <peer-npub>.fips
+
+# A reply while the direct route is DROPped proves the traffic crossed the
+# mixnet; the seconds-range RTT is the Sphinx path's signature, and a few
+# extra hundred ms over reaching your own peer is the added mesh hops (a
+# direct, non-mixnet connection would be ~30 ms).
 ```
 
 The Nostr relay answers only over the FIPS mesh (fd00::/8) and on the

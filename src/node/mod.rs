@@ -50,6 +50,7 @@ use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 #[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
+use crate::transport::nym::NymTransport;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
 use crate::transport::udp::UdpTransport;
@@ -993,12 +994,7 @@ impl Node {
 
         for (name, nym_config) in nym_instances {
             let transport_id = self.allocate_transport_id();
-            let nym = crate::transport::nym::NymTransport::new(
-                transport_id,
-                name,
-                nym_config,
-                packet_tx.clone(),
-            );
+            let nym = NymTransport::new(transport_id, name, nym_config, packet_tx.clone());
             transports.push(TransportHandle::Nym(nym));
         }
 

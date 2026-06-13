@@ -1,6 +1,6 @@
 //! Nym transport statistics.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
@@ -18,7 +18,6 @@ pub struct NymStats {
     pub mtu_exceeded: AtomicU64,
     pub connections_established: AtomicU64,
     pub connect_timeouts: AtomicU64,
-    pub connect_refused: AtomicU64,
     pub socks5_errors: AtomicU64,
 }
 
@@ -35,7 +34,6 @@ impl NymStats {
             mtu_exceeded: AtomicU64::new(0),
             connections_established: AtomicU64::new(0),
             connect_timeouts: AtomicU64::new(0),
-            connect_refused: AtomicU64::new(0),
             socks5_errors: AtomicU64::new(0),
         }
     }
@@ -77,11 +75,6 @@ impl NymStats {
         self.connect_timeouts.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a connection refused.
-    pub fn record_connect_refused(&self) {
-        self.connect_refused.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Record a SOCKS5 protocol error.
     pub fn record_socks5_error(&self) {
         self.socks5_errors.fetch_add(1, Ordering::Relaxed);
@@ -99,7 +92,6 @@ impl NymStats {
             mtu_exceeded: self.mtu_exceeded.load(Ordering::Relaxed),
             connections_established: self.connections_established.load(Ordering::Relaxed),
             connect_timeouts: self.connect_timeouts.load(Ordering::Relaxed),
-            connect_refused: self.connect_refused.load(Ordering::Relaxed),
             socks5_errors: self.socks5_errors.load(Ordering::Relaxed),
         }
     }
@@ -123,6 +115,5 @@ pub struct NymStatsSnapshot {
     pub mtu_exceeded: u64,
     pub connections_established: u64,
     pub connect_timeouts: u64,
-    pub connect_refused: u64,
     pub socks5_errors: u64,
 }
