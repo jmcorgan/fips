@@ -1,0 +1,55 @@
+networks:
+  fips-net:
+    name: ${FIPS_NETWORK:-fips-mixnet-net}
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${FIPS_SUBNET:-172.20.2.0/24}
+
+services:
+  # Single container running ALL services: fips daemon, nym-socks5-client,
+  # strfry Nostr relay, nginx, dnsmasq. See entrypoint.sh for start order.
+  fips:
+    # Builds NATIVE for the host — fips must not run under emulation
+    # (Rosetta breaks its AEAD on larger frames). Only the embedded
+    # amd64 nym-socks5-client is emulated on Apple Silicon.
+    build:
+      context: ../..
+      dockerfile: examples/sidecar-nostr-mixnet-relay/Dockerfile
+    hostname: fips-mixnet
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    restart: unless-stopped
+    ports:
+      - "2121:2121/udp"   # FIPS UDP transport
+      - "8443:8443/tcp"   # FIPS TCP transport
+      - "80:80/tcp"       # Nostr relay WebSocket (via nginx)
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - FIPS_NSEC=${FIPS_NSEC}
+      - FIPS_PEER_NPUB=${FIPS_PEER_NPUB:-}
+      - FIPS_PEER_ADDR=${FIPS_PEER_ADDR:-}
+      - FIPS_PEER_ALIAS=${FIPS_PEER_ALIAS:-peer}
+      - FIPS_PEER_TRANSPORT=${FIPS_PEER_TRANSPORT:-nym}
+      - FIPS_UDP_BIND=${FIPS_UDP_BIND:-0.0.0.0:2121}
+      - FIPS_TUN_MTU=${FIPS_TUN_MTU:-1280}
+      - FIPS_UDP_MTU=${FIPS_UDP_MTU:-1472}
+      - FIPS_NYM_SOCKS5_ADDR=${FIPS_NYM_SOCKS5_ADDR:-127.0.0.1:1080}
+      - NYM_CLIENT_ID=${NYM_CLIENT_ID:-fips-nym-client}
+      - NYM_SERVICE_PROVIDER=${NYM_SERVICE_PROVIDER:-}
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./relay/strfry.conf:/usr/src/app/strfry.conf:ro
+      - relay-data:/usr/src/app/strfry-db
+      - nym-data:/root/.nym
+    networks:
+      fips-net:
+        ipv4_address: ${FIPS_IPV4:-172.20.2.20}
+
+volumes:
+  relay-data:
+  nym-data:

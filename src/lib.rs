@@ -30,7 +30,7 @@ pub use identity::{
 };
 
 // Re-export config types
-pub use config::{Config, ConfigError, IdentityConfig, TorConfig, UdpConfig};
+pub use config::{Config, ConfigError, IdentityConfig, NymConfig, TorConfig, UdpConfig};
 pub use upper::config::{DnsConfig, TunConfig};
 
 // Re-export discovery types
