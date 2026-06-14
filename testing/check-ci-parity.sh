@@ -13,9 +13,9 @@
 #
 # Granularity-only differences folded before comparison (same coverage,
 # different matrix shape — NOT a divergence):
-#   deb-install    — GitHub splits into per-distro legs
-#                    (deb-install-debian12/ubuntu24/ubuntu26); local runs all
-#                    distros in one suite. Folded to "deb-install".
+#   deb-install    — GitHub splits into per-distro legs (deb-install-debian12/
+#                    debian13/ubuntu22/ubuntu24/ubuntu26); local runs the same
+#                    distro set in one suite. Folded to "deb-install".
 #   chaos-*        — GitHub fans each chaos scenario into its own matrix leg
 #                    (type: chaos); local runs them all via the one CHAOS_SUITES
 #                    path. The individual scenario names also differ cosmetically

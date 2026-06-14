@@ -40,9 +40,9 @@ env:
 #
 # Granularity-only differences (same coverage, different matrix shape —
 # NOT a divergence):
-#   deb-install    — split here into per-distro legs (debian12/ubuntu24/
-#                    ubuntu26) for parallelism; local runs all distros in one
-#                    suite.
+#   deb-install    — split here into per-distro legs (debian12/debian13/
+#                    ubuntu22/ubuntu24/ubuntu26) for parallelism; local runs the
+#                    same distro set in one suite.
 #   dns-resolver   — single leg here; runs all scenarios (same as local).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -454,6 +454,12 @@ jobs:
           - suite: deb-install-debian12
             type: deb-install
             scenario: debian12
+          - suite: deb-install-debian13
+            type: deb-install
+            scenario: debian13
+          - suite: deb-install-ubuntu22
+            type: deb-install
+            scenario: ubuntu22
           - suite: deb-install-ubuntu24
             type: deb-install
             scenario: ubuntu24
