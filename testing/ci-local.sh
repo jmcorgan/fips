@@ -50,7 +50,8 @@
 # Granularity-only differences (same coverage, different matrix shape —
 # NOT a divergence):
 #   deb-install    — local runs all distros sequentially in one suite; GitHub
-#                    splits into per-distro legs (debian12/ubuntu24/ubuntu26).
+#                    splits into per-distro legs (debian12/debian13/ubuntu22/
+#                    ubuntu24/ubuntu26 — the same distro set).
 #   dns-resolver   — single suite both sides; runs all scenarios.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail

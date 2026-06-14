@@ -218,7 +218,7 @@ involving the DNS proxy or the pool.
 
 ### Virtual IP Pool
 
-The pool allocates IPv6 addresses from a configured CIDR (default
+The pool allocates IPv6 addresses from a required CIDR (commonly
 `fd01::/112`). Each address maps to one mesh destination, keyed by
 `NodeAddr` rather than by hostname — different `.fips` aliases for
 the same node share a virtual IP. Address 0 (the network-equivalent)

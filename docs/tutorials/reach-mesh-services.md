@@ -56,8 +56,11 @@ hostname on the public internet. There is no separate
 the tool takes a hostname, it accepts a `.fips` hostname.
 
 > **Where the address comes from.** Every FIPS node's mesh
-> address is the SHA-256 of its public key, truncated to the
-> bottom 64 bits and prepended with `fd97:`. Names of the form
+> address is the first 16 bytes of SHA-256 of its public key,
+> with the leading byte replaced by `0xfd` (the `fd00::/8` ULA
+> prefix). The remaining bytes are hash output, so an address
+> like `fd97:...` is per-node — the `97` is part of the hash,
+> not a fixed prefix shared across nodes. Names of the form
 > `<npub>.fips` and any shortname mapped in `/etc/fips/hosts`
 > are aliases for that address. The daemon's local DNS
 > responder hands the answer back to your kernel without ever

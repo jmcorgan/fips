@@ -169,7 +169,7 @@ sudo usermod -aG fips $USER
 Then:
 
 ```sh
-fipsctl show node
+fipsctl show status
 ```
 
 ## Caveats

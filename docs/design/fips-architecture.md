@@ -219,9 +219,11 @@ discovery protocol, and error-recovery integration view live in
 ## Transport Abstraction
 
 FIPS treats the communication medium as a pluggable component. UDP,
-TCP, raw Ethernet, Tor, and BLE all implement the same small datagram
-interface (send, receive, report MTU) and feed peers into a single FMP
-routing layer; radio and serial transports are in the planned set.
+TCP, raw Ethernet, Tor, BLE, and Nym all implement the same small
+datagram interface (send, receive, report MTU) and feed peers into a
+single FMP routing layer; radio and serial transports are in the
+planned set. Nym (an outbound-only mixnet transport) and Tor are
+privacy-oriented deployment modes rather than failover paths.
 Multi-transport nodes bridge between networks transparently. The
 transport-layer specification — including per-transport categories,
 the trait surface, the connection model, and implementation status —

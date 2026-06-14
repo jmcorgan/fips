@@ -33,6 +33,23 @@ node:
     #     - "stun:stun.l.google.com:19302"
     #     - "stun:stun.cloudflare.com:3478"
     #     - "stun:global.stun.twilio.com:3478"
+    #
+    # Optional mDNS-based LAN discovery for sub-second same-LAN pairing.
+    # Opt-in (default false): default-off avoids a per-LAN identity
+    # broadcast on nodes that have deliberately disabled other discovery
+    # channels, and avoids any multicast surprise on upgrade. Requires an
+    # operational UDP transport (the advertised port is the one peers dial).
+    # lan:
+    #   enabled: false
+    #   # Optional application/network scope carried in the LAN-only TXT
+    #   # record. Browsers that set a scope ignore adverts for other scopes.
+    #   # Kept separate from the Nostr discovery `app` tag so relay-visible
+    #   # adverts can stay generic while LAN discovery stays per-private-network.
+    #   # scope: "lab-floor-3"
+    #   # Advanced: overrides the mDNS service type. Leave unset in normal
+    #   # use — only needed to run multiple isolated services on one
+    #   # interface (e.g. test isolation on loopback).
+    #   # service_type: "_fips._udp.local."
 
 tun:
   enabled: true
@@ -85,6 +102,18 @@ transports:
   #   scan: true
   #   auto_connect: true
   #   accept_connections: true
+
+  # Nym transport — outbound-only connections through the Nym mixnet for
+  # sender/receiver privacy. This is a privacy posture, not a NAT-traversal
+  # or failover transport: it only dials out (no inbound listener) and is
+  # chosen for its anonymity properties. Requires a nym-socks5-client
+  # running separately as its own process; FIPS dials it over SOCKS5.
+  # nym:
+  #   socks5_addr: "127.0.0.1:1080"     # nym-socks5-client SOCKS5 address
+  #   connect_timeout_ms: 300000        # outbound connect timeout (300s);
+  #                                     # mixnet round-trips can take minutes
+  #   mtu: 1400                         # per-connection MTU
+  #   startup_timeout_secs: 120         # wait for nym-socks5-client readiness
 
 # Outbound LAN gateway. Allows non-FIPS hosts on the LAN to reach
 # mesh destinations via DNS-allocated virtual IPs and kernel NAT.

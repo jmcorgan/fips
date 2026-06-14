@@ -99,17 +99,6 @@ with v0.3.x peers.
 
 ## [Unreleased]
 
-### Fixed
-
-- The Tor transport now increments its `connect_refused` statistic (the
-  "Refused" line in fipstop) when a SOCKS5 connection is actively
-  refused, instead of recording every connect failure as a generic
-  SOCKS5 error. The counter previously stayed at zero.
-- MMP sender metrics now ignore duplicate or regressed receiver reports
-  before updating RTT, loss, goodput, or ETX. Receiver reports also
-  suppress timestamp echo when dwell time overflows, so stale reports
-  cannot inflate SRTT.
-
 ### Added
 
 - Nym mixnet transport (`transports.nym`) for outbound peer links
@@ -164,6 +153,16 @@ with v0.3.x peers.
   is updated at every pool-insert and receive-loop-exit site, plus on
   transport stop and on send-failure-driven removal. Surfaces through
   `TcpStatsSnapshot` and `TorStatsSnapshot` for `show_transports`.
+- `fipsctl stats metrics`, backed by a new counter-only `show_metrics`
+  control query that dumps the atomic metric registry as flat counter
+  name/value pairs. Serves a Prometheus-style scraper that samples node
+  counters without contending the receive loop.
+- Discovery now counts `LookupRequest`s dropped when the dedup cache is
+  full. A saturated `recent_requests` cache
+  (`MAX_RECENT_DISCOVERY_REQUESTS`) previously dropped requests
+  silently; a new `DiscoveryStats::req_dedup_cache_full` counter (typed
+  reject reason `DiscoveryReject::ReqDedupCacheFull`) makes the drop
+  visible through `show_routing`.
 - [`PR-REVIEW.md`](PR-REVIEW.md) — the 13-criteria PR review checklist
   the maintainer runs against every incoming PR, published at the
   repo root so contributors can run the same pass on their own change
@@ -212,6 +211,52 @@ with v0.3.x peers.
   restores headroom toward the fixed-filter capacity limit without
   materially weakening the antipoison gate: a saturated or poisoned filter
   is ~100% FPR and still rejected.
+- TCP inbound connection cap now honors `node.limits.max_connections`.
+  The per-transport TCP inbound accept ceiling was hardwired to 256 and
+  never read `max_connections`, so raising it was a silent no-op for
+  inbound TCP. The effective cap now resolves with precedence: explicit
+  per-transport `max_inbound_connections`, then node-wide
+  `max_connections`, then the built-in default of 256. Established peers
+  remain bounded node-wide by `add_connection`.
+- The control-socket read surface is now served off the `rx_loop`.
+  Every pure-read `show_*` query — `show_status`, the `show_stats_*`
+  family, `show_listening_sockets`, the new `show_metrics`,
+  `show_tree`/`show_bloom`/`show_cache`/`show_routing`/
+  `show_identity_cache`, `show_peers`/`show_sessions`/`show_links`/
+  `show_connections`/`show_transports`/`show_mmp`, and `show_acl` — now
+  renders in the control accept task from ArcSwap-published read
+  snapshots instead of round-tripping the data-plane receive loop; only
+  the mutating `connect`/`disconnect` commands still reach the loop.
+  This removes the head-of-line coupling where a busy or slow `rx_loop`
+  could time out `fipsctl` and `fipstop` observability (the five-second
+  query pattern operators saw on loaded nodes). Per-entity snapshots
+  reuse unchanged rows by pointer, so per-tick publish cost stays
+  bounded as peer/session count grows. New daemon-resolved fields
+  surface through the snapshots: effective persistence, root/is-root,
+  and a per-transport-type peer-count map in `show_status`; per-peer
+  `effective_depth` in `show_peers`; `root_npub` in `show_tree`; and the
+  last-sent uptree filter fill ratio and subtree estimate in
+  `show_bloom`.
+- `fipstop` TUI overhaul: reworked rendering, navigation model, and the
+  control read surface it draws from, surfacing the new daemon-resolved
+  snapshot fields above. Built on a ratatui `TestBackend`
+  render-snapshot harness that asserts the text grid and per-cell
+  style of every `ui::draw_*` against canned `show_*` JSON.
+- Static host aliases in `/etc/fips/hosts` now hot-reload on mtime
+  change instead of only at daemon startup, so `fipsctl`/`fipstop`
+  display names reflect edits without a restart. The peer ACL and host
+  map both reload once per node tick through a new lock-free
+  `Reloadable` snapshot.
+- Steady-state log noise reduced on saturated public-mesh nodes.
+  Routine per-peer connection-lifecycle and capacity-cap events are
+  demoted from info/warn to debug — FMP K-bit cutover promotion,
+  connection-promoted-to-active-peer (a redundant duplicate
+  promotion line removed), peer-restart-detected, peer-removed-and-
+  cleaned-up, the TCP `max_inbound_connections`-reached rejection, and
+  the congestion-CE-flag line — so genuinely notable info/warn lines
+  are no longer drowned out. An exhausted FMP-msg1 / FSP-msg3 rekey
+  retransmission-budget abort (an expected, self-limiting outcome on
+  lossy or high-latency links) is likewise demoted from warn to debug.
 - Sidecar example (`examples/sidecar-nostr-relay`): `udp.mtu` is now
   overridable via the `FIPS_UDP_MTU` environment variable, defaulting to
   1472 (preserving prior behavior). Plumbed through `docker-compose.yml`
@@ -322,7 +367,13 @@ with v0.3.x peers.
   medians, Linux x86_64, docker-bridge mesh): A→D 1379→2708 Mbps
   (1.96×), A→E 1394→2663 Mbps (1.91×), E→A 1406→2624 Mbps (1.87×);
   RTT +0.11–0.19 ms from the worker queue handoff. Windows
-  continues on the existing tokio-based send/recv path.
+  continues on the existing tokio-based send/recv path. Two issues in
+  the off-rx_loop drain path are resolved as part of the overhaul: the
+  per-peer drain worker is now detached on `Drop` rather than joined
+  synchronously (a synchronous join from the runtime thread could wedge
+  the whole daemon when a peer was removed with an in-flight worker),
+  and the connected-UDP drain no longer busy-spins on a poll error
+  (#106).
 
 - The Debian package no longer ships `/etc/fips/fips.yaml` as a dpkg
   conf-file. The default configuration is installed as an example at
@@ -359,6 +410,14 @@ with v0.3.x peers.
 
 ### Fixed
 
+- The Tor transport now increments its `connect_refused` statistic (the
+  "Refused" line in fipstop) when a SOCKS5 connection is actively
+  refused, instead of recording every connect failure as a generic
+  SOCKS5 error. The counter previously stayed at zero.
+- MMP sender metrics now ignore duplicate or regressed receiver reports
+  before updating RTT, loss, goodput, or ETX. Receiver reports also
+  suppress timestamp echo when dwell time overflows, so stale reports
+  cannot inflate SRTT.
 - On the XX FMP handshake, an over-cap inbound connection is rejected
   solely by the late `promote_connection` check, and the resulting
   `MaxPeersExceeded` rejection is logged at debug rather than warn so a
@@ -488,25 +547,6 @@ with v0.3.x peers.
   accounting change. Operators with mixed outbound + inbound
   deployments no longer see legitimate inbound peers rejected once
   outbound connections fill the pool past the configured cap.
-- `PeerRecvDrain::drop` no longer calls `std::thread::join` on the
-  worker thread. The drain worker uses `packet_tx.blocking_send(...)`
-  on a tokio mpsc Sender, which internally parks the worker in
-  `tokio::block_on` on the same `current_thread` runtime that drives
-  `rx_loop`. Joining synchronously from inside `remove_active_peer`
-  (which runs on the runtime thread, the runtime's sole driver)
-  produced a circular wait: rx_loop blocked in libc futex via
-  `Thread::join`, the worker unable to observe the stop flag because
-  the runtime that polls it is the very thread now blocked joining
-  it, and all other peer-drain workers parked on the same runtime
-  via `block_on`. Full daemon wedge, fipsctl unresponsive, SIGTERM
-  ignored. Trigger was peer-removal via the 30-s link-dead-timeout
-  cleanup path with any in-flight worker, with statistical likelihood
-  amplified by aggressive multi-npub-from-one-NAT reconnect patterns
-  but not bounded to them. Fix: detach the std::thread (drop the
-  `JoinHandle` without joining); the stop flag + self-pipe write
-  already signal the worker to exit; the kernel-level `libc::poll()`
-  inside the drain loop sees the wake, checks the flag, exits, and
-  the OS reclaims the thread state independently.
 - Outbound connection initiation now honors the `node.limits.max_peers`
   cap that was previously only checked on inbound msg1 admission. Four
   paths gated: auto-reconnect retries (`process_pending_retries`),
@@ -519,13 +559,21 @@ with v0.3.x peers.
   `handshake.rs:1114` is unchanged. Introduces a shared
   `Node::outbound_admission_check()` helper so the invariant is
   grep-able and unit-testable.
-- Mesh-size estimator (`compute_mesh_size`) no longer double-counts the
-  parent's bloom cardinality during the transient cache window after a
-  local parent-switch. Symptom: `fipsctl show status` / fipstop displayed
-  mesh size nearly-but-not-exactly doubling during tree rebalancing.
-  Fix: explicit parent-skip at the head of the children loop, making the
-  disjoint-subtree invariant structural rather than dependent on
-  `peer_declaration` cache freshness. Per-peer 500 ms rate-limiter and
+- The mesh-size estimator (`compute_mesh_size`) no longer over-counts
+  under filter overlap. It previously summed the per-filter cardinality
+  of the parent and each child filter, which assumes the filters are
+  perfectly disjoint; a stale or oversized parent filter or a routing
+  loop inflated the reported mesh size to several times the true value,
+  and dropping the parent on a tree rebalance collapsed the upward leg
+  and flapped the count (the symptom operators saw as the size
+  nearly-but-not-exactly doubling during rebalancing). The estimator now
+  computes the cardinality of the OR-union over self plus every
+  connected peer's inbound filter, dropping the parent/child tree gating
+  entirely.
+  OR is idempotent, so any overlap is deduplicated — the result equals
+  the old sum in the disjoint case, stays correct under overlap, damps
+  the parent-switch flap, and removes the estimate's dependence on
+  tree-declaration cache freshness. The per-peer 500 ms rate-limiter and
   overall recompute cadence are unchanged.
 - Spanning-tree state distribution is now eventually-consistent.
   Previously every `send_tree_announce_to_all` call site fired only
@@ -552,6 +600,18 @@ with v0.3.x peers.
   so any partition healed by the periodic broadcast at T+60 lands
   inside the convergence window; `wait_for_full_baseline` early-exits
   on PASS, so successful reps see no extra wall-clock.
+- A single-uplink node stranded out of the tree now re-attaches within
+  a round-trip instead of waiting for the periodic re-broadcast cadence.
+  A node with one tree peer has periodic parent re-evaluation disabled,
+  so a lost one-shot attaching `TreeAnnounce` left it self-rooted and
+  unreachable until the next periodic re-broadcast
+  (`reeval_interval_secs` later). Tree-position exchange is now
+  self-healing on the receive path: when an accepted `TreeAnnounce`
+  advertises a root strictly worse (higher NodeAddr; election is
+  smallest-wins) than our own, we echo our current declaration back to
+  that peer, provoking the better-rooted peer to re-push its real
+  position immediately. The echo fires only in that one direction and is
+  bounded by the existing per-peer rate limiter.
 
 - `rx_loop` tick-arm stall under convergence-phase mesh pressure
   is eliminated. Previously, the tick body's per-peer `check_*`
@@ -734,6 +794,47 @@ with v0.3.x peers.
   future caller bypasses the outer dispatch check. As a side benefit,
   narrows a cooldown-poisoning vector previously available to an
   attacker injecting stale failure events for an active peer.
+- A manual `fipsctl disconnect` now notifies the peer so teardown is
+  symmetric. Previously a manual disconnect tore down only the local
+  side and sent the peer nothing, so the peer kept its session and never
+  re-emitted its tree and filter announcements; on reconnect it was
+  never re-adopted as a child and its bloom filter was never recorded.
+  The local side now sends the disconnected peer a scoped `Disconnect`
+  (the same message graceful shutdown sends), so both ends tear down and
+  re-handshake cleanly on the next connection.
+- `fips-gateway` no longer drops long-lived or DNS-cached client
+  mappings while traffic is still flowing. The virtual-IP pool's TTL
+  clock advanced only on DNS re-query, never on traffic, and the mapping
+  TTL is wired equal to the DNS TTL, so an in-use mapping was forced to
+  drain at TTL and reclaimed at the first zero-conntrack tick — breaking
+  long-lived, bursty, or DNS-cached clients. The tick now refreshes the
+  mapping's last-referenced time whenever conntrack reports active
+  sessions, and recovers a draining mapping to active (with a fresh
+  grace window) when traffic resumes; only genuinely idle mappings
+  drain.
+- Transport-layer mutex poisoning no longer cascades. Ten
+  `Mutex::lock().unwrap()` sites across the UDP, BLE, and Ethernet
+  transports would turn a single panic (poisoning the mutex) into a
+  cascade of panics on every subsequent lock. Each is replaced with
+  `lock().unwrap_or_else(|e| e.into_inner())`, recovering the guarded
+  data with no new dependency and no call-graph change; four
+  `local_addr.unwrap()` calls on the UDP start/adopt paths get a
+  provably-safe sentinel fallback. The critical sections are short,
+  locally-scoped, and not reachable from peer input, so this is
+  robustness hardening, not a remotely-triggerable fix.
+- `fipstop` no longer renders a garbled screen on startup or leaves
+  stray bytes on quit, most visible over SSH and inside tmux. Startup
+  forces a full repaint (`terminal.clear()`) before the first draw so
+  prior alternate-screen contents no longer show through; quit gives the
+  stdin-poll thread a stop flag and joins it before restoring the
+  terminal, so post-raw-mode keystrokes or terminal query responses no
+  longer echo onto the restored screen.
+- macOS `.fips` name resolution now works on a fresh install: the
+  shipped resolver shim points at `::1`, matching the daemon's default
+  IPv6 DNS listener, instead of `127.0.0.1`. The mismatched shim
+  (`nameserver 127.0.0.1` while the daemon listens on `::1`) broke
+  `getaddrinfo` for `.fips` on every macOS install since the resolver
+  was introduced.
 
 ## [0.3.0] - 2026-05-11
 

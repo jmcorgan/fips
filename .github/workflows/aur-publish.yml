@@ -1,25 +1,151 @@
 name: AUR Publish
 
 on:
+  push:
+    branches:
+      - master
+      - maint
+      - next
+    tags:
+      - 'v*'
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish (e.g. v0.3.0). Defaults to the tag the workflow was dispatched from.'
+        description: 'Release tag to publish (e.g. v0.4.0). Defaults to the tag the workflow was dispatched from.'
         required: false
         default: ''
       pkgrel:
         description: 'AUR pkgrel to publish. Use 2+ for packaging-only republishes of an existing tag.'
         required: false
         default: '1'
-  push:
-    tags:
-      - 'v*'
 
 jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Build + lint the AUR package on every trigger, matching the coverage the
+  # other package workflows (linux/macos/windows/openwrt) give their artifacts:
+  # branch pushes, pull requests, tags, and manual dispatch. Uses makepkg +
+  # namcap in an Arch container (neither tool exists on ubuntu-latest) and builds
+  # the *checked-out tree* from a local git-archive tarball, so it works for
+  # branch/PR builds and unreleased rc tags whose GitHub source archive does not
+  # exist yet. This job never publishes.
+  # ───────────────────────────────────────────────────────────────────────────
+  aur-build:
+    name: Build and lint fips AUR package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+
+    steps:
+      - name: Install build and lint tooling
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm --needed base-devel namcap git curl
+
+      - uses: actions/checkout@v4
+
+      - name: Resolve package version
+        id: ver
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PKGREL: ${{ inputs.pkgrel }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            RAW="${INPUT_TAG#v}"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            RAW="${GITHUB_REF_NAME#v}"
+          else
+            # Branch push / PR: derive the version from the crate manifest.
+            RAW=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          # makepkg forbids '-' in pkgver; map e.g. 0.4.0-rc1 -> 0.4.0rc1,
+          # 0.4.0-dev -> 0.4.0dev. The build only needs an internally consistent
+          # pkgver (it matches the git-archive prefix below); this is not the
+          # value the real publish uses.
+          VERSION="${RAW//-/}"
+          PKGREL="${INPUT_PKGREL:-1}"
+          case "$PKGREL" in
+            ''|*[!0-9]*|0) echo "pkgrel '$PKGREL' must be a positive integer"; exit 1 ;;
+          esac
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=${PKGREL}" >> "$GITHUB_OUTPUT"
+          echo "Resolved AUR pkgver=${VERSION} pkgrel=${PKGREL}"
+
+      - name: Create non-root build user and fix ownership
+        run: |
+          set -euo pipefail
+          # makepkg refuses to run as root; create an unprivileged build user
+          # with passwordless sudo (needed for pacman dep installs during -s).
+          useradd -m -s /bin/bash builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          # The checkout is owned by root; hand it to the build user.
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build a local source tarball of the checkout
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The PKGBUILD source= points at GitHub archive/<tag>.tar.gz, which does
+          # not exist for a branch push, a PR, or an unreleased rc tag and would
+          # 404. Instead build the checked-out tree by packing it into a local
+          # tarball whose top-level directory matches what the PKGBUILD expects
+          # ("fips-<pkgver>/"); patch-pkgbuild.sh repoints source= at it.
+          TARBALL="packaging/aur/fips-${VERSION}.tar.gz"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" archive --format=tar.gz \
+            --prefix="fips-${VERSION}/" -o "$TARBALL" HEAD
+          chown builder:builder "$TARBALL"
+          ls -l "$TARBALL"
+
+      - name: Patch PKGBUILD
+        env:
+          TAG: v${{ steps.ver.outputs.version }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PKGREL: ${{ steps.ver.outputs.pkgrel }}
+        run: |
+          set -euo pipefail
+          LOCAL_TARBALL="packaging/aur/fips-${VERSION}.tar.gz" \
+            bash packaging/aur/patch-pkgbuild.sh
+          chown builder:builder packaging/aur/PKGBUILD
+
+      - name: makepkg build and namcap lint (as build user)
+        run: |
+          set -euo pipefail
+          sudo -u builder bash -euo pipefail -c '
+            cd packaging/aur
+            echo "::group::namcap PKGBUILD"
+            namcap PKGBUILD
+            echo "::endgroup::"
+            echo "::group::makepkg build"
+            # --nocheck: skip the PKGBUILD check() (cargo test --lib); the test
+            # suite is already covered by ci.yml. This job validates packaging.
+            makepkg -s --noconfirm --nocheck
+            echo "::endgroup::"
+            echo "::group::namcap built package"
+            for pkg in *.pkg.tar.*; do
+              echo "namcap $pkg"
+              namcap "$pkg"
+            done
+            echo "::endgroup::"
+          '
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Publish to the AUR. Runs only on a real (non-prerelease) release tag push,
+  # or a manual dispatch (packaging-only republish with explicit tag + pkgrel).
+  # Branch pushes and pull requests build+lint above but never reach this job.
+  # Gated on aur-build so a package that fails to build/lint is never published.
+  # ───────────────────────────────────────────────────────────────────────────
   aur-publish-fips:
     name: Publish fips to AUR
+    needs: aur-build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-')
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+          && startsWith(github.ref, 'refs/tags/v')
+          && !contains(github.ref_name, '-'))
 
     steps:
       - name: Resolve release tag
@@ -59,36 +185,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           VERSION: ${{ steps.tag.outputs.version }}
           PKGREL: ${{ steps.tag.outputs.pkgrel }}
-        run: |
-          set -euo pipefail
-          URL="https://github.com/${GITHUB_REPOSITORY}/archive/${TAG}.tar.gz"
-          echo "Fetching $URL"
-          SOURCE_SUM=$(curl -fsSL --retry 3 "$URL" | b2sum | awk '{print $1}')
-          SYSUSERS_SUM=$(b2sum packaging/aur/fips.sysusers | awk '{print $1}')
-          TMPFILES_SUM=$(b2sum packaging/aur/fips.tmpfiles | awk '{print $1}')
-          for v in SOURCE_SUM SYSUSERS_SUM TMPFILES_SUM; do
-            eval val=\$$v
-            if [ -z "$val" ]; then echo "$v is empty"; exit 1; fi
-          done
-          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/aur/PKGBUILD
-          sed -i "s/^pkgrel=.*/pkgrel=${PKGREL}/" packaging/aur/PKGBUILD
-          sed -i "s/^conflicts=.*/conflicts=('fips-git' 'fips-git-debug')/" packaging/aur/PKGBUILD
-          sed -i "s/^options=.*/options=('!lto' '!debug')/" packaging/aur/PKGBUILD
-          sed -i "s|^b2sums=('SKIP'.*|b2sums=('${SOURCE_SUM}'|" packaging/aur/PKGBUILD
-          awk -v s1="$SYSUSERS_SUM" -v s2="$TMPFILES_SUM" '
-            /^b2sums=\(/ { in_block=1; count=0 }
-            in_block {
-              count++
-              if (count == 2) sub(/[a-f0-9]{128}/, s1)
-              if (count == 3) sub(/[a-f0-9]{128}/, s2)
-              if ($0 ~ /\)/) in_block=0
-            }
-            { print }
-          ' packaging/aur/PKGBUILD > packaging/aur/PKGBUILD.new
-          mv packaging/aur/PKGBUILD.new packaging/aur/PKGBUILD
-          echo "Patched PKGBUILD:"
-          grep -E "^(pkgver|pkgrel|conflicts|options)=" packaging/aur/PKGBUILD
-          awk '/^b2sums=\(/,/\)$/' packaging/aur/PKGBUILD
+        run: bash packaging/aur/patch-pkgbuild.sh
 
       - name: Publish to AUR
         uses: KSXGitHub/github-actions-deploy-aur@v4.1.2

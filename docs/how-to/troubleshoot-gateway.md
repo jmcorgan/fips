@@ -151,7 +151,7 @@ rather than `flush ruleset`, which destroys every table on the host.
 Symptom: `nc -U /run/fips/gateway.sock` fails with "Permission
 denied" or "No such file or directory".
 
-The socket is owned by root with mode `0660` (group `fips`). Either
+The socket is owned by root with mode `0770` (group `fips`). Either
 run `nc` as root (`sudo nc -U ...`) or add your user to the `fips`
 group and re-login. If the file does not exist at all, the gateway
 either failed to start (check `journalctl -u fips-gateway`) or

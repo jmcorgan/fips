@@ -1347,9 +1347,12 @@ impl Node {
 
     /// Compute and cache the estimated mesh size from bloom filters.
     ///
-    /// Uses the spanning tree partition: parent's filter covers nodes reachable
-    /// upward, children's filters cover disjoint subtrees downward. The sum
-    /// of estimated entry counts plus one (self) approximates total network size.
+    /// Builds an OR-union of self plus every connected peer's inbound filter
+    /// and estimates its cardinality once. Unioning (rather than summing
+    /// per-peer counts) deduplicates the overlap between the split-horizon
+    /// filters, each of which approximates "the whole mesh minus my subtree".
+    /// See the body for why all routing peers contribute, not just the tree
+    /// neighborhood.
     pub(crate) fn compute_mesh_size(&mut self) {
         let my_addr = *self.tree_state.my_node_addr();
 

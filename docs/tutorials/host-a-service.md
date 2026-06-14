@@ -98,11 +98,10 @@ is what you want.
 Or via the daemon:
 
 ```sh
-sudo fipsctl show identities
+sudo fipsctl show status
 ```
 
-The first JSON entry has `local: true` and a `ula` field — that
-is your address.
+The JSON has an `ipv6_addr` field — that is your address.
 
 For the rest of this tutorial we will write the address as
 `<your-fips0-addr>`. Substitute the actual `fd97:...` value

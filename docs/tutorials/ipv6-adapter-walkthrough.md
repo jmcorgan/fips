@@ -63,9 +63,11 @@ mesh address:
 dig npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98.fips AAAA +short
 ```
 
-You should see one AAAA record returning a `fd97:...` address.
-The prefix is the FIPS ULA range (`fd00::/8`, with `fd97:...`
-covering the address space derived from npubs).
+You should see one AAAA record returning an address such as
+`fd97:...`. The prefix is the FIPS ULA range (`fd00::/8`): only
+the leading `fd` byte is fixed, and everything after it is hash
+output derived from the npub, so the digits beyond `fd` vary per
+node.
 
 The query went through `systemd-resolved` (or your platform
 equivalent), which routed `.fips` queries to the daemon's local

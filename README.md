@@ -40,8 +40,8 @@ same way it would on a local network.
 - **Self-organizing mesh routing.** Spanning-tree coordinates with
   bloom-filter-guided discovery; no global routing tables, no
   flooding.
-- **Multi-transport.** UDP, TCP, Ethernet, Tor, and Bluetooth (BLE
-  L2CAP) ship today; transports compose on a single mesh and a
+- **Multi-transport.** UDP, TCP, Ethernet, Tor, Nym, and Bluetooth
+  (BLE L2CAP) ship today; transports compose on a single mesh and a
   node may run several at once.
 - **Two-layer encryption.** Noise XX both hop-by-hop (peer links)
   and end-to-end (mesh sessions), with periodic rekey for forward
@@ -55,7 +55,8 @@ same way it would on a local network.
 - **Nostr-mediated discovery and NAT traversal.** Peers publish
   endpoint adverts on public Nostr relays, exchange candidates via
   NIP-59 gift-wrapped offers and answers, and establish direct
-  paths through NATs using STUN-assisted hole punching.
+  paths through NATs using STUN-assisted hole punching. On the local
+  network, mDNS LAN discovery finds peers directly without relays.
 - **LAN gateway.** Optional `fips-gateway` service folds an entire
   unmodified LAN into the mesh: outbound (LAN clients reach mesh
   destinations through a DNS-allocated virtual IPv6 pool and
@@ -120,6 +121,7 @@ supported; transport availability varies by platform.
 | TCP       |   ✅  |   ✅  |    ✅   |   ✅    |
 | Ethernet  |   ✅  |   ✅  |    ❌   |   ✅    |
 | Tor       |   ✅  |   ✅  |    ✅   |   ✅    |
+| Nym       |   ✅  |   ✅  |    ✅   |   ❌    |
 | BLE       |   ✅  |   ❌  |    ❌   |   ❌    |
 
 On Linux, a source build requires `libclang` — the LAN gateway's
@@ -135,6 +137,11 @@ BLE is optional and, on Linux, requires BlueZ and libdbus
 gated on a build-script probe — install the dependencies first and
 the `cargo build` line above picks it up. The OpenWrt ipk omits
 BLE because libdbus is not available on the target.
+
+Nym (mixnet) transport builds on all desktop platforms. The OpenWrt
+❌ is provisional, pending verification of `nym-socks5-client`
+availability on the target; it will flip to ✅ only if confirmed
+buildable there.
 
 ## Documentation
 
@@ -204,8 +211,8 @@ wire-format-breaking work for v0.5.0 — unified Noise XX handshake
 at both layers, FMP node profiles, slimmer MMP reports, and an
 extensible bloom-filter encoding — that will not interoperate with
 v0.2.x or v0.3.x peers. The core protocol works end-to-end over
-UDP, TCP, Ethernet, Tor, and Bluetooth on a small live mesh of
-deployed nodes. See the CHANGELOG `## Breaking` section for the
+UDP, TCP, Ethernet, Tor, Nym, and Bluetooth on a global, public test
+mesh of thousands of nodes. See the CHANGELOG `## Breaking` section for the
 full list of v0.5.0 wire-format changes in flight.
 
 ### What works today
@@ -226,10 +233,10 @@ full list of v0.5.0 wire-format changes in flight.
   estimation.
 - ECN congestion signaling (hop-by-hop CE relay, IPv6 CE marking,
   kernel-drop detection).
-- UDP, TCP, Ethernet, Tor, and BLE transports (BLE via L2CAP CoC
-  with per-link MTU negotiation).
+- UDP, TCP, Ethernet, Tor, Nym (mixnet), and BLE transports (BLE
+  via L2CAP CoC with per-link MTU negotiation).
 - Nostr-mediated overlay endpoint discovery and UDP hole punching
-  for NAT traversal.
+  for NAT traversal, plus mDNS LAN discovery for local peers.
 - LAN gateway (`fips-gateway`) with both outbound (LAN-to-mesh)
   and inbound (mesh-to-LAN port-forwarding) modes.
 - Peer ACL: per-npub allow / deny admission control at the link

@@ -1,4 +1,13 @@
-# FIPS Nostr-Mediated Discovery and NAT Traversal
+# FIPS Discovery: Nostr-Mediated and LAN/mDNS
+
+FIPS nodes have two discovery mechanisms beyond the static `peers[]`
+list. The bulk of this document describes **Nostr-mediated discovery**,
+which works across the internet using public Nostr relays as a
+signaling channel and can punch through UDP NAT. A second, much
+simpler mechanism — **LAN/mDNS discovery** — finds peers on the same
+local link with no relay, STUN, or NAT traversal at all; it is
+described in its own section near the end. The two are independent: a
+node can enable either, both, or neither.
 
 Nostr-mediated discovery lets FIPS nodes find each other, and if
 necessary, punch through UDP NAT, using public Nostr relays as the
@@ -376,6 +385,182 @@ semaphore and replay-cache layers downstream.
   trusted until FMP's Noise XX handshake completes. A peer whose
   advert says "I am npub X at 1.2.3.4:5678" but whose FMP handshake
   presents a different static key is rejected at the mesh layer.
+
+## LAN/mDNS discovery
+
+LAN discovery is a separate, link-local discovery mechanism that finds
+peers on the same broadcast domain using mDNS / DNS-SD
+([RFC 6762](https://www.rfc-editor.org/rfc/rfc6762) /
+[RFC 6763](https://www.rfc-editor.org/rfc/rfc6763)). Unlike
+Nostr-mediated discovery, it contacts no relay, runs no STUN
+observation, and performs no NAT traversal: an endpoint learned from a
+LAN advert is by construction routable from the consumer's own link.
+The result is sub-second peer pairing on the same LAN.
+
+It is unrelated to the "LAN candidate" terminology used in the
+NAT-traversal sections above (which refers to a host's own
+locally-bound address offered as a hole-punch candidate). LAN/mDNS
+discovery is a distinct subsystem under `src/discovery/lan/`.
+
+### Role
+
+LAN discovery adds two capabilities, both confined to the local link:
+
+- **Advertising.** The node publishes a `_fips._udp.local.` DNS-SD
+  service advert carrying its `npub`, its protocol version, and (if
+  configured) a discovery scope. The advert is multicast on the local
+  link only; it does not leave the broadcast domain unless the
+  operator's network bridges mDNS.
+- **Browsing.** The node concurrently browses for the same service
+  type, learns the endpoints of other FIPS nodes on the link, and
+  initiates a normal FMP link to each newly-seen peer.
+
+The mDNS service type is `_fips._udp.local.`
+(`src/discovery/lan/mod.rs:45`). Per RFC 6763 the `_udp` label denotes
+the IP transport used for the advert, not the FIPS upper protocol —
+both UDP and TCP FIPS endpoints announce under the same service type
+because the link-layer handshake travels over UDP either way. (In
+practice LAN discovery dials only over a UDP transport; see the
+handshake subsection.)
+
+### When to use it
+
+- **You run several FIPS nodes on one LAN** (a lab bench, an office
+  segment, a home network) and want them to find each other without
+  hand-maintaining `peers[]` blocks or standing up Nostr discovery.
+- **You want the lowest-latency pairing path.** Same-link pairing
+  completes in well under a second with no relay round-trip.
+
+Skip it when nodes are not on a shared broadcast domain (mDNS does not
+cross routed boundaries), or when you do not want the node to multicast
+its identity on the local link. LAN discovery is **opt-in and disabled
+by default**, so doing nothing leaves it off.
+
+### How it works
+
+The LAN discovery runtime (`src/discovery/lan/mod.rs`) is started
+during node initialization when `node.discovery.lan.enabled` is true.
+It is independent of Nostr discovery and runs even when Nostr is
+disabled (`src/node/lifecycle.rs:1159-1162`). Startup requires an
+operational UDP transport: the node advertises the port of its
+lowest-`TransportId` operational, non-bootstrap UDP transport, chosen
+deterministically so the advertised port is stable across restarts
+(`src/node/lifecycle.rs:1169-1180`). If no such port exists, the
+runtime returns `NoAdvertisedPort` and LAN discovery does not start
+(`src/discovery/lan/mod.rs:156-158`).
+
+The runtime does two things concurrently:
+
+1. **Responder.** It registers a DNS-SD service with instance name
+   `fips-<first-16-chars-of-npub>` and a TXT record carrying the keys
+   below. `mdns-sd`'s address auto-detection appends every non-loopback
+   interface address, with `127.0.0.1` seeded so same-host peers and
+   integration tests can still resolve the advert
+   (`src/discovery/lan/mod.rs:182-203`).
+2. **Browser.** A background pump receives `ServiceResolved` events for
+   the same service type. For each resolved advert it extracts the
+   `npub` and `scope` TXT values, drops adverts that echo the node's own
+   npub, drops cross-scope adverts (see scope filtering), drops records
+   without an `npub`, and surfaces one `LanDiscoveredPeer` per routable
+   interface address (`src/discovery/lan/mod.rs:212-299`). IPv6
+   unicast link-local addresses without an interface scope id are
+   skipped, since they cannot be dialed unambiguously
+   (`src/discovery/lan/mod.rs:348-365`).
+
+The TXT record carries three keys (`src/discovery/lan/mod.rs:47-55`):
+
+| TXT key | Contents |
+| --- | --- |
+| `npub` | bech32-encoded npub of the advertising node |
+| `scope` | the node's discovery scope, if one is configured (omitted otherwise) |
+| `v` | FIPS protocol version (the same `PROTOCOL_VERSION` used by the Nostr advert) |
+
+Once per node tick, the node drains browser events and acts on them in
+`poll_lan_discovery()` (`src/node/lifecycle.rs:907`, called from
+`src/node/handlers/rx_loop.rs:266`). For each discovered peer it finds
+a UDP transport whose family matches the peer address, parses the
+`npub` into a `PeerIdentity`, skips peers it is already connected to or
+currently connecting to, and otherwise initiates a connection.
+
+### Handshake: Noise IK
+
+LAN-discovered peers are dialed through the standard FMP outbound link
+path. `poll_lan_discovery()` calls `initiate_connection()`
+(`src/node/lifecycle.rs:380`), which, for connectionless transports
+such as UDP, allocates a link and **starts the Noise IK handshake**
+(documented at `src/node/lifecycle.rs:373-374`). This is the same
+link-layer handshake used by every other FMP connection — IK at the
+link layer per the FIPS architecture — not a different pattern for LAN
+peers.
+
+The mDNS advert is **unauthenticated**: anyone on the link can
+multicast a TXT claiming any `npub`. Identity is proven end-to-end by
+the Noise IK handshake against the observed endpoint. A spoofed advert
+carrying another node's npub fails the handshake — the impostor does
+not hold the matching static key — and the half-open link is dropped.
+The mDNS advert is therefore a routing hint, never an identity
+assertion, exactly as a Nostr advert is treated (a successful contact
+is not trusted until FMP's Noise IK handshake completes).
+
+> Note: a stale source doc-comment at `src/node/lifecycle.rs:904-906`
+> describes this path as a "Noise XX" handshake. That comment is
+> inaccurate — the path uses Noise IK as described above. The comment
+> is flagged for a separate source fix and does not reflect actual
+> behavior.
+
+### Scope filtering
+
+When a discovery scope is configured, the advert carries it in the
+`scope` TXT entry and the browser surfaces only peers whose advert
+carries a matching scope. Nodes on the same physical LAN but configured
+for different mesh networks therefore do not cross-feed each other.
+
+The scope is resolved by `lan_discovery_scope()`
+(`src/node/lifecycle.rs:880-902`): the explicit
+`node.discovery.lan.scope`, if non-empty, is used directly. Otherwise
+the node falls back to deriving a scope from the Nostr discovery `app`
+tag (stripping the `fips-overlay-v1:` prefix when present). This lets
+an application keep its public, relay-visible Nostr `app` tag generic
+while still isolating LAN discovery per private network, or share one
+value across both. A node with no scope on either side surfaces all
+adverts it sees on the link.
+
+### Configuration
+
+LAN discovery is configured under `node.discovery.lan.*`
+(`src/config/node.rs:222-227`, `src/discovery/lan/mod.rs:88-129`):
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `node.discovery.lan.enabled` | bool | `false` | Master switch. LAN discovery is opt-in; default-off avoids an unexpected per-link identity multicast on upgrade. |
+| `node.discovery.lan.service_type` | string | `_fips._udp.local.` | DNS-SD service type. Overridable mainly so integration tests can isolate multiple services on one loopback interface. |
+| `node.discovery.lan.scope` | string (optional) | unset | Application/network scope carried in the LAN-only `scope` TXT record. Kept deliberately separate from the public Nostr `app` tag. When unset, the scope falls back to the derived Nostr `app` value. |
+
+The identity surface published over mDNS (`npub`, version, optional
+scope) is a strict subset of what `nostr.advertise` already publishes
+publicly, so enabling LAN discovery adds no marginal privacy cost
+beyond making the node's presence observable on its own local link.
+
+### Relationship to Nostr discovery
+
+The two mechanisms are complementary and independent:
+
+| | Nostr-mediated | LAN/mDNS |
+| --- | --- | --- |
+| Reach | Internet-wide, via relays | Same broadcast domain only |
+| Signaling channel | Public Nostr relays | mDNS multicast on the local link |
+| NAT traversal | STUN + UDP hole-punch for `udp:nat` peers | None — endpoint is link-routable by construction |
+| Identity carrier | signed kind 37195 advert (authenticated at publish) | unauthenticated mDNS TXT (routing hint only) |
+| Identity proof | FMP Noise IK on the connection | FMP Noise IK on the connection |
+| Default | disabled (`nostr.enabled: false`) | disabled (`lan.enabled: false`) |
+| Scope key | `app` tag (public) | `scope` TXT (link-local), falls back to `app` |
+
+Both ultimately converge on the same trust boundary: discovery only
+supplies candidate endpoints, and no peer is trusted until FMP's Noise
+IK handshake confirms the claimed identity. A node may run both at
+once — for example, advertising globally over Nostr while also pairing
+instantly with same-LAN peers — with no interaction between the two
+beyond the shared scope fallback.
 
 ## See also
 

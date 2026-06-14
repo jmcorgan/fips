@@ -251,7 +251,7 @@ would later drop.
 The adapter integrates with the MTU subsystem rather than owning it.
 The "why we clamp and what `max_mss` means" lives here in the MTU
 design; the "how the clamp is implemented at the TUN" lives in the
-[IPv6 adapter](fips-ipv6-adapter.md#tcp-mss-clamping) doc.
+[IPv6 adapter](fips-ipv6-adapter.md#tun-side-tcp-mss-clamping) doc.
 
 ## ICMP Packet Too Big
 

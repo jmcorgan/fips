@@ -34,6 +34,8 @@ module.
 | `connections_rejected` | Rejected inbound connections (limit exceeded) |
 | `connect_timeouts` | Connection timeout count |
 | `connect_refused` | Connection refused count |
+| `pool_inbound` | Current inbound connections held in the connection pool (gauge) |
+| `pool_outbound` | Current outbound connections held in the connection pool (gauge) |
 
 ## Ethernet
 
@@ -61,6 +63,23 @@ module.
 | `connections_accepted` | Accepted inbound connections via onion service |
 | `connections_rejected` | Rejected inbound connections (limit exceeded) |
 | `control_errors` | Tor control port errors |
+| `pool_inbound` | Current inbound connections held in the connection pool (gauge) |
+| `pool_outbound` | Current outbound connections held in the connection pool (gauge) |
+
+## Nym
+
+| Counter | Description |
+| ------- | ----------- |
+| `packets_sent` / `bytes_sent` | Successful sends |
+| `packets_recv` / `bytes_recv` | Successful receives |
+| `send_errors` / `recv_errors` | Send/receive failures |
+| `mtu_exceeded` | Packets rejected for MTU violation |
+| `connections_established` | Successful SOCKS5 connections through `nym-socks5-client` |
+| `connect_timeouts` | Connection timeout count |
+| `socks5_errors` | SOCKS5 protocol errors |
+
+Nym is outbound-only (no inbound listener), so there are no
+`connections_accepted` / `connections_rejected` counters.
 
 ## Bluetooth
 

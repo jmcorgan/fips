@@ -120,6 +120,7 @@ for internet connectivity:
 | UDP/IP | host:port | 1280–1472 | Unreliable | Primary internet transport |
 | TCP/IP | host:port | Stream | Reliable | Requires length-prefix framing |
 | Tor | .onion | Stream | Reliable | High latency, strong anonymity |
+| Nym | host:port | Stream | Reliable | Mixnet, outbound-only, strong anonymity |
 
 **Shared medium transports** operate over broadcast- or multicast-capable
 media:
@@ -190,6 +191,7 @@ proceed.
 | --------- | ---------------- |
 | TCP/IP | TCP three-way handshake |
 | Tor | Circuit establishment (typically 10–60s, default timeout 120s) |
+| Nym | SOCKS5 connect through mixnet (minutes possible, default timeout 300s) |
 | BLE | L2CAP CoC or GATT connection |
 | Serial | Physical connection (static) |
 
@@ -597,6 +599,120 @@ SOCKS5-level errors, MTU rejections, accepted/rejected inbound
 connections, and Tor control-port errors. The full counter table
 lives in [../reference/transports.md](../reference/transports.md).
 
+## Nym: The Mixnet Transport
+
+The Nym transport routes FIPS traffic through the Nym mixnet, providing
+network-level anonymity via Sphinx packet routing and timing
+obfuscation. It uses the "mixnet-as-proxy" pattern: a node connects
+outbound through a local `nym-socks5-client` SOCKS5 proxy, which carries
+the traffic into the mixnet. The `nym-socks5-client` runs as a separate
+process alongside the fips daemon and must be started independently.
+
+Like Tor, Nym is a privacy-oriented deployment mode chosen for the
+anonymity properties of the mixnet, not a failover for other transports.
+Like TCP and Tor, it is connection-oriented and reliable; the same
+TCP-over-TCP considerations apply, and cost-based parent selection
+naturally deprioritizes the high-latency Nym links.
+
+### Architecture
+
+The Nym transport is a separate `NymTransport` implementation. It reuses
+the FMP header-based stream reader (`tcp/stream.rs`) for packet framing
+on the underlying byte stream, and follows the same connection-pool
+pattern as the TCP and Tor transports.
+
+It maintains two pools: a `ConnectingPool` for background SOCKS5
+connection attempts, and an established pool of `NymConnection` entries.
+Each `NymConnection` holds a write half, a per-connection receive task,
+the configured MTU, and a connection timestamp.
+
+| Property | Value |
+| -------- | ----- |
+| Addressing | IP:port or hostname:port |
+| Default MTU | 1400 bytes |
+| Framing | FMP header-based (shared with TCP) |
+| Connection model | Outbound-only, non-blocking connect through SOCKS5 |
+| Platform | Cross-platform (requires external nym-socks5-client) |
+
+### Outbound-Only
+
+The Nym transport is strictly outbound. It supports no inbound service:
+`accept_connections()` returns `false` and `discover()` returns no
+peers. A node using the Nym transport can initiate links to remote peers
+through the mixnet, but cannot accept inbound connections over Nym. (A
+node can still accept inbound links over other transports it runs.)
+
+### Address Types
+
+The Nym transport accepts two address formats, parsed into an internal
+target address:
+
+- **IP:port** — a numeric IP and port, sent to the SOCKS5 proxy as a
+  numeric target.
+- **Hostname:port** — the hostname is passed through SOCKS5 so it is
+  resolved on the exit side rather than locally.
+
+Both forms are routed through the same SOCKS5 proxy.
+
+### Connection Establishment
+
+Connection setup follows the same non-blocking pattern as the TCP and
+Tor transports. When FMP needs to reach a peer, the node initiates a
+background connect (`connect_async`). The transport spawns a background
+tokio task that opens a SOCKS5 connection through the local
+`nym-socks5-client`, configures the socket (including TCP keepalive),
+splits the stream, and spawns a per-connection receive loop using the
+shared FMP stream reader. The call returns immediately while the connect
+proceeds in the background.
+
+SOCKS5 connection setup through the mixnet can take much longer than a
+direct TCP connection because each connection traverses multiple mix
+nodes with timing obfuscation. Accordingly the connect timeout defaults
+to 300 seconds (`connect_timeout_ms`). Non-blocking connect is essential
+here — a blocking connect would stall the FMP event loop for the
+duration of mixnet setup. As a fallback, `send_async(addr, data)`
+performs a connect-on-send if no connection to the address yet exists.
+
+Each outbound packet is checked against the configured MTU before being
+written; an oversized packet is rejected with an MTU-exceeded error
+rather than being sent.
+
+### Startup Readiness
+
+At startup the transport validates the configured `socks5_addr` and then
+probes the SOCKS5 port to wait for `nym-socks5-client` to become ready,
+using exponential backoff (starting at 1 second, capped at 10 seconds
+between attempts) up to `startup_timeout_secs` (default 120 seconds). If
+the proxy does not become reachable within that window, the transport
+logs a warning and starts anyway; outbound connections then fail until
+the `nym-socks5-client` becomes available.
+
+### Session Independence
+
+Same as TCP and Tor: loss of a Nym connection does **not** tear down the
+FIPS peer. Noise keys, MMP state, and FSP sessions survive reconnection.
+
+### Configuration
+
+The Nym transport block (`transports.nym.*`) has the following fields:
+
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `socks5_addr` | `127.0.0.1:1080` | Address (host:port) of the local nym-socks5-client SOCKS5 proxy |
+| `connect_timeout_ms` | `300000` | Outbound SOCKS5 connect timeout in milliseconds (300s) |
+| `mtu` | `1400` | Maximum FIPS packet size for Nym connections, in bytes |
+| `startup_timeout_secs` | `120` | Seconds to wait for nym-socks5-client to become ready at startup |
+
+The Nym transport requires an external `nym-socks5-client`. Named
+instances are supported for multiple proxy endpoints. Unknown
+configuration keys are rejected.
+
+### Statistics
+
+The Nym transport exposes per-instance counters covering successful
+send/receive, send/receive errors, connection establishment, SOCKS5-level
+errors, connect timeouts, and MTU rejections.
+
 ## Discovery
 
 Discovery determines that a FIPS-capable endpoint is reachable at a given
@@ -723,7 +839,8 @@ TransportType {
 }
 ```
 
-Predefined types exist for UDP, TCP, Ethernet, WiFi, Tor, and Serial.
+Predefined types exist for UDP, TCP, Ethernet, WiFi, Tor, Nym, BLE, and
+Serial.
 
 ### Congestion Reporting
 
@@ -748,6 +865,7 @@ on all forwarded datagrams.
 | UDP | `SO_RXQ_OVFL` kernel drop counter | `recvmsg()` ancillary data on every packet |
 | TCP | Not implemented | Returns `None` (TCP handles congestion internally) |
 | Tor | Not implemented | Returns `None` (TCP handles congestion internally) |
+| Nym | Not implemented | Returns `None` (TCP handles congestion internally) |
 | Ethernet | Not implemented | Returns `None` |
 
 ### Transport Addresses
@@ -778,6 +896,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
+| Nym | **Implemented** | Outbound-only SOCKS5 through nym-socks5-client, mixnet anonymity, IP/hostname addressing |
 | BLE | **Implemented** (Linux/glibc only; experimental) | L2CAP CoC, ATT_MTU negotiation, per-link MTU; musl/macOS/Windows skip |
 | Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |

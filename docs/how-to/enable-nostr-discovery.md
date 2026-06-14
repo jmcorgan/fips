@@ -284,6 +284,7 @@ transports:
   tor:
     mode: directory
     socks5_addr: "127.0.0.1:9050"
+    advertised_port: 8443
     directory_service:
       hostname_file: "/var/lib/tor/fips/hostname"
       bind_addr: "127.0.0.1:8444"

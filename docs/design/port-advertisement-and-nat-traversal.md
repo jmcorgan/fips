@@ -526,7 +526,7 @@ own.
 
 | Failure | Symptom | Mitigation |
 | --- | --- | --- |
-| Symmetric NAT (one side) | Punch timeout | Retry with port-prediction heuristics; otherwise fall back to a relay or different transport |
+| Symmetric NAT (one side) | Punch timeout | Retry with port-prediction heuristics; otherwise fall back to an application-level relay |
 | Symmetric NAT (both sides) | Punch timeout | Application-level relay required |
 | Relay latency > 60 s | Stale reflexive address | Use low-latency relays; consider self-hosted relay |
 | Relay does not support ephemeral kinds | Signaling events persist | Use NIP-40 expiration + NIP-09 deletion as fallback |

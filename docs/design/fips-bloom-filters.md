@@ -180,7 +180,7 @@ network with no overlap (excluding the node itself at the split point).
 
 All peers — including non-tree mesh shortcuts — still **receive**
 FilterAnnounce messages and **store** received filters locally. These
-stored filters are consulted during routing (step 3 of `find_next_hop()`)
+stored filters are consulted during routing (step 4 of `find_next_hop()`)
 for single-hop shortcut discovery. However, mesh peer filters contain
 only the mesh peer's own tree-propagated information, not transitive
 entries from the broader network.
@@ -336,14 +336,24 @@ positions that folding produces.
 
 ## Mesh Size Estimation
 
-Each filter's saturation can be inverted into an estimated entry count
+A filter's saturation can be inverted into an estimated entry count
 via the standard formula `n ≈ -(m/k) · ln(1 − X/m)`, where `m` is the
 filter size in bits, `k` is the hash count, and `X` is the population
-count. Combining the parent's inbound filter with the children's
-inbound filters gives an estimate of the whole network: parent + each
-child's subtree are disjoint by construction, and adding 1 for the
-node itself yields the total. The result is cached on the node and
-exposed through the control socket and `fipstop` dashboard.
+count. Rather than estimate per-filter and sum, the node first builds
+an **OR-union of every connected peer's inbound filter** — all routing
+peers, including cross-links, not just the tree parent and children —
+inserts its own address into the union, and inverts the cardinality
+**once on the resulting union**. Because filter propagation is
+split-horizon (each outgoing filter excludes the peer it routes back
+to), every routing peer advertises a near-complete "whole mesh minus
+my subtree" view, so the union covers the network. OR-ing is
+idempotent, so overlapping bits deduplicate instead of over-counting,
+and folding in all peers rather than only the tree neighborhood damps
+the count flap on a parent switch (the cross-links still carry the
+upward coverage) and removes any dependence on tree-declaration cache
+freshness. The result is cached on the node and exposed through the
+control socket and `fipstop` dashboard. (See `compute_mesh_size()` in
+`src/node/mod.rs`.)
 
 The estimator refuses to produce a value when any contributing filter
 is above the antipoison FPR cap (`node.bloom.max_inbound_fpr`,
@@ -379,7 +389,7 @@ as described above.
 | Fold/duplicate size conversion | **Implemented** |
 | FilterAnnounce gossip (all peers) | **Implemented** |
 | Filter cardinality logging | **Implemented** |
-| Mesh size estimation (parent + children + 1) | **Implemented** |
+| Mesh size estimation (OR-union of peer filters) | **Implemented** |
 | Inbound FPR cap (antipoison) | **Implemented** |
 | Size class negotiation | Future direction |
 | Folding support | Future direction |

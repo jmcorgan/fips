@@ -236,6 +236,29 @@ addresses for the punch socket port.
 During punching, compatible private-subnet candidates and reflexive candidates
 are attempted in parallel; the first successful path wins.
 
+#### LAN Discovery (`node.discovery.lan.*`)
+
+Peer discovery on the local link via mDNS / DNS-SD (RFC 6762 / RFC
+6763). When enabled, the node publishes a `_fips._udp.local.` service
+advert carrying its `npub` (and optional scope) and concurrently
+browses for the same service type to learn same-broadcast-domain peers.
+The result is sub-second peer pairing with no Nostr-relay roundtrip,
+STUN observation, or NAT traversal: the observed endpoint is by
+construction routable from the consumer's LAN.
+
+mDNS adverts are unauthenticated, so a LAN advert is treated only as a
+routing hint. Identity is still proven end-to-end by the Noise XX
+handshake the node initiates against the observed endpoint; a spoofed
+advert carrying another peer's npub fails the handshake and is dropped.
+LAN discovery requires an active UDP transport (peers dial the
+advertised UDP port to begin the handshake).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.discovery.lan.enabled` | bool | `false` | Master switch. Opt-in: enable for sub-second same-LAN pairing. Default-off avoids reintroducing a per-LAN identity broadcast on nodes that have deliberately disabled other discovery channels |
+| `node.discovery.lan.service_type` | string | `"_fips._udp.local."` | DNS-SD service type. Primarily an override for integration tests running multiple isolated services on one loopback interface; leave at the default in production |
+| `node.discovery.lan.scope` | string | *(none)* | Optional application/network scope carried in a `scope=<name>` TXT entry. Browsers with a scope set only surface peers advertising the same scope, so nodes on the same physical LAN configured for different mesh networks do not cross-feed. Intentionally separate from `node.discovery.nostr.app` so relay-visible adverts can stay generic while LAN discovery is isolated per private network |
+
 ### Spanning Tree (`node.tree.*`)
 
 Controls tree construction and parent selection.
@@ -577,6 +600,25 @@ HiddenServiceDir /var/lib/tor/fips
 HiddenServicePort 8443 127.0.0.1:8444
 ```
 
+### Nym (`transports.nym.*`)
+
+Nym transport routes FIPS traffic through the Nym mixnet for
+metadata-resistant anonymity. Outbound-only: connections are made
+through a `nym-socks5-client` SOCKS5 proxy that must be running
+separately (e.g. as a service running alongside the fips daemon or as a
+container). There is no inbound listener — a Nym-only node initiates
+outbound links but is not reachable for unsolicited inbound handshakes.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `transports.nym.socks5_addr` | string | `"127.0.0.1:1080"` | `nym-socks5-client` SOCKS5 proxy address (host:port) |
+| `transports.nym.connect_timeout_ms` | u64 | `300000` | Outbound connect timeout in milliseconds. Mixnet SOCKS5 connections traverse 3 mix nodes with timing obfuscation and can take several minutes, so this is generous (300s). |
+| `transports.nym.mtu` | u16 | `1400` | Default MTU |
+| `transports.nym.startup_timeout_secs` | u64 | `120` | Seconds to wait for `nym-socks5-client` to become ready at startup before giving up |
+
+**Named instances.** Like other transports, multiple Nym instances can
+be configured with named sub-keys for different SOCKS5 proxy endpoints.
+
 ### BLE (`transports.ble.*`)
 
 Bluetooth Low Energy transport using L2CAP Connection-Oriented Channels.
@@ -891,6 +933,9 @@ node:
     backoff_base_secs: 0
     backoff_max_secs: 0
     forward_min_interval_secs: 2
+    # lan:                             # uncomment to enable mDNS LAN discovery
+    #   enabled: true                  # opt-in, default false
+    #   scope: "my-mesh"               # optional per-network scope filter
   tree:
     announce_min_interval_ms: 500
     parent_hysteresis: 0.2              # cost improvement fraction for parent switch
@@ -985,6 +1030,11 @@ transports:
   #   #   bind_addr: "127.0.0.1:8443"
   #   # max_inbound_connections: 64
   #   # advertised_port: 443           # public-facing onion port for Nostr adverts
+  # nym:                              # uncomment to enable Nym mixnet transport (outbound-only)
+  #   socks5_addr: "127.0.0.1:1080" # nym-socks5-client SOCKS5 proxy address
+  #   connect_timeout_ms: 300000    # connect timeout (300s for mixnet)
+  #   mtu: 1400                     # default MTU
+  #   startup_timeout_secs: 120     # wait for nym-socks5-client to be ready
   # ble:                              # uncomment to enable BLE transport (Linux only, requires BlueZ)
   #   adapter: "hci0"                 # HCI adapter name
   #   psm: 0x0085                     # L2CAP PSM (133)

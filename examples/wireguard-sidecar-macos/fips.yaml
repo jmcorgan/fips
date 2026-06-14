@@ -20,7 +20,9 @@ transports:
 
 peers:
   - npub: "npub1zv58cn7v83mxvttl70w5fwjwuclfmntv9cnmv5wmz2nzz88u5urqvdx96n"
-    alias: "fips.v0l.io"
+    # alias becomes the peer's .fips hostname (<alias>.fips), so it must be a
+    # plain label with no dots — the connection address below is the real host.
+    alias: "v0l"
     addresses:
       - transport: tcp
         addr: "fips.v0l.io:8443"

@@ -73,13 +73,14 @@ ws://npub1xxxx.fips:80
 
 The sidecar pattern enforces strict network isolation on the app container:
 
-- **No IPv4 access**: iptables blocks all eth0 traffic except FIPS UDP
-  transport (port 2121) and TCP transport (port 443). The app container
+- **No IPv4 access**: iptables blocks all eth0 traffic except the FIPS UDP
+  transport (port 2121), the local FIPS TCP listener (port 8443), and
+  outbound TCP to peers' published endpoints (port 443). The app container
   cannot reach the Docker bridge, the host network, or any IPv4 address.
 - **No IPv6 on eth0**: ip6tables blocks all IPv6 traffic on eth0. The app
   container cannot use link-local or any Docker-assigned IPv6 addresses.
 - **FIPS mesh only**: The only routable network path is through `fips0`
-  (`fd::/8`). All application traffic traverses the FIPS mesh with
+  (`fd00::/8`). All application traffic traverses the FIPS mesh with
   end-to-end encryption.
 - **Loopback allowed**: `lo` is unrestricted for inter-process communication
   within the shared namespace.
@@ -105,7 +106,7 @@ with the transport layer directly.
 │ Interfaces:                                       │
 │   lo    — loopback (unrestricted)                 │
 │   eth0  — Docker bridge (iptables: FIPS only)     │
-│   fips0 — FIPS TUN (fd::/8, unrestricted)         │
+│   fips0 — FIPS TUN (fd00::/8, unrestricted)         │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -118,7 +119,8 @@ before launching the FIPS daemon:
 
 - ACCEPT on `lo` (both directions)
 - ACCEPT UDP sport/dport 2121 on `eth0` (FIPS UDP transport)
-- ACCEPT TCP dport 443 / sport 443 on `eth0` (FIPS TCP transport)
+- ACCEPT TCP dport 443 / sport 443 on `eth0` (outbound to peers' TCP endpoints)
+- ACCEPT TCP dport/sport 8443 on `eth0` (local FIPS TCP listener, `FIPS_TCP_BIND`)
 - DROP everything else on `eth0`
 
 **IPv6 rules** (ip6tables):
@@ -132,7 +134,7 @@ before launching the FIPS daemon:
 DNS inside the container is handled by dnsmasq (127.0.0.1:53):
 
 - `.fips` queries are forwarded to the FIPS daemon's built-in DNS resolver
-  (127.0.0.1:5354), which resolves npub-based names to `fd::/8` addresses
+  (127.0.0.1:5354), which resolves npub-based names to `fd00::/8` addresses
 - All other queries are forwarded to Docker's embedded DNS (127.0.0.11)
 
 The `resolv.conf` mount points the container's resolver at 127.0.0.1,
@@ -165,7 +167,8 @@ From the app container:
 # Ping a mesh node by npub (resolves via .fips DNS):
 docker exec sidecar-nostr-relay-app-1 ping6 -c3 npub1xxxx.fips
 
-# Fetch a web page from a mesh node over FIPS:
+# Fetch a web page from some other mesh node over FIPS
+# (:8000 is a stand-in for that node's own service; this relay serves :80):
 docker exec sidecar-nostr-relay-app-1 curl -6 "http://npub1xxxx.fips:8000/"
 
 # Docker bridge is blocked — this should fail:

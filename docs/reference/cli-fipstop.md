@@ -15,8 +15,11 @@ socket, polls a small set of `show_*` queries on a timer, and renders
 the state in a tabbed full-screen UI. A separate poll runs against the
 gateway control socket when the Gateway tab is active.
 
-`fipstop` is read-only — it cannot mutate daemon state. Use
-[`fipsctl`](cli-fipsctl.md) for `connect` / `disconnect` and friends.
+`fipstop` is almost entirely read-only: the only state-mutating action
+it offers is disconnecting a peer (`Del` on a selected Peers row, with
+a confirmation prompt — see [Keybindings](#keybindings)). For
+`connect` and other mutating commands, use
+[`fipsctl`](cli-fipsctl.md).
 
 ## Options
 
@@ -86,6 +89,11 @@ empty list and the panel hides.
 
 ## Keybindings
 
+Press `?` at any time for an in-app help overlay. The overlay and the
+status-bar hint footer both read from a single keybinding registry
+keyed by `(tab, mode)`, so the always-visible hints describe exactly
+the keys the current context accepts.
+
 ### Global
 
 | Key | Action |
@@ -94,7 +102,8 @@ empty list and the panel hides.
 | `Tab` | Next tab. |
 | `Shift-Tab` | Previous tab. |
 | `g` | Jump to the Graphs tab. |
-| `Esc` | Close detail view (if open). |
+| `?` | Toggle the help overlay. |
+| `Esc` | Close an open detail view; otherwise deselect the active table row. |
 
 ### Table tabs (Peers, Sessions, Transports, Gateway)
 
@@ -102,6 +111,13 @@ empty list and the panel hides.
 | --- | ------ |
 | `Up`, `Down` | Move row selection. |
 | `Enter` | Open detail view for the selected row. |
+| `Esc` | Deselect the row (return to the tab's overview state). |
+
+### Peers tab (extra)
+
+| Key | Action |
+| --- | ------ |
+| `Del` | Disconnect the selected peer. Opens a `Y`/`N` confirmation modal first; this is the only state-mutating action in `fipstop`. |
 
 ### Transports tab (extra)
 
@@ -112,16 +128,43 @@ empty list and the panel hides.
 | `e` | Expand all transports. |
 | `c` | Collapse all transports. |
 
+### Multi-pane scrolling tabs (Tree, Filters, Routing)
+
+Each lays out stacked panes that scroll independently.
+
+| Key | Action |
+| --- | ------ |
+| `f` | Move focus to the next pane. |
+| `Up`, `Down` | Scroll the focused pane by one row. |
+| `PageUp`, `PageDown` | Scroll the focused pane by ten rows. |
+| `Home`, `End` | Jump to the top / bottom of the focused pane. |
+
+### Performance tab (extra)
+
+The Performance tab lays out two panes (Link MMP, Session MMP).
+
+| Key | Action |
+| --- | ------ |
+| `f` | Move focus between the Link and Session MMP panes. |
+| `Up`, `Down` | Scroll the focused pane. |
+| `PageUp`, `PageDown` | Scroll the focused pane by ten rows. |
+| `Home`, `End` | Jump to the top / bottom of the focused pane. |
+| `s` | Cycle the sort column of the focused pane. |
+| `Shift-S` | Toggle the sort direction of the focused pane. |
+
 ### Graphs tab (extra)
 
 | Key | Action |
 | --- | ------ |
-| `Up`, `Down` | Scroll within the stacked plots. |
+| `Up`, `Down` | Scroll the stacked plots; in `MetricByPeer` mode, move the by-peer selection (and follow it when the by-peer detail is open). |
 | `Right`, `Space` | Next time window. Cycles `1m / 1s` → `10m / 1s` → `1h / 1s` → `24h / 1m`. |
 | `Left` | Previous time window. |
+| `Enter` | In `MetricByPeer` mode, expand the selected peer summary into a full-pane plot. |
 | `m` | Cycle view mode: `Node` (stacked node metrics) → `MetricByPeer` (one per-peer metric across all peers) → `PeerByMetric` (all per-peer metrics for one peer). |
 | `n` | Next selector (next per-peer metric in MetricByPeer; next peer in PeerByMetric). |
 | `Shift-N` | Previous selector. |
+| `s` | Cycle the sort column of the by-peer summary list. |
+| `Shift-S` | Toggle the sort direction of the by-peer summary list. |
 
 ## Exit Codes
 

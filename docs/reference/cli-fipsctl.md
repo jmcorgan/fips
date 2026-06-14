@@ -69,6 +69,7 @@ Time-series metrics from the in-process history rings.
 | Subcommand | Control-socket command | Description |
 | ---------- | ---------------------- | ----------- |
 | `stats list` | `show_stats_list` | Enumerate available metrics, their units, and the per-ring retention windows. |
+| `stats metrics` | `show_metrics` | Dump current counter values for every protocol metric family (`forwarding`, `discovery`, `tree`, `bloom`, `congestion`, `errors`). |
 | `stats peers` | `show_stats_peers` | List peers tracked in stats history (active or recently active). |
 | `stats history <metric> [options]` | `show_stats_history` | Fetch a time-series window for one metric. |
 
@@ -104,7 +105,7 @@ Tell the daemon to dial a peer over a specific transport.
 | -------- | ----------- |
 | `peer` | npub (bech32) or hostname from `/etc/fips/hosts`. |
 | `address` | Transport endpoint, e.g. `192.168.1.10:2121`, `[2001:db8::1]:2121`, or a Tor onion. FIPS-mesh ULAs (`fd00::/8`) are rejected for the IP-based transports (udp, tcp, ethernet). |
-| `transport` | One of `udp`, `tcp`, `tor`, `ethernet`. |
+| `transport` | One of `udp`, `tcp`, `tor`, `nym`, `ethernet`. The named transport must be configured and running. |
 
 ### `disconnect <peer>`
 

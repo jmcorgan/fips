@@ -39,7 +39,7 @@ fips sidecar:
 4. Starts dnsmasq and then `exec`s the FIPS daemon.
 
 The app container starts concurrently and immediately sees `lo`, `eth0`, and
-`fips0`. DNS for `<npub>.fips` names resolves to `fd::/8` addresses via the
+`fips0`. DNS for `<npub>.fips` names resolves to `fd00::/8` addresses via the
 dnsmasq → FIPS daemon pipeline.
 
 ```text
