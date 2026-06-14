@@ -524,8 +524,18 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate OpenWrt release checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f -name '*.ipk' -printf '%P\n' \
+            | LC_ALL=C sort \
+            | xargs sha256sum \
+            > checksums-openwrt.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.ipk
+          files: |
+            dist/*.ipk
+            dist/checksums-openwrt.txt
           generate_release_notes: true
