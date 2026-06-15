@@ -177,6 +177,27 @@ yay -S fips        # release build from latest tag
 See [aur/README.md](aur/README.md) for AUR publication instructions
 and maintainer guide.
 
+### Nix / NixOS (flake)
+
+A [flake](../flake.nix) at the project root builds all four binaries
+(`fips`, `fipsctl`, `fips-gateway`, `fipstop`) from source. It pins the
+exact toolchain from `rust-toolchain.toml` via
+[fenix](https://github.com/nix-community/fenix) and wires up the
+build-time native dependencies (`libclang` for `bindgen`, plus `dbus`
+and `pkg-config` for BLE), so it needs no system setup beyond Nix with
+flakes enabled.
+
+```sh
+nix build .#fips          # build the package (all four binaries)
+nix run .#fips -- --help  # run a binary directly
+nix run .#fipsctl -- status
+nix develop               # dev shell with the pinned toolchain + cargo-edit
+nix flake check           # build + validate the flake
+```
+
+Add to a NixOS configuration via the flake's `packages.<system>.fips`
+output, e.g. `environment.systemPackages = [ fips.packages.${system}.default ];`.
+
 ## Shared Assets
 
 `common/` contains assets used across packaging formats:
