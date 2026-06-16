@@ -1476,8 +1476,10 @@ impl Node {
     /// over this node's already-shared `NodeContext` and `MetricsRegistry`.
     ///
     /// Used at control-socket spawn time so pure-snapshot `show_*` queries
-    /// render off the rx_loop. Cloneable; cheap (all `Arc` clones).
-    pub(crate) fn control_read_handle(&self) -> crate::control::read_handle::ControlReadHandle {
+    /// render off the rx_loop. Cloneable; cheap (all `Arc` clones). Also the
+    /// public seam for embedders that run [`Self::run_rx_loop`] on a background
+    /// task and poll peer state via [`crate::control::read_handle::ControlReadHandle::peer_views`].
+    pub fn control_read_handle(&self) -> crate::control::read_handle::ControlReadHandle {
         crate::control::read_handle::ControlReadHandle::new(
             self.context.clone(),
             self.metrics.clone(),

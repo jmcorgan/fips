@@ -41,7 +41,7 @@ use super::snapshot::{EntitySnapshot, RoutingSnapshot, StatsSnapshot};
 /// starting R1 as `show_*` queries cut over to off-loop rendering; until then
 /// they are wired but unread.
 #[derive(Clone)]
-pub(crate) struct ControlReadHandle {
+pub struct ControlReadHandle {
     /// Effectively-immutable node context (config, identity, limits).
     context: Arc<NodeContext>,
     /// Metrics registry (counters / gauges) for `show_stats_*`.
@@ -105,6 +105,40 @@ impl ControlReadHandle {
     /// by construction; no staleness gate, per Q1-e).
     pub(crate) fn entities(&self) -> arc_swap::Guard<Arc<EntitySnapshot>> {
         self.entities.load()
+    }
+}
+
+/// A minimal, public view of one peer for embedders (e.g. an app UI), read
+/// lock-free from the tick-published snapshot. See [`ControlReadHandle::peer_views`].
+#[derive(Debug, Clone)]
+pub struct PeerView {
+    /// The peer's `node_addr`, hex-encoded.
+    pub node_addr_hex: String,
+    /// Resolved npub (or the `node_addr` hex when not yet resolved to a peer).
+    pub npub: String,
+    /// Whether the peer is currently in the live authenticated-peer table.
+    pub connected: bool,
+}
+
+impl ControlReadHandle {
+    /// A lock-free snapshot of known peers (node_addr / npub / connected),
+    /// read from the tick-published stats snapshot.
+    ///
+    /// Intended for embedders that run [`crate::Node::run_rx_loop`] on a
+    /// background task (so the node is exclusively borrowed there) and poll peer
+    /// state from a clone of this handle — the read touches only an `ArcSwap`
+    /// load, never the `Node`. See the Myco app for the reference embedding.
+    pub fn peer_views(&self) -> Vec<PeerView> {
+        self.stats
+            .load()
+            .peer_meta
+            .iter()
+            .map(|(addr, meta)| PeerView {
+                node_addr_hex: addr.to_string(),
+                npub: meta.npub.clone(),
+                connected: meta.is_active,
+            })
+            .collect()
     }
 }
 
