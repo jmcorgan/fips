@@ -91,6 +91,18 @@ pub trait AndroidRadio: Send + Sync {
     fn close_channel(&self, ch_id: i64);
 }
 
+/// One discovered scan advert (address / learned PSM / RSSI), for the developer
+/// UI's "discovered devices" list.
+#[derive(Debug, Clone)]
+pub struct AdvertView {
+    /// `BleAddr` string (`adapter/AA:BB:..`); the MAC rotates with privacy.
+    pub addr: String,
+    /// The peer's advertised listener PSM (0 if not present in the advert).
+    pub psm: u16,
+    /// Signal strength in dBm (negative; closer ≈ less negative).
+    pub rssi: i32,
+}
+
 // ============================================================================
 // AndroidBleBridge — the shared channel machinery
 // ============================================================================
@@ -129,6 +141,9 @@ pub struct AndroidBleBridge {
     local_psm: AtomicU16,
     /// Learned peer PSMs (advert service-data), consulted on `connect`.
     psm_map: PsmMap,
+    /// Latest scan advert per address (PSM + RSSI), for the developer UI's
+    /// "discovered" list. Re-learned each scan cycle (addresses rotate).
+    adverts: Mutex<HashMap<BleAddr, (u16, i32)>>,
     channels: Mutex<HashMap<i64, ChannelState>>,
     /// connect_id → result slot for an in-flight outbound dial.
     connects: Mutex<HashMap<i64, oneshot::Sender<StreamEndpoints>>>,
@@ -150,6 +165,7 @@ impl AndroidBleBridge {
             next_id: AtomicI64::new(1),
             local_psm: AtomicU16::new(DEFAULT_PSM),
             psm_map: PsmMap::new(),
+            adverts: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
             connects: Mutex::new(HashMap::new()),
             accept_tx,
@@ -233,12 +249,40 @@ impl AndroidBleBridge {
     }
 
     /// Kotlin discovered a FIPS peer advertising `psm` (its OS-assigned listener
-    /// PSM). Learns the per-peer PSM and surfaces the address to the scanner.
-    pub fn deliver_scan(&self, addr: BleAddr, psm: u16) {
+    /// PSM) at signal strength `rssi` (dBm). Learns the per-peer PSM, records the
+    /// advert for the developer UI, and surfaces the address to the scanner.
+    pub fn deliver_scan(&self, addr: BleAddr, psm: u16, rssi: i32) {
         if psm != 0 {
             self.psm_map.learn(&addr, psm);
         }
+        self.adverts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(addr.clone(), (psm, rssi));
         let _ = self.scan_tx.try_send(addr);
+    }
+
+    /// Snapshot of the current scan adverts (address / PSM / RSSI) for the
+    /// developer UI.
+    pub fn advert_views(&self) -> Vec<AdvertView> {
+        self.adverts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(addr, (psm, rssi))| AdvertView {
+                addr: addr.to_string_repr(),
+                psm: *psm,
+                rssi: *rssi,
+            })
+            .collect()
+    }
+
+    /// Drop recorded adverts (called at the start of a scan cycle).
+    pub fn clear_adverts(&self) {
+        self.adverts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// Kotlin read one L2CAP packet for `ch_id`. Returns false if the channel is
@@ -502,8 +546,9 @@ impl BleIo for AndroidIo {
     }
 
     async fn start_scanning(&self) -> Result<AndroidScanner, TransportError> {
-        // Re-learn PSMs each scan cycle (addresses rotate with MAC randomization).
+        // Re-learn PSMs / adverts each scan cycle (addresses rotate with MAC).
         self.bridge.psm_map.clear();
+        self.bridge.clear_adverts();
         self.bridge.radio.start_scanning();
         let rx = self
             .bridge
@@ -617,8 +662,13 @@ mod tests {
         let mut scanner = io.start_scanning().await.unwrap();
         assert!(radio.scanning.load(Ordering::Relaxed));
 
-        bridge.deliver_scan(addr(3), 0x00C1);
+        bridge.deliver_scan(addr(3), 0x00C1, -50);
         assert_eq!(scanner.next().await, Some(addr(3)));
+        // The advert is also recorded for the developer UI.
+        let adverts = bridge.advert_views();
+        assert_eq!(adverts.len(), 1);
+        assert_eq!(adverts[0].psm, 0x00C1);
+        assert_eq!(adverts[0].rssi, -50);
         // The learned PSM is what a later dial would use (over FIPS's default).
         assert_eq!(bridge.psm_map.resolve(&addr(3), DEFAULT_PSM), 0x00C1);
     }
