@@ -301,7 +301,7 @@ fn extract_pktinfo_ifindex(msg: &libc::msghdr) -> Option<u32> {
         if cmsg.cmsg_level == libc::IPPROTO_IPV6 && cmsg.cmsg_type == libc::IPV6_PKTINFO {
             let data_ptr = unsafe { libc::CMSG_DATA(cmsg_ptr) } as *const libc::in6_pktinfo;
             let pktinfo: libc::in6_pktinfo = unsafe { std::ptr::read_unaligned(data_ptr) };
-            return Some(pktinfo.ipi6_ifindex);
+            return Some(pktinfo.ipi6_ifindex as u32);
         }
         cmsg_ptr = unsafe { libc::CMSG_NXTHDR(msg, cmsg_ptr) };
     }
