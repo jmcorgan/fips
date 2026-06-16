@@ -1201,8 +1201,10 @@ impl Node {
         // This allows handshake messages to be sent before we start accepting packets
         self.initiate_peer_connections().await;
 
-        // Initialize TUN interface last, after transports and peers are ready
-        if self.config().tun.enabled {
+        // Initialize TUN interface last, after transports and peers are ready.
+        // Skip when the TUN is app-owned (the embedder pre-set `tun_tx` via
+        // `enable_app_owned_tun`) — then FIPS does no system-TUN ops.
+        if self.config().tun.enabled && self.tun_tx.is_none() {
             let address = *self.identity().address();
             match TunDevice::create(&self.config().tun, address).await {
                 Ok(device) => {
