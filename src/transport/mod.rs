@@ -14,10 +14,10 @@ pub mod udp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod ethernet;
 
-#[cfg(target_os = "linux")]
+#[cfg(ble_available)]
 pub mod ble;
 
-#[cfg(target_os = "linux")]
+#[cfg(ble_available)]
 use ble::DefaultBleTransport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use ethernet::EthernetTransport;
@@ -903,7 +903,7 @@ pub enum TransportHandle {
     /// Nym mixnet transport (via SOCKS5).
     Nym(NymTransport),
     /// BLE L2CAP transport.
-    #[cfg(target_os = "linux")]
+    #[cfg(ble_available)]
     Ble(DefaultBleTransport),
     /// In-process loopback transport (test harness only).
     #[cfg(test)]
@@ -920,7 +920,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.start_async().await,
             TransportHandle::Tor(t) => t.start_async().await,
             TransportHandle::Nym(t) => t.start_async().await,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.start_async().await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.start_async().await,
@@ -936,7 +936,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.stop_async().await,
             TransportHandle::Tor(t) => t.stop_async().await,
             TransportHandle::Nym(t) => t.stop_async().await,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.stop_async().await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.stop_async().await,
@@ -952,7 +952,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.send_async(addr, data).await,
             TransportHandle::Tor(t) => t.send_async(addr, data).await,
             TransportHandle::Nym(t) => t.send_async(addr, data).await,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.send_async(addr, data).await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.send_async(addr, data).await,
@@ -968,7 +968,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.transport_id(),
             TransportHandle::Tor(t) => t.transport_id(),
             TransportHandle::Nym(t) => t.transport_id(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.transport_id(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.transport_id(),
@@ -984,7 +984,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.name(),
             TransportHandle::Tor(t) => t.name(),
             TransportHandle::Nym(t) => t.name(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.name(),
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
@@ -1000,7 +1000,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.transport_type(),
             TransportHandle::Tor(t) => t.transport_type(),
             TransportHandle::Nym(t) => t.transport_type(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.transport_type(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.transport_type(),
@@ -1016,7 +1016,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.state(),
             TransportHandle::Tor(t) => t.state(),
             TransportHandle::Nym(t) => t.state(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.state(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.state(),
@@ -1032,7 +1032,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.mtu(),
             TransportHandle::Tor(t) => t.mtu(),
             TransportHandle::Nym(t) => t.mtu(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.mtu(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.mtu(),
@@ -1051,7 +1051,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.link_mtu(addr),
             TransportHandle::Tor(t) => t.link_mtu(addr),
             TransportHandle::Nym(t) => t.link_mtu(addr),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.link_mtu(addr),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.link_mtu(addr),
@@ -1067,7 +1067,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.local_addr(),
             TransportHandle::Tor(_) => None,
             TransportHandle::Nym(_) => None,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
@@ -1083,7 +1083,7 @@ impl TransportHandle {
             TransportHandle::Tcp(_) => None,
             TransportHandle::Tor(_) => None,
             TransportHandle::Nym(_) => None,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
@@ -1123,7 +1123,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.discover(),
             TransportHandle::Tor(t) => t.discover(),
             TransportHandle::Nym(t) => t.discover(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.discover(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.discover(),
@@ -1139,7 +1139,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.auto_connect(),
             TransportHandle::Tor(t) => t.auto_connect(),
             TransportHandle::Nym(t) => t.auto_connect(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.auto_connect(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.auto_connect(),
@@ -1155,7 +1155,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.accept_connections(),
             TransportHandle::Tor(t) => t.accept_connections(),
             TransportHandle::Nym(t) => t.accept_connections(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.accept_connections(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.accept_connections(),
@@ -1177,7 +1177,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.connect_async(addr).await,
             TransportHandle::Tor(t) => t.connect_async(addr).await,
             TransportHandle::Nym(t) => t.connect_async(addr).await,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.connect_async(addr).await,
             #[cfg(test)]
             TransportHandle::Loopback(_) => Ok(()), // connectionless
@@ -1197,7 +1197,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.connection_state_sync(addr),
             TransportHandle::Tor(t) => t.connection_state_sync(addr),
             TransportHandle::Nym(t) => t.connection_state_sync(addr),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.connection_state_sync(addr),
             #[cfg(test)]
             TransportHandle::Loopback(_) => ConnectionState::Connected,
@@ -1216,7 +1216,7 @@ impl TransportHandle {
             TransportHandle::Tcp(t) => t.close_connection_async(addr).await,
             TransportHandle::Tor(t) => t.close_connection_async(addr).await,
             TransportHandle::Nym(t) => t.close_connection_async(addr).await,
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
             TransportHandle::Loopback(_) => {} // connectionless no-op
@@ -1241,7 +1241,7 @@ impl TransportHandle {
             TransportHandle::Tcp(_) => TransportCongestion::default(),
             TransportHandle::Tor(_) => TransportCongestion::default(),
             TransportHandle::Nym(_) => TransportCongestion::default(),
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(_) => TransportCongestion::default(),
             #[cfg(test)]
             TransportHandle::Loopback(_) => TransportCongestion::default(),
@@ -1281,7 +1281,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(ble_available)]
             TransportHandle::Ble(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }

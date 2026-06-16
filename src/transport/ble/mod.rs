@@ -22,6 +22,7 @@ pub mod addr;
 pub mod discovery;
 pub mod io;
 pub mod pool;
+pub mod psm;
 pub mod stats;
 
 use super::{
