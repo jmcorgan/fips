@@ -280,6 +280,12 @@ impl AndroidBleBridge {
             drop(state);
         }
     }
+
+    /// Whether `ch_id` is still registered. The JNI `next_send` export uses this
+    /// to tell a timeout (loop again) from a closed channel (stop the writer).
+    pub fn channel_open(&self, ch_id: i64) -> bool {
+        self.lock_channels().contains_key(&ch_id)
+    }
 }
 
 // ============================================================================
