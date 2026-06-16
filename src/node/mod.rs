@@ -41,14 +41,18 @@ use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 /// `node.rekey.after_secs` remains the nominal interval (mean preserved).
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
 use self::wire::{
-    ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, build_encrypted,
-    build_established_header, prepend_inner_header,
+    FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, build_encrypted, build_established_header,
+    prepend_inner_header,
 };
+// Only referenced by the unix UDP fast-path block below; on Windows the wire
+// buffer is sized through build_encrypted, leaving this import otherwise unused.
+#[cfg(unix)]
+use self::wire::ESTABLISHED_HEADER_SIZE;
 use crate::bloom::{BloomFilter, BloomState};
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
 use crate::transport::tcp::TcpTransport;
@@ -928,7 +932,7 @@ impl Node {
         }
 
         // Create Ethernet transport instances (Unix only — requires raw sockets)
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let eth_instances: Vec<_> = self
                 .config()
@@ -1062,7 +1066,7 @@ impl Node {
         &self,
         addr_str: &str,
     ) -> Result<(TransportId, TransportAddr), NodeError> {
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (iface, mac_str) = addr_str.split_once('/').ok_or_else(|| {
                 NodeError::NoTransportForType(format!(
@@ -1094,7 +1098,7 @@ impl Node {
 
             Ok((transport_id, TransportAddr::from_bytes(&mac)))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(NodeError::NoTransportForType(
                 "Ethernet transport is not supported on this platform".to_string(),
