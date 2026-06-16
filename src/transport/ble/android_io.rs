@@ -36,7 +36,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -100,7 +100,9 @@ struct ChannelState {
     /// Kotlin-pushed inbound bytes land here; the stream's `recv` awaits them.
     recv_tx: mpsc::Sender<Vec<u8>>,
     /// `BleStream::send` pushes here; the Kotlin writer thread pulls via `next_send`.
-    send_rx: Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
+    /// `Arc` so `next_send` can clone it out and release the channels lock before
+    /// blocking on `recv_timeout`.
+    send_rx: Arc<Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>,
     closed: Arc<AtomicBool>,
 }
 
@@ -172,7 +174,7 @@ impl AndroidBleBridge {
             ch_id,
             ChannelState {
                 recv_tx,
-                send_rx: Mutex::new(send_rx),
+                send_rx: Arc::new(Mutex::new(send_rx)),
                 closed: Arc::clone(&closed),
             },
         );
@@ -255,19 +257,25 @@ impl AndroidBleBridge {
     /// Kotlin's per-channel writer thread pulls the next outbound packet, blocking
     /// up to `timeout`. `None` = timed out (Kotlin loops) or the channel is gone.
     pub fn next_send(&self, ch_id: i64, timeout: Duration) -> Option<Vec<u8>> {
-        // Clone-free: hold the channels lock only long enough to find the
-        // per-channel receiver lock, then block on recv_timeout outside it would
-        // require the receiver to outlive the guard — instead we briefly take the
-        // channels lock, then the channel's own lock, and block there. The
-        // channels map is only mutated on create/close, so contention is low.
-        let guard = self.lock_channels();
-        let state = guard.get(&ch_id)?;
-        let rx = state.send_rx.lock().unwrap_or_else(|e| e.into_inner());
-        // Note: we hold both locks across the blocking recv. Acceptable for P1 —
-        // create/close are rare; revisit if it shows up under load (R3).
+        // Clone the per-channel receiver Arc + closed flag, then release the
+        // channels lock before blocking on recv_timeout (so close/create on other
+        // channels aren't stalled for up to `timeout`).
+        let (send_rx, closed) = {
+            let guard = self.lock_channels();
+            let state = guard.get(&ch_id)?;
+            (Arc::clone(&state.send_rx), Arc::clone(&state.closed))
+        };
+        let rx = send_rx.lock().unwrap_or_else(|e| e.into_inner());
         match rx.recv_timeout(timeout) {
             Ok(bytes) => Some(bytes),
-            Err(_) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            // The send half (the BleStream) was dropped — the stream is gone
+            // (e.g. the node stopped). Mark closed so the next channel_open()
+            // returns false and the Kotlin writer thread exits.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                closed.store(true, Ordering::Relaxed);
+                None
+            }
         }
     }
 
@@ -281,10 +289,14 @@ impl AndroidBleBridge {
         }
     }
 
-    /// Whether `ch_id` is still registered. The JNI `next_send` export uses this
-    /// to tell a timeout (loop again) from a closed channel (stop the writer).
+    /// Whether `ch_id` is still open (registered and not marked closed). The JNI
+    /// `next_send` export uses this to tell a timeout (loop again) from a closed
+    /// channel (stop the writer thread).
     pub fn channel_open(&self, ch_id: i64) -> bool {
-        self.lock_channels().contains_key(&ch_id)
+        self.lock_channels()
+            .get(&ch_id)
+            .map(|s| !s.closed.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 }
 
@@ -292,18 +304,18 @@ impl AndroidBleBridge {
 // Global injection seam
 // ============================================================================
 
-static BRIDGE: OnceLock<Arc<AndroidBleBridge>> = OnceLock::new();
+static BRIDGE: Mutex<Option<Arc<AndroidBleBridge>>> = Mutex::new(None);
 
-/// Inject the process-wide bridge before `Node::new` (one radio per process, so a
-/// global is correct; macOS/Linux backends own their radio in-process instead).
-/// Returns `Err` if a bridge was already set.
-pub fn set_android_ble_bridge(bridge: Arc<AndroidBleBridge>) -> Result<(), ()> {
-    BRIDGE.set(bridge).map_err(|_| ())
+/// Inject the process-wide bridge before `Node::new` / start (one radio per
+/// process). Replaceable so a stop-then-start cycle (BLE toggled off then on)
+/// can inject a fresh bridge for the rebuilt node.
+pub fn set_android_ble_bridge(bridge: Arc<AndroidBleBridge>) {
+    *BRIDGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(bridge);
 }
 
 /// The injected bridge, if any. The node's BLE construction arm reads this.
 pub fn android_ble_bridge() -> Option<Arc<AndroidBleBridge>> {
-    BRIDGE.get().cloned()
+    BRIDGE.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 // ============================================================================
