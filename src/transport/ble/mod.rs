@@ -25,6 +25,12 @@ pub mod pool;
 pub mod psm;
 pub mod stats;
 
+// The Android backend (radio in Kotlin, bytes over a bridge). Compiled on
+// Android, and under `cfg(test)` on any host so its channel logic is unit-tested
+// without a device. Not built into non-test desktop builds.
+#[cfg(any(target_os = "android", test))]
+pub mod android_io;
+
 use super::{
     ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
@@ -56,7 +62,12 @@ pub const DEFAULT_PSM: u16 = 0x0085;
 #[cfg(all(bluer_available, not(test)))]
 pub type DefaultBleTransport = BleTransport<io::BluerIo>;
 
-#[cfg(any(not(bluer_available), test))]
+// Android: the Kotlin-radio backend over the byte-bridge.
+#[cfg(all(target_os = "android", not(test)))]
+pub type DefaultBleTransport = BleTransport<android_io::AndroidIo>;
+
+// Everything else (macOS/musl/host) and all test builds: the in-memory mock.
+#[cfg(any(all(not(bluer_available), not(target_os = "android")), test))]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
 
 // ============================================================================
