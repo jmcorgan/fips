@@ -11,6 +11,16 @@ readme = "README.md"
 keywords = ["mesh", "p2p", "decentralized", "overlay-network", "nostr"]
 categories = ["network-programming", "command-line-utilities", "cryptography"]
 
+[features]
+# Desktop transports/seams, on by default. Mobile builds (Android/iOS)
+# use `default-features = false` to drop them.
+default = ["ethernet", "system-tun"]
+# Raw-socket Ethernet transport (Linux AF_PACKET / macOS BPF). Unavailable on mobile.
+ethernet = []
+# Manage a real system TUN device. When off, the TUN is app-owned (provided
+# by the embedder, e.g. Android VpnService); FIPS does no system-TUN ops.
+system-tun = []
+
 [dependencies]
 ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
