@@ -50,7 +50,7 @@ use crate::proto::lookup::{Lookup, LookupBackoff, LookupForwardRateLimiter};
 use crate::proto::mmp::Mmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 use crate::proto::stp::TreeState;
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
 use crate::transport::tcp::TcpTransport;
@@ -873,7 +873,7 @@ impl Node {
         }
 
         // Create Ethernet transport instances (Unix only — requires raw sockets)
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let eth_instances: Vec<_> = self
                 .config()
@@ -1007,7 +1007,7 @@ impl Node {
         &self,
         addr_str: &str,
     ) -> Result<(TransportId, TransportAddr), NodeError> {
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (iface, mac_str) = addr_str.split_once('/').ok_or_else(|| {
                 NodeError::NoTransportForType(format!(
@@ -1039,7 +1039,7 @@ impl Node {
 
             Ok((transport_id, TransportAddr::from_bytes(&mac)))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(NodeError::NoTransportForType(
                 "Ethernet transport is not supported on this platform".to_string(),
