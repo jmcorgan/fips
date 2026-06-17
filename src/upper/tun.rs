@@ -704,6 +704,27 @@ fn handle_tun_packet(
 
     // Check if destination is a FIPS address (fd::/8 prefix)
     if packet[24] == crate::identity::FIPS_ADDRESS_PREFIX {
+        // Loopback: a packet to our own mesh address must be delivered
+        // locally, not pushed into the mesh (we have no session/route to
+        // ourselves, so it would just be dropped). Hairpin it back to the TUN
+        // writer for inbound delivery.
+        //
+        // Platform note: in practice this branch is reached only on macOS.
+        // macOS point-to-point `utun` interfaces egress self-addressed traffic
+        // down the tunnel into this reader, so the daemon has to loop it back
+        // itself. On Linux the kernel routes traffic to our own bound
+        // addresses via `lo` before it ever reaches the TUN, so this branch
+        // never fires there. The check is kept unconditional anyway, both as a
+        // platform-independent self-delivery invariant and so the path stays
+        // exercised by the Linux-only CI unit tests.
+        if packet[24..40] == *our_addr.as_bytes() {
+            trace!(name = %name, "Hairpinning self-addressed packet back to TUN (loopback)");
+            if tun_tx.send(packet.to_vec()).is_err() {
+                return false; // Channel closed, shutdown
+            }
+            return true;
+        }
+
         // Per-destination clamp: if discovery has learned a smaller path
         // MTU for this destination, tighten the ceiling for this flow.
         let effective_max_mss = per_flow_max_mss(path_mtu_lookup, &packet[24..40], max_mss);
@@ -1518,6 +1539,88 @@ mod tests {
         lookup.write().unwrap().insert(b, 1452);
         assert_eq!(per_flow_max_mss(&lookup, a.as_bytes(), 1360), 1143);
         assert_eq!(per_flow_max_mss(&lookup, b.as_bytes(), 1360), 1315);
+    }
+
+    // ========================================================================
+    // handle_tun_packet — self-addressed loopback hairpin
+    //
+    // A packet destined for our own mesh address must be delivered back to
+    // the local stack via the TUN writer, never pushed into the mesh (there
+    // is no session/route to ourselves). On macOS the kernel egresses such
+    // self-traffic down the utun into the reader, so the daemon has to loop
+    // it back itself.
+    // ========================================================================
+
+    /// Build a minimal 40-byte IPv6 packet (no upper-layer payload) addressed
+    /// to `dst`, sourced from a distinct fips address.
+    fn ipv6_packet_to(dst: &FipsAddress) -> Vec<u8> {
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x60; // version 6
+        pkt[6] = 59; // next header = No Next Header (skips MSS clamp)
+        pkt[7] = 64; // hop limit
+        pkt[8] = crate::identity::FIPS_ADDRESS_PREFIX; // src in fd::/8
+        pkt[24..40].copy_from_slice(dst.as_bytes()); // dst
+        pkt
+    }
+
+    #[test]
+    fn self_addressed_packet_is_hairpinned_to_tun() {
+        let our_addr = fips_addr_with_node_byte(0x55);
+        let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let lookup = empty_lookup();
+        let mut pkt = ipv6_packet_to(&our_addr);
+
+        assert!(handle_tun_packet(
+            &mut pkt,
+            1360,
+            "test0",
+            our_addr,
+            &tun_tx,
+            &outbound_tx,
+            &lookup,
+        ));
+
+        // Delivered locally via the TUN writer...
+        let looped = tun_rx
+            .try_recv()
+            .expect("self-addressed packet should be hairpinned to the TUN");
+        assert_eq!(&looped[24..40], our_addr.as_bytes());
+        // ...and never handed to the mesh.
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "self-addressed packet must not be pushed into the mesh"
+        );
+    }
+
+    #[test]
+    fn other_fips_packet_goes_to_mesh() {
+        let our_addr = fips_addr_with_node_byte(0x55);
+        let peer = fips_addr_with_node_byte(0x66);
+        let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let lookup = empty_lookup();
+        let mut pkt = ipv6_packet_to(&peer);
+
+        assert!(handle_tun_packet(
+            &mut pkt,
+            1360,
+            "test0",
+            our_addr,
+            &tun_tx,
+            &outbound_tx,
+            &lookup,
+        ));
+
+        // A non-self fips destination is routed into the mesh, not looped back.
+        assert!(
+            outbound_rx.try_recv().is_ok(),
+            "non-self fips destination should be sent to the mesh"
+        );
+        assert!(
+            tun_rx.try_recv().is_err(),
+            "non-self fips destination must not be hairpinned"
+        );
     }
 
     // ========================================================================
