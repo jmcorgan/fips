@@ -54,10 +54,17 @@ use super::DEFAULT_PSM;
 /// identity is the pubkey, never the MAC — see ble-interop.md).
 const ANDROID_ADAPTER: &str = "ble0";
 
-/// Bound on a per-channel inbound/outbound queue and the accept/scan fan-in.
-/// Generous so control events (accept/scan) are not dropped under burst; L2CAP
-/// data drops are tolerable since FMP/Noise above retransmits.
+/// Bound on a per-channel inbound queue and the accept/scan fan-in. Generous so
+/// control events (accept/scan) are not dropped under burst; L2CAP data drops are
+/// tolerable since FMP/Noise above retransmits.
 const CHANNEL_CAP: usize = 256;
+
+/// Bound on the **outbound byte** queue (Rust → Kotlin writer). Kept shallow on
+/// purpose: a BLE link's bandwidth-delay product is ~1 packet, so a deep queue
+/// only bufferbloats it — RTT balloons to seconds and TCP above can't ramp. A
+/// small bound makes `BleStream::send` backpressure (the `SyncSender` blocks),
+/// which propagates up through FSP/MMP to the TUN and TCP's own flow control.
+const SEND_QUEUE_CAP: usize = 8;
 
 /// Transport default MTU, used when the OS reports an unknown (0) channel MTU.
 /// Matches `DEFAULT_BLE_MTU` in `config/transport.rs`.
@@ -184,7 +191,7 @@ impl AndroidBleBridge {
     fn make_channel(&self, remote: BleAddr, send_mtu: u16, recv_mtu: u16) -> StreamEndpoints {
         let ch_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (recv_tx, recv_rx) = mpsc::channel(CHANNEL_CAP);
-        let (send_tx, send_rx) = std::sync::mpsc::sync_channel(CHANNEL_CAP);
+        let (send_tx, send_rx) = std::sync::mpsc::sync_channel(SEND_QUEUE_CAP);
         let closed = Arc::new(AtomicBool::new(false));
         self.lock_channels().insert(
             ch_id,
@@ -418,9 +425,28 @@ impl BleStream for AndroidStream {
         }
         // Pure channel push — no JNI on the hot path. The Kotlin writer thread
         // pulls this via the bridge's next_send and writes the socket.
-        self.send_tx
-            .try_send(data.to_vec())
-            .map_err(|e| TransportError::Io(std::io::Error::other(format!("BLE send: {e}"))))
+        //
+        // Backpressure rather than drop on a full queue. The queue is deliberately
+        // shallow (SEND_QUEUE_CAP) so it can't bufferbloat the BLE link; awaiting a
+        // free slot here propagates flow control up through FSP/MMP to the TUN and
+        // TCP — keeping RTT low *without* the loss-driven throughput collapse that a
+        // shallow tail-drop queue causes.
+        let mut payload = data.to_vec();
+        loop {
+            if self.closed.load(Ordering::Relaxed) {
+                return Err(TransportError::Io(std::io::Error::other("BLE channel closed")));
+            }
+            match self.send_tx.try_send(payload) {
+                Ok(()) => return Ok(()),
+                Err(std::sync::mpsc::TrySendError::Full(p)) => {
+                    payload = p;
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(TransportError::Io(std::io::Error::other("BLE send: peer closed")));
+                }
+            }
+        }
     }
 
     async fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError> {
