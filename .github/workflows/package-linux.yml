@@ -19,7 +19,7 @@ jobs:
     outputs:
       linux_package_version: ${{ steps.linux_version.outputs.linux_package_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -61,7 +61,7 @@ jobs:
             deb_arch: arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -79,7 +79,7 @@ jobs:
 
       - name: Cache Cargo registry + build
         if: ${{ env.ACT != 'true' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -140,7 +140,7 @@ jobs:
 
       - name: Upload artifact (GitHub only)
         if: ${{ env.ACT != 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fips_${{ needs.determine-versioning.outputs.linux_package_version }}_${{ matrix.artifact_arch }}_linux
           path: |
@@ -164,7 +164,7 @@ jobs:
 
     steps:
       - name: Download Linux artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

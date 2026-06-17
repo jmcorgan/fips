@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           pacman -Sy --noconfirm --needed base-devel namcap git curl
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve package version
         id: ver
@@ -176,7 +176,7 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "pkgrel=${PKGREL}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ steps.tag.outputs.tag }}
 

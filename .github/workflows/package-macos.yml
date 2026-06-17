@@ -19,7 +19,7 @@ jobs:
     outputs:
       macos_package_version: ${{ steps.macos_version.outputs.macos_package_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -61,7 +61,7 @@ jobs:
             target: x86_64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -76,7 +76,7 @@ jobs:
           rustflags: ''
 
       - name: Cache Cargo registry + build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -209,7 +209,7 @@ jobs:
           ( cd "$(dirname "$PKG")" && shasum -a 256 "$(basename "$PKG")" | tee "$(basename "$PKG").sha256" )
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fips_${{ needs.determine-versioning.outputs.macos_package_version }}_${{ matrix.arch }}_macos
           path: |
@@ -229,7 +229,7 @@ jobs:
 
     steps:
       - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -283,7 +283,7 @@ jobs:
 
     steps:
       - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
