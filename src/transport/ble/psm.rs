@@ -17,6 +17,7 @@
 //! [`docs/design/ble-interop.md`](../../../../docs/design/ble-interop.md).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
 
 use super::addr::BleAddr;
@@ -53,6 +54,12 @@ pub fn decode_psm(data: &[u8]) -> Option<u16> {
 #[derive(Debug, Default)]
 pub struct PsmMap {
     inner: Mutex<HashMap<BleAddr, u16>>,
+    /// The most-recently-learned PSM across all peers. A node advertises exactly
+    /// one OS-assigned listener PSM, so when an exact-address lookup misses — the
+    /// common case, since the peer's RPA rotates between the scan that learned the
+    /// PSM and the dial — this is a far better guess than the fixed legacy default,
+    /// which no one listens on. 0 = unset.
+    last: AtomicU16,
 }
 
 impl PsmMap {
@@ -65,6 +72,9 @@ impl PsmMap {
     /// advert for the same address overwrites the earlier value.
     pub fn learn(&self, addr: &BleAddr, psm: u16) {
         self.lock().insert(addr.clone(), psm);
+        if psm != 0 {
+            self.last.store(psm, Ordering::Relaxed);
+        }
     }
 
     /// Look up a peer's learned PSM, if one has been seen this scan cycle.
@@ -76,7 +86,17 @@ impl PsmMap {
     /// otherwise `fallback` (the configured PSM, else the legacy
     /// [`DEFAULT_PSM`](super::DEFAULT_PSM)).
     pub fn resolve(&self, addr: &BleAddr, fallback: u16) -> u16 {
-        self.lookup(addr).unwrap_or(fallback)
+        if let Some(psm) = self.lookup(addr) {
+            return psm;
+        }
+        // Exact-address miss — almost always because the peer's MAC rotated
+        // between the scan that learned its PSM and this dial. Use the most
+        // recently learned PSM rather than the legacy default (never a real
+        // listener); a wrong guess only costs a dial-retry and a re-probe.
+        match self.last.load(Ordering::Relaxed) {
+            0 => fallback,
+            last => last,
+        }
     }
 
     /// Forget a single learned entry (e.g. after a dial failure).
@@ -151,8 +171,9 @@ mod tests {
 
         map.learn(&addr(1), 0x0091);
         assert_eq!(map.resolve(&addr(1), DEFAULT_PSM), 0x0091);
-        // A different, unseen address still falls back.
-        assert_eq!(map.resolve(&addr(9), DEFAULT_PSM), DEFAULT_PSM);
+        // An unseen address (e.g. the peer's MAC rotated since we learned its PSM)
+        // dials the most-recently-learned PSM, not the legacy default.
+        assert_eq!(map.resolve(&addr(9), DEFAULT_PSM), 0x0091);
     }
 
     #[test]
