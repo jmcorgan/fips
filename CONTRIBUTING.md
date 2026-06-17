@@ -42,6 +42,10 @@ and fail without it. BLE-capable builds additionally need `bluez`,
 `libdbus-1-dev`, and `pkg-config` installed; the default build picks
 up BLE if those are present and skips it cleanly if not.
 
+On Nix, `nix develop` provides the pinned toolchain and all of these
+build prerequisites without any manual install; see the Nix / NixOS
+section of [packaging/README.md](packaging/README.md).
+
 For multi-node integration runs, Docker is required. The harness
 under [testing/](testing/) starts containerized topologies and
 exercises real mesh behavior; see [testing/README.md](testing/README.md)

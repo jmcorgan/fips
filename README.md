@@ -98,9 +98,9 @@ This installs the daemon, CLI tools (`fipsctl`, `fipstop`), the
 optional `fips-gateway` service, systemd units, and a default
 `/etc/fips/fips.yaml` you can edit before starting.
 
-For macOS, Windows, OpenWrt, the systemd tarball, or a from-source
-build, see [docs/getting-started.md](docs/getting-started.md) for
-the full multi-platform installation guide.
+For macOS, Windows, OpenWrt, the systemd tarball, a Nix flake, or a
+from-source build, see [docs/getting-started.md](docs/getting-started.md)
+for the full multi-platform installation guide.
 
 To join a live mesh and reach your first peer, follow the new-user
 tutorial progression starting at
@@ -142,6 +142,12 @@ Nym (mixnet) transport builds on all desktop platforms. The OpenWrt
 ❌ is provisional, pending verification of `nym-socks5-client`
 availability on the target; it will flip to ✅ only if confirmed
 buildable there.
+
+Alternatively, the repo ships a [Nix flake](flake.nix): `nix develop`
+drops you into a shell with the pinned toolchain and every build
+prerequisite (libclang, dbus, pkg-config) already provided, and
+`nix build .#fips` builds all four binaries with no host setup. See the
+Nix / NixOS section of [packaging/README.md](packaging/README.md).
 
 ## Documentation
 

@@ -87,6 +87,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`LimitNOFILE` drop-in) and OpenWrt (procd `nofile`) procedures to
   raise the limit, and how to verify the per-peer ratio stays bounded.
   Linked from the how-to index.
+- Nix flake (`flake.nix` at the project root) for reproducible
+  from-source builds on Nix/NixOS. Builds all four binaries (`fips`,
+  `fipsctl`, `fips-gateway`, `fipstop`), pins the exact toolchain from
+  `rust-toolchain.toml` via fenix, and wires the build-time native
+  dependencies (`libclang` for `bindgen`, plus `dbus` and `pkg-config`),
+  so it needs no host setup beyond Nix with flakes enabled. Flake inputs
+  are lock-pinned (`flake.lock` committed) for reproducibility, and the
+  flake exposes `nix build`, `nix run`, a `nix develop` dev shell with the
+  pinned toolchain, and `nix flake check`. The flake produces binaries
+  (and a NixOS `packages.<system>.fips` output); the systemd/service
+  integration that the `.deb`/tarball installers provide is handled
+  through the NixOS configuration instead.
 
 ### Changed
 

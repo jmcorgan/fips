@@ -257,6 +257,9 @@ Operator-actionable items moving from v0.3.0 to v0.4.0:
 - **From source**: `cargo build --release` from a checkout of the v0.4.0
   tag (Rust 1.94.1 per `rust-toolchain.toml`; `libclang-dev` is a
   required Linux build prerequisite).
+- **Nix / NixOS**: `nix build .#fips` from a checkout of the v0.4.0 tag
+  builds the binaries from source with the pinned toolchain and no manual
+  prerequisites (see the Nix section of `packaging/README.md`).
 
 The full per-commit changelog lives in
 [`CHANGELOG.md`](../../CHANGELOG.md). Issues and discussion at

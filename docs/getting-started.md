@@ -88,6 +88,23 @@ See [packaging/README.md](../packaging/README.md) for per-format
 build details, cross-target options, and the full `make` target
 list.
 
+### With Nix (flake)
+
+On Nix/NixOS, a [flake](../flake.nix) at the project root builds the
+binaries from source with the pinned toolchain and no manual
+prerequisite install:
+
+```sh
+nix build .#fips          # all four binaries, into ./result/bin
+nix develop               # dev shell with the toolchain + build deps
+```
+
+This path produces binaries only — it does not run the installer, so
+there are no systemd units, no `fips` group, and no default `fips.yaml`.
+On NixOS, wire the daemon in through your system configuration using the
+flake's `packages.<system>.fips` output instead. See the Nix / NixOS
+section of [packaging/README.md](../packaging/README.md).
+
 ## What's installed and running
 
 Here's what the installer leaves on your machine, what's
