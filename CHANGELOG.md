@@ -410,6 +410,14 @@ with v0.3.x peers.
 
 ### Fixed
 
+- Packets addressed to a node's own mesh address are now delivered
+  locally instead of being dropped. On macOS the point-to-point `utun`
+  interface egresses self-addressed traffic into the daemon, which
+  previously pushed it onto the mesh outbound path where it was dropped
+  for lack of a route to self; such packets are now hairpinned back to
+  the TUN for inbound delivery, so `ping6` and connections to a node's
+  own `<npub>.fips` address work. Linux was unaffected (the kernel
+  already loops self-traffic via `lo`).
 - The Tor transport now increments its `connect_refused` statistic (the
   "Refused" line in fipstop) when a SOCKS5 connection is actively
   refused, instead of recording every connect failure as a generic
