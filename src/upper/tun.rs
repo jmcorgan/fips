@@ -693,7 +693,7 @@ fn handle_tun_packet(
     path_mtu_lookup: &PathMtuLookup,
 ) -> bool {
     use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
-    use super::tcp_mss::clamp_tcp_mss;
+    use super::tcp_mss::{clamp_tcp_mss, recalculate_l4_checksum};
 
     log_ipv6_packet(packet);
 
@@ -719,6 +719,9 @@ fn handle_tun_packet(
         // exercised by the Linux-only CI unit tests.
         if packet[24..40] == *our_addr.as_bytes() {
             trace!(name = %name, "Hairpinning self-addressed packet back to TUN (loopback)");
+            // Finish the checksum macOS leaves offloaded on self-traffic, else the
+            // local stack drops every non-SYN segment. See recalculate_l4_checksum.
+            recalculate_l4_checksum(packet);
             if tun_tx.send(packet.to_vec()).is_err() {
                 return false; // Channel closed, shutdown
             }

@@ -324,9 +324,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interface egresses self-addressed traffic into the daemon, which
   previously pushed it onto the mesh outbound path where it was dropped
   for lack of a route to self; such packets are now hairpinned back to
-  the TUN for inbound delivery, so `ping6` and connections to a node's
-  own `<npub>.fips` address work. Linux was unaffected (the kernel
-  already loops self-traffic via `lo`).
+  the TUN for inbound delivery, so `ping6` to a node's own
+  `<npub>.fips` address works. Linux was unaffected (the kernel
+  already loops self-traffic via `lo`). (Full TCP/UDP self-delivery is
+  completed by the checksum fix below.)
+- Self-delivered TCP and UDP traffic on macOS now carries a completed
+  checksum, finishing the self-delivery the hairpin above only partly
+  provided. macOS first routes self-addressed packets as loopback (a
+  `LOCAL` route via `lo0`), which leaves their transport TX checksum
+  offloaded and unfinished, but the point-to-point `utun` then egresses
+  them into the daemon with only the pseudo-header partial present.
+  Re-injecting them verbatim made the local stack drop every segment
+  whose checksum MSS clamping did not happen to rewrite: the SYN and
+  SYN-ACK got through, but the bare ACK, data, and FIN were dropped for
+  a bad checksum, so connections to a node's own `<npub>.fips` service
+  half-opened and hung. The hairpin path now recomputes the TCP/UDP
+  checksum before re-injection, so full self-connections — not just
+  `ping6` — work. Linux remains unaffected.
 - The Tor transport now increments its `connect_refused` statistic (the
   "Refused" line in fipstop) when a SOCKS5 connection is actively
   refused, instead of recording every connect failure as a generic
