@@ -83,6 +83,35 @@ fn fwd_value(data: &serde_json::Value, pkt_key: &str, byte_key: &str) -> String 
     format!("{} pkts ({})", pkts, helpers::format_bytes(bytes))
 }
 
+/// Read a raw forwarding counter as a u64 (0 if missing), for arithmetic
+/// (percentages, derived totals) that the string-returning helpers can't do.
+fn fwd_count(data: &serde_json::Value, key: &str) -> u64 {
+    data.get("forwarding")
+        .and_then(|f| f.get(key))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+/// Total mesh egress = locally-originated + transit-forwarded, formatted as
+/// "N pkts (B)". There is no single daemon counter for everything this node
+/// transmits to peers, so it is derived from its two contributors.
+fn mesh_tx_value(data: &serde_json::Value) -> String {
+    let pkts = fwd_count(data, "originated_packets") + fwd_count(data, "forwarded_packets");
+    let bytes = fwd_count(data, "originated_bytes") + fwd_count(data, "forwarded_bytes");
+    format!("{} pkts ({})", pkts, helpers::format_bytes(bytes))
+}
+
+/// Format a route-class count as "N (xx.x%)" where the percentage is the class's
+/// share of total forwarded (transit) packets. Zero forwarded yields "0.0%".
+fn route_class_value(count: u64, total_forwarded: u64) -> String {
+    let pct = if total_forwarded > 0 {
+        count as f64 / total_forwarded as f64 * 100.0
+    } else {
+        0.0
+    };
+    format!("{count} ({pct:.1}%)")
+}
+
 /// Build a section: a styled header line followed by the kv pairs rendered
 /// through the group helper so the section's values share a left edge.
 fn section(title: &str, pairs: &[(&str, String)]) -> Vec<Line<'static>> {
@@ -110,49 +139,39 @@ fn draw_routing_stats(
     let err = |key: &str| helpers::nested_u64(data, "error_signals", key);
     let cong = |key: &str| helpers::nested_u64(data, "congestion", key);
 
-    // Left column: Forwarding + Discovery. Each section's values share a left
-    // edge via the kv_lines group helper.
+    // The node is an interface adapter between the local host stack and the
+    // mesh; the left column reads each side as a Transmitted/Received pair.
+    //
+    // Local Stack — traffic crossing the TUN / local-origination boundary:
+    // Transmitted is what the host injects into the mesh (originated), Received
+    // is what the mesh hands up to the host (delivered).
     let mut left = section(
-        "Forwarding",
+        "Local Stack",
         &[
+            (
+                "Transmitted",
+                fwd_value(data, "originated_packets", "originated_bytes"),
+            ),
+            (
+                "Received",
+                fwd_value(data, "delivered_packets", "delivered_bytes"),
+            ),
+        ],
+    );
+    left.push(Line::from(""));
+    // Mesh — traffic crossing the peer-link boundary: Transmitted is everything
+    // this node puts on the wire (originated + forwarded, derived), Received is
+    // the ingress aggregate from peers (own-delivered + transit + drops).
+    left.extend(section(
+        "Mesh",
+        &[
+            ("Transmitted", mesh_tx_value(data)),
             (
                 "Received",
                 fwd_value(data, "received_packets", "received_bytes"),
             ),
-            (
-                "Delivered",
-                fwd_value(data, "delivered_packets", "delivered_bytes"),
-            ),
-            (
-                "Forwarded",
-                fwd_value(data, "forwarded_packets", "forwarded_bytes"),
-            ),
-            (
-                "Originated",
-                fwd_value(data, "originated_packets", "originated_bytes"),
-            ),
-            (
-                "Decode Error",
-                fwd_value(data, "decode_error_packets", "decode_error_bytes"),
-            ),
-            (
-                "TTL Exhausted",
-                fwd_value(data, "ttl_exhausted_packets", "ttl_exhausted_bytes"),
-            ),
-            (
-                "No Route",
-                fwd_value(data, "drop_no_route_packets", "drop_no_route_bytes"),
-            ),
-            (
-                "MTU Exceeded",
-                fwd_value(data, "drop_mtu_exceeded_packets", "drop_mtu_exceeded_bytes"),
-            ),
-            (
-                "Send Error",
-                fwd_value(data, "drop_send_error_packets", "drop_send_error_bytes"),
-            ),
         ],
-    );
+    ));
     left.push(Line::from(""));
     left.extend(section(
         "Discovery Requests",
@@ -184,15 +203,89 @@ fn draw_routing_stats(
         ],
     ));
 
-    // Right column: Error Signals + Congestion
+    // Right column — "Forwarded" (transit / routed through this node).
+    // Forwarded total, then the route-class breakdown (a percentage partition
+    // of the total), then the transit-path drop reasons.
+    let fwd_total = fwd_count(data, "forwarded_packets");
     let mut right = section(
+        "Forwarded",
+        &[(
+            "Forwarded",
+            fwd_value(data, "forwarded_packets", "forwarded_bytes"),
+        )],
+    );
+    // Blank separator after the Forwarded total, matching the spacing between
+    // every other section pair; the total and its route-class breakdown read
+    // as two distinct groups.
+    right.push(Line::from(""));
+    // Route-class breakdown: a partition of Forwarded, each line annotated with
+    // its share of the total. Tree-down cross — the dive-to-tree-child
+    // cut-through — is the last class; Tree-down + Tree-down cross sum to the
+    // pre-split tree-down total.
+    right.extend(section(
+        "Route Class",
+        &[
+            (
+                "Direct Peer",
+                route_class_value(fwd_count(data, "route_direct_peer"), fwd_total),
+            ),
+            (
+                "Tree-down",
+                route_class_value(fwd_count(data, "route_tree_down"), fwd_total),
+            ),
+            (
+                "Tree-up",
+                route_class_value(fwd_count(data, "route_tree_up"), fwd_total),
+            ),
+            (
+                "Cross-link descend",
+                route_class_value(fwd_count(data, "route_crosslink_descend"), fwd_total),
+            ),
+            (
+                "Cross-link ascend",
+                route_class_value(fwd_count(data, "route_crosslink_ascend"), fwd_total),
+            ),
+            (
+                "Tree-down cross",
+                route_class_value(fwd_count(data, "route_tree_down_cross"), fwd_total),
+            ),
+        ],
+    ));
+    right.push(Line::from(""));
+    right.extend(section(
+        "Dropped",
+        &[
+            (
+                "No Route",
+                fwd_value(data, "drop_no_route_packets", "drop_no_route_bytes"),
+            ),
+            (
+                "TTL Exhausted",
+                fwd_value(data, "ttl_exhausted_packets", "ttl_exhausted_bytes"),
+            ),
+            (
+                "Decode Error",
+                fwd_value(data, "decode_error_packets", "decode_error_bytes"),
+            ),
+            (
+                "MTU Exceeded",
+                fwd_value(data, "drop_mtu_exceeded_packets", "drop_mtu_exceeded_bytes"),
+            ),
+            (
+                "Send Error",
+                fwd_value(data, "drop_send_error_packets", "drop_send_error_bytes"),
+            ),
+        ],
+    ));
+    right.push(Line::from(""));
+    right.extend(section(
         "Error Signals",
         &[
             ("Coords Required", err("coords_required")),
             ("Path Broken", err("path_broken")),
             ("MTU Exceeded", err("mtu_exceeded")),
         ],
-    );
+    ));
     right.push(Line::from(""));
     right.extend(section(
         "Congestion",

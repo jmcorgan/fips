@@ -53,6 +53,12 @@
       "originated_packets": 0,
       "received_bytes": 0,
       "received_packets": 0,
+      "route_crosslink_ascend": 0,
+      "route_crosslink_descend": 0,
+      "route_direct_peer": 0,
+      "route_tree_down": 0,
+      "route_tree_down_cross": 0,
+      "route_tree_up": 0,
       "ttl_exhausted_bytes": 0,
       "ttl_exhausted_packets": 0
     },

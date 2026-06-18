@@ -92,6 +92,15 @@ impl TreeState {
         &self.my_coords
     }
 
+    /// Test-only override of this node's coordinates, bypassing the
+    /// parent/declaration state machine. Lets routing tests place the node at
+    /// an arbitrary tree position to exercise coordinate-based classification.
+    #[cfg(test)]
+    pub(crate) fn set_my_coords_for_test(&mut self, coords: TreeCoordinate) {
+        self.root = *coords.root_id();
+        self.my_coords = coords;
+    }
+
     /// Get the current root.
     pub fn root(&self) -> &NodeAddr {
         &self.root
