@@ -115,8 +115,8 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
             if current_mss > max_mss {
                 ipv6_packet[i + 2..i + 4].copy_from_slice(&max_mss.to_be_bytes());
 
-                // Recalculate TCP checksum
-                recalculate_tcp_checksum(ipv6_packet, tcp_start);
+                // Recompute the now-stale checksum over the rewritten header.
+                recalculate_l4_checksum(ipv6_packet);
 
                 modified = true;
             }
@@ -129,41 +129,39 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
     modified
 }
 
-/// Recalculate TCP checksum after modifying the packet.
-fn recalculate_tcp_checksum(ipv6_packet: &mut [u8], tcp_start: usize) {
-    // Zero out existing checksum
-    ipv6_packet[tcp_start + 16] = 0;
-    ipv6_packet[tcp_start + 17] = 0;
-
-    // Extract addresses
-    let src = &ipv6_packet[8..24];
-    let dst = &ipv6_packet[24..40];
-
-    // Get TCP segment length
+/// Recalculate the TCP or UDP checksum (IPv6 pseudo-header + segment) in place.
+///
+/// Completes the checksum macOS leaves offloaded on hairpinned self-traffic, and
+/// is reused by MSS clamping. No-op for other next-headers (e.g. ICMPv6) and for
+/// malformed packets. Assumes the L4 header follows the 40-byte IPv6 header, as
+/// all FIPS packets do.
+pub fn recalculate_l4_checksum(ipv6_packet: &mut [u8]) {
+    if ipv6_packet.len() < 40 || ipv6_packet[0] >> 4 != 6 {
+        return;
+    }
     let payload_len = u16::from_be_bytes([ipv6_packet[4], ipv6_packet[5]]) as usize;
-    let tcp_segment = &ipv6_packet[tcp_start..tcp_start + payload_len];
+    if payload_len == 0 || 40 + payload_len > ipv6_packet.len() {
+        return;
+    }
 
-    // Calculate checksum with pseudo-header
+    // Transport checksum field offset within the packet: TCP at 16, UDP at 6.
+    let proto = ipv6_packet[6];
+    let csum = match proto {
+        6 if payload_len >= TCP_HEADER_MIN_LEN => 40 + 16,
+        17 if payload_len >= 8 => 40 + 6,
+        _ => return,
+    };
+    ipv6_packet[csum] = 0;
+    ipv6_packet[csum + 1] = 0;
+
+    // Pseudo-header (src + dst are contiguous at 8..40), length, next header,
     let mut sum: u32 = 0;
-
-    // Pseudo-header: source address
-    for chunk in src.chunks(2) {
+    for chunk in ipv6_packet[8..40].chunks(2) {
         sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
     }
-
-    // Pseudo-header: destination address
-    for chunk in dst.chunks(2) {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-    }
-
-    // Pseudo-header: TCP length
-    sum += payload_len as u32;
-
-    // Pseudo-header: next header (TCP = 6)
-    sum += 6;
-
-    // TCP segment
-    for chunk in tcp_segment.chunks(2) {
+    sum += payload_len as u32 + proto as u32;
+    // then the transport segment itself (with the checksum field zeroed above).
+    for chunk in ipv6_packet[40..40 + payload_len].chunks(2) {
         let value = if chunk.len() == 2 {
             u16::from_be_bytes([chunk[0], chunk[1]])
         } else {
@@ -171,15 +169,16 @@ fn recalculate_tcp_checksum(ipv6_packet: &mut [u8], tcp_start: usize) {
         };
         sum += value as u32;
     }
-
-    // Fold 32-bit sum to 16 bits
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
 
-    // One's complement
-    let checksum = !sum as u16;
-    ipv6_packet[tcp_start + 16..tcp_start + 18].copy_from_slice(&checksum.to_be_bytes());
+    // IPv6 forbids an all-zero UDP checksum; send 0xffff instead (TCP keeps 0).
+    let checksum = match (!sum as u16, proto) {
+        (0, 17) => 0xffff,
+        (c, _) => c,
+    };
+    ipv6_packet[csum..csum + 2].copy_from_slice(&checksum.to_be_bytes());
 }
 
 #[cfg(test)]
@@ -216,7 +215,7 @@ mod tests {
         packet[tcp_start + 24] = 0;
 
         // Calculate checksum
-        recalculate_tcp_checksum(&mut packet, tcp_start);
+        recalculate_l4_checksum(&mut packet);
 
         packet
     }
@@ -276,5 +275,127 @@ mod tests {
         let modified = clamp_tcp_mss(&mut packet, 1200);
 
         assert!(!modified);
+    }
+
+    // ========================================================================
+    // recalculate_l4_checksum — finish macOS's offloaded self-traffic
+    // checksums (the bug that left ACK/data/FIN segments undeliverable).
+    // ========================================================================
+
+    /// True if the packet's TCP/UDP checksum verifies (folded ones-complement
+    /// sum over pseudo-header + segment, including the checksum field, == 0xffff).
+    fn l4_checksum_valid(pkt: &[u8]) -> bool {
+        let payload_len = u16::from_be_bytes([pkt[4], pkt[5]]) as usize;
+        let mut sum: u32 = 0;
+        for chunk in pkt[8..40].chunks(2) {
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        }
+        sum += payload_len as u32;
+        sum += pkt[6] as u32; // next header
+        for chunk in pkt[40..40 + payload_len].chunks(2) {
+            let v = if chunk.len() == 2 {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_be_bytes([chunk[0], 0])
+            };
+            sum += v as u32;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16 == 0xffff
+    }
+
+    const SELF_ADDR: [u8; 16] = [0xfd, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x55];
+
+    /// A self-addressed 20-byte TCP ACK (no options) carrying a deliberately
+    /// wrong checksum — the shape macOS hands us for hairpinned non-SYN traffic.
+    fn make_tcp_ack_packet() -> Vec<u8> {
+        let mut p = vec![0u8; 40 + 20];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&20u16.to_be_bytes()); // payload length
+        p[6] = 6; // TCP
+        p[7] = 64;
+        p[8..24].copy_from_slice(&SELF_ADDR);
+        p[24..40].copy_from_slice(&SELF_ADDR);
+        let t = 40;
+        p[t..t + 2].copy_from_slice(&52097u16.to_be_bytes());
+        p[t + 2..t + 4].copy_from_slice(&9999u16.to_be_bytes());
+        p[t + 4..t + 8].copy_from_slice(&1000u32.to_be_bytes()); // seq
+        p[t + 8..t + 12].copy_from_slice(&2000u32.to_be_bytes()); // ack
+        p[t + 12] = 0x50; // data offset = 5 (20-byte header)
+        p[t + 13] = 0x10; // ACK
+        p[t + 14..t + 16].copy_from_slice(&2049u16.to_be_bytes()); // window
+        p[t + 16] = 0x8e; // bogus checksum (macOS pseudo-header partial)
+        p[t + 17] = 0xce;
+        p
+    }
+
+    #[test]
+    fn recompute_fixes_tcp_non_syn_checksum() {
+        let mut pkt = make_tcp_ack_packet();
+        assert!(
+            !l4_checksum_valid(&pkt),
+            "fixture should start with a bad checksum"
+        );
+        recalculate_l4_checksum(&mut pkt);
+        assert!(
+            l4_checksum_valid(&pkt),
+            "TCP checksum must verify after recompute"
+        );
+    }
+
+    #[test]
+    fn recompute_fixes_udp_checksum() {
+        let mut p = vec![0u8; 40 + 12]; // 8-byte UDP header + 4-byte payload
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&12u16.to_be_bytes());
+        p[6] = 17; // UDP
+        p[7] = 64;
+        p[8..24].copy_from_slice(&SELF_ADDR);
+        p[24..40].copy_from_slice(&SELF_ADDR);
+        let u = 40;
+        p[u..u + 2].copy_from_slice(&40000u16.to_be_bytes()); // src port
+        p[u + 2..u + 4].copy_from_slice(&5354u16.to_be_bytes()); // dst port
+        p[u + 4..u + 6].copy_from_slice(&12u16.to_be_bytes()); // UDP length
+        p[u + 6] = 0x8e; // bogus checksum
+        p[u + 7] = 0xce;
+        p[u + 8..u + 12].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // payload
+
+        assert!(!l4_checksum_valid(&p), "fixture should start invalid");
+        recalculate_l4_checksum(&mut p);
+        assert!(
+            l4_checksum_valid(&p),
+            "UDP checksum must verify after recompute"
+        );
+        assert_ne!(
+            &p[u + 6..u + 8],
+            &[0, 0],
+            "IPv6 UDP checksum must not be zero"
+        );
+    }
+
+    #[test]
+    fn recompute_is_noop_for_non_transport() {
+        // Next-header 59 (No Next Header): nothing to checksum.
+        let mut pkt = vec![0u8; 60];
+        pkt[0] = 0x60;
+        pkt[4..6].copy_from_slice(&20u16.to_be_bytes());
+        pkt[6] = 59;
+        let before = pkt.clone();
+        recalculate_l4_checksum(&mut pkt);
+        assert_eq!(pkt, before, "non-transport packet must be left untouched");
+    }
+
+    #[test]
+    fn recompute_ignores_truncated_packet() {
+        // payload_len claims 20 bytes of TCP but only 10 are present.
+        let mut pkt = vec![0u8; 40 + 10];
+        pkt[0] = 0x60;
+        pkt[4..6].copy_from_slice(&20u16.to_be_bytes());
+        pkt[6] = 6;
+        let before = pkt.clone();
+        recalculate_l4_checksum(&mut pkt); // must not panic
+        assert_eq!(pkt, before, "truncated packet must be left untouched");
     }
 }
