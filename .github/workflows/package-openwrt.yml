@@ -677,19 +677,25 @@ jobs:
             echo "  PASS: installed-size >= 1MB"
           fi
 
-          # The adbdump paths: block is hierarchical — directory entries carry
-          # the full relative path, files are basenames nested beneath them.
-          # Reconstruct full paths so we can assert exact payload locations.
+          # The adbdump paths: block is hierarchical. Each directory is a
+          # top-level list item "- name: <full relative dir>"; its files are
+          # "- name: <basename>" nested one indent level deeper under "files:".
+          # (There are no "path:" keys.) Reconstruct full file paths by keying
+          # off the indentation of the directory-level list items.
           RECON=$(awk '
-            /^paths:/ {p=1; next}
-            p && /^[^[:space:]-]/ {p=0}        # a new top-level key ends paths:
+            /^paths:/ {p=1; diri=-1; next}
+            p && /^[^ #-]/ {p=0}                 # a new top-level key ends paths:
             !p {next}
-            /^[[:space:]]*-?[[:space:]]*path:[[:space:]]/ {
-              d=$0; sub(/^[[:space:]]*-?[[:space:]]*path:[[:space:]]*/,"",d); next
-            }
-            /^[[:space:]]*-[[:space:]]*name:[[:space:]]/ {
-              n=$0; sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/,"",n);
-              if (d != "") print d"/"n; else print n
+            match($0, /^ *- /) {
+              ind=RLENGTH; rest=substr($0, RLENGTH+1)
+              if (diri==-1) diri=ind             # first list item = directory indent
+              if (ind==diri) {                   # directory entry (or the root acl: entry)
+                if (rest ~ /^name: /) { dir=rest; sub(/^name: /,"",dir) } else dir=""
+                next
+              }
+              if (rest ~ /^name: /) {            # deeper item = a file under files:
+                f=rest; sub(/^name: /,"",f); print (dir==""?f:dir"/"f)
+              }
             }
           ' "$DUMP")
           echo "==> reconstructed paths:"; printf '%s\n' "$RECON"
