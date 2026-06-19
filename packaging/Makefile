@@ -6,7 +6,8 @@
 # Usage:
 #   make deb        Build a Debian/Ubuntu .deb package
 #   make tarball    Build a systemd install tarball
-#   make ipk        Build an OpenWrt .ipk package
+#   make ipk        Build an OpenWrt .ipk package (opkg, OpenWrt 24.x and earlier)
+#   make apk        Build an OpenWrt .apk package (apk-tools, mandatory on OpenWrt 25+)
 #   make aur        Build fips-git AUR package and validate with namcap
 #   make pkg        Build a macOS .pkg installer
 #   make zip        Build a Windows .zip package
@@ -17,7 +18,7 @@ SHELL := /bin/bash
 PACKAGING_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT  := $(abspath $(PACKAGING_DIR)/..)
 
-.PHONY: all deb tarball ipk aur pkg zip clean
+.PHONY: all deb tarball ipk apk aur pkg zip clean
 
 all: deb tarball
 
@@ -29,6 +30,9 @@ tarball:
 
 ipk:
 	@bash $(PACKAGING_DIR)/openwrt-ipk/build-ipk.sh
+
+apk:
+	@bash $(PACKAGING_DIR)/openwrt-apk/build-apk.sh
 
 aur:
 	@bash $(PACKAGING_DIR)/aur/build-aur.sh
