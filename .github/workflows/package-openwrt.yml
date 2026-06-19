@@ -648,46 +648,66 @@ jobs:
           fi
           echo "==> file type:"; file "$APK"
 
-          # apk v3 packages are ADB containers; dump the metadata + path list
-          # with the apk-tools we just built and assert the payload is present.
+          # apk v3 packages are ADB containers; dump the whole manifest with the
+          # apk-tools we just built. Print it in full so the exact schema is
+          # always visible in the log if an assertion needs adjusting.
           DUMP=$(mktemp)
           "$APK_BIN" adbdump "$APK" > "$DUMP" 2>/dev/null || {
             echo "FAIL: 'apk adbdump' could not read $APK"; exit 1; }
-          echo "==> adbdump (head):"; head -60 "$DUMP"
+          echo "==> full adbdump:"; cat "$DUMP"
 
           fail=0
-          # Embedded package metadata.
+          # Package metadata (flat keys under info:).
           for needle in "name: fips" "version: ${{ needs.determine-versioning.outputs.apk_version }}" "arch: ${{ matrix.openwrt_arch }}"; do
             if grep -qF "$needle" "$DUMP"; then
-              echo "    PASS meta: $needle"
+              echo "  PASS meta: $needle"
             else
-              echo "    FAIL meta: missing '$needle'"; fail=1
+              echo "  FAIL meta: missing '$needle'"; fail=1
             fi
           done
-          # Payload paths (adbdump lists the package's file tree).
-          REQUIRED=(
-            usr/bin/fips
-            usr/bin/fipsctl
-            usr/bin/fipstop
-            usr/bin/fips-gateway
-            etc/init.d/fips
-            etc/init.d/fips-gateway
-            etc/fips/fips.yaml
-            etc/fips/firewall.sh
-            etc/dnsmasq.d/fips.conf
-            etc/sysctl.d/fips-gateway.conf
-            etc/sysctl.d/fips-bridge.conf
-            etc/hotplug.d/net/99-fips
-            etc/uci-defaults/90-fips-setup
-            lib/upgrade/keep.d/fips
-          )
-          for path in "${REQUIRED[@]}"; do
-            if grep -qF "$path" "$DUMP"; then
-              echo "    PASS path: $path"
+
+          # installed-size reflects the bundled binaries (4 stripped Rust
+          # binaries, several MB). A payload regression that drops them shows up
+          # here regardless of how the path tree is formatted.
+          SIZE=$(awk '/^[[:space:]]*installed-size:/ {print $2; exit}' "$DUMP")
+          echo "  installed-size: ${SIZE:-unknown}"
+          if [ -z "${SIZE:-}" ] || [ "$SIZE" -lt 1000000 ]; then
+            echo "  FAIL: installed-size implausibly small (binaries missing?)"; fail=1
+          else
+            echo "  PASS: installed-size >= 1MB"
+          fi
+
+          # The adbdump paths: block is hierarchical — directory entries carry
+          # the full relative path, files are basenames nested beneath them.
+          # Reconstruct full paths so we can assert exact payload locations.
+          RECON=$(awk '
+            /^paths:/ {p=1; next}
+            p && /^[^[:space:]-]/ {p=0}        # a new top-level key ends paths:
+            !p {next}
+            /^[[:space:]]*-?[[:space:]]*path:[[:space:]]/ {
+              d=$0; sub(/^[[:space:]]*-?[[:space:]]*path:[[:space:]]*/,"",d); next
+            }
+            /^[[:space:]]*-[[:space:]]*name:[[:space:]]/ {
+              n=$0; sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/,"",n);
+              if (d != "") print d"/"n; else print n
+            }
+          ' "$DUMP")
+          echo "==> reconstructed paths:"; printf '%s\n' "$RECON"
+
+          for path in \
+            usr/bin/fips usr/bin/fipsctl usr/bin/fipstop usr/bin/fips-gateway \
+            etc/init.d/fips etc/init.d/fips-gateway \
+            etc/fips/fips.yaml etc/fips/firewall.sh etc/dnsmasq.d/fips.conf \
+            etc/sysctl.d/fips-gateway.conf etc/sysctl.d/fips-bridge.conf \
+            etc/hotplug.d/net/99-fips etc/uci-defaults/90-fips-setup \
+            lib/upgrade/keep.d/fips; do
+            if printf '%s\n' "$RECON" | grep -qxF "$path"; then
+              echo "  PASS path: $path"
             else
-              echo "    FAIL path: missing $path"; fail=1
+              echo "  FAIL path: missing $path"; fail=1
             fi
           done
+
           if [ "$fail" -ne 0 ]; then
             echo "apk structural verification FAILED"
             exit 1
