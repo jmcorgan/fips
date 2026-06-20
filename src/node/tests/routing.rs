@@ -1110,3 +1110,226 @@ async fn test_routing_source_only_coords_100_nodes() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+// === Route-class classification (transit-forward partition) ===
+
+use crate::node::metrics::{ForwardingMetrics, RouteClass};
+
+/// Current epoch millis, matching the cache-insert idiom used above.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[test]
+fn test_classify_forward_tree_up() {
+    // my_coords = [me, parent, root]; the chosen peer is our parent (an
+    // ancestor in our path) → tree-up.
+    let mut node = make_node();
+    let me = *node.node_addr();
+    let parent = make_node_addr(10);
+    let root = make_node_addr(1);
+    node.tree_state_mut()
+        .set_my_coords_for_test(TreeCoordinate::from_addrs(vec![me, parent, root]).unwrap());
+
+    // Destination somewhere above us; routed via the parent.
+    let dest = make_node_addr(50);
+    node.coord_cache_mut().insert(
+        dest,
+        TreeCoordinate::from_addrs(vec![dest, root]).unwrap(),
+        now_ms(),
+    );
+
+    assert_eq!(
+        node.classify_forward(&dest, &parent),
+        RouteClass::TreeUp,
+        "chosen peer is our ancestor"
+    );
+}
+
+#[test]
+fn test_classify_forward_tree_down() {
+    // Chosen peer is our descendant: its coords name us as an ancestor.
+    let mut node = make_node();
+    let me = *node.node_addr();
+    let root = make_node_addr(1);
+    node.tree_state_mut()
+        .set_my_coords_for_test(TreeCoordinate::from_addrs(vec![me, root]).unwrap());
+
+    let child = make_node_addr(20);
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(child, me, 1, 1000),
+        TreeCoordinate::from_addrs(vec![child, me, root]).unwrap(),
+    );
+
+    // Destination below the child; routed down to it.
+    let dest = make_node_addr(60);
+    node.coord_cache_mut().insert(
+        dest,
+        TreeCoordinate::from_addrs(vec![dest, child, me, root]).unwrap(),
+        now_ms(),
+    );
+
+    assert_eq!(
+        node.classify_forward(&dest, &child),
+        RouteClass::TreeDown,
+        "chosen peer is our descendant, dest in its subtree"
+    );
+}
+
+#[test]
+fn test_classify_forward_tree_down_cross() {
+    // Chosen peer is our descendant (a tree child), but the destination is NOT
+    // in that child's subtree: we are diving down to the child only because it
+    // advertised cross-link reach upward, beyond its own subtree. This is the
+    // dive-to-tree-child cut-through.
+    let mut node = make_node();
+    let me = *node.node_addr();
+    let root = make_node_addr(1);
+    node.tree_state_mut()
+        .set_my_coords_for_test(TreeCoordinate::from_addrs(vec![me, root]).unwrap());
+
+    let child = make_node_addr(20);
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(child, me, 1, 1000),
+        TreeCoordinate::from_addrs(vec![child, me, root]).unwrap(),
+    );
+
+    // Destination lives elsewhere (directly under root), NOT under the child;
+    // reachable from the child only via a cross-link.
+    let dest = make_node_addr(60);
+    node.coord_cache_mut().insert(
+        dest,
+        TreeCoordinate::from_addrs(vec![dest, root]).unwrap(),
+        now_ms(),
+    );
+
+    assert_eq!(
+        node.classify_forward(&dest, &child),
+        RouteClass::TreeDownCross,
+        "descendant peer, dest not in its subtree (dive-to-tree-child cut-through)"
+    );
+}
+
+#[test]
+fn test_classify_forward_crosslink_descend() {
+    // Chosen peer is lateral (not in our path, we are not in its path) and the
+    // destination is inside the peer's subtree → cross-link descend.
+    let mut node = make_node();
+    let me = *node.node_addr();
+    let root = make_node_addr(1);
+    let sibling_parent = make_node_addr(2);
+    node.tree_state_mut()
+        .set_my_coords_for_test(TreeCoordinate::from_addrs(vec![me, root]).unwrap());
+
+    let peer = make_node_addr(30);
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(peer, sibling_parent, 1, 1000),
+        TreeCoordinate::from_addrs(vec![peer, sibling_parent, root]).unwrap(),
+    );
+
+    // Destination is under the cross-link peer.
+    let dest = make_node_addr(70);
+    node.coord_cache_mut().insert(
+        dest,
+        TreeCoordinate::from_addrs(vec![dest, peer, sibling_parent, root]).unwrap(),
+        now_ms(),
+    );
+
+    assert_eq!(
+        node.classify_forward(&dest, &peer),
+        RouteClass::CrosslinkDescend,
+        "lateral peer, dest in its subtree"
+    );
+}
+
+#[test]
+fn test_classify_forward_crosslink_ascend() {
+    // Chosen peer is lateral and the destination is NOT in its subtree → the
+    // up-and-over case (the Bloom v2 behavior delta).
+    let mut node = make_node();
+    let me = *node.node_addr();
+    let root = make_node_addr(1);
+    let sibling_parent = make_node_addr(2);
+    node.tree_state_mut()
+        .set_my_coords_for_test(TreeCoordinate::from_addrs(vec![me, root]).unwrap());
+
+    let peer = make_node_addr(40);
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(peer, sibling_parent, 1, 1000),
+        TreeCoordinate::from_addrs(vec![peer, sibling_parent, root]).unwrap(),
+    );
+
+    // Destination lives elsewhere (under root directly), NOT under the peer.
+    let dest = make_node_addr(80);
+    node.coord_cache_mut().insert(
+        dest,
+        TreeCoordinate::from_addrs(vec![dest, root]).unwrap(),
+        now_ms(),
+    );
+
+    assert_eq!(
+        node.classify_forward(&dest, &peer),
+        RouteClass::CrosslinkAscend,
+        "lateral peer, dest not in its subtree"
+    );
+}
+
+#[test]
+fn test_classify_forward_direct_peer() {
+    // Degenerate case: the next hop is the destination itself.
+    let mut node = make_node();
+    let me = *node.node_addr();
+    let root = make_node_addr(1);
+    node.tree_state_mut()
+        .set_my_coords_for_test(TreeCoordinate::from_addrs(vec![me, root]).unwrap());
+
+    let dest = make_node_addr(90);
+    assert_eq!(
+        node.classify_forward(&dest, &dest),
+        RouteClass::DirectPeer,
+        "next hop is the destination"
+    );
+}
+
+#[test]
+fn test_route_class_partition_sums_to_forwarded() {
+    // The six route classes partition forwarded_packets: bumping
+    // record_forwarded once per record_route_class keeps the sum of the class
+    // counters equal to forwarded_packets.
+    let m = ForwardingMetrics::default();
+    let classes = [
+        RouteClass::TreeUp,
+        RouteClass::TreeUp,
+        RouteClass::TreeDown,
+        RouteClass::TreeDownCross,
+        RouteClass::TreeDownCross,
+        RouteClass::CrosslinkDescend,
+        RouteClass::CrosslinkAscend,
+        RouteClass::CrosslinkAscend,
+        RouteClass::CrosslinkAscend,
+        RouteClass::DirectPeer,
+    ];
+    for &c in &classes {
+        m.record_forwarded(100);
+        m.record_route_class(c);
+    }
+
+    let snap = m.snapshot();
+    let class_sum = snap.route_tree_up
+        + snap.route_tree_down
+        + snap.route_tree_down_cross
+        + snap.route_crosslink_descend
+        + snap.route_crosslink_ascend
+        + snap.route_direct_peer;
+    assert_eq!(
+        class_sum, snap.forwarded_packets,
+        "route classes must partition forwarded_packets"
+    );
+    assert_eq!(snap.route_tree_up, 2);
+    assert_eq!(snap.route_tree_down_cross, 2);
+    assert_eq!(snap.route_crosslink_ascend, 3);
+    assert_eq!(snap.route_direct_peer, 1);
+}

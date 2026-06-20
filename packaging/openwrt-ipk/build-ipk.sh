@@ -27,11 +27,14 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 ARCH="aarch64"
+BIN_DIR=""   # if set, use prebuilt binaries from here instead of compiling
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --arch) ARCH="$2"; shift 2 ;;
         --arch=*) ARCH="${1#*=}"; shift ;;
+        --bin-dir) BIN_DIR="$2"; shift 2 ;;
+        --bin-dir=*) BIN_DIR="${1#*=}"; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -86,44 +89,55 @@ PKG_VERSION="${PKG_VERSION:-$(cd "$PROJECT_ROOT" && git describe --tags --always
 echo "==> Building $PKG_NAME $PKG_VERSION for $OPENWRT_ARCH ($RUST_TARGET)"
 
 # ---------------------------------------------------------------------------
-# Prerequisites
+# 1. Obtain binaries
+#
+# Either use a directory of prebuilt binaries (--bin-dir; CI cross-compiles
+# once in a shared job and hands them to both the .ipk and .apk packagers), or
+# compile from source here for a self-contained local build.
 # ---------------------------------------------------------------------------
 
-if ! command -v cargo-zigbuild &>/dev/null; then
-    echo "Error: cargo-zigbuild not found." >&2
-    echo "  Install: cargo install cargo-zigbuild" >&2
-    exit 1
+if [ -n "$BIN_DIR" ]; then
+    RELEASE_DIR="$BIN_DIR"
+    echo "==> Using prebuilt binaries from $RELEASE_DIR"
+    for bin in fips fipsctl fipstop fips-gateway; do
+        [ -f "$RELEASE_DIR/$bin" ] || {
+            echo "Error: prebuilt binary not found: $RELEASE_DIR/$bin" >&2
+            exit 1
+        }
+    done
+else
+    if ! command -v cargo-zigbuild &>/dev/null; then
+        echo "Error: cargo-zigbuild not found." >&2
+        echo "  Install: cargo install cargo-zigbuild" >&2
+        exit 1
+    fi
+
+    if ! rustup target list --installed | grep -q "^$RUST_TARGET$"; then
+        echo "==> Adding Rust target $RUST_TARGET..."
+        rustup target add "$RUST_TARGET"
+    fi
+
+    echo "==> Compiling..."
+    cd "$PROJECT_ROOT"
+    cargo zigbuild \
+        --release \
+        --target "$RUST_TARGET" \
+        --bin fips \
+        --bin fipsctl \
+        --bin fipstop \
+        --bin fips-gateway
+
+    RELEASE_DIR="$PROJECT_ROOT/target/$RUST_TARGET/release"
+
+    echo "==> Stripping binaries..."
+    STRIP="${LLVM_STRIP:-strip}"
+    for bin in fips fipsctl fipstop fips-gateway; do
+        "$STRIP" "$RELEASE_DIR/$bin" 2>/dev/null || true
+    done
 fi
-
-if ! rustup target list --installed | grep -q "^$RUST_TARGET$"; then
-    echo "==> Adding Rust target $RUST_TARGET..."
-    rustup target add "$RUST_TARGET"
-fi
-
-# ---------------------------------------------------------------------------
-# 1. Build
-# ---------------------------------------------------------------------------
-
-echo "==> Compiling..."
-cd "$PROJECT_ROOT"
-cargo zigbuild \
-    --release \
-    --target "$RUST_TARGET" \
-    --bin fips \
-    --bin fipsctl \
-    --bin fipstop \
-    --bin fips-gateway
-
-RELEASE_DIR="$PROJECT_ROOT/target/$RUST_TARGET/release"
-
-echo "==> Stripping binaries..."
-STRIP="${LLVM_STRIP:-strip}"
-for bin in fips fipsctl fipstop fips-gateway; do
-    "$STRIP" "$RELEASE_DIR/$bin" 2>/dev/null || true
-done
 
 SIZE=$(du -sh "$RELEASE_DIR/fips" | cut -f1)
-echo "    fips: $SIZE after strip"
+echo "    fips: $SIZE"
 
 # ---------------------------------------------------------------------------
 # 2. Assemble .ipk

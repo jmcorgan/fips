@@ -1134,7 +1134,12 @@ fn routing_focused_pane_scrolls() {
     let mut app1 = app_with(Tab::Routing, data);
     app1.data.insert(Tab::Cache, json!({}));
     app1.focused_pane.insert(Tab::Routing, 2);
-    app1.scroll_offsets.insert((Tab::Routing, 2), 6);
+    // Congestion is the last section of the right ("Forwarded") column, below
+    // the route-class breakdown, Dropped, and Error Signals groups. The left
+    // column is the taller of the two, so scrolling fully to the bottom would
+    // over-scroll the right column past Congestion; this offset lands the
+    // Congestion region inside the short window instead.
+    app1.scroll_offsets.insert((Tab::Routing, 2), 24);
     let buf1 = testkit::render(100, 20, |frame, area| {
         super::routing::draw(frame, &app1, area);
     });

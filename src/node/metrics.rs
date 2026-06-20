@@ -81,6 +81,51 @@ pub struct ForwardingMetrics {
     pub drop_send_error_bytes: Counter,
     pub originated_packets: Counter,
     pub originated_bytes: Counter,
+    pub route_tree_up: Counter,
+    pub route_tree_down: Counter,
+    pub route_tree_down_cross: Counter,
+    pub route_crosslink_descend: Counter,
+    pub route_crosslink_ascend: Counter,
+    pub route_direct_peer: Counter,
+}
+
+/// Route class of a transit-forwarded packet, classified from tree
+/// coordinates at the forwarding decision point. The six variants
+/// partition `forwarded_packets` exactly.
+///
+/// Two variants are up-and-over forwards (destination not in the chosen
+/// peer's subtree); they differ in whether they depend on a child
+/// advertising cross-link reach *upward* to its parent:
+/// - `TreeDownCross`: the chosen peer is our tree descendant, but the
+///   destination is *not* in that child's subtree. The forward only fired
+///   because the child advertised cross-link reach upward to us, beyond its
+///   own subtree. If children advertised only their subtree upward, this
+///   forward would route up instead, so its count measures how much
+///   forwarding depends on the upward cross-link advertisement — the
+///   dive-to-tree-child cut-through.
+/// - `CrosslinkAscend`: the chosen peer is lateral (neither ancestor nor
+///   descendant) and the destination is not in its subtree. This is a node
+///   using its *own* cross-link, learned via the peer's split-horizon
+///   advertisement to its neighbors, so it does not depend on any upward
+///   advertisement. Tracked alongside `TreeDownCross` as the lateral
+///   up-and-over contrast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteClass {
+    /// Chosen peer is our ancestor (tree-up).
+    TreeUp,
+    /// Chosen peer is our descendant and dest is in its subtree (canonical
+    /// tree-down).
+    TreeDown,
+    /// Chosen peer is our descendant but dest is *not* in its subtree: the
+    /// dive-to-tree-child cut-through enabled by upward cross-link
+    /// advertisement.
+    TreeDownCross,
+    /// Chosen peer is lateral and dest is in its subtree (subtree entry).
+    CrosslinkDescend,
+    /// Chosen peer is lateral and dest is not in its subtree (up-and-over).
+    CrosslinkAscend,
+    /// Chosen peer is the destination itself (degenerate direct hop).
+    DirectPeer,
 }
 
 impl ForwardingMetrics {
@@ -110,6 +155,21 @@ impl ForwardingMetrics {
     pub fn record_originated(&self, bytes: usize) {
         self.originated_packets.inc();
         self.originated_bytes.add(bytes as u64);
+    }
+
+    /// Record the route class of a transit-forwarded packet. The five
+    /// classes partition `forwarded_packets`, so this is called exactly
+    /// once per `record_forwarded` (transit chokepoint only).
+    #[inline]
+    pub fn record_route_class(&self, class: RouteClass) {
+        match class {
+            RouteClass::TreeUp => self.route_tree_up.inc(),
+            RouteClass::TreeDown => self.route_tree_down.inc(),
+            RouteClass::TreeDownCross => self.route_tree_down_cross.inc(),
+            RouteClass::CrosslinkDescend => self.route_crosslink_descend.inc(),
+            RouteClass::CrosslinkAscend => self.route_crosslink_ascend.inc(),
+            RouteClass::DirectPeer => self.route_direct_peer.inc(),
+        }
     }
 
     /// Mirror of `ForwardingStats::record_reject_bytes`: route a typed
@@ -163,6 +223,12 @@ impl ForwardingMetrics {
             drop_send_error_bytes: self.drop_send_error_bytes.get(),
             originated_packets: self.originated_packets.get(),
             originated_bytes: self.originated_bytes.get(),
+            route_tree_up: self.route_tree_up.get(),
+            route_tree_down: self.route_tree_down.get(),
+            route_tree_down_cross: self.route_tree_down_cross.get(),
+            route_crosslink_descend: self.route_crosslink_descend.get(),
+            route_crosslink_ascend: self.route_crosslink_ascend.get(),
+            route_direct_peer: self.route_direct_peer.get(),
         }
     }
 }

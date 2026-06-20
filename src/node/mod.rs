@@ -2706,6 +2706,86 @@ impl Node {
         self.peers.get(&next_hop_id).filter(|p| p.can_send())
     }
 
+    /// Classify a transit forward by route class from tree coordinates.
+    ///
+    /// Called at the transit chokepoint after `find_next_hop` returns a peer,
+    /// so the six classes partition `forwarded_packets` exactly. The branch
+    /// that `find_next_hop` took (bloom vs greedy-tree) is *not* the route
+    /// class: a peer can be selected by either, so the cut-through splits
+    /// (`TreeDownCross`, `CrosslinkAscend`) are decided here from coordinates,
+    /// not from which branch fired.
+    ///
+    /// Inputs: our coords (`tree_state.my_coords`), the chosen peer's coords
+    /// (`tree_state.peer_coords`), and the destination coords (re-read from the
+    /// coord cache, which `find_next_hop` just touched). Both the tree-down and
+    /// cross-link branches split on whether the destination is in the chosen
+    /// peer's subtree; when the dest coords are unavailable that test defaults
+    /// to "not in subtree", i.e. the up-and-over variant (`TreeDownCross` for a
+    /// descendant peer, `CrosslinkAscend` for a lateral one).
+    pub(crate) fn classify_forward(
+        &self,
+        dest: &NodeAddr,
+        chosen_peer: &NodeAddr,
+    ) -> metrics::RouteClass {
+        // Degenerate: the next hop is the destination itself (Branch 2).
+        if chosen_peer == dest {
+            return metrics::RouteClass::DirectPeer;
+        }
+
+        let my_addr = self.node_addr();
+        let my_coords = self.tree_state.my_coords();
+
+        // Tree-up: the chosen peer is our ancestor.
+        if my_coords.has_ancestor(chosen_peer) {
+            return metrics::RouteClass::TreeUp;
+        }
+
+        // Whether the destination is in the chosen peer's subtree. Both the
+        // tree-down and cross-link splits below turn on this same test, so it
+        // is computed once. On the live transit path the dest coords are
+        // always present here: `find_next_hop` looks them up with an early
+        // return, so a coord-cache miss yields no next hop to classify (the
+        // caller signals `CoordsRequired` instead of forwarding). The miss
+        // branch below is therefore defensive — reachable only by direct
+        // unit-test calls — and defaults the test to "not in subtree", i.e.
+        // the up-and-over variant of whichever branch fires (TreeDownCross for
+        // a descendant peer, CrosslinkAscend for a lateral one), matching the
+        // original cross-link default-to-ascend.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let dest_in_peer_subtree = self
+            .coord_cache
+            .get(dest, now_ms)
+            .is_some_and(|dest_coords| dest_coords.has_ancestor(chosen_peer));
+
+        // Tree-down: the chosen peer is our descendant (we are its ancestor).
+        // Split by subtree membership: a dest genuinely below the child is the
+        // canonical tree-down; a dest *not* below it means we only forwarded
+        // down because the child advertised cross-link reach upward, beyond its
+        // own subtree — the dive-to-tree-child cut-through (TreeDownCross).
+        if let Some(peer_coords) = self.tree_state.peer_coords(chosen_peer)
+            && peer_coords.has_ancestor(my_addr)
+        {
+            return if dest_in_peer_subtree {
+                metrics::RouteClass::TreeDown
+            } else {
+                metrics::RouteClass::TreeDownCross
+            };
+        }
+
+        // Cross-link (lateral): split by whether the destination is in the
+        // chosen peer's subtree. Descend = subtree entry; ascend = up-and-over
+        // via the node's own cross-link (learned from the peer's split-horizon
+        // advertisement, independent of any upward advertisement).
+        if dest_in_peer_subtree {
+            return metrics::RouteClass::CrosslinkDescend;
+        }
+
+        metrics::RouteClass::CrosslinkAscend
+    }
+
     /// Select the best peer from a set of bloom filter candidates.
     ///
     /// Uses distance from each candidate's tree coordinates to the destination

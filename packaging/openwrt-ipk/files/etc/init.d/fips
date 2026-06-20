@@ -12,6 +12,17 @@ start_service() {
 	# Ensure TUN module is loaded before starting the daemon.
 	modprobe tun 2>/dev/null || true
 
+	# Pre-create the control-socket runtime directory so the daemon binds the
+	# canonical /run/fips/control.sock instead of falling back to /tmp. This is
+	# the procd equivalent of the systemd unit's RuntimeDirectory=fips (and the
+	# fips.tmpfiles "d /run/fips 0750 root fips" entry); OpenWrt was the only
+	# platform missing it. Without it, fips-gateway — which creates /run/fips
+	# for its own gateway.sock — makes fipsctl/fipstop resolve a control socket
+	# under /run/fips that the daemon actually bound under /tmp.
+	mkdir -p /run/fips
+	chmod 0750 /run/fips
+	chgrp fips /run/fips 2>/dev/null || true
+
 	procd_open_instance
 	procd_set_param command "$PROG" --config "$CONFIG"
 	# Respawn: restart after 5 s, give up after 5 consecutive failures within

@@ -151,6 +151,11 @@ impl Node {
             }
         } else {
             self.metrics().forwarding.record_forwarded(encoded.len());
+            // Classify this transit forward by route class (partition of
+            // forwarded_packets). Done here, at the data-plane chokepoint, so
+            // the error-signal routing callers of find_next_hop are excluded.
+            let class = self.classify_forward(&datagram.dest_addr, &next_hop_addr);
+            self.metrics().forwarding.record_route_class(class);
             if outgoing_ce {
                 self.metrics().congestion.ce_forwarded.inc();
             }

@@ -229,6 +229,12 @@ pub struct ForwardingStatsSnapshot {
     pub drop_send_error_bytes: u64,
     pub originated_packets: u64,
     pub originated_bytes: u64,
+    pub route_tree_up: u64,
+    pub route_tree_down: u64,
+    pub route_tree_down_cross: u64,
+    pub route_crosslink_descend: u64,
+    pub route_crosslink_ascend: u64,
+    pub route_direct_peer: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
