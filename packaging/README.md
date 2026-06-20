@@ -8,7 +8,8 @@ All build outputs go to `deploy/` at the project root.
 ```sh
 make deb        # Debian/Ubuntu .deb
 make tarball    # systemd install tarball
-make ipk        # OpenWrt .ipk
+make ipk        # OpenWrt .ipk (opkg, OpenWrt 24.x and earlier)
+make apk        # OpenWrt .apk (apk-tools, mandatory on OpenWrt 25+)
 make aur        # Arch Linux AUR package (fips-git, local build + namcap)
 make pkg        # macOS .pkg installer
 make zip        # Windows .zip package
@@ -46,7 +47,8 @@ packaging/
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
   macos/          macOS .pkg installer via pkgbuild
   systemd/        Generic Linux systemd tarball packaging
-  openwrt/        OpenWrt .ipk packaging via cargo-zigbuild
+  openwrt-ipk/    OpenWrt .ipk packaging via cargo-zigbuild (opkg)
+  openwrt-apk/    OpenWrt .apk packaging via cargo-zigbuild + apk mkpkg
   windows/        Windows .zip package with service scripts
 ```
 
@@ -100,7 +102,7 @@ sudo ./fips-<version>-linux-<arch>/install.sh
 See [systemd/README.install.md](systemd/README.install.md) for full
 installation and configuration instructions.
 
-### OpenWrt (`.ipk`)
+### OpenWrt (`.ipk`, opkg — OpenWrt 24.x and earlier)
 
 Cross-compiled with cargo-zigbuild and assembled as a standard `.ipk`
 archive. Supports aarch64, mipsel, mips, arm, and x86\_64 targets.
@@ -110,11 +112,32 @@ archive. Supports aarch64, mipsel, mips, arm, and x86\_64 targets.
 make ipk
 
 # Build for a specific architecture
-bash packaging/openwrt/build-ipk.sh --arch mipsel
+bash packaging/openwrt-ipk/build-ipk.sh --arch mipsel
 ```
 
-See [openwrt/README.md](openwrt/README.md) for router-specific
+See [openwrt-ipk/README.md](openwrt-ipk/README.md) for router-specific
 installation instructions.
+
+### OpenWrt (`.apk`, apk-tools — mandatory on OpenWrt 25+)
+
+OpenWrt 25 makes apk-tools the mandatory package manager (it is opt-in on
+24.10). Same SDK-free approach
+(cargo-zigbuild), but the `.apk` container is assembled by `apk mkpkg`
+rather than hand-rolled, so the build additionally needs an apk-tools v3
+`apk` binary built from source. The installed-filesystem payload is shared
+with the `.ipk` package.
+
+```sh
+# Build (default: aarch64; also x86_64)
+make apk
+
+# Build for a specific architecture
+bash packaging/openwrt-apk/build-apk.sh --arch x86_64
+```
+
+Packages are unsigned; install with `apk add --allow-untrusted`. See
+[openwrt-apk/README.md](openwrt-apk/README.md) for building apk-tools and
+router-specific installation.
 
 ### macOS (`.pkg`)
 

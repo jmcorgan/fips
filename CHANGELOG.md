@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- OpenWrt `.apk` packaging (`packaging/openwrt-apk/`, `make apk`) for
+  OpenWrt 25+, where apk-tools is the mandatory package manager (the
+  existing `.ipk` continues to cover OpenWrt 24.x and earlier). Built
+  SDK-free: it reuses the `.ipk` cross-compile (`cargo-zigbuild`) and the
+  shared installed-filesystem payload, and assembles the package with
+  `apk mkpkg` from apk-tools 3.0.5 built from source — no OpenWrt SDK
+  image. A `build-apk` CI job (aarch64, x86_64) builds and structurally
+  verifies the package; releases now publish `.apk` artifacts and
+  checksums alongside `.ipk`. Packages are unsigned, installed with
+  `apk add --allow-untrusted`, matching the `.ipk` posture.
 - Nym mixnet transport (`transports.nym`) for outbound peer links
   tunneled through a local `nym-socks5-client` SOCKS5 proxy into the
   Nym mixnet, as a privacy transport alongside Tor. Outbound-only and
