@@ -9,16 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- OpenWrt `.apk` packaging (`packaging/openwrt-apk/`, `make apk`) for
-  OpenWrt 25+, where apk-tools is the mandatory package manager (the
-  existing `.ipk` continues to cover OpenWrt 24.x and earlier). Built
-  SDK-free: it reuses the `.ipk` cross-compile (`cargo-zigbuild`) and the
-  shared installed-filesystem payload, and assembles the package with
-  `apk mkpkg` from apk-tools 3.0.5 built from source — no OpenWrt SDK
-  image. A `build-apk` CI job (aarch64, x86_64) builds and structurally
-  verifies the package; releases now publish `.apk` artifacts and
-  checksums alongside `.ipk`. Packages are unsigned, installed with
-  `apk add --allow-untrusted`, matching the `.ipk` posture.
+### Changed
+
+### Fixed
+
+## [0.4.0] - 2026-06-21
+
+### Added
+
+#### Transports (Nym, mDNS LAN discovery)
+
 - Nym mixnet transport (`transports.nym`) for outbound peer links
   tunneled through a local `nym-socks5-client` SOCKS5 proxy into the
   Nym mixnet, as a privacy transport alongside Tor. Outbound-only and
@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crate dependencies. A single-container example
   (`examples/sidecar-nostr-mixnet-relay/`) demonstrates FIPS peering
   across the mixnet end to end.
+- Opt-in mDNS / DNS-SD LAN discovery for sub-second pairing of peers on
+  the same local link, without a relay or NAT-traversal roundtrip.
+  Disabled by default; operators enable it with
+  `node.discovery.lan.enabled: true`. Configurable service type and an
+  optional `node.discovery.lan.scope` that isolates discovery to peers
+  sharing the same private-network scope. The advertised UDP port is
+  chosen from a non-bootstrap operational UDP transport using a stable
+  selector, so it is deterministic across restarts.
+
+#### Admission / peer-list management
+
+- `Node::update_peers` for runtime peer-list refresh, returning an
+  `UpdatePeersOutcome` summarizing added, removed, and retained peers.
+  Re-derives active peer connections from a new peer configuration
+  without dropping links to peers that remain in the set.
+  `PeerAddress` gains a `seen_at_ms` recency field (with
+  `with_seen_at_ms`) used to prefer more recently observed addresses.
+
+#### Data-plane / metrics / observability
+
 - Typed `RejectReason` classification for receive-path silent-rejection
   sites across the node. Each rejection-and-return path now passes a
   typed reason to `NodeStats::record_reject`, which routes it to a
@@ -38,47 +58,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   site that was previously silent. Several handshake, MMP, tree, and
   discovery rejection paths that had no counter at all are now counted,
   including the `send_lookup_response` no-route drop
-  (`DiscoveryStats::resp_no_route`). Existing
-  direct counters at the bloom / discovery / forwarding sites are
-  retained alongside the new dispatch while the rollout is in progress;
-  a later change collapses the duplicate increment.
+  (`DiscoveryStats::resp_no_route`).
 - Internal atomic metric registry (`Arc<MetricsRegistry>`) that shadows
   the plain-`u64` `NodeStats` counters, written alongside them and
   validated by a whole-struct debug-build parity check. Covers the
   forwarding receive counters, the full discovery counter family, and the
-  tree, bloom, congestion, and error-signal counter families so far, with
+  tree, bloom, congestion, and error-signal counter families, with
   the hottest counters cache-line padded. Behavior-neutral:
   `NodeStats` remains the serving path. Groundwork for sampling metrics
   without contending the receive loop.
-- `Node::update_peers` for runtime peer-list refresh, returning an
-  `UpdatePeersOutcome` summarizing added, removed, and retained peers.
-  Re-derives active peer connections from a new peer configuration
-  without dropping links to peers that remain in the set.
-  `PeerAddress` gains a `seen_at_ms` recency field (with
-  `with_seen_at_ms`) used to prefer more recently observed addresses.
-- Opt-in mDNS / DNS-SD LAN discovery for sub-second pairing of peers on
-  the same local link, without a relay or NAT-traversal roundtrip.
-  Disabled by default; operators enable it with
-  `node.discovery.lan.enabled: true`. Configurable service type and an
-  optional `node.discovery.lan.scope` that isolates discovery to peers
-  sharing the same private-network scope. The advertised UDP port is
-  chosen from a non-bootstrap operational UDP transport using a stable
-  selector, so it is deterministic across restarts.
+- `fipsctl stats metrics`, backed by a new counter-only `show_metrics`
+  control query that dumps the atomic metric registry as flat counter
+  name/value pairs. Serves a Prometheus-style scraper that samples node
+  counters without contending the receive loop.
 - `pool_inbound` and `pool_outbound` counters on the TCP and Tor
   transport stats (`TcpStats`, `TorStats`). Per-direction accounting
   is updated at every pool-insert and receive-loop-exit site, plus on
   transport stop and on send-failure-driven removal. Surfaces through
   `TcpStatsSnapshot` and `TorStatsSnapshot` for `show_transports`.
-- `fipsctl stats metrics`, backed by a new counter-only `show_metrics`
-  control query that dumps the atomic metric registry as flat counter
-  name/value pairs. Serves a Prometheus-style scraper that samples node
-  counters without contending the receive loop.
+
+#### Spanning-tree / mesh-size / routing
+
+- Six route-class transit counters that partition transit-forwarded
+  packets by their tree relationship to the chosen next hop: tree-up
+  (peer is our ancestor), tree-down (peer is our descendant and the
+  destination is within its subtree), tree-down-cross (peer is our
+  descendant but the destination is outside its subtree), cross-link
+  descend (lateral peer, destination within its subtree), cross-link
+  ascend (lateral peer, destination outside its subtree), and
+  direct-peer. The six classes sum to `forwarded_packets` (asserted by a
+  unit test) and are computed from tree coordinates at the transit
+  chokepoint, so error-signal routing callers are excluded. They surface
+  through the forwarding stats snapshot via `show_routing` and
+  `show_status`.
 - Discovery now counts `LookupRequest`s dropped when the dedup cache is
   full. A saturated `recent_requests` cache
   (`MAX_RECENT_DISCOVERY_REQUESTS`) previously dropped requests
   silently; a new `DiscoveryStats::req_dedup_cache_full` counter (typed
   reject reason `DiscoveryReject::ReqDedupCacheFull`) makes the drop
   visible through `show_routing`.
+
+#### Packaging & deployment
+
+- OpenWrt `.apk` packaging (`packaging/openwrt-apk/`, `make apk`) for
+  OpenWrt 25+, where apk-tools is the mandatory package manager (the
+  existing `.ipk` continues to cover OpenWrt 24.x and earlier). Built
+  SDK-free: it reuses the `.ipk` cross-compile (`cargo-zigbuild`) and the
+  shared installed-filesystem payload, and assembles the package with
+  `apk mkpkg` from apk-tools 3.0.5 built from source — no OpenWrt SDK
+  image. A `build-apk` CI job (aarch64, x86_64) builds and structurally
+  verifies the package; releases now publish `.apk` artifacts and
+  checksums alongside `.ipk`. Packages are unsigned, installed with
+  `apk add --allow-untrusted`, matching the `.ipk` posture.
+- Nix flake (`flake.nix` at the project root) for reproducible
+  from-source builds on Nix/NixOS. Builds all four binaries (`fips`,
+  `fipsctl`, `fips-gateway`, `fipstop`), pins the exact toolchain from
+  `rust-toolchain.toml` via fenix, and wires the build-time native
+  dependencies (`libclang` for `bindgen`, plus `dbus` and `pkg-config`),
+  so it needs no host setup beyond Nix with flakes enabled. Flake inputs
+  are lock-pinned (`flake.lock` committed) for reproducibility, and the
+  flake exposes `nix build`, `nix run`, a `nix develop` dev shell with the
+  pinned toolchain, and `nix flake check`. The flake produces binaries
+  (and a NixOS `packages.<system>.fips` output); the systemd/service
+  integration that the `.deb`/tarball installers provide is handled
+  through the NixOS configuration instead.
+
+#### Docs & contributor tooling
+
 - [`PR-REVIEW.md`](PR-REVIEW.md) — the 13-criteria PR review checklist
   the maintainer runs against every incoming PR, published at the
   repo root so contributors can run the same pass on their own change
@@ -97,32 +143,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`LimitNOFILE` drop-in) and OpenWrt (procd `nofile`) procedures to
   raise the limit, and how to verify the per-peer ratio stays bounded.
   Linked from the how-to index.
-- Nix flake (`flake.nix` at the project root) for reproducible
-  from-source builds on Nix/NixOS. Builds all four binaries (`fips`,
-  `fipsctl`, `fips-gateway`, `fipstop`), pins the exact toolchain from
-  `rust-toolchain.toml` via fenix, and wires the build-time native
-  dependencies (`libclang` for `bindgen`, plus `dbus` and `pkg-config`),
-  so it needs no host setup beyond Nix with flakes enabled. Flake inputs
-  are lock-pinned (`flake.lock` committed) for reproducibility, and the
-  flake exposes `nix build`, `nix run`, a `nix develop` dev shell with the
-  pinned toolchain, and `nix flake check`. The flake produces binaries
-  (and a NixOS `packages.<system>.fips` output); the systemd/service
-  integration that the `.deb`/tarball installers provide is handled
-  through the NixOS configuration instead.
 
 ### Changed
+
+#### FMP/FSP rekey reliability
 
 - `complete_rekey_msg2` now returns the remote peer's startup epoch
   alongside the new Noise session, so the rekey path can detect a peer
   restart and clear stale session state.
-- Active-peer path selection now sorts address candidates by recency
-  (`seen_at_ms`), preferring the most recently observed address when
-  racing concurrent path probes.
-- Per-tick work budgets bound the connection churn done in a single
-  node tick: `MAX_DISCOVERY_CONNECTS_PER_TICK`,
-  `MAX_RETRY_CONNECTIONS_PER_TICK`, and
-  `MAX_PARALLEL_PATH_CANDIDATES_PER_PEER`. Work beyond a tick's budget
-  is deferred to the next tick rather than discarded.
+
+#### NAT traversal / Nostr discovery
+
 - Nostr discovery startup is now non-blocking. `Node::start` no
   longer waits for relay connect, subscribe, or initial advert
   publish before returning. A slow or unreachable relay no longer
@@ -131,6 +162,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Subscribe retries with exponential backoff (2 s base, 60 s cap),
   publish attempts time out at 10 s, and the new tasks are aborted
   cleanly on `Node::stop`.
+
+#### Spanning-tree / mesh-size / routing
+
+- Active-peer path selection now sorts address candidates by recency
+  (`seen_at_ms`), preferring the most recently observed address when
+  racing concurrent path probes.
+- Per-tick work budgets bound the connection churn done in a single
+  node tick: `MAX_DISCOVERY_CONNECTS_PER_TICK`,
+  `MAX_RETRY_CONNECTIONS_PER_TICK`, and
+  `MAX_PARALLEL_PATH_CANDIDATES_PER_PEER`. Work beyond a tick's budget
+  is deferred to the next tick rather than discarded.
+
+#### Admission / peer caps
+
 - `node.bloom.max_inbound_fpr` default raised from `0.05` to `0.10`. The
   cap rejects inbound `FilterAnnounce` whose FPR (`fill^k`) exceeds it. On
   the fixed 1 KB / k=5 filter, `0.05` corresponds to fill 0.549 (~1,300
@@ -146,6 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-transport `max_inbound_connections`, then node-wide
   `max_connections`, then the built-in default of 256. Established peers
   remain bounded node-wide by `add_connection`.
+
+#### Data-plane / worker-pool / metrics / observability
+
 - The control-socket read surface is now served off the `rx_loop`.
   Every pure-read `show_*` query — `show_status`, the `show_stats_*`
   family, `show_listening_sockets`, the new `show_metrics`,
@@ -170,11 +218,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot fields above. Built on a ratatui `TestBackend`
   render-snapshot harness that asserts the text grid and per-cell
   style of every `ui::draw_*` against canned `show_*` JSON.
-- Static host aliases in `/etc/fips/hosts` now hot-reload on mtime
-  change instead of only at daemon startup, so `fipsctl`/`fipstop`
-  display names reflect edits without a restart. The peer ACL and host
-  map both reload once per node tick through a new lock-free
-  `Reloadable` snapshot.
 - Steady-state log noise reduced on saturated public-mesh nodes.
   Routine per-peer connection-lifecycle and capacity-cap events are
   demoted from info/warn to debug — FMP K-bit cutover promotion,
@@ -185,43 +228,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are no longer drowned out. An exhausted FMP-msg1 / FSP-msg3 rekey
   retransmission-budget abort (an expected, self-limiting outcome on
   lossy or high-latency links) is likewise demoted from warn to debug.
-- Sidecar example (`examples/sidecar-nostr-relay`): `udp.mtu` is now
-  overridable via the `FIPS_UDP_MTU` environment variable, defaulting to
-  1472 (preserving prior behavior). Plumbed through `docker-compose.yml`
-  and documented in the README env-var table. Annotated the static-CI
-  node template `mtu: 1472` literal with the same Docker-bridge
-  rationale and a pointer at the daemon's 1280 default.
-- Overhauled `CONTRIBUTING.md`: replaced generic Rust-template framing
-  with a FIPS-specific entry point covering the four-layer
-  architecture, branch model and PR-target selection, structured bug
-  reporting, scope discipline and local-CI requirements, an AI coding
-  assistant policy, and project communication channels. Added
-  `docs/branching.md` as the long-form companion covering the release
-  workflow, version conventions, and merge-direction rationale.
-- CI and release-publish workflows hardened:
-  - `ci.yml` declares a top-level `concurrency` block keyed on
-    `(workflow, ref)` with `cancel-in-progress: true`. Force-pushes
-    and rapid successive pushes to the same ref now retire any
-    in-flight run rather than letting superseded and current-tip runs
-    both burn runner minutes.
-  - `aur-publish.yml` rewritten to fetch the upstream source tarball
-    and compute its `b2sum` in CI, then patch `pkgver` and the
-    `b2sums` SKIP placeholder in `PKGBUILD` in-place. Previously
-    `updpkgsums: true` downloaded the tarball into the AUR working
-    tree, where it was rejected by AUR's 488 KiB max-blob hook —
-    silently no-op'ing the v0.3.0 stable AUR push. `fips.sysusers` /
-    `fips.tmpfiles` asset b2sums are recomputed in the same step to
-    stay in sync with the local files. `workflow_dispatch` gains a
-    tag input so historical release tags can be re-published
-    manually, and `continue-on-error: true` is dropped so future
-    regressions surface in CI.
-  - New `aur-publish-git.yml` workflow for the `fips-git` VCS
-    PKGBUILD, triggered on master pushes touching `PKGBUILD-git` or
-    companion files plus `workflow_dispatch`. `pkgver` is computed at
-    build time by the PKGBUILD's `pkgver()` function, so this workflow
-    is not tied to release tags.
-  - Tag-triggered `package-*` release-build workflows remain
-    untouched.
 - macOS UDP receive path now batches up to 32 datagrams per kernel
   wakeup via `recvmsg_x(2)`, matching the Linux `recvmmsg(2)`
   amortization shape introduced in v0.3.0. Previously macOS fell
@@ -294,6 +300,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the connected-UDP drain no longer busy-spins on a poll error
   (#106).
 
+#### Transports & config
+
+- Static host aliases in `/etc/fips/hosts` now hot-reload on mtime
+  change instead of only at daemon startup, so `fipsctl`/`fipstop`
+  display names reflect edits without a restart. The peer ACL and host
+  map both reload once per node tick through a new lock-free
+  `Reloadable` snapshot.
+- Sidecar example (`examples/sidecar-nostr-relay`): `udp.mtu` is now
+  overridable via the `FIPS_UDP_MTU` environment variable, defaulting to
+  1472 (preserving prior behavior). Plumbed through `docker-compose.yml`
+  and documented in the README env-var table. Annotated the static-CI
+  node template `mtu: 1472` literal with the same Docker-bridge
+  rationale and a pointer at the daemon's 1280 default.
+
+#### Packaging & deployment
+
 - The Debian package no longer ships `/etc/fips/fips.yaml` as a dpkg
   conf-file. The default configuration is installed as an example at
   `/usr/share/fips/fips.yaml.example`, and `postinst` seeds
@@ -305,6 +327,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example is placed under `/usr/share/fips`, deliberately outside
   `/usr/share/doc`, which minimal and container installs path-exclude
   (so the install-time seed source is never dropped).
+
+#### CI & test-harness reliability
+
+- CI and release-publish workflows hardened:
+  - `ci.yml` declares a top-level `concurrency` block keyed on
+    `(workflow, ref)` with `cancel-in-progress: true`. Force-pushes
+    and rapid successive pushes to the same ref now retire any
+    in-flight run rather than letting superseded and current-tip runs
+    both burn runner minutes.
+  - `aur-publish.yml` rewritten to fetch the upstream source tarball
+    and compute its `b2sum` in CI, then patch `pkgver` and the
+    `b2sums` SKIP placeholder in `PKGBUILD` in-place. Previously
+    `updpkgsums: true` downloaded the tarball into the AUR working
+    tree, where it was rejected by AUR's 488 KiB max-blob hook —
+    silently no-op'ing the v0.3.0 stable AUR push. `fips.sysusers` /
+    `fips.tmpfiles` asset b2sums are recomputed in the same step to
+    stay in sync with the local files. `workflow_dispatch` gains a
+    tag input so historical release tags can be re-published
+    manually, and `continue-on-error: true` is dropped so future
+    regressions surface in CI.
+  - New `aur-publish-git.yml` workflow for the `fips-git` VCS
+    PKGBUILD, triggered on master pushes touching `PKGBUILD-git` or
+    companion files plus `workflow_dispatch`. `pkgver` is computed at
+    build time by the PKGBUILD's `pkgver()` function, so this workflow
+    is not tied to release tags.
+  - Tag-triggered `package-*` release-build workflows remain
+    untouched.
 - Local and GitHub CI integration coverage brought into parity, and
   the Rust toolchain selection given a single source of truth:
   - The `admission-cap` integration suite, previously run only by
@@ -327,60 +376,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `-D warnings` is newly imposed. The OpenWrt nightly Tier-3 leg
     keeps `@nightly`.
 
+#### Docs & contributor tooling
+
+- Overhauled `CONTRIBUTING.md`: replaced generic Rust-template framing
+  with a FIPS-specific entry point covering the four-layer
+  architecture, branch model and PR-target selection, structured bug
+  reporting, scope discipline and local-CI requirements, an AI coding
+  assistant policy, and project communication channels. Added
+  `docs/branching.md` as the long-form companion covering the release
+  workflow, version conventions, and merge-direction rationale.
+
 ### Fixed
 
-- Packets addressed to a node's own mesh address are now delivered
-  locally instead of being dropped. On macOS the point-to-point `utun`
-  interface egresses self-addressed traffic into the daemon, which
-  previously pushed it onto the mesh outbound path where it was dropped
-  for lack of a route to self; such packets are now hairpinned back to
-  the TUN for inbound delivery, so `ping6` to a node's own
-  `<npub>.fips` address works. Linux was unaffected (the kernel
-  already loops self-traffic via `lo`). (Full TCP/UDP self-delivery is
-  completed by the checksum fix below.)
-- Self-delivered TCP and UDP traffic on macOS now carries a completed
-  checksum, finishing the self-delivery the hairpin above only partly
-  provided. macOS first routes self-addressed packets as loopback (a
-  `LOCAL` route via `lo0`), which leaves their transport TX checksum
-  offloaded and unfinished, but the point-to-point `utun` then egresses
-  them into the daemon with only the pseudo-header partial present.
-  Re-injecting them verbatim made the local stack drop every segment
-  whose checksum MSS clamping did not happen to rewrite: the SYN and
-  SYN-ACK got through, but the bare ACK, data, and FIN were dropped for
-  a bad checksum, so connections to a node's own `<npub>.fips` service
-  half-opened and hung. The hairpin path now recomputes the TCP/UDP
-  checksum before re-injection, so full self-connections — not just
-  `ping6` — work. Linux remains unaffected.
-- The Tor transport now increments its `connect_refused` statistic (the
-  "Refused" line in fipstop) when a SOCKS5 connection is actively
-  refused, instead of recording every connect failure as a generic
-  SOCKS5 error. The counter previously stayed at zero.
-- MMP sender metrics now ignore duplicate or regressed receiver reports
-  before updating RTT, loss, goodput, or ETX. Receiver reports also
-  suppress timestamp echo when dwell time overflows, so stale reports
-  cannot inflate SRTT.
-- Six discovery counters (`req_decode_error`, `req_duplicate`,
-  `req_ttl_exhausted`, `resp_decode_error`, `resp_identity_miss`,
-  `resp_proof_failed`) no longer double-count. Each was incremented both
-  by a direct bump and again through the typed reject dispatch; the
-  redundant direct increment is removed, so each counts once per event.
-- Six bloom counters (`decode_error`, `invalid`, `non_v1`,
-  `unknown_peer`, `stale`, `fill_exceeded`) no longer double-count. Each
-  was incremented both by a direct bump and again through the typed
-  reject dispatch; the redundant direct increment is removed, so each
-  counts once per event.
-- Five forwarding reject packet counters (`decode_error_packets`,
-  `ttl_exhausted_packets`, `drop_no_route_packets`,
-  `drop_mtu_exceeded_packets`, `drop_send_error_packets`) no longer
-  double-count. Each was incremented both by the byte-aware outcome
-  recorder and again through the typed reject dispatch; the two calls are
-  collapsed into a single byte-aware reject entry point, so packets and
-  bytes each count once per event.
+#### FMP/FSP rekey reliability
+
+- FMP link-layer rekey is now reliable under packet loss, bringing it up
+  to the FSP session layer's rekey discipline. The rekey msg1
+  retransmission driver was previously uncapped and never abandoned, so a
+  rekey that never completed resent msg1 forever; it now uses a bounded
+  retransmission budget (`handshake_max_resends` with exponential
+  backoff) and abandons the rekey cycle cleanly once the budget is
+  exhausted, mirroring the FSP rekey msg3 driver. With the cap in place
+  the link-dead heartbeat is rekey-aware: `check_link_heartbeats` no
+  longer reaps a link that is still actively carrying rekey-handshake
+  traffic, while a genuinely dead link is still reaped once the budget
+  abandons. At the K-bit cutover the receiver now authenticates an
+  inbound frame against the pending session before promoting it, instead
+  of promoting on the bare header K-bit; under jitter a node could
+  otherwise promote a stale pending session, leaving the two endpoints on
+  different keys and silently dropping traffic until the link died — the
+  same failure class already closed on FSP, now closed on FMP.
+- FSP session rekey is now hitless under packet loss and reordering.
+  Previously, a rekey could leave the two endpoints holding different
+  key sets for a brief window — if a handshake message was lost in
+  transit one side rotated keys while the other did not, and traffic
+  sealed in one key epoch reached a peer still on the other epoch and
+  failed to decrypt, producing bursts of AEAD decryption failures and
+  dropped connectivity until a later rekey reconverged the pair. The
+  receive path now trial-decrypts each frame against every live key
+  epoch (current, pending, and the draining previous session) for the
+  duration of the rekey transition, so no rotation ordering and no
+  packet reordering can cause a decryption failure. The previous-epoch
+  slot is retained as long as the peer keeps using it, with its drain
+  deadline anchored on the last frame the peer authenticates against
+  it rather than a fixed wall-clock timer, so a peer that did not
+  receive the new keys is not stranded by a silent permanent decrypt
+  failure. The lost-handshake case is closed by retransmitting the
+  third rekey handshake message until the peer is confirmed on the
+  new keys, with a bounded retry budget after which the rekey cycle
+  is cleanly abandoned and retried. There are no FSP decryption
+  failures across a rekey under lossy, jittery links.
+- ±15s symmetric jitter is applied per session to the FMP and FSP rekey
+  timer trigger, eliminating the steady-state dual-initiation race in
+  symmetric-start meshes (previously the smaller-NodeAddr tie-breaker
+  resolved correctness only after every cycle's collision).
+  `node.rekey.after_secs` becomes the nominal interval rather than a
+  floor; the mean is preserved.
 - A stale FSP (session-layer) session is now cleared when a peer
   restart is detected during FMP rekey or cross-connection promotion.
   Previously the old session could linger after the peer came back
   with a new startup epoch, leaving the session-layer map out of sync
   with the freshly promoted peer.
+
+#### NAT traversal / Nostr discovery
 
 - Two nodes that each `auto_connect` to the other no longer stall their
   Nostr-mediated NAT-traversal handshake. Each side ran both an
@@ -394,43 +452,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own NodeAddr is smaller — so one matching socket pair survives on
   both ends and the peer's redundant initiator times out harmlessly.
   One-sided (asymmetric) `auto_connect` has no co-active initiator and is
-  never suppressed, so connectivity is preserved. (Distinct from the
-  cross-init adoption tie-breaker below, which dedups two simultaneous
-  punches but does not stop each node from running redundant
-  initiator + responder sessions.)
-- FMP link-layer rekey is now reliable under packet loss, bringing it up
-  to the FSP session layer's rekey discipline:
-  - The rekey msg1 retransmission driver was uncapped and never
-    abandoned, so a rekey that never completed resent msg1 forever. It
-    now uses a bounded retransmission budget (`handshake_max_resends`
-    with exponential backoff) and abandons the rekey cycle cleanly once
-    the budget is exhausted, mirroring the FSP rekey msg3 driver. With
-    the cap in place the link-dead heartbeat is rekey-aware:
-    `check_link_heartbeats` no longer reaps a link that is still
-    actively carrying rekey-handshake traffic, while a genuinely dead
-    link is still reaped once the budget abandons.
-  - At the K-bit cutover the receiver now authenticates an inbound frame
-    against the pending session before promoting it, instead of
-    promoting on the bare header K-bit. Under jitter a node could
-    otherwise promote a stale pending session, leaving the two endpoints
-    on different keys and silently dropping traffic until the link died
-    — the same failure class already closed on FSP, now closed on FMP.
-- Node-level multi-node tests no longer flake under parallel CPU load.
-  They previously delivered handshake packets over real localhost UDP,
-  whose kernel receive buffer could overflow and drop a packet when many
-  tests ran concurrently, panicking the large-network convergence tests.
-  A `cfg(test)`-only loopback `TransportHandle` variant now delivers
-  packets directly between nodes over an unbounded in-process channel, so
-  there is no socket buffer to overflow, and the previously-quarantined
-  large-network tests run in the default suite again. The shipping daemon
-  build is unaffected (the variant is test-gated).
-- Integration suites that wait for the mesh to converge no longer
-  false-fail under concurrent CI load. The rekey, static-mesh, and
-  sidecar suites replace a fixed wall-clock baseline timeout (and a blind
-  sleep) with a progress-aware wait that polls the suite's own pairwise
-  pings, returns as soon as every pair is reachable, extends its deadline
-  while the reachable-pair count is still climbing, and gives up only
-  when progress stalls.
+  never suppressed, so connectivity is preserved.
+- NAT-traversal cross-init adoption is now deterministic under
+  simultaneous dual-initiation. Previously, when two peers'
+  Nostr-mediated UDP punches completed within the same scheduling
+  window, each side's bootstrap-completion event arrived with an
+  in-flight handshake already recorded against the other peer (each
+  side had received an inbound msg1 from the other's pre-punch
+  outbound attempt). The deduplication skip then fired on both
+  sides, neither installed the fresh traversal socket as canonical,
+  and the 45-second peer-adoption budget expired with both nodes
+  stuck waiting for an adoption that never happened. The handler now
+  applies the same deterministic NodeAddr tie-breaker the codebase
+  already uses for rekey dual-initiation and cross-connection
+  resolution: the smaller NodeAddr wins as adopter, tears down its
+  in-flight handshake state, and proceeds with adoption; the larger
+  NodeAddr keeps the skip semantics, and its in-flight outbound is
+  reconciled by the cross-connection logic when the winner's fresh
+  msg1 arrives over the adopted socket. The dual cross-init stall is
+  eliminated; cross-init NAT-traversal completes in well under a
+  second even under host CPU contention.
+- Nostr-discovered NAT-traversal events (`BootstrapEvent::Established`
+  and `BootstrapEvent::Failed`) for peers that are already connected
+  or actively handshaking are now short-circuited at the
+  `poll_nostr_discovery` dispatch sites before any cooldown
+  bookkeeping or fallback retry scheduling runs. Stale `Failed` events
+  previously poisoned the per-peer failure-state cooldown of healthy
+  peers and could trigger redundant retraversal attempts via
+  `schedule_retry` / `try_peer_addresses`; stale `Established`
+  handoffs could attempt to adopt a second socket against a live
+  connection. A defense-in-depth guard was added to
+  `adopt_established_traversal` so the same invariant holds if a
+  future caller bypasses the outer dispatch check. As a side benefit,
+  narrows a cooldown-poisoning vector previously available to an
+  attacker injecting stale failure events for an active peer.
+- Nostr discovery now filters unroutable direct UDP/TCP advert
+  endpoints. Publisher and validator retain only endpoints that parse as
+  concrete socket addresses with routable IPs and nonzero ports;
+  `udp:nat` rendezvous endpoints and Tor endpoints pass through
+  unchanged. Adverts that collapse to zero usable endpoints after
+  filtering are rejected with a clear "missing publicly routable
+  endpoints" error. Before this change, misconfigured nodes could
+  publish RFC1918, loopback, link-local, CGNAT 100.64/10, IPv6 ULA,
+  or IPv6 link-local endpoints into Nostr discovery, and consumers
+  would cache and dial them; in mixed LAN/VPN/NAT environments, that
+  could prefer a misleading one-way private path over the intended
+  `udp:nat` bootstrap.
+
+#### Admission / peer caps
+
 - TCP and Tor `max_inbound_connections` admission cap is now compared
   against the per-direction inbound count (`pool_inbound`) rather than
   the combined pool size. Outbound connect-on-send connections share
@@ -459,10 +529,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconnect / cross-connection bypass for known peers still fires) and
   before index allocation + Msg2 wire send. The late cap check inside
   `promote_connection` is intentionally retained as
-  defense-in-depth. Wire savings observed in a 45 s ops tcpdump at
+  defense-in-depth. Wire savings observed in a 45 s tcpdump at
   saturation: ~3.6 cap-denials/s × Msg2 (~104 B + AEAD compute) each.
   Bigger win is cleaner peer-side semantics — no fake-completed
   handshake whose subsequent data frames fail decryption on this side.
+
+#### Spanning-tree / mesh-size / routing
+
 - The mesh-size estimator (`compute_mesh_size`) no longer over-counts
   under filter overlap. It previously summed the per-filter cardinality
   of the parent and each child filter, which assumes the filters are
@@ -473,12 +546,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nearly-but-not-exactly doubling during rebalancing). The estimator now
   computes the cardinality of the OR-union over self plus every
   connected peer's inbound filter, dropping the parent/child tree gating
-  entirely.
-  OR is idempotent, so any overlap is deduplicated — the result equals
-  the old sum in the disjoint case, stays correct under overlap, damps
-  the parent-switch flap, and removes the estimate's dependence on
-  tree-declaration cache freshness. The per-peer 500 ms rate-limiter and
-  overall recompute cadence are unchanged.
+  entirely. OR is idempotent, so any overlap is deduplicated — the
+  result equals the old sum in the disjoint case, stays correct under
+  overlap, damps the parent-switch flap, and removes the estimate's
+  dependence on tree-declaration cache freshness. The per-peer 500 ms
+  rate-limiter and overall recompute cadence are unchanged.
 - Spanning-tree state distribution is now eventually-consistent.
   Previously every `send_tree_announce_to_all` call site fired only
   on a local state-change event (parent switch, self-root promotion,
@@ -516,7 +588,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that peer, provoking the better-rooted peer to re-push its real
   position immediately. The echo fires only in that one direction and is
   bounded by the existing per-peer rate limiter.
-
+- Coord cache invalidation made surgical at parent-position-change
+  and root-change sites. Replaces the previous unconditional
+  `CoordCache::clear()` calls with two targeted methods:
+  `invalidate_via_node(node_addr)` (drops entries whose cached
+  ancestry contains the changed node, used at parent-switch /
+  become-root / loop-detection sites) and `invalidate_other_roots`
+  (drops entries from a different tree, used at root-change sites).
+  The previous global flush left `find_next_hop` returning `None`
+  for every non-direct-peer destination after every parent switch
+  until the cache passively re-warmed; surgical invalidation
+  preserves entries that remain correct across the topology change.
+  Peer-removal retains the original "no invalidation" behavior
+  (`find_next_hop` already recomputes against the current peer set
+  every call, and Discovery handles "no route" on demand).
 - `rx_loop` tick-arm stall under convergence-phase mesh pressure
   is eliminated. Previously, the tick body's per-peer `check_*`
   loops (heartbeats, bloom announces, MMP reports, tree announces)
@@ -548,45 +633,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   synchronous connect (e.g., explicit operator-driven
   `fipsctl connect`); the tick path just no longer trips it.
 
-- NAT-traversal cross-init adoption is now deterministic under
-  simultaneous dual-initiation. Previously, when two peers'
-  Nostr-mediated UDP punches completed within the same scheduling
-  window, each side's bootstrap-completion event arrived with an
-  in-flight handshake already recorded against the other peer (each
-  side had received an inbound msg1 from the other's pre-punch
-  outbound attempt). The deduplication skip then fired on both
-  sides, neither installed the fresh traversal socket as canonical,
-  and the 45-second peer-adoption budget expired with both nodes
-  stuck waiting for an adoption that never happened. The handler now
-  applies the same deterministic NodeAddr tie-breaker the codebase
-  already uses for rekey dual-initiation and cross-connection
-  resolution: the smaller NodeAddr wins as adopter, tears down its
-  in-flight handshake state, and proceeds with adoption; the larger
-  NodeAddr keeps the skip semantics, and its in-flight outbound is
-  reconciled by the cross-connection logic when the winner's fresh
-  msg1 arrives over the adopted socket. The dual cross-init stall is
-  eliminated; cross-init NAT-traversal completes in well under a
-  second even under host CPU contention.
-- FSP session rekey is now hitless under packet loss and reordering.
-  Previously, a rekey could leave the two endpoints holding different
-  key sets for a brief window — if a handshake message was lost in
-  transit one side rotated keys while the other did not, and traffic
-  sealed in one key epoch reached a peer still on the other epoch and
-  failed to decrypt, producing bursts of AEAD decryption failures and
-  dropped connectivity until a later rekey reconverged the pair. The
-  receive path now trial-decrypts each frame against every live key
-  epoch (current, pending, and the draining previous session) for the
-  duration of the rekey transition, so no rotation ordering and no
-  packet reordering can cause a decryption failure. The previous-epoch
-  slot is retained as long as the peer keeps using it, with its drain
-  deadline anchored on the last frame the peer authenticates against
-  it rather than a fixed wall-clock timer, so a peer that did not
-  receive the new keys is not stranded by a silent permanent decrypt
-  failure. The lost-handshake case is closed by retransmitting the
-  third rekey handshake message until the peer is confirmed on the
-  new keys, with a bounded retry budget after which the rekey cycle
-  is cleanly abandoned and retried. There are no FSP decryption
-  failures across a rekey under lossy, jittery links.
+#### Data-plane / metrics / observability
+
+- The Tor transport now increments its `connect_refused` statistic (the
+  "Refused" line in fipstop) when a SOCKS5 connection is actively
+  refused, instead of recording every connect failure as a generic
+  SOCKS5 error. The counter previously stayed at zero.
+- MMP sender metrics now ignore duplicate or regressed receiver reports
+  before updating RTT, loss, goodput, or ETX. Receiver reports also
+  suppress timestamp echo when dwell time overflows, so stale reports
+  cannot inflate SRTT.
+- Reject-reason counters no longer double-count now that the rollout's
+  interim direct increments are removed. Six discovery counters
+  (`req_decode_error`, `req_duplicate`, `req_ttl_exhausted`,
+  `resp_decode_error`, `resp_identity_miss`, `resp_proof_failed`), six
+  bloom counters (`decode_error`, `invalid`, `non_v1`, `unknown_peer`,
+  `stale`, `fill_exceeded`), and five forwarding reject packet counters
+  (`decode_error_packets`, `ttl_exhausted_packets`,
+  `drop_no_route_packets`, `drop_mtu_exceeded_packets`,
+  `drop_send_error_packets`) were each incremented both by a direct bump
+  and again through the typed reject dispatch. The redundant direct
+  increments are removed — for the forwarding family the two calls are
+  collapsed into a single byte-aware reject entry point — so each counter
+  (and, for forwarding, its byte tally) counts once per event.
+- Transport-layer mutex poisoning no longer cascades. Ten
+  `Mutex::lock().unwrap()` sites across the UDP, BLE, and Ethernet
+  transports would turn a single panic (poisoning the mutex) into a
+  cascade of panics on every subsequent lock. Each is replaced with
+  `lock().unwrap_or_else(|e| e.into_inner())`, recovering the guarded
+  data with no new dependency and no call-graph change; four
+  `local_addr.unwrap()` calls on the UDP start/adopt paths get a
+  provably-safe sentinel fallback. The critical sections are short,
+  locally-scoped, and not reachable from peer input, so this is
+  robustness hardening, not a remotely-triggerable fix.
+
+#### Peer lifecycle / gateway
+
+- A manual `fipsctl disconnect` now notifies the peer so teardown is
+  symmetric. Previously a manual disconnect tore down only the local
+  side and sent the peer nothing, so the peer kept its session and never
+  re-emitted its tree and filter announcements; on reconnect it was
+  never re-adopted as a child and its bloom filter was never recorded.
+  The local side now sends the disconnected peer a scoped `Disconnect`
+  (the same message graceful shutdown sends), so both ends tear down and
+  re-handshake cleanly on the next connection.
+- `fips-gateway` no longer drops long-lived or DNS-cached client
+  mappings while traffic is still flowing. The virtual-IP pool's TTL
+  clock advanced only on DNS re-query, never on traffic, and the mapping
+  TTL is wired equal to the DNS TTL, so an in-use mapping was forced to
+  drain at TTL and reclaimed at the first zero-conntrack tick — breaking
+  long-lived, bursty, or DNS-cached clients. The tick now refreshes the
+  mapping's last-referenced time whenever conntrack reports active
+  sessions, and recovers a draining mapping to active (with a fresh
+  grace window) when traffic resumes; only genuinely idle mappings
+  drain.
+
+#### macOS self-traffic / resolver
+
+- Self-addressed mesh traffic is now delivered locally on macOS instead
+  of being dropped, for both `ping6` and full TCP/UDP. The point-to-point
+  `utun` interface egresses self-addressed traffic into the daemon, which
+  previously pushed it onto the mesh outbound path where it was dropped
+  for lack of a route to self; such packets are now hairpinned back to
+  the TUN for inbound delivery. macOS first routes self-addressed packets
+  as loopback (a `LOCAL` route via `lo0`), which leaves their transport
+  TX checksum offloaded and unfinished, so re-injecting them verbatim
+  made the local stack drop every segment whose checksum MSS clamping did
+  not happen to rewrite (the SYN and SYN-ACK got through, but the bare
+  ACK, data, and FIN were dropped, so connections to a node's own
+  `<npub>.fips` service half-opened and hung). The hairpin path now
+  recomputes the TCP/UDP checksum before re-injection, so full
+  self-connections — not just `ping6` — to a node's own `<npub>.fips`
+  address work. Linux was unaffected (the kernel already loops
+  self-traffic via `lo`). (#117)
+- macOS `.fips` name resolution now works on a fresh install: the
+  shipped resolver shim points at `::1`, matching the daemon's default
+  IPv6 DNS listener, instead of `127.0.0.1`. The mismatched shim
+  (`nameserver 127.0.0.1` while the daemon listens on `::1`) broke
+  `getaddrinfo` for `.fips` on every macOS install since the resolver
+  was introduced.
+
+#### CI & test-harness reliability
+
+- Node-level multi-node tests no longer flake under parallel CPU load.
+  They previously delivered handshake packets over real localhost UDP,
+  whose kernel receive buffer could overflow and drop a packet when many
+  tests ran concurrently, panicking the large-network convergence tests.
+  A `cfg(test)`-only loopback `TransportHandle` variant now delivers
+  packets directly between nodes over an unbounded in-process channel, so
+  there is no socket buffer to overflow, and the previously-quarantined
+  large-network tests run in the default suite again. The shipping daemon
+  build is unaffected (the variant is test-gated).
+- Integration suites that wait for the mesh to converge no longer
+  false-fail under concurrent CI load. The rekey, static-mesh, and
+  sidecar suites replace a fixed wall-clock baseline timeout (and a blind
+  sleep) with a progress-aware wait that polls the suite's own pairwise
+  pings, returns as soon as every pair is reachable, extends its deadline
+  while the reachable-pair count is still climbing, and gives up only
+  when progress stalls.
+- Rekey integration test (`testing/static/scripts/rekey-test.sh`) no
+  longer false-fails on GitHub runners under packet loss and CPU
+  contention. Phase 1, Phase 3, and Phase 5 strict per-pair pings retry
+  up to 4 attempts (configurable via `MAX_PING_ATTEMPTS` /
+  `PING_RETRY_DELAY`) — under 1% per-direction loss, single-shot 20-pair
+  ping_all misses ~33% per phase from ICMP noise alone, and the
+  4-attempt retry brings that floor to ~3.2e-6 per phase; the
+  `wait_for_full_baseline` convergence loop stays single-shot so retries
+  there cannot conflate transient ping loss with still-converging routing
+  state. Phase 1 baseline-convergence headroom is bumped from 36s to 60s
+  to eliminate the intermittent Phase 1 timeout that previously required
+  a `gh run rerun --failed`, and a post-second-rekey settle window is
+  added in Phase 5 (mirroring Phase 3's 12-second pattern) to close the
+  post-rekey per-pair-ping flake from convergence exceeding the per-ping
+  5-second timeout. Test scaffold only; no daemon code changes, and the
+  success path is unchanged because the wait loops return as soon as all
+  20 pairs converge.
+- ACL-allowlist integration test (`testing/acl-allowlist/test.sh`):
+  converted `assert_log_contains` from a one-shot `docker logs | grep`
+  snapshot into a bounded poll with the same wait-with-timeout shape
+  as `wait_for_peers_exact`. Absorbs the millisecond-to-second
+  variance in the XX-handshake cross-connection tie-breaker: the
+  inbound-handshake-context rejection can land tens of milliseconds
+  after the test's previous one-shot grep gave up, producing a
+  pre-existing flake on CI. Success-path cost is unchanged — the helper
+  returns as soon as the pattern appears.
+
+#### Packaging & deployment
+
 - AUR packaging: the `fips` and `fips-git` PKGBUILDs now install the
   `fips-dns-setup` and `fips-dns-teardown` helpers into
   `/usr/lib/fips/`, matching the Debian package. The AUR `package()`
@@ -608,113 +781,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the arch-named file is present and carries a SHA-256 integrity
   chain from the build runner through to `gh release upload`, so a
   recurrence fails CI instead of publishing.
-- Nostr discovery: filter unroutable direct UDP/TCP advert endpoints.
-  Publisher and validator now retain only endpoints that parse as
-  concrete socket addresses with routable IPs and nonzero ports.
-  `udp:nat` rendezvous endpoints and Tor endpoints pass through
-  unchanged. Adverts that collapse to zero usable endpoints after
-  filtering are rejected with a clear "missing publicly routable
-  endpoints" error. Before this change, misconfigured nodes could
-  publish RFC1918, loopback, link-local, CGNAT 100.64/10, IPv6 ULA,
-  or IPv6 link-local endpoints into Nostr discovery, and consumers
-  would cache and dial them; in mixed LAN/VPN/NAT environments, that
-  could prefer a misleading one-way private path over the intended
-  `udp:nat` bootstrap.
-- Coord cache invalidation made surgical at parent-position-change
-  and root-change sites. Replaces the previous unconditional
-  `CoordCache::clear()` calls with two targeted methods:
-  `invalidate_via_node(node_addr)` (drops entries whose cached
-  ancestry contains the changed node, used at parent-switch /
-  become-root / loop-detection sites) and `invalidate_other_roots`
-  (drops entries from a different tree, used at root-change sites).
-  The previous global flush left `find_next_hop` returning `None`
-  for every non-direct-peer destination after every parent switch
-  until the cache passively re-warmed; surgical invalidation
-  preserves entries that remain correct across the topology change.
-  Peer-removal retains the original "no invalidation" behavior
-  (`find_next_hop` already recomputes against the current peer set
-  every call, and Discovery handles "no route" on demand).
-- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
-  Phase 1, Phase 3, and Phase 5 strict per-pair pings now retry up
-  to 4 attempts (configurable via `MAX_PING_ATTEMPTS` /
-  `PING_RETRY_DELAY`). Under low-level packet loss (1% per
-  direction), single-shot 20-pair ping_all misses with probability
-  ~33% per phase from ICMP noise alone, masking the routing-state
-  signal the asserts target. The 4-attempt retry brings that floor
-  to ~3.2e-6 per phase. The `wait_for_full_baseline` convergence
-  loop itself stays single-shot — retries there would conflate
-  transient ping loss with still-converging routing state. Test
-  scaffold only; no daemon code changes.
-- Apply ±15s symmetric jitter per session to the FMP and FSP rekey
-  timer trigger. Eliminates the steady-state dual-initiation race
-  in symmetric-start meshes; previously the smaller-NodeAddr
-  tie-breaker resolved correctness after every cycle's collision.
-  `node.rekey.after_secs` becomes the nominal interval rather than
-  a floor; mean is preserved.
-- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
-  bumped Phase 1 baseline-convergence headroom from 36s to 60s.
-  Eliminates the intermittent GitHub-runner Phase 1 timeout that
-  previously required `gh run rerun --failed`. Cost on the success
-  path is unchanged because the wait loop returns as soon as all 20
-  pairs converge.
-- Rekey integration test (`testing/static/scripts/rekey-test.sh`):
-  added a post-second-rekey settle window in Phase 5, mirroring
-  Phase 3's existing 12-second pattern. Closes the intermittent
-  GitHub-runner Phase 5 per-pair-ping flake caused by post-rekey
-  routing convergence exceeding the per-ping 5-second timeout under
-  runner CPU contention. Cost on the success path is a fixed 12s per
-  suite run.
-- ACL-allowlist integration test (`testing/acl-allowlist/test.sh`):
-  converted `assert_log_contains` from a one-shot `docker logs | grep`
-  snapshot into a bounded poll with the same wait-with-timeout shape
-  as `wait_for_peers_exact`. Absorbs the millisecond-to-second
-  variance in the XX-handshake cross-connection tie-breaker: the
-  inbound-handshake-context rejection can land tens of milliseconds
-  after the test's previous one-shot grep gave up, producing a
-  pre-existing flake on next-branch CI. Success-path cost is
-  unchanged — the helper returns as soon as the pattern appears.
-- Nostr-discovered NAT-traversal events (`BootstrapEvent::Established`
-  and `BootstrapEvent::Failed`) for peers that are already connected
-  or actively handshaking are now short-circuited at the
-  `poll_nostr_discovery` dispatch sites before any cooldown
-  bookkeeping or fallback retry scheduling runs. Stale `Failed` events
-  previously poisoned the per-peer failure-state cooldown of healthy
-  peers and could trigger redundant retraversal attempts via
-  `schedule_retry` / `try_peer_addresses`; stale `Established`
-  handoffs could attempt to adopt a second socket against a live
-  connection. A defense-in-depth guard was added to
-  `adopt_established_traversal` so the same invariant holds if a
-  future caller bypasses the outer dispatch check. As a side benefit,
-  narrows a cooldown-poisoning vector previously available to an
-  attacker injecting stale failure events for an active peer.
-- A manual `fipsctl disconnect` now notifies the peer so teardown is
-  symmetric. Previously a manual disconnect tore down only the local
-  side and sent the peer nothing, so the peer kept its session and never
-  re-emitted its tree and filter announcements; on reconnect it was
-  never re-adopted as a child and its bloom filter was never recorded.
-  The local side now sends the disconnected peer a scoped `Disconnect`
-  (the same message graceful shutdown sends), so both ends tear down and
-  re-handshake cleanly on the next connection.
-- `fips-gateway` no longer drops long-lived or DNS-cached client
-  mappings while traffic is still flowing. The virtual-IP pool's TTL
-  clock advanced only on DNS re-query, never on traffic, and the mapping
-  TTL is wired equal to the DNS TTL, so an in-use mapping was forced to
-  drain at TTL and reclaimed at the first zero-conntrack tick — breaking
-  long-lived, bursty, or DNS-cached clients. The tick now refreshes the
-  mapping's last-referenced time whenever conntrack reports active
-  sessions, and recovers a draining mapping to active (with a fresh
-  grace window) when traffic resumes; only genuinely idle mappings
-  drain.
-- Transport-layer mutex poisoning no longer cascades. Ten
-  `Mutex::lock().unwrap()` sites across the UDP, BLE, and Ethernet
-  transports would turn a single panic (poisoning the mutex) into a
-  cascade of panics on every subsequent lock. Each is replaced with
-  `lock().unwrap_or_else(|e| e.into_inner())`, recovering the guarded
-  data with no new dependency and no call-graph change; four
-  `local_addr.unwrap()` calls on the UDP start/adopt paths get a
-  provably-safe sentinel fallback. The critical sections are short,
-  locally-scoped, and not reachable from peer input, so this is
-  robustness hardening, not a remotely-triggerable fix.
+
+#### fipstop
+
 - `fipstop` no longer renders a garbled screen on startup or leaves
   stray bytes on quit, most visible over SSH and inside tmux. Startup
   forces a full repaint (`terminal.clear()`) before the first draw so
@@ -722,12 +791,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdin-poll thread a stop flag and joins it before restoring the
   terminal, so post-raw-mode keystrokes or terminal query responses no
   longer echo onto the restored screen.
-- macOS `.fips` name resolution now works on a fresh install: the
-  shipped resolver shim points at `::1`, matching the daemon's default
-  IPv6 DNS listener, instead of `127.0.0.1`. The mismatched shim
-  (`nameserver 127.0.0.1` while the daemon listens on `::1`) broke
-  `getaddrinfo` for `.fips` on every macOS install since the resolver
-  was introduced.
 
 ## [0.3.0] - 2026-05-11
 
