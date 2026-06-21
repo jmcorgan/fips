@@ -1,6 +1,6 @@
 # FIPS v0.4.0
 
-**Released**: 2026-06-DD (provisional)
+**Released**: 2026-06-21 (provisional)
 
 v0.4.0 is the throughput-and-observability release on the v0.3.x wire
 format. It adds two new ways for nodes to find and reach each other (the
@@ -31,6 +31,11 @@ across a mesh in any order.
   hot-path cost.
 - Reworked `fipstop` TUI on a machine-verified render-snapshot base.
 - Rekey is now hitless under loss and reordering in both directions.
+- New packaging targets: an OpenWrt `.apk` for OpenWrt 25+ and a Nix
+  flake for reproducible from-source builds on Nix/NixOS.
+- Six route-class transit counters partition forwarded traffic by its
+  tree relationship to the next hop, visible via `show_routing` and
+  `show_status`.
 
 ## What's new
 
@@ -115,6 +120,14 @@ returns a counter-only snapshot of every metric family. It is the
 enabler for a Prometheus scraper that pulls node counters at no hot-path
 cost.
 
+Six **route-class transit counters** partition transit-forwarded packets
+by their tree relationship to the chosen next hop — tree-up, tree-down,
+tree-down-cross, cross-link descend, cross-link ascend, and direct-peer
+— and the six classes sum to `forwarded_packets`. They surface through
+`show_routing` and `show_status`, and the `fipstop` routing tab is
+reorganized so its two columns separate own/endpoint traffic from
+forwarded/transit traffic with the tree-down-cross line visually flagged.
+
 ### Reworked fipstop TUI
 
 `fipstop` gets a rendering, navigation, and read-surface overhaul on a
@@ -154,6 +167,22 @@ reordering in both directions:
 The net operator takeaway: rekey completes cleanly without dropping
 traffic, even on lossy or high-latency links, and the log no longer
 cries wolf when a rekey gives up and retries.
+
+### New packaging targets
+
+- **OpenWrt `.apk`.** A new `.apk` package targets OpenWrt 25+, where
+  apk-tools is the mandatory package manager; the existing `.ipk`
+  continues to cover OpenWrt 24.x and earlier. It is built SDK-free,
+  reusing the `.ipk` cross-compile and installed-filesystem payload, and
+  releases publish `.apk` artifacts and checksums alongside `.ipk`. Like
+  the `.ipk`, the package is unsigned and installed with
+  `apk add --allow-untrusted`.
+- **Nix flake.** A `flake.nix` at the project root builds all four
+  binaries (`fips`, `fipsctl`, `fips-gateway`, `fipstop`) from source on
+  Nix/NixOS, pinning the exact toolchain and wiring the native build
+  dependencies so no host setup is needed beyond Nix with flakes
+  enabled. It exposes `nix build`, `nix run`, a `nix develop` dev shell,
+  and `nix flake check`, with `flake.lock` committed for reproducibility.
 
 ## Behavior changes worth flagging
 
@@ -223,6 +252,15 @@ subset of fixes for behavior that shipped in v0.3.0.
   advertising a strictly worse root echoes its own declaration back,
   provoking the better-rooted peer to re-push its real position
   immediately.
+- **macOS self-connections work end to end (#117).** Traffic a macOS
+  node sends to its own `<npub>.fips` address is now delivered locally
+  for full TCP/UDP, not just `ping6`. The point-to-point `utun` egresses
+  self-addressed packets into the daemon with an unfinished transport
+  checksum (macOS offloads it on the `lo0` loopback route), so
+  re-injecting them verbatim made the local stack drop every segment the
+  MSS-clamp rewrite did not happen to fix and self-connections
+  half-opened and hung. The hairpin path now recomputes the TCP/UDP
+  checksum before re-injection. Linux was unaffected.
 
 ## Upgrade notes
 
@@ -253,7 +291,8 @@ Operator-actionable items moving from v0.3.0 to v0.4.0:
 - **Arch Linux**: `fips` from the AUR.
 - **macOS**: `.pkg` at the v0.4.0 release page.
 - **Windows**: ZIP at the v0.4.0 release page.
-- **OpenWrt**: `.ipk` at the v0.4.0 release page.
+- **OpenWrt**: `.ipk` (OpenWrt 24.x and earlier) or `.apk` (OpenWrt 25+)
+  at the v0.4.0 release page.
 - **From source**: `cargo build --release` from a checkout of the v0.4.0
   tag (Rust 1.94.1 per `rust-toolchain.toml`; `libclang-dev` is a
   required Linux build prerequisite).
