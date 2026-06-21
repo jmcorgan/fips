@@ -460,6 +460,7 @@ jobs:
 
       - name: Upload to Blossom
         id: blossom_upload
+        continue-on-error: true
         shell: bash
         env:
           BLOSSOM_SERVER: "https://blossom.primal.net"
@@ -467,17 +468,30 @@ jobs:
         run: |
           : ${GITHUB_OUTPUT:=/tmp/github_output}
 
-          UPLOAD_RESPONSE=$(nak blossom upload \
-            --server "$BLOSSOM_SERVER" \
-            --sec "$NSEC" \
-            "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null)
+          FILE_HASH=""
+          for attempt in 1 2 3; do
+            if UPLOAD_RESPONSE=$(nak blossom upload \
+              --server "$BLOSSOM_SERVER" \
+              --sec "$NSEC" \
+              "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null); then
+              echo "Upload response (attempt $attempt):"
+              echo "$UPLOAD_RESPONSE"
+              FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
+              if [ -n "$FILE_HASH" ] && [ "$FILE_HASH" != "null" ]; then
+                break
+              fi
+              echo "Upload response had no sha256 (attempt $attempt)"
+            else
+              echo "Blossom upload timed out or failed (attempt $attempt)"
+            fi
+            FILE_HASH=""
+            [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
+          done
 
-          echo "Upload response:"
-          echo "$UPLOAD_RESPONSE"
-
-          FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
           if [ -z "$FILE_HASH" ] || [ "$FILE_HASH" = "null" ]; then
-            echo "Failed to extract hash from upload response"
+            echo "Blossom upload did not succeed after 3 attempts; non-fatal."
+            echo "The package still ships as a GitHub release artifact; only the"
+            echo "supplementary Blossom/nostr distribution is skipped this run."
             exit 1
           fi
 
@@ -488,6 +502,7 @@ jobs:
 
       - name: Publish NIP-94 release event
         id: publish
+        if: steps.blossom_upload.outcome == 'success'
         shell: bash
         env:
           RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://offchain.pub"
@@ -783,6 +798,7 @@ jobs:
 
       - name: Upload to Blossom
         id: blossom_upload
+        continue-on-error: true
         shell: bash
         env:
           BLOSSOM_SERVER: "https://blossom.primal.net"
@@ -790,17 +806,30 @@ jobs:
         run: |
           : ${GITHUB_OUTPUT:=/tmp/github_output}
 
-          UPLOAD_RESPONSE=$(nak blossom upload \
-            --server "$BLOSSOM_SERVER" \
-            --sec "$NSEC" \
-            "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null)
+          FILE_HASH=""
+          for attempt in 1 2 3; do
+            if UPLOAD_RESPONSE=$(nak blossom upload \
+              --server "$BLOSSOM_SERVER" \
+              --sec "$NSEC" \
+              "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null); then
+              echo "Upload response (attempt $attempt):"
+              echo "$UPLOAD_RESPONSE"
+              FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
+              if [ -n "$FILE_HASH" ] && [ "$FILE_HASH" != "null" ]; then
+                break
+              fi
+              echo "Upload response had no sha256 (attempt $attempt)"
+            else
+              echo "Blossom upload timed out or failed (attempt $attempt)"
+            fi
+            FILE_HASH=""
+            [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
+          done
 
-          echo "Upload response:"
-          echo "$UPLOAD_RESPONSE"
-
-          FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
           if [ -z "$FILE_HASH" ] || [ "$FILE_HASH" = "null" ]; then
-            echo "Failed to extract hash from upload response"
+            echo "Blossom upload did not succeed after 3 attempts; non-fatal."
+            echo "The package still ships as a GitHub release artifact; only the"
+            echo "supplementary Blossom/nostr distribution is skipped this run."
             exit 1
           fi
 
@@ -811,6 +840,7 @@ jobs:
 
       - name: Publish NIP-94 release event
         id: publish
+        if: steps.blossom_upload.outcome == 'success'
         shell: bash
         env:
           RELAYS: "wss://relay.damus.io wss://nos.lol wss://nostr.mom wss://offchain.pub"
