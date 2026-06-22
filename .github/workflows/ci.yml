@@ -170,6 +170,50 @@ jobs:
           retention-days: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Job 1b – Android cross-build (NDK)
+#
+# Verifies the target_os cfg gating compiles for Android. FIPS runs on Android
+# as an embedded library (the host app owns the TUN via a VpnService), so this
+# builds the library only — the desktop daemon binaries are not built there.
+# cargo-ndk wires up the NDK clang/linker the C dependencies (e.g. secp256k1-sys)
+# need; the runner image ships the NDK.
+# ─────────────────────────────────────────────────────────────────────────────
+  build-android:
+    name: Build (Android NDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+          target: aarch64-linux-android
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            android-cargo-
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build library (Android arm64)
+        run: cargo ndk -t arm64-v8a build --lib
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Job 2 – Unit tests
 #
 # Runs `cargo test` on Linux.  Gated on the build matrix completing so we
