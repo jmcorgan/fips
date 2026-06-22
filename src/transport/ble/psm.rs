@@ -17,8 +17,8 @@
 //! [`docs/design/ble-interop.md`](../../../../docs/design/ble-interop.md).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use super::addr::BleAddr;
 
