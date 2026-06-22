@@ -899,7 +899,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
 | Nym | **Implemented** | Outbound-only SOCKS5 through nym-socks5-client, mixnet anonymity, IP/hostname addressing |
-| BLE | **Implemented** (Linux/glibc only; experimental) | L2CAP CoC, ATT_MTU negotiation, per-link MTU; musl/macOS/Windows skip |
+| BLE | **Implemented** (Linux/glibc and Android; experimental) | L2CAP CoC, ATT_MTU negotiation, per-link MTU; Linux via BlueZ, Android via the embedder radio bridge; macOS/Windows/musl skip |
 | Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |
 
