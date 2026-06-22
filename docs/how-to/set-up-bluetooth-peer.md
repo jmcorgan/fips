@@ -44,6 +44,7 @@ crate accordingly).
 | -------- | -------------- |
 | Linux (glibc) | Supported. |
 | Linux (musl, OpenWrt) | Disabled at build time. |
+| Android | Supported (native Android BLE, via the embedder's radio bridge). |
 | macOS | Not supported. |
 | Windows | Not supported. |
 
