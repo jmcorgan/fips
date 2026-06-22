@@ -39,16 +39,16 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::TransportError;
 
+use super::DEFAULT_PSM;
 use super::addr::BleAddr;
 use super::io::{BleAcceptor, BleIo, BleScanner, BleStream};
 use super::psm::PsmMap;
-use super::DEFAULT_PSM;
 
 /// Synthetic adapter label (Android does not expose a BlueZ-style adapter name;
 /// identity is the pubkey, never the MAC — see ble-interop.md).
@@ -204,8 +204,16 @@ impl AndroidBleBridge {
         StreamEndpoints {
             ch_id,
             remote,
-            send_mtu: if send_mtu == 0 { DEFAULT_BLE_MTU } else { send_mtu },
-            recv_mtu: if recv_mtu == 0 { DEFAULT_BLE_MTU } else { recv_mtu },
+            send_mtu: if send_mtu == 0 {
+                DEFAULT_BLE_MTU
+            } else {
+                send_mtu
+            },
+            recv_mtu: if recv_mtu == 0 {
+                DEFAULT_BLE_MTU
+            } else {
+                recv_mtu
+            },
             recv_rx,
             send_tx,
             closed,
@@ -295,10 +303,7 @@ impl AndroidBleBridge {
     /// Kotlin read one L2CAP packet for `ch_id`. Returns false if the channel is
     /// unknown/closed (Kotlin should then stop its reader).
     pub fn deliver_recv(&self, ch_id: i64, data: &[u8]) -> bool {
-        let tx = self
-            .lock_channels()
-            .get(&ch_id)
-            .map(|c| c.recv_tx.clone());
+        let tx = self.lock_channels().get(&ch_id).map(|c| c.recv_tx.clone());
         match tx {
             Some(tx) => tx.try_send(data.to_vec()).is_ok(),
             None => false,
@@ -421,7 +426,9 @@ impl Drop for AndroidStream {
 impl BleStream for AndroidStream {
     async fn send(&self, data: &[u8]) -> Result<(), TransportError> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(TransportError::Io(std::io::Error::other("BLE channel closed")));
+            return Err(TransportError::Io(std::io::Error::other(
+                "BLE channel closed",
+            )));
         }
         // Pure channel push — no JNI on the hot path. The Kotlin writer thread
         // pulls this via the bridge's next_send and writes the socket.
@@ -434,7 +441,9 @@ impl BleStream for AndroidStream {
         let mut payload = data.to_vec();
         loop {
             if self.closed.load(Ordering::Relaxed) {
-                return Err(TransportError::Io(std::io::Error::other("BLE channel closed")));
+                return Err(TransportError::Io(std::io::Error::other(
+                    "BLE channel closed",
+                )));
             }
             match self.send_tx.try_send(payload) {
                 Ok(()) => return Ok(()),
@@ -443,7 +452,9 @@ impl BleStream for AndroidStream {
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    return Err(TransportError::Io(std::io::Error::other("BLE send: peer closed")));
+                    return Err(TransportError::Io(std::io::Error::other(
+                        "BLE send: peer closed",
+                    )));
                 }
             }
         }
@@ -545,7 +556,10 @@ impl BleIo for AndroidIo {
         self.bridge.radio.connect(connect_id, addr, dial_psm);
         // FIPS already wraps connect() in a timeout, so we just await the result.
         match rx.await {
-            Ok(ep) => Ok(AndroidStream::from_endpoints(ep, Arc::clone(&self.bridge.radio))),
+            Ok(ep) => Ok(AndroidStream::from_endpoints(
+                ep,
+                Arc::clone(&self.bridge.radio),
+            )),
             Err(_) => {
                 self.bridge
                     .connects
