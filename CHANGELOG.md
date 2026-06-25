@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- openwrt: the `.apk` package now defaults `ethernet.wan` to the
+  OpenWrt 25 DSA port name `wan`; the `.ipk` package keeps `eth0` for
+  OpenWrt 24 and earlier.
+
 ### Fixed
 
 ## [0.4.0] - 2026-06-21

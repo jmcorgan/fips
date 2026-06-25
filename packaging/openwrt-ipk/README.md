@@ -132,7 +132,10 @@ The default config enables:
 
 For Ethernet transport, uncomment the `ethernet:` section and set the correct
 physical interface names for your router. **Always use physical port names
-(`eth0`, `eth1`), never bridge names (`br-lan`).** See
+(`eth0`, `eth1`, or DSA port names like `wan`/`lan1`), never bridge names
+(`br-lan`).** The shipped default WAN port is `eth0` (OpenWrt 24); on OpenWrt
+25 (DSA) boards the WAN port is named `wan` — the `.apk` package ships that
+default. Run `ip link show` to confirm the names on your board. See
 [`deploy/native/README.md`](../../deploy/native/README.md) for details.
 
 ## Service management
