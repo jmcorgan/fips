@@ -327,6 +327,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example is placed under `/usr/share/fips`, deliberately outside
   `/usr/share/doc`, which minimal and container installs path-exclude
   (so the install-time seed source is never dropped).
+- openwrt: the `.apk` package now defaults `ethernet.wan` to the
+  OpenWrt 25 DSA port name `wan`; the `.ipk` package keeps `eth0` for
+  OpenWrt 24 and earlier.
 
 #### CI & test-harness reliability
 
