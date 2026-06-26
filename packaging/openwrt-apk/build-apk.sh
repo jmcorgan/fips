@@ -191,6 +191,13 @@ install -d "$STAGE_DIR/etc/fips"
 install -m 0600 "$FILES_DIR/etc/fips/fips.yaml"   "$STAGE_DIR/etc/fips/fips.yaml"
 install -m 0755 "$FILES_DIR/etc/fips/firewall.sh" "$STAGE_DIR/etc/fips/firewall.sh"
 
+# The shared fips.yaml ships ethernet.wan.interface: "eth0", the OpenWrt 24
+# default. This .apk package targets OpenWrt 25+ (DSA), where the WAN port is
+# named "wan", so ship "wan" as the default. Patching the staged copy keeps the
+# as-installed config correct for the platform without maintaining a second copy
+# of the file; operators can still edit /etc/fips/fips.yaml for non-standard boards.
+sed -i 's|interface: "eth0"|interface: "wan"|' "$STAGE_DIR/etc/fips/fips.yaml"
+
 install -d "$STAGE_DIR/etc/dnsmasq.d"
 install -m 0644 "$FILES_DIR/etc/dnsmasq.d/fips.conf" "$STAGE_DIR/etc/dnsmasq.d/fips.conf"
 
