@@ -3,7 +3,7 @@
 ![banner](docs/logos/fips_banner.png)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.4.0-green.svg)](#status--roadmap)
+[![Status](https://img.shields.io/badge/status-v0.4.1--dev-green.svg)](#status--roadmap)
 
 A self-organizing encrypted mesh network built on Nostr identities,
 capable of operating over arbitrary transports without central
@@ -210,12 +210,14 @@ testing/      Docker-based integration test harnesses + chaos simulation
 
 ## Status & roadmap
 
-FIPS is at **v0.4.0**. The core protocol works end-to-end over
+FIPS is at **v0.4.1-dev** on the `maint` branch.
+[v0.4.0](https://github.com/jmcorgan/fips/releases/tag/v0.4.0) has
+shipped; this line carries patch-level fixes for the 0.4.x series. The
+core protocol works end-to-end over
 UDP, TCP, Ethernet, Tor, Nym, and Bluetooth on a global, public test
-mesh of thousands of nodes. v0.4.0 builds on the v0.3.0 testing-and-polishing
-track, adding the Nym mixnet transport and mDNS LAN discovery
-alongside the existing Nostr-mediated peer discovery, UDP NAT
-traversal, peer ACL, and packaging hardening. New wire-format work
+mesh of thousands of nodes. v0.4.0 added the Nym mixnet transport and
+mDNS LAN discovery alongside the existing Nostr-mediated peer discovery,
+UDP NAT traversal, peer ACL, and packaging hardening. New wire-format work
 continues to be staged on the `next` branch for the subsequent
 release line.
 
