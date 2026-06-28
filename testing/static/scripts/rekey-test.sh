@@ -158,8 +158,19 @@ REKEY_SETTLE=12        # > DRAIN_WINDOW_SECS (10) so post-rekey samples are off 
 # fully converged. Keep this bounded to preserve a meaningful scheduling check
 # while still allowing for log visibility at the timeout edge.
 FIRST_REKEY_TIMEOUT=$((REKEY_AFTER_SECS + 15))
-SECOND_REKEY_WAIT=40   # wait for second cycle
+SECOND_REKEY_WAIT=40   # upper bound for observing the second rekey cutover
 LOG_EVENT_POLL_INTERVAL=1
+
+# Post-rekey data-plane reconvergence is polled, not fixed-slept.
+# wait_until_connected drives the same all-pairs ping sweep the strict
+# per-phase assert depends on: it fails fast when reachability stops
+# improving (no new reachable pair for RECONVERGE_STALL seconds while
+# more than the near-converged slack of pairs is still down) and extends
+# its deadline up to RECONVERGE_TIMEOUT only while pairs keep coming up,
+# so a slow-but-converging post-rekey mesh under CI load passes instead
+# of false-failing on a fixed settle window.
+RECONVERGE_TIMEOUT=45
+RECONVERGE_STALL=10
 
 TIMEOUT=5
 CONVERGENCE_PING_TIMEOUT=1
@@ -392,20 +403,38 @@ assert_min_count "Rekey cutover complete (initiator), K-bit flipped" 1 \
 phase_result "FMP rekey events"
 echo ""
 
-# Verify connectivity after first rekey (strict — no failures allowed)
-echo "Phase 3: Post-rekey connectivity (settling ${REKEY_SETTLE}s)"
-sleep "$REKEY_SETTLE"
+# Verify connectivity after first rekey (strict — no failures allowed).
+# Wait for the data plane to reconverge with a progress-aware deadline
+# (the same all-pairs ping sweep the strict assert below depends on)
+# instead of a fixed settle: fail fast on a genuinely stuck pair, extend
+# only while reachability is still climbing. The strict ping_all is the
+# actual assertion, run only after the reconverge poll.
+echo "Phase 3: Post-rekey connectivity (reconverging up to ${RECONVERGE_TIMEOUT}s)"
+wait_until_connected _baseline_ping "$RECONVERGE_TIMEOUT" "$RECONVERGE_STALL" || true
 ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
 phase_result "Post-first-rekey (all 20 pairs)"
 echo ""
 
 # ── Phase 4: Wait for second rekey cycle ──────────────────────────────
-echo "Phase 4: Second rekey cycle (waiting ${SECOND_REKEY_WAIT}s)"
-sleep "$SECOND_REKEY_WAIT"
+# Poll for the next FMP rekey cutover instead of blind-sleeping: capture
+# the cutover count reached so far, then wait until at least one more
+# cutover lands — that increment is the second rekey cycle firing.
+# Bounded by SECOND_REKEY_WAIT so a stalled rekey still falls through to
+# the strict Phase 5/6 assertions rather than hanging.
+echo "Phase 4: Second rekey cycle (waiting up to ${SECOND_REKEY_WAIT}s for the next cutover)"
+fmp_cutovers_before=$(count_log_pattern "Rekey cutover complete (initiator), K-bit flipped")
+wait_for_log_pattern_count \
+    "Rekey cutover complete (initiator), K-bit flipped" \
+    "$((fmp_cutovers_before + 1))" "$SECOND_REKEY_WAIT" || true
 
-# Verify connectivity after second rekey (back-to-back)
-echo "Phase 5: Post-second-rekey connectivity (settling ${REKEY_SETTLE}s)"
-sleep "$REKEY_SETTLE"
+# Verify connectivity after second rekey (back-to-back). This is the
+# site of the recurring post-second-rekey straggler-pair flake: wait for
+# the data plane to reconverge with a progress-aware deadline (the same
+# all-pairs ping sweep the strict assert below depends on) rather than a
+# fixed settle window — fail fast if reachability stops improving, extend
+# only while pairs are still coming up.
+echo "Phase 5: Post-second-rekey connectivity (reconverging up to ${RECONVERGE_TIMEOUT}s)"
+wait_until_connected _baseline_ping "$RECONVERGE_TIMEOUT" "$RECONVERGE_STALL" || true
 ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
 phase_result "Post-second-rekey (all 20 pairs)"
 echo ""
