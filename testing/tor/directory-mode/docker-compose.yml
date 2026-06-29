@@ -11,6 +11,8 @@
 networks:
   dir-test:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
 
 services:
   fips-a:

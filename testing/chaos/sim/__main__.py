@@ -25,6 +25,12 @@ def main():
         "--duration", type=int, default=None,
         help="Override scenario duration in seconds",
     )
+    parser.add_argument(
+        "--subnet", type=str, default=None,
+        help="Override topology subnet CIDR (e.g. 10.30.0.0/24); node IPs "
+             "derive from it. Used by CI to give each parallel run a "
+             "non-overlapping network.",
+    )
     args = parser.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -48,6 +54,8 @@ def main():
             print("Error: --duration must be >= 1", file=sys.stderr)
             sys.exit(1)
         scenario.duration_secs = args.duration
+    if args.subnet is not None:
+        scenario.topology.subnet = args.subnet
 
     runner = SimRunner(scenario)
     result = runner.run()

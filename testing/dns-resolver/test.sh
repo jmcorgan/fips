@@ -67,6 +67,7 @@ start_systemd_container() {
     local name="$1" image="$2"
     cleanup_container "$name"
     docker run -d --name "$name" \
+        --label com.corganlabs.fips-ci=1 \
         --privileged \
         --cgroupns=host \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
@@ -79,6 +80,7 @@ start_systemd_container_with_tun() {
     local name="$1" image="$2"
     cleanup_container "$name"
     docker run -d --name "$name" \
+        --label com.corganlabs.fips-ci=1 \
         --privileged \
         --cgroupns=host \
         --device /dev/net/tun \

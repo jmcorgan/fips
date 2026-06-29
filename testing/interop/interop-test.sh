@@ -162,6 +162,13 @@ REKEY_SETTLE=12                 # FSP-cutover settle budget (Phase 6)
 # strict assertion sweep runs. A genuinely stuck pair still fails — the
 # poll times out and the recording sweep captures it.
 POST_REKEY_TIMEOUT=45
+# Progress-aware stall budget for the convergence detector
+# (wait_for_full_baseline → wait_until_connected). If no additional pair
+# becomes reachable for this long while more than the near-converged
+# slack of pairs is still down, the detector gives up early instead of
+# burning the whole convergence/post-rekey window; any progress resets
+# the clock, so a slow-but-converging mesh under netem keeps polling.
+RECONVERGE_STALL=15
 LOG_POLL_INTERVAL=2
 
 # Data-plane continuity stream (control-differential). Streams run a
@@ -434,25 +441,27 @@ ping_all_pairs() {
     done
 }
 
+# Convergence detector probe: one full all-pairs ping sweep in the
+# "convergence" context (which ping_all_pairs deliberately does NOT
+# record as a failure), setting PASSED/FAILED for wait_until_connected.
+_baseline_probe() {
+    ping_all_pairs quiet 1 "convergence"
+}
+
 # Poll until every directed pair pings clean, or until timeout. This is a
 # convergence DETECTOR — used at establishment (Phase 1) and after each
 # rekey (Phases 3/5). It pings with the "convergence" context, which
 # ping_all_pairs deliberately does not record as a failure; the caller
 # runs a separate strict assertion sweep afterwards.
+#
+# Delegates to the shared progress-aware wait_until_connected so the
+# deadline extends while more pairs are still coming up and gives up fast
+# on a genuine stall, instead of the prior fixed-deadline poll that could
+# false-time-out under heavy CI contention even while still converging.
+# Returns 0 once every pair is reachable, 1 on stall/timeout.
 wait_for_full_baseline() {
     local timeout="$1"
-    local start=$SECONDS
-    local best_passed=0 best_failed="$NUM_DIRECTED"
-    while (( SECONDS - start < timeout )); do
-        ping_all_pairs quiet 1 "convergence"
-        if [ "$PASSED" -gt "$best_passed" ]; then
-            best_passed="$PASSED"; best_failed="$FAILED"
-        fi
-        [ "$FAILED" -eq 0 ] && return 0
-        sleep 1
-    done
-    PASSED="$best_passed"; FAILED="$best_failed"
-    return 1
+    wait_until_connected _baseline_probe "$timeout" "$RECONVERGE_STALL"
 }
 
 phase_result() {
@@ -759,8 +768,15 @@ echo ""
 
 # ── Phase 4: second rekey cycle ──────────────────────────────────────
 
-echo "Phase 4: Second rekey cycle (waiting ${SECOND_REKEY_WAIT}s)"
-sleep "$SECOND_REKEY_WAIT"
+echo "Phase 4: Second rekey cycle (waiting up to ${SECOND_REKEY_WAIT}s for the next cutover)"
+# Poll for the next FMP cutover beyond what Phases 2/3 already saw, using
+# the same pre/post cutover-count delta convention as the control window
+# (Phase 1b), instead of a blind sleep. Bounded by SECOND_REKEY_WAIT so a
+# stalled rekey falls through to the strict Phase 5/6 assertions.
+fmp_cutovers_before="$(count_log_pattern 'Rekey cutover complete \(initiator\), K-bit flipped')"
+wait_for_log_pattern_count \
+    "Rekey cutover complete \(initiator\), K-bit flipped" \
+    "$((fmp_cutovers_before + 1))" "$SECOND_REKEY_WAIT" || true
 echo ""
 
 echo "Phase 5: Post-second-rekey connectivity (reconverge within ${POST_REKEY_TIMEOUT}s)"

@@ -1,11 +1,15 @@
 networks:
   wan:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: 172.31.254.0/24
   shared-lan:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: 172.31.10.0/24

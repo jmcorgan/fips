@@ -156,7 +156,7 @@ HELPER_IMAGE=$(docker inspect -f '{{.Config.Image}}' fips-node-$CAP_NODE 2>/dev/
 LOAD_PID=$!
 
 # Foreground: tcpdump capture for CAPTURE_SECS
-docker run --rm --net=container:fips-node-$CAP_NODE \
+docker run --rm --label com.corganlabs.fips-ci=1 --net=container:fips-node-$CAP_NODE \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     --entrypoint sh "$HELPER_IMAGE" \
     -c "timeout $CAPTURE_SECS tcpdump -nn -i any 'udp port 2121' -l 2>&1 || true" \
