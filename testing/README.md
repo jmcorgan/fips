@@ -72,3 +72,75 @@ and optional trace-level RUST_LOG, capturing per-rep diagnostics and a
 mechanism-match summary across the run. Used for statistical reliability
 characterization of known flake classes under calibrated stress, not as
 a per-commit gate; not part of `ci-local.sh`.
+
+## Running CI locally (`ci-local.sh`)
+
+[`ci-local.sh`](ci-local.sh) runs the full local CI pipeline — build,
+clippy, unit tests, and the integration suites (including the chaos
+scenarios) — mirroring the GitHub `ci.yml` integration matrix. Run
+`./ci-local.sh --help` for the full option list and `--list` for the
+available suites. `--check-parity` verifies the local suite set matches
+the GitHub matrix (see [check-ci-parity.sh](check-ci-parity.sh)).
+
+### Per-run isolation and the `FIPS_CI_RUN_ID` override
+
+Every invocation derives a **run id** and scopes all of its Docker
+resources to it, so two simultaneous runs on the same host (for example,
+one per git worktree, or an operator testing by hand while CI is in
+flight) never collide:
+
+- **Compose projects** are named `fipsci_<run-id>_<suite>`, so
+  container, network, and volume names are all prefixed per run.
+- **Build images** are tagged `fips-test:<run-id>` and
+  `fips-test-app:<run-id>` (exported as `FIPS_TEST_IMAGE` /
+  `FIPS_TEST_APP_IMAGE` for the compose consumers).
+- Each parallel chaos child gets a unique, non-overlapping `/24` in
+  `10.30.x` (via the sim `--subnet` override). `10.30.x` sits outside
+  Docker's default address pool and the fixed-subnet suites' `172.x`
+  ranges, so neither a sibling chaos child nor an auto-assigned network
+  can swallow a pinned subnet.
+
+By default the run id is `<short-git-sha>-<random>` — the SHA portion
+records *what code* a container is testing, the random suffix keeps
+simultaneous runs of the same SHA disjoint. Override it for a
+reproducible, attach-by-name debug session:
+
+```sh
+FIPS_CI_RUN_ID=mydebug ./ci-local.sh --only static-mesh
+# containers are named fipsci_mydebug_static_fips-node-a, etc.
+```
+
+### Preemption-safety and exit codes
+
+`ci-local.sh` is safe to cancel mid-run. A signal trap tears down *every*
+compose project the run started (not just the current suite) and reaps
+any in-flight parallel chaos children, bounded by a `timeout` so a stuck
+`compose down` cannot wedge the trap. Exit codes distinguish a cancelled
+run from a failing one:
+
+| Code | Meaning |
+| ---- | ------- |
+| `0`  | all stages passed |
+| `1`  | one or more stages failed |
+| `130` | interrupted by SIGINT — cancelled, not a failure |
+| `143` | terminated by SIGTERM — cancelled, not a failure |
+
+A preempting CI worker (the push-triggered, CI-gated build pipeline that
+kills an in-flight run when a newer same-branch tip arrives) maps
+`130`/`143` → *cancelled* (discard, do not record a failing commit), `0`
+→ green, any other non-zero → red.
+
+### Cleaning up leftover resources
+
+Every CI-created container, network, and volume carries the label
+`com.corganlabs.fips-ci=1`. If a run is hard-killed (SIGKILL, OOM, crash)
+and leaves resources behind, reap them with:
+
+```sh
+./ci-local.sh --reap        # or: ./ci-cleanup.sh
+```
+
+[`ci-cleanup.sh`](ci-cleanup.sh) force-removes everything bearing the CI
+label or a `fipsci_` compose-project prefix; it is safe to run when there
+is nothing to reap and safe to run repeatedly. Pass `--project-prefix` to
+scope the sweep to a single run.
