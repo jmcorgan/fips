@@ -2,6 +2,12 @@ networks:
   fips-net:
     name: ${FIPS_NETWORK:-fips-sidecar-net}
     driver: bridge
+    # Reap label: this harness uses fixed -p sidecar-{a,b,c} project names
+    # (the test execs containers by those derived names), so its resources are
+    # NOT covered by ci-local's fipsci_ project prefix. Label them directly so
+    # ci-cleanup.sh can still reap them after a preemption/SIGKILL.
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: ${FIPS_SUBNET:-172.20.1.0/24}
@@ -10,6 +16,8 @@ services:
   fips:
     image: fips-test:latest
     hostname: fips-sidecar
+    labels:
+      - "com.corganlabs.fips-ci=1"
     cap_add:
       - NET_ADMIN
     devices:
@@ -33,6 +41,8 @@ services:
 
   app:
     image: fips-test-app:latest
+    labels:
+      - "com.corganlabs.fips-ci=1"
     network_mode: "service:fips"
     depends_on:
       - fips

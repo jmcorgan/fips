@@ -20,6 +20,8 @@ _COMPOSE_TEMPLATE = Template(
 networks:
   fips-net:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: {{ subnet }}

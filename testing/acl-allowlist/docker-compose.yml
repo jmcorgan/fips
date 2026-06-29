@@ -1,6 +1,8 @@
 networks:
   acl-net:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: 172.31.0.0/24

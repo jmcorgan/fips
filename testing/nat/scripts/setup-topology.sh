@@ -57,6 +57,7 @@ run_host_ip() {
     local image="$1"
     shift
     docker run --rm \
+        --label com.corganlabs.fips-ci=1 \
         --privileged \
         --net=host \
         --pid=host \
