@@ -14,6 +14,9 @@
 #   --list               List available integration suites
 #   --check-parity       Verify this suite set matches ci.yml's integration
 #                        matrix (see testing/check-ci-parity.sh), then exit
+#   --reap               Force-remove all leftover FIPS CI docker resources
+#                        (containers/networks/volumes carrying the CI label or a
+#                        fipsci_ compose project), then exit. See ci-cleanup.sh.
 #   -h, --help           Show this help
 #
 # Integration suites (default coverage):
@@ -32,8 +35,13 @@
 #   tor-socks5, tor-directory
 #
 # Exit codes:
-#   0 — all stages passed
-#   1 — one or more stages failed
+#   0   — all stages passed
+#   1   — one or more stages failed
+#   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
+#   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
+#
+# A preempting CI worker maps 130/143 → "cancelled" (discard, do not record a
+# failing commit), 0 → green, any other non-zero → red.
 #
 # ── CI parity invariant ─────────────────────────────────────────────────────
 # This local default suite set and the GitHub integration matrix
@@ -193,6 +201,7 @@ while [[ $# -gt 0 ]]; do
         -j|--jobs)          PARALLEL_JOBS="$2"; shift 2 ;;
         --list)             list_suites ;;
         --check-parity)     exec "$SCRIPT_DIR/check-ci-parity.sh" ;;
+        --reap)             exec "$SCRIPT_DIR/ci-cleanup.sh" ;;
         -h|--help)          usage ;;
         *)                  echo "Unknown option: $1"; usage ;;
     esac
@@ -213,6 +222,104 @@ record() {
         pass "$name"
     fi
 }
+
+# ── Per-run isolation + signal-safe teardown ───────────────────────────────
+#
+# This script may be preempted (a CI worker sends SIGTERM, waits ~30s, then
+# SIGKILL) so it can restart on a newer tip. To make that safe:
+#   * every docker resource is namespaced to THIS run (compose project prefix
+#     + per-run image tags) so a restart never collides with a dying run;
+#   * a trap tears down everything this run created on signal/exit, bounded by
+#     `timeout` so a stuck `down` cannot wedge the trap (SIGKILL is the backstop).
+
+# Derive a run id: honor the worker's $FIPS_CI_RUN_ID, else <short-sha>-<rand>,
+# else $$-<timestamp>. Sanitize to a valid compose project / image-tag token.
+if [[ -n "${FIPS_CI_RUN_ID:-}" ]]; then
+    CI_RUN_ID="$FIPS_CI_RUN_ID"
+else
+    _ci_sha="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+    if [[ -n "$_ci_sha" ]]; then
+        CI_RUN_ID="${_ci_sha}-${RANDOM}${RANDOM}"
+    else
+        CI_RUN_ID="$$-$(date +%s)"
+    fi
+fi
+CI_RUN_ID="$(printf '%s' "$CI_RUN_ID" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')"
+# A docker image tag and a compose project name must both START with an
+# alphanumeric, so strip any leading -/_ left by sanitization.
+CI_RUN_ID="$(printf '%s' "$CI_RUN_ID" | sed -E 's/^[^a-z0-9]+//')"
+[[ -z "$CI_RUN_ID" ]] && CI_RUN_ID="r$$"
+
+CI_PROJECT_PREFIX="fipsci_${CI_RUN_ID}"
+CI_IMAGE_TEST="fips-test:${CI_RUN_ID}"
+CI_IMAGE_APP="fips-test-app:${CI_RUN_ID}"
+CI_LABEL="com.corganlabs.fips-ci=1"
+
+# Exported so child suite scripts + their compose/`docker run` invocations
+# inherit the run identity. Compose files read FIPS_TEST_IMAGE/FIPS_TEST_APP_IMAGE
+# (default :latest when unset, preserving manual `docker compose` use).
+export FIPS_CI_RUN_ID="$CI_RUN_ID"
+export FIPS_TEST_IMAGE="$CI_IMAGE_TEST"
+export FIPS_TEST_APP_IMAGE="$CI_IMAGE_APP"
+
+# Per-suite compose project name: ${prefix}_<suite-or-compose-basename>. Keeps
+# today's intra-run distinctness (one project per compose file / chaos child)
+# while adding the cross-run prefix that scopes the reap.
+ci_project() { printf '%s_%s' "$CI_PROJECT_PREFIX" "$1"; }
+
+# PIDs of in-flight parallel chaos children (subshells). The trap signals these.
+CI_CHAOS_PIDS=()
+CI_CLEANED=0
+
+# Best-effort, BOUNDED teardown of every docker resource THIS run may have
+# created. Idempotent (guarded), so the signal and EXIT paths don't double-run.
+ci_teardown() {
+    [[ $CI_CLEANED -eq 1 ]] && return 0
+    CI_CLEANED=1
+
+    # 1. Propagate to parallel chaos children and reap them (bounded).
+    if [[ ${#CI_CHAOS_PIDS[@]} -gt 0 ]]; then
+        kill -TERM "${CI_CHAOS_PIDS[@]}" 2>/dev/null || true
+        local _end=$(( SECONDS + 10 )) _p
+        for _p in "${CI_CHAOS_PIDS[@]}"; do
+            while kill -0 "$_p" 2>/dev/null && (( SECONDS < _end )); do
+                sleep 0.3
+            done
+        done
+        kill -KILL "${CI_CHAOS_PIDS[@]}" 2>/dev/null || true
+        wait "${CI_CHAOS_PIDS[@]}" 2>/dev/null || true
+    fi
+
+    # 2. Remove all compose projects + direct-run resources + per-run images
+    #    for this run. ci-cleanup.sh wraps each docker op in `timeout`; bound
+    #    the whole sweep too so the trap can never wedge.
+    timeout 150 bash "$SCRIPT_DIR/ci-cleanup.sh" \
+        --label "$CI_LABEL" \
+        --project-prefix "$CI_PROJECT_PREFIX" \
+        --images "$CI_IMAGE_TEST $CI_IMAGE_APP" >/dev/null 2>&1 || true
+}
+
+on_signal() {
+    local sig="$1"
+    # Block re-entry and stop the EXIT trap from overriding the signal code.
+    trap '' TERM INT EXIT
+    echo "" >&2
+    fail "Received SIG$sig — cancelling run, tearing down ${CI_PROJECT_PREFIX}"
+    ci_teardown
+    # 128 + signal number: distinct from 0 (green) / 1 (stage failed).
+    if [[ "$sig" == "TERM" ]]; then exit 143; else exit 130; fi
+}
+
+on_exit() {
+    local code=$?
+    trap '' TERM INT EXIT
+    ci_teardown
+    exit "$code"
+}
+
+trap 'on_signal TERM' TERM
+trap 'on_signal INT'  INT
+trap 'on_exit'        EXIT
 
 # ── Stage 1: Build ─────────────────────────────────────────────────────────
 
@@ -317,6 +424,7 @@ run_static() {
     local topology="$1"
     local compose="testing/static/docker-compose.yml"
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project static)"
 
     info "[$topology] Generating configs"
     bash testing/static/scripts/generate-configs.sh "$topology" || { record "static-$topology" 1; return; }
@@ -341,6 +449,7 @@ run_static() {
 run_rekey() {
     local compose="testing/static/docker-compose.yml"
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project static)"
 
     info "[rekey] Generating configs"
     bash testing/static/scripts/generate-configs.sh rekey || { record "rekey" 1; return; }
@@ -369,6 +478,7 @@ run_rekey() {
 run_admission_cap() {
     local compose="testing/static/docker-compose.yml"
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project static)"
 
     info "[admission-cap] Generating configs"
     bash testing/static/scripts/generate-configs.sh mesh || { record "admission-cap" 1; return; }
@@ -395,6 +505,9 @@ run_chaos() {
     local name="$1"
     shift
     local rc=0
+    # Distinct project per scenario (chaos children run in parallel). When
+    # invoked from a background subshell this export is local to that child.
+    export COMPOSE_PROJECT_NAME="$(ci_project "chaos-$name")"
 
     info "[chaos/$name] Running simulation"
     if bash testing/chaos/scripts/chaos.sh "$@" 2>&1; then
@@ -410,6 +523,7 @@ run_chaos() {
 run_gateway() {
     local compose="testing/static/docker-compose.yml"
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project static)"
 
     info "[gateway] Generating configs"
     bash testing/static/scripts/generate-configs.sh gateway gateway-test || { record "gateway" 1; return; }
@@ -434,6 +548,7 @@ run_gateway() {
 # Run sidecar test
 run_sidecar() {
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project sidecar)"
 
     info "[sidecar] Running integration test"
     if bash testing/sidecar/scripts/test-sidecar.sh --skip-build 2>&1; then
@@ -450,6 +565,7 @@ run_sidecar() {
 run_rekey_accept_off() {
     local compose="testing/static/docker-compose.yml"
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project static)"
 
     info "[rekey-accept-off] Generating configs"
     bash testing/static/scripts/generate-configs.sh rekey-accept-off || \
@@ -484,6 +600,7 @@ run_rekey_accept_off() {
 run_rekey_outbound_only() {
     local compose="testing/static/docker-compose.yml"
     local rc=0
+    export COMPOSE_PROJECT_NAME="$(ci_project static)"
 
     info "[rekey-outbound-only] Generating configs"
     bash testing/static/scripts/generate-configs.sh rekey-outbound-only || \
@@ -512,6 +629,7 @@ run_rekey_outbound_only() {
 
 # Run ACL allowlist integration test
 run_acl_allowlist() {
+    export COMPOSE_PROJECT_NAME="$(ci_project acl)"
     info "[acl-allowlist] Running integration test"
     if bash testing/acl-allowlist/test.sh --skip-build 2>&1; then
         record "acl-allowlist" 0
@@ -522,6 +640,7 @@ run_acl_allowlist() {
 
 # Run firewall baseline integration test
 run_firewall() {
+    export COMPOSE_PROJECT_NAME="$(ci_project firewall)"
     info "[firewall] Running integration test"
     if bash testing/firewall/test.sh --skip-build 2>&1; then
         record "firewall" 0
@@ -533,6 +652,7 @@ run_firewall() {
 # Run a NAT scenario (cone, symmetric, lan)
 run_nat() {
     local scenario="$1"
+    export COMPOSE_PROJECT_NAME="$(ci_project nat)"
     info "[nat-$scenario] Running NAT lab"
     if bash testing/nat/scripts/nat-test.sh "$scenario" 2>&1; then
         record "nat-$scenario" 0
@@ -546,6 +666,7 @@ run_nat() {
 # (A→B publish/consume), Phase 2 (B→A reverse), and Phase 3 (malformed
 # advert injected directly to the relay; consumer-liveness assertion).
 run_nostr_publish_consume() {
+    export COMPOSE_PROJECT_NAME="$(ci_project nat)"
     info "[nostr-publish-consume] Running Nostr publish/consume test"
     if bash testing/nat/scripts/nostr-relay-test.sh 2>&1; then
         record "nostr-publish-consume" 0
@@ -560,6 +681,7 @@ run_nostr_publish_consume() {
 # kill. Asserts the daemon detects each fault, recovers from delay, and
 # never panics.
 run_stun_faults() {
+    export COMPOSE_PROJECT_NAME="$(ci_project nat)"
     info "[stun-faults] Running STUN fault-injection test"
     if bash testing/nat/scripts/stun-faults-test.sh 2>&1; then
         record "stun-faults" 0
@@ -590,6 +712,7 @@ run_deb_install() {
 
 # Run Tor SOCKS5 outbound test (live Tor network)
 run_tor_socks5() {
+    export COMPOSE_PROJECT_NAME="$(ci_project tor-socks5)"
     info "[tor-socks5] Running Tor SOCKS5 outbound test (live Tor)"
     if bash testing/tor/socks5-outbound/scripts/tor-test.sh 2>&1; then
         record "tor-socks5" 0
@@ -600,6 +723,7 @@ run_tor_socks5() {
 
 # Run Tor directory-mode test (live Tor network)
 run_tor_directory() {
+    export COMPOSE_PROJECT_NAME="$(ci_project tor-directory)"
     info "[tor-directory] Running Tor directory-mode test (live Tor)"
     if bash testing/tor/directory-mode/scripts/directory-test.sh 2>&1; then
         record "tor-directory" 0
@@ -616,10 +740,20 @@ run_integration() {
     info "Installing release binaries"
     install_binaries testing/docker
 
-    # Build unified test image once (used by all harnesses)
-    info "Building fips-test Docker image"
-    docker build -t fips-test:latest testing/docker --quiet || { record "docker-build" 1; return; }
-    docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker --quiet || { record "docker-build-app" 1; return; }
+    # Build unified test image once (used by all harnesses). Tag per-run
+    # (fips-test:${run}) so a build killed mid-flight never wedges the next
+    # run's rebuild, and concurrent runs never clobber each other's image.
+    # Then retag :latest for the compose files / harness scripts that still
+    # reference fips-test:latest directly; the retag happens only after BOTH
+    # builds succeed, so :latest never points at a half-built image.
+    info "Building $CI_IMAGE_TEST Docker image"
+    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" testing/docker --quiet \
+        || { record "docker-build" 1; return; }
+    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" \
+        -f testing/docker/Dockerfile.app testing/docker --quiet \
+        || { record "docker-build-app" 1; return; }
+    docker tag "$CI_IMAGE_TEST" fips-test:latest
+    docker tag "$CI_IMAGE_APP" fips-test-app:latest
 
     # Single suite mode
     if [[ -n "$ONLY_SUITE" ]]; then
@@ -673,12 +807,22 @@ run_integration() {
         local pids=()
         local suite_names=()
         local running=0
+        local chaos_idx=0
 
         for entry in "${CHAOS_SUITES[@]}"; do
             # Parse: "display-name scenario [flags...]"
             read -ra parts <<< "$entry"
             local name="${parts[0]}"
             local args=("${parts[@]:1}")
+
+            # Give each chaos child a unique, non-overlapping /24 in 10.30.x so
+            # parallel children never collide with each other, and so a chaos
+            # net can never swallow a fixed-subnet suite (sidecar/static/nat in
+            # 172.x). 10.30.x sits outside docker's default-address-pool range
+            # (172.17-31 / 192.168), so auto-assigned nets can't land on it
+            # either. Node IPs derive from this subnet inside the sim.
+            args+=("--subnet" "10.30.${chaos_idx}.0/24")
+            chaos_idx=$((chaos_idx + 1))
 
             # Throttle: wait for a slot
             while [[ $running -ge $PARALLEL_JOBS ]]; do
@@ -693,6 +837,7 @@ run_integration() {
                 run_chaos "$name" "${args[@]}" >"$logfile" 2>&1
             ) &
             pids+=($!)
+            CI_CHAOS_PIDS+=("$!")
             suite_names+=("$name:$logfile")
             running=$((running + 1))
         done
@@ -715,6 +860,9 @@ run_integration() {
             fi
             rm -f "$logfile"
         done
+        # All chaos children have been waited on; clear so a later signal does
+        # not try to kill already-reaped PIDs.
+        CI_CHAOS_PIDS=()
     fi
 
     # Sidecar

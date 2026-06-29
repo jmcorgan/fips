@@ -1,11 +1,15 @@
 networks:
   fips-net:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: 172.20.0.0/24
   gateway-lan:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     enable_ipv6: true
     ipam:
       config:
@@ -534,7 +538,7 @@ services:
         ipv4_address: 172.20.0.12
 
   gw-client:
-    image: fips-test-app:latest
+    image: ${FIPS_TEST_APP_IMAGE:-fips-test-app:latest}
     profiles: ["gateway"]
     container_name: fips-gw-client
     hostname: gw-client
@@ -556,7 +560,7 @@ services:
   # Same image and gateway-lan attachment as
   # gw-client; the gateway must allocate a distinct virtual IP for it.
   gw-client-2:
-    image: fips-test-app:latest
+    image: ${FIPS_TEST_APP_IMAGE:-fips-test-app:latest}
     profiles: ["gateway"]
     container_name: fips-gw-client-2
     hostname: gw-client-2

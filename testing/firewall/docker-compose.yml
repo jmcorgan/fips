@@ -1,6 +1,8 @@
 networks:
   fw-net:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: 172.32.0.0/24

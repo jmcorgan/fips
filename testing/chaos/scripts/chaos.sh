@@ -65,6 +65,7 @@ VERBOSE=""
 SEED=""
 DURATION=""
 NODES=""
+SUBNET=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,6 +73,7 @@ while [ $# -gt 0 ]; do
         --seed)       SEED="$2"; shift 2 ;;
         --duration)   DURATION="$2"; shift 2 ;;
         --nodes)      NODES="$2"; shift 2 ;;
+        --subnet)     SUBNET="$2"; shift 2 ;;
         --list)       list_scenarios ;;
         -*)           echo "Error: Unknown option '$1'" >&2; usage ;;
         *)
@@ -135,6 +137,7 @@ PYTHON_ARGS=("$SCENARIO_FILE")
 [ -n "$VERBOSE" ] && PYTHON_ARGS+=("$VERBOSE")
 [ -n "$SEED" ] && PYTHON_ARGS+=("--seed" "$SEED")
 [ -n "$DURATION" ] && PYTHON_ARGS+=("--duration" "$DURATION")
+[ -n "$SUBNET" ] && PYTHON_ARGS+=("--subnet" "$SUBNET")
 
 echo "=== FIPS Stochastic Simulation ==="
 echo ""
@@ -143,6 +146,7 @@ echo "  File:     $SCENARIO_FILE"
 [ -n "$SEED" ] && echo "  Seed:     $SEED (override)"
 [ -n "$DURATION" ] && echo "  Duration: ${DURATION}s (override)"
 [ -n "$NODES" ] && echo "  Nodes:    $NODES (override)"
+[ -n "$SUBNET" ] && echo "  Subnet:   $SUBNET (override)"
 echo ""
 
 # If --nodes is specified, create a patched copy of the scenario file

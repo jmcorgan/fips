@@ -6,6 +6,8 @@
 networks:
   bt-net:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
     ipam:
       config:
         - subnet: 172.99.0.0/24

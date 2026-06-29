@@ -202,7 +202,7 @@ dump_stun_udp_probe() {
 
     local capture_file
     capture_file="$(mktemp)"
-    docker run --rm --net=container:fips-nat-stun --cap-add NET_ADMIN --cap-add NET_RAW \
+    docker run --rm --label com.corganlabs.fips-ci=1 --net=container:fips-nat-stun --cap-add NET_ADMIN --cap-add NET_RAW \
         --entrypoint sh "$helper_image" \
         -lc "timeout 8 tcpdump -ni any 'udp and not port 53' -c 80" \
         >"$capture_file" 2>&1 &

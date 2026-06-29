@@ -10,6 +10,8 @@
 networks:
   tor-test:
     driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
 
 services:
   tor-daemon:
