@@ -1,9 +1,11 @@
 //! BLE L2CAP Transport Implementation
 //!
 //! Provides BLE-based transport for FIPS peer communication using L2CAP
-//! Connection-Oriented Channels (CoC) in SeqPacket mode. L2CAP CoC
-//! preserves message boundaries (unlike TCP byte streams), so no FMP
-//! framing is needed — each send/recv is one FIPS packet.
+//! Connection-Oriented Channels (CoC). BlueZ (SeqPacket) preserves message
+//! boundaries, but stream-oriented backends (Android `BluetoothSocket`,
+//! CoreBluetooth) do not, so the receive path recovers FIPS packet boundaries
+//! with the shared FMP framer (`tcp::stream::read_fmp_packet`) over a
+//! [`stream_read::BleStreamRead`] adapter — reliable on every platform.
 //!
 //! ## Architecture
 //!
@@ -24,6 +26,7 @@ pub mod io;
 pub mod pool;
 pub mod psm;
 pub mod stats;
+pub mod stream_read;
 
 // The Android backend (radio in Kotlin, bytes over a bridge). Compiled on
 // Android, and under `cfg(test)` on any host so its channel logic is unit-tested
@@ -42,6 +45,9 @@ use discovery::DiscoveryBuffer;
 use io::{BleIo, BleScanner, BleStream};
 use pool::{BleConnection, ConnectionPool};
 use stats::BleStats;
+use stream_read::BleStreamRead;
+
+use crate::transport::tcp::stream::{StreamError, read_fmp_packet};
 
 use secp256k1::XOnlyPublicKey;
 use std::collections::HashMap;
@@ -376,9 +382,15 @@ impl<I: BleIo> BleTransport<I> {
             }
         };
 
+        // One buffering reader per connection, shared by the pubkey exchange
+        // and the receive loop so coalesced bytes are never dropped.
+        let recv_mtu = stream.recv_mtu();
+        let stream = Arc::new(stream);
+        let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+
         // Pre-handshake pubkey exchange (temporary, pre-XX)
         if let Some(ref our_pubkey) = self.local_pubkey {
-            match pubkey_exchange(&stream, our_pubkey).await {
+            match pubkey_exchange(&mut reader, our_pubkey).await {
                 Ok(peer_pubkey) => {
                     debug!(addr = %addr, "BLE outbound pubkey exchange complete");
                     self.discovery_buffer
@@ -391,24 +403,26 @@ impl<I: BleIo> BleTransport<I> {
             }
         }
 
-        self.promote_connection(addr, &ble_addr, stream).await
+        self.promote_connection(addr, &ble_addr, stream, reader)
+            .await
     }
 
     /// Promote a newly established stream into the connection pool.
     ///
-    /// Spawns the receive loop and inserts into the pool with eviction.
+    /// Spawns the receive loop (driven by `reader`) and inserts into the pool
+    /// with eviction.
     async fn promote_connection(
         &self,
         addr: &TransportAddr,
         ble_addr: &BleAddr,
-        stream: I::Stream,
+        stream: Arc<I::Stream>,
+        reader: BleStreamRead<I::Stream>,
     ) -> Result<(), TransportError> {
         let send_mtu = stream.send_mtu();
         let recv_mtu = stream.recv_mtu();
-        let stream = Arc::new(stream);
 
         let recv_task = tokio::spawn(receive_loop(
-            Arc::clone(&stream),
+            reader,
             addr.clone(),
             Arc::clone(&self.pool),
             self.packet_tx.clone(),
@@ -496,9 +510,16 @@ impl<I: BleIo> BleTransport<I> {
 
             match result {
                 Ok(Ok(stream)) => {
+                    let send_mtu = stream.send_mtu();
+                    let recv_mtu = stream.recv_mtu();
+                    let stream = Arc::new(stream);
+                    // Shared reader: pubkey exchange + receive loop read the
+                    // same buffer so coalesced bytes survive the handoff.
+                    let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+
                     // Pre-handshake pubkey exchange (temporary, pre-XX)
                     if let Some(ref our_pubkey) = local_pubkey {
-                        match pubkey_exchange(&stream, our_pubkey).await {
+                        match pubkey_exchange(&mut reader, our_pubkey).await {
                             Ok(peer_pubkey) => {
                                 debug!(addr = %addr_clone, "BLE outbound pubkey exchange complete");
                                 discovery_buffer.add_peer_with_pubkey(&ble_addr, peer_pubkey);
@@ -513,12 +534,8 @@ impl<I: BleIo> BleTransport<I> {
                         }
                     }
 
-                    let send_mtu = stream.send_mtu();
-                    let recv_mtu = stream.recv_mtu();
-                    let stream = Arc::new(stream);
-
                     let recv_task = tokio::spawn(receive_loop(
-                        Arc::clone(&stream),
+                        reader,
                         addr_clone.clone(),
                         Arc::clone(&pool),
                         packet_tx,
@@ -689,31 +706,38 @@ const PUBKEY_EXCHANGE_TIMEOUT_SECS: u64 = 5;
 
 /// Exchange public keys over a newly established L2CAP connection.
 ///
-/// Both sides send `[0x00][our_pubkey:32]` and receive the peer's.
+/// Both sides send `[0x00][our_pubkey:32]` and receive the peer's. Reads go
+/// through the connection's [`BleStreamRead`] buffer so a peer that fragments
+/// the 33-byte message (stream-oriented backends) is read correctly, and any
+/// bytes it coalesced after the pubkey stay buffered for the receive loop.
 /// Returns the peer's XOnlyPublicKey on success.
 async fn pubkey_exchange<S: BleStream>(
-    stream: &S,
+    reader: &mut BleStreamRead<S>,
     local_pubkey: &[u8; 32],
 ) -> Result<XOnlyPublicKey, TransportError> {
+    use tokio::io::AsyncReadExt;
+
     // Send our pubkey
     let mut msg = [0u8; PUBKEY_EXCHANGE_SIZE];
     msg[0] = PUBKEY_EXCHANGE_PREFIX;
     msg[1..].copy_from_slice(local_pubkey);
-    stream.send(&msg).await?;
+    reader.stream().send(&msg).await?;
 
-    // Receive peer's pubkey (with timeout to prevent indefinite blocking)
+    // Receive peer's pubkey (with timeout to prevent indefinite blocking).
+    // read_exact reassembles across fragmented recvs and leaves any trailing
+    // bytes in the reader's buffer.
     let mut buf = [0u8; PUBKEY_EXCHANGE_SIZE];
     let timeout = std::time::Duration::from_secs(PUBKEY_EXCHANGE_TIMEOUT_SECS);
-    let n = match tokio::time::timeout(timeout, stream.recv(&mut buf)).await {
-        Ok(result) => result?,
+    match tokio::time::timeout(timeout, reader.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Err(TransportError::RecvFailed(format!(
+                "pubkey exchange: {}",
+                e
+            )));
+        }
         Err(_) => return Err(TransportError::Timeout),
     };
-    if n != PUBKEY_EXCHANGE_SIZE {
-        return Err(TransportError::RecvFailed(format!(
-            "pubkey exchange: expected {} bytes, got {}",
-            PUBKEY_EXCHANGE_SIZE, n
-        )));
-    }
     if buf[0] != PUBKEY_EXCHANGE_PREFIX {
         return Err(TransportError::RecvFailed(format!(
             "pubkey exchange: bad prefix 0x{:02X}",
@@ -763,10 +787,13 @@ async fn accept_loop<A>(
 
                 let send_mtu = stream.send_mtu();
                 let recv_mtu = stream.recv_mtu();
+                let stream = Arc::new(stream);
+                // Shared reader for pubkey exchange + receive loop.
+                let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
                 // Pre-handshake pubkey exchange (temporary, pre-XX)
                 if let Some(ref our_pubkey) = local_pubkey {
-                    match pubkey_exchange(&stream, our_pubkey).await {
+                    match pubkey_exchange(&mut reader, our_pubkey).await {
                         Ok(peer_pubkey) => {
                             debug!(addr = %ta, "BLE inbound pubkey exchange complete");
                             discovery_buffer.add_peer_with_pubkey(&addr, peer_pubkey);
@@ -792,11 +819,9 @@ async fn accept_loop<A>(
                     }
                 }
 
-                let stream = Arc::new(stream);
-
                 // Spawn receive loop
                 let recv_task = tokio::spawn(receive_loop(
-                    Arc::clone(&stream),
+                    reader,
                     ta.clone(),
                     Arc::clone(&pool),
                     packet_tx.clone(),
@@ -841,8 +866,14 @@ async fn accept_loop<A>(
 }
 
 /// Receive loop: reads packets from a BLE stream and delivers to node.
-async fn receive_loop<S: BleStream>(
-    stream: Arc<S>,
+///
+/// Recovers FIPS packet boundaries from the byte stream via the shared FMP
+/// framer ([`read_fmp_packet`]) rather than assuming one `recv` is one packet.
+/// L2CAP only preserves SDU boundaries on BlueZ (SeqPacket); stream-oriented
+/// backends (Android, CoreBluetooth) fragment and coalesce, so the framer's
+/// length-prefixed reads are what make delivery reliable across platforms.
+async fn receive_loop<S: BleStream + 'static>(
+    mut reader: BleStreamRead<S>,
     addr: TransportAddr,
     pool: Arc<Mutex<ConnectionPool<Arc<S>>>>,
     packet_tx: PacketTx,
@@ -850,20 +881,20 @@ async fn receive_loop<S: BleStream>(
     stats: Arc<BleStats>,
     recv_mtu: u16,
 ) {
-    let mut buf = vec![0u8; recv_mtu as usize];
     loop {
-        match stream.recv(&mut buf).await {
-            Ok(0) => {
-                debug!(addr = %addr, "BLE connection closed by peer");
-                break;
-            }
-            Ok(n) => {
-                stats.record_recv(n);
-                let packet = ReceivedPacket::new(transport_id, addr.clone(), buf[..n].to_vec());
-                if packet_tx.send(packet).await.is_err() {
+        match read_fmp_packet(&mut reader, recv_mtu).await {
+            Ok(packet) => {
+                stats.record_recv(packet.len());
+                let received = ReceivedPacket::new(transport_id, addr.clone(), packet);
+                if packet_tx.send(received).await.is_err() {
                     trace!("BLE packet_tx closed, stopping receive loop");
                     break;
                 }
+            }
+            // Clean peer close (EOF at a packet boundary) is expected, not an error.
+            Err(StreamError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                debug!(addr = %addr, "BLE connection closed by peer");
+                break;
             }
             Err(e) => {
                 debug!(addr = %addr, error = %e, "BLE receive error");
@@ -998,7 +1029,12 @@ async fn scan_probe_loop<I: io::BleIo>(
 
         // Pubkey exchange, then promote connection to pool
         let ta = addr.to_transport_addr();
-        match pubkey_exchange(&stream, &our_pubkey).await {
+        let send_mtu = stream.send_mtu();
+        let recv_mtu = stream.recv_mtu();
+        let stream = Arc::new(stream);
+        // Shared reader for pubkey exchange + receive loop.
+        let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+        match pubkey_exchange(&mut reader, &our_pubkey).await {
             Ok(peer_pubkey) => {
                 debug!(addr = %addr, "BLE probe complete");
 
@@ -1017,12 +1053,8 @@ async fn scan_probe_loop<I: io::BleIo>(
                 }
 
                 // Promote connection to pool — no second L2CAP connect needed
-                let send_mtu = stream.send_mtu();
-                let recv_mtu = stream.recv_mtu();
-                let stream = Arc::new(stream);
-
                 let recv_task = tokio::spawn(receive_loop(
-                    Arc::clone(&stream),
+                    reader,
                     ta.clone(),
                     Arc::clone(&pool),
                     packet_tx.clone(),
