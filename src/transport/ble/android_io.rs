@@ -59,12 +59,19 @@ const ANDROID_ADAPTER: &str = "ble0";
 /// tolerable since FMP/Noise above retransmits.
 const CHANNEL_CAP: usize = 256;
 
-/// Bound on the **outbound byte** queue (Rust → Kotlin writer). Kept shallow on
-/// purpose: a BLE link's bandwidth-delay product is ~1 packet, so a deep queue
-/// only bufferbloats it — RTT balloons to seconds and TCP above can't ramp. A
-/// small bound makes `BleStream::send` backpressure (the `SyncSender` blocks),
-/// which propagates up through FSP/MMP to the TUN and TCP's own flow control.
-const SEND_QUEUE_CAP: usize = 8;
+/// Bound on the **outbound byte** queue (Rust → Kotlin writer), fixed at channel
+/// creation. A bounded queue makes `BleStream::send` backpressure (the `SyncSender`
+/// blocks), propagating flow control up through FSP/MMP to the TUN and TCP rather
+/// than letting an unbounded queue bufferbloat the link.
+///
+/// 32 is empirical, swept against the peer speedtest: 8 starved the radio's
+/// connection events (~half throughput), 64 bufferbloated TCP (regressed), and 32
+/// was best (~200/500 kbps up/down). The sweep was noisy and non-monotonic across
+/// single runs, though — run-to-run BLE variance (RF, and whether the OS grants 2M
+/// PHY / high connection priority that session) rivals the effect of this knob — so
+/// 32 is the best-observed working value, to be re-validated with repeated runs +
+/// PHY/interval instrumentation, not a proven optimum.
+const SEND_QUEUE_CAP: usize = 32;
 
 /// Transport default MTU, used when the OS reports an unknown (0) channel MTU.
 /// Matches `DEFAULT_BLE_MTU` in `config/transport.rs`.
