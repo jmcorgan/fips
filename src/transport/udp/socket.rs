@@ -606,7 +606,17 @@ mod platform {
                     unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
                 let ip = std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr);
                 let port = u16::from_be(addr.sin6_port);
-                Ok(SocketAddr::from((ip, port)))
+                // Preserve sin6_scope_id: a link-local source (fe80::/10) is
+                // only routable together with its interface scope, so dropping
+                // it here breaks replies to a link-local peer (e.g. a Wi-Fi
+                // Aware NDP interface). Non-link-local sources carry scope 0,
+                // for which SocketAddrV6 is identical to the unscoped form.
+                Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+                    ip,
+                    port,
+                    0,
+                    addr.sin6_scope_id,
+                )))
             }
             family => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
