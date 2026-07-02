@@ -1093,6 +1093,29 @@ impl Node {
             .map(|(id, _)| *id)
     }
 
+    /// Link preference of a transport instance by id (higher = preferred),
+    /// from its transport type. See [`crate::transport::transport_link_preference`].
+    /// Unknown ids get 0 so any real transport outranks a stale/removed one.
+    pub(crate) fn transport_preference(&self, id: TransportId) -> u8 {
+        self.transports
+            .get(&id)
+            .map(|h| crate::transport::transport_link_preference(h.transport_type().name))
+            .unwrap_or(0)
+    }
+
+    /// How long a preferred transport must be silent before a lower-preference
+    /// transport may take over the peer's link (the roaming cutover hysteresis).
+    /// ~2 heartbeat intervals so a single missed heartbeat can't cause a
+    /// spurious downgrade; floored so a tiny configured interval can't flap.
+    pub(crate) fn roam_hysteresis_ms(&self) -> u64 {
+        (self
+            .config()
+            .node
+            .heartbeat_interval_secs
+            .saturating_mul(2_000))
+        .max(15_000)
+    }
+
     /// Resolve an Ethernet peer address ("interface/mac") to a transport ID
     /// and binary TransportAddr.
     ///

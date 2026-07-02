@@ -263,6 +263,11 @@ impl Node {
         let ce_flag = header.flags & FLAG_CE != 0;
         let sp_flag = header.flags & FLAG_SP != 0;
 
+        // Transport-preference cutover: gate roaming so a faster transport
+        // (Wi-Fi Aware / UDP) isn't dragged back to a slower one (BLE) by a
+        // stray packet. Computed before the peer borrow (needs `self`).
+        let roam_pref = self.transport_preference(packet.transport_id);
+        let roam_hysteresis = self.roam_hysteresis_ms();
         if let Some(peer) = self.peers.get_mut(&node_addr) {
             if let Some(mmp) = peer.mmp_mut() {
                 mmp.receiver.record_recv(
@@ -274,7 +279,13 @@ impl Node {
                 );
                 let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, header.counter, now);
             }
-            peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
+            peer.roam_current_addr(
+                packet.transport_id,
+                packet.remote_addr.clone(),
+                roam_pref,
+                packet.timestamp_ms,
+                roam_hysteresis,
+            );
             peer.link_stats_mut()
                 .record_recv(packet.data.len(), packet.timestamp_ms);
             peer.touch(packet.timestamp_ms);
@@ -356,10 +367,18 @@ impl Node {
             return;
         };
         let now = Instant::now();
+        let roam_pref = self.transport_preference(transport_id);
+        let roam_hysteresis = self.roam_hysteresis_ms();
         let mut address_changed = false;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.reset_decrypt_failures();
-            address_changed = peer.set_current_addr(transport_id, remote_addr.clone());
+            address_changed = peer.roam_current_addr(
+                transport_id,
+                remote_addr.clone(),
+                roam_pref,
+                packet_timestamp_ms,
+                roam_hysteresis,
+            );
             peer.link_stats_mut()
                 .record_recv(packet_len, packet_timestamp_ms);
             peer.touch(packet_timestamp_ms);

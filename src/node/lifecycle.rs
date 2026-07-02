@@ -620,6 +620,18 @@ impl Node {
                 let remote_addr = peer.addr;
 
                 if self.peers.contains_key(&node_addr) {
+                    // Don't re-probe an alternate path that is strictly worse
+                    // than the one the peer is already on: a peer settled on a
+                    // faster transport (Wi-Fi Aware / UDP) must not be pulled
+                    // back to BLE by BLE rediscovery. Equal-or-better candidates
+                    // still refresh, so BLE → Aware upgrades proceed.
+                    if let Some(cur) = self.peers.get(&node_addr).and_then(|p| p.transport_id()) {
+                        if self.transport_preference(cur)
+                            > self.transport_preference(candidate_transport_id)
+                        {
+                            continue;
+                        }
+                    }
                     let transport_name = transport.transport_type().name;
                     let candidate = PeerAddress::new(transport_name, remote_addr.to_string());
                     if self.active_peer_candidate_is_fresh_enough_to_skip(

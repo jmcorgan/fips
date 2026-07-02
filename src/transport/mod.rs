@@ -280,6 +280,27 @@ impl fmt::Display for TransportType {
     }
 }
 
+/// Link preference for a transport type — higher is preferred for carrying a
+/// peer's traffic when that peer is reachable over more than one transport at
+/// once. Used by the roaming cutover (`ActivePeer::roam_current_addr`) so a
+/// peer on a fast transport (Wi-Fi Aware / UDP) is not dragged onto a slow
+/// one (BLE) by a stray packet. Equal preferences reduce to plain
+/// last-authenticated-packet-wins roaming, so single-transport deployments are
+/// unaffected.
+pub fn transport_link_preference(name: &str) -> u8 {
+    match name {
+        // High-bandwidth IP transports (incl. the Wi-Fi Aware data path, which
+        // rides the UDP transport).
+        "wifi" | "udp" | "tcp" => 100,
+        "ethernet" => 90,
+        // Always-on but low-bandwidth control link.
+        "ble" => 50,
+        // Anonymity overlays: high latency.
+        "tor" | "nym" => 40,
+        _ => 80,
+    }
+}
+
 // ============================================================================
 // Transport State
 // ============================================================================

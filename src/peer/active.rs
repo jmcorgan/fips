@@ -99,6 +99,14 @@ pub struct ActivePeer {
     transport_id: Option<TransportId>,
     /// Current transport address (for roaming support).
     current_addr: Option<TransportAddr>,
+    /// Link preference of the current transport (higher = preferred). Gates
+    /// roaming so a fast transport (e.g. Wi-Fi Aware / UDP) is not dragged back
+    /// onto a slow one (BLE) by a stray packet — see `roam_current_addr`.
+    current_transport_preference: u8,
+    /// When the current transport last delivered an authenticated packet (Unix
+    /// ms). Lets the roam gate detect that the preferred transport has gone
+    /// silent, so a lower-preference transport may take over.
+    current_transport_last_recv_ms: u64,
 
     // === Spanning Tree ===
     /// Their latest parent declaration.
@@ -232,6 +240,8 @@ impl ActivePeer {
             their_index: None,
             transport_id: None,
             current_addr: None,
+            current_transport_preference: 0,
+            current_transport_last_recv_ms: 0,
             declaration: None,
             ancestry: None,
             tree_announce_min_interval_ms: 500,
@@ -318,6 +328,11 @@ impl ActivePeer {
             their_index: Some(their_index),
             transport_id: Some(transport_id),
             current_addr: Some(current_addr),
+            // Preference 0 until the first authenticated data packet sets the
+            // real value (via roam_current_addr); last-recv starts fresh at
+            // authentication so the preferred link isn't seen as stale.
+            current_transport_preference: 0,
+            current_transport_last_recv_ms: authenticated_at,
             declaration: None,
             ancestry: None,
             tree_announce_min_interval_ms: 500,
@@ -532,6 +547,45 @@ impl ActivePeer {
             self.transport_id != Some(transport_id) || self.current_addr.as_ref() != Some(&addr);
         self.transport_id = Some(transport_id);
         self.current_addr = Some(addr);
+        changed
+    }
+
+    /// Roam to `(transport_id, addr)` under the transport-preference cutover
+    /// policy, returning whether `(transport_id, addr)` actually changed.
+    ///
+    /// The new path is adopted when it is the current transport (ordinary
+    /// address roaming, e.g. BLE MAC rotation), when its `preference` is `>=`
+    /// the current transport's (eager upgrade to a faster link — BLE →
+    /// Wi-Fi Aware), or when the current, higher-preference transport has gone
+    /// silent for at least `hysteresis_ms` (the preferred link died — fall
+    /// back). A lower-preference packet arriving on a still-live preferred
+    /// transport is ignored for roaming, so e.g. a BLE keepalive cannot drag an
+    /// active Wi-Fi Aware session back onto BLE. Equal preferences reduce to
+    /// plain last-authenticated-packet-wins roaming.
+    pub fn roam_current_addr(
+        &mut self,
+        transport_id: TransportId,
+        addr: TransportAddr,
+        preference: u8,
+        now_ms: u64,
+        hysteresis_ms: u64,
+    ) -> bool {
+        let same_transport = self.transport_id == Some(transport_id);
+        let adopt = self.transport_id.is_none()
+            || same_transport
+            || preference >= self.current_transport_preference
+            || now_ms.saturating_sub(self.current_transport_last_recv_ms) >= hysteresis_ms;
+        if !adopt {
+            // Stay on the preferred transport; do not refresh its last-recv,
+            // so it keeps aging toward the hysteresis fallback if it is dead.
+            return false;
+        }
+        let changed =
+            self.transport_id != Some(transport_id) || self.current_addr.as_ref() != Some(&addr);
+        self.transport_id = Some(transport_id);
+        self.current_addr = Some(addr);
+        self.current_transport_preference = preference;
+        self.current_transport_last_recv_ms = now_ms;
         changed
     }
 
@@ -1243,6 +1297,40 @@ mod tests {
         peer.mark_disconnected();
         assert!(peer.is_disconnected());
         assert!(!peer.can_send());
+    }
+
+    #[test]
+    fn test_roam_transport_preference_cutover() {
+        let mut peer = ActivePeer::new(make_peer_identity(), LinkId::new(1), 1000);
+        let ble = TransportId::new(1);
+        let udp = TransportId::new(2);
+        let ble_addr = TransportAddr::from_string("ble0/AA:BB");
+        let udp_addr = TransportAddr::from_string("[fe80::1%3]:4870");
+        const BLE_PREF: u8 = 50;
+        const UDP_PREF: u8 = 100;
+        const HYST: u64 = 20_000;
+
+        // First packet (no current transport): adopted.
+        assert!(peer.roam_current_addr(ble, ble_addr.clone(), BLE_PREF, 1000, HYST));
+        assert_eq!(peer.transport_id(), Some(ble));
+
+        // Higher-preference transport: eager upgrade BLE -> Aware/UDP.
+        assert!(peer.roam_current_addr(udp, udp_addr.clone(), UDP_PREF, 1100, HYST));
+        assert_eq!(peer.transport_id(), Some(udp));
+
+        // Lower-preference keepalive while UDP is fresh: ignored, stays on UDP.
+        assert!(!peer.roam_current_addr(ble, ble_addr.clone(), BLE_PREF, 1200, HYST));
+        assert_eq!(peer.transport_id(), Some(udp));
+
+        // UDP silent past the hysteresis window: a BLE packet now wins (fall
+        // back). Last UDP recv was 1100; this arrives at 1100 + HYST + 1.
+        assert!(peer.roam_current_addr(ble, ble_addr.clone(), BLE_PREF, 1100 + HYST + 1, HYST));
+        assert_eq!(peer.transport_id(), Some(ble));
+
+        // Same-transport address roaming is always allowed.
+        let ble_addr2 = TransportAddr::from_string("ble0/CC:DD");
+        assert!(peer.roam_current_addr(ble, ble_addr2.clone(), BLE_PREF, 1100 + HYST + 2, HYST));
+        assert_eq!(peer.current_addr(), Some(&ble_addr2));
     }
 
     #[test]
