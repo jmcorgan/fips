@@ -264,6 +264,7 @@ impl Node {
                     self.poll_pending_connects().await;
                     self.poll_nostr_discovery().await;
                     self.poll_lan_discovery().await;
+                    self.poll_platform_discovery().await;
                     self.resend_pending_handshakes(now_ms).await;
                     self.resend_pending_rekeys(now_ms).await;
                     self.resend_pending_session_handshakes(now_ms).await;

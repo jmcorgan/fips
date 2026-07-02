@@ -8,6 +8,7 @@
 
 pub mod lan;
 pub mod nostr;
+pub mod platform;
 
 use crate::config::UdpConfig;
 use crate::{NodeAddr, TransportId};

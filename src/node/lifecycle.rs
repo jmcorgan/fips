@@ -367,6 +367,27 @@ impl Node {
             .min_by_key(|(id, _)| id.as_u32())
     }
 
+    /// Resolve a discovered `(transport_type, addr)` pair to an operational
+    /// transport. For `udp` addresses the socket family matters — a wildcard
+    /// IPv4 socket cannot send to an IPv6 link-local target (e.g. a Wi-Fi
+    /// Aware data path) — so when the address parses as a socket address the
+    /// selection is family-aware and skips bootstrap-adopted sockets. All
+    /// other transport types match by name alone.
+    fn find_transport_for_discovered_addr(
+        &self,
+        transport_type: &str,
+        addr: &str,
+    ) -> Option<TransportId> {
+        if transport_type == "udp"
+            && let Ok(remote_addr) = addr.parse::<SocketAddr>()
+        {
+            return self
+                .find_udp_transport_for_remote_addr(remote_addr)
+                .map(|(id, _)| id);
+        }
+        self.find_transport_for_type(transport_type)
+    }
+
     /// Initiate a connection to a peer on a specific transport and address.
     ///
     /// For connectionless transports (UDP, Ethernet): allocates a link, starts
@@ -952,6 +973,139 @@ impl Node {
                     error = %err,
                     "lan: failed to initiate connection to discovered peer"
                 );
+            }
+        }
+    }
+
+    /// Drain platform-pushed peers and initiate Noise IK handshakes.
+    ///
+    /// The transport-agnostic sibling of `poll_lan_discovery`: an embedding
+    /// platform (e.g. the Android Wi-Fi Aware radio) pushes
+    /// `(npub, addr, transport type)` events into the process-global queue
+    /// (`crate::discovery::platform`) and this drains them once per tick.
+    /// As with mDNS, the pushed npub is only a hint — the IK handshake is
+    /// the authentication.
+    ///
+    /// Unlike the LAN drain, an event for an already-active peer starts an
+    /// alternate-path handshake (gated by the same freshness/in-flight
+    /// checks as `poll_transport_discovery`), so a platform push can move a
+    /// peer onto a faster transport — the BLE→Wi-Fi-Aware cutover.
+    pub(super) async fn poll_platform_discovery(&mut self) {
+        let events = crate::discovery::platform::drain_platform_peer_events();
+        if events.is_empty() {
+            return;
+        }
+        let mut connect_budget = self.discovery_connect_budget();
+        for event in events {
+            match event {
+                crate::discovery::platform::PlatformPeerEvent::Available {
+                    npub,
+                    addr,
+                    transport_type,
+                } => {
+                    let Some(transport_id) =
+                        self.find_transport_for_discovered_addr(&transport_type, &addr)
+                    else {
+                        debug!(
+                            npub = %npub,
+                            transport_type = %transport_type,
+                            addr = %addr,
+                            "platform: skip pushed peer with no compatible operational transport"
+                        );
+                        continue;
+                    };
+                    let identity = match crate::PeerIdentity::from_npub(&npub) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            debug!(npub = %npub, error = %err, "platform: skip bad npub");
+                            continue;
+                        }
+                    };
+                    let peer_node_addr = *identity.node_addr();
+                    if peer_node_addr == *self.identity().node_addr() {
+                        continue;
+                    }
+                    let remote_addr = crate::transport::TransportAddr::from_string(&addr);
+
+                    if self.peers.contains_key(&peer_node_addr) {
+                        // Active peer: this is a path upgrade, not a first
+                        // contact — apply the alternate-path gates.
+                        let candidate = PeerAddress::new(&transport_type, addr.clone());
+                        if self.active_peer_candidate_is_fresh_enough_to_skip(
+                            &peer_node_addr,
+                            std::slice::from_ref(&candidate),
+                        ) {
+                            continue;
+                        }
+                    }
+                    if self.is_connecting_to_peer_on_path(
+                        &peer_node_addr,
+                        transport_id,
+                        &remote_addr,
+                    ) {
+                        continue;
+                    }
+                    if connect_budget == 0 {
+                        debug!(npub = %npub, "platform: connect budget exhausted");
+                        continue;
+                    }
+                    connect_budget = connect_budget.saturating_sub(1);
+                    info!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        "platform: initiating handshake to pushed peer"
+                    );
+                    if let Err(err) = self
+                        .initiate_connection(transport_id, remote_addr, identity)
+                        .await
+                    {
+                        debug!(
+                            npub = %npub,
+                            error = %err,
+                            "platform: failed to initiate connection to pushed peer"
+                        );
+                    }
+                }
+                crate::discovery::platform::PlatformPeerEvent::Lost {
+                    npub,
+                    transport_type,
+                } => {
+                    let Ok(identity) = crate::PeerIdentity::from_npub(&npub) else {
+                        continue;
+                    };
+                    let peer_node_addr = *identity.node_addr();
+                    let Some(peer) = self.peers.get(&peer_node_addr) else {
+                        continue;
+                    };
+                    // Only act if the peer currently sits on the named
+                    // transport type: close the pooled connection so the
+                    // dead socket is not re-used. Reconnection (including
+                    // falling back to another transport) is the ordinary
+                    // machinery's job.
+                    let (Some(transport_id), Some(current_addr)) =
+                        (peer.transport_id(), peer.current_addr().cloned())
+                    else {
+                        continue;
+                    };
+                    let on_named_transport = self
+                        .transports
+                        .get(&transport_id)
+                        .map(|t| t.transport_type().name == transport_type)
+                        .unwrap_or(false);
+                    if !on_named_transport {
+                        continue;
+                    }
+                    info!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        transport_id = %transport_id,
+                        remote_addr = %current_addr,
+                        "platform: closing connection for lost pushed peer"
+                    );
+                    if let Some(transport) = self.transports.get(&transport_id) {
+                        transport.close_connection(&current_addr).await;
+                    }
+                }
             }
         }
     }
@@ -1769,34 +1923,17 @@ impl Node {
                     continue;
                 }
             } else {
-                let tid = if addr.transport == "udp"
-                    && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
-                {
-                    match self.find_udp_transport_for_remote_addr(remote_socket_addr) {
-                        Some((id, _)) => id,
-                        None => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                "No compatible operational UDP transport for address"
-                            );
-                            continue;
-                        }
+                match self.find_transport_for_discovered_addr(&addr.transport, &addr.addr) {
+                    Some(tid) => (tid, TransportAddr::from_string(&addr.addr)),
+                    None => {
+                        debug!(
+                            transport = %addr.transport,
+                            addr = %addr.addr,
+                            "No compatible operational transport for address"
+                        );
+                        continue;
                     }
-                } else {
-                    match self.find_transport_for_type(&addr.transport) {
-                        Some(id) => id,
-                        None => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                "No operational transport for address type"
-                            );
-                            continue;
-                        }
-                    }
-                };
-                (tid, TransportAddr::from_string(&addr.addr))
+                }
             };
 
             if self.is_connecting_to_peer_on_path(&peer_node_addr, transport_id, &remote_addr) {
