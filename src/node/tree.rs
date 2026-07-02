@@ -626,6 +626,16 @@ impl Node {
                         .tree
                         .record_reject(TreeReject::OutboundSignFailed);
                 }
+                // handle_parent_lost may promote to root OR find new parent;
+                // cover both invalidation classes (same as the loop-detection
+                // branch above). Without this, cached downstream entries keep
+                // our now-stale coordinate prefix until TTL — and get_and_touch
+                // refreshes the TTL on every routing access, so an actively
+                // routed stale entry never self-expires.
+                self.coord_cache
+                    .invalidate_via_node(our_identity.node_addr());
+                self.coord_cache
+                    .invalidate_other_roots(self.tree_state.root());
                 info!(
                     new_root = %self.tree_state.root(),
                     is_root = self.tree_state.is_root(),
