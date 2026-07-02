@@ -92,7 +92,7 @@ IDX="$(printf '%s' "$RADIO" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
 [ -n "$IDX" ] || IDX="$(printf '%s' "$RADIO" | sed -n 's/^\([0-9]\{1,\}\)$/\1/p')"
 if [ -z "$IDX" ]; then
 	IDX=0
-	while [ -n "$(uci show wireless 2>/dev/null | grep "\.ifname='fips-mesh$IDX'")" ]; do
+	while uci show wireless 2>/dev/null | grep -q "\.ifname='fips-mesh$IDX'"; do
 		IDX=$((IDX + 1))
 	done
 fi
