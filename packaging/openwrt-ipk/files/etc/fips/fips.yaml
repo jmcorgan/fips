@@ -100,15 +100,23 @@ transports:
       auto_connect: true
       accept_connections: true
 
-    # 802.11s mesh backhaul between FIPS routers. Inert until the radio
-    # interface exists — create it with 'fips-mesh-setup <radio>', then
+    # 802.11s mesh backhaul between FIPS routers. Each entry is inert until
+    # its radio interface exists — create them with 'fips-mesh-setup <radio>'
+    # (once per radio; radio0 -> fips-mesh0, radio1 -> fips-mesh1), then
     # restart fips (a transport whose interface is missing at startup is
-    # skipped, not retried). The mesh runs OPEN (no SAE) with 802.11s
+    # skipped, not retried). Dual-band routers can mesh on both bands at
+    # once for redundant paths. The mesh runs OPEN (no SAE) with 802.11s
     # forwarding off: FIPS's Noise handshake is the encryption and
     # authentication, and FIPS is the routing layer. See
     # docs/how-to/set-up-80211s-mesh-backhaul.md.
-    mesh:
+    mesh0:
       interface: "fips-mesh0"
+      discovery: true
+      announce: true
+      auto_connect: true
+      accept_connections: true
+    mesh1:
+      interface: "fips-mesh1"
       discovery: true
       announce: true
       auto_connect: true

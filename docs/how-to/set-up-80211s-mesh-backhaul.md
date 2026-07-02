@@ -59,24 +59,37 @@ on the same router (see constraints below), or over BLE.
 - Ideally a dual- or tri-band router, so one band can be dedicated to
   the backhaul (see constraints).
 
-## Step 1 — create the mesh interface
+## Step 1 — create the mesh interface(s)
 
-On **each** router, pick the radio to dedicate and run:
+On **each** router, run the helper once per radio you want in the
+backhaul:
 
 ```sh
 fips-mesh-setup radio1
 ```
 
-This creates an open 802.11s interface named `fips-mesh0` with mesh ID
-`fips-mesh` and HWMP forwarding off, attaches it to an unmanaged
-netifd interface (no IP configuration — none is needed), and reloads
-the radio. Pass a second argument to use a different mesh ID.
+This creates an open 802.11s interface with mesh ID `fips-mesh` and
+HWMP forwarding off, attaches it to an unmanaged netifd interface (no
+IP configuration — none is needed), and reloads the radio. Interfaces
+are named by radio index: `radio0` → `fips-mesh0`, `radio1` →
+`fips-mesh1`. Pass a second argument to use a different mesh ID.
 
-**Pin the same channel on every backhaul router.** Mesh points only
-peer on the same channel, and the mesh inherits whatever the radio is
-set to — with `channel 'auto'` (the default on many devices) each
-router picks its own and the mesh silently never forms. The script
-prints the radio's current band and channel and warns on `auto`:
+On dual-band routers, meshing **both** bands is worth it: 2.4 GHz
+reaches further at lower rates, 5 GHz carries more over shorter
+links, and FIPS's spanning tree treats the two as redundant paths
+with automatic failover:
+
+```sh
+fips-mesh-setup radio0
+fips-mesh-setup radio1
+```
+
+**Pin the same channel on every backhaul router, per band.** Mesh
+points only peer on the same channel, and the mesh inherits whatever
+the radio is set to — with `channel 'auto'` (the default on many
+devices) each router picks its own and the mesh silently never forms.
+The script prints the radio's current band and channel and warns on
+`auto`:
 
 ```sh
 uci set wireless.radio1.channel='36'
@@ -86,20 +99,20 @@ uci commit wireless && wifi reload
 Prefer a non-DFS channel (36–48 on 5 GHz): on DFS channels the radio
 must wait ~60 s in CAC before transmitting after every reload.
 
-Equivalent manual UCI, if you prefer to see what it does:
+Equivalent manual UCI (per radio), if you prefer to see what it does:
 
 ```sh
 uci batch <<'EOF'
-set wireless.fips_mesh=wifi-iface
-set wireless.fips_mesh.device='radio1'
-set wireless.fips_mesh.mode='mesh'
-set wireless.fips_mesh.mesh_id='fips-mesh'
-set wireless.fips_mesh.encryption='none'
-set wireless.fips_mesh.mesh_fwding='0'
-set wireless.fips_mesh.ifname='fips-mesh0'
-set wireless.fips_mesh.network='fips_mesh'
-set network.fips_mesh=interface
-set network.fips_mesh.proto='none'
+set wireless.fips_mesh_radio1=wifi-iface
+set wireless.fips_mesh_radio1.device='radio1'
+set wireless.fips_mesh_radio1.mode='mesh'
+set wireless.fips_mesh_radio1.mesh_id='fips-mesh'
+set wireless.fips_mesh_radio1.encryption='none'
+set wireless.fips_mesh_radio1.mesh_fwding='0'
+set wireless.fips_mesh_radio1.ifname='fips-mesh1'
+set wireless.fips_mesh_radio1.network='fips_mesh_radio1'
+set network.fips_mesh_radio1=interface
+set network.fips_mesh_radio1.proto='none'
 EOF
 uci commit
 wifi reload
@@ -107,15 +120,22 @@ wifi reload
 
 ## Step 2 — check the FIPS transport binding
 
-The `fips.yaml` shipped in the OpenWrt package already carries the
-transport entry, enabled by default — it is inert until the interface
-exists. If you maintain your own config, make sure it is present:
+The `fips.yaml` shipped in the OpenWrt package already carries one
+transport entry per radio, enabled by default — each is inert until
+its interface exists. If you maintain your own config, make sure they
+are present:
 
 ```yaml
 transports:
   ethernet:
-    mesh:
+    mesh0:
       interface: "fips-mesh0"
+      discovery: true
+      announce: true
+      auto_connect: true
+      accept_connections: true
+    mesh1:
+      interface: "fips-mesh1"
       discovery: true
       announce: true
       auto_connect: true

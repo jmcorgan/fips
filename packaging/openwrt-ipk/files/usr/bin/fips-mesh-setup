@@ -1,12 +1,15 @@
 #!/bin/sh
-# fips-mesh-setup — configure an open 802.11s mesh interface for FIPS backhaul.
+# fips-mesh-setup — configure open 802.11s mesh interfaces for FIPS backhaul.
 #
 # Usage:
 #   fips-mesh-setup <radio> [mesh-id]    e.g. fips-mesh-setup radio1
-#   fips-mesh-setup remove
+#   fips-mesh-setup remove [radio]       no radio: remove all instances
 #
-# Creates a mesh-point interface named 'fips-mesh0' on the given radio and
-# leaves everything above L2 to FIPS:
+# Creates a mesh-point interface on the given radio and leaves everything
+# above L2 to FIPS. Run once per radio: dual-band routers can mesh on both
+# bands at once (2.4 GHz reaches further, 5 GHz carries more), giving every
+# router pair two complementary paths — FIPS's spanning tree treats them as
+# redundant links with automatic failover.
 #
 #   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
 #     handshake authenticates and encrypts every peer link, so SAE would
@@ -17,38 +20,57 @@
 #     link is a plain L2 neighbor link. FIPS is the routing layer; two
 #     routing layers would fight.
 #
-# The interface is intentionally NOT bridged into br-lan: the FIPS Ethernet
-# transport binds it directly and runs discovery beacons over it.
+# Interfaces are named per radio index (radio0 -> fips-mesh0, radio1 ->
+# fips-mesh1) and are intentionally NOT bridged into br-lan: the FIPS
+# Ethernet transport binds each directly and runs discovery beacons over it.
 #
-# The shipped /etc/fips/fips.yaml already carries a 'mesh' entry under
-# 'transports.ethernet' bound to 'fips-mesh0' — it is inert until this
-# script creates the interface. After the interface is up, restart fips.
+# The shipped /etc/fips/fips.yaml already carries 'mesh0' and 'mesh1'
+# entries under 'transports.ethernet' bound to these names — each is inert
+# until its interface exists. After an interface is up, restart fips.
 # See docs/how-to/set-up-80211s-mesh-backhaul.md for the full guide.
 
-MESH_IFNAME="fips-mesh0"
 DEFAULT_MESH_ID="fips-mesh"
 
 usage() {
 	echo "Usage: fips-mesh-setup <radio> [mesh-id]" >&2
-	echo "       fips-mesh-setup remove" >&2
+	echo "       fips-mesh-setup remove [radio]" >&2
 	echo "Radios on this device:" >&2
 	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/  \1/p" >&2
 	exit 1
 }
 
+# List the UCI section names of fips-managed mesh wifi-ifaces.
+mesh_sections() {
+	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\(fips_mesh[^.=]*\)=wifi-iface$/\1/p"
+}
+
 # ---------------------------------------------------------------------------
-# remove — delete the wireless and network sections created below
+# remove [radio] — delete the wireless and network sections created below
 # ---------------------------------------------------------------------------
 
 if [ "$1" = "remove" ]; then
-	uci -q delete wireless.fips_mesh
-	uci -q delete network.fips_mesh
+	if [ -n "$2" ]; then
+		SECTIONS="fips_mesh_$(printf '%s' "$2" | tr -c 'a-zA-Z0-9_' '_')"
+	else
+		SECTIONS="$(mesh_sections)"
+	fi
+	[ -n "$SECTIONS" ] || {
+		echo "No fips mesh instances configured."
+		exit 0
+	}
+	for section in $SECTIONS; do
+		ifname="$(uci -q get "wireless.$section.ifname")"
+		uci -q delete "wireless.$section"
+		uci -q delete "network.$section"
+		echo "Removed ${ifname:-$section}."
+	done
 	uci commit wireless
 	uci commit network
 	wifi reload
-	echo "Removed $MESH_IFNAME. Restart fips: /etc/init.d/fips restart"
-	echo "(The 'mesh' entry in /etc/fips/fips.yaml is harmless without the"
-	echo "interface, but you may comment it out to silence the startup warning.)"
+	echo "Restart fips: /etc/init.d/fips restart"
+	echo "(The 'mesh*' entries in /etc/fips/fips.yaml are harmless without"
+	echo "their interfaces, but you may comment them out to silence the"
+	echo "startup warnings.)"
 	exit 0
 fi
 
@@ -60,6 +82,30 @@ MESH_ID="${2:-$DEFAULT_MESH_ID}"
 if [ "$(uci -q get "wireless.$RADIO")" != "wifi-device" ]; then
 	echo "Error: '$RADIO' is not a wifi-device in /etc/config/wireless." >&2
 	usage
+fi
+
+# One instance per radio: section fips_mesh_<radio>, netdev fips-mesh<N>
+# where N is the radio's trailing index (radio0 -> fips-mesh0). For radios
+# named without a trailing number, fall back to the first free index.
+SECTION="fips_mesh_$(printf '%s' "$RADIO" | tr -c 'a-zA-Z0-9_' '_')"
+IDX="$(printf '%s' "$RADIO" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
+[ -n "$IDX" ] || IDX="$(printf '%s' "$RADIO" | sed -n 's/^\([0-9]\{1,\}\)$/\1/p')"
+if [ -z "$IDX" ]; then
+	IDX=0
+	while [ -n "$(uci show wireless 2>/dev/null | grep "\.ifname='fips-mesh$IDX'")" ]; do
+		IDX=$((IDX + 1))
+	done
+fi
+MESH_IFNAME="fips-mesh$IDX"
+
+# Refuse a name collision from another radio's instance (e.g. two radios
+# whose names end in the same digit) rather than silently hijacking it.
+OWNER="$(uci show wireless 2>/dev/null \
+	| sed -n "s/^wireless\.\(fips_mesh[^.=]*\)\.ifname='$MESH_IFNAME'$/\1/p")"
+if [ -n "$OWNER" ] && [ "$OWNER" != "$SECTION" ]; then
+	echo "Error: $MESH_IFNAME is already used by section '$OWNER'." >&2
+	echo "Remove it first: fips-mesh-setup remove" >&2
+	exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -77,15 +123,15 @@ fi
 # Wireless: open 802.11s mesh point, HWMP forwarding off
 # ---------------------------------------------------------------------------
 
-uci -q delete wireless.fips_mesh
-uci set wireless.fips_mesh=wifi-iface
-uci set wireless.fips_mesh.device="$RADIO"
-uci set wireless.fips_mesh.mode='mesh'
-uci set wireless.fips_mesh.mesh_id="$MESH_ID"
-uci set wireless.fips_mesh.encryption='none'
-uci set wireless.fips_mesh.mesh_fwding='0'
-uci set wireless.fips_mesh.ifname="$MESH_IFNAME"
-uci set wireless.fips_mesh.network='fips_mesh'
+uci -q delete "wireless.$SECTION"
+uci set "wireless.$SECTION=wifi-iface"
+uci set "wireless.$SECTION.device=$RADIO"
+uci set "wireless.$SECTION.mode=mesh"
+uci set "wireless.$SECTION.mesh_id=$MESH_ID"
+uci set "wireless.$SECTION.encryption=none"
+uci set "wireless.$SECTION.mesh_fwding=0"
+uci set "wireless.$SECTION.ifname=$MESH_IFNAME"
+uci set "wireless.$SECTION.network=$SECTION"
 
 # Radios ship disabled on fresh OpenWrt installs; a disabled radio would
 # leave the mesh interface down with no error anywhere visible.
@@ -111,9 +157,9 @@ fi
 # the FIPS Ethernet transport speaks raw frames on it.
 # ---------------------------------------------------------------------------
 
-uci -q delete network.fips_mesh
-uci set network.fips_mesh=interface
-uci set network.fips_mesh.proto='none'
+uci -q delete "network.$SECTION"
+uci set "network.$SECTION=interface"
+uci set "network.$SECTION.proto=none"
 
 uci commit wireless
 uci commit network
@@ -123,18 +169,21 @@ cat <<EOF
 Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO \
 (band ${BAND:-?}, channel ${CHANNEL:-auto}).
 
-ALL routers in this backhaul must share this mesh ID AND channel.
+ALL routers in this backhaul must share this mesh ID AND channel
+(per band). On a dual-band router, run fips-mesh-setup for the other
+radio too — two bands give every router pair redundant paths.
 
 Next steps:
   1. Restart the daemon (the shipped /etc/fips/fips.yaml already binds
-     the mesh transport to $MESH_IFNAME). Restart AFTER the interface
-     is up — a transport whose interface is missing at startup is
-     skipped, not retried:
+     mesh transports to fips-mesh0/fips-mesh1). Restart AFTER the
+     interface is up — a transport whose interface is missing at
+     startup is skipped, not retried:
        /etc/init.d/fips restart
   2. Verify L2 peering with a second FIPS router in range:
        iw dev $MESH_IFNAME station dump
      and the FIPS link on top of it:
        fipsctl show peers
 
-Run 'fips-mesh-setup remove' to undo.
+Run 'fips-mesh-setup remove' to undo all instances, or
+'fips-mesh-setup remove $RADIO' for just this one.
 EOF
