@@ -1333,3 +1333,125 @@ fn test_route_class_partition_sums_to_forwarded() {
     assert_eq!(snap.route_crosslink_ascend, 3);
     assert_eq!(snap.route_direct_peer, 1);
 }
+
+// === Coord-cache invalidation on parent loss ===
+//
+// Parent-lost-via-peer-removal is a genuine position change and must
+// surgically invalidate the coordinate cache like every other such path
+// (reparent → invalidate_via_node; self-root → invalidate_other_roots).
+// `make_node_addr(0)` is the network minimum, so the node's random identity
+// addr is always greater than it — the reparent/child geometry is deterministic.
+
+#[test]
+fn test_parent_loss_reparent_invalidates_coord_cache() {
+    let mut node = make_node();
+    let my_addr = *node.node_addr();
+
+    let root = make_node_addr(0);
+    let parent = make_node_addr(1);
+    let alt = make_node_addr(2);
+
+    // Current parent and an alternative, both rooted at `root`.
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(parent, root, 1, 1000),
+        TreeCoordinate::from_addrs(vec![parent, root]).unwrap(),
+    );
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(alt, root, 1, 1000),
+        TreeCoordinate::from_addrs(vec![alt, root]).unwrap(),
+    );
+    // Adopt `parent`; our coords become [my_addr, parent, root], root = `root`.
+    node.tree_state_mut().set_parent(parent, 1, 1000);
+    node.tree_state_mut().recompute_coords();
+    assert!(!node.tree_state().is_root());
+    assert_eq!(node.tree_state().root(), &root);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // via-node class: a downstream destination that routes through us.
+    let downstream = make_node_addr(10);
+    node.coord_cache_mut().insert(
+        downstream,
+        TreeCoordinate::from_addrs(vec![downstream, my_addr, root]).unwrap(),
+        now_ms,
+    );
+    // survivor: same root, does not route through us.
+    let sibling_dest = make_node_addr(11);
+    node.coord_cache_mut().insert(
+        sibling_dest,
+        TreeCoordinate::from_addrs(vec![sibling_dest, alt, root]).unwrap(),
+        now_ms,
+    );
+
+    // Parent link drops; node reparents onto `alt` (still rooted at `root`).
+    let changed = node.handle_peer_removal_tree_cleanup(&parent);
+    assert!(changed);
+    assert_eq!(node.tree_state().my_declaration().parent_id(), &alt);
+    assert_eq!(node.tree_state().root(), &root);
+
+    assert!(
+        !node.coord_cache().contains(&downstream, now_ms),
+        "entry routing through us must be invalidated after reparent"
+    );
+    assert!(
+        node.coord_cache().contains(&sibling_dest, now_ms),
+        "same-root entry not routing through us must survive (surgical, not a flush)"
+    );
+}
+
+#[test]
+fn test_parent_loss_selfroot_invalidates_coord_cache() {
+    let mut node = make_node();
+    let my_addr = *node.node_addr();
+
+    let old_root = make_node_addr(0);
+    let parent = make_node_addr(1);
+
+    // Adopt `parent` (rooted at `old_root`); no alternative peers exist, so a
+    // parent loss self-roots the node.
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(parent, old_root, 1, 1000),
+        TreeCoordinate::from_addrs(vec![parent, old_root]).unwrap(),
+    );
+    node.tree_state_mut().set_parent(parent, 1, 1000);
+    node.tree_state_mut().recompute_coords();
+    assert!(!node.tree_state().is_root());
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // via-node class: routes through us.
+    let downstream = make_node_addr(10);
+    node.coord_cache_mut().insert(
+        downstream,
+        TreeCoordinate::from_addrs(vec![downstream, my_addr, old_root]).unwrap(),
+        now_ms,
+    );
+    // other-roots class: on the old root, does not route through us.
+    let foreign = make_node_addr(11);
+    node.coord_cache_mut().insert(
+        foreign,
+        TreeCoordinate::from_addrs(vec![foreign, parent, old_root]).unwrap(),
+        now_ms,
+    );
+
+    // Parent link drops; no alternative parent → node self-roots.
+    let changed = node.handle_peer_removal_tree_cleanup(&parent);
+    assert!(changed);
+    assert!(node.tree_state().is_root());
+    assert_eq!(node.tree_state().root(), &my_addr);
+
+    assert!(
+        !node.coord_cache().contains(&downstream, now_ms),
+        "via-node entry must be invalidated after self-root"
+    );
+    assert!(
+        !node.coord_cache().contains(&foreign, now_ms),
+        "stale old-root entry must be invalidated after self-root"
+    );
+}
