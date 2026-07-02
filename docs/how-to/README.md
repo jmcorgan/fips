@@ -25,4 +25,5 @@ X" to "X is done".
 | [persistent-identity.md](persistent-identity.md) | Provision a stable Nostr keypair so the node keeps the same npub across restarts |
 | [host-aliases.md](host-aliases.md) | Use shortnames (`test-us01.fips`, `my-laptop.fips`) instead of full npubs by editing `/etc/fips/hosts` or setting peer aliases |
 | [set-up-bluetooth-peer.md](set-up-bluetooth-peer.md) | Configure a Bluetooth Low Energy peer link |
+| [set-up-80211s-mesh-backhaul.md](set-up-80211s-mesh-backhaul.md) | Link OpenWrt FIPS routers over an open 802.11s radio backhaul (FIPS provides encryption, authentication, and routing) |
 | [diagnose-mtu-issues.md](diagnose-mtu-issues.md) | Triage MTU-shaped failures and rule out their imposters (bufferbloat, transport saturation) |

@@ -1,0 +1,125 @@
+#!/bin/sh
+# fips-mesh-setup — configure an open 802.11s mesh interface for FIPS backhaul.
+#
+# Usage:
+#   fips-mesh-setup <radio> [mesh-id]    e.g. fips-mesh-setup radio1
+#   fips-mesh-setup remove
+#
+# Creates a mesh-point interface named 'fips-mesh0' on the given radio and
+# leaves everything above L2 to FIPS:
+#
+#   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
+#     handshake authenticates and encrypts every peer link, so SAE would
+#     only duplicate that (and on ath10k it forces the slower raw Tx/Rx
+#     firmware mode). A stranger can form an 802.11s peering but cannot
+#     pass the FIPS handshake.
+#   - mesh_fwding '0'    — disables 802.11s HWMP forwarding so each mesh
+#     link is a plain L2 neighbor link. FIPS is the routing layer; two
+#     routing layers would fight.
+#
+# The interface is intentionally NOT bridged into br-lan: the FIPS Ethernet
+# transport binds it directly and runs discovery beacons over it.
+#
+# The shipped /etc/fips/fips.yaml already carries a 'mesh' entry under
+# 'transports.ethernet' bound to 'fips-mesh0' — it is inert until this
+# script creates the interface. After the interface is up, restart fips.
+# See docs/how-to/set-up-80211s-mesh-backhaul.md for the full guide.
+
+MESH_IFNAME="fips-mesh0"
+DEFAULT_MESH_ID="fips-mesh"
+
+usage() {
+	echo "Usage: fips-mesh-setup <radio> [mesh-id]" >&2
+	echo "       fips-mesh-setup remove" >&2
+	echo "Radios on this device:" >&2
+	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/  \1/p" >&2
+	exit 1
+}
+
+# ---------------------------------------------------------------------------
+# remove — delete the wireless and network sections created below
+# ---------------------------------------------------------------------------
+
+if [ "$1" = "remove" ]; then
+	uci -q delete wireless.fips_mesh
+	uci -q delete network.fips_mesh
+	uci commit wireless
+	uci commit network
+	wifi reload
+	echo "Removed $MESH_IFNAME. Restart fips: /etc/init.d/fips restart"
+	echo "(The 'mesh' entry in /etc/fips/fips.yaml is harmless without the"
+	echo "interface, but you may comment it out to silence the startup warning.)"
+	exit 0
+fi
+
+RADIO="$1"
+MESH_ID="${2:-$DEFAULT_MESH_ID}"
+
+[ -n "$RADIO" ] || usage
+
+if [ "$(uci -q get "wireless.$RADIO")" != "wifi-device" ]; then
+	echo "Error: '$RADIO' is not a wifi-device in /etc/config/wireless." >&2
+	usage
+fi
+
+# ---------------------------------------------------------------------------
+# Driver capability check (advisory — config below is harmless either way)
+# ---------------------------------------------------------------------------
+
+if command -v iw >/dev/null 2>&1; then
+	if ! iw list 2>/dev/null | grep -q "\* mesh point"; then
+		echo "Warning: no radio on this device advertises 'mesh point' support" >&2
+		echo "(iw list | grep 'mesh point'). The interface may fail to come up." >&2
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Wireless: open 802.11s mesh point, HWMP forwarding off
+# ---------------------------------------------------------------------------
+
+uci -q delete wireless.fips_mesh
+uci set wireless.fips_mesh=wifi-iface
+uci set wireless.fips_mesh.device="$RADIO"
+uci set wireless.fips_mesh.mode='mesh'
+uci set wireless.fips_mesh.mesh_id="$MESH_ID"
+uci set wireless.fips_mesh.encryption='none'
+uci set wireless.fips_mesh.mesh_fwding='0'
+uci set wireless.fips_mesh.ifname="$MESH_IFNAME"
+uci set wireless.fips_mesh.network='fips_mesh'
+
+# Radios ship disabled on fresh OpenWrt installs; a disabled radio would
+# leave the mesh interface down with no error anywhere visible.
+if [ "$(uci -q get "wireless.$RADIO.disabled")" = "1" ]; then
+	echo "Note: enabling $RADIO (was disabled)."
+	uci -q delete "wireless.$RADIO.disabled"
+fi
+
+# ---------------------------------------------------------------------------
+# Network: unmanaged interface so netifd brings the netdev up. No IP config —
+# the FIPS Ethernet transport speaks raw frames on it.
+# ---------------------------------------------------------------------------
+
+uci -q delete network.fips_mesh
+uci set network.fips_mesh=interface
+uci set network.fips_mesh.proto='none'
+
+uci commit wireless
+uci commit network
+wifi reload
+
+cat <<EOF
+Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO.
+
+Next steps:
+  1. Restart the daemon (the shipped /etc/fips/fips.yaml already binds
+     the mesh transport to $MESH_IFNAME). Restart AFTER the interface
+     is up — a transport whose interface is missing at startup is
+     skipped, not retried:
+       /etc/init.d/fips restart
+  2. Verify L2 peering with a second FIPS router in range:
+       iw dev $MESH_IFNAME station dump
+     and the FIPS link on top of it:
+       fipsctl show peers
+
+Run 'fips-mesh-setup remove' to undo.
+EOF

@@ -285,6 +285,7 @@ jobs:
             "$FILES_DIR/etc/fips/firewall.sh"
             "$FILES_DIR/etc/hotplug.d/net/99-fips"
             "$FILES_DIR/etc/uci-defaults/90-fips-setup"
+            "$FILES_DIR/usr/bin/fips-mesh-setup"
           )
           fail=0
           for f in "${TARGETS[@]}"; do
@@ -404,6 +405,7 @@ jobs:
             ./usr/bin/fipsctl
             ./usr/bin/fipstop
             ./usr/bin/fips-gateway
+            ./usr/bin/fips-mesh-setup
             ./etc/init.d/fips
             ./etc/init.d/fips-gateway
             ./etc/fips/fips.yaml
@@ -717,6 +719,7 @@ jobs:
 
           for path in \
             usr/bin/fips usr/bin/fipsctl usr/bin/fipstop usr/bin/fips-gateway \
+            usr/bin/fips-mesh-setup \
             etc/init.d/fips etc/init.d/fips-gateway \
             etc/fips/fips.yaml etc/fips/firewall.sh etc/dnsmasq.d/fips.conf \
             etc/sysctl.d/fips-gateway.conf etc/sysctl.d/fips-bridge.conf \

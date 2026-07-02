@@ -96,6 +96,9 @@ define Package/fips/install
 	$(INSTALL_BIN) $(RUST_RELEASE_DIR)/fipstop $(1)/usr/bin/fipstop
 	$(INSTALL_BIN) $(RUST_RELEASE_DIR)/fips-gateway $(1)/usr/bin/fips-gateway
 
+	# 802.11s mesh backhaul setup helper
+	$(INSTALL_BIN) $(CURDIR)/files/usr/bin/fips-mesh-setup $(1)/usr/bin/fips-mesh-setup
+
 	# procd init script
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/etc/init.d/fips $(1)/etc/init.d/fips

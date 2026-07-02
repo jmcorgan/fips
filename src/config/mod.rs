@@ -770,6 +770,23 @@ node:
         assert!(config.has_identity());
     }
 
+    /// The fips.yaml shipped in the OpenWrt package must keep parsing as the
+    /// config schema evolves, including the default-enabled 802.11s mesh
+    /// backhaul transport entry (docs/how-to/set-up-80211s-mesh-backhaul.md).
+    #[test]
+    fn shipped_openwrt_config_parses() {
+        let yaml = include_str!("../../packaging/openwrt-ipk/files/etc/fips/fips.yaml");
+        let config: Config = serde_yaml::from_str(yaml).expect("shipped OpenWrt fips.yaml");
+        assert!(
+            config
+                .transports
+                .ethernet
+                .iter()
+                .any(|(name, eth)| name == Some("mesh") && eth.interface == "fips-mesh0"),
+            "mesh backhaul entry missing from shipped OpenWrt fips.yaml"
+        );
+    }
+
     #[test]
     fn test_parse_yaml_with_hex() {
         let yaml = r#"
