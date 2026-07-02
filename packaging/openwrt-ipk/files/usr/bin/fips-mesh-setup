@@ -94,6 +94,18 @@ if [ "$(uci -q get "wireless.$RADIO.disabled")" = "1" ]; then
 	uci -q delete "wireless.$RADIO.disabled"
 fi
 
+# The mesh inherits the radio's channel, and mesh points only peer on the
+# same channel. 'auto' lets each router pick its own — the classic silent
+# non-peering cause — so surface the setting loudly.
+CHANNEL="$(uci -q get "wireless.$RADIO.channel")"
+BAND="$(uci -q get "wireless.$RADIO.band")"
+if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "auto" ]; then
+	echo "Warning: $RADIO channel is '${CHANNEL:-unset}' — each router may" >&2
+	echo "auto-select a different channel and mesh points only peer on the" >&2
+	echo "same one. Pin the same channel on every backhaul router, e.g.:" >&2
+	echo "  uci set wireless.$RADIO.channel='36' && uci commit wireless && wifi reload" >&2
+fi
+
 # ---------------------------------------------------------------------------
 # Network: unmanaged interface so netifd brings the netdev up. No IP config —
 # the FIPS Ethernet transport speaks raw frames on it.
@@ -108,7 +120,10 @@ uci commit network
 wifi reload
 
 cat <<EOF
-Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO.
+Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO \
+(band ${BAND:-?}, channel ${CHANNEL:-auto}).
+
+ALL routers in this backhaul must share this mesh ID AND channel.
 
 Next steps:
   1. Restart the daemon (the shipped /etc/fips/fips.yaml already binds

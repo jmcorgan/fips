@@ -70,9 +70,21 @@ fips-mesh-setup radio1
 This creates an open 802.11s interface named `fips-mesh0` with mesh ID
 `fips-mesh` and HWMP forwarding off, attaches it to an unmanaged
 netifd interface (no IP configuration — none is needed), and reloads
-the radio. Pass a second argument to use a different mesh ID; all
-routers in one backhaul must share the same mesh ID and be on the
-same channel (which follows the radio's existing channel setting).
+the radio. Pass a second argument to use a different mesh ID.
+
+**Pin the same channel on every backhaul router.** Mesh points only
+peer on the same channel, and the mesh inherits whatever the radio is
+set to — with `channel 'auto'` (the default on many devices) each
+router picks its own and the mesh silently never forms. The script
+prints the radio's current band and channel and warns on `auto`:
+
+```sh
+uci set wireless.radio1.channel='36'
+uci commit wireless && wifi reload
+```
+
+Prefer a non-DFS channel (36–48 on 5 GHz): on DFS channels the radio
+must wait ~60 s in CAC before transmitting after every reload.
 
 Equivalent manual UCI, if you prefer to see what it does:
 
@@ -133,8 +145,25 @@ iw dev fips-mesh0 station dump
 ```
 
 You should see one station entry per neighbor router, with signal
-levels. No entries means a radio problem (channel mismatch, mesh ID
-mismatch, range), not a FIPS problem.
+levels. No entries means a radio problem, not a FIPS problem — triage
+in this order:
+
+1. **Channel mismatch** (the most common cause): compare
+   `iw dev fips-mesh0 info` on both routers — mesh ID *and* channel
+   must match exactly.
+2. **Is the other router transmitting at all?**
+
+   ```sh
+   iw dev fips-mesh0 scan | grep -i -B4 "MESH ID"
+   ```
+
+   Its mesh ID visible → transmission works, peering is failing
+   (mesh ID typo, or one side has encryption set). Nothing visible →
+   check `wifi status` on the other router, remember the ~60 s DFS
+   CAC wait, and confirm the country code is set
+   (`uci get wireless.radio1.country`) — an unset regdomain can
+   block channels entirely.
+3. `logread | grep -iE "mesh|fips-mesh0"` on both sides.
 
 Then the FIPS layer on top:
 
