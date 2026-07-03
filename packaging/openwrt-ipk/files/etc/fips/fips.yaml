@@ -126,6 +126,30 @@ transports:
     #   auto_connect: true
     #   accept_connections: true
 
+    # Open "!FIPS" access SSID for phones and laptops running FIPS. These
+    # entries ship commented out so a stock install that never creates
+    # fips-ap* logs no per-boot "interface missing" bind warning. Running
+    # 'fips-ap-setup <radio>' creates the interface AND uncomments the
+    # matching block here (once per radio; radio0 -> fips-ap0, radio1 ->
+    # fips-ap1); 'fips-ap-setup remove' re-comments it. Restart fips after
+    # — a transport whose interface is missing at startup is skipped, not
+    # retried. The SSID is OPEN and isolated on purpose: FIPS's Noise
+    # handshake is the only security layer, and associated clients reach
+    # nothing but the FIPS handshake surface. See
+    # docs/how-to/set-up-open-access-ssid.md.
+    # ap0:
+    #   interface: "fips-ap0"
+    #   discovery: true
+    #   announce: true
+    #   auto_connect: true
+    #   accept_connections: true
+    # ap1:
+    #   interface: "fips-ap1"
+    #   discovery: true
+    #   announce: true
+    #   auto_connect: true
+    #   accept_connections: true
+
   # Bluetooth Low Energy transport — requires BlueZ and the 'ble' feature.
   # ble:
   #   adapter: "hci0"
