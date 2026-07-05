@@ -20,15 +20,13 @@
 //! Session-layer datagrams are carried as opaque payloads through the link
 //! layer, encrypted end-to-end independently of per-hop link encryption.
 
-mod discovery;
 mod error;
 mod filter;
 mod link;
-mod session;
+pub(crate) mod session;
 mod tree;
 
 // Re-export all public types at protocol:: level
-pub use discovery::{LookupRequest, LookupResponse};
 pub use error::ProtocolError;
 pub use filter::FilterAnnounce;
 pub use link::{

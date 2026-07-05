@@ -3,6 +3,12 @@
 //! A distributed, decentralized network routing protocol for mesh nodes
 //! connecting over arbitrary transports.
 
+// Name the `alloc` crate directly so the sans-IO protocol cores can spell their
+// heap-type imports in `no_std`-forward form (`alloc::sync::Arc`,
+// `alloc::collections::BTreeMap`). The crate remains `std`; this only reduces the
+// distance to extracting the pure cores into a `no_std` crate later.
+extern crate alloc;
+
 pub mod bloom;
 pub mod cache;
 pub mod config;
@@ -16,7 +22,10 @@ pub mod node;
 pub mod noise;
 pub mod peer;
 pub mod perf_profile;
+pub(crate) mod proto;
 pub mod protocol;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod transport;
 pub mod tree;
 pub mod upper;
@@ -52,10 +61,13 @@ pub use transport::{
 
 // Re-export protocol types
 pub use protocol::{
-    CoordsRequired, FilterAnnounce, HandshakeMessageType, LinkMessageType, LookupRequest,
-    LookupResponse, PathBroken, ProtocolError, SessionAck, SessionDatagram, SessionFlags,
-    SessionMessageType, SessionSetup, TreeAnnounce,
+    CoordsRequired, FilterAnnounce, HandshakeMessageType, LinkMessageType, PathBroken,
+    ProtocolError, SessionAck, SessionDatagram, SessionFlags, SessionMessageType, SessionSetup,
+    TreeAnnounce,
 };
+
+// Re-export discovery wire types (relocated from protocol:: to proto::discovery)
+pub use proto::discovery::{LookupRequest, LookupResponse};
 
 // Re-export cache types
 pub use cache::{CacheEntry, CacheError, CacheStats, CoordCache};

@@ -9,7 +9,6 @@ mod bloom;
 pub(crate) mod context;
 #[cfg(unix)]
 pub(crate) mod decrypt_worker;
-mod discovery_rate_limit;
 #[cfg(unix)]
 pub(crate) mod encrypt_worker;
 mod handlers;
@@ -29,7 +28,6 @@ mod tests;
 mod tree;
 pub(crate) mod wire;
 
-use self::discovery_rate_limit::{DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use self::rate_limit::HandshakeRateLimiter;
 use self::reloadable::Reloadable;
 use self::routing_error_rate_limit::RoutingErrorRateLimiter;
@@ -48,6 +46,7 @@ use crate::bloom::{BloomFilter, BloomState};
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
+use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
 #[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
@@ -218,39 +217,6 @@ pub struct UpdatePeersOutcome {
     pub unchanged: usize,
 }
 
-/// Recent request tracking for dedup and reverse-path forwarding.
-///
-/// When a LookupRequest is forwarded through a node, the node stores the
-/// request_id and which peer sent it. When the corresponding LookupResponse
-/// arrives, it's forwarded back to that peer (reverse-path forwarding).
-/// The `response_forwarded` flag prevents response routing loops.
-#[derive(Clone, Debug)]
-pub(crate) struct RecentRequest {
-    /// The peer who sent this request to us.
-    pub(crate) from_peer: NodeAddr,
-    /// When we received this request (Unix milliseconds).
-    pub(crate) timestamp_ms: u64,
-    /// Whether we've already forwarded a response for this request.
-    /// Prevents response routing loops when convergent request paths
-    /// create bidirectional entries in recent_requests.
-    pub(crate) response_forwarded: bool,
-}
-
-impl RecentRequest {
-    pub(crate) fn new(from_peer: NodeAddr, timestamp_ms: u64) -> Self {
-        Self {
-            from_peer,
-            timestamp_ms,
-            response_forwarded: false,
-        }
-    }
-
-    /// Check if this entry has expired (older than expiry_ms).
-    pub(crate) fn is_expired(&self, current_time_ms: u64, expiry_ms: u64) -> bool {
-        current_time_ms.saturating_sub(self.timestamp_ms) > expiry_ms
-    }
-}
-
 /// Key for addr_to_link reverse lookup.
 type AddrKey = (TransportId, TransportAddr);
 
@@ -319,9 +285,6 @@ pub struct Node {
     // === Routing ===
     /// Address -> coordinates cache (from session setup and discovery).
     coord_cache: CoordCache,
-    /// Recent discovery requests (dedup + reverse-path forwarding).
-    /// Maps request_id → RecentRequest.
-    recent_requests: HashMap<u64, RecentRequest>,
     /// Per-destination path MTU lookup, keyed by FipsAddress (mirrors
     /// `coord_cache.entries[*].path_mtu`). Sync read-only access from
     /// the TUN reader/writer threads at TCP MSS clamp time so the
@@ -369,10 +332,11 @@ pub struct Node {
     /// Packets queued while waiting for session establishment.
     /// Keyed by destination NodeAddr, bounded per-dest and total.
     pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
-    // === Pending Discovery Lookups ===
-    /// Tracks in-flight discovery lookups. Maps target NodeAddr to the
-    /// initiation timestamp (Unix ms). Prevents duplicate flood queries.
-    pending_lookups: HashMap<NodeAddr, handlers::discovery::PendingLookup>,
+
+    // === Discovery ===
+    /// Discovery-subsystem state: recent-request dedup cache, in-flight
+    /// lookups, originator-side backoff, and transit-side forward limiter.
+    discovery: Discovery,
 
     // === Counters ===
     /// Next link ID to allocate.
@@ -455,10 +419,6 @@ pub struct Node {
     routing_error_rate_limiter: RoutingErrorRateLimiter,
     /// Rate limiter for source-side CoordsRequired/PathBroken responses.
     coords_response_rate_limiter: RoutingErrorRateLimiter,
-    /// Backoff for failed discovery lookups (originator-side).
-    discovery_backoff: DiscoveryBackoff,
-    /// Rate limiter for forwarded discovery requests (transit-side).
-    discovery_forward_limiter: DiscoveryForwardRateLimiter,
 
     // === Pending Transport Connects ===
     /// Links waiting for transport-level connection establishment before
@@ -658,7 +618,6 @@ impl Node {
             tree_state,
             bloom_state,
             coord_cache,
-            recent_requests: HashMap::new(),
             transports: HashMap::new(),
             transport_drops: HashMap::new(),
             links: HashMap::new(),
@@ -670,7 +629,6 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
-            pending_lookups: HashMap::new(),
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
@@ -704,9 +662,9 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
-            discovery_backoff: DiscoveryBackoff::with_params(backoff_base_secs, backoff_max_secs),
-            discovery_forward_limiter: DiscoveryForwardRateLimiter::with_interval(
-                std::time::Duration::from_secs(forward_min_interval_secs),
+            discovery: Discovery::new(
+                DiscoveryBackoff::with_params(backoff_base_secs, backoff_max_secs),
+                DiscoveryForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
             ),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
@@ -819,7 +777,6 @@ impl Node {
             tree_state,
             bloom_state,
             coord_cache,
-            recent_requests: HashMap::new(),
             transports: HashMap::new(),
             transport_drops: HashMap::new(),
             links: HashMap::new(),
@@ -831,7 +788,6 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
-            pending_lookups: HashMap::new(),
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
@@ -865,8 +821,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
-            discovery_backoff: DiscoveryBackoff::new(),
-            discovery_forward_limiter: DiscoveryForwardRateLimiter::new(),
+            discovery: Discovery::new(DiscoveryBackoff::new(), DiscoveryForwardRateLimiter::new()),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             nostr_discovery: None,
@@ -2446,8 +2401,7 @@ impl Node {
     /// Disable the discovery forward rate limiter (for tests).
     #[cfg(test)]
     pub(crate) fn disable_discovery_forward_rate_limit(&mut self) {
-        self.discovery_forward_limiter
-            .set_interval(std::time::Duration::ZERO);
+        self.discovery.forward_limiter.set_interval_ms(0);
     }
 
     #[cfg(test)]
@@ -2559,19 +2513,19 @@ impl Node {
 
     /// Number of pending discovery lookups.
     pub fn pending_lookup_count(&self) -> usize {
-        self.pending_lookups.len()
+        self.discovery.pending_lookups.len()
     }
 
     /// Iterate over pending discovery lookups for diagnostics.
     pub fn pending_lookups_iter(
         &self,
-    ) -> impl Iterator<Item = (&NodeAddr, &handlers::discovery::PendingLookup)> {
-        self.pending_lookups.iter()
+    ) -> impl Iterator<Item = (&NodeAddr, &crate::proto::discovery::PendingLookup)> {
+        self.discovery.pending_lookups.iter()
     }
 
     /// Number of recent discovery requests tracked.
     pub fn recent_request_count(&self) -> usize {
-        self.recent_requests.len()
+        self.discovery.recent_requests.len()
     }
 
     /// Count of destinations with queued TUN packets awaiting session setup.
