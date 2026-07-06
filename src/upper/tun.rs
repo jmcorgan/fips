@@ -31,7 +31,7 @@ use tracing::error;
 use tracing::{debug, trace};
 #[cfg(windows)]
 use tracing::{error, warn};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use tun::Layer;
 
 /// Read-only handle to the per-destination path MTU map. Populated by
@@ -235,6 +235,7 @@ impl TunDevice {
         }
 
         // Create the TUN device
+        #[cfg_attr(target_os = "android", allow(unused_mut))]
         let mut tun_config = tun::Configuration::default();
 
         // On macOS, utun devices get kernel-assigned names (utun0, utun1, ...),
@@ -1421,6 +1422,36 @@ mod platform {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "android")]
+mod platform {
+    use super::TunError;
+    use std::net::Ipv6Addr;
+
+    pub fn is_ipv6_disabled() -> bool {
+        false
+    }
+
+    pub async fn interface_exists(_name: &str) -> bool {
+        false
+    }
+
+    pub async fn delete_interface(name: &str) -> Result<(), TunError> {
+        Err(TunError::Configure(format!(
+            "TUN interface management is not supported on Android: {name}"
+        )))
+    }
+
+    pub async fn configure_interface(
+        name: &str,
+        _addr: Ipv6Addr,
+        _mtu: u16,
+    ) -> Result<(), TunError> {
+        Err(TunError::Configure(format!(
+            "TUN interface management is not supported on Android: {name}"
+        )))
     }
 }
 

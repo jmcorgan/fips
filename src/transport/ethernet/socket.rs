@@ -18,6 +18,45 @@ mod platform;
 #[path = "socket_macos.rs"]
 mod platform;
 
+#[cfg(target_os = "android")]
+mod platform {
+    use crate::transport::TransportError;
+
+    pub struct PacketSocket;
+
+    impl PacketSocket {
+        pub fn open(_interface: &str, _ethertype: u16) -> Result<Self, TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+
+        pub fn local_mac(&self) -> Result<[u8; 6], TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+
+        pub fn interface_mtu(&self) -> Result<u16, TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+
+        pub fn set_recv_buffer_size(&self, _size: usize) -> Result<(), TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+
+        pub fn set_send_buffer_size(&self, _size: usize) -> Result<(), TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(unix)]
 pub use platform::PacketSocket;
 
@@ -261,6 +300,44 @@ mod async_impl {
                 let _ = handle.join();
             }
         }
+    }
+}
+
+#[cfg(target_os = "android")]
+mod async_impl {
+    use super::PacketSocket;
+    use crate::transport::TransportError;
+
+    pub struct AsyncPacketSocket {
+        inner: PacketSocket,
+    }
+
+    impl AsyncPacketSocket {
+        pub fn new(socket: PacketSocket) -> Result<Self, TransportError> {
+            Ok(Self { inner: socket })
+        }
+
+        pub async fn send_to(
+            &self,
+            _data: &[u8],
+            _dest_mac: &[u8; 6],
+        ) -> Result<usize, TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+
+        pub async fn recv_from(&self, _buf: &mut [u8]) -> Result<(usize, [u8; 6]), TransportError> {
+            Err(TransportError::NotSupported(
+                "raw Ethernet sockets are not supported on Android".into(),
+            ))
+        }
+
+        pub fn get_ref(&self) -> &PacketSocket {
+            &self.inner
+        }
+
+        pub fn shutdown(&self) {}
     }
 }
 

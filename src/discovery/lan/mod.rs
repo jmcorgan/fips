@@ -25,14 +25,20 @@
 //! matching scope. Nodes on the same physical LAN but configured for
 //! different mesh networks don't cross-feed each other.
 
+#[cfg(not(target_os = "android"))]
 use std::collections::HashMap;
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::SocketAddr;
+#[cfg(not(target_os = "android"))]
+use std::net::{SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(not(target_os = "android"))]
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use thiserror::Error;
+#[cfg(not(target_os = "android"))]
 use tokio::sync::Mutex;
+#[cfg(not(target_os = "android"))]
 use tracing::{debug, info, warn};
 
 use crate::Identity;
@@ -129,6 +135,7 @@ impl LanDiscoveryConfig {
 }
 
 /// Running mDNS responder + browser bound to the node's UDP advert port.
+#[cfg(not(target_os = "android"))]
 pub struct LanDiscovery {
     daemon: ServiceDaemon,
     own_npub: String,
@@ -137,6 +144,12 @@ pub struct LanDiscovery {
     event_pump: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(target_os = "android")]
+pub struct LanDiscovery {
+    own_npub: String,
+}
+
+#[cfg(not(target_os = "android"))]
 impl LanDiscovery {
     /// Start the mDNS responder and browser.
     ///
@@ -340,11 +353,44 @@ impl LanDiscovery {
     }
 }
 
+#[cfg(target_os = "android")]
+impl LanDiscovery {
+    pub async fn start(
+        identity: &Identity,
+        _scope: Option<String>,
+        advertised_port: u16,
+        config: LanDiscoveryConfig,
+    ) -> Result<Arc<Self>, LanDiscoveryError> {
+        if !config.enabled {
+            return Err(LanDiscoveryError::Disabled);
+        }
+        if advertised_port == 0 {
+            return Err(LanDiscoveryError::NoAdvertisedPort);
+        }
+        let _ = identity;
+        Err(LanDiscoveryError::Daemon(
+            "LAN discovery is not supported on Android".into(),
+        ))
+    }
+
+    pub fn own_npub(&self) -> &str {
+        &self.own_npub
+    }
+
+    pub async fn drain_events(&self) -> Vec<LanEvent> {
+        Vec::new()
+    }
+
+    pub async fn shutdown(self: &Arc<Self>) {}
+}
+
+#[cfg(not(target_os = "android"))]
 fn short(npub: &str) -> &str {
     let end = 16.min(npub.len());
     &npub[..end]
 }
 
+#[cfg(not(target_os = "android"))]
 fn socket_addr_from_scoped_ip(scoped: &ScopedIp, port: u16) -> Option<SocketAddr> {
     match scoped {
         ScopedIp::V4(v4) => Some(SocketAddr::V4(SocketAddrV4::new(*v4.addr(), port))),
@@ -360,6 +406,7 @@ fn socket_addr_from_scoped_ip(scoped: &ScopedIp, port: u16) -> Option<SocketAddr
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn ipv6_is_unicast_link_local(ip: std::net::Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }

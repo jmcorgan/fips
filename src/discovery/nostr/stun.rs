@@ -265,7 +265,7 @@ fn push_private_interface_ips(addresses: &mut Vec<String>) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn private_interface_ips() -> Vec<IpAddr> {
     let mut output = Vec::new();
     let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -319,11 +319,12 @@ fn private_interface_ips() -> Vec<IpAddr> {
     output
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "android"))]
 fn private_interface_ips() -> Vec<IpAddr> {
     Vec::new()
 }
 
+#[cfg(not(target_os = "android"))]
 fn is_private_overlay_candidate_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_private(),
