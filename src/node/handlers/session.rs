@@ -6,8 +6,6 @@
 //! encrypted data, and error signals (CoordsRequired, PathBroken).
 
 use crate::NodeAddr;
-use crate::mmp::report::ReceiverReport;
-use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{EndToEndState, EpochSlot, SessionEntry};
 use crate::node::session_wire::{
@@ -24,14 +22,17 @@ use crate::node::{Node, NodeError};
 use crate::noise::{
     HandshakeState, XK_HANDSHAKE_MSG1_SIZE, XK_HANDSHAKE_MSG2_SIZE, XK_HANDSHAKE_MSG3_SIZE,
 };
+use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
+use crate::proto::mmp::{
+    PathMtuNotification, ReceiverReport, SessionReceiverReport, SessionSenderReport,
+};
 use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken};
 #[cfg(unix)]
 use crate::protocol::LinkMessageType;
 #[cfg(unix)]
 use crate::protocol::SESSION_DATAGRAM_HEADER_SIZE;
 use crate::protocol::{
-    FspInnerFlags, PathMtuNotification, SessionAck, SessionDatagram, SessionMessageType,
-    SessionMsg3, SessionReceiverReport, SessionSenderReport, SessionSetup,
+    FspInnerFlags, SessionAck, SessionDatagram, SessionMessageType, SessionMsg3, SessionSetup,
 };
 use crate::protocol::{coords_wire_size, encode_coords};
 #[cfg(unix)]
@@ -305,16 +306,16 @@ impl Node {
         if let Some(entry) = self.sessions.get_mut(src_addr)
             && let Some(mmp) = entry.mmp_mut()
         {
-            let now = std::time::Instant::now();
+            let now_ms = crate::mmp::mono_ms();
             mmp.receiver
-                .record_recv(header.counter, timestamp, plaintext.len(), ce_flag, now);
+                .record_recv(header.counter, timestamp, plaintext.len(), ce_flag, now_ms);
             // Spin bit: advance state machine for correct TX reflection.
             // RTT samples not fed into SRTT — timestamp-echo provides
             // accurate RTT; spin bit includes variable inter-frame delays.
             let inner_flags = FspInnerFlags::from_byte(inner_flags_byte);
             let _spin_rtt = mmp
                 .spin_bit
-                .rx_observe(inner_flags.spin_bit, header.counter, now);
+                .rx_observe(inner_flags.spin_bit, header.counter, now_ms);
         }
 
         // Feed path_mtu from datagram envelope to MMP path MTU tracking.
@@ -974,9 +975,11 @@ impl Node {
             return;
         };
 
-        let now = std::time::Instant::now();
-        mmp.metrics
-            .process_receiver_report(&rr, our_timestamp_ms, now);
+        let (_first_rtt, rr_log) =
+            mmp.metrics
+                .process_receiver_report(&rr, our_timestamp_ms, crate::mmp::mono_ms());
+        // Re-emit the operator trace the core used to log mid-decision.
+        super::mmp::log_rr_outcome(&rr, our_timestamp_ms, rr_log);
 
         // Feed SRTT back to sender/receiver report interval tuning (session-layer bounds)
         if let Some(srtt_ms) = mmp.metrics.srtt_ms() {
@@ -1042,8 +1045,9 @@ impl Node {
         };
 
         let old_mtu = mmp.path_mtu.current_mtu();
-        let now = std::time::Instant::now();
-        let changed = mmp.path_mtu.apply_notification(notif.path_mtu, now);
+        let changed = mmp
+            .path_mtu
+            .apply_notification(notif.path_mtu, crate::mmp::mono_ms());
         let new_mtu = mmp.path_mtu.current_mtu();
 
         if !changed {
@@ -1256,8 +1260,10 @@ impl Node {
             && let Some(mmp) = entry.mmp_mut()
         {
             let old_mtu = mmp.path_mtu.current_mtu();
-            let now = std::time::Instant::now();
-            if mmp.path_mtu.apply_notification(msg.mtu, now) {
+            if mmp
+                .path_mtu
+                .apply_notification(msg.mtu, crate::mmp::mono_ms())
+            {
                 let new_mtu = mmp.path_mtu.current_mtu();
                 info!(
                     dest = %peer_name,

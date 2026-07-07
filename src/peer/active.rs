@@ -4,9 +4,10 @@
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
 use crate::bloom::BloomFilter;
-use crate::mmp::{MmpConfig, MmpPeerState};
+use crate::mmp::MmpConfig;
 use crate::node::REKEY_JITTER_SECS;
 use crate::noise::{HandshakeState as NoiseHandshakeState, NoiseError, NoiseSession};
+use crate::proto::mmp::MmpPeerState;
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use crate::utils::index::SessionIndex;
@@ -332,7 +333,12 @@ impl ActivePeer {
             authenticated_at,
             last_seen: authenticated_at,
             remote_epoch,
-            mmp: Some(MmpPeerState::new(mmp_config, is_initiator)),
+            mmp: Some(MmpPeerState::new(
+                mmp_config.mode,
+                mmp_config.log_interval_secs,
+                mmp_config.owd_window_size,
+                is_initiator,
+            )),
             last_heartbeat_sent: None,
             handshake_msg2: None,
             replay_suppressed_count: 0,
@@ -892,6 +898,38 @@ impl ActivePeer {
             .unwrap_or_else(Instant::now);
     }
 
+    /// Test-only seam: install link-layer MMP state with a chosen operating
+    /// mode on a peer that was constructed without a Noise session (the bare
+    /// `new` constructor leaves `mmp` as `None`). This only attaches the same
+    /// `MmpPeerState::new` the session path installs; it changes no decision
+    /// logic and no threshold, and is compiled out of release builds.
+    #[cfg(test)]
+    pub(crate) fn test_init_mmp(&mut self, mode: crate::proto::mmp::MmpMode) {
+        let config = MmpConfig {
+            mode,
+            ..MmpConfig::default()
+        };
+        self.mmp = Some(MmpPeerState::new(
+            config.mode,
+            config.log_interval_secs,
+            config.owd_window_size,
+            true,
+        ));
+    }
+
+    /// Test-only seam: backdate the session-start instant so a test can make
+    /// `session_elapsed_ms()` read as `age`-old (needed to synthesize a
+    /// positive RTT sample from a crafted ReceiverReport). This only shifts the
+    /// private timestamp field; it changes no decision logic, no threshold, and
+    /// is compiled out of release builds.
+    #[cfg(test)]
+    pub(crate) fn test_backdate_session_start(&mut self, age: std::time::Duration) {
+        self.session_start = self
+            .session_start
+            .checked_sub(age)
+            .unwrap_or_else(Instant::now);
+    }
+
     /// Per-session symmetric rekey-timer jitter offset (seconds).
     ///
     /// Drawn at session construction and at each rekey cutover; uniform
@@ -1018,9 +1056,9 @@ impl ActivePeer {
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey(now);
+            mmp.reset_for_rekey(now_ms);
         }
 
         self.previous_our_index
@@ -1055,9 +1093,9 @@ impl ActivePeer {
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey(now);
+            mmp.reset_for_rekey(now_ms);
         }
 
         self.previous_our_index

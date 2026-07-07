@@ -4,7 +4,6 @@ use crate::node::Node;
 use crate::node::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, strip_inner_header};
 use crate::noise::NoiseError;
 use crate::transport::ReceivedPacket;
-use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 /// Force-remove a peer after this many consecutive decryption failures.
@@ -259,7 +258,7 @@ impl Node {
         };
 
         // MMP per-frame processing and statistics
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         let ce_flag = header.flags & FLAG_CE != 0;
         let sp_flag = header.flags & FLAG_SP != 0;
 
@@ -270,9 +269,9 @@ impl Node {
                     timestamp,
                     packet.data.len(),
                     ce_flag,
-                    now,
+                    now_ms,
                 );
-                let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, header.counter, now);
+                let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, header.counter, now_ms);
             }
             peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
             peer.link_stats_mut()
@@ -355,7 +354,7 @@ impl Node {
         } else {
             return;
         };
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         let mut address_changed = false;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.reset_decrypt_failures();
@@ -365,8 +364,8 @@ impl Node {
             peer.touch(packet_timestamp_ms);
             if let Some(mmp) = peer.mmp_mut() {
                 mmp.receiver
-                    .record_recv(fmp_counter, inner_ts, packet_len, ce_flag, now);
-                let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, fmp_counter, now);
+                    .record_recv(fmp_counter, inner_ts, packet_len, ce_flag, now_ms);
+                let _spin_rtt = mmp.spin_bit.rx_observe(sp_flag, fmp_counter, now_ms);
             }
         }
         // Address rotation invalidates the per-peer connect()-ed UDP
