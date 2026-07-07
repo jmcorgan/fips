@@ -9,11 +9,11 @@
 //! downward here (a `proto -> protocol` dependency is allowed).
 
 use crate::NodeAddr;
+use crate::proto::stp::TreeCoordinate;
 use crate::protocol::ProtocolError;
 use crate::protocol::session::{
     SessionMessageType, decode_optional_coords, encode_coords, encode_empty_coords,
 };
-use crate::tree::TreeCoordinate;
 
 /// Link-layer error signal indicating router cache miss.
 ///

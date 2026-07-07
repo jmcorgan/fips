@@ -33,7 +33,7 @@ use crate::node::session::{EndToEndState, SessionEntry};
 use crate::noise::HandshakeState;
 use crate::peer::ActivePeer;
 use crate::proto::mmp::{MmpMode, ReceiverReport};
-use crate::tree::{ParentDeclaration, TreeCoordinate};
+use crate::proto::stp::{ParentDeclaration, TreeCoordinate};
 
 // ===========================================================================
 // Helpers

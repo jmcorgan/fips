@@ -48,6 +48,7 @@ use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateL
 use crate::proto::fmp::Fmp;
 use crate::proto::mmp::Mmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
+use crate::proto::stp::TreeState;
 #[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
@@ -58,14 +59,13 @@ use crate::transport::{
     ConnectionState, Link, LinkId, PacketRx, PacketTx, TransportAddr, TransportError,
     TransportHandle, TransportId,
 };
-use crate::tree::TreeState;
 use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use crate::utils::index::IndexAllocator;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity, TreeCoordinate};
 use rand::Rng;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -562,7 +562,11 @@ impl Node {
         };
 
         // Initialize tree state with signed self-declaration
-        let mut tree_state = TreeState::new(node_addr);
+        let tree_now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut tree_state = TreeState::new(node_addr, tree_now_secs);
         tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
         tree_state.set_hold_down(config.node.tree.hold_down_secs);
         tree_state.set_flap_dampening(
@@ -570,8 +574,7 @@ impl Node {
             config.node.tree.flap_window_secs,
             config.node.tree.flap_dampening_secs,
         );
-        tree_state
-            .sign_declaration(&identity)
+        tree::sign_declaration(tree_state.my_declaration_mut(), &identity)
             .expect("signing own declaration should never fail");
 
         let coord_cache = CoordCache::new(
@@ -723,7 +726,11 @@ impl Node {
         };
 
         // Initialize tree state with signed self-declaration
-        let mut tree_state = TreeState::new(node_addr);
+        let tree_now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut tree_state = TreeState::new(node_addr, tree_now_secs);
         tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
         tree_state.set_hold_down(config.node.tree.hold_down_secs);
         tree_state.set_flap_dampening(
@@ -731,8 +738,7 @@ impl Node {
             config.node.tree.flap_window_secs,
             config.node.tree.flap_dampening_secs,
         );
-        tree_state
-            .sign_declaration(&identity)
+        tree::sign_declaration(tree_state.my_declaration_mut(), &identity)
             .expect("signing own declaration should never fail");
 
         let mut bloom_state = BloomState::new(node_addr);
@@ -1564,7 +1570,7 @@ impl Node {
     /// Resolution order: this node when it is root, then the root as a live
     /// authenticated peer (cryptographically attested npub), then the
     /// identity-cache, else `None`.
-    pub(crate) fn resolve_root_npub(&self, tree: &crate::tree::TreeState) -> Option<String> {
+    pub(crate) fn resolve_root_npub(&self, tree: &crate::proto::stp::TreeState) -> Option<String> {
         if tree.is_root() {
             return Some(self.npub());
         }
@@ -2641,8 +2647,11 @@ impl Node {
             return self.peers.get(&next_hop);
         }
 
-        // 4. Greedy tree routing fallback
-        let next_hop_id = self.tree_state.find_next_hop(&dest_coords)?;
+        // 4. Greedy tree routing fallback. No peers are excluded from transit
+        //    on this branch; the non-full/leaf skip is a next-only refinement.
+        let next_hop_id = self
+            .tree_state
+            .find_next_hop(&dest_coords, &BTreeSet::new())?;
 
         self.peers.get(&next_hop_id).filter(|p| p.can_send())
     }

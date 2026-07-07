@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::node::session_wire::{FSP_FLAG_CP, build_fsp_header};
+use crate::proto::stp::TreeCoordinate;
 use crate::protocol::{SessionAck, SessionDatagram, SessionSetup, encode_coords};
-use crate::tree::TreeCoordinate;
 use spanning_tree::{
     TestNode, cleanup_nodes, process_available_packets, run_tree_test, verify_tree_convergence,
 };

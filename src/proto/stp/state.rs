@@ -1,11 +1,11 @@
 //! Local spanning tree state for a node.
 
-use std::collections::HashMap;
-use std::fmt;
-use std::time::{Duration, Instant};
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::fmt;
 
-use super::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
-use crate::{Identity, NodeAddr};
+use super::limits::FlapDampener;
+use super::{CoordEntry, TreeCoordinate};
+use crate::NodeAddr;
 
 /// Local spanning tree state for a node.
 ///
@@ -22,39 +22,23 @@ pub struct TreeState {
     /// The current elected root (smallest reachable node_addr).
     pub(super) root: NodeAddr,
     /// Each peer's most recent parent declaration.
-    peer_declarations: HashMap<NodeAddr, ParentDeclaration>,
+    peer_declarations: BTreeMap<NodeAddr, ParentDeclaration>,
     /// Each peer's full ancestry to root.
-    peer_ancestry: HashMap<NodeAddr, TreeCoordinate>,
+    peer_ancestry: BTreeMap<NodeAddr, TreeCoordinate>,
     /// Hysteresis factor for cost-based parent re-selection (0.0-1.0).
     parent_hysteresis: f64,
-    /// Hold-down period after parent switch (0 = disabled).
-    hold_down: Duration,
-    /// Timestamp of last parent switch (for hold-down enforcement).
-    last_parent_switch: Option<Instant>,
-    /// Number of parent switches in current flap window.
-    flap_count: u32,
-    /// Start of the current flap counting window.
-    flap_window_start: Option<Instant>,
-    /// If dampened, suppressed until this instant.
-    flap_dampening_until: Option<Instant>,
-    /// Flap threshold: max switches before dampening engages.
-    flap_threshold: u32,
-    /// Flap window duration.
-    flap_window: Duration,
-    /// Dampening duration when threshold exceeded.
-    flap_dampening_duration: Duration,
+    /// Flap-dampening / hold-down state machine.
+    flap: FlapDampener,
 }
 
 impl TreeState {
     /// Create initial tree state for a node (as root candidate).
     ///
     /// The node starts as its own root until it learns of a smaller node_addr.
-    /// Initial sequence is 1 per protocol spec; timestamp is current Unix time.
-    pub fn new(my_node_addr: NodeAddr) -> Self {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+    /// Initial sequence is 1 per protocol spec; `now_secs` is the injected
+    /// wall-clock Unix time in seconds stamped onto the initial declaration.
+    pub fn new(my_node_addr: NodeAddr, now_secs: u64) -> Self {
+        let timestamp = now_secs;
         let my_declaration = ParentDeclaration::self_root(my_node_addr, 1, timestamp);
         let my_coords = TreeCoordinate::root_with_meta(my_node_addr, 1, timestamp);
 
@@ -63,17 +47,10 @@ impl TreeState {
             my_declaration,
             my_coords,
             root: my_node_addr,
-            peer_declarations: HashMap::new(),
-            peer_ancestry: HashMap::new(),
+            peer_declarations: BTreeMap::new(),
+            peer_ancestry: BTreeMap::new(),
             parent_hysteresis: 0.0,
-            hold_down: Duration::ZERO,
-            last_parent_switch: None,
-            flap_count: 0,
-            flap_window_start: None,
-            flap_dampening_until: None,
-            flap_threshold: 4,
-            flap_window: Duration::from_secs(60),
-            flap_dampening_duration: Duration::from_secs(120),
+            flap: FlapDampener::new(),
         }
     }
 
@@ -164,15 +141,25 @@ impl TreeState {
     /// Call this when switching parents. Updates the declaration and coordinates.
     /// Returns true if flap dampening was just engaged due to this switch.
     /// Only records a flap when the parent actually changes.
-    pub fn set_parent(&mut self, parent_id: NodeAddr, sequence: u64, timestamp: u64) -> bool {
+    ///
+    /// `timestamp` is the escaping wall-clock Unix seconds stamped onto the new
+    /// declaration; `now_ms` is the monotonic milliseconds driving the
+    /// flap-dampening timers (the two clock bases must not be crossed).
+    pub fn set_parent(
+        &mut self,
+        parent_id: NodeAddr,
+        sequence: u64,
+        timestamp: u64,
+        now_ms: u64,
+    ) -> bool {
         let parent_changed = self.is_root() || *self.my_declaration.parent_id() != parent_id;
         self.my_declaration =
             ParentDeclaration::new(self.my_node_addr, parent_id, sequence, timestamp);
-        self.last_parent_switch = Some(Instant::now());
+        self.flap.mark_switch(now_ms);
         // Record switch for flap detection only when parent actually changes;
         // coordinates will be recomputed when ancestry is available
         if parent_changed {
-            self.record_parent_switch()
+            self.flap.record_parent_switch(now_ms)
         } else {
             false
         }
@@ -239,13 +226,12 @@ impl TreeState {
 
     /// Promote self to root with an incremented sequence number.
     ///
-    /// Caller must `sign_declaration` afterwards before sending the result.
-    pub fn become_root(&mut self) {
+    /// `now_secs` is the injected wall-clock Unix time in seconds stamped onto
+    /// the new self-root declaration. Caller must `sign_declaration` afterwards
+    /// before sending the result.
+    pub fn become_root(&mut self, now_secs: u64) {
         let new_seq = self.my_declaration.sequence() + 1;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let timestamp = now_secs;
         self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, new_seq, timestamp);
         self.recompute_coords();
     }
@@ -268,7 +254,14 @@ impl TreeState {
     /// - No peers have coordinates
     /// - Destination is in a different tree (different root)
     /// - No peer is closer to the destination than we are
-    pub fn find_next_hop(&self, dest_coords: &TreeCoordinate) -> Option<NodeAddr> {
+    ///
+    /// `skip_peers` contains peers that should not be used as transit
+    /// (e.g., non-routing and leaf nodes).
+    pub fn find_next_hop(
+        &self,
+        dest_coords: &TreeCoordinate,
+        skip_peers: &BTreeSet<NodeAddr>,
+    ) -> Option<NodeAddr> {
         if self.my_coords.root_id() != dest_coords.root_id() {
             return None;
         }
@@ -278,6 +271,9 @@ impl TreeState {
         let mut best: Option<(NodeAddr, usize)> = None;
 
         for (peer_id, peer_coords) in &self.peer_ancestry {
+            if skip_peers.contains(peer_id) {
+                continue;
+            }
             let distance = peer_coords.distance_to(dest_coords);
 
             let dominated = match &best {
@@ -305,46 +301,19 @@ impl TreeState {
 
     /// Set the hold-down duration after parent switches.
     pub fn set_hold_down(&mut self, secs: u64) {
-        self.hold_down = Duration::from_secs(secs);
+        self.flap.set_hold_down(secs);
     }
 
     /// Configure flap dampening parameters.
     pub fn set_flap_dampening(&mut self, threshold: u32, window_secs: u64, dampening_secs: u64) {
-        self.flap_threshold = threshold;
-        self.flap_window = Duration::from_secs(window_secs);
-        self.flap_dampening_duration = Duration::from_secs(dampening_secs);
+        self.flap
+            .set_flap_dampening(threshold, window_secs, dampening_secs);
     }
 
-    /// Record a parent switch for flap detection.
-    /// Returns true if dampening was just engaged.
-    pub fn record_parent_switch(&mut self) -> bool {
-        let now = Instant::now();
-
-        // Reset window if expired or not started
-        match self.flap_window_start {
-            Some(start) if now.duration_since(start) < self.flap_window => {
-                self.flap_count += 1;
-            }
-            _ => {
-                self.flap_window_start = Some(now);
-                self.flap_count = 1;
-            }
-        }
-
-        // Check threshold
-        if self.flap_count >= self.flap_threshold && self.flap_dampening_until.is_none() {
-            self.flap_dampening_until = Some(now + self.flap_dampening_duration);
-            return true;
-        }
-        false
-    }
-
-    /// Check if flap dampening is currently active.
-    pub fn is_flap_dampened(&self) -> bool {
-        match self.flap_dampening_until {
-            Some(until) => Instant::now() < until,
-            None => false,
-        }
+    /// Check if flap dampening is currently active. `now_ms` is the injected
+    /// monotonic time in milliseconds.
+    pub fn is_flap_dampened(&self, now_ms: u64) -> bool {
+        self.flap.is_flap_dampened(now_ms)
     }
 
     /// Evaluate whether to switch parents based on current peer tree state.
@@ -355,7 +324,18 @@ impl TreeState {
     ///
     /// Returns `Some(peer_node_addr)` if a parent switch is recommended,
     /// or `None` if the current parent is adequate.
-    pub fn evaluate_parent(&self, peer_costs: &HashMap<NodeAddr, f64>) -> Option<NodeAddr> {
+    ///
+    /// `skip_peers` contains peers that should not be considered as parent
+    /// candidates (e.g., non-routing and leaf nodes that don't forward transit).
+    ///
+    /// `now_ms` is the injected monotonic time in milliseconds, used only for
+    /// the hold-down / flap-dampening suppression checks below.
+    pub fn evaluate_parent(
+        &self,
+        peer_costs: &BTreeMap<NodeAddr, f64>,
+        skip_peers: &BTreeSet<NodeAddr>,
+        now_ms: u64,
+    ) -> Option<NodeAddr> {
         if self.peer_ancestry.is_empty() {
             return None;
         }
@@ -394,6 +374,10 @@ impl TreeState {
         let mut best_peer: Option<(NodeAddr, f64)> = None; // (peer_addr, effective_depth)
         for (peer_id, coords) in &self.peer_ancestry {
             if *coords.root_id() != smallest_root {
+                continue;
+            }
+            // Skip non-routing/leaf peers (can't forward transit)
+            if skip_peers.contains(peer_id) {
                 continue;
             }
             // Reject candidates whose ancestry contains us (would create a loop)
@@ -450,17 +434,13 @@ impl TreeState {
 
         // --- Hold-down: suppress non-mandatory re-evaluation after recent switch ---
 
-        if !self.hold_down.is_zero()
-            && self
-                .last_parent_switch
-                .is_some_and(|last| last.elapsed() < self.hold_down)
-        {
+        if self.flap.is_hold_down_active(now_ms) {
             return None;
         }
 
         // --- Flap dampening: suppress after excessive parent switches ---
 
-        if self.is_flap_dampened() {
+        if self.flap.is_flap_dampened(now_ms) {
             return None;
         }
 
@@ -498,35 +478,38 @@ impl TreeState {
     /// If none available, becomes its own root (increments sequence).
     ///
     /// Returns `true` if the tree state changed (caller should re-announce).
-    pub fn handle_parent_lost(&mut self, peer_costs: &HashMap<NodeAddr, f64>) -> bool {
+    ///
+    /// `now_secs` is the injected wall-clock Unix seconds stamped onto the new
+    /// declaration; `now_ms` is the monotonic milliseconds driving the parent
+    /// re-evaluation's flap timers (the two clock bases must not be crossed).
+    pub fn handle_parent_lost(
+        &mut self,
+        peer_costs: &BTreeMap<NodeAddr, f64>,
+        now_secs: u64,
+        now_ms: u64,
+    ) -> bool {
         // Try to find an alternative parent
-        if let Some(new_parent) = self.evaluate_parent(peer_costs) {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+        if let Some(new_parent) = self.evaluate_parent(peer_costs, &BTreeSet::new(), now_ms) {
             let new_seq = self.my_declaration.sequence() + 1;
-            self.set_parent(new_parent, new_seq, timestamp);
+            self.set_parent(new_parent, new_seq, now_secs, now_ms);
             self.recompute_coords();
             return true;
         }
 
         // No alternative: become own root
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let new_seq = self.my_declaration.sequence() + 1;
-        self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, new_seq, timestamp);
+        self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, new_seq, now_secs);
         self.recompute_coords();
         true
     }
 
-    /// Sign this node's declaration with the given identity.
+    /// Mutable access to this node's declaration.
     ///
-    /// The identity's node_addr must match this TreeState's node_addr.
-    pub fn sign_declaration(&mut self, identity: &Identity) -> Result<(), TreeError> {
-        self.my_declaration.sign(identity)
+    /// Exposed so the shell can write back a signature after signing: the
+    /// declaration data + `signing_bytes()` live in-core, but the key-crypto
+    /// (the schnorr sign) is a shell-driven boundary (§6), mirroring discovery.
+    pub(crate) fn my_declaration_mut(&mut self) -> &mut ParentDeclaration {
+        &mut self.my_declaration
     }
 
     /// Check if this node's declaration is signed.
@@ -546,3 +529,142 @@ impl fmt::Debug for TreeState {
             .finish()
     }
 }
+
+/// A node's declaration of its parent in the spanning tree.
+///
+/// Each node periodically announces its parent selection. The declaration
+/// includes a monotonic sequence number for freshness and a signature
+/// for authenticity. When `parent_id == node_addr`, the node declares itself
+/// as a root candidate.
+#[derive(Clone)]
+pub struct ParentDeclaration {
+    /// The node making this declaration.
+    node_addr: NodeAddr,
+    /// The selected parent (equals node_addr if self-declaring as root).
+    parent_id: NodeAddr,
+    /// Monotonically increasing sequence number.
+    sequence: u64,
+    /// Timestamp when this declaration was created (Unix seconds).
+    timestamp: u64,
+    /// Raw 64-byte Schnorr signature over the declaration fields. Stored as
+    /// opaque bytes so the in-core type carries no signature-crypto dependency;
+    /// the shell computes/verifies it over `signing_bytes()` (§6).
+    signature: Option<[u8; 64]>,
+}
+
+impl ParentDeclaration {
+    /// Create a new unsigned parent declaration.
+    ///
+    /// The declaration must be signed before transmission using `set_signature()`.
+    pub fn new(node_addr: NodeAddr, parent_id: NodeAddr, sequence: u64, timestamp: u64) -> Self {
+        Self {
+            node_addr,
+            parent_id,
+            sequence,
+            timestamp,
+            signature: None,
+        }
+    }
+
+    /// Create a self-declaration (node is root candidate).
+    pub fn self_root(node_addr: NodeAddr, sequence: u64, timestamp: u64) -> Self {
+        Self::new(node_addr, node_addr, sequence, timestamp)
+    }
+
+    /// Create a declaration with a pre-computed signature.
+    pub fn with_signature(
+        node_addr: NodeAddr,
+        parent_id: NodeAddr,
+        sequence: u64,
+        timestamp: u64,
+        signature: [u8; 64],
+    ) -> Self {
+        Self {
+            node_addr,
+            parent_id,
+            sequence,
+            timestamp,
+            signature: Some(signature),
+        }
+    }
+
+    /// Get the declaring node's ID.
+    pub fn node_addr(&self) -> &NodeAddr {
+        &self.node_addr
+    }
+
+    /// Get the parent node's ID.
+    pub fn parent_id(&self) -> &NodeAddr {
+        &self.parent_id
+    }
+
+    /// Get the sequence number.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Get the timestamp.
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    /// Get the raw 64-byte signature, if set.
+    pub fn signature(&self) -> Option<&[u8; 64]> {
+        self.signature.as_ref()
+    }
+
+    /// Set the raw 64-byte signature after signing.
+    pub fn set_signature(&mut self, signature: [u8; 64]) {
+        self.signature = Some(signature);
+    }
+
+    /// Check if this is a root declaration (parent == self).
+    pub fn is_root(&self) -> bool {
+        self.node_addr == self.parent_id
+    }
+
+    /// Check if this declaration is signed.
+    pub fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+
+    /// Get the bytes that should be signed.
+    ///
+    /// Format: node_addr (16) || parent_id (16) || sequence (8) || timestamp (8)
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(48);
+        bytes.extend_from_slice(self.node_addr.as_bytes());
+        bytes.extend_from_slice(self.parent_id.as_bytes());
+        bytes.extend_from_slice(&self.sequence.to_le_bytes());
+        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        bytes
+    }
+
+    /// Check if this declaration is fresher than another.
+    pub fn is_fresher_than(&self, other: &ParentDeclaration) -> bool {
+        self.sequence > other.sequence
+    }
+}
+
+impl fmt::Debug for ParentDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParentDeclaration")
+            .field("node_addr", &self.node_addr)
+            .field("parent_id", &self.parent_id)
+            .field("sequence", &self.sequence)
+            .field("is_root", &self.is_root())
+            .field("signed", &self.is_signed())
+            .finish()
+    }
+}
+
+impl PartialEq for ParentDeclaration {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_addr == other.node_addr
+            && self.parent_id == other.parent_id
+            && self.sequence == other.sequence
+            && self.timestamp == other.timestamp
+    }
+}
+
+impl Eq for ParentDeclaration {}

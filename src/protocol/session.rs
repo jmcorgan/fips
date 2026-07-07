@@ -2,7 +2,7 @@
 
 use super::ProtocolError;
 use crate::NodeAddr;
-use crate::tree::TreeCoordinate;
+use crate::proto::stp::TreeCoordinate;
 use std::fmt;
 
 // ============================================================================

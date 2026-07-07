@@ -7,6 +7,7 @@
 use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::reject::{MmpReject, RejectReason, TreeReject};
+use crate::node::tree::sign_declaration;
 use crate::proto::mmp::{
     BackoffUpdate, LinkReportKind, LinkReportSnapshot, MmpAction, MmpSessionState,
     PathMtuNotification, PeerLivenessSnapshot, ReceiverReport, RrLog, SendResult, SenderReport,
@@ -185,25 +186,36 @@ impl Node {
         // Trigger re-evaluation so the node doesn't wait for the next
         // periodic tick or TreeAnnounce.
         if first_rtt {
-            let peer_costs: std::collections::HashMap<crate::NodeAddr, f64> = self
+            let peer_costs: std::collections::BTreeMap<crate::NodeAddr, f64> = self
                 .peers
                 .iter()
                 .filter(|(_, p)| p.has_srtt())
                 .map(|(a, p)| (*a, p.link_cost()))
                 .collect();
-            if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
+            // Wall-clock seconds for the escaping declaration timestamp;
+            // monotonic ms for the flap-dampening / hold-down timers.
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mono_now_ms = crate::mmp::mono_ms();
+            if let Some(new_parent) = self.tree_state.evaluate_parent(
+                &peer_costs,
+                &std::collections::BTreeSet::new(),
+                mono_now_ms,
+            ) {
                 let new_seq = self.tree_state.my_declaration().sequence() + 1;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
+                let flap_dampened =
+                    self.tree_state
+                        .set_parent(new_parent, new_seq, now_secs, mono_now_ms);
                 self.tree_state.recompute_coords();
                 // Clone identity once: sign_declaration borrows &mut tree_state while
                 // the identity() accessor borrows all of &self, so an owned copy avoids
                 // the split-borrow conflict on this infrequent parent-switch path.
                 let our_identity = self.identity().clone();
-                if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
                     warn!(error = %e, "Failed to sign declaration after first-RTT parent eval");
                     self.metrics()
                         .tree
@@ -232,10 +244,12 @@ impl Node {
                 let all_peers: Vec<crate::NodeAddr> = self.peers.keys().copied().collect();
                 self.bloom_state.mark_all_updates_needed(all_peers);
             } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
-                self.tree_state.become_root();
+                self.tree_state.become_root(now_secs);
                 // Clone identity once (see the parent-switch branch above for why).
                 let our_identity = self.identity().clone();
-                if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
                     warn!(error = %e, "Failed to sign self-root declaration after first-RTT");
                     self.metrics()
                         .tree

@@ -24,7 +24,6 @@ mod error;
 mod filter;
 mod link;
 pub(crate) mod session;
-mod tree;
 
 // Re-export all public types at protocol:: level
 pub use error::ProtocolError;
@@ -37,7 +36,6 @@ pub use session::{
     SessionSetup,
 };
 pub(crate) use session::{coords_wire_size, decode_optional_coords, encode_coords};
-pub use tree::TreeAnnounce;
 
 /// Protocol version for message compatibility.
 pub const PROTOCOL_VERSION: u8 = 1;
