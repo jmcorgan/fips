@@ -152,6 +152,21 @@ if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "auto" ]; then
 	echo "  uci set wireless.$RADIO.channel='36' && uci commit wireless && wifi reload" >&2
 fi
 
+# A client (sta) interface on the same radio follows its upstream AP's
+# channel and drags every other interface with it — a mesh pinned to a
+# different channel silently never joins, and does not recover when the
+# STA disconnects.
+for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.mode='sta'$/\1/p"); do
+	if [ "$(uci -q get "wireless.$s.device")" = "$RADIO" ]; then
+		echo "Warning: $RADIO also carries client interface '$s' (mode 'sta')." >&2
+		echo "The whole radio follows that STA's upstream channel — a mesh" >&2
+		echo "pinned to a different channel stays down silently. Align the" >&2
+		echo "mesh channel with the upstream AP, or put the mesh on a radio" >&2
+		echo "without a STA (a roaming uplink is incompatible with a" >&2
+		echo "fixed-channel mesh on the same radio)." >&2
+	fi
+done
+
 # ---------------------------------------------------------------------------
 # Network: unmanaged interface so netifd brings the netdev up. No IP config —
 # the FIPS Ethernet transport speaks raw frames on it.

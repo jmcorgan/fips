@@ -174,7 +174,16 @@ in this order:
 1. **Channel mismatch** (the most common cause): compare
    `iw dev fips-mesh0 info` on both routers — mesh ID *and* channel
    must match exactly.
-2. **Is the other router transmitting at all?**
+2. **The mesh interface never joined** — `iw dev fips-meshX info`
+   shows `type mesh point` but **no channel line**, and `station dump`
+   is empty. Usual cause: a client (`sta`) interface on the same
+   radio. A STA must follow its upstream AP's channel, the whole
+   radio follows the STA, and a mesh pinned to a different channel
+   silently stays down. Check for a STA sharing the radio
+   (`iw dev`, look for `type managed` on the same phy), compare
+   `iw dev <sta-iface> info | grep channel`, and re-pin the mesh
+   channel to match — on every backhaul router.
+3. **Is the other router transmitting at all?**
 
    ```sh
    iw dev fips-mesh0 scan | grep -i -B4 "MESH ID"
@@ -186,7 +195,7 @@ in this order:
    CAC wait, and confirm the country code is set
    (`uci get wireless.radio1.country`) — an unset regdomain can
    block channels entirely.
-3. `logread | grep -iE "mesh|fips-mesh0"` on both sides.
+4. `logread | grep -iE "mesh|fips-mesh0"` on both sides.
 
 Then the FIPS layer on top:
 
@@ -217,3 +226,12 @@ sight.
 - **Radio links are lossy.** A neighbor at the edge of range will
   form an 802.11s peering yet deliver a fraction of its frames.
   Expect link-quality effects that don't exist on wired Ethernet.
+- **A client (STA) uplink on the same radio owns the channel.** The
+  STA must follow whatever channel its upstream AP uses; every other
+  interface on that radio follows the STA. A mesh pinned to a
+  different channel silently never joins, and it does **not** recover
+  when the STA disconnects — a `wifi reload` (plus a fips restart) is
+  needed. A *roaming* uplink (travel-router / hotspot-chasing setups)
+  is fundamentally incompatible with a fixed-channel mesh on the same
+  radio: dedicate the mesh to the radio the STA never uses, and treat
+  any mesh sharing a STA radio as best-effort.
