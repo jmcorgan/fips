@@ -7,9 +7,9 @@
 #
 # Creates a mesh-point interface on the given radio and leaves everything
 # above L2 to FIPS. Run once per radio: dual-band routers can mesh on both
-# bands at once (2.4 GHz reaches further, 5 GHz carries more), giving every
-# router pair two complementary paths — FIPS's spanning tree treats them as
-# redundant links with automatic failover.
+# bands at once (2.4 GHz reaches further, 5 GHz carries more). Note this is
+# failover, not multipath — FIPS keeps one active link per peer; the other
+# band stands by and reconnects the peer if the active link dies.
 #
 #   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
 #     handshake authenticates and encrypts every peer link, so SAE would
@@ -171,7 +171,7 @@ Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO \
 
 ALL routers in this backhaul must share this mesh ID AND channel
 (per band). On a dual-band router, run fips-mesh-setup for the other
-radio too — two bands give every router pair redundant paths.
+radio too — second band is a standby path (failover, not multipath).
 
 Next steps:
   1. Restart the daemon (the shipped /etc/fips/fips.yaml already binds

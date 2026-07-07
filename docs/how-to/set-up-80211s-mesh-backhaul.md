@@ -76,8 +76,11 @@ are named by radio index: `radio0` → `fips-mesh0`, `radio1` →
 
 On dual-band routers, meshing **both** bands is worth it: 2.4 GHz
 reaches further at lower rates, 5 GHz carries more over shorter
-links, and FIPS's spanning tree treats the two as redundant paths
-with automatic failover:
+links. Note this is **failover, not multipath**: FIPS keeps one
+active link per peer, so traffic uses one band at a time — the other
+is a standby that re-establishes the peer if the active link dies
+(detection via keepalive timeout, so a cutover takes seconds, not
+milliseconds):
 
 ```sh
 fips-mesh-setup radio0

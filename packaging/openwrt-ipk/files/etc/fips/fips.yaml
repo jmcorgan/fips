@@ -105,7 +105,8 @@ transports:
     # (once per radio; radio0 -> fips-mesh0, radio1 -> fips-mesh1), then
     # restart fips (a transport whose interface is missing at startup is
     # skipped, not retried). Dual-band routers can mesh on both bands at
-    # once for redundant paths. The mesh runs OPEN (no SAE) with 802.11s
+    # once — failover, not multipath: FIPS keeps one active link per peer,
+    # the other band stands by. The mesh runs OPEN (no SAE) with 802.11s
     # forwarding off: FIPS's Noise handshake is the encryption and
     # authentication, and FIPS is the routing layer. See
     # docs/how-to/set-up-80211s-mesh-backhaul.md.
