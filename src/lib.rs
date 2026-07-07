@@ -27,7 +27,6 @@ pub mod protocol;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod transport;
-pub mod tree;
 pub mod upper;
 pub mod utils;
 pub mod version;
@@ -45,8 +44,8 @@ pub use upper::config::{DnsConfig, TunConfig};
 // Re-export discovery types
 pub use discovery::{BootstrapHandoffResult, EstablishedTraversal};
 
-// Re-export tree types
-pub use tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
+// Re-export tree types (relocated from tree:: to proto::stp)
+pub use proto::stp::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
 
 // Re-export bloom filter types
 pub use bloom::{BloomError, BloomFilter, BloomState};
@@ -62,8 +61,11 @@ pub use transport::{
 // Re-export protocol types
 pub use protocol::{
     FilterAnnounce, LinkMessageType, ProtocolError, SessionAck, SessionDatagram, SessionFlags,
-    SessionMessageType, SessionSetup, TreeAnnounce,
+    SessionMessageType, SessionSetup,
 };
+
+// Re-export STP wire types (relocated from protocol:: to proto::stp)
+pub use proto::stp::TreeAnnounce;
 
 // Re-export discovery wire types (relocated from protocol:: to proto::discovery)
 pub use proto::discovery::{LookupRequest, LookupResponse};

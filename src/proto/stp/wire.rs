@@ -1,9 +1,9 @@
 //! TreeAnnounce message: spanning tree state propagation.
 
-use super::error::ProtocolError;
-use super::link::LinkMessageType;
+use super::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
 use crate::NodeAddr;
-use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
+use crate::protocol::LinkMessageType;
+use crate::protocol::ProtocolError;
 use secp256k1::schnorr::Signature;
 
 /// Spanning tree announcement carrying parent declaration and ancestry.
@@ -218,8 +218,11 @@ impl TreeAnnounce {
         let sig_bytes: [u8; 64] = payload[pos..pos + 64]
             .try_into()
             .map_err(|_| ProtocolError::Malformed("bad signature".into()))?;
-        let signature =
-            Signature::from_slice(&sig_bytes).map_err(|_| ProtocolError::InvalidSignature)?;
+        // Validate the signature parses as a well-formed schnorr signature (the
+        // codec's only crypto touch, §11 w2); store the raw bytes so the in-core
+        // declaration carries no `secp256k1` dependency. Actual verification is a
+        // shell concern (§6).
+        Signature::from_slice(&sig_bytes).map_err(|_| ProtocolError::InvalidSignature)?;
 
         // The first entry's node_addr is the declaring node
         if entries.is_empty() {
@@ -230,7 +233,7 @@ impl TreeAnnounce {
         let node_addr = entries[0].node_addr;
 
         let declaration =
-            ParentDeclaration::with_signature(node_addr, parent, sequence, timestamp, signature);
+            ParentDeclaration::with_signature(node_addr, parent, sequence, timestamp, sig_bytes);
 
         let ancestry = TreeCoordinate::new(entries)
             .map_err(|e| ProtocolError::Malformed(format!("bad ancestry: {}", e)))?;
@@ -245,11 +248,20 @@ impl TreeAnnounce {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Identity;
 
     fn make_node_addr(val: u8) -> NodeAddr {
         let mut bytes = [0u8; 16];
         bytes[0] = val;
         NodeAddr::from_bytes(bytes)
+    }
+
+    /// Sign a declaration in place. In production the shell owns the key-crypto
+    /// (§6); this test-local helper keeps the sign/verify boundary out of the
+    /// in-core `state.rs` while letting the codec tests build signed messages.
+    fn sign_decl(decl: &mut ParentDeclaration, identity: &Identity) {
+        let sig = identity.sign(&decl.signing_bytes());
+        decl.set_signature(sig.to_byte_array());
     }
 
     fn make_coords(ids: &[u8]) -> TreeCoordinate {
@@ -278,7 +290,7 @@ mod tests {
 
         // Root declaration: parent == self
         let mut decl = ParentDeclaration::new(node_addr, node_addr, 1, 5000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         // Root ancestry: just the root itself
         let ancestry = TreeCoordinate::new(vec![CoordEntry::new(node_addr, 1, 5000)]).unwrap();
@@ -317,7 +329,7 @@ mod tests {
         let root = make_node_addr(4);
 
         let mut decl = ParentDeclaration::new(node_addr, parent, 5, 10000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![
             CoordEntry::new(node_addr, 5, 10000),
@@ -366,7 +378,7 @@ mod tests {
         let node_addr = *identity.node_addr();
 
         let mut decl = ParentDeclaration::new(node_addr, node_addr, 1, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![CoordEntry::new(node_addr, 1, 1000)]).unwrap();
         let announce = TreeAnnounce::new(decl, ancestry);
@@ -408,7 +420,7 @@ mod tests {
         let node_addr = *identity.node_addr();
 
         let mut decl = ParentDeclaration::new(node_addr, node_addr, 1, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![CoordEntry::new(node_addr, 1, 1000)]).unwrap();
         let announce = TreeAnnounce::new(decl, ancestry);
@@ -453,7 +465,7 @@ mod tests {
         let root = make_node_addr(1);
 
         let mut decl = ParentDeclaration::new(node_addr, parent, 5, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![
             CoordEntry::new(node_addr, 5, 1000),
@@ -477,7 +489,7 @@ mod tests {
         let advertised_root = make_node_addr(1);
 
         let mut decl = ParentDeclaration::new(node_addr, smaller, 5, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![
             CoordEntry::new(node_addr, 5, 1000),
@@ -507,7 +519,7 @@ mod tests {
         let ancestry_parent = make_node_addr(3);
 
         let mut decl = ParentDeclaration::new(node_addr, declared_parent, 5, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![
             CoordEntry::new(node_addr, 5, 1000),
@@ -537,7 +549,7 @@ mod tests {
         let parent = make_node_addr(2);
 
         let mut decl = ParentDeclaration::new(node_addr, parent, 5, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![
             CoordEntry::new(ancestry_sender, 5, 1000),
@@ -565,7 +577,7 @@ mod tests {
         let node_addr = *identity.node_addr();
 
         let mut decl = ParentDeclaration::self_root(node_addr, 5, 1000);
-        decl.sign(&identity).unwrap();
+        sign_decl(&mut decl, &identity);
 
         let ancestry = TreeCoordinate::new(vec![
             CoordEntry::new(node_addr, 5, 1000),

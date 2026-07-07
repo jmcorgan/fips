@@ -7,3 +7,4 @@ pub(crate) mod discovery;
 pub(crate) mod fmp;
 pub(crate) mod mmp;
 pub(crate) mod routing;
+pub(crate) mod stp;

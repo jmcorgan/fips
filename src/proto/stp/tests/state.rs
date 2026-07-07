@@ -1,175 +1,9 @@
-use std::collections::{HashMap, HashSet};
+//! ParentDeclaration, TreeState, parent-selection, and find_next_hop unit tests.
 
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 
-fn make_node_addr(val: u8) -> NodeAddr {
-    let mut bytes = [0u8; 16];
-    bytes[0] = val;
-    NodeAddr::from_bytes(bytes)
-}
-
-fn make_coords(ids: &[u8]) -> TreeCoordinate {
-    TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
-}
-
-// ===== TreeCoordinate Tests =====
-
-#[test]
-fn test_tree_coordinate_root() {
-    let root_id = make_node_addr(1);
-    let coord = TreeCoordinate::root(root_id);
-
-    assert!(coord.is_root());
-    assert_eq!(coord.depth(), 0);
-    assert_eq!(coord.node_addr(), &root_id);
-    assert_eq!(coord.root_id(), &root_id);
-    assert_eq!(coord.parent_id(), &root_id);
-}
-
-#[test]
-fn test_tree_coordinate_path() {
-    let node = make_node_addr(1);
-    let parent = make_node_addr(2);
-    let root = make_node_addr(3);
-
-    let coord = make_coords(&[1, 2, 3]);
-
-    assert!(!coord.is_root());
-    assert_eq!(coord.depth(), 2);
-    assert_eq!(coord.node_addr(), &node);
-    assert_eq!(coord.parent_id(), &parent);
-    assert_eq!(coord.root_id(), &root);
-}
-
-#[test]
-fn test_tree_coordinate_empty_fails() {
-    let result = TreeCoordinate::from_addrs(vec![]);
-    assert!(matches!(result, Err(TreeError::EmptyCoordinate)));
-}
-
-#[test]
-fn test_tree_coordinate_entries_metadata() {
-    let node = make_node_addr(1);
-    let root = make_node_addr(0);
-
-    let coord = TreeCoordinate::new(vec![
-        CoordEntry::new(node, 5, 1000),
-        CoordEntry::new(root, 1, 500),
-    ])
-    .unwrap();
-
-    assert_eq!(coord.entries()[0].sequence, 5);
-    assert_eq!(coord.entries()[0].timestamp, 1000);
-    assert_eq!(coord.entries()[1].sequence, 1);
-    assert_eq!(coord.entries()[1].timestamp, 500);
-}
-
-#[test]
-fn test_tree_distance_same_node() {
-    let node = make_node_addr(1);
-    let coord = TreeCoordinate::root(node);
-
-    assert_eq!(coord.distance_to(&coord), 0);
-}
-
-#[test]
-fn test_tree_distance_siblings() {
-    let coord_a = make_coords(&[1, 0]);
-    let coord_b = make_coords(&[2, 0]);
-
-    // a -> root -> b = 2 hops
-    assert_eq!(coord_a.distance_to(&coord_b), 2);
-}
-
-#[test]
-fn test_tree_distance_ancestor() {
-    let coord_parent = make_coords(&[1, 0]);
-    let coord_child = make_coords(&[2, 1, 0]);
-
-    // child -> parent = 1 hop
-    assert_eq!(coord_child.distance_to(&coord_parent), 1);
-}
-
-#[test]
-fn test_tree_distance_cousins() {
-    // Tree structure:
-    //       root(0)
-    //      /    \
-    //     a(1)   b(2)
-    //    /        \
-    //   c(3)       d(4)
-    let coord_c = make_coords(&[3, 1, 0]);
-    let coord_d = make_coords(&[4, 2, 0]);
-
-    // c -> a -> root -> b -> d = 4 hops
-    assert_eq!(coord_c.distance_to(&coord_d), 4);
-}
-
-#[test]
-fn test_tree_distance_different_roots() {
-    let coord1 = TreeCoordinate::root(make_node_addr(1));
-    let coord2 = TreeCoordinate::root(make_node_addr(2));
-
-    assert_eq!(coord1.distance_to(&coord2), usize::MAX);
-}
-
-#[test]
-fn test_has_ancestor() {
-    let root = make_node_addr(0);
-    let parent = make_node_addr(1);
-    let child = make_node_addr(2);
-
-    let coord = make_coords(&[2, 1, 0]);
-
-    assert!(coord.has_ancestor(&parent));
-    assert!(coord.has_ancestor(&root));
-    assert!(!coord.has_ancestor(&child)); // self is not an ancestor
-}
-
-#[test]
-fn test_contains() {
-    let root = make_node_addr(0);
-    let parent = make_node_addr(1);
-    let child = make_node_addr(2);
-    let other = make_node_addr(99);
-
-    let coord = make_coords(&[2, 1, 0]);
-
-    assert!(coord.contains(&child));
-    assert!(coord.contains(&parent));
-    assert!(coord.contains(&root));
-    assert!(!coord.contains(&other));
-}
-
-#[test]
-fn test_ancestor_at() {
-    let root = make_node_addr(0);
-    let parent = make_node_addr(1);
-    let child = make_node_addr(2);
-
-    let coord = make_coords(&[2, 1, 0]);
-
-    assert_eq!(coord.ancestor_at(0), Some(&child));
-    assert_eq!(coord.ancestor_at(1), Some(&parent));
-    assert_eq!(coord.ancestor_at(2), Some(&root));
-    assert_eq!(coord.ancestor_at(3), None);
-}
-
-#[test]
-fn test_lca() {
-    let root = make_node_addr(0);
-    let a = make_node_addr(1);
-
-    // c under a, d under b, both under root
-    let coord_c = make_coords(&[3, 1, 0]);
-    let coord_d = make_coords(&[4, 2, 0]);
-
-    assert_eq!(coord_c.lca(&coord_d), Some(&root));
-
-    // c and a share ancestry through a and root
-    let coord_a = make_coords(&[1, 0]);
-    assert_eq!(coord_c.lca(&coord_a), Some(&a));
-}
+use super::util::{add_peer, make_coords, make_costs, make_node_addr, make_tree_state};
+use crate::proto::stp::{ParentDeclaration, TreeCoordinate, TreeState};
 
 // ===== ParentDeclaration Tests =====
 
@@ -247,7 +81,7 @@ fn test_parent_declaration_equality() {
 #[test]
 fn test_tree_state_new() {
     let node = make_node_addr(1);
-    let state = TreeState::new(node);
+    let state = TreeState::new(node, 1000);
 
     assert_eq!(state.my_node_addr(), &node);
     assert!(state.is_root());
@@ -259,7 +93,7 @@ fn test_tree_state_new() {
 #[test]
 fn test_tree_state_update_peer() {
     let my_node = make_node_addr(0);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer = make_node_addr(1);
     let root = make_node_addr(2);
@@ -284,7 +118,7 @@ fn test_tree_state_update_peer() {
 #[test]
 fn test_tree_state_remove_peer() {
     let my_node = make_node_addr(0);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer = make_node_addr(1);
     let root = make_node_addr(2);
@@ -303,7 +137,7 @@ fn test_tree_state_remove_peer() {
 #[test]
 fn test_tree_state_distance_to_peer() {
     let my_node = make_node_addr(0);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer = make_node_addr(1);
 
@@ -319,7 +153,7 @@ fn test_tree_state_distance_to_peer() {
     let shared_root = make_node_addr(99);
 
     // Update my state to have shared root
-    state.set_parent(shared_root, 1, 1000);
+    state.set_parent(shared_root, 1, 1000, 1000);
     let my_new_coords = make_coords(&[0, 99]);
     // Manually set coords for test (normally done by recompute_coords)
     state.my_coords = my_new_coords;
@@ -337,7 +171,7 @@ fn test_tree_state_distance_to_peer() {
 #[test]
 fn test_tree_state_peer_ids() {
     let my_node = make_node_addr(0);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -366,7 +200,7 @@ fn test_evaluate_parent_picks_smallest_root() {
     // Peer 7's path: [7, 2] (root=2)
     // Should pick peer 3 because root 1 < root 2.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer3 = make_node_addr(3);
     let peer7 = make_node_addr(7);
@@ -380,7 +214,7 @@ fn test_evaluate_parent_picks_smallest_root() {
         make_coords(&[7, 2]),
     );
 
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer3));
 }
 
@@ -389,7 +223,7 @@ fn test_evaluate_parent_prefers_shallowest_depth() {
     // Node 5, root=0 (shared). Peer 1 at depth 1, peer 2 at depth 3.
     // Both reach root 0. Should pick peer 1 (shallowest).
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -406,7 +240,7 @@ fn test_evaluate_parent_prefers_shallowest_depth() {
         make_coords(&[2, 3, 4, 0]),
     );
 
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer1));
 }
 
@@ -414,7 +248,7 @@ fn test_evaluate_parent_prefers_shallowest_depth() {
 fn test_evaluate_parent_stays_root_when_smallest() {
     // Node 0 (smallest possible) should stay root even if peers exist.
     let my_node = make_node_addr(0);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     // Peer 1 has root 0 (us) — shouldn't trigger switch
@@ -424,7 +258,7 @@ fn test_evaluate_parent_stays_root_when_smallest() {
     );
 
     assert_eq!(
-        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
         None
     );
 }
@@ -433,7 +267,7 @@ fn test_evaluate_parent_stays_root_when_smallest() {
 fn test_evaluate_parent_no_switch_when_already_best() {
     // Node 5, already using peer 1 as parent. No better option.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let root = make_node_addr(0);
@@ -444,12 +278,12 @@ fn test_evaluate_parent_no_switch_when_already_best() {
     );
 
     // Switch to peer1 as parent first
-    state.set_parent(peer1, 1, 1000);
+    state.set_parent(peer1, 1, 1000, 1000);
     state.recompute_coords();
 
     // Now evaluate — should return None since peer1 is already our parent
     assert_eq!(
-        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
         None
     );
 }
@@ -457,10 +291,10 @@ fn test_evaluate_parent_no_switch_when_already_best() {
 #[test]
 fn test_evaluate_parent_no_peers() {
     let my_node = make_node_addr(5);
-    let state = TreeState::new(my_node);
+    let state = TreeState::new(my_node, 1000);
 
     assert_eq!(
-        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
         None
     );
 }
@@ -472,7 +306,7 @@ fn test_evaluate_parent_depth_threshold() {
     // Peer 3 offers depth 1 (improvement of 3, exceeds threshold).
     // Should switch to peer 3.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer2 = make_node_addr(2);
     let peer3 = make_node_addr(3);
@@ -485,7 +319,7 @@ fn test_evaluate_parent_depth_threshold() {
     );
 
     // Set peer2 as our parent, making us depth 4
-    state.set_parent(peer2, 1, 1000);
+    state.set_parent(peer2, 1, 1000, 1000);
     state.recompute_coords();
     assert_eq!(state.my_coords().depth(), 4);
 
@@ -495,7 +329,7 @@ fn test_evaluate_parent_depth_threshold() {
         make_coords(&[3, 0]),
     );
 
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer3));
 }
 
@@ -504,7 +338,7 @@ fn test_evaluate_parent_rejects_loop_candidate() {
     // Node 5 with peer 1 whose ancestry contains node 5 — selecting
     // peer 1 would create a coordinate loop. evaluate_parent must skip it.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let _root = make_node_addr(0);
@@ -517,7 +351,7 @@ fn test_evaluate_parent_rejects_loop_candidate() {
 
     // Should return None — the only candidate creates a loop
     assert_eq!(
-        state.evaluate_parent(&HashMap::new(), &HashSet::new()),
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
         None
     );
 }
@@ -527,7 +361,7 @@ fn test_evaluate_parent_picks_loop_free_over_loopy() {
     // Two peers reach the same root. Peer 1's ancestry contains us (loop),
     // peer 2's does not. Should pick peer 2 even though peer 1 is shallower.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -544,14 +378,14 @@ fn test_evaluate_parent_picks_loop_free_over_loopy() {
         make_coords(&[2, 3, 4, 0]),
     );
 
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer2));
 }
 
 #[test]
 fn test_handle_parent_lost_finds_alternative() {
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -567,12 +401,12 @@ fn test_handle_parent_lost_finds_alternative() {
     );
 
     // Set peer1 as parent
-    state.set_parent(peer1, 1, 1000);
+    state.set_parent(peer1, 1, 1000, 1000);
     state.recompute_coords();
 
     // Remove peer1 (parent lost)
     state.remove_peer(&peer1);
-    let changed = state.handle_parent_lost(&HashMap::new());
+    let changed = state.handle_parent_lost(&BTreeMap::new(), 1000, 1000);
 
     assert!(changed);
     // Should have switched to peer2
@@ -591,7 +425,7 @@ fn test_handle_parent_lost_becomes_root_when_self_smaller_than_remaining() {
     // bug seen in production where ubuntu-dev (3847a4..) advertised itself
     // as root while its path still contained mac (312c79..).
     let my_node = make_node_addr(1); // our addr is the smallest
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let smaller = make_node_addr(0);
     let bigger1 = make_node_addr(2);
@@ -613,14 +447,14 @@ fn test_handle_parent_lost_becomes_root_when_self_smaller_than_remaining() {
         make_coords(&[3]),
     );
 
-    state.set_parent(smaller, 2, 2000);
+    state.set_parent(smaller, 2, 2000, 2000);
     state.recompute_coords();
     assert_eq!(state.my_coords().entries().len(), 2);
     assert_eq!(state.root(), &smaller);
 
     // Smaller peer disconnects.
     state.remove_peer(&smaller);
-    let changed = state.handle_parent_lost(&HashMap::new());
+    let changed = state.handle_parent_lost(&BTreeMap::new(), 1000, 1000);
     assert!(changed);
 
     // Must become root (we're the smallest visible), NOT pick bigger1/bigger2.
@@ -644,7 +478,7 @@ fn test_recompute_coords_demotes_when_self_smaller_than_parent_root() {
     // path), recompute_coords must produce a valid ancestry by demoting to
     // self-root rather than emit [self, peer, peer_root] with last > min.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let bigger_peer = make_node_addr(7);
     state.update_peer(
@@ -652,7 +486,7 @@ fn test_recompute_coords_demotes_when_self_smaller_than_parent_root() {
         make_coords(&[7]),
     );
 
-    state.set_parent(bigger_peer, 2, 2000);
+    state.set_parent(bigger_peer, 2, 2000, 2000);
     state.recompute_coords();
 
     assert!(state.is_root(), "recompute_coords demoted to self-root");
@@ -666,7 +500,7 @@ fn test_recompute_coords_demotes_when_self_smaller_than_parent_root() {
 #[test]
 fn test_handle_parent_lost_becomes_root() {
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let root = make_node_addr(0);
@@ -677,13 +511,13 @@ fn test_handle_parent_lost_becomes_root() {
     );
 
     // Set peer1 as parent
-    state.set_parent(peer1, 1, 1000);
+    state.set_parent(peer1, 1, 1000, 1000);
     state.recompute_coords();
     let seq_before = state.my_declaration().sequence();
 
     // Remove peer1 (only parent)
     state.remove_peer(&peer1);
-    let changed = state.handle_parent_lost(&HashMap::new());
+    let changed = state.handle_parent_lost(&BTreeMap::new(), 1000, 1000);
 
     assert!(changed);
     assert!(state.is_root());
@@ -692,26 +526,6 @@ fn test_handle_parent_lost_becomes_root() {
 }
 
 // === find_next_hop tests ===
-
-/// Build a TreeState with our own coordinates set.
-fn make_tree_state(my_addr: u8, coord_path: &[u8]) -> TreeState {
-    let my_node = make_node_addr(my_addr);
-    let mut state = TreeState::new(my_node);
-    let coords = make_coords(coord_path);
-    state.root = *coords.root_id();
-    state.my_coords = coords;
-    state
-}
-
-/// Add a peer with given coordinates to the tree state.
-fn add_peer(state: &mut TreeState, peer_addr: u8, coord_path: &[u8]) {
-    let peer = make_node_addr(peer_addr);
-    let parent = make_node_addr(coord_path[1]);
-    state.update_peer(
-        ParentDeclaration::new(peer, parent, 1, 1000),
-        make_coords(coord_path),
-    );
-}
 
 #[test]
 fn test_find_next_hop_chain() {
@@ -724,7 +538,7 @@ fn test_find_next_hop_chain() {
 
     let dest = make_coords(&[2, 1, 5, 0]);
     assert_eq!(
-        state.find_next_hop(&dest, &HashSet::new()),
+        state.find_next_hop(&dest, &BTreeSet::new()),
         Some(make_node_addr(2))
     );
 }
@@ -739,7 +553,7 @@ fn test_find_next_hop_chain_indirect() {
 
     let dest = make_coords(&[2, 1, 5, 0]);
     assert_eq!(
-        state.find_next_hop(&dest, &HashSet::new()),
+        state.find_next_hop(&dest, &BTreeSet::new()),
         Some(make_node_addr(1))
     );
 }
@@ -753,7 +567,7 @@ fn test_find_next_hop_toward_root() {
 
     let dest = make_coords(&[0]);
     assert_eq!(
-        state.find_next_hop(&dest, &HashSet::new()),
+        state.find_next_hop(&dest, &BTreeSet::new()),
         Some(make_node_addr(1))
     );
 }
@@ -771,7 +585,7 @@ fn test_find_next_hop_sibling() {
 
     let dest = make_coords(&[3, 0]);
     assert_eq!(
-        state.find_next_hop(&dest, &HashSet::new()),
+        state.find_next_hop(&dest, &BTreeSet::new()),
         Some(make_node_addr(3))
     );
 }
@@ -790,7 +604,7 @@ fn test_find_next_hop_tie_breaking() {
     // Peer 3 distance: 2 (up to root, down to 4)
     // Peer 2 distance: 2 (up to root, down to 4)
     // All equal to our distance — no peer is strictly closer.
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), None);
+    assert_eq!(state.find_next_hop(&dest, &BTreeSet::new()), None);
 }
 
 #[test]
@@ -800,14 +614,14 @@ fn test_find_next_hop_different_root() {
 
     // Destination in a different tree (root = 9)
     let dest = make_coords(&[3, 9]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), None);
+    assert_eq!(state.find_next_hop(&dest, &BTreeSet::new()), None);
 }
 
 #[test]
 fn test_find_next_hop_no_peers() {
     let state = make_tree_state(5, &[5, 0]);
     let dest = make_coords(&[3, 0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), None);
+    assert_eq!(state.find_next_hop(&dest, &BTreeSet::new()), None);
 }
 
 #[test]
@@ -822,7 +636,7 @@ fn test_find_next_hop_local_minimum() {
     add_peer(&mut state, 8, &[8, 5, 0]);
 
     let dest = make_coords(&[3, 0]);
-    assert_eq!(state.find_next_hop(&dest, &HashSet::new()), None);
+    assert_eq!(state.find_next_hop(&dest, &BTreeSet::new()), None);
 }
 
 #[test]
@@ -839,20 +653,12 @@ fn test_find_next_hop_best_of_multiple() {
 
     let dest = make_coords(&[7, 3, 1, 0]);
     assert_eq!(
-        state.find_next_hop(&dest, &HashSet::new()),
+        state.find_next_hop(&dest, &BTreeSet::new()),
         Some(make_node_addr(3))
     );
 }
 
 // === Cost-based parent selection tests ===
-
-/// Build a peer_costs map from (addr_byte, cost) pairs.
-fn make_costs(entries: &[(u8, f64)]) -> HashMap<NodeAddr, f64> {
-    entries
-        .iter()
-        .map(|&(addr, cost)| (make_node_addr(addr), cost))
-        .collect()
-}
 
 #[test]
 fn test_effective_depth_selects_lower_cost_deeper_peer() {
@@ -861,7 +667,7 @@ fn test_effective_depth_selects_lower_cost_deeper_peer() {
     // effective_depth(B) = 2 + 1.01 = 3.01
     // Should select B despite being deeper.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer_a = make_node_addr(1);
     let peer_b = make_node_addr(2);
@@ -879,7 +685,7 @@ fn test_effective_depth_selects_lower_cost_deeper_peer() {
     );
 
     let costs = make_costs(&[(1, 6.0), (2, 1.01)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer_b));
 }
 
@@ -887,7 +693,7 @@ fn test_effective_depth_selects_lower_cost_deeper_peer() {
 fn test_effective_depth_equal_cost_degenerates_to_depth() {
     // Both peers at cost 1.0 (default). Should pick shallowest, same as v1.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -905,7 +711,7 @@ fn test_effective_depth_equal_cost_degenerates_to_depth() {
     );
 
     let costs = make_costs(&[(1, 1.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer1));
 }
 
@@ -913,7 +719,7 @@ fn test_effective_depth_equal_cost_degenerates_to_depth() {
 fn test_effective_depth_tiebreak_by_node_addr() {
     // Two peers with identical effective_depth. Smaller NodeAddr wins.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -930,7 +736,7 @@ fn test_effective_depth_tiebreak_by_node_addr() {
     );
 
     let costs = make_costs(&[(1, 1.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer1)); // smaller NodeAddr
 }
 
@@ -940,7 +746,7 @@ fn test_hysteresis_prevents_marginal_switch() {
     // With 20% hysteresis, threshold = 3.5 * 0.8 = 2.8.
     // 3.2 > 2.8, so no switch.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
     state.set_parent_hysteresis(0.2);
 
     let peer_a = make_node_addr(1); // current parent
@@ -959,11 +765,11 @@ fn test_hysteresis_prevents_marginal_switch() {
     );
 
     // Set peer_a as current parent
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     let costs = make_costs(&[(1, 2.5), (2, 2.2)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, None); // marginal improvement blocked by hysteresis
 }
 
@@ -973,7 +779,7 @@ fn test_hysteresis_allows_significant_switch() {
     // With 20% hysteresis, threshold = 7.0 * 0.8 = 5.6.
     // 3.01 < 5.6, so switch occurs.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
     state.set_parent_hysteresis(0.2);
 
     let peer_a = make_node_addr(1); // current parent (LoRa)
@@ -992,11 +798,11 @@ fn test_hysteresis_allows_significant_switch() {
     );
 
     // Set peer_a as current parent
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     let costs = make_costs(&[(1, 6.0), (2, 1.01)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer_b));
 }
 
@@ -1005,7 +811,7 @@ fn test_cold_start_default_cost() {
     // Peer with no cost entry in map gets default 1.0.
     // This degenerates to depth-only selection.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1);
     let peer2 = make_node_addr(2);
@@ -1022,7 +828,7 @@ fn test_cold_start_default_cost() {
     );
 
     // Empty cost map — all peers get default 1.0
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer1)); // shallowest wins
 }
 
@@ -1030,7 +836,7 @@ fn test_cold_start_default_cost() {
 fn test_hold_down_suppresses_reeval() {
     // After a parent switch, re-evaluation returns None during hold-down.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
     state.set_hold_down(60); // 60s hold-down
 
     let peer_a = make_node_addr(1);
@@ -1047,13 +853,13 @@ fn test_hold_down_suppresses_reeval() {
     );
 
     // Switch to peer_a (sets last_parent_switch)
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     // Peer_b now offers better cost, but hold-down suppresses
     let costs = make_costs(&[(1, 5.0), (2, 1.0)]);
     state.set_parent_hysteresis(0.0); // no hysteresis, only hold-down
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, None); // suppressed by hold-down
 }
 
@@ -1061,7 +867,7 @@ fn test_hold_down_suppresses_reeval() {
 fn test_mandatory_switch_bypasses_hold_down() {
     // Parent loss during hold-down still triggers switch.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
     state.set_hold_down(60); // 60s hold-down
 
     let peer_a = make_node_addr(1);
@@ -1078,12 +884,12 @@ fn test_mandatory_switch_bypasses_hold_down() {
     );
 
     // Switch to peer_a
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     // Remove peer_a (parent lost) — should bypass hold-down
     state.remove_peer(&peer_a);
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer_b)); // mandatory switch
 }
 
@@ -1109,7 +915,7 @@ fn test_heterogeneous_7node_avoids_bottleneck() {
 
     // Test from node 5's perspective
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer1 = make_node_addr(1); // fiber peer at depth 1
     let peer2 = make_node_addr(2); // LoRa peer at depth 1
@@ -1125,28 +931,28 @@ fn test_heterogeneous_7node_avoids_bottleneck() {
     );
 
     // Without costs (all 1.0): picks peer 1 (smaller addr) — correct by luck
-    let result_no_cost = state.evaluate_parent(&HashMap::new(), &HashSet::new());
+    let result_no_cost = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
     assert_eq!(result_no_cost, Some(peer1));
 
     // With costs: fiber (1.01) vs LoRa (6.0) — fiber wins definitively
     let costs = make_costs(&[(1, 1.01), (2, 6.0)]);
-    let result_with_cost = state.evaluate_parent(&costs, &HashSet::new());
+    let result_with_cost = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result_with_cost, Some(peer1));
 
     // Now test the critical case: node 5 currently has LoRa parent (peer 2).
     // Even without hysteresis, it should want to switch to fiber (peer 1).
-    state.set_parent(peer2, 1, 1000);
+    state.set_parent(peer2, 1, 1000, 1000);
     state.recompute_coords();
     assert_eq!(state.my_coords().depth(), 2); // depth 2 through LoRa peer
 
-    let result_switch = state.evaluate_parent(&costs, &HashSet::new());
+    let result_switch = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result_switch, Some(peer1)); // switches away from LoRa bottleneck
 
     // With hysteresis enabled, still switches because the cost difference is large
     state.set_parent_hysteresis(0.2);
     // current_parent_eff = 1 + 6.0 = 7.0, best_eff = 1 + 1.01 = 2.01
     // threshold = 7.0 * 0.8 = 5.6, 2.01 < 5.6 → switch
-    let result_hyst = state.evaluate_parent(&costs, &HashSet::new());
+    let result_hyst = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result_hyst, Some(peer1));
 }
 
@@ -1164,7 +970,7 @@ fn test_cost_degradation_triggers_switch() {
     // (both fiber). After stabilization, peer A's link degrades (becomes
     // LoRa-like). Re-evaluation with updated costs should trigger a switch.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
     state.set_parent_hysteresis(0.2);
 
     let peer_a = make_node_addr(1);
@@ -1182,14 +988,14 @@ fn test_cost_degradation_triggers_switch() {
 
     // Initial: both fiber-like costs. Node picks peer_a (smaller addr).
     let initial_costs = make_costs(&[(1, 1.05), (2, 1.08)]);
-    let result = state.evaluate_parent(&initial_costs, &HashSet::new());
+    let result = state.evaluate_parent(&initial_costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer_a));
 
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     // Verify stable: no switch with same costs
-    let result = state.evaluate_parent(&initial_costs, &HashSet::new());
+    let result = state.evaluate_parent(&initial_costs, &BTreeSet::new(), 1000);
     assert_eq!(result, None);
 
     // Peer A's link degrades significantly (LoRa-like latency + loss)
@@ -1197,7 +1003,7 @@ fn test_cost_degradation_triggers_switch() {
     // best_eff = 1 + 1.08 = 2.08
     // threshold = 7.0 * 0.8 = 5.6, 2.08 < 5.6 → switch
     let degraded_costs = make_costs(&[(1, 6.0), (2, 1.08)]);
-    let result = state.evaluate_parent(&degraded_costs, &HashSet::new());
+    let result = state.evaluate_parent(&degraded_costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer_b));
 }
 
@@ -1206,7 +1012,7 @@ fn test_cost_improvement_within_hysteresis_no_switch() {
     // Node 5 has parent peer_a. Peer_b's cost improves slightly but
     // stays within the hysteresis band. Re-evaluation should not switch.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
     state.set_parent_hysteresis(0.2);
 
     let peer_a = make_node_addr(1);
@@ -1222,7 +1028,7 @@ fn test_cost_improvement_within_hysteresis_no_switch() {
         make_coords(&[2, 0]),
     );
 
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     // Peer B slightly better: cost 1.5 vs peer A cost 2.0
@@ -1230,7 +1036,7 @@ fn test_cost_improvement_within_hysteresis_no_switch() {
     // best_eff = 1 + 1.5 = 2.5
     // threshold = 3.0 * 0.8 = 2.4, 2.5 > 2.4 → no switch
     let costs = make_costs(&[(1, 2.0), (2, 1.5)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, None);
 }
 
@@ -1240,7 +1046,7 @@ fn test_single_peer_no_reeval_benefit() {
     // but once it's our parent, re-evaluation returns None regardless
     // of cost changes (no alternative exists).
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let peer_a = make_node_addr(1);
     let root = make_node_addr(0);
@@ -1252,249 +1058,16 @@ fn test_single_peer_no_reeval_benefit() {
 
     // Initial selection: picks the only peer
     let costs = make_costs(&[(1, 1.05)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
+    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
     assert_eq!(result, Some(peer_a));
 
-    state.set_parent(peer_a, 1, 1000);
+    state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     // Even with terrible cost, no switch (no alternative)
     let bad_costs = make_costs(&[(1, 50.0)]);
-    let result = state.evaluate_parent(&bad_costs, &HashSet::new());
+    let result = state.evaluate_parent(&bad_costs, &BTreeSet::new(), 1000);
     assert_eq!(result, None);
-}
-
-// =====================================================================
-// Flap dampening tests
-// =====================================================================
-
-#[test]
-fn test_flap_dampening_engages_after_threshold() {
-    // Create TreeState with flap_threshold=3, window=60s, dampening=3600s (long)
-    let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
-    state.set_flap_dampening(3, 60, 3600);
-    state.set_hold_down(0); // disable hold-down for this test
-
-    let peer_a = make_node_addr(1);
-    let peer_b = make_node_addr(2);
-    let root = make_node_addr(0);
-
-    state.update_peer(
-        ParentDeclaration::new(peer_a, root, 1, 1000),
-        make_coords(&[1, 0]),
-    );
-    state.update_peer(
-        ParentDeclaration::new(peer_b, root, 1, 1000),
-        make_coords(&[2, 0]),
-    );
-
-    // Switch 1: initial parent selection (root -> peer_a)
-    assert!(!state.is_flap_dampened());
-    state.set_parent(peer_a, 1, 1000);
-    state.recompute_coords();
-    assert!(!state.is_flap_dampened());
-
-    // Switch 2: peer_a -> peer_b
-    state.set_parent(peer_b, 2, 2000);
-    state.recompute_coords();
-    assert!(!state.is_flap_dampened());
-
-    // Switch 3: peer_b -> peer_a — threshold reached, dampening engages
-    let dampened = state.set_parent(peer_a, 3, 3000);
-    state.recompute_coords();
-    assert!(dampened);
-    assert!(state.is_flap_dampened());
-
-    // evaluate_parent should return None for non-mandatory switches
-    // Make peer_b much better than peer_a
-    let costs = make_costs(&[(1, 10.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
-    assert_eq!(result, None); // suppressed by flap dampening
-}
-
-#[test]
-fn test_flap_dampening_allows_mandatory_switches() {
-    // Engage dampening, then verify mandatory switches still work
-    let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
-    state.set_flap_dampening(3, 60, 3600);
-    state.set_hold_down(0);
-
-    let peer_a = make_node_addr(1);
-    let peer_b = make_node_addr(2);
-    let root = make_node_addr(0);
-
-    state.update_peer(
-        ParentDeclaration::new(peer_a, root, 1, 1000),
-        make_coords(&[1, 0]),
-    );
-    state.update_peer(
-        ParentDeclaration::new(peer_b, root, 1, 1000),
-        make_coords(&[2, 0]),
-    );
-
-    // Trigger dampening with 3 switches
-    state.set_parent(peer_a, 1, 1000);
-    state.recompute_coords();
-    state.set_parent(peer_b, 2, 2000);
-    state.recompute_coords();
-    state.set_parent(peer_a, 3, 3000);
-    state.recompute_coords();
-    assert!(state.is_flap_dampened());
-
-    // Remove current parent (peer_a) — this is a mandatory switch
-    state.remove_peer(&peer_a);
-    let result = state.evaluate_parent(&HashMap::new(), &HashSet::new());
-    assert_eq!(result, Some(peer_b)); // mandatory switch bypasses dampening
-}
-
-#[test]
-fn test_flap_dampening_expires() {
-    // Test with 0-second dampening duration to verify expiry logic
-    let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
-    state.set_flap_dampening(3, 60, 0); // 0-second dampening
-    state.set_hold_down(0);
-
-    let peer_a = make_node_addr(1);
-    let peer_b = make_node_addr(2);
-    let root = make_node_addr(0);
-
-    state.update_peer(
-        ParentDeclaration::new(peer_a, root, 1, 1000),
-        make_coords(&[1, 0]),
-    );
-    state.update_peer(
-        ParentDeclaration::new(peer_b, root, 1, 1000),
-        make_coords(&[2, 0]),
-    );
-
-    // Trigger dampening
-    state.set_parent(peer_a, 1, 1000);
-    state.recompute_coords();
-    state.set_parent(peer_b, 2, 2000);
-    state.recompute_coords();
-    let dampened = state.set_parent(peer_a, 3, 3000);
-    state.recompute_coords();
-    assert!(dampened); // dampening was engaged
-
-    // With 0-second duration, dampening should have already expired
-    assert!(!state.is_flap_dampened());
-
-    // evaluate_parent should work normally now
-    let costs = make_costs(&[(1, 10.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
-    assert_eq!(result, Some(peer_b)); // not suppressed
-}
-
-#[test]
-fn test_flap_dampening_below_threshold() {
-    // Fewer switches than threshold should NOT engage dampening
-    let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
-    state.set_flap_dampening(4, 60, 3600); // threshold=4
-    state.set_hold_down(0);
-
-    let peer_a = make_node_addr(1);
-    let peer_b = make_node_addr(2);
-    let root = make_node_addr(0);
-
-    state.update_peer(
-        ParentDeclaration::new(peer_a, root, 1, 1000),
-        make_coords(&[1, 0]),
-    );
-    state.update_peer(
-        ParentDeclaration::new(peer_b, root, 1, 1000),
-        make_coords(&[2, 0]),
-    );
-
-    // Only 3 switches (below threshold of 4)
-    state.set_parent(peer_a, 1, 1000);
-    state.recompute_coords();
-    state.set_parent(peer_b, 2, 2000);
-    state.recompute_coords();
-    state.set_parent(peer_a, 3, 3000);
-    state.recompute_coords();
-
-    assert!(!state.is_flap_dampened());
-
-    // evaluate_parent should still work normally
-    let costs = make_costs(&[(1, 10.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &HashSet::new());
-    assert_eq!(result, Some(peer_b)); // not suppressed
-}
-
-#[test]
-fn test_flap_dampening_window_reset() {
-    // Test that the flap window resets after expiry.
-    // Use a 0-second window so it immediately expires between switch groups.
-    let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
-    // threshold=3, window=0s (expires immediately), dampening=3600s
-    state.set_flap_dampening(3, 0, 3600);
-    state.set_hold_down(0);
-
-    let peer_a = make_node_addr(1);
-    let peer_b = make_node_addr(2);
-    let root = make_node_addr(0);
-
-    state.update_peer(
-        ParentDeclaration::new(peer_a, root, 1, 1000),
-        make_coords(&[1, 0]),
-    );
-    state.update_peer(
-        ParentDeclaration::new(peer_b, root, 1, 1000),
-        make_coords(&[2, 0]),
-    );
-
-    // Each switch resets the window (0s window means every switch starts fresh).
-    // So we never accumulate enough to reach threshold=3.
-    state.set_parent(peer_a, 1, 1000);
-    state.recompute_coords();
-    // Window expired, counter resets on next switch
-    state.set_parent(peer_b, 2, 2000);
-    state.recompute_coords();
-    // Window expired, counter resets on next switch
-    state.set_parent(peer_a, 3, 3000);
-    state.recompute_coords();
-
-    // Dampening should NOT have engaged because each switch reset the window
-    assert!(!state.is_flap_dampened());
-}
-
-#[test]
-fn test_flap_dampening_same_parent_no_count() {
-    // Re-declaring the same parent should not count as a flap
-    let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
-    state.set_flap_dampening(3, 60, 3600);
-    state.set_hold_down(0);
-
-    let peer_a = make_node_addr(1);
-    let root = make_node_addr(0);
-
-    state.update_peer(
-        ParentDeclaration::new(peer_a, root, 1, 1000),
-        make_coords(&[1, 0]),
-    );
-
-    // Initial parent selection
-    state.set_parent(peer_a, 1, 1000);
-    state.recompute_coords();
-
-    // Re-declare same parent multiple times (e.g., parent ancestry changed)
-    state.set_parent(peer_a, 2, 2000);
-    state.recompute_coords();
-    state.set_parent(peer_a, 3, 3000);
-    state.recompute_coords();
-    state.set_parent(peer_a, 4, 4000);
-    state.recompute_coords();
-    state.set_parent(peer_a, 5, 5000);
-    state.recompute_coords();
-
-    // Should NOT be dampened since only the first was a real switch
-    assert!(!state.is_flap_dampened());
 }
 
 // === Skip peers (non-routing/leaf profile exclusion) ===
@@ -1504,7 +1077,7 @@ fn test_evaluate_parent_skips_non_full_peer() {
     // Two peers reaching the same root (0). Peer 3 is shallower (depth 1)
     // but in skip set. Peer 7 is deeper (depth 2) but not skipped.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let root = make_node_addr(0);
     let peer3 = make_node_addr(3);
@@ -1521,9 +1094,9 @@ fn test_evaluate_parent_skips_non_full_peer() {
         make_coords(&[7, 2, 0]),
     );
 
-    let mut skip = HashSet::new();
+    let mut skip = BTreeSet::new();
     skip.insert(peer3);
-    let result = state.evaluate_parent(&HashMap::new(), &skip);
+    let result = state.evaluate_parent(&BTreeMap::new(), &skip, 1000);
     assert_eq!(result, Some(peer7));
 }
 
@@ -1531,7 +1104,7 @@ fn test_evaluate_parent_skips_non_full_peer() {
 fn test_evaluate_parent_all_skipped_returns_none() {
     // Only peer is in skip set — no valid parent.
     let my_node = make_node_addr(5);
-    let mut state = TreeState::new(my_node);
+    let mut state = TreeState::new(my_node, 1000);
 
     let root = make_node_addr(0);
     let peer3 = make_node_addr(3);
@@ -1540,9 +1113,9 @@ fn test_evaluate_parent_all_skipped_returns_none() {
         make_coords(&[3, 0]),
     );
 
-    let mut skip = HashSet::new();
+    let mut skip = BTreeSet::new();
     skip.insert(peer3);
-    assert_eq!(state.evaluate_parent(&HashMap::new(), &skip), None);
+    assert_eq!(state.evaluate_parent(&BTreeMap::new(), &skip, 1000), None);
 }
 
 #[test]
@@ -1555,7 +1128,7 @@ fn test_find_next_hop_skips_non_full_peer() {
     add_peer(&mut state, 2, &[2, 1, 5, 0]);
 
     let dest = make_coords(&[2, 1, 5, 0]);
-    let mut skip = HashSet::new();
+    let mut skip = BTreeSet::new();
     skip.insert(make_node_addr(2));
     assert_eq!(state.find_next_hop(&dest, &skip), Some(make_node_addr(1)));
 }
@@ -1567,7 +1140,7 @@ fn test_find_next_hop_all_closer_skipped() {
     add_peer(&mut state, 1, &[1, 5, 0]);
 
     let dest = make_coords(&[2, 1, 5, 0]);
-    let mut skip = HashSet::new();
+    let mut skip = BTreeSet::new();
     skip.insert(make_node_addr(1));
     assert_eq!(state.find_next_hop(&dest, &skip), None);
 }

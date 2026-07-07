@@ -1,6 +1,6 @@
 //! Tree coordinates and distance calculations.
 
-use std::fmt;
+use core::fmt;
 
 use super::TreeError;
 use crate::NodeAddr;

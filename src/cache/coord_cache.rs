@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use super::CacheStats;
 use super::entry::CacheEntry;
 use crate::NodeAddr;
-use crate::tree::TreeCoordinate;
+use crate::proto::stp::TreeCoordinate;
 
 /// Default maximum entries in coordinate cache.
 pub const DEFAULT_COORD_CACHE_SIZE: usize = 50_000;

@@ -18,7 +18,7 @@ fn populate_all_coord_caches(nodes: &mut [TestNode]) {
         .unwrap()
         .as_millis() as u64;
 
-    let all_coords: Vec<(NodeAddr, crate::tree::TreeCoordinate)> = nodes
+    let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes
         .iter()
         .map(|tn| {
             (

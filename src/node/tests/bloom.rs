@@ -457,7 +457,7 @@ async fn test_bloom_filter_split_horizon() {
 fn compute_mesh_size_counts_each_peer_filter_once() {
     use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
-    use crate::tree::ParentDeclaration;
+    use crate::proto::stp::ParentDeclaration;
 
     let mut node = make_node();
     let my_addr = *node.tree_state().my_node_addr();
@@ -498,8 +498,8 @@ fn compute_mesh_size_counts_each_peer_filter_once() {
 
     // Seed parent ancestry first so recompute_coords can extend it and
     // flip is_root() to false; child ancestry is for completeness.
-    let parent_ancestry = crate::tree::TreeCoordinate::root_with_meta(parent_addr, 1, 1);
-    let child_ancestry = crate::tree::TreeCoordinate::root_with_meta(child_addr, 1, 1);
+    let parent_ancestry = crate::proto::stp::TreeCoordinate::root_with_meta(parent_addr, 1, 1);
+    let child_ancestry = crate::proto::stp::TreeCoordinate::root_with_meta(child_addr, 1, 1);
     // Inject the stale-cache scenario: peer_declaration(P) still names
     // US (M) as P's parent (the pre-switch advert that the cache hasn't
     // refreshed yet). Q is a legitimate child also naming M as parent.
@@ -513,7 +513,7 @@ fn compute_mesh_size_counts_each_peer_filter_once() {
         .update_peer(child_decl, child_ancestry);
 
     // Switch our parent to P and recompute coords so root flips off self.
-    node.tree_state_mut().set_parent(parent_addr, 2, 1);
+    node.tree_state_mut().set_parent(parent_addr, 2, 1, 1);
     node.tree_state_mut().recompute_coords();
     assert!(
         !node.tree_state().is_root(),

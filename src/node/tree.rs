@@ -3,14 +3,62 @@
 //! Handles building, sending, and receiving TreeAnnounce messages,
 //! including periodic root refresh and rate-limited propagation.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use crate::NodeAddr;
-use crate::protocol::TreeAnnounce;
+use secp256k1::XOnlyPublicKey;
+use secp256k1::schnorr::Signature;
+
+use crate::proto::stp::{ParentDeclaration, Stp, TreeAnnounce, TreeDecision, TreeError};
+use crate::{Identity, NodeAddr};
 
 use super::reject::TreeReject;
 use super::{Node, NodeError};
 use tracing::{debug, info, trace, warn};
+
+/// Sign a node's own tree declaration, writing the 64-byte signature back into
+/// it. The key-crypto boundary (§6): `proto::stp` owns the declaration data and
+/// the pure `signing_bytes()` serialization; the shell owns the `secp256k1`
+/// sign (`Identity::sign` hashes with SHA-256 internally). Mirrors discovery's
+/// shell-side proof signing.
+pub(super) fn sign_declaration(
+    decl: &mut ParentDeclaration,
+    identity: &Identity,
+) -> Result<(), TreeError> {
+    if identity.node_addr() != decl.node_addr() {
+        return Err(TreeError::InvalidSignature(*decl.node_addr()));
+    }
+    let signature = identity.sign(&decl.signing_bytes());
+    decl.set_signature(signature.to_byte_array());
+    Ok(())
+}
+
+/// Verify a peer's tree declaration signature against their pubkey. The shell
+/// side of the key-crypto boundary (§6): runs the `sha2` hash + `secp256k1`
+/// schnorr verification over the in-core declaration's `signing_bytes()`.
+pub(super) fn verify_declaration(
+    decl: &ParentDeclaration,
+    pubkey: &XOnlyPublicKey,
+) -> Result<(), TreeError> {
+    let sig_bytes = decl
+        .signature()
+        .ok_or(TreeError::InvalidSignature(*decl.node_addr()))?;
+    let signature = Signature::from_slice(sig_bytes)
+        .map_err(|_| TreeError::InvalidSignature(*decl.node_addr()))?;
+
+    let secp = secp256k1::Secp256k1::verification_only();
+    let hash = signing_hash(decl);
+
+    secp.verify_schnorr(&signature, &hash, pubkey)
+        .map_err(|_| TreeError::InvalidSignature(*decl.node_addr()))
+}
+
+/// Compute the SHA-256 hash of a declaration's signing bytes (shell side, §6).
+fn signing_hash(decl: &ParentDeclaration) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(decl.signing_bytes());
+    hasher.finalize().into()
+}
 
 impl Node {
     /// Build a TreeAnnounce from our current tree state.
@@ -167,7 +215,7 @@ impl Node {
             return;
         }
 
-        if let Err(e) = announce.declaration.verify(&pubkey) {
+        if let Err(e) = verify_declaration(&announce.declaration, &pubkey) {
             self.metrics().tree.sig_failed.inc();
             warn!(
                 from = %self.peer_display_name(from),
@@ -249,7 +297,7 @@ impl Node {
         // receive path and is naturally bounded by the per-peer 500 ms
         // tree-announce rate limiter, so it does not storm during normal
         // convergence (it stops as soon as the peer adopts our root).
-        if *announce.ancestry.root_id() > *self.tree_state.root()
+        if Stp::should_echo(announce.ancestry.root_id(), self.tree_state.root())
             && let Err(e) = self.send_tree_announce_to_peer(from).await
         {
             debug!(
@@ -271,110 +319,128 @@ impl Node {
         // Re-evaluate parent selection with current link costs.
         // Exclude peers without MMP RTT data — they are not yet eligible
         // as parent candidates (prevents oscillation from optimistic defaults).
-        let peer_costs: HashMap<NodeAddr, f64> = self
+        let peer_costs: BTreeMap<NodeAddr, f64> = self
             .peers
             .iter()
             .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
         let skip = self.non_full_peers();
-        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs, &skip) {
-            let new_seq = self.tree_state.my_declaration().sequence() + 1;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
 
-            // Clone identity up front to avoid a split borrow against the
-            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
-            let our_identity = self.identity().clone();
-            let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
-            // recompute_coords may demote to self_root if the new path would be
-            // invalid; sign AFTER recompute so the signature covers the final
-            // declaration.
-            self.tree_state.recompute_coords();
-            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
-                warn!(error = %e, "Failed to sign declaration after parent switch");
-                self.metrics()
-                    .tree
-                    .record_reject(TreeReject::OutboundSignFailed);
-                return;
+        // Monotonic ms for the flap-dampening / hold-down timers (distinct from
+        // the wall-clock `now_ms` above used for the peer's tree position). Read
+        // once and threaded into classify + the state mutators.
+        let mono_now_ms = crate::mmp::mono_ms();
+
+        match Stp::classify_announce(&self.tree_state, *from, &peer_costs, &skip, mono_now_ms) {
+            TreeDecision::Switch {
+                new_parent,
+                new_seq,
+            } => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                // Clone identity up front to avoid a split borrow against the
+                // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+                let our_identity = self.identity().clone();
+                let flap_dampened =
+                    self.tree_state
+                        .set_parent(new_parent, new_seq, timestamp, mono_now_ms);
+                // recompute_coords may demote to self_root if the new path would be
+                // invalid; sign AFTER recompute so the signature covers the final
+                // declaration.
+                self.tree_state.recompute_coords();
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
+                    warn!(error = %e, "Failed to sign declaration after parent switch");
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
+                    return;
+                }
+                // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+                self.coord_cache
+                    .invalidate_via_node(our_identity.node_addr());
+                self.reset_discovery_backoff();
+
+                self.metrics().tree.parent_switched.inc();
+                self.metrics().tree.parent_switches.inc();
+
+                info!(
+                    new_parent = %self.peer_display_name(&new_parent),
+                    new_seq = new_seq,
+                    new_root = %self.tree_state.root(),
+                    depth = self.tree_state.my_coords().depth(),
+                    "Parent switched, invalidated downstream coord cache entries, announcing to all peers"
+                );
+                if flap_dampened {
+                    self.metrics().tree.flap_dampened.inc();
+                    warn!("Flap dampening engaged: excessive parent switches detected");
+                }
+
+                self.send_tree_announce_to_all().await;
+
+                // Tree structure changed — trigger bloom filter exchange with all peers
+                let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
             }
-            // Surgical invalidation — see CoordCache::invalidate_via_node doc.
-            self.coord_cache
-                .invalidate_via_node(our_identity.node_addr());
-            self.reset_discovery_backoff();
-
-            self.metrics().tree.parent_switched.inc();
-            self.metrics().tree.parent_switches.inc();
-
-            info!(
-                new_parent = %self.peer_display_name(&new_parent),
-                new_seq = new_seq,
-                new_root = %self.tree_state.root(),
-                depth = self.tree_state.my_coords().depth(),
-                "Parent switched, invalidated downstream coord cache entries, announcing to all peers"
-            );
-            if flap_dampened {
-                self.metrics().tree.flap_dampened.inc();
-                warn!("Flap dampening engaged: excessive parent switches detected");
+            TreeDecision::SelfRoot => {
+                // Self is the smallest visible NodeAddr — promote to root rather
+                // than continuing to advertise a stale ancestry rooted elsewhere.
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Clone identity up front to avoid a split borrow against the
+                // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+                let our_identity = self.identity().clone();
+                self.tree_state.become_root(timestamp);
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
+                    warn!(error = %e, "Failed to sign self-root declaration");
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
+                    return;
+                }
+                // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
+                self.coord_cache
+                    .invalidate_other_roots(our_identity.node_addr());
+                self.reset_discovery_backoff();
+                self.metrics().tree.parent_switched.inc();
+                self.metrics().tree.parent_switches.inc();
+                info!(
+                    new_root = %self.tree_state.root(),
+                    "Self-promoted to root: smallest visible NodeAddr"
+                );
+                self.send_tree_announce_to_all().await;
+                let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
             }
-
-            self.send_tree_announce_to_all().await;
-
-            // Tree structure changed — trigger bloom filter exchange with all peers
-            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-            self.bloom_state.mark_all_updates_needed(all_peers);
-        } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
-            // Self is the smallest visible NodeAddr — promote to root rather
-            // than continuing to advertise a stale ancestry rooted elsewhere.
-            // Clone identity up front to avoid a split borrow against the
-            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
-            let our_identity = self.identity().clone();
-            self.tree_state.become_root();
-            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
-                warn!(error = %e, "Failed to sign self-root declaration");
-                self.metrics()
-                    .tree
-                    .record_reject(TreeReject::OutboundSignFailed);
-                return;
-            }
-            // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
-            self.coord_cache
-                .invalidate_other_roots(our_identity.node_addr());
-            self.reset_discovery_backoff();
-            self.metrics().tree.parent_switched.inc();
-            self.metrics().tree.parent_switches.inc();
-            info!(
-                new_root = %self.tree_state.root(),
-                "Self-promoted to root: smallest visible NodeAddr"
-            );
-            self.send_tree_announce_to_all().await;
-            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-            self.bloom_state.mark_all_updates_needed(all_peers);
-        } else if !self.tree_state.is_root()
-            && *self.tree_state.my_declaration().parent_id() == *from
-        {
-            // Check for loop: if parent's ancestry now contains us, drop parent
-            if let Some(parent_coords) = self.tree_state.peer_coords(from)
-                && parent_coords.contains(self.identity().node_addr())
-            {
+            TreeDecision::LoopDrop => {
                 self.metrics().tree.loop_detected.inc();
                 warn!(
                     parent = %self.peer_display_name(from),
                     "Parent ancestry contains us — loop detected, dropping parent"
                 );
-                let peer_costs: HashMap<NodeAddr, f64> = self
-                    .peers
-                    .iter()
-                    .filter(|(_, peer)| peer.has_srtt())
-                    .map(|(addr, peer)| (*addr, peer.link_cost()))
-                    .collect();
-                if self.tree_state.handle_parent_lost(&peer_costs) {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if self
+                    .tree_state
+                    .handle_parent_lost(&peer_costs, timestamp, mono_now_ms)
+                {
                     // Clone identity up front to avoid a split borrow against the
                     // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
                     let our_identity = self.identity().clone();
-                    if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
+                    if let Err(e) =
+                        sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                    {
                         warn!(error = %e, "Failed to sign declaration after loop detection");
                         self.metrics()
                             .tree
@@ -390,74 +456,82 @@ impl Node {
                     self.reset_discovery_backoff();
                     self.send_tree_announce_to_all().await;
                 }
-                return;
             }
+            TreeDecision::AncestryUpdate { parent, new_seq } => {
+                // Our parent's ancestry changed but we're keeping the same parent.
+                // Recompute our own coordinates (which derive from parent's ancestry)
+                // and re-announce so downstream nodes stay current.
+                //
+                // Compare the full address path (not just root + depth) so that a
+                // mid-chain ancestor swap also triggers re-announce. A reroute that
+                // replaces an interior ancestor without changing the root or the
+                // path length leaves both `root` and `depth` unchanged but still
+                // alters our coords; downstream peers must learn the new path or
+                // they will route into a phantom intermediate that no longer
+                // exists on our parent's tree.
+                let old_root = *self.tree_state.root();
+                let old_depth = self.tree_state.my_coords().depth();
+                let old_addrs: Vec<NodeAddr> =
+                    self.tree_state.my_coords().node_addrs().copied().collect();
 
-            // Our parent's ancestry changed but we're keeping the same parent.
-            // Recompute our own coordinates (which derive from parent's ancestry)
-            // and re-announce so downstream nodes stay current.
-            //
-            // Compare the full address path (not just root + depth) so that a
-            // mid-chain ancestor swap also triggers re-announce. A reroute that
-            // replaces an interior ancestor without changing the root or the
-            // path length leaves both `root` and `depth` unchanged but still
-            // alters our coords; downstream peers must learn the new path or
-            // they will route into a phantom intermediate that no longer
-            // exists on our parent's tree.
-            let old_root = *self.tree_state.root();
-            let old_depth = self.tree_state.my_coords().depth();
-            let old_addrs: Vec<NodeAddr> =
-                self.tree_state.my_coords().node_addrs().copied().collect();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
 
-            let new_seq = self.tree_state.my_declaration().sequence() + 1;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+                // Clone identity up front to avoid a split borrow against the
+                // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+                let our_identity = self.identity().clone();
+                self.tree_state
+                    .set_parent(parent, new_seq, timestamp, mono_now_ms);
+                self.tree_state.recompute_coords();
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
+                    warn!(error = %e, "Failed to sign declaration after parent update");
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
+                    return;
+                }
+                // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+                self.coord_cache
+                    .invalidate_via_node(our_identity.node_addr());
+                self.reset_discovery_backoff();
 
-            // Clone identity up front to avoid a split borrow against the
-            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
-            let our_identity = self.identity().clone();
-            self.tree_state.set_parent(*from, new_seq, timestamp);
-            self.tree_state.recompute_coords();
-            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
-                warn!(error = %e, "Failed to sign declaration after parent update");
-                self.metrics()
-                    .tree
-                    .record_reject(TreeReject::OutboundSignFailed);
-                return;
+                let new_addrs: Vec<NodeAddr> =
+                    self.tree_state.my_coords().node_addrs().copied().collect();
+
+                if old_addrs != new_addrs {
+                    self.metrics().tree.ancestry_changed.inc();
+                    info!(
+                        parent = %self.peer_display_name(from),
+                        old_root = %old_root,
+                        new_root = %self.tree_state.root(),
+                        old_depth = old_depth,
+                        new_depth = self.tree_state.my_coords().depth(),
+                        "Parent ancestry changed, re-announcing"
+                    );
+                    self.send_tree_announce_to_all().await;
+
+                    // Bloom contents do not depend on path structure, only on
+                    // identity sets. Our parent_id is unchanged in this branch,
+                    // so our tree-peer set is unchanged and our outgoing filter
+                    // content is unchanged. Use mark_changed_peers, which
+                    // checks for actual content delta against last_sent_filters,
+                    // instead of mark_all_updates_needed, which marks
+                    // unconditionally regardless of whether content changed.
+                    let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                    let peer_filters = self.peer_inbound_filters();
+                    self.bloom_state
+                        .mark_changed_peers(from, &peer_addrs, &peer_filters);
+                }
             }
-            // Surgical invalidation — see CoordCache::invalidate_via_node doc.
-            self.coord_cache
-                .invalidate_via_node(our_identity.node_addr());
-            self.reset_discovery_backoff();
-
-            let new_addrs: Vec<NodeAddr> =
-                self.tree_state.my_coords().node_addrs().copied().collect();
-
-            if old_addrs != new_addrs {
-                self.metrics().tree.ancestry_changed.inc();
-                info!(
-                    parent = %self.peer_display_name(from),
-                    old_root = %old_root,
-                    new_root = %self.tree_state.root(),
-                    old_depth = old_depth,
-                    new_depth = self.tree_state.my_coords().depth(),
-                    "Parent ancestry changed, re-announcing"
-                );
-                self.send_tree_announce_to_all().await;
-
-                // Bloom contents do not depend on path structure, only on
-                // identity sets. Our parent_id is unchanged in this branch,
-                // so our tree-peer set is unchanged and our outgoing filter
-                // content is unchanged. Use mark_changed_peers, which
-                // checks for actual content delta against last_sent_filters,
-                // instead of mark_all_updates_needed, which marks
-                // unconditionally regardless of whether content changed.
-                let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
-                let peer_filters = self.peer_inbound_filters();
-                self.bloom_state
-                    .mark_changed_peers(from, &peer_addrs, &peer_filters);
+            TreeDecision::NoChange => {}
+            // classify_announce never yields PeriodicRebroadcast (the periodic
+            // path's no-change tail) nor ParentLost (the removal drive's outcome).
+            TreeDecision::PeriodicRebroadcast | TreeDecision::ParentLost => {
+                unreachable!("classify_announce yields neither PeriodicRebroadcast nor ParentLost")
             }
         }
     }
@@ -498,100 +572,132 @@ impl Node {
 
         self.last_parent_reeval = Some(now);
 
-        let peer_costs: HashMap<NodeAddr, f64> = self
+        let peer_costs: BTreeMap<NodeAddr, f64> = self
             .peers
             .iter()
             .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
-
         let skip = self.non_full_peers();
-        if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs, &skip) {
-            let new_seq = self.tree_state.my_declaration().sequence() + 1;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
 
-            // Clone identity up front to avoid a split borrow against the
-            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
-            let our_identity = self.identity().clone();
-            let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
-            self.tree_state.recompute_coords();
-            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
-                warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
-                self.metrics()
-                    .tree
-                    .record_reject(TreeReject::OutboundSignFailed);
-                return;
+        // Monotonic ms for the flap-dampening / hold-down timers, read once and
+        // threaded into classify + the state mutators.
+        let mono_now_ms = crate::mmp::mono_ms();
+
+        match Stp::classify_periodic(&self.tree_state, &peer_costs, &skip, mono_now_ms) {
+            TreeDecision::Switch {
+                new_parent,
+                new_seq,
+            } => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                // Clone identity up front to avoid a split borrow against the
+                // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+                let our_identity = self.identity().clone();
+                let flap_dampened =
+                    self.tree_state
+                        .set_parent(new_parent, new_seq, timestamp, mono_now_ms);
+                self.tree_state.recompute_coords();
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
+                    warn!(error = %e, "Failed to sign declaration after periodic parent re-eval");
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
+                    return;
+                }
+                // Surgical invalidation — see CoordCache::invalidate_via_node doc.
+                self.coord_cache
+                    .invalidate_via_node(our_identity.node_addr());
+                self.reset_discovery_backoff();
+
+                self.metrics().tree.parent_switched.inc();
+                self.metrics().tree.parent_switches.inc();
+
+                info!(
+                    new_parent = %self.peer_display_name(&new_parent),
+                    new_seq = new_seq,
+                    new_root = %self.tree_state.root(),
+                    depth = self.tree_state.my_coords().depth(),
+                    trigger = "periodic",
+                    "Parent switched via periodic cost re-evaluation"
+                );
+                if flap_dampened {
+                    self.metrics().tree.flap_dampened.inc();
+                    warn!("Flap dampening engaged: excessive parent switches detected");
+                }
+
+                self.send_tree_announce_to_all().await;
+
+                let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
             }
-            // Surgical invalidation — see CoordCache::invalidate_via_node doc.
-            self.coord_cache
-                .invalidate_via_node(our_identity.node_addr());
-            self.reset_discovery_backoff();
-
-            self.metrics().tree.parent_switched.inc();
-            self.metrics().tree.parent_switches.inc();
-
-            info!(
-                new_parent = %self.peer_display_name(&new_parent),
-                new_seq = new_seq,
-                new_root = %self.tree_state.root(),
-                depth = self.tree_state.my_coords().depth(),
-                trigger = "periodic",
-                "Parent switched via periodic cost re-evaluation"
-            );
-            if flap_dampened {
-                self.metrics().tree.flap_dampened.inc();
-                warn!("Flap dampening engaged: excessive parent switches detected");
+            TreeDecision::SelfRoot => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Clone identity up front to avoid a split borrow against the
+                // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
+                let our_identity = self.identity().clone();
+                self.tree_state.become_root(timestamp);
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
+                    warn!(error = %e, "Failed to sign self-root declaration in periodic reeval");
+                    self.metrics()
+                        .tree
+                        .record_reject(TreeReject::OutboundSignFailed);
+                    return;
+                }
+                // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
+                self.coord_cache
+                    .invalidate_other_roots(our_identity.node_addr());
+                self.reset_discovery_backoff();
+                self.metrics().tree.parent_switched.inc();
+                self.metrics().tree.parent_switches.inc();
+                info!(
+                    new_root = %self.tree_state.root(),
+                    trigger = "periodic",
+                    "Self-promoted to root in periodic reeval: smallest visible NodeAddr"
+                );
+                self.send_tree_announce_to_all().await;
+                let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
             }
-
-            self.send_tree_announce_to_all().await;
-
-            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-            self.bloom_state.mark_all_updates_needed(all_peers);
-        } else if !self.tree_state.is_root() && self.tree_state.should_be_root() {
-            // Clone identity up front to avoid a split borrow against the
-            // &mut self.tree_state / &mut self.coord_cache calls below (cold path).
-            let our_identity = self.identity().clone();
-            self.tree_state.become_root();
-            if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
-                warn!(error = %e, "Failed to sign self-root declaration in periodic reeval");
-                self.metrics()
-                    .tree
-                    .record_reject(TreeReject::OutboundSignFailed);
-                return;
+            TreeDecision::PeriodicRebroadcast => {
+                // Periodic re-broadcast on no-change: makes TreeAnnounce
+                // distribution eventually-consistent. Receivers coalesce
+                // by sequence via ParentDeclaration::is_fresher_than and
+                // short-circuit at the `if !updated` gate in
+                // handle_tree_announce; the per-peer 500 ms rate-limiter
+                // never blocks at this 60 s cadence. Closes the cross-init
+                // in-flight loss recovery gap where the swap window can
+                // strand one side's announce on a session-index the other
+                // side cannot decrypt.
+                trace!(
+                    seq = self.tree_state.my_declaration().sequence(),
+                    root = %self.tree_state.root(),
+                    "Periodic TreeAnnounce re-broadcast (no state change)"
+                );
+                self.send_tree_announce_to_all().await;
             }
-            // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
-            self.coord_cache
-                .invalidate_other_roots(our_identity.node_addr());
-            self.reset_discovery_backoff();
-            self.metrics().tree.parent_switched.inc();
-            self.metrics().tree.parent_switches.inc();
-            info!(
-                new_root = %self.tree_state.root(),
-                trigger = "periodic",
-                "Self-promoted to root in periodic reeval: smallest visible NodeAddr"
-            );
-            self.send_tree_announce_to_all().await;
-            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-            self.bloom_state.mark_all_updates_needed(all_peers);
-        } else {
-            // Periodic re-broadcast on no-change: makes TreeAnnounce
-            // distribution eventually-consistent. Receivers coalesce
-            // by sequence via ParentDeclaration::is_fresher_than and
-            // short-circuit at the `if !updated` gate in
-            // handle_tree_announce; the per-peer 500 ms rate-limiter
-            // never blocks at this 60 s cadence. Closes the cross-init
-            // in-flight loss recovery gap where the swap window can
-            // strand one side's announce on a session-index the other
-            // side cannot decrypt.
-            trace!(
-                seq = self.tree_state.my_declaration().sequence(),
-                root = %self.tree_state.root(),
-                "Periodic TreeAnnounce re-broadcast (no state change)"
-            );
-            self.send_tree_announce_to_all().await;
+            // classify_periodic never yields these: a periodic tick has no
+            // announcing peer, so the same-parent loop-drop / ancestry-update
+            // arms cannot arise, the no-change tail is PeriodicRebroadcast, and
+            // ParentLost is the removal drive's outcome.
+            TreeDecision::LoopDrop
+            | TreeDecision::AncestryUpdate { .. }
+            | TreeDecision::ParentLost
+            | TreeDecision::NoChange => {
+                unreachable!(
+                    "classify_periodic yields only Switch / SelfRoot / PeriodicRebroadcast"
+                )
+            }
         }
     }
 
@@ -607,20 +713,50 @@ impl Node {
 
         self.tree_state.remove_peer(node_addr);
 
-        if was_parent {
-            self.metrics().tree.parent_losses.inc();
-            let peer_costs: HashMap<NodeAddr, f64> = self
-                .peers
-                .iter()
-                .filter(|(_, peer)| peer.has_srtt())
-                .map(|(addr, peer)| (*addr, peer.link_cost()))
-                .collect();
-            let changed = self.tree_state.handle_parent_lost(&peer_costs);
-            if changed {
+        if !was_parent {
+            return false;
+        }
+
+        // The removed peer was our parent. `parent_losses` counts the loss
+        // itself (independent of whether we recover), so it is stamped here —
+        // before the recovery mutation — exactly as before.
+        self.metrics().tree.parent_losses.inc();
+
+        let peer_costs: BTreeMap<NodeAddr, f64> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.has_srtt())
+            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .collect();
+
+        // Wall-clock seconds stamped onto the new declaration; monotonic ms for
+        // the parent re-evaluation's flap timers.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mono_now_ms = crate::mmp::mono_ms();
+
+        // Removal is not a pure classify: `handle_parent_lost` is a &mut mutator
+        // whose returned `changed` bool IS the decision. Drive it and map the
+        // outcome onto the TreeDecision vocabulary.
+        let decision = if self
+            .tree_state
+            .handle_parent_lost(&peer_costs, now_secs, mono_now_ms)
+        {
+            TreeDecision::ParentLost
+        } else {
+            TreeDecision::NoChange
+        };
+
+        match decision {
+            TreeDecision::ParentLost => {
                 // Re-sign the new declaration. Clone identity to avoid a split
                 // borrow against the &mut self.tree_state receiver (cold path).
                 let our_identity = self.identity().clone();
-                if let Err(e) = self.tree_state.sign_declaration(&our_identity) {
+                if let Err(e) =
+                    sign_declaration(self.tree_state.my_declaration_mut(), &our_identity)
+                {
                     warn!(error = %e, "Failed to sign declaration after parent loss");
                     self.metrics()
                         .tree
@@ -641,10 +777,11 @@ impl Node {
                     is_root = self.tree_state.is_root(),
                     "Tree state updated after parent loss"
                 );
+                true
             }
-            changed
-        } else {
-            false
+            TreeDecision::NoChange => false,
+            // The removal drive constructs only ParentLost / NoChange above.
+            _ => unreachable!("removal drive yields only ParentLost / NoChange"),
         }
     }
 }

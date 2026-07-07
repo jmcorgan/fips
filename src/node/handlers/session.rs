@@ -49,8 +49,8 @@ struct PipelinedSend<'a> {
     timestamp: u32,
     fsp_flags: u8,
     inner_plaintext: &'a [u8],
-    my_coords: Option<&'a crate::tree::TreeCoordinate>,
-    dest_coords: Option<&'a crate::tree::TreeCoordinate>,
+    my_coords: Option<&'a crate::proto::stp::TreeCoordinate>,
+    dest_coords: Option<&'a crate::proto::stp::TreeCoordinate>,
 }
 
 impl Node {
@@ -2152,7 +2152,10 @@ impl Node {
     /// Returns our own coordinates as a fallback (the SessionSetup will
     /// carry src_coords for return path routing; empty dest_coords
     /// would fail wire encoding since TreeCoordinate requires ≥1 entry).
-    pub(in crate::node) fn get_dest_coords(&self, dest: &NodeAddr) -> crate::tree::TreeCoordinate {
+    pub(in crate::node) fn get_dest_coords(
+        &self,
+        dest: &NodeAddr,
+    ) -> crate::proto::stp::TreeCoordinate {
         let now_ms = Self::now_ms();
         if let Some(coords) = self.coord_cache.get(dest, now_ms) {
             return coords.clone();

@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::bloom::BloomFilter;
-use crate::tree::{ParentDeclaration, TreeCoordinate};
+use crate::proto::stp::{ParentDeclaration, TreeCoordinate};
 use spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
     lock_large_network_test, make_test_node, run_tree_test, verify_tree_convergence,
@@ -826,7 +826,7 @@ async fn test_routing_stops_after_peer_removal() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let all_coords: Vec<(NodeAddr, crate::tree::TreeCoordinate)> = nodes
+    let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes
         .iter()
         .map(|tn| {
             (
@@ -1007,7 +1007,7 @@ async fn test_routing_source_only_coords_100_nodes() {
         .unwrap_or(0);
 
     // Collect all coords for injection
-    let all_coords: Vec<(NodeAddr, crate::tree::TreeCoordinate)> = nodes
+    let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes
         .iter()
         .map(|tn| {
             (
@@ -1361,7 +1361,7 @@ fn test_parent_loss_reparent_invalidates_coord_cache() {
         TreeCoordinate::from_addrs(vec![alt, root]).unwrap(),
     );
     // Adopt `parent`; our coords become [my_addr, parent, root], root = `root`.
-    node.tree_state_mut().set_parent(parent, 1, 1000);
+    node.tree_state_mut().set_parent(parent, 1, 1000, 1000);
     node.tree_state_mut().recompute_coords();
     assert!(!node.tree_state().is_root());
     assert_eq!(node.tree_state().root(), &root);
@@ -1416,7 +1416,7 @@ fn test_parent_loss_selfroot_invalidates_coord_cache() {
         ParentDeclaration::new(parent, old_root, 1, 1000),
         TreeCoordinate::from_addrs(vec![parent, old_root]).unwrap(),
     );
-    node.tree_state_mut().set_parent(parent, 1, 1000);
+    node.tree_state_mut().set_parent(parent, 1, 1000, 1000);
     node.tree_state_mut().recompute_coords();
     assert!(!node.tree_state().is_root());
 

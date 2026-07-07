@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::proto::discovery::{LookupRequest, LookupResponse, RecentRequest};
-use crate::tree::TreeCoordinate;
+use crate::proto::stp::TreeCoordinate;
 use spanning_tree::{
     cleanup_nodes, generate_random_edges, lock_large_network_test, process_available_packets,
     run_tree_test, run_tree_test_with_mtus, verify_tree_convergence,
@@ -1204,7 +1204,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     // as its parent. `is_tree_peer` checks both directions — the child
     // direction (peer.parent_id == self.node_addr) is what we exercise.
     let our_addr = *node.node_addr();
-    let peer_decl = crate::tree::ParentDeclaration::new(peer_addr, our_addr, 1, 0);
+    let peer_decl = crate::proto::stp::ParentDeclaration::new(peer_addr, our_addr, 1, 0);
     let peer_coords = TreeCoordinate::from_addrs(vec![peer_addr, our_addr]).unwrap();
     node.tree_state_mut().update_peer(peer_decl, peer_coords);
     assert!(node.is_tree_peer(&peer_addr), "peer must be a tree peer");

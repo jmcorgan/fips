@@ -1,6 +1,6 @@
 //! Cache entry with TTL and LRU tracking.
 
-use crate::tree::TreeCoordinate;
+use crate::proto::stp::TreeCoordinate;
 
 /// A cached coordinate entry.
 #[derive(Clone, Debug)]

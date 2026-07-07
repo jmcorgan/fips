@@ -5,9 +5,10 @@
 //! reused by bloom filter tests.
 
 use super::*;
-use crate::protocol::TreeAnnounce;
+use crate::node::tree::sign_declaration;
+use crate::proto::stp::TreeAnnounce;
+use crate::proto::stp::{CoordEntry, ParentDeclaration, TreeCoordinate};
 use crate::transport::loopback::{LoopbackRegistry, LoopbackTransport, new_registry};
-use crate::tree::{CoordEntry, ParentDeclaration, TreeCoordinate};
 
 static LARGE_NETWORK_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -914,7 +915,7 @@ async fn test_rejects_tree_announce_with_inconsistent_root() {
     // sequence/timestamp so the announce would be acceptable on freshness
     // grounds if its ancestry semantics were valid.
     let mut declaration = ParentDeclaration::new(a_addr, fake_parent, 99, 12345);
-    declaration.sign(nodes[0].node.identity()).unwrap();
+    sign_declaration(&mut declaration, nodes[0].node.identity()).unwrap();
 
     let announce = TreeAnnounce::new(
         declaration,
@@ -993,18 +994,15 @@ async fn test_tree_announce_repushed_on_root_disagreement() {
     // it had never processed the root's attaching announce. The child's
     // advertised root is now itself, disagreeing with the root's view, and its
     // own periodic re-evaluation cannot recover it (single peer).
-    nodes[child_idx].node.tree_state_mut().become_root();
+    nodes[child_idx].node.tree_state_mut().become_root(1000);
     nodes[child_idx]
         .node
         .tree_state_mut()
         .remove_peer(&root_addr);
     {
         let identity = nodes[child_idx].node.identity().clone();
-        nodes[child_idx]
-            .node
-            .tree_state_mut()
-            .sign_declaration(&identity)
-            .unwrap();
+        let decl_mut = nodes[child_idx].node.tree_state_mut().my_declaration_mut();
+        sign_declaration(decl_mut, &identity).unwrap();
     }
     assert!(nodes[child_idx].node.tree_state().is_root());
 
@@ -1049,6 +1047,372 @@ async fn test_tree_announce_repushed_on_root_disagreement() {
         "child should have re-converged to the root"
     );
     let _ = child_addr;
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+// ===== Direct handler characterization tests =====
+//
+// These drive `handle_tree_announce` directly to pin the individual
+// classification and validation arms that the aggregate convergence suite
+// only exercises indirectly: the four validation rejects (addr-mismatch,
+// sig-fail, stale, unknown-peer) and the self-root / loop-drop /
+// same-parent ancestry-update transitions. `run_tree_test(2, ..)` supplies
+// two handshaked peers (so the sender's pubkey is known); the transition
+// tests then force the receiver's local tree state into the precise shape
+// each arm requires — the same `tree_state_mut()` seam
+// `test_tree_announce_repushed_on_root_disagreement` uses above.
+//
+// `make_node_addr(0)` is the all-zero address, strictly smaller than every
+// randomly-generated real node address, so it is used as a synthetic global
+// root that keeps forced ancestries valid (advertised root = path minimum).
+
+/// A TreeAnnounce whose declared `node_addr` does not match the sending peer
+/// must be rejected (addr-mismatch) before any state mutation. The addr-match
+/// gate precedes signature verification, so a harvested-but-unrelated
+/// signature is enough to reach it.
+#[tokio::test]
+async fn test_tree_announce_rejects_addr_mismatch() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    let a_addr = *nodes[0].node.node_addr();
+
+    let sig = nodes[0].node.identity().sign(&[0u8; 48]).to_byte_array();
+    let bogus = make_node_addr(200);
+    let declaration = ParentDeclaration::with_signature(bogus, bogus, 5, 2000, sig);
+    let announce = TreeAnnounce::new(
+        declaration,
+        TreeCoordinate::from_addrs(vec![bogus]).unwrap(),
+    );
+    let encoded = announce.encode().unwrap();
+
+    let mismatch_before = nodes[1].node.metrics().tree.addr_mismatch.get();
+    let accepted_before = nodes[1].node.metrics().tree.accepted.get();
+    let root_before = *nodes[1].node.tree_state().root();
+
+    // Sender is the known peer a_addr, but the declaration claims `bogus`.
+    nodes[1]
+        .node
+        .handle_tree_announce(&a_addr, &encoded[1..])
+        .await;
+
+    assert_eq!(
+        nodes[1].node.metrics().tree.addr_mismatch.get(),
+        mismatch_before + 1
+    );
+    assert_eq!(nodes[1].node.metrics().tree.accepted.get(), accepted_before);
+    assert_eq!(*nodes[1].node.tree_state().root(), root_before);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A TreeAnnounce whose declared node_addr matches the sender but whose
+/// signature does not verify under the sender's pubkey must be rejected
+/// (sig-fail) without mutating tree state.
+#[tokio::test]
+async fn test_tree_announce_rejects_bad_signature() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    let a_addr = *nodes[0].node.node_addr();
+
+    // A valid A-signature, but over a *different* declaration, so verifying it
+    // against the forged declaration's signing bytes fails.
+    let mut signed_other = ParentDeclaration::new(a_addr, a_addr, 99, 88);
+    sign_declaration(&mut signed_other, nodes[0].node.identity()).unwrap();
+    let sig = *signed_other.signature().unwrap();
+    let forged = ParentDeclaration::with_signature(a_addr, a_addr, 5, 2000, sig);
+    let announce = TreeAnnounce::new(forged, TreeCoordinate::from_addrs(vec![a_addr]).unwrap());
+    let encoded = announce.encode().unwrap();
+
+    let sig_failed_before = nodes[1].node.metrics().tree.sig_failed.get();
+    let accepted_before = nodes[1].node.metrics().tree.accepted.get();
+
+    nodes[1]
+        .node
+        .handle_tree_announce(&a_addr, &encoded[1..])
+        .await;
+
+    assert_eq!(
+        nodes[1].node.metrics().tree.sig_failed.get(),
+        sig_failed_before + 1
+    );
+    assert_eq!(nodes[1].node.metrics().tree.accepted.get(), accepted_before);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Replaying a peer's already-known declaration verbatim (same sequence) is
+/// not fresher, so `update_peer` reports no change and the announce is counted
+/// stale and ignored rather than accepted.
+#[tokio::test]
+async fn test_tree_announce_stale_ignored() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    let a_addr = *nodes[0].node.node_addr();
+
+    let stored_decl = nodes[1]
+        .node
+        .tree_state()
+        .peer_declaration(&a_addr)
+        .expect("node 1 should hold A's declaration after convergence")
+        .clone();
+    let stored_coords = nodes[1]
+        .node
+        .tree_state()
+        .peer_coords(&a_addr)
+        .expect("node 1 should hold A's coordinates after convergence")
+        .clone();
+    let announce = TreeAnnounce::new(stored_decl, stored_coords);
+    let encoded = announce.encode().unwrap();
+
+    let stale_before = nodes[1].node.metrics().tree.stale.get();
+    let accepted_before = nodes[1].node.metrics().tree.accepted.get();
+
+    nodes[1]
+        .node
+        .handle_tree_announce(&a_addr, &encoded[1..])
+        .await;
+
+    assert_eq!(nodes[1].node.metrics().tree.stale.get(), stale_before + 1);
+    assert_eq!(nodes[1].node.metrics().tree.accepted.get(), accepted_before);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A TreeAnnounce from a node that is not a known peer must be rejected
+/// (unknown-peer) at the pubkey-lookup gate.
+#[tokio::test]
+async fn test_tree_announce_rejects_unknown_peer() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+
+    let unknown = make_node_addr(201);
+    let sig = nodes[0].node.identity().sign(&[0u8; 48]).to_byte_array();
+    let declaration = ParentDeclaration::with_signature(unknown, unknown, 1, 1000, sig);
+    let announce = TreeAnnounce::new(
+        declaration,
+        TreeCoordinate::from_addrs(vec![unknown]).unwrap(),
+    );
+    let encoded = announce.encode().unwrap();
+
+    let unknown_before = nodes[1].node.metrics().tree.unknown_peer.get();
+
+    nodes[1]
+        .node
+        .handle_tree_announce(&unknown, &encoded[1..])
+        .await;
+
+    assert_eq!(
+        nodes[1].node.metrics().tree.unknown_peer.get(),
+        unknown_before + 1
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A non-root node whose only visible root is larger than its own address must
+/// self-promote to root. P (the smaller-addr node) is forced into a child of
+/// its larger peer L rooted at a synthetic smaller root; when L then announces
+/// itself as its own (larger) root, P's smallest visible root becomes L, so P
+/// promotes itself.
+#[tokio::test]
+async fn test_tree_announce_self_root_promotion() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+
+    // P must be the smaller-addr node (the one that should win root); L larger.
+    let (p_idx, l_idx) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let p_addr = *nodes[p_idx].node.node_addr();
+    let l_addr = *nodes[l_idx].node.node_addr();
+    let fake_root = make_node_addr(0);
+
+    // Force P into a non-root child of L rooted at fake_root: coords
+    // [P, L, fake_root]. P > fake_root, so recompute keeps it attached.
+    {
+        let ts = nodes[p_idx].node.tree_state_mut();
+        ts.remove_peer(&l_addr);
+        ts.update_peer(
+            ParentDeclaration::new(l_addr, fake_root, 1, 1000),
+            TreeCoordinate::from_addrs(vec![l_addr, fake_root]).unwrap(),
+        );
+        ts.set_parent(l_addr, 1, 1000, 1000);
+        ts.recompute_coords();
+    }
+    {
+        let identity = nodes[p_idx].node.identity().clone();
+        let decl_mut = nodes[p_idx].node.tree_state_mut().my_declaration_mut();
+        sign_declaration(decl_mut, &identity).unwrap();
+    }
+    assert!(!nodes[p_idx].node.tree_state().is_root());
+    assert_eq!(*nodes[p_idx].node.tree_state().root(), fake_root);
+
+    // L announces a fresh self-root (root = L > P).
+    let mut decl = ParentDeclaration::self_root(l_addr, 5, 2000);
+    sign_declaration(&mut decl, nodes[l_idx].node.identity()).unwrap();
+    let announce = TreeAnnounce::new(decl, TreeCoordinate::from_addrs(vec![l_addr]).unwrap());
+    let encoded = announce.encode().unwrap();
+
+    let switched_before = nodes[p_idx].node.metrics().tree.parent_switched.get();
+    nodes[p_idx]
+        .node
+        .handle_tree_announce(&l_addr, &encoded[1..])
+        .await;
+
+    assert!(
+        nodes[p_idx].node.tree_state().is_root(),
+        "P should self-promote to root when its only visible root is larger"
+    );
+    assert_eq!(*nodes[p_idx].node.tree_state().root(), p_addr);
+    assert_eq!(
+        nodes[p_idx].node.metrics().tree.parent_switched.get(),
+        switched_before + 1
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// When our current parent's freshly announced ancestry comes to contain us, a
+/// loop has formed and the parent must be dropped. P is forced into a child of
+/// Q rooted at a synthetic root; Q then announces an ancestry [Q, P, root] that
+/// runs back through P, so P detects the loop and (having no alternative) falls
+/// back to self-root.
+#[tokio::test]
+async fn test_tree_announce_loop_detection_drops_parent() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+
+    let (p_idx, q_idx) = (0, 1);
+    let p_addr = *nodes[p_idx].node.node_addr();
+    let q_addr = *nodes[q_idx].node.node_addr();
+    let root = make_node_addr(0);
+
+    // Force P into a child of Q rooted at `root`: coords [P, Q, root].
+    {
+        let ts = nodes[p_idx].node.tree_state_mut();
+        ts.remove_peer(&q_addr);
+        ts.update_peer(
+            ParentDeclaration::new(q_addr, root, 1, 1000),
+            TreeCoordinate::from_addrs(vec![q_addr, root]).unwrap(),
+        );
+        ts.set_parent(q_addr, 1, 1000, 1000);
+        ts.recompute_coords();
+    }
+    {
+        let identity = nodes[p_idx].node.identity().clone();
+        let decl_mut = nodes[p_idx].node.tree_state_mut().my_declaration_mut();
+        sign_declaration(decl_mut, &identity).unwrap();
+    }
+    assert!(!nodes[p_idx].node.tree_state().is_root());
+    assert_eq!(
+        nodes[p_idx].node.tree_state().my_declaration().parent_id(),
+        &q_addr
+    );
+
+    // Q announces an ancestry that now runs through P (declaring P as its own
+    // parent): [Q, P, root]. Adopting it would form a loop.
+    let mut decl = ParentDeclaration::new(q_addr, p_addr, 5, 2000);
+    sign_declaration(&mut decl, nodes[q_idx].node.identity()).unwrap();
+    let announce = TreeAnnounce::new(
+        decl,
+        TreeCoordinate::from_addrs(vec![q_addr, p_addr, root]).unwrap(),
+    );
+    let encoded = announce.encode().unwrap();
+
+    let loop_before = nodes[p_idx].node.metrics().tree.loop_detected.get();
+    nodes[p_idx]
+        .node
+        .handle_tree_announce(&q_addr, &encoded[1..])
+        .await;
+
+    assert_eq!(
+        nodes[p_idx].node.metrics().tree.loop_detected.get(),
+        loop_before + 1
+    );
+    // No alternative parent remains, so P falls back to self-root.
+    assert!(nodes[p_idx].node.tree_state().is_root());
+    assert_eq!(*nodes[p_idx].node.tree_state().root(), p_addr);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// When our parent keeps the same root and depth but swaps a mid-chain
+/// ancestor, we keep the parent yet must recompute our coordinates and
+/// re-announce (the `old_addrs != new_addrs` gate). P is forced into
+/// [P, Q, mid, root]; Q re-announces [Q, new_mid, root], leaving root and depth
+/// unchanged while replacing the interior ancestor.
+#[tokio::test]
+async fn test_tree_announce_same_parent_ancestry_update() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+
+    let (p_idx, q_idx) = (0, 1);
+    let q_addr = *nodes[q_idx].node.node_addr();
+    let root = make_node_addr(0);
+    let mid = make_node_addr(1);
+    let new_mid = make_node_addr(2);
+
+    // Force P into a child of Q rooted at `root` via `mid`: [P, Q, mid, root].
+    {
+        let ts = nodes[p_idx].node.tree_state_mut();
+        ts.remove_peer(&q_addr);
+        ts.update_peer(
+            ParentDeclaration::new(q_addr, mid, 1, 1000),
+            TreeCoordinate::from_addrs(vec![q_addr, mid, root]).unwrap(),
+        );
+        ts.set_parent(q_addr, 1, 1000, 1000);
+        ts.recompute_coords();
+    }
+    {
+        let identity = nodes[p_idx].node.identity().clone();
+        let decl_mut = nodes[p_idx].node.tree_state_mut().my_declaration_mut();
+        sign_declaration(decl_mut, &identity).unwrap();
+    }
+    let depth_before = nodes[p_idx].node.tree_state().my_coords().depth();
+    assert_eq!(
+        nodes[p_idx].node.tree_state().my_declaration().parent_id(),
+        &q_addr
+    );
+
+    // Q keeps root and depth but swaps its mid-chain ancestor mid -> new_mid.
+    let mut decl = ParentDeclaration::new(q_addr, new_mid, 5, 2000);
+    sign_declaration(&mut decl, nodes[q_idx].node.identity()).unwrap();
+    let announce = TreeAnnounce::new(
+        decl,
+        TreeCoordinate::from_addrs(vec![q_addr, new_mid, root]).unwrap(),
+    );
+    let encoded = announce.encode().unwrap();
+
+    let ancestry_before = nodes[p_idx].node.metrics().tree.ancestry_changed.get();
+    nodes[p_idx]
+        .node
+        .handle_tree_announce(&q_addr, &encoded[1..])
+        .await;
+
+    assert_eq!(
+        nodes[p_idx].node.metrics().tree.ancestry_changed.get(),
+        ancestry_before + 1
+    );
+    // Same parent, same depth, but the recomputed path now runs through new_mid.
+    assert_eq!(
+        nodes[p_idx].node.tree_state().my_declaration().parent_id(),
+        &q_addr
+    );
+    assert_eq!(
+        nodes[p_idx].node.tree_state().my_coords().depth(),
+        depth_before
+    );
+    let path: Vec<NodeAddr> = nodes[p_idx]
+        .node
+        .tree_state()
+        .my_coords()
+        .node_addrs()
+        .copied()
+        .collect();
+    assert!(
+        path.contains(&new_mid),
+        "recomputed path should include the swapped-in ancestor"
+    );
+    assert!(
+        !path.contains(&mid),
+        "old mid-chain ancestor should be gone from the recomputed path"
+    );
 
     cleanup_nodes(&mut nodes).await;
 }
