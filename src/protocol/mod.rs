@@ -34,10 +34,9 @@ pub use link::{
     SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
 };
 pub use session::{
-    COORDS_REQUIRED_SIZE, CoordsRequired, FspFlags, FspInnerFlags, MTU_EXCEEDED_SIZE, MtuExceeded,
-    PATH_MTU_NOTIFICATION_SIZE, PathBroken, PathMtuNotification, SESSION_RECEIVER_REPORT_SIZE,
-    SESSION_SENDER_REPORT_SIZE, SessionAck, SessionFlags, SessionMessageType, SessionMsg3,
-    SessionReceiverReport, SessionSenderReport, SessionSetup,
+    FspFlags, FspInnerFlags, PATH_MTU_NOTIFICATION_SIZE, PathMtuNotification,
+    SESSION_RECEIVER_REPORT_SIZE, SESSION_SENDER_REPORT_SIZE, SessionAck, SessionFlags,
+    SessionMessageType, SessionMsg3, SessionReceiverReport, SessionSenderReport, SessionSetup,
 };
 pub(crate) use session::{coords_wire_size, decode_optional_coords, encode_coords};
 pub use tree::TreeAnnounce;

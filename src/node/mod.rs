@@ -18,7 +18,6 @@ mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
 mod retry;
-mod routing_error_rate_limit;
 pub(crate) mod session;
 pub(crate) mod session_wire;
 pub(crate) mod stats;
@@ -30,7 +29,6 @@ pub(crate) mod wire;
 
 use self::rate_limit::HandshakeRateLimiter;
 use self::reloadable::Reloadable;
-use self::routing_error_rate_limit::RoutingErrorRateLimiter;
 
 /// Half-range of the symmetric jitter applied to the per-session rekey timer.
 /// Each session draws an offset uniformly from `[-REKEY_JITTER_SECS,
@@ -47,6 +45,7 @@ use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
+use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 #[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
@@ -62,7 +61,7 @@ use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use crate::utils::index::IndexAllocator;
-use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
+use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity, TreeCoordinate};
 use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -415,8 +414,8 @@ pub struct Node {
     msg1_rate_limiter: HandshakeRateLimiter,
     /// Rate limiter for ICMP Packet Too Big messages.
     icmp_rate_limiter: IcmpRateLimiter,
-    /// Rate limiter for routing error signals (CoordsRequired / PathBroken).
-    routing_error_rate_limiter: RoutingErrorRateLimiter,
+    /// Routing-subsystem state (routing error-signal rate limiter).
+    routing: Router,
     /// Rate limiter for source-side CoordsRequired/PathBroken responses.
     coords_response_rate_limiter: RoutingErrorRateLimiter,
 
@@ -658,9 +657,9 @@ impl Node {
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
-            routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
-            coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
-                std::time::Duration::from_millis(coords_response_interval_ms),
+            routing: Router::new(),
+            coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
+                coords_response_interval_ms,
             ),
             discovery: Discovery::new(
                 DiscoveryBackoff::with_params(backoff_base_secs, backoff_max_secs),
@@ -817,9 +816,9 @@ impl Node {
             pending_outbound: HashMap::new(),
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
-            routing_error_rate_limiter: RoutingErrorRateLimiter::new(),
-            coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
-                std::time::Duration::from_millis(coords_response_interval_ms),
+            routing: Router::new(),
+            coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
+                coords_response_interval_ms,
             ),
             discovery: Discovery::new(DiscoveryBackoff::new(), DiscoveryForwardRateLimiter::new()),
             pending_connects: Vec::new(),
@@ -2607,11 +2606,27 @@ impl Node {
 
         // 3. Bloom filter candidates — requires dest_coords for loop-free selection.
         //    If no candidate is strictly closer, fall through to tree routing.
-        let candidates: Vec<&ActivePeer> = self.destination_in_filters(dest_node_addr);
+        //    The sans-IO core assembles the candidate snapshot over the
+        //    `RoutingView` seam (enumerate peers, apply the bloom `may_reach`
+        //    filter, snapshot each), then picks the winner; the shell supplies
+        //    only the raw per-peer reads.
+        let candidates = {
+            let view = NodeRoutingView {
+                coord_cache: &self.coord_cache,
+                peers: &self.peers,
+                tree_state: &self.tree_state,
+                congested: false,
+            };
+            routing::routing_candidates(&view, dest_node_addr)
+        };
         if !candidates.is_empty()
-            && let Some(peer) = self.select_best_candidate(&candidates, &dest_coords)
+            && let Some(next_hop) = routing::select_best_candidate(
+                &candidates,
+                &dest_coords,
+                self.tree_state.my_coords(),
+            )
         {
-            return Some(peer);
+            return self.peers.get(&next_hop);
         }
 
         // 4. Greedy tree routing fallback
@@ -2622,142 +2637,29 @@ impl Node {
 
     /// Classify a transit forward by route class from tree coordinates.
     ///
-    /// Called at the transit chokepoint after `find_next_hop` returns a peer,
-    /// so the six classes partition `forwarded_packets` exactly. The branch
-    /// that `find_next_hop` took (bloom vs greedy-tree) is *not* the route
-    /// class: a peer can be selected by either, so the cut-through splits
-    /// (`TreeDownCross`, `CrosslinkAscend`) are decided here from coordinates,
-    /// not from which branch fired.
-    ///
-    /// Inputs: our coords (`tree_state.my_coords`), the chosen peer's coords
-    /// (`tree_state.peer_coords`), and the destination coords (re-read from the
-    /// coord cache, which `find_next_hop` just touched). Both the tree-down and
-    /// cross-link branches split on whether the destination is in the chosen
-    /// peer's subtree; when the dest coords are unavailable that test defaults
-    /// to "not in subtree", i.e. the up-and-over variant (`TreeDownCross` for a
-    /// descendant peer, `CrosslinkAscend` for a lateral one).
+    /// Thin shell adapter over the pure [`routing::classify_forward`]: it
+    /// pre-resolves the destination coordinates from the coord cache (the
+    /// sole impurity — a read-only lookup, no LRU touch) and reads our own
+    /// and the chosen peer's coordinates from tree state, then defers the
+    /// six-way classification to the sans-IO routing core.
     pub(crate) fn classify_forward(
         &self,
         dest: &NodeAddr,
         chosen_peer: &NodeAddr,
     ) -> metrics::RouteClass {
-        // Degenerate: the next hop is the destination itself (Branch 2).
-        if chosen_peer == dest {
-            return metrics::RouteClass::DirectPeer;
-        }
-
-        let my_addr = self.node_addr();
-        let my_coords = self.tree_state.my_coords();
-
-        // Tree-up: the chosen peer is our ancestor.
-        if my_coords.has_ancestor(chosen_peer) {
-            return metrics::RouteClass::TreeUp;
-        }
-
-        // Whether the destination is in the chosen peer's subtree. Both the
-        // tree-down and cross-link splits below turn on this same test, so it
-        // is computed once. On the live transit path the dest coords are
-        // always present here: `find_next_hop` looks them up with an early
-        // return, so a coord-cache miss yields no next hop to classify (the
-        // caller signals `CoordsRequired` instead of forwarding). The miss
-        // branch below is therefore defensive — reachable only by direct
-        // unit-test calls — and defaults the test to "not in subtree", i.e.
-        // the up-and-over variant of whichever branch fires (TreeDownCross for
-        // a descendant peer, CrosslinkAscend for a lateral one), matching the
-        // original cross-link default-to-ascend.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dest_in_peer_subtree = self
-            .coord_cache
-            .get(dest, now_ms)
-            .is_some_and(|dest_coords| dest_coords.has_ancestor(chosen_peer));
-
-        // Tree-down: the chosen peer is our descendant (we are its ancestor).
-        // Split by subtree membership: a dest genuinely below the child is the
-        // canonical tree-down; a dest *not* below it means we only forwarded
-        // down because the child advertised cross-link reach upward, beyond its
-        // own subtree — the dive-to-tree-child cut-through (TreeDownCross).
-        if let Some(peer_coords) = self.tree_state.peer_coords(chosen_peer)
-            && peer_coords.has_ancestor(my_addr)
-        {
-            return if dest_in_peer_subtree {
-                metrics::RouteClass::TreeDown
-            } else {
-                metrics::RouteClass::TreeDownCross
-            };
-        }
-
-        // Cross-link (lateral): split by whether the destination is in the
-        // chosen peer's subtree. Descend = subtree entry; ascend = up-and-over
-        // via the node's own cross-link (learned from the peer's split-horizon
-        // advertisement, independent of any upward advertisement).
-        if dest_in_peer_subtree {
-            return metrics::RouteClass::CrosslinkDescend;
-        }
-
-        metrics::RouteClass::CrosslinkAscend
-    }
-
-    /// Select the best peer from a set of bloom filter candidates.
-    ///
-    /// Uses distance from each candidate's tree coordinates to the destination
-    /// as the primary metric (after link_cost). Only selects peers that are
-    /// strictly closer to the destination than we are (self-distance check
-    /// prevents routing loops).
-    ///
-    /// Ordering: `(link_cost, distance_to_dest, node_addr)`.
-    fn select_best_candidate<'a>(
-        &'a self,
-        candidates: &[&'a ActivePeer],
-        dest_coords: &crate::tree::TreeCoordinate,
-    ) -> Option<&'a ActivePeer> {
-        let my_distance = self.tree_state.my_coords().distance_to(dest_coords);
-
-        let mut best: Option<(&ActivePeer, f64, usize)> = None;
-
-        for &candidate in candidates {
-            if !candidate.can_send() {
-                continue;
-            }
-
-            let cost = candidate.link_cost();
-
-            let dist = self
-                .tree_state
-                .peer_coords(candidate.node_addr())
-                .map(|pc| pc.distance_to(dest_coords))
-                .unwrap_or(usize::MAX);
-
-            // Self-distance check: only consider peers strictly closer
-            // to the destination than we are (prevents routing loops)
-            if dist >= my_distance {
-                continue;
-            }
-
-            let dominated = match &best {
-                None => true,
-                Some((_, best_cost, best_dist)) => {
-                    cost < *best_cost
-                        || (cost == *best_cost && dist < *best_dist)
-                        || (cost == *best_cost
-                            && dist == *best_dist
-                            && candidate.node_addr() < best.as_ref().unwrap().0.node_addr())
-                }
-            };
-
-            if dominated {
-                best = Some((candidate, cost, dist));
-            }
-        }
-
-        best.map(|(peer, _, _)| peer)
-    }
-
-    /// Check if a destination is in any peer's bloom filter.
-    pub fn destination_in_filters(&self, dest: &NodeAddr) -> Vec<&ActivePeer> {
-        self.peers.values().filter(|p| p.may_reach(dest)).collect()
+        let dest_coords = self.coord_cache.get(dest, now_ms).cloned();
+        routing::classify_forward(
+            dest,
+            chosen_peer,
+            self.node_addr(),
+            self.tree_state.my_coords(),
+            dest_coords.as_ref(),
+            self.tree_state.peer_coords(chosen_peer),
+        )
     }
 
     /// Get the TUN packet sender channel.
@@ -2999,6 +2901,62 @@ impl Node {
         }
 
         Ok(())
+    }
+}
+
+/// Shell-side [`routing::RoutingView`] seam over live `Node` state — the sole
+/// routing read adapter the shell retains. It hands the sans-IO routing core
+/// raw per-peer reads (enumeration plus `may_reach` / `can_send` / `link_cost`
+/// / `coords`) so the candidate assembly, selection, and error synthesis all
+/// live in `proto::routing::core`; no routing decision or assembly logic
+/// remains here.
+///
+/// Field-narrowed to `coord_cache` + `peers` + `tree_state` (never `&Node`
+/// whole) so it borrows disjointly from `&mut self.routing` on the
+/// forward/synth path, where the handler also holds the mutable `Router`.
+///
+/// Two call sites:
+/// - `find_next_hop` builds it to assemble bloom candidates via the `peer_*`
+///   reads; it never queries `is_congested`, so it leaves `congested` false.
+/// - `handle_session_datagram` builds it for `Router::route` / `synth_*`,
+///   which read `is_congested` (precomputed once for the resolved next hop)
+///   and `cached_coords`.
+pub(in crate::node) struct NodeRoutingView<'a> {
+    pub(in crate::node) coord_cache: &'a CoordCache,
+    pub(in crate::node) peers: &'a HashMap<NodeAddr, ActivePeer>,
+    pub(in crate::node) tree_state: &'a TreeState,
+    pub(in crate::node) congested: bool,
+}
+
+impl routing::RoutingView for NodeRoutingView<'_> {
+    fn is_congested(&self, _next_hop: &NodeAddr) -> bool {
+        self.congested
+    }
+
+    fn cached_coords(&self, dest: &NodeAddr, now_ms: u64) -> Option<TreeCoordinate> {
+        self.coord_cache.get(dest, now_ms).cloned()
+    }
+
+    fn peer_addrs(&self) -> Vec<NodeAddr> {
+        self.peers.keys().copied().collect()
+    }
+
+    fn peer_may_reach(&self, peer: &NodeAddr, dest: &NodeAddr) -> bool {
+        self.peers.get(peer).is_some_and(|p| p.may_reach(dest))
+    }
+
+    fn peer_can_send(&self, peer: &NodeAddr) -> bool {
+        self.peers.get(peer).is_some_and(|p| p.can_send())
+    }
+
+    fn peer_link_cost(&self, peer: &NodeAddr) -> f64 {
+        self.peers
+            .get(peer)
+            .map_or(f64::INFINITY, |p| p.link_cost())
+    }
+
+    fn peer_coords(&self, peer: &NodeAddr) -> Option<TreeCoordinate> {
+        self.tree_state.peer_coords(peer).cloned()
     }
 }
 

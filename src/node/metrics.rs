@@ -90,43 +90,10 @@ pub struct ForwardingMetrics {
 }
 
 /// Route class of a transit-forwarded packet, classified from tree
-/// coordinates at the forwarding decision point. The six variants
-/// partition `forwarded_packets` exactly.
-///
-/// Two variants are up-and-over forwards (destination not in the chosen
-/// peer's subtree); they differ in whether they depend on a child
-/// advertising cross-link reach *upward* to its parent:
-/// - `TreeDownCross`: the chosen peer is our tree descendant, but the
-///   destination is *not* in that child's subtree. The forward only fired
-///   because the child advertised cross-link reach upward to us, beyond its
-///   own subtree. If children advertised only their subtree upward, this
-///   forward would route up instead, so its count measures how much
-///   forwarding depends on the upward cross-link advertisement — the
-///   dive-to-tree-child cut-through.
-/// - `CrosslinkAscend`: the chosen peer is lateral (neither ancestor nor
-///   descendant) and the destination is not in its subtree. This is a node
-///   using its *own* cross-link, learned via the peer's split-horizon
-///   advertisement to its neighbors, so it does not depend on any upward
-///   advertisement. Tracked alongside `TreeDownCross` as the lateral
-///   up-and-over contrast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteClass {
-    /// Chosen peer is our ancestor (tree-up).
-    TreeUp,
-    /// Chosen peer is our descendant and dest is in its subtree (canonical
-    /// tree-down).
-    TreeDown,
-    /// Chosen peer is our descendant but dest is *not* in its subtree: the
-    /// dive-to-tree-child cut-through enabled by upward cross-link
-    /// advertisement.
-    TreeDownCross,
-    /// Chosen peer is lateral and dest is in its subtree (subtree entry).
-    CrosslinkDescend,
-    /// Chosen peer is lateral and dest is not in its subtree (up-and-over).
-    CrosslinkAscend,
-    /// Chosen peer is the destination itself (degenerate direct hop).
-    DirectPeer,
-}
+/// coordinates at the forwarding decision point. Defined by the sans-IO
+/// routing core and re-exported here for the forwarding-metrics counters
+/// ([`ForwardingMetrics::record_route_class`]).
+pub(crate) use crate::proto::routing::RouteClass;
 
 impl ForwardingMetrics {
     /// Record a received packet of `bytes` payload (packets and bytes).

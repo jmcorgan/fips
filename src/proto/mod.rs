@@ -4,3 +4,4 @@
 //! I/O adapters remain in `node::handlers`.
 
 pub(crate) mod discovery;
+pub(crate) mod routing;
