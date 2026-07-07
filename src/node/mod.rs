@@ -53,10 +53,10 @@ use self::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
     prepend_inner_header,
 };
-use crate::bloom::{BloomFilter, BloomState};
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
+use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use crate::proto::fmp::Fmp;
 use crate::proto::fmp::NodeProfile;

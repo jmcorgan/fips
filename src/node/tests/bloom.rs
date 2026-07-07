@@ -455,8 +455,8 @@ async fn test_bloom_filter_split_horizon() {
 /// counted once, not the double-count fingerprint.
 #[test]
 fn compute_mesh_size_counts_each_peer_filter_once() {
-    use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
+    use crate::proto::bloom::BloomFilter;
     use crate::proto::stp::ParentDeclaration;
 
     let mut node = make_node();
@@ -550,8 +550,8 @@ fn compute_mesh_size_counts_each_peer_filter_once() {
 /// `estimated_mesh_size` carries.
 #[test]
 fn compute_mesh_size_unions_overlapping_filters() {
-    use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
+    use crate::proto::bloom::BloomFilter;
 
     let mut node = make_node();
 
@@ -632,8 +632,8 @@ fn compute_mesh_size_unions_overlapping_filters() {
 /// removes the parent, and asserts the estimate does not collapse.
 #[test]
 fn compute_mesh_size_stable_across_parent_drop_with_cross_link() {
-    use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
+    use crate::proto::bloom::BloomFilter;
 
     let mut node = make_node();
 

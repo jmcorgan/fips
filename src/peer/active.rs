@@ -3,10 +3,10 @@
 //! Represents a fully authenticated peer after successful Noise handshake.
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
-use crate::bloom::BloomFilter;
 use crate::mmp::MmpConfig;
 use crate::node::REKEY_JITTER_SECS;
 use crate::noise::{HandshakeState as NoiseHandshakeState, NoiseError, NoiseSession};
+use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::{NegotiationPayload, NodeProfile};
 use crate::proto::mmp::MmpPeerState;
 use crate::proto::stp::{ParentDeclaration, TreeCoordinate};

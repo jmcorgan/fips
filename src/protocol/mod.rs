@@ -21,13 +21,11 @@
 //! layer, encrypted end-to-end independently of per-hop link encryption.
 
 mod error;
-mod filter;
 mod link;
 pub(crate) mod session;
 
 // Re-export all public types at protocol:: level
 pub use error::ProtocolError;
-pub use filter::{FilterAnnounce, FilterNack};
 pub use link::{
     LinkMessageType, SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
 };

@@ -7,9 +7,9 @@
 //! bloom.rs.
 
 use super::*;
-use crate::bloom::{BloomFilter, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
 use crate::peer::ActivePeer;
-use crate::protocol::FilterAnnounce;
+use crate::proto::bloom::FilterAnnounce;
+use crate::proto::bloom::{BloomFilter, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
 
 /// Inject a synthetic active peer into the node with a known NodeAddr.
 /// Returns the peer's NodeAddr.
@@ -24,7 +24,7 @@ fn inject_peer(node: &mut Node) -> NodeAddr {
 /// Encode a FilterAnnounce to the payload format handle_filter_announce
 /// expects (msg_type byte stripped).
 fn encode_payload(announce: &FilterAnnounce) -> Vec<u8> {
-    let (mut full, _stats) = announce.encode().unwrap();
+    let mut full = announce.encode().unwrap();
     full.remove(0); // strip msg_type byte
     full
 }
@@ -40,7 +40,7 @@ async fn test_m1_rejects_all_ones_filter_announce() {
         DEFAULT_HASH_COUNT,
     )
     .unwrap();
-    let announce = FilterAnnounce::full(all_ones, 1, 1);
+    let announce = FilterAnnounce::new(all_ones, 1);
     let payload = encode_payload(&announce);
 
     let before_fill_exceeded = node.metrics().bloom.fill_exceeded.get();
@@ -88,7 +88,7 @@ async fn test_m1_accepts_sub_cap_filter() {
         bytes[0] = i;
         filter.insert(&NodeAddr::from_bytes(bytes));
     }
-    let announce = FilterAnnounce::full(filter, 1, 1);
+    let announce = FilterAnnounce::new(filter, 1);
     let payload = encode_payload(&announce);
 
     let before_fill_exceeded = node.metrics().bloom.fill_exceeded.get();
@@ -135,7 +135,7 @@ async fn test_m1_sequence_not_advanced_allows_recovery() {
         DEFAULT_HASH_COUNT,
     )
     .unwrap();
-    let bad_announce = FilterAnnounce::full(bad, 1, 1);
+    let bad_announce = FilterAnnounce::new(bad, 1);
     node.handle_filter_announce(&peer_addr, &encode_payload(&bad_announce))
         .await;
     assert_eq!(
@@ -152,7 +152,7 @@ async fn test_m1_sequence_not_advanced_allows_recovery() {
         bytes[0] = i;
         good.insert(&NodeAddr::from_bytes(bytes));
     }
-    let good_announce = FilterAnnounce::full(good, 1, 1);
+    let good_announce = FilterAnnounce::new(good, 1);
     node.handle_filter_announce(&peer_addr, &encode_payload(&good_announce))
         .await;
 

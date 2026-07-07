@@ -1,30 +1,26 @@
 //! Bloom filter announce send/receive logic.
 //!
 //! Handles building, sending, and receiving FilterAnnounce messages,
-//! including delta compression with NACK-based recovery and debounced
-//! propagation to peers.
+//! including debounced propagation to peers.
 
 use crate::NodeAddr;
-use crate::bloom::BloomFilter;
-use crate::protocol::{FilterAnnounce, FilterNack};
+use crate::proto::bloom::BloomFilter;
+use crate::proto::bloom::FilterAnnounce;
 
 use super::reject::BloomReject;
 use super::{Node, NodeError};
-use std::collections::HashMap;
-use tracing::{debug, trace, warn};
+use std::collections::BTreeMap;
+use tracing::{debug, warn};
 
 impl Node {
-    /// Collect inbound filters from full tree peers for outgoing filter computation.
+    /// Collect inbound filters from all peers for outgoing filter computation.
     ///
     /// Returns a map of (peer_node_addr -> filter) for peers that
-    /// have sent us a FilterAnnounce. Non-routing and leaf peers are
-    /// excluded (they don't send filters; their identity is covered
-    /// via leaf_dependents).
-    pub(super) fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
-        let mut filters = HashMap::new();
+    /// have sent us a FilterAnnounce.
+    pub(super) fn peer_inbound_filters(&self) -> BTreeMap<NodeAddr, BloomFilter> {
+        let mut filters = BTreeMap::new();
         for (addr, peer) in &self.peers {
             if self.is_tree_peer(addr)
-                && peer.peer_profile() == crate::proto::fmp::NodeProfile::Full
                 && let Some(filter) = peer.inbound_filter()
             {
                 filters.insert(*addr, filter.clone());
@@ -35,29 +31,16 @@ impl Node {
 
     /// Build a FilterAnnounce for a specific peer.
     ///
-    /// Returns a delta (XOR diff) if we have a previous filter for this peer
-    /// at the same size class. Otherwise returns a full send.
+    /// The outgoing filter excludes the destination peer's own filter
+    /// to prevent routing loops (don't tell a peer about destinations
+    /// reachable only through them).
     fn build_filter_announce(&mut self, exclude_peer: &NodeAddr) -> FilterAnnounce {
         let peer_filters = self.peer_inbound_filters();
         let filter = self
             .bloom_state
             .compute_outgoing_filter(exclude_peer, &peer_filters);
         let sequence = self.bloom_state.next_sequence();
-        let size_class = self.bloom_state.size_class();
-
-        // Try delta if we have a previous filter for this peer at the same size
-        if let Some(last_filter) = self.bloom_state.last_sent_filter(exclude_peer)
-            && last_filter.num_bits() == filter.num_bits()
-            && let (Some(base_seq), Ok(diff)) = (
-                self.bloom_state.last_sent_seq(exclude_peer),
-                last_filter.xor_diff(&filter),
-            )
-        {
-            return FilterAnnounce::delta(diff, sequence, base_seq, size_class);
-        }
-
-        // Full send
-        FilterAnnounce::full(filter, sequence, size_class)
+        FilterAnnounce::new(filter, sequence)
     }
 
     /// Send a FilterAnnounce to a specific peer, respecting debounce.
@@ -82,22 +65,8 @@ impl Node {
 
         // Build and encode
         let announce = self.build_filter_announce(peer_addr);
-        let is_delta = announce.is_delta;
-        let sent_filter = if is_delta {
-            // For deltas, reconstruct the actual filter for change detection:
-            // apply the diff to the last-sent filter
-            let mut reconstructed = self
-                .bloom_state
-                .last_sent_filter(peer_addr)
-                .cloned()
-                .unwrap_or_default();
-            let _ = reconstructed.apply_diff(&announce.filter);
-            reconstructed
-        } else {
-            announce.filter.clone()
-        };
-
-        let (encoded, stats) = announce.encode().map_err(|e| NodeError::SendFailed {
+        let sent_filter = announce.filter.clone();
+        let encoded = announce.encode().map_err(|e| NodeError::SendFailed {
             node_addr: *peer_addr,
             reason: format!("FilterAnnounce encode failed: {}", e),
         })?;
@@ -109,19 +78,6 @@ impl Node {
         }
 
         self.metrics().bloom.sent.inc();
-        if is_delta {
-            self.metrics().bloom.deltas_sent.inc();
-        } else {
-            self.metrics().bloom.full_sends.inc();
-        }
-        self.metrics()
-            .bloom
-            .total_compressed_bytes
-            .add(stats.compressed_bytes as u64);
-        self.metrics()
-            .bloom
-            .total_raw_bytes
-            .add((stats.raw_words * 8) as u64);
 
         // Self-plausibility check: WARN if our own outgoing filter is
         // above the antipoison cap. Independent detection signal if
@@ -154,15 +110,13 @@ impl Node {
         debug!(
             peer = %self.peer_display_name(peer_addr),
             seq = announce.sequence,
-            delta = is_delta,
-            compressed = stats.compressed_bytes,
-            runs = stats.run_count,
             est_entries = match sent_filter.estimated_count(max_fpr) {
                 Some(n) => format!("{:.0}", n),
                 None => "—".to_string(),
             },
             set_bits = sent_filter.count_ones(),
             fill = format_args!("{:.1}%", sent_filter.fill_ratio() * 100.0),
+            tree_peer = self.is_tree_peer(peer_addr),
             "Sent FilterAnnounce"
         );
         self.bloom_state.record_update_sent(*peer_addr, now_ms);
@@ -175,14 +129,7 @@ impl Node {
     }
 
     /// Send pending rate-limited filter announces whose debounce has expired.
-    ///
-    /// Non-routing nodes do not send filters (they receive only).
     pub(super) async fn send_pending_filter_announces(&mut self) {
-        // Non-routing and leaf nodes don't send bloom filters
-        if self.node_profile() != crate::proto::fmp::NodeProfile::Full {
-            return;
-        }
-
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -208,8 +155,10 @@ impl Node {
 
     /// Handle an inbound FilterAnnounce from an authenticated peer.
     ///
-    /// Supports both full sends and delta (XOR diff) updates.
-    /// On out-of-sequence delta, sends a NACK to request full retransmission.
+    /// 1. Decode and validate the message
+    /// 2. Check sequence freshness (reject stale/replay)
+    /// 3. Store the filter on the peer
+    /// 4. Mark other peers for outgoing filter update
     pub(super) async fn handle_filter_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
         self.metrics().bloom.received.inc();
 
@@ -228,22 +177,26 @@ impl Node {
             debug!(from = %self.peer_display_name(from), "FilterAnnounce filter/size_class mismatch");
             return;
         }
+        if !announce.is_v1_compliant() {
+            self.metrics().bloom.record_reject(BloomReject::NonV1);
+            debug!(from = %self.peer_display_name(from), size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
+            return;
+        }
 
         // Check peer exists
-        let peer = match self.peers.get(from) {
-            Some(p) => p,
+        let current_seq = match self.peers.get(from) {
+            Some(peer) => peer.filter_sequence(),
             None => {
                 self.metrics().bloom.record_reject(BloomReject::UnknownPeer);
                 debug!(from = %self.peer_display_name(from), "FilterAnnounce from unknown peer");
                 return;
             }
         };
-        let current_seq = peer.filter_sequence();
 
         // Reject stale/replay
         if announce.sequence <= current_seq {
             self.metrics().bloom.record_reject(BloomReject::Stale);
-            trace!(
+            debug!(
                 from = %self.peer_display_name(from),
                 received_seq = announce.sequence,
                 current_seq = current_seq,
@@ -252,75 +205,15 @@ impl Node {
             return;
         }
 
-        // Handle delta vs full
-        let resolved_filter = if announce.is_delta {
-            // Delta: apply XOR diff to stored inbound filter
-            let expected_base = current_seq;
-            if announce.base_seq != expected_base {
-                // Out-of-sequence delta — send NACK
-                debug!(
-                    from = %self.peer_display_name(from),
-                    expected_base = expected_base,
-                    got_base = announce.base_seq,
-                    "Out-of-sequence delta, sending NACK"
-                );
-                let nack = FilterNack {
-                    expected_seq: expected_base,
-                };
-                let nack_encoded = nack.encode();
-                let _ = self.send_encrypted_link_message(from, &nack_encoded).await;
-                self.metrics().bloom.nacks_sent.inc();
-                return;
-            }
-
-            // Apply diff to current inbound filter
-            match self.peers.get(from).and_then(|p| p.inbound_filter()) {
-                Some(current) => {
-                    let mut result = current.clone();
-                    if let Err(e) = result.apply_diff(&announce.filter) {
-                        warn!(
-                            from = %self.peer_display_name(from),
-                            error = %e,
-                            "Failed to apply filter delta"
-                        );
-                        // Send NACK to request full retransmit
-                        let nack = FilterNack {
-                            expected_seq: current_seq,
-                        };
-                        let _ = self.send_encrypted_link_message(from, &nack.encode()).await;
-                        self.metrics().bloom.nacks_sent.inc();
-                        return;
-                    }
-                    result
-                }
-                None => {
-                    // No stored filter to apply delta to — NACK
-                    debug!(
-                        from = %self.peer_display_name(from),
-                        "Delta received but no stored filter, sending NACK"
-                    );
-                    let nack = FilterNack { expected_seq: 0 };
-                    let _ = self.send_encrypted_link_message(from, &nack.encode()).await;
-                    self.metrics().bloom.nacks_sent.inc();
-                    return;
-                }
-            }
-        } else {
-            // Full send: use directly
-            announce.filter.clone()
-        };
-
-        // Antipoison FPR cap. Reject announces whose resolved filter FPR
-        // exceeds node.bloom.max_inbound_fpr. Silent on the wire (no NACK)
-        // — the peer's prior accepted filter and filter_sequence stay
-        // untouched so the peer is not permanently silenced and a single
-        // corrupted frame cannot be weaponized to wipe a victim's
-        // contribution to aggregation. Applied to the resolved filter so
-        // deltas that reconstruct to an over-cap state are caught as well
-        // as full sends.
+        // Antipoison FPR cap. Reject announces whose FPR exceeds
+        // node.bloom.max_inbound_fpr. Silent on the wire (no NACK) —
+        // the peer's prior accepted filter and filter_sequence stay
+        // untouched so the peer is not permanently silenced and an
+        // on-path attacker cannot weaponize a single corrupted frame
+        // to wipe a victim's contribution to aggregation.
         let max_fpr = self.config().node.bloom.max_inbound_fpr;
-        let fill = resolved_filter.fill_ratio();
-        let fpr = fill.powi(resolved_filter.hash_count() as i32);
+        let fill = announce.filter.fill_ratio();
+        let fpr = fill.powi(announce.filter.hash_count() as i32);
         if fpr > max_fpr {
             self.metrics()
                 .bloom
@@ -346,99 +239,34 @@ impl Node {
         debug!(
             from = %self.peer_display_name(from),
             seq = announce.sequence,
-            delta = announce.is_delta,
-            est_entries = match resolved_filter.estimated_count(max_fpr) {
+            est_entries = match announce.filter.estimated_count(max_fpr) {
                 Some(n) => format!("{:.0}", n),
                 None => "—".to_string(),
             },
-            set_bits = resolved_filter.count_ones(),
-            fill = format_args!("{:.1}%", resolved_filter.fill_ratio() * 100.0),
+            set_bits = announce.filter.count_ones(),
+            fill = format_args!("{:.1}%", announce.filter.fill_ratio() * 100.0),
             tree_peer = self.is_tree_peer(from),
             "Received FilterAnnounce"
         );
 
-        // Store resolved filter on peer
+        // Store on peer
         if let Some(peer) = self.peers.get_mut(from) {
-            peer.update_filter(resolved_filter, announce.sequence, now_ms);
+            peer.update_filter(announce.filter, announce.sequence, now_ms);
         }
 
-        // Check which peers' outgoing filters actually changed
+        // Check which peers' outgoing filters actually changed.
+        // All peers receive filters, but only tree peers' inbound filters
+        // are merged into outgoing computation (tree-only propagation).
         let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
         let peer_filters = self.peer_inbound_filters();
         self.bloom_state
             .mark_changed_peers(from, &peer_addrs, &peer_filters);
     }
 
-    /// Handle an inbound FilterNack from a peer.
-    ///
-    /// Clears the last-sent filter for that peer, forcing a full re-send
-    /// on the next tick.
-    pub(super) async fn handle_filter_nack(&mut self, from: &NodeAddr, payload: &[u8]) {
-        let nack = match FilterNack::decode(payload) {
-            Ok(n) => n,
-            Err(e) => {
-                debug!(from = %self.peer_display_name(from), error = %e, "Malformed FilterNack");
-                return;
-            }
-        };
-
-        debug!(
-            from = %self.peer_display_name(from),
-            expected_seq = nack.expected_seq,
-            "Received FilterNack, scheduling full re-send"
-        );
-
-        self.metrics().bloom.nacks_received.inc();
-        // Clear sent state for this peer → next send will be full
-        self.bloom_state.clear_sent_filter(from);
-        self.bloom_state.mark_update_needed(*from);
-    }
-
-    /// Evaluate adaptive filter sizing and adjust if needed.
-    ///
-    /// Checks the outgoing fill ratio for a representative peer and
-    /// steps up or down the size class if thresholds are crossed.
-    /// On size change, clears all sent filters (forcing full re-sends)
-    /// and marks all peers for update.
-    fn check_adaptive_sizing(&mut self) {
-        // Only Full nodes participate in filter sizing
-        if self.node_profile() != crate::proto::fmp::NodeProfile::Full {
-            return;
-        }
-
-        // Use an arbitrary peer to compute a representative outgoing filter
-        let representative_peer = match self.peers.keys().next() {
-            Some(addr) => *addr,
-            None => return,
-        };
-
-        let peer_filters = self.peer_inbound_filters();
-        let outgoing = self
-            .bloom_state
-            .compute_outgoing_filter(&representative_peer, &peer_filters);
-        let fill = outgoing.fill_ratio();
-
-        if let Some(new_class) = self.bloom_state.evaluate_size_change(fill) {
-            let old_class = self.bloom_state.size_class();
-            debug!(
-                old_class = old_class,
-                new_class = new_class,
-                fill = format_args!("{:.1}%", fill * 100.0),
-                "Adaptive bloom filter resize"
-            );
-            self.bloom_state.set_size_class(new_class);
-            self.bloom_state.clear_all_sent_filters();
-            self.metrics().bloom.size_changes.inc();
-            let all_peers: Vec<NodeAddr> = self.peers.keys().copied().collect();
-            self.bloom_state.mark_all_updates_needed(all_peers);
-        }
-    }
-
     /// Check bloom filter state on tick (called from event loop).
     ///
-    /// Evaluates adaptive sizing, then sends any pending filter announces.
+    /// Sends any pending debounced filter announces.
     pub(super) async fn check_bloom_state(&mut self) {
-        self.check_adaptive_sizing();
         self.send_pending_filter_announces().await;
     }
 }

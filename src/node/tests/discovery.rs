@@ -1160,8 +1160,8 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
 /// that `initiate_lookup` ran fresh on each attempt.
 #[tokio::test]
 async fn test_check_pending_lookups_default_sequence_unreachable() {
-    use crate::bloom::BloomFilter;
     use crate::peer::ActivePeer;
+    use crate::proto::bloom::BloomFilter;
     use crate::proto::discovery::PendingLookup;
     use crate::transport::LinkId;
     use std::sync::mpsc;

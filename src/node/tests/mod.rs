@@ -8,7 +8,6 @@ mod acl;
 #[cfg(target_os = "linux")]
 mod ble;
 mod bloom;
-mod bloom_metrics;
 mod bloom_poison;
 mod bootstrap;
 mod decrypt_failure;
