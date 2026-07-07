@@ -20,15 +20,15 @@ use crate::node::session_wire::{
 use crate::node::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::node::{Node, NodeError};
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
+use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken};
 #[cfg(unix)]
 use crate::protocol::LinkMessageType;
 use crate::protocol::NegotiationPayload;
 #[cfg(unix)]
 use crate::protocol::SESSION_DATAGRAM_HEADER_SIZE;
 use crate::protocol::{
-    CoordsRequired, FspInnerFlags, MtuExceeded, PathBroken, PathMtuNotification, SessionAck,
-    SessionDatagram, SessionMessageType, SessionMsg3, SessionReceiverReport, SessionSenderReport,
-    SessionSetup,
+    FspInnerFlags, PathMtuNotification, SessionAck, SessionDatagram, SessionMessageType,
+    SessionMsg3, SessionReceiverReport, SessionSenderReport, SessionSetup,
 };
 use crate::protocol::{coords_wire_size, encode_coords};
 #[cfg(unix)]
@@ -1211,7 +1211,7 @@ impl Node {
         // Send standalone CoordsWarmup immediately (rate-limited)
         if self
             .coords_response_rate_limiter
-            .should_send(&msg.dest_addr)
+            .should_send(&msg.dest_addr, Self::now_ms())
         {
             if let Some(entry) = self.sessions.get(&msg.dest_addr)
                 && entry.is_established()
@@ -1272,7 +1272,7 @@ impl Node {
         // Send standalone CoordsWarmup immediately (rate-limited)
         if self
             .coords_response_rate_limiter
-            .should_send(&msg.dest_addr)
+            .should_send(&msg.dest_addr, Self::now_ms())
         {
             if let Some(entry) = self.sessions.get(&msg.dest_addr)
                 && entry.is_established()

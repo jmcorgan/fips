@@ -61,13 +61,17 @@ pub use transport::{
 
 // Re-export protocol types
 pub use protocol::{
-    CoordsRequired, FilterAnnounce, HandshakeMessageType, LinkMessageType, PathBroken,
-    ProtocolError, SessionAck, SessionDatagram, SessionFlags, SessionMessageType, SessionSetup,
-    TreeAnnounce,
+    FilterAnnounce, HandshakeMessageType, LinkMessageType, ProtocolError, SessionAck,
+    SessionDatagram, SessionFlags, SessionMessageType, SessionSetup, TreeAnnounce,
 };
 
 // Re-export discovery wire types (relocated from protocol:: to proto::discovery)
 pub use proto::discovery::{LookupRequest, LookupResponse};
+
+// Re-export routing wire types (relocated from protocol:: to proto::routing)
+pub use proto::routing::{
+    COORDS_REQUIRED_SIZE, CoordsRequired, MTU_EXCEEDED_SIZE, MtuExceeded, PathBroken,
+};
 
 // Re-export cache types
 pub use cache::{CacheEntry, CacheError, CacheStats, CoordCache};
