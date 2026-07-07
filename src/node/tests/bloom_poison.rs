@@ -7,9 +7,9 @@
 //! bloom.rs.
 
 use super::*;
-use crate::bloom::{BloomFilter, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
 use crate::peer::ActivePeer;
-use crate::protocol::FilterAnnounce;
+use crate::proto::bloom::FilterAnnounce;
+use crate::proto::bloom::{BloomFilter, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
 
 /// Inject a synthetic active peer into the node with a known NodeAddr.
 /// Returns the peer's NodeAddr.

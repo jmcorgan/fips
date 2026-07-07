@@ -9,7 +9,6 @@
 // distance to extracting the pure cores into a `no_std` crate later.
 extern crate alloc;
 
-pub mod bloom;
 pub mod cache;
 pub mod config;
 pub mod control;
@@ -47,8 +46,8 @@ pub use discovery::{BootstrapHandoffResult, EstablishedTraversal};
 // Re-export tree types (relocated from tree:: to proto::stp)
 pub use proto::stp::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
 
-// Re-export bloom filter types
-pub use bloom::{BloomError, BloomFilter, BloomState};
+// Re-export bloom filter types (relocated from bloom:: to proto::bloom)
+pub use proto::bloom::{BloomError, BloomFilter, BloomState};
 
 // Re-export transport types
 pub use transport::udp::UdpTransport;
@@ -60,12 +59,15 @@ pub use transport::{
 
 // Re-export protocol types
 pub use protocol::{
-    FilterAnnounce, LinkMessageType, ProtocolError, SessionAck, SessionDatagram, SessionFlags,
-    SessionMessageType, SessionSetup,
+    LinkMessageType, ProtocolError, SessionAck, SessionDatagram, SessionFlags, SessionMessageType,
+    SessionSetup,
 };
 
 // Re-export STP wire types (relocated from protocol:: to proto::stp)
 pub use proto::stp::TreeAnnounce;
+
+// Re-export bloom wire types (relocated from protocol:: to proto::bloom)
+pub use proto::bloom::FilterAnnounce;
 
 // Re-export discovery wire types (relocated from protocol:: to proto::discovery)
 pub use proto::discovery::{LookupRequest, LookupResponse};

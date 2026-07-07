@@ -1,8 +1,6 @@
 //! Generic Bloom filter data structure.
 
-use std::fmt;
-
-use tracing::trace;
+use core::fmt;
 
 use super::{BloomError, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
 use crate::NodeAddr;
@@ -164,7 +162,6 @@ impl BloomFilter {
         let fill = x / m;
         let fpr = fill.powi(self.hash_count as i32);
         if fpr > max_fpr {
-            trace!(fill, fpr, max_fpr, "estimated_count: filter above cap");
             return None;
         }
 

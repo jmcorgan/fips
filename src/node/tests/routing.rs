@@ -4,7 +4,7 @@
 //! filter priority, greedy tree routing, and tie-breaking.
 
 use super::*;
-use crate::bloom::BloomFilter;
+use crate::proto::bloom::BloomFilter;
 use crate::proto::stp::{ParentDeclaration, TreeCoordinate};
 use spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,

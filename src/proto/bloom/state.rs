@@ -1,6 +1,6 @@
 //! FIPS-specific Bloom filter announcement state management.
 
-use std::collections::{HashMap, HashSet};
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::BloomFilter;
 use crate::NodeAddr;
@@ -13,19 +13,19 @@ pub struct BloomState {
     /// This node's NodeAddr (always included in outgoing filters).
     own_node_addr: NodeAddr,
     /// Leaf-only nodes we speak for (included in our filter).
-    leaf_dependents: HashSet<NodeAddr>,
+    leaf_dependents: BTreeSet<NodeAddr>,
     /// Whether this node operates in leaf-only mode.
     is_leaf_only: bool,
     /// Rate limiting: minimum interval between outgoing updates (milliseconds).
     update_debounce_ms: u64,
     /// Timestamp of last update sent (per peer, in milliseconds).
-    last_update_sent: HashMap<NodeAddr, u64>,
+    last_update_sent: BTreeMap<NodeAddr, u64>,
     /// Peers that need a filter update.
-    pending_updates: HashSet<NodeAddr>,
+    pending_updates: BTreeSet<NodeAddr>,
     /// Current sequence number for outgoing filters.
     sequence: u64,
     /// Last outgoing filter sent to each peer (for change detection).
-    last_sent_filters: HashMap<NodeAddr, BloomFilter>,
+    last_sent_filters: BTreeMap<NodeAddr, BloomFilter>,
 }
 
 impl BloomState {
@@ -33,13 +33,13 @@ impl BloomState {
     pub fn new(own_node_addr: NodeAddr) -> Self {
         Self {
             own_node_addr,
-            leaf_dependents: HashSet::new(),
+            leaf_dependents: BTreeSet::new(),
             is_leaf_only: false,
             update_debounce_ms: 500,
-            last_update_sent: HashMap::new(),
-            pending_updates: HashSet::new(),
+            last_update_sent: BTreeMap::new(),
+            pending_updates: BTreeSet::new(),
             sequence: 0,
-            last_sent_filters: HashMap::new(),
+            last_sent_filters: BTreeMap::new(),
         }
     }
 
@@ -92,7 +92,7 @@ impl BloomState {
     }
 
     /// Get the set of leaf dependents.
-    pub fn leaf_dependents(&self) -> &HashSet<NodeAddr> {
+    pub fn leaf_dependents(&self) -> &BTreeSet<NodeAddr> {
         &self.leaf_dependents
     }
 
@@ -170,7 +170,7 @@ impl BloomState {
         &mut self,
         exclude_from: &NodeAddr,
         peer_addrs: &[NodeAddr],
-        peer_filters: &HashMap<NodeAddr, BloomFilter>,
+        peer_filters: &BTreeMap<NodeAddr, BloomFilter>,
     ) {
         for peer_addr in peer_addrs {
             if peer_addr == exclude_from {
@@ -199,7 +199,7 @@ impl BloomState {
     pub fn compute_outgoing_filter(
         &self,
         exclude_peer: &NodeAddr,
-        peer_filters: &HashMap<NodeAddr, BloomFilter>,
+        peer_filters: &BTreeMap<NodeAddr, BloomFilter>,
     ) -> BloomFilter {
         let mut filter = BloomFilter::new();
 

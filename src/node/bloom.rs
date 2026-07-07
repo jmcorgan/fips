@@ -4,12 +4,12 @@
 //! including debounced propagation to peers.
 
 use crate::NodeAddr;
-use crate::bloom::BloomFilter;
-use crate::protocol::FilterAnnounce;
+use crate::proto::bloom::BloomFilter;
+use crate::proto::bloom::FilterAnnounce;
 
 use super::reject::BloomReject;
 use super::{Node, NodeError};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 impl Node {
@@ -17,8 +17,8 @@ impl Node {
     ///
     /// Returns a map of (peer_node_addr -> filter) for peers that
     /// have sent us a FilterAnnounce.
-    pub(super) fn peer_inbound_filters(&self) -> HashMap<NodeAddr, BloomFilter> {
-        let mut filters = HashMap::new();
+    pub(super) fn peer_inbound_filters(&self) -> BTreeMap<NodeAddr, BloomFilter> {
+        let mut filters = BTreeMap::new();
         for (addr, peer) in &self.peers {
             if self.is_tree_peer(addr)
                 && let Some(filter) = peer.inbound_filter()
