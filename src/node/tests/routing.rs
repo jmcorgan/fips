@@ -809,7 +809,7 @@ async fn test_routing_reachability_100_nodes() {
 /// Node 0 should no longer be able to route to node 3.
 #[tokio::test]
 async fn test_routing_stops_after_peer_removal() {
-    use crate::protocol::{Disconnect, DisconnectReason};
+    use crate::proto::fmp::{Disconnect, DisconnectReason};
 
     let edges = vec![(0, 1), (1, 2), (2, 3)];
     let mut nodes = run_tree_test(4, &edges, false).await;

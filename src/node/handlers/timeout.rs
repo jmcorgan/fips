@@ -3,14 +3,69 @@
 
 use crate::node::Node;
 use crate::peer::HandshakeState;
+use crate::proto::fmp::{
+    ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
+};
 use crate::transport::LinkId;
 use tracing::{debug, info};
+
+impl LifecycleView for Node {
+    fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
+        self.connections
+            .iter()
+            .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())
+            .map(|(link_id, conn)| ConnSnapshot {
+                link: *link_id,
+                is_outbound: conn.is_outbound(),
+                retry_addr: conn.expected_identity().map(|id| *id.node_addr()),
+                resend_count: 0,
+                msg1: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn resend_candidates(&self, now_ms: u64, max_resends: u32) -> Vec<ConnSnapshot> {
+        self.connections
+            .iter()
+            .filter(|(_, conn)| {
+                conn.is_outbound()
+                    && conn.handshake_state() == HandshakeState::SentMsg1
+                    && conn.resend_count() < max_resends
+                    && conn.next_resend_at_ms() > 0
+                    && now_ms >= conn.next_resend_at_ms()
+            })
+            .filter_map(|(link_id, conn)| {
+                conn.handshake_msg1().map(|msg1| ConnSnapshot {
+                    link: *link_id,
+                    is_outbound: true,
+                    retry_addr: None,
+                    resend_count: conn.resend_count(),
+                    msg1: msg1.to_vec(),
+                })
+            })
+            .collect()
+    }
+
+    fn rekey_peers(&self) -> Vec<PeerSnapshot> {
+        // The snapshot builder lives in `rekey` beside its drain/dampening
+        // constants; the read-seam unifies here.
+        self.rekey_peer_snapshots()
+    }
+
+    fn rekey_resend_candidates(&self, now_ms: u64) -> Vec<RekeyResendSnapshot> {
+        self.rekey_resend_snapshots(now_ms)
+    }
+}
 
 impl Node {
     /// Check for timed-out handshake connections and clean them up.
     ///
     /// Called periodically by the RX event loop. Removes connections that have
     /// been idle longer than the configured handshake timeout or are in Failed state.
+    ///
+    /// The stale/failed predicate and every registry mutation stay shell-side;
+    /// the retry-then-teardown choreography is the pure
+    /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
     pub(in crate::node) fn check_timeouts(&mut self) {
         if self.connections.is_empty() {
             return;
@@ -19,41 +74,34 @@ impl Node {
         let now_ms = Self::now_ms();
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
 
-        let stale: Vec<LinkId> = self
-            .connections
-            .iter()
-            .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())
-            .map(|(link_id, _)| *link_id)
-            .collect();
-
-        for link_id in stale {
-            // Log and schedule retry before cleanup (need connection state)
-            if let Some(conn) = self.connections.get(&link_id) {
-                let direction = conn.direction();
-                let idle_ms = conn.idle_time(now_ms);
-                if conn.is_failed() {
-                    debug!(
-                        link_id = %link_id,
-                        direction = %direction,
-                        "Failed handshake connection cleaned up"
-                    );
-                } else {
-                    debug!(
-                        link_id = %link_id,
-                        direction = %direction,
-                        idle_secs = idle_ms / 1000,
-                        "Stale handshake connection timed out"
-                    );
+        let stale = self.stale_connections(now_ms, timeout_ms);
+        for action in self.fmp.poll_timeouts(stale) {
+            match action {
+                ConnAction::ScheduleRetry { peer } => self.schedule_retry(peer, now_ms),
+                ConnAction::Teardown { link } => {
+                    // Log before cleanup (needs live connection state).
+                    if let Some(conn) = self.connections.get(&link) {
+                        let direction = conn.direction();
+                        if conn.is_failed() {
+                            debug!(
+                                link_id = %link,
+                                direction = %direction,
+                                "Failed handshake connection cleaned up"
+                            );
+                        } else {
+                            debug!(
+                                link_id = %link,
+                                direction = %direction,
+                                idle_secs = conn.idle_time(now_ms) / 1000,
+                                "Stale handshake connection timed out"
+                            );
+                        }
+                    }
+                    self.cleanup_stale_connection(link, now_ms);
                 }
-
-                // Schedule retry for failed outbound auto-connect peers
-                if conn.is_outbound()
-                    && let Some(identity) = conn.expected_identity()
-                {
-                    self.schedule_retry(*identity.node_addr(), now_ms);
-                }
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
-            self.cleanup_stale_connection(link_id, now_ms);
         }
     }
 
@@ -97,26 +145,24 @@ impl Node {
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
         let backoff = self.config().node.rate_limit.handshake_resend_backoff;
 
-        // Collect resend candidates: outbound, in SentMsg1, with stored msg1,
-        // under max resends, and past the scheduled time.
-        let candidates: Vec<(LinkId, Vec<u8>)> = self
-            .connections
-            .iter()
-            .filter(|(_, conn)| {
-                conn.is_outbound()
-                    && conn.handshake_state() == HandshakeState::SentMsg1
-                    && conn.resend_count() < max_resends
-                    && conn.next_resend_at_ms() > 0
-                    && now_ms >= conn.next_resend_at_ms()
-            })
-            .filter_map(|(link_id, conn)| {
-                conn.handshake_msg1().map(|msg1| (*link_id, msg1.to_vec()))
-            })
-            .collect();
+        // The shell resolves the resend-candidate predicate and copies the
+        // opaque msg1 bytes; the core computes the backoff schedule.
+        let candidates = self.resend_candidates(now_ms, max_resends);
+        for action in self
+            .fmp
+            .poll_resends(candidates, now_ms, interval_ms, backoff)
+        {
+            let ConnAction::ResendMsg1 {
+                link,
+                bytes,
+                next_resend_at_ms,
+            } = action
+            else {
+                continue;
+            };
 
-        for (link_id, msg1_bytes) in candidates {
             // Get transport and address info from the connection
-            let (transport_id, remote_addr) = match self.connections.get(&link_id) {
+            let (transport_id, remote_addr) = match self.connections.get(&link) {
                 Some(conn) => match (conn.transport_id(), conn.source_addr()) {
                     (Some(tid), Some(addr)) => (tid, addr.clone()),
                     _ => continue,
@@ -126,11 +172,11 @@ impl Node {
 
             // Send the stored msg1
             let sent = if let Some(transport) = self.transports.get(&transport_id) {
-                match transport.send(&remote_addr, &msg1_bytes).await {
+                match transport.send(&remote_addr, &bytes).await {
                     Ok(_) => true,
                     Err(e) => {
                         debug!(
-                            link_id = %link_id,
+                            link_id = %link,
                             error = %e,
                             "Handshake msg1 resend failed"
                         );
@@ -141,13 +187,11 @@ impl Node {
                 false
             };
 
-            if sent && let Some(conn) = self.connections.get_mut(&link_id) {
-                let count = conn.resend_count() + 1;
-                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
-                conn.record_resend(next);
+            if sent && let Some(conn) = self.connections.get_mut(&link) {
+                conn.record_resend(next_resend_at_ms);
                 debug!(
-                    link_id = %link_id,
-                    resend = count,
+                    link_id = %link,
+                    resend = conn.resend_count(),
                     "Resent handshake msg1"
                 );
             }

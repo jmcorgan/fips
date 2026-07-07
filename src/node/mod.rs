@@ -45,6 +45,7 @@ use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
+use crate::proto::fmp::Fmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 #[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
@@ -416,6 +417,9 @@ pub struct Node {
     icmp_rate_limiter: IcmpRateLimiter,
     /// Routing-subsystem state (routing error-signal rate limiter).
     routing: Router,
+    /// FMP connection-lifecycle decision anchor (stateless; drives the
+    /// tick-poll maintain/teardown decisions).
+    fmp: Fmp,
     /// Rate limiter for source-side CoordsRequired/PathBroken responses.
     coords_response_rate_limiter: RoutingErrorRateLimiter,
 
@@ -658,6 +662,7 @@ impl Node {
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
+            fmp: Fmp::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
@@ -817,6 +822,7 @@ impl Node {
             msg1_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
+            fmp: Fmp::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),

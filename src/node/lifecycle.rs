@@ -10,7 +10,7 @@ use crate::discovery::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::node::acl::PeerAclContext;
 use crate::node::wire::build_msg1;
 use crate::peer::PeerConnection;
-use crate::protocol::{Disconnect, DisconnectReason};
+use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
 use crate::{NodeAddr, PeerIdentity};

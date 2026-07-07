@@ -119,35 +119,6 @@ impl PromotionResult {
     }
 }
 
-/// Determine winner of cross-connection tie-breaker.
-///
-/// Rule: The node with the smaller node_addr prefers its OUTBOUND connection.
-/// This is deterministic and symmetric: both nodes will reach the same conclusion.
-///
-/// # Arguments
-/// * `our_node_addr` - Our node's ID
-/// * `their_node_addr` - The peer's node ID
-/// * `this_is_outbound` - Whether the connection being evaluated is our outbound
-///
-/// # Returns
-/// `true` if this connection should win (survive), `false` if it should close.
-pub fn cross_connection_winner(
-    our_node_addr: &NodeAddr,
-    their_node_addr: &NodeAddr,
-    this_is_outbound: bool,
-) -> bool {
-    let we_are_smaller = our_node_addr < their_node_addr;
-
-    // Smaller node's outbound wins
-    // If we're smaller: our outbound wins, our inbound loses
-    // If they're smaller: our outbound loses, our inbound wins
-    if we_are_smaller {
-        this_is_outbound
-    } else {
-        !this_is_outbound
-    }
-}
-
 // ============================================================================
 // PeerSlot
 // ============================================================================
@@ -272,48 +243,9 @@ mod tests {
     use crate::transport::LinkId;
     use crate::{Identity, PeerIdentity};
 
-    fn make_node_addr(val: u8) -> NodeAddr {
-        let mut bytes = [0u8; 16];
-        bytes[0] = val;
-        NodeAddr::from_bytes(bytes)
-    }
-
     fn make_peer_identity() -> PeerIdentity {
         let identity = Identity::generate();
         PeerIdentity::from_pubkey(identity.pubkey())
-    }
-
-    #[test]
-    fn test_cross_connection_smaller_node_wins_outbound() {
-        let node_a = make_node_addr(1); // smaller
-        let node_b = make_node_addr(2); // larger
-
-        // Node A's perspective
-        assert!(cross_connection_winner(&node_a, &node_b, true)); // A's outbound wins
-        assert!(!cross_connection_winner(&node_a, &node_b, false)); // A's inbound loses
-
-        // Node B's perspective
-        assert!(!cross_connection_winner(&node_b, &node_a, true)); // B's outbound loses
-        assert!(cross_connection_winner(&node_b, &node_a, false)); // B's inbound wins
-    }
-
-    #[test]
-    fn test_cross_connection_symmetric() {
-        let node_a = make_node_addr(1);
-        let node_b = make_node_addr(2);
-
-        // A's outbound = B's inbound
-        let a_outbound_wins = cross_connection_winner(&node_a, &node_b, true);
-        let b_inbound_wins = cross_connection_winner(&node_b, &node_a, false);
-        assert_eq!(a_outbound_wins, b_inbound_wins);
-
-        // A's inbound = B's outbound
-        let a_inbound_wins = cross_connection_winner(&node_a, &node_b, false);
-        let b_outbound_wins = cross_connection_winner(&node_b, &node_a, true);
-        assert_eq!(a_inbound_wins, b_outbound_wins);
-
-        // Exactly one survives
-        assert!(a_outbound_wins != a_inbound_wins);
     }
 
     #[test]

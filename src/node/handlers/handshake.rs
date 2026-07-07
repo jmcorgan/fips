@@ -1,14 +1,61 @@
 //! Handshake handlers and connection promotion.
 
+use crate::NodeAddr;
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::node::{Node, NodeError};
-use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
+use crate::peer::{ActivePeer, PeerConnection, PromotionResult};
+use crate::proto::fmp::{
+    ConnAction, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundDecision,
+    OutboundSnapshot, WireOutcome, cross_connection_winner,
+};
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+impl EstablishView for Node {
+    fn establish_snapshot(&self, peer_addr: &NodeAddr) -> EstablishSnapshot {
+        let existing = self.peers.get(peer_addr);
+        let max_peers = self.max_peers();
+        EstablishSnapshot {
+            has_existing_peer: existing.is_some(),
+            existing_peer_epoch: existing.and_then(|p| p.remote_epoch()),
+            existing_session_age_secs: existing
+                .map(|p| p.session_established_at().elapsed().as_secs())
+                .unwrap_or(0),
+            has_session: existing.map(|p| p.has_session()).unwrap_or(false),
+            is_healthy: existing.map(|p| p.is_healthy()).unwrap_or(false),
+            pending_new_session: existing
+                .map(|p| p.pending_new_session().is_some())
+                .unwrap_or(false),
+            rekey_in_progress: existing.map(|p| p.rekey_in_progress()).unwrap_or(false),
+            existing_msg2: existing.and_then(|p| p.handshake_msg2().map(|m| m.to_vec())),
+            at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
+            has_pending_outbound_to_peer: self.connections.values().any(|conn| {
+                conn.expected_identity()
+                    .map(|id| id.node_addr() == peer_addr)
+                    .unwrap_or(false)
+            }),
+            rekey_enabled: self.config().node.rekey.enabled,
+            our_node_addr: *self.identity().node_addr(),
+        }
+    }
+
+    fn outbound_snapshot(&self, peer_addr: &NodeAddr) -> OutboundSnapshot {
+        OutboundSnapshot {
+            has_existing_peer: self.peers.contains_key(peer_addr),
+            // Tie-break for THIS outbound connection (`is_outbound = true`),
+            // pre-evaluated here so the core stays free of the peer helper.
+            our_outbound_wins: cross_connection_winner(
+                self.identity().node_addr(),
+                peer_addr,
+                true,
+            ),
+        }
+    }
+}
 
 impl Node {
     /// Returns true if an inbound msg1 should be admitted past the
@@ -96,32 +143,23 @@ impl Node {
             }
         };
 
-        // Check for existing connection from this address.
-        //
-        // If we already have an *inbound* link from this address, this could be:
-        // 1. A duplicate msg1 (our msg2 was lost) — resend msg2
-        // 2. A restarted peer (different epoch) — tear down and reprocess
-        //
-        // If we have an *outbound* link to this address (we initiated to them
-        // AND they initiated to us), this is a cross-connection — allow it.
-        //
-        // Epoch-based restart detection: if the sender already has an inbound
-        // link AND is an active peer in self.peers, fall through to decrypt
-        // the msg1 and check the epoch. Otherwise, treat as duplicate.
+        // Pre-crypto duplicate short-circuit. An *inbound* link from this
+        // address that is not (yet) a promoted peer means our earlier msg2 was
+        // lost: resend the stored msg2 without paying the crypto cost and
+        // return. An inbound link that DOES belong to an active peer (a possible
+        // restart/rekey) or an *outbound* link (a cross-connection) falls
+        // through to the wire step and the structured classification below —
+        // the pre-refactor `possible_restart` flag is no longer needed because
+        // that classification now gates on `has_existing_peer` (identity), which
+        // subsumes it.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
-        let mut possible_restart = false;
         if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key)
             && let Some(link) = self.links.get(&existing_link_id)
         {
             if link.direction() == LinkDirection::Inbound {
-                // Check if this link belongs to an already-promoted active peer
                 let is_active_peer = self.peers.values().any(|p| p.link_id() == existing_link_id);
-
-                if is_active_peer {
-                    // Possible restart — fall through to decrypt and check epoch
-                    possible_restart = true;
-                } else {
-                    // Genuinely pending handshake — resend msg2
+                if !is_active_peer {
+                    // Genuinely pending handshake — resend msg2.
                     let msg2_bytes = self.find_stored_msg2(existing_link_id);
                     if let Some(msg2) = msg2_bytes {
                         if let Some(transport) = self.transports.get(&packet.transport_id) {
@@ -150,14 +188,11 @@ impl Node {
                     return;
                 }
             } else {
-                // Outbound link to this address. If it belongs to an active
-                // peer, this may be a rekey msg1 (same epoch) or a
-                // restart (different epoch). Set possible_restart to enable
-                // the epoch/rekey check below.
+                // Outbound link to this address with no active peer yet: a
+                // cross-connection. Just log; it is classified as a net-new
+                // inbound below.
                 let is_active_peer = self.peers.values().any(|p| p.link_id() == existing_link_id);
-                if is_active_peer {
-                    possible_restart = true;
-                } else {
+                if !is_active_peer {
                     debug!(
                         transport_id = %packet.transport_id,
                         remote_addr = %packet.remote_addr,
@@ -212,247 +247,184 @@ impl Node {
 
         let peer_node_addr = *peer_identity.node_addr();
 
-        // Identity-based restart/rekey detection: if the peer is already
-        // active but addr_to_link didn't match (different source address, e.g.,
-        // TCP from a different port), we still need to check for restart/rekey.
-        if !possible_restart && self.peers.contains_key(&peer_node_addr) {
-            possible_restart = true;
-        }
+        // === PHASE B result ===
+        // Bundle the Noise wire-step outputs (identity, remote epoch, sender
+        // index, opaque msg2 payload). The wire step touched no `Node` registry
+        // state; from here the decision reads only `wire` and the snapshot.
+        let wire = WireOutcome {
+            peer_identity,
+            remote_epoch: conn.remote_epoch(),
+            their_index: header.sender_idx,
+            msg2_payload: msg2_response,
+        };
 
-        // Early cap check: at max_peers and this is a net-new identity?
-        // Bypass for known peers (reconnect / cross-connection) — admitting
-        // them doesn't grow peers.len(). This silent-drops the Msg1 before
-        // the Msg2 build/send and index allocation, avoiding wasted wire
-        // bytes and giving the peer cleaner semantics (no fake-completed
-        // handshake whose data frames subsequently fail decryption here).
-        // The late cap check inside promote_connection() is intentionally
-        // left in place as defense-in-depth.
-        if self.max_peers() > 0 && self.peers.len() >= self.max_peers() {
-            let is_known_active = self.peers.contains_key(&peer_node_addr);
-            let is_pending_outbound = self.connections.iter().any(|(_, conn)| {
-                conn.expected_identity()
-                    .map(|id| *id.node_addr() == peer_node_addr)
-                    .unwrap_or(false)
-            });
-            if !is_known_active && !is_pending_outbound {
-                debug!(
-                    peer = %self.peer_display_name(&peer_node_addr),
-                    max = self.max_peers(),
-                    "Silent-dropping Msg1 at max_peers cap (early gate; no Msg2 sent)"
-                );
-                // `link_id` was allocated above but `conn` is still a local
-                // (not yet inserted into self.connections / self.links /
-                // self.addr_to_link), so the local drop suffices.
+        // === PHASE C input ===
+        // Snapshot the registry state the inbound classification reads about
+        // this peer identity (existing epoch/session/rekey state with the
+        // session age resolved here, the max-peers cap, our own address for the
+        // tie-break). Taken before this connection is inserted into the
+        // registry, matching the pre-refactor read points.
+        let est = self.establish_snapshot(&peer_node_addr);
+
+        // === PHASE C: structured classification (pure core) ===
+        // The decision reads only the snapshot + wire outcome; the shell below
+        // drives the effects. `Promote`/`RestartThenPromote` fall through to the
+        // shared authorize → allocate → send-msg2 → promote tail; the other
+        // variants complete the rate-limiter and return here.
+        match self.fmp.establish_inbound(&est, &wire) {
+            InboundDecision::Reject { reason } => {
+                match reason {
+                    InboundReject::AtMaxPeers => debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        max = self.max_peers(),
+                        "Silent-dropping Msg1 at max_peers cap (early gate; no Msg2 sent)"
+                    ),
+                    InboundReject::PendingSession => debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        "Rekey msg1 received but already have pending session, dropping"
+                    ),
+                    InboundReject::DualRekeyWon => debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        "Dual rekey initiation: we win (smaller addr), dropping their msg1"
+                    ),
+                }
+                // `conn`/`link_id` were never inserted into the registry, so the
+                // local drop suffices — no cleanup needed.
                 self.msg1_rate_limiter.complete_handshake();
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
-        }
-
-        // Epoch-based restart detection and duplicate msg1 handling.
-        //
-        // If we fell through from the addr_to_link check above with
-        // possible_restart=true, we now have the decrypted epoch from msg1.
-        // Compare it against the stored epoch for this peer.
-        if possible_restart && let Some(existing_peer) = self.peers.get(&peer_node_addr) {
-            let new_epoch = conn.remote_epoch();
-            let existing_epoch = existing_peer.remote_epoch();
-
-            match (existing_epoch, new_epoch) {
-                (Some(existing), Some(new)) if existing != new => {
-                    // Epoch mismatch — peer restarted. Tear down stale session.
-                    debug!(
-                        peer = %self.peer_display_name(&peer_node_addr),
-                        "Peer restart detected (epoch mismatch), removing stale session"
-                    );
-                    self.remove_active_peer(&peer_node_addr);
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    self.schedule_reconnect(peer_node_addr, now_ms);
-                    // Fall through to process as new connection
+            InboundDecision::ResendMsg2 { msg2 } => {
+                if let Some(msg2) = msg2.as_deref()
+                    && let Some(transport) = self.transports.get(&packet.transport_id)
+                {
+                    match transport.send(&packet.remote_addr, msg2).await {
+                        Ok(_) => debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            "Resent msg2 for duplicate msg1 (same epoch)"
+                        ),
+                        Err(e) => debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            error = %e,
+                            "Failed to resend msg2"
+                        ),
+                    }
                 }
-                _ => {
-                    // Same epoch (or no epoch stored).
-                    // If the peer has an active session and rekey is enabled,
-                    // this is a rekey msg1 (not a duplicate initial msg1).
-                    // Guard: the session must be at least 30s old to avoid
-                    // misidentifying a cross-connection msg1 as a rekey.
-                    // During simultaneous connection, both sides promote
-                    // within the same tick and the peer's msg1 arrives
-                    // immediately — a genuine rekey can't fire that fast.
-                    let session_age_secs =
-                        existing_peer.session_established_at().elapsed().as_secs();
-                    if self.config().node.rekey.enabled
-                        && existing_peer.has_session()
-                        && existing_peer.is_healthy()
-                        && session_age_secs >= 30
+                self.msg1_rate_limiter.complete_handshake();
+                return;
+            }
+            InboundDecision::RekeyRespond {
+                peer,
+                abandon_first,
+            } => {
+                if abandon_first {
+                    // Dual-initiation loser: abandon our own in-flight rekey and
+                    // free its index before responding as the rekey responder.
+                    debug!(
+                        peer = %self.peer_display_name(&peer),
+                        "Dual rekey initiation: we lose (larger addr), abandoning ours"
+                    );
+                    if let Some(existing) = self.peers.get_mut(&peer)
+                        && let Some(idx) = existing.abandon_rekey()
                     {
-                        // Guard: already have a pending session from a completed
-                        // rekey (waiting for K-bit cutover). Don't overwrite it
-                        // with a new handshake — drop this msg1.
-                        if existing_peer.pending_new_session().is_some() {
+                        if let Some(tid) = existing.transport_id() {
+                            self.peers_by_index.remove(&(tid, idx.as_u32()));
+                            self.pending_outbound.remove(&(tid, idx.as_u32()));
+                        }
+                        let _ = self.index_allocator.free(idx);
+                    }
+                }
+
+                // Rekey: process as responder, store new session as pending.
+                let noise_session = conn.take_session();
+                let our_new_index = match self.index_allocator.allocate() {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to allocate index for rekey");
+                        self.msg1_rate_limiter.complete_handshake();
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        return;
+                    }
+                };
+
+                let noise_session = match noise_session {
+                    Some(s) => s,
+                    None => {
+                        warn!("Rekey msg1: no session from handshake");
+                        let _ = self.index_allocator.free(our_new_index);
+                        self.msg1_rate_limiter.complete_handshake();
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        return;
+                    }
+                };
+
+                // Send msg2 response using the new handshake.
+                let wire_msg2 = build_msg2(our_new_index, wire.their_index, &wire.msg2_payload);
+                if let Some(transport) = self.transports.get(&packet.transport_id) {
+                    match transport.send(&packet.remote_addr, &wire_msg2).await {
+                        Ok(_) => {
                             debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                "Rekey msg1 received but already have pending session, dropping"
+                                peer = %self.peer_display_name(&peer),
+                                new_our_index = %our_new_index,
+                                "Sent rekey msg2 response"
                             );
-                            self.connections.remove(&link_id);
-                            self.links.remove(&link_id);
+                        }
+                        Err(e) => {
+                            warn!(
+                                peer = %self.peer_display_name(&peer),
+                                error = %e,
+                                "Failed to send rekey msg2"
+                            );
+                            let _ = self.index_allocator.free(our_new_index);
                             self.msg1_rate_limiter.complete_handshake();
                             self.stats_mut()
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
                         }
-
-                        // Dual-initiation detection: both sides sent msg1
-                        // simultaneously. Apply tie-breaker — smaller NodeAddr
-                        // wins as initiator (same as cross-connection resolution).
-                        if existing_peer.rekey_in_progress() {
-                            let our_addr = self.identity().node_addr();
-                            if our_addr < &peer_node_addr {
-                                // We win as initiator — drop their msg1.
-                                // Our msg2 will arrive at peer, who completes
-                                // as our responder.
-                                debug!(
-                                    peer = %self.peer_display_name(&peer_node_addr),
-                                    "Dual rekey initiation: we win (smaller addr), dropping their msg1"
-                                );
-                                self.connections.remove(&link_id);
-                                self.links.remove(&link_id);
-                                self.msg1_rate_limiter.complete_handshake();
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
-                                return;
-                            }
-                            // We lose — abandon our rekey, become responder below.
-                            debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                "Dual rekey initiation: we lose (larger addr), abandoning ours"
-                            );
-                            if let Some(peer) = self.peers.get_mut(&peer_node_addr)
-                                && let Some(idx) = peer.abandon_rekey()
-                            {
-                                if let Some(tid) = peer.transport_id() {
-                                    self.peers_by_index.remove(&(tid, idx.as_u32()));
-                                    self.pending_outbound.remove(&(tid, idx.as_u32()));
-                                }
-                                let _ = self.index_allocator.free(idx);
-                            }
-                            // Fall through to respond as responder
-                        }
-
-                        // Rekey: process as responder, store new session as pending
-                        let noise_session = conn.take_session();
-                        let our_new_index = match self.index_allocator.allocate() {
-                            Ok(idx) => idx,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to allocate index for rekey");
-                                self.msg1_rate_limiter.complete_handshake();
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
-                                return;
-                            }
-                        };
-
-                        let noise_session = match noise_session {
-                            Some(s) => s,
-                            None => {
-                                warn!("Rekey msg1: no session from handshake");
-                                let _ = self.index_allocator.free(our_new_index);
-                                self.msg1_rate_limiter.complete_handshake();
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
-                                return;
-                            }
-                        };
-
-                        // Send msg2 response using the new handshake
-                        let wire_msg2 =
-                            build_msg2(our_new_index, header.sender_idx, &msg2_response);
-                        if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            match transport.send(&packet.remote_addr, &wire_msg2).await {
-                                Ok(_) => {
-                                    debug!(
-                                        peer = %self.peer_display_name(&peer_node_addr),
-                                        new_our_index = %our_new_index,
-                                        "Sent rekey msg2 response"
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        peer = %self.peer_display_name(&peer_node_addr),
-                                        error = %e,
-                                        "Failed to send rekey msg2"
-                                    );
-                                    let _ = self.index_allocator.free(our_new_index);
-                                    self.msg1_rate_limiter.complete_handshake();
-                                    self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::BadState,
-                                    ));
-                                    return;
-                                }
-                            }
-                        }
-
-                        // Store pending session on the existing peer
-                        if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                            peer.set_pending_session(
-                                noise_session,
-                                our_new_index,
-                                header.sender_idx,
-                            );
-                            peer.record_peer_rekey();
-                        }
-
-                        // Register new index in peers_by_index
-                        self.peers_by_index.insert(
-                            (packet.transport_id, our_new_index.as_u32()),
-                            peer_node_addr,
-                        );
-
-                        // Clean up: remove the temporary connection/link we created.
-                        // Do NOT remove addr_to_link — the entry must remain pointing
-                        // to the original link so future msg1s from this address are
-                        // recognized as rekeys (not new connections).
-                        self.connections.remove(&link_id);
-                        self.links.remove(&link_id);
-
-                        self.msg1_rate_limiter.complete_handshake();
-                        return;
                     }
-
-                    // Not a rekey — duplicate msg1. Resend stored msg2.
-                    if let Some(msg2) = existing_peer.handshake_msg2().map(|m| m.to_vec())
-                        && let Some(transport) = self.transports.get(&packet.transport_id)
-                    {
-                        match transport.send(&packet.remote_addr, &msg2).await {
-                            Ok(_) => debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                "Resent msg2 for duplicate msg1 (same epoch)"
-                            ),
-                            Err(e) => debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                error = %e,
-                                "Failed to resend msg2"
-                            ),
-                        }
-                    }
-                    self.msg1_rate_limiter.complete_handshake();
-                    return;
                 }
+
+                // Store pending session on the existing peer.
+                if let Some(existing) = self.peers.get_mut(&peer) {
+                    existing.set_pending_session(noise_session, our_new_index, wire.their_index);
+                    existing.record_peer_rekey();
+                }
+
+                // Register new index in peers_by_index.
+                self.peers_by_index
+                    .insert((packet.transport_id, our_new_index.as_u32()), peer);
+
+                // Do NOT touch addr_to_link — the entry must keep pointing at the
+                // original link so future msg1s from this address are recognized
+                // as rekeys (not new connections). The temporary `conn`/`link_id`
+                // were never inserted into the registry, so no cleanup is needed.
+                self.msg1_rate_limiter.complete_handshake();
+                return;
             }
+            InboundDecision::RestartThenPromote { peer } => {
+                // Epoch mismatch — peer restarted. Tear down the stale session
+                // and schedule a reconnect, then fall through to promote the
+                // fresh handshake as a new connection.
+                debug!(
+                    peer = %self.peer_display_name(&peer),
+                    "Peer restart detected (epoch mismatch), removing stale session"
+                );
+                self.remove_active_peer(&peer);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.schedule_reconnect(peer, now_ms);
+            }
+            InboundDecision::Promote => {}
         }
-        // If possible_restart was true but peer is no longer in self.peers
-        // (removed by another path), fall through to process as new connection.
 
         if self
             .authorize_peer(
-                &peer_identity,
+                &wire.peer_identity,
                 PeerAclContext::InboundHandshake,
                 packet.transport_id,
                 &packet.remote_addr,
@@ -481,7 +453,7 @@ impl Node {
         };
 
         conn.set_our_index(our_index);
-        conn.set_their_index(header.sender_idx);
+        conn.set_their_index(wire.their_index);
 
         // Create link
         let link = Link::connectionless(
@@ -497,7 +469,7 @@ impl Node {
         self.connections.insert(link_id, conn);
 
         // Build and send msg2 response, storing for potential resend
-        let wire_msg2 = build_msg2(our_index, header.sender_idx, &msg2_response);
+        let wire_msg2 = build_msg2(our_index, wire.their_index, &wire.msg2_payload);
         if let Some(conn) = self.connections.get_mut(&link_id) {
             conn.set_handshake_msg2(wire_msg2.clone());
         }
@@ -508,7 +480,7 @@ impl Node {
                     debug!(
                         link_id = %link_id,
                         our_index = %our_index,
-                        their_index = %header.sender_idx,
+                        their_index = %wire.their_index,
                         bytes,
                         "Sent msg2 response"
                     );
@@ -536,7 +508,8 @@ impl Node {
         // Responder handshake is complete after receive_handshake_init (Noise IK
         // pattern: responder processes msg1 and generates msg2 in one step).
         // Promote the connection to active peer now.
-        match self.promote_connection(link_id, peer_identity, packet.timestamp_ms) {
+        let promote = ConnAction::PromoteToActive { link: link_id };
+        match self.drive_promote_to_active(promote, wire.peer_identity, packet.timestamp_ms) {
             Ok(result) => {
                 match result {
                     PromotionResult::Promoted(node_addr) => {
@@ -841,13 +814,12 @@ impl Node {
         //
         // This ensures both nodes use the same Noise handshake (the winner's
         // outbound = the loser's inbound).
-        if self.peers.contains_key(&peer_node_addr) {
-            let our_outbound_wins = cross_connection_winner(
-                self.identity().node_addr(),
-                &peer_node_addr,
-                true, // this IS our outbound
-            );
-
+        // Structured classification (pure core): cross-connection swap/keep, or
+        // a net-new promote. The tie-break is pre-evaluated in the snapshot; the
+        // effect bodies below are unchanged.
+        let out_snap = self.outbound_snapshot(&peer_node_addr);
+        let out_decision = self.fmp.establish_outbound(&out_snap);
+        if out_decision != OutboundDecision::Promote {
             // Extract the outbound connection
             let mut conn = match self.connections.remove(&link_id) {
                 Some(c) => c,
@@ -859,7 +831,7 @@ impl Node {
                 }
             };
 
-            if our_outbound_wins {
+            if out_decision == OutboundDecision::CrossConnectionSwap {
                 // We're the smaller node. Swap to outbound session + indices.
                 // The peer will keep their inbound session (complement of ours).
                 let outbound_our_index = conn.our_index();
@@ -961,7 +933,8 @@ impl Node {
         }
 
         // Normal path: promote to active peer
-        match self.promote_connection(link_id, peer_identity, packet.timestamp_ms) {
+        let promote = ConnAction::PromoteToActive { link: link_id };
+        match self.drive_promote_to_active(promote, peer_identity, packet.timestamp_ms) {
             Ok(result) => {
                 // Clean up pending_outbound
                 self.pending_outbound.remove(&key);
@@ -1038,6 +1011,30 @@ impl Node {
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             }
+        }
+    }
+
+    /// Execute a [`ConnAction::PromoteToActive`] from the establish machine.
+    ///
+    /// The decision to promote is made by the establish handlers (and, from the
+    /// establish-core stage on, the pure decision in `proto::fmp`); this is the
+    /// executor half of the seam. It runs the promotion through
+    /// [`Self::promote_connection`], resolving the verified identity and
+    /// promotion timestamp from the ambient wire context, and returns the
+    /// [`PromotionResult`] so the caller can drive the site-specific
+    /// post-promotion tail (TreeAnnounce, bloom mark, discovery-backoff reset,
+    /// loser-link cleanup).
+    fn drive_promote_to_active(
+        &mut self,
+        action: ConnAction,
+        verified_identity: PeerIdentity,
+        current_time_ms: u64,
+    ) -> Result<PromotionResult, NodeError> {
+        match action {
+            ConnAction::PromoteToActive { link } => {
+                self.promote_connection(link, verified_identity, current_time_ms)
+            }
+            _ => unreachable!("drive_promote_to_active requires a PromoteToActive action"),
         }
     }
 

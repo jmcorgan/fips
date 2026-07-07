@@ -30,8 +30,7 @@ mod tree;
 pub use error::ProtocolError;
 pub use filter::FilterAnnounce;
 pub use link::{
-    Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType,
-    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
+    LinkMessageType, SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
 };
 pub use session::{
     FspFlags, FspInnerFlags, PATH_MTU_NOTIFICATION_SIZE, PathMtuNotification,

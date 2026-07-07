@@ -6,133 +6,37 @@
 
 use crate::PeerIdentity;
 use crate::noise::{self, NoiseError, NoiseSession};
+use crate::proto::fmp::ConnectionState;
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use secp256k1::Keypair;
 use std::fmt;
 
-/// Handshake protocol state machine.
-///
-/// For Noise IK pattern:
-/// - Initiator: Initial → SentMsg1 → Complete
-/// - Responder: Initial → ReceivedMsg1 → Complete
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HandshakeState {
-    /// Initial state, ready to start handshake.
-    Initial,
-    /// Initiator: Sent message 1, awaiting message 2.
-    SentMsg1,
-    /// Responder: Received message 1, ready to send message 2.
-    ReceivedMsg1,
-    /// Handshake completed successfully.
-    Complete,
-    /// Handshake failed.
-    Failed,
-}
-
-impl HandshakeState {
-    /// Check if handshake is still in progress.
-    pub fn is_in_progress(&self) -> bool {
-        matches!(
-            self,
-            HandshakeState::Initial | HandshakeState::SentMsg1 | HandshakeState::ReceivedMsg1
-        )
-    }
-
-    /// Check if handshake completed successfully.
-    pub fn is_complete(&self) -> bool {
-        matches!(self, HandshakeState::Complete)
-    }
-
-    /// Check if handshake failed.
-    pub fn is_failed(&self) -> bool {
-        matches!(self, HandshakeState::Failed)
-    }
-}
-
-impl fmt::Display for HandshakeState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            HandshakeState::Initial => "initial",
-            HandshakeState::SentMsg1 => "sent_msg1",
-            HandshakeState::ReceivedMsg1 => "received_msg1",
-            HandshakeState::Complete => "complete",
-            HandshakeState::Failed => "failed",
-        };
-        write!(f, "{}", s)
-    }
-}
+// The pure handshake-phase bookkeeping (`ConnectionState`) and its
+// `HandshakeState` phase enum now live in `proto::fmp::state`. Re-export
+// `HandshakeState` here so its original public path
+// (`crate::peer::HandshakeState`) is preserved for existing call sites.
+pub use crate::proto::fmp::HandshakeState;
 
 /// A connection in the handshake phase, before authentication completes.
 ///
 /// For outbound connections, we know the expected peer identity from config.
 /// For inbound connections, we learn the identity during the Noise handshake.
+///
+/// This is the shell holder for the FMP crypto/state split: the pure
+/// connection bookkeeping lives in [`ConnectionState`] (`proto::fmp::state`),
+/// and the two Noise crypto handles stay here beside it. Pure public methods
+/// delegate to `self.state`; the XX transition methods drive the crypto and
+/// write results back through `self.state`'s setters.
 pub struct PeerConnection {
-    // === Link Reference ===
-    /// The link carrying this connection.
-    link_id: LinkId,
-
-    /// Connection direction (we initiated or they initiated).
-    direction: LinkDirection,
-
-    // === Handshake State ===
-    /// Current handshake state.
-    handshake_state: HandshakeState,
-
-    /// Expected peer identity (known for outbound, learned for inbound).
-    /// Updated after receiving their static key in the handshake.
-    expected_identity: Option<PeerIdentity>,
+    /// Pure, runtime-agnostic connection bookkeeping.
+    state: ConnectionState,
 
     /// Noise handshake state (consumes on completion).
     noise_handshake: Option<noise::HandshakeState>,
 
     /// Completed Noise session (available after handshake complete).
     noise_session: Option<NoiseSession>,
-
-    // === Timing ===
-    /// When the connection attempt started (Unix milliseconds).
-    started_at: u64,
-
-    /// When the last handshake message was sent/received.
-    last_activity: u64,
-
-    // === Statistics ===
-    /// Link statistics during handshake.
-    link_stats: LinkStats,
-
-    // === Wire Protocol Index Tracking ===
-    /// Our sender_idx for this handshake (chosen by us).
-    /// For outbound: included in msg1, used as receiver_idx in msg2 echo.
-    /// For inbound: chosen after processing msg1, included in msg2.
-    our_index: Option<SessionIndex>,
-
-    /// Their sender_idx (learned from their messages).
-    /// For outbound: learned from msg2.
-    /// For inbound: learned from msg1.
-    their_index: Option<SessionIndex>,
-
-    /// Transport ID (for index namespace).
-    transport_id: Option<TransportId>,
-
-    /// Current source address (updated on packet receipt).
-    source_addr: Option<TransportAddr>,
-
-    // === Epoch (Restart Detection) ===
-    /// Remote peer's startup epoch (learned from handshake).
-    remote_epoch: Option<[u8; 8]>,
-
-    // === Handshake Resend ===
-    /// Wire-format msg1 bytes for resend (initiator only).
-    handshake_msg1: Option<Vec<u8>>,
-
-    /// Wire-format msg2 bytes for resend (responder only).
-    handshake_msg2: Option<Vec<u8>>,
-
-    /// Number of resends performed so far.
-    resend_count: u32,
-
-    /// When the next resend should fire (Unix ms). 0 = no resend scheduled.
-    next_resend_at_ms: u64,
 }
 
 impl PeerConnection {
@@ -146,25 +50,9 @@ impl PeerConnection {
         current_time_ms: u64,
     ) -> Self {
         Self {
-            link_id,
-            direction: LinkDirection::Outbound,
-            handshake_state: HandshakeState::Initial,
-            expected_identity: Some(expected_identity),
+            state: ConnectionState::outbound(link_id, expected_identity, current_time_ms),
             noise_handshake: None,
             noise_session: None,
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
-
-            link_stats: LinkStats::new(),
-            our_index: None,
-            their_index: None,
-            transport_id: None,
-            source_addr: None,
-            remote_epoch: None,
-            handshake_msg1: None,
-            handshake_msg2: None,
-            resend_count: 0,
-            next_resend_at_ms: 0,
         }
     }
 
@@ -174,25 +62,9 @@ impl PeerConnection {
     /// identity from Noise message 1.
     pub fn inbound(link_id: LinkId, current_time_ms: u64) -> Self {
         Self {
-            link_id,
-            direction: LinkDirection::Inbound,
-            handshake_state: HandshakeState::Initial,
-            expected_identity: None,
+            state: ConnectionState::inbound(link_id, current_time_ms),
             noise_handshake: None,
             noise_session: None,
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
-
-            link_stats: LinkStats::new(),
-            our_index: None,
-            their_index: None,
-            transport_id: None,
-            source_addr: None,
-            remote_epoch: None,
-            handshake_msg1: None,
-            handshake_msg2: None,
-            resend_count: 0,
-            next_resend_at_ms: 0,
         }
     }
 
@@ -206,195 +78,181 @@ impl PeerConnection {
         current_time_ms: u64,
     ) -> Self {
         Self {
-            link_id,
-            direction: LinkDirection::Inbound,
-            handshake_state: HandshakeState::Initial,
-            expected_identity: None,
+            state: ConnectionState::inbound_with_transport(
+                link_id,
+                transport_id,
+                source_addr,
+                current_time_ms,
+            ),
             noise_handshake: None,
             noise_session: None,
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
-
-            link_stats: LinkStats::new(),
-            our_index: None,
-            their_index: None,
-            transport_id: Some(transport_id),
-            source_addr: Some(source_addr),
-            remote_epoch: None,
-            handshake_msg1: None,
-            handshake_msg2: None,
-            resend_count: 0,
-            next_resend_at_ms: 0,
         }
     }
 
-    // === Accessors ===
+    // === Accessors (delegated to the pure ConnectionState) ===
 
     /// Get the link ID.
     pub fn link_id(&self) -> LinkId {
-        self.link_id
+        self.state.link_id()
     }
 
     /// Get the connection direction.
     pub fn direction(&self) -> LinkDirection {
-        self.direction
+        self.state.direction()
     }
 
     /// Get the handshake state.
     pub fn handshake_state(&self) -> HandshakeState {
-        self.handshake_state
+        self.state.handshake_state()
     }
 
     /// Get the expected/learned peer identity, if known.
     pub fn expected_identity(&self) -> Option<&PeerIdentity> {
-        self.expected_identity.as_ref()
+        self.state.expected_identity()
     }
 
     /// Check if this is an outbound connection.
     pub fn is_outbound(&self) -> bool {
-        self.direction == LinkDirection::Outbound
+        self.state.is_outbound()
     }
 
     /// Check if this is an inbound connection.
     pub fn is_inbound(&self) -> bool {
-        self.direction == LinkDirection::Inbound
+        self.state.is_inbound()
     }
 
     /// Check if handshake is in progress.
     pub fn is_in_progress(&self) -> bool {
-        self.handshake_state.is_in_progress()
+        self.state.is_in_progress()
     }
 
     /// Check if handshake completed.
     pub fn is_complete(&self) -> bool {
-        self.handshake_state.is_complete()
+        self.state.is_complete()
     }
 
     /// Check if handshake failed.
     pub fn is_failed(&self) -> bool {
-        self.handshake_state.is_failed()
+        self.state.is_failed()
     }
 
     /// When the connection started.
     pub fn started_at(&self) -> u64 {
-        self.started_at
+        self.state.started_at()
     }
 
     /// When the last activity occurred.
     pub fn last_activity(&self) -> u64 {
-        self.last_activity
+        self.state.last_activity()
     }
 
     /// Connection duration so far.
     pub fn duration(&self, current_time_ms: u64) -> u64 {
-        current_time_ms.saturating_sub(self.started_at)
+        self.state.duration(current_time_ms)
     }
 
     /// Time since last activity.
     pub fn idle_time(&self, current_time_ms: u64) -> u64 {
-        current_time_ms.saturating_sub(self.last_activity)
+        self.state.idle_time(current_time_ms)
     }
 
     /// Get link statistics.
     pub fn link_stats(&self) -> &LinkStats {
-        &self.link_stats
+        self.state.link_stats()
     }
 
     /// Get mutable link statistics.
     pub fn link_stats_mut(&mut self) -> &mut LinkStats {
-        &mut self.link_stats
+        self.state.link_stats_mut()
     }
 
     // === Index Accessors ===
 
     /// Get our session index (if set).
     pub fn our_index(&self) -> Option<SessionIndex> {
-        self.our_index
+        self.state.our_index()
     }
 
     /// Set our session index.
     pub fn set_our_index(&mut self, index: SessionIndex) {
-        self.our_index = Some(index);
+        self.state.set_our_index(index);
     }
 
     /// Get their session index (if known).
     pub fn their_index(&self) -> Option<SessionIndex> {
-        self.their_index
+        self.state.their_index()
     }
 
     /// Set their session index.
     pub fn set_their_index(&mut self, index: SessionIndex) {
-        self.their_index = Some(index);
+        self.state.set_their_index(index);
     }
 
     /// Get the transport ID (if set).
     pub fn transport_id(&self) -> Option<TransportId> {
-        self.transport_id
+        self.state.transport_id()
     }
 
     /// Set the transport ID.
     pub fn set_transport_id(&mut self, id: TransportId) {
-        self.transport_id = Some(id);
+        self.state.set_transport_id(id);
     }
 
     /// Get the source address (if known).
     pub fn source_addr(&self) -> Option<&TransportAddr> {
-        self.source_addr.as_ref()
+        self.state.source_addr()
     }
 
     /// Set the source address.
     pub fn set_source_addr(&mut self, addr: TransportAddr) {
-        self.source_addr = Some(addr);
+        self.state.set_source_addr(addr);
     }
 
     // === Epoch Accessors ===
 
     /// Get the remote peer's startup epoch (available after handshake).
     pub fn remote_epoch(&self) -> Option<[u8; 8]> {
-        self.remote_epoch
+        self.state.remote_epoch()
     }
 
     // === Handshake Resend ===
 
     /// Store the wire-format msg1 bytes for resend and schedule the first resend.
     pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
-        self.handshake_msg1 = Some(msg1);
-        self.resend_count = 0;
-        self.next_resend_at_ms = first_resend_at_ms;
+        self.state.set_handshake_msg1(msg1, first_resend_at_ms);
     }
 
     /// Store the wire-format msg2 bytes for resend on duplicate msg1.
     pub fn set_handshake_msg2(&mut self, msg2: Vec<u8>) {
-        self.handshake_msg2 = Some(msg2);
+        self.state.set_handshake_msg2(msg2);
     }
 
     /// Get the stored msg1 bytes (if any).
     pub fn handshake_msg1(&self) -> Option<&[u8]> {
-        self.handshake_msg1.as_deref()
+        self.state.handshake_msg1()
     }
 
     /// Get the stored msg2 bytes (if any).
     pub fn handshake_msg2(&self) -> Option<&[u8]> {
-        self.handshake_msg2.as_deref()
+        self.state.handshake_msg2()
     }
 
     /// Number of resends performed.
     pub fn resend_count(&self) -> u32 {
-        self.resend_count
+        self.state.resend_count()
     }
 
     /// When the next resend is scheduled (Unix ms).
     pub fn next_resend_at_ms(&self) -> u64 {
-        self.next_resend_at_ms
+        self.state.next_resend_at_ms()
     }
 
     /// Record a resend and schedule the next one.
     pub fn record_resend(&mut self, next_resend_at_ms: u64) {
-        self.resend_count += 1;
-        self.next_resend_at_ms = next_resend_at_ms;
+        self.state.record_resend(next_resend_at_ms);
     }
 
-    // === Noise Handshake Operations ===
+    // === Noise Handshake Operations (shell: drives crypto, updates pure state) ===
 
     /// Start the handshake as initiator and generate message 1.
     ///
@@ -406,23 +264,23 @@ impl PeerConnection {
         epoch: [u8; 8],
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
-        if self.direction != LinkDirection::Outbound {
+        if self.state.direction() != LinkDirection::Outbound {
             return Err(NoiseError::WrongState {
                 expected: "outbound connection".to_string(),
                 got: "inbound connection".to_string(),
             });
         }
 
-        if self.handshake_state != HandshakeState::Initial {
+        if self.state.handshake_state() != HandshakeState::Initial {
             return Err(NoiseError::WrongState {
                 expected: "initial state".to_string(),
-                got: self.handshake_state.to_string(),
+                got: self.state.handshake_state().to_string(),
             });
         }
 
         let remote_static = self
-            .expected_identity
-            .as_ref()
+            .state
+            .expected_identity()
             .expect("outbound must have expected identity")
             .pubkey_full();
 
@@ -431,8 +289,8 @@ impl PeerConnection {
         let msg1 = hs.write_message_1()?;
 
         self.noise_handshake = Some(hs);
-        self.handshake_state = HandshakeState::SentMsg1;
-        self.last_activity = current_time_ms;
+        self.state.set_handshake_state(HandshakeState::SentMsg1);
+        self.state.touch(current_time_ms);
 
         Ok(msg1)
     }
@@ -448,17 +306,17 @@ impl PeerConnection {
         message: &[u8],
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
-        if self.direction != LinkDirection::Inbound {
+        if self.state.direction() != LinkDirection::Inbound {
             return Err(NoiseError::WrongState {
                 expected: "inbound connection".to_string(),
                 got: "outbound connection".to_string(),
             });
         }
 
-        if self.handshake_state != HandshakeState::Initial {
+        if self.state.handshake_state() != HandshakeState::Initial {
             return Err(NoiseError::WrongState {
                 expected: "initial state".to_string(),
-                got: self.handshake_state.to_string(),
+                got: self.state.handshake_state().to_string(),
             });
         }
 
@@ -468,14 +326,16 @@ impl PeerConnection {
         // Process message 1 (this reveals the initiator's identity and epoch)
         hs.read_message_1(message)?;
 
-        // Extract the discovered identity
+        // Extract the discovered identity from the crypto and record it as
+        // pure data on the state.
         let remote_static = *hs
             .remote_static()
             .expect("remote static available after msg1");
-        self.expected_identity = Some(PeerIdentity::from_pubkey_full(remote_static));
+        self.state
+            .set_expected_identity(PeerIdentity::from_pubkey_full(remote_static));
 
         // Capture remote epoch from msg1
-        self.remote_epoch = hs.remote_epoch();
+        self.state.set_remote_epoch(hs.remote_epoch());
 
         // Generate message 2
         let msg2 = hs.write_message_2()?;
@@ -483,8 +343,8 @@ impl PeerConnection {
         // Handshake is complete for responder
         let session = hs.into_session()?;
         self.noise_session = Some(session);
-        self.handshake_state = HandshakeState::Complete;
-        self.last_activity = current_time_ms;
+        self.state.set_handshake_state(HandshakeState::Complete);
+        self.state.touch(current_time_ms);
 
         Ok(msg2)
     }
@@ -497,10 +357,10 @@ impl PeerConnection {
         message: &[u8],
         current_time_ms: u64,
     ) -> Result<(), NoiseError> {
-        if self.handshake_state != HandshakeState::SentMsg1 {
+        if self.state.handshake_state() != HandshakeState::SentMsg1 {
             return Err(NoiseError::WrongState {
                 expected: "sent_msg1 state".to_string(),
-                got: self.handshake_state.to_string(),
+                got: self.state.handshake_state().to_string(),
             });
         }
 
@@ -512,12 +372,12 @@ impl PeerConnection {
         hs.read_message_2(message)?;
 
         // Capture remote epoch from msg2
-        self.remote_epoch = hs.remote_epoch();
+        self.state.set_remote_epoch(hs.remote_epoch());
 
         let session = hs.into_session()?;
         self.noise_session = Some(session);
-        self.handshake_state = HandshakeState::Complete;
-        self.last_activity = current_time_ms;
+        self.state.set_handshake_state(HandshakeState::Complete);
+        self.state.touch(current_time_ms);
 
         Ok(())
     }
@@ -527,7 +387,7 @@ impl PeerConnection {
     /// Returns the NoiseSession for use in ActivePeer. Can only be called
     /// once after handshake completes.
     pub fn take_session(&mut self) -> Option<NoiseSession> {
-        if self.handshake_state == HandshakeState::Complete {
+        if self.state.handshake_state() == HandshakeState::Complete {
             self.noise_session.take()
         } else {
             None
@@ -536,44 +396,45 @@ impl PeerConnection {
 
     /// Check if we have a completed session ready to take.
     pub fn has_session(&self) -> bool {
-        self.handshake_state == HandshakeState::Complete && self.noise_session.is_some()
+        self.state.handshake_state() == HandshakeState::Complete && self.noise_session.is_some()
     }
 
     // === State Transitions (for manual control if needed) ===
 
-    /// Mark handshake as failed.
+    /// Mark handshake as failed. Sets the pure lifecycle state and drops the
+    /// shell-owned crypto handshake handle.
     pub fn mark_failed(&mut self) {
-        self.handshake_state = HandshakeState::Failed;
+        self.state.mark_failed();
         self.noise_handshake = None;
     }
 
     /// Update last activity timestamp.
     pub fn touch(&mut self, current_time_ms: u64) {
-        self.last_activity = current_time_ms;
+        self.state.touch(current_time_ms);
     }
 
     // === Validation ===
 
     /// Check if the connection has timed out.
     pub fn is_timed_out(&self, current_time_ms: u64, timeout_ms: u64) -> bool {
-        self.idle_time(current_time_ms) > timeout_ms
+        self.state.is_timed_out(current_time_ms, timeout_ms)
     }
 }
 
 impl fmt::Debug for PeerConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerConnection")
-            .field("link_id", &self.link_id)
-            .field("direction", &self.direction)
-            .field("handshake_state", &self.handshake_state)
-            .field("expected_identity", &self.expected_identity)
+            .field("link_id", &self.state.link_id())
+            .field("direction", &self.state.direction())
+            .field("handshake_state", &self.state.handshake_state())
+            .field("expected_identity", &self.state.expected_identity())
             .field("has_noise_handshake", &self.noise_handshake.is_some())
             .field("has_noise_session", &self.noise_session.is_some())
-            .field("our_index", &self.our_index)
-            .field("their_index", &self.their_index)
-            .field("transport_id", &self.transport_id)
-            .field("started_at", &self.started_at)
-            .field("last_activity", &self.last_activity)
+            .field("our_index", &self.state.our_index())
+            .field("their_index", &self.state.their_index())
+            .field("transport_id", &self.state.transport_id())
+            .field("started_at", &self.state.started_at())
+            .field("last_activity", &self.state.last_activity())
             .finish()
     }
 }

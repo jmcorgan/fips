@@ -880,6 +880,18 @@ impl ActivePeer {
         self.session_established_at
     }
 
+    /// Test-only seam: backdate the session-established instant so a test can
+    /// construct a session that reads as `age`-old. This only shifts the
+    /// private timestamp field; it changes no decision logic, no threshold, and
+    /// is compiled out of release builds.
+    #[cfg(test)]
+    pub(crate) fn test_backdate_session_established(&mut self, age: std::time::Duration) {
+        self.session_established_at = self
+            .session_established_at
+            .checked_sub(age)
+            .unwrap_or_else(Instant::now);
+    }
+
     /// Per-session symmetric rekey-timer jitter offset (seconds).
     ///
     /// Drawn at session construction and at each rekey cutover; uniform

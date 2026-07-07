@@ -61,8 +61,8 @@ pub use transport::{
 
 // Re-export protocol types
 pub use protocol::{
-    FilterAnnounce, HandshakeMessageType, LinkMessageType, ProtocolError, SessionAck,
-    SessionDatagram, SessionFlags, SessionMessageType, SessionSetup, TreeAnnounce,
+    FilterAnnounce, LinkMessageType, ProtocolError, SessionAck, SessionDatagram, SessionFlags,
+    SessionMessageType, SessionSetup, TreeAnnounce,
 };
 
 // Re-export discovery wire types (relocated from protocol:: to proto::discovery)
@@ -73,13 +73,19 @@ pub use proto::routing::{
     COORDS_REQUIRED_SIZE, CoordsRequired, MTU_EXCEEDED_SIZE, MtuExceeded, PathBroken,
 };
 
+// Re-export FMP link-framing wire type (relocated from protocol:: to proto::fmp)
+pub use proto::fmp::HandshakeMessageType;
+
 // Re-export cache types
 pub use cache::{CacheEntry, CacheError, CacheStats, CoordCache};
+
+// Re-export FMP tie-break helper (relocated from peer:: to proto::fmp)
+pub use proto::fmp::cross_connection_winner;
 
 // Re-export peer types
 pub use peer::{
     ActivePeer, ConnectivityState, HandshakeState, PeerConnection, PeerError, PeerSlot,
-    PromotionResult, cross_connection_winner,
+    PromotionResult,
 };
 
 // Re-export node types

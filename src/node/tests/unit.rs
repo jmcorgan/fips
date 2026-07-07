@@ -1260,7 +1260,7 @@ fn test_schedule_reconnect_preserves_backoff() {
     // With count=3, backoff should be 5s * 2^3 = 40s.
     let base_ms = node.config().node.retry.base_interval_secs * 1000;
     let max_ms = node.config().node.retry.max_backoff_secs * 1000;
-    let expected_delay = state.backoff_ms(base_ms, max_ms);
+    let expected_delay = crate::proto::fmp::backoff_ms(state.retry_count, base_ms, max_ms);
     assert_eq!(
         state.retry_after_ms,
         31_000 + expected_delay,
@@ -1296,7 +1296,7 @@ fn test_schedule_reconnect_fresh_state() {
     // Base delay: 5s * 2^0 = 5s
     let base_ms = node.config().node.retry.base_interval_secs * 1000;
     let max_ms = node.config().node.retry.max_backoff_secs * 1000;
-    let expected_delay = state.backoff_ms(base_ms, max_ms);
+    let expected_delay = crate::proto::fmp::backoff_ms(state.retry_count, base_ms, max_ms);
     assert_eq!(state.retry_after_ms, 1_000 + expected_delay);
 }
 
@@ -1308,7 +1308,7 @@ fn test_schedule_reconnect_fresh_state() {
 /// decrypt failure, peer restart) all schedule reconnect.
 #[test]
 fn test_disconnect_schedules_reconnect() {
-    use crate::protocol::{Disconnect, DisconnectReason};
+    use crate::proto::fmp::{Disconnect, DisconnectReason};
 
     let peer_identity = Identity::generate();
     let peer_npub = peer_identity.npub();
