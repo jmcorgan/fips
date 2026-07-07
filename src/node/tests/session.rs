@@ -1908,7 +1908,7 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
         let entry = nodes[0].node.get_session_mut(&node1_addr).unwrap();
         let mmp = entry.mmp_mut().unwrap();
         mmp.path_mtu
-            .apply_notification(reduced_mtu, std::time::Instant::now());
+            .apply_notification(reduced_mtu, crate::mmp::mono_ms());
         assert_eq!(mmp.path_mtu.current_mtu(), reduced_mtu);
     }
 

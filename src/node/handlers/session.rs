@@ -6,8 +6,6 @@
 //! encrypted data, and error signals (CoordsRequired, PathBroken).
 
 use crate::NodeAddr;
-use crate::mmp::report::ReceiverReport;
-use crate::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{EndToEndState, EpochSlot, SessionEntry};
 use crate::node::session_wire::{
@@ -21,14 +19,17 @@ use crate::node::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_establish
 use crate::node::{Node, NodeError};
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
 use crate::proto::fmp::NegotiationPayload;
+use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
+use crate::proto::mmp::{
+    PathMtuNotification, ReceiverReport, SessionReceiverReport, SessionSenderReport,
+};
 use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken};
 #[cfg(unix)]
 use crate::protocol::LinkMessageType;
 #[cfg(unix)]
 use crate::protocol::SESSION_DATAGRAM_HEADER_SIZE;
 use crate::protocol::{
-    FspInnerFlags, PathMtuNotification, SessionAck, SessionDatagram, SessionMessageType,
-    SessionMsg3, SessionReceiverReport, SessionSenderReport, SessionSetup,
+    FspInnerFlags, SessionAck, SessionDatagram, SessionMessageType, SessionMsg3, SessionSetup,
 };
 use crate::protocol::{coords_wire_size, encode_coords};
 #[cfg(unix)]
@@ -302,9 +303,9 @@ impl Node {
         if let Some(entry) = self.sessions.get_mut(src_addr)
             && let Some(mmp) = entry.mmp_mut()
         {
-            let now = std::time::Instant::now();
+            let now_ms = crate::mmp::mono_ms();
             mmp.receiver
-                .record_recv(header.counter, timestamp, plaintext.len(), ce_flag, now);
+                .record_recv(header.counter, timestamp, plaintext.len(), ce_flag, now_ms);
             let _inner_flags = FspInnerFlags::from_byte(inner_flags_byte);
         }
 
@@ -1060,9 +1061,11 @@ impl Node {
             return;
         };
 
-        let now = std::time::Instant::now();
-        mmp.metrics
-            .process_receiver_report(&rr, our_timestamp_ms, now);
+        let (_first_rtt, rr_log) =
+            mmp.metrics
+                .process_receiver_report(&rr, our_timestamp_ms, crate::mmp::mono_ms());
+        // Re-emit the operator trace the core used to log mid-decision.
+        super::mmp::log_rr_outcome(&rr, our_timestamp_ms, rr_log);
 
         // Feed SRTT back to sender/receiver report interval tuning (session-layer bounds)
         if let Some(srtt_ms) = mmp.metrics.srtt_ms() {
@@ -1128,8 +1131,9 @@ impl Node {
         };
 
         let old_mtu = mmp.path_mtu.current_mtu();
-        let now = std::time::Instant::now();
-        let changed = mmp.path_mtu.apply_notification(notif.path_mtu, now);
+        let changed = mmp
+            .path_mtu
+            .apply_notification(notif.path_mtu, crate::mmp::mono_ms());
         let new_mtu = mmp.path_mtu.current_mtu();
 
         if !changed {
@@ -1342,8 +1346,10 @@ impl Node {
             && let Some(mmp) = entry.mmp_mut()
         {
             let old_mtu = mmp.path_mtu.current_mtu();
-            let now = std::time::Instant::now();
-            if mmp.path_mtu.apply_notification(msg.mtu, now) {
+            if mmp
+                .path_mtu
+                .apply_notification(msg.mtu, crate::mmp::mono_ms())
+            {
                 let new_mtu = mmp.path_mtu.current_mtu();
                 info!(
                     dest = %peer_name,
@@ -1928,7 +1934,7 @@ impl Node {
     /// Similar to `send_session_data()` but:
     /// - Takes an explicit `msg_type` byte (0x11, 0x12, 0x13, etc.)
     /// - Never includes COORDS_PRESENT (reports are lightweight)
-    /// - Reads spin bit from MMP state for the inner header
+    /// - Reads the session timestamp for the inner header
     /// - Records the send in MMP sender state
     pub(in crate::node) async fn send_session_msg(
         &mut self,
@@ -1938,7 +1944,7 @@ impl Node {
     ) -> Result<(), NodeError> {
         let now_ms = Self::now_ms();
 
-        // Read spin bit and session timestamp from entry
+        // Read session timestamp from entry
         let entry = self
             .sessions
             .get(dest_addr)

@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::IdentityConfig;
-use crate::mmp::{DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MmpConfig, MmpMode};
+use crate::mmp::MmpConfig;
+use crate::proto::mmp::{DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MmpMode};
 
 // ============================================================================
 // Node Configuration Subsections

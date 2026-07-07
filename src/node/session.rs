@@ -5,13 +5,11 @@
 //! (SessionSetup/SessionAck/SessionMsg3) carried inside SessionDatagram
 //! envelopes through the mesh.
 
-use std::time::Instant;
-
 use crate::NodeAddr;
 use crate::config::SessionMmpConfig;
-use crate::mmp::MmpSessionState;
 use crate::node::REKEY_JITTER_SECS;
 use crate::noise::{HandshakeState, NoiseSession};
+use crate::proto::mmp::MmpSessionState;
 use rand::RngExt;
 use secp256k1::PublicKey;
 
@@ -100,7 +98,7 @@ pub(crate) struct SessionEntry {
     /// reset on CoordsRequired receipt.
     coords_warmup_remaining: u8,
     /// Whether this node initiated the Noise handshake.
-    /// Used for spin bit role assignment in session-layer MMP.
+    /// Surfaced through the `is_initiator()` accessor.
     is_initiator: bool,
     /// Session-layer MMP state. Initialized on Established transition.
     mmp: Option<MmpSessionState>,
@@ -338,7 +336,11 @@ impl SessionEntry {
 
     /// Initialize session-layer MMP state (called on Established transition).
     pub(crate) fn init_mmp(&mut self, config: &SessionMmpConfig) {
-        self.mmp = Some(MmpSessionState::new(config, self.is_initiator));
+        self.mmp = Some(MmpSessionState::new(
+            config.mode,
+            config.log_interval_secs,
+            config.owd_window_size,
+        ));
     }
 
     // === Traffic Counters ===
@@ -665,9 +667,9 @@ impl SessionEntry {
         self.rekey_jitter_secs = draw_rekey_jitter();
 
         // Reset MMP counters to avoid metric discontinuity
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         if let Some(mmp) = &mut self.mmp {
-            mmp.reset_for_rekey(now);
+            mmp.reset_for_rekey(now_ms);
         }
         true
     }

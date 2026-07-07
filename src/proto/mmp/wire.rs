@@ -1,10 +1,14 @@
-//! MMP report wire format: SenderReport and ReceiverReport.
+//! MMP report wire format: link-layer and session-layer report codecs.
 //!
-//! Serialization and deserialization for the two report types exchanged
-//! between link-layer peers. Wire format uses an extensibility header:
-//! `[msg_type:1][format_version:1][total_length:2 LE]` followed by payload.
-//! Format version 0 defines the slim layouts below. Decoders skip unknown
-//! trailing bytes via total_length for forward compatibility.
+//! Serialization and deserialization for the report types exchanged between
+//! MMP peers: the link-layer [`SenderReport`]/[`ReceiverReport`] and their
+//! session-layer FSP counterparts ([`SessionSenderReport`]/
+//! [`SessionReceiverReport`]/[`PathMtuNotification`]), plus the conversions
+//! between the two layers. Wire format uses an extensibility header:
+//! `[format_version:1][total_length:2 LE]` (link reports prefix this with a
+//! `msg_type:1` byte). Format version 0 defines the slim layouts below;
+//! decoders skip unknown trailing bytes via total_length for forward
+//! compatibility.
 
 use crate::protocol::ProtocolError;
 
@@ -37,7 +41,7 @@ pub struct SenderReport {
 pub const SENDER_REPORT_SIZE: usize = 20;
 
 /// Payload size after total_length field for SenderReport format v0.
-const SENDER_REPORT_PAYLOAD: u16 = 16;
+pub(crate) const SENDER_REPORT_PAYLOAD: u16 = 16;
 
 /// ReceiverReport (msg_type 0x02, 54 bytes total)
 ///
@@ -75,7 +79,7 @@ pub struct ReceiverReport {
 pub const RECEIVER_REPORT_SIZE: usize = 54;
 
 /// Payload size after total_length field for ReceiverReport format v0.
-const RECEIVER_REPORT_PAYLOAD: u16 = 50;
+pub(crate) const RECEIVER_REPORT_PAYLOAD: u16 = 50;
 
 impl SenderReport {
     /// Encode to wire format (20 bytes: header + payload).
@@ -201,10 +205,216 @@ impl ReceiverReport {
 }
 
 // ============================================================================
-// Conversions between link-layer and session-layer report types
+// Session-Layer MMP Reports
 // ============================================================================
 
-use crate::protocol::{SessionReceiverReport, SessionSenderReport};
+/// Session-layer sender report (msg_type 0x11).
+///
+/// Mirrors the link-layer `SenderReport` fields but carried as an FSP session
+/// message inside the AEAD envelope. The msg_type is in the FSP inner header,
+/// so the body starts with the extensibility header (format_version +
+/// total_length).
+///
+/// ## Wire Format (19 bytes body, after inner header stripped)
+///
+/// ```text
+/// [0]     format_version = 0
+/// [1-2]   total_length: u16 LE (= 16)
+/// [3-6]   interval_packets_sent: u32 LE
+/// [7-10]  interval_bytes_sent: u32 LE
+/// [11-18] cumulative_packets_sent: u64 LE
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSenderReport {
+    pub interval_packets_sent: u32,
+    pub interval_bytes_sent: u32,
+    pub cumulative_packets_sent: u64,
+}
+
+/// Body size for SessionSenderReport: format_version(1) + total_length(2) + payload(16).
+pub const SESSION_SENDER_REPORT_SIZE: usize = 19;
+
+/// Payload size after total_length field for SessionSenderReport format v0.
+const SESSION_SR_PAYLOAD: u16 = 16;
+
+impl SessionSenderReport {
+    /// Encode to wire format (19 bytes body).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(SESSION_SENDER_REPORT_SIZE);
+        buf.push(0x00); // format_version
+        buf.extend_from_slice(&SESSION_SR_PAYLOAD.to_le_bytes());
+        buf.extend_from_slice(&self.interval_packets_sent.to_le_bytes());
+        buf.extend_from_slice(&self.interval_bytes_sent.to_le_bytes());
+        buf.extend_from_slice(&self.cumulative_packets_sent.to_le_bytes());
+        buf
+    }
+
+    /// Decode from body (after FSP inner header has been stripped).
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        if body.len() < SESSION_SENDER_REPORT_SIZE {
+            return Err(ProtocolError::MessageTooShort {
+                expected: SESSION_SENDER_REPORT_SIZE,
+                got: body.len(),
+            });
+        }
+        let _format_version = body[0];
+        let total_length = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
+        if body.len() < 3 + total_length {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 3 + total_length,
+                got: body.len(),
+            });
+        }
+        let p = &body[3..];
+        Ok(Self {
+            interval_packets_sent: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            interval_bytes_sent: u32::from_le_bytes(p[4..8].try_into().unwrap()),
+            cumulative_packets_sent: u64::from_le_bytes(p[8..16].try_into().unwrap()),
+        })
+    }
+}
+
+/// Session-layer receiver report (msg_type 0x12).
+///
+/// Mirrors the link-layer `ReceiverReport` fields but carried as an FSP session
+/// message inside the AEAD envelope. Uses the same extensibility header as the
+/// link-layer format: `[format_version:1][total_length:2 LE]`.
+///
+/// ## Wire Format (53 bytes body, after inner header stripped)
+///
+/// ```text
+/// [0]     format_version = 0
+/// [1-2]   total_length: u16 LE (= 50)
+/// [3-6]   timestamp_echo: u32 LE
+/// [7-8]   dwell_time: u16 LE
+/// [9-16]  highest_counter: u64 LE
+/// [17-24] cumulative_packets_recv: u64 LE
+/// [25-32] cumulative_bytes_recv: u64 LE
+/// [33-36] jitter: u32 LE (microseconds)
+/// [37-40] ecn_ce_count: u32 LE
+/// [41-44] owd_trend: i32 LE (µs/s)
+/// [45-48] burst_loss_count: u32 LE
+/// [49-52] cumulative_reorder_count: u32 LE
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReceiverReport {
+    pub timestamp_echo: u32,
+    pub dwell_time: u16,
+    pub highest_counter: u64,
+    pub cumulative_packets_recv: u64,
+    pub cumulative_bytes_recv: u64,
+    pub jitter: u32,
+    pub ecn_ce_count: u32,
+    pub owd_trend: i32,
+    pub burst_loss_count: u32,
+    pub cumulative_reorder_count: u32,
+}
+
+/// Body size for SessionReceiverReport: format_version(1) + total_length(2) + payload(50).
+pub const SESSION_RECEIVER_REPORT_SIZE: usize = 53;
+
+/// Payload size after total_length field for SessionReceiverReport format v0.
+const SESSION_RR_PAYLOAD: u16 = 50;
+
+impl SessionReceiverReport {
+    /// Encode to wire format (53 bytes body).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(SESSION_RECEIVER_REPORT_SIZE);
+        buf.push(0x00); // format_version
+        buf.extend_from_slice(&SESSION_RR_PAYLOAD.to_le_bytes());
+        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
+        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
+        buf.extend_from_slice(&self.highest_counter.to_le_bytes());
+        buf.extend_from_slice(&self.cumulative_packets_recv.to_le_bytes());
+        buf.extend_from_slice(&self.cumulative_bytes_recv.to_le_bytes());
+        buf.extend_from_slice(&self.jitter.to_le_bytes());
+        buf.extend_from_slice(&self.ecn_ce_count.to_le_bytes());
+        buf.extend_from_slice(&self.owd_trend.to_le_bytes());
+        buf.extend_from_slice(&self.burst_loss_count.to_le_bytes());
+        buf.extend_from_slice(&self.cumulative_reorder_count.to_le_bytes());
+        buf
+    }
+
+    /// Decode from body (after FSP inner header has been stripped).
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        if body.len() < SESSION_RECEIVER_REPORT_SIZE {
+            return Err(ProtocolError::MessageTooShort {
+                expected: SESSION_RECEIVER_REPORT_SIZE,
+                got: body.len(),
+            });
+        }
+        let _format_version = body[0];
+        let total_length = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
+        if body.len() < 3 + total_length {
+            return Err(ProtocolError::MessageTooShort {
+                expected: 3 + total_length,
+                got: body.len(),
+            });
+        }
+        let p = &body[3..];
+        Ok(Self {
+            timestamp_echo: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            dwell_time: u16::from_le_bytes(p[4..6].try_into().unwrap()),
+            highest_counter: u64::from_le_bytes(p[6..14].try_into().unwrap()),
+            cumulative_packets_recv: u64::from_le_bytes(p[14..22].try_into().unwrap()),
+            cumulative_bytes_recv: u64::from_le_bytes(p[22..30].try_into().unwrap()),
+            jitter: u32::from_le_bytes(p[30..34].try_into().unwrap()),
+            ecn_ce_count: u32::from_le_bytes(p[34..38].try_into().unwrap()),
+            owd_trend: i32::from_le_bytes(p[38..42].try_into().unwrap()),
+            burst_loss_count: u32::from_le_bytes(p[42..46].try_into().unwrap()),
+            cumulative_reorder_count: u32::from_le_bytes(p[46..50].try_into().unwrap()),
+        })
+    }
+}
+
+/// Path MTU notification (msg_type 0x13).
+///
+/// Sent by a node that discovers a path MTU value (from transit router
+/// feedback or ICMP Packet Too Big). Allows the remote endpoint to
+/// adjust its sending MTU.
+///
+/// ## Wire Format (2 bytes body, after inner header stripped)
+///
+/// ```text
+/// [0-1]   path_mtu: u16 LE
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathMtuNotification {
+    /// Discovered path MTU in bytes.
+    pub path_mtu: u16,
+}
+
+/// Body size for PathMtuNotification.
+pub const PATH_MTU_NOTIFICATION_SIZE: usize = 2;
+
+impl PathMtuNotification {
+    /// Create a new path MTU notification.
+    pub fn new(path_mtu: u16) -> Self {
+        Self { path_mtu }
+    }
+
+    /// Encode to wire format (2 bytes body).
+    pub fn encode(&self) -> Vec<u8> {
+        self.path_mtu.to_le_bytes().to_vec()
+    }
+
+    /// Decode from body (after FSP inner header has been stripped).
+    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+        if body.len() < PATH_MTU_NOTIFICATION_SIZE {
+            return Err(ProtocolError::MessageTooShort {
+                expected: PATH_MTU_NOTIFICATION_SIZE,
+                got: body.len(),
+            });
+        }
+        Ok(Self {
+            path_mtu: u16::from_le_bytes([body[0], body[1]]),
+        })
+    }
+}
+
+// ============================================================================
+// Conversions between link-layer and session-layer report types
+// ============================================================================
 
 impl From<&SenderReport> for SessionSenderReport {
     fn from(r: &SenderReport) -> Self {
@@ -257,207 +467,5 @@ impl From<&SessionReceiverReport> for ReceiverReport {
             burst_loss_count: r.burst_loss_count,
             cumulative_reorder_count: r.cumulative_reorder_count,
         }
-    }
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_sender_report() -> SenderReport {
-        SenderReport {
-            interval_packets_sent: 100,
-            interval_bytes_sent: 50_000,
-            cumulative_packets_sent: 10_000,
-        }
-    }
-
-    fn sample_receiver_report() -> ReceiverReport {
-        ReceiverReport {
-            timestamp_echo: 5900,
-            dwell_time: 5,
-            highest_counter: 195,
-            cumulative_packets_recv: 9_500,
-            cumulative_bytes_recv: 4_750_000,
-            jitter: 1200,
-            ecn_ce_count: 0,
-            owd_trend: -50,
-            burst_loss_count: 2,
-            cumulative_reorder_count: 10,
-        }
-    }
-
-    #[test]
-    fn test_sender_report_encode_size() {
-        let sr = sample_sender_report();
-        let encoded = sr.encode();
-        assert_eq!(encoded.len(), SENDER_REPORT_SIZE);
-        assert_eq!(encoded[0], 0x01); // msg_type
-        assert_eq!(encoded[1], 0x00); // format_version
-        let total_len = u16::from_le_bytes([encoded[2], encoded[3]]);
-        assert_eq!(total_len, SENDER_REPORT_PAYLOAD);
-    }
-
-    #[test]
-    fn test_sender_report_roundtrip() {
-        let sr = sample_sender_report();
-        let encoded = sr.encode();
-        let decoded = SenderReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(sr, decoded);
-    }
-
-    #[test]
-    fn test_sender_report_too_short() {
-        let result = SenderReport::decode(&[0u8; 10]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_receiver_report_encode_size() {
-        let rr = sample_receiver_report();
-        let encoded = rr.encode();
-        assert_eq!(encoded.len(), RECEIVER_REPORT_SIZE);
-        assert_eq!(encoded[0], 0x02); // msg_type
-        assert_eq!(encoded[1], 0x00); // format_version
-        let total_len = u16::from_le_bytes([encoded[2], encoded[3]]);
-        assert_eq!(total_len, RECEIVER_REPORT_PAYLOAD);
-    }
-
-    #[test]
-    fn test_receiver_report_roundtrip() {
-        let rr = sample_receiver_report();
-        let encoded = rr.encode();
-        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(rr, decoded);
-    }
-
-    #[test]
-    fn test_receiver_report_too_short() {
-        let result = ReceiverReport::decode(&[0u8; 10]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_sender_report_zero_values() {
-        let sr = SenderReport {
-            interval_packets_sent: 0,
-            interval_bytes_sent: 0,
-            cumulative_packets_sent: 0,
-        };
-        let encoded = sr.encode();
-        let decoded = SenderReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(sr, decoded);
-    }
-
-    #[test]
-    fn test_receiver_report_max_values() {
-        let rr = ReceiverReport {
-            timestamp_echo: u32::MAX,
-            dwell_time: u16::MAX,
-            highest_counter: u64::MAX,
-            cumulative_packets_recv: u64::MAX,
-            cumulative_bytes_recv: u64::MAX,
-            jitter: u32::MAX,
-            ecn_ce_count: u32::MAX,
-            owd_trend: i32::MAX,
-            burst_loss_count: u32::MAX,
-            cumulative_reorder_count: u32::MAX,
-        };
-        let encoded = rr.encode();
-        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(rr, decoded);
-    }
-
-    #[test]
-    fn test_receiver_report_negative_owd_trend() {
-        let rr = ReceiverReport {
-            owd_trend: -12345,
-            ..sample_receiver_report()
-        };
-        let encoded = rr.encode();
-        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(decoded.owd_trend, -12345);
-    }
-
-    #[test]
-    fn test_sender_report_forward_compat_trailing_bytes() {
-        let sr = sample_sender_report();
-        let mut encoded = sr.encode();
-        // Simulate a future version with extra trailing bytes:
-        // bump total_length to include 4 extra bytes
-        let new_total_len = SENDER_REPORT_PAYLOAD + 4;
-        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
-        encoded.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        // Decoder should skip trailing bytes and parse v0 fields
-        let decoded = SenderReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(sr, decoded);
-    }
-
-    #[test]
-    fn test_receiver_report_forward_compat_trailing_bytes() {
-        let rr = sample_receiver_report();
-        let mut encoded = rr.encode();
-        // Simulate a future version with extra trailing bytes
-        let new_total_len = RECEIVER_REPORT_PAYLOAD + 8;
-        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
-        encoded.extend_from_slice(&[0x11; 8]);
-        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(rr, decoded);
-    }
-
-    #[test]
-    fn test_sender_report_v1_parsed_by_v0_decoder() {
-        let sr = sample_sender_report();
-        let mut encoded = sr.encode();
-        // Set format_version = 1
-        encoded[1] = 1;
-        // Extend with hypothetical v1 fields (8 extra bytes)
-        let new_total_len = SENDER_REPORT_PAYLOAD + 8;
-        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
-        encoded.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
-        // v0 decoder parses known fields correctly
-        let decoded = SenderReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(sr, decoded);
-    }
-
-    #[test]
-    fn test_receiver_report_v1_parsed_by_v0_decoder() {
-        let rr = sample_receiver_report();
-        let mut encoded = rr.encode();
-        // Set format_version = 1
-        encoded[1] = 1;
-        // Extend with hypothetical v1 fields (12 extra bytes)
-        let new_total_len = RECEIVER_REPORT_PAYLOAD + 12;
-        encoded[2..4].copy_from_slice(&new_total_len.to_le_bytes());
-        encoded.extend_from_slice(&[0xAB; 12]);
-        // v0 decoder parses known fields correctly
-        let decoded = ReceiverReport::decode(&encoded[1..]).unwrap();
-        assert_eq!(rr, decoded);
-    }
-
-    #[test]
-    fn test_sender_report_v1_total_length_too_short() {
-        let sr = sample_sender_report();
-        let mut encoded = sr.encode();
-        // Set format_version = 1 but total_length < v0 payload size
-        encoded[1] = 1;
-        let short_len: u16 = SENDER_REPORT_PAYLOAD - 2;
-        encoded[2..4].copy_from_slice(&short_len.to_le_bytes());
-        assert!(SenderReport::decode(&encoded[1..]).is_err());
-    }
-
-    #[test]
-    fn test_receiver_report_v1_total_length_too_short() {
-        let rr = sample_receiver_report();
-        let mut encoded = rr.encode();
-        // Set format_version = 1 but total_length < v0 payload size
-        encoded[1] = 1;
-        let short_len: u16 = RECEIVER_REPORT_PAYLOAD - 4;
-        encoded[2..4].copy_from_slice(&short_len.to_le_bytes());
-        assert!(ReceiverReport::decode(&encoded[1..]).is_err());
     }
 }

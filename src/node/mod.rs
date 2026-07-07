@@ -60,6 +60,7 @@ use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use crate::proto::fmp::Fmp;
 use crate::proto::fmp::NodeProfile;
+use crate::proto::mmp::Mmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 #[cfg(unix)]
 use crate::transport::ethernet::EthernetTransport;
@@ -440,6 +441,9 @@ pub struct Node {
     /// FMP connection-lifecycle decision anchor (stateless; drives the
     /// tick-poll maintain/teardown decisions).
     fmp: Fmp,
+    /// MMP reporting decision anchor (stateless; drives the report-fan-out /
+    /// liveness / heartbeat decisions).
+    mmp: Mmp,
     /// Rate limiter for source-side CoordsRequired/PathBroken responses.
     coords_response_rate_limiter: RoutingErrorRateLimiter,
 
@@ -686,6 +690,7 @@ impl Node {
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
             fmp: Fmp::new(),
+            mmp: Mmp::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
@@ -848,6 +853,7 @@ impl Node {
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
             fmp: Fmp::new(),
+            mmp: Mmp::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
@@ -2079,7 +2085,7 @@ impl Node {
                     (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
                     _ => None,
                 };
-                let trend = |dual: &crate::mmp::algorithms::DualEwma| {
+                let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
                 };
@@ -2119,7 +2125,7 @@ impl Node {
                     (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
                     _ => None,
                 };
-                let trend = |dual: &crate::mmp::algorithms::DualEwma| {
+                let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
                 };
@@ -3074,7 +3080,7 @@ impl routing::RoutingView for NodeRoutingView<'_> {
 /// is precomputed here exactly as the on-loop queries do, so the render is a
 /// plain field emit.
 fn project_entity_mmp(
-    metrics: &crate::mmp::metrics::MmpMetrics,
+    metrics: &crate::proto::mmp::MmpMetrics,
     mode: String,
     path_mtu: Option<u16>,
 ) -> crate::control::snapshot::EntityMmp {

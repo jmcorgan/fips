@@ -4,7 +4,6 @@ use crate::node::Node;
 use crate::node::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, strip_inner_header};
 use crate::noise::NoiseError;
 use crate::transport::ReceivedPacket;
-use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 /// Force-remove a peer after this many consecutive decryption failures.
@@ -257,7 +256,7 @@ impl Node {
         };
 
         // MMP per-frame processing and statistics
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         let ce_flag = header.flags & FLAG_CE != 0;
 
         if let Some(peer) = self.peers.get_mut(&node_addr) {
@@ -274,7 +273,7 @@ impl Node {
                     timestamp,
                     packet.data.len(),
                     ce_flag,
-                    now,
+                    now_ms,
                 );
             }
             peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
@@ -331,8 +330,8 @@ impl Node {
 
     /// Canonical post-FMP-decrypt side-effect site. Used by both the
     /// inline rx_loop decrypt path and the decrypt-worker bounce path
-    /// so the per-peer bookkeeping (stats, MMP, spin-bit RTT, ECN
-    /// propagation, address-rotation handling, link-message dispatch)
+    /// so the per-peer bookkeeping (stats, MMP, ECN propagation,
+    /// address-rotation handling, link-message dispatch)
     /// happens in exactly one place.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::node) async fn process_authentic_fmp_plaintext(
@@ -357,7 +356,7 @@ impl Node {
         } else {
             return;
         };
-        let now = Instant::now();
+        let now_ms = crate::mmp::mono_ms();
         let mut address_changed = false;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.reset_decrypt_failures();
@@ -379,7 +378,7 @@ impl Node {
             peer.touch(packet_timestamp_ms);
             if let Some(mmp) = peer.mmp_mut() {
                 mmp.receiver
-                    .record_recv(fmp_counter, inner_ts, packet_len, ce_flag, now);
+                    .record_recv(fmp_counter, inner_ts, packet_len, ce_flag, now_ms);
             }
         }
         // Address rotation invalidates the per-peer connect()-ed UDP

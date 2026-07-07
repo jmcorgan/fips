@@ -112,8 +112,8 @@ pub(crate) struct DecryptJob {
     pub fmp_counter: u64,
     /// Flag byte from the FMP outer header. Carried through the
     /// fallback so the rx_loop bounce arm can extract `CE` and `SP`
-    /// for ECN propagation, MMP stats, and spin-bit RTT
-    /// observation — these used to be dropped on the worker path
+    /// for ECN propagation and MMP stats — these used to be dropped
+    /// on the worker path
     /// because the bounce hardcoded `fmp_flags: 0`.
     pub fmp_flags: u8,
     /// 16-byte FMP outer header used as AAD during AEAD open.
@@ -544,8 +544,7 @@ mod tests {
     /// `DecryptFallback.fmp_flags`. Pre-fix the worker hardcoded
     /// `fmp_flags: 0`, dropping CE / SP on every packet handled by
     /// the production worker path (i.e. every bulk-data packet).
-    /// Loss of CE wrecks ECN propagation; loss of SP wrecks
-    /// spin-bit RTT observation.
+    /// Loss of CE wrecks ECN propagation.
     ///
     /// Drives the worker's `handle_job` directly: build an FMP wire
     /// packet sealed with a known cipher, ship a `DecryptJob` with
