@@ -84,8 +84,10 @@ pub(super) async fn make_test_node_with_mtu(mtu: u16) -> TestNode {
 /// Create a test node with a specific routing profile. Profile is immutable
 /// (lives in the shared context), so it is set via the `Config` flags that
 /// `Config::node_profile()` reads rather than poked post-construction.
-pub(super) async fn make_test_node_with_profile(profile: crate::protocol::NodeProfile) -> TestNode {
-    use crate::protocol::NodeProfile;
+pub(super) async fn make_test_node_with_profile(
+    profile: crate::proto::fmp::NodeProfile,
+) -> TestNode {
+    use crate::proto::fmp::NodeProfile;
     let mut config = Config::new();
     match profile {
         NodeProfile::Leaf => config.node.leaf_only = true,

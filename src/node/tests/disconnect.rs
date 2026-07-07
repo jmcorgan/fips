@@ -6,7 +6,7 @@
 
 use super::spanning_tree::*;
 use super::*;
-use crate::protocol::{Disconnect, DisconnectReason};
+use crate::proto::fmp::{Disconnect, DisconnectReason};
 
 /// 3-node chain: middle node disconnects one peer.
 ///
@@ -296,7 +296,7 @@ async fn test_disconnect_clears_session() {
     );
 
     // Node 0 sends Disconnect to node 1.
-    let disconnect = crate::protocol::Disconnect::new(DisconnectReason::Shutdown);
+    let disconnect = crate::proto::fmp::Disconnect::new(DisconnectReason::Shutdown);
     nodes[0]
         .node
         .send_encrypted_link_message(&node1_addr, &disconnect.encode())

@@ -20,10 +20,10 @@ use crate::node::session_wire::{
 use crate::node::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::node::{Node, NodeError};
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
+use crate::proto::fmp::NegotiationPayload;
 use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken};
 #[cfg(unix)]
 use crate::protocol::LinkMessageType;
-use crate::protocol::NegotiationPayload;
 #[cfg(unix)]
 use crate::protocol::SESSION_DATAGRAM_HEADER_SIZE;
 use crate::protocol::{

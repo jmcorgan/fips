@@ -10,6 +10,7 @@ use crate::node::Node;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::build_msg1;
 use crate::noise::HandshakeState;
+use crate::proto::fmp::{ConnAction, LifecycleView, PeerSnapshot, RekeyCfg, RekeyResendSnapshot};
 use crate::protocol::{SessionDatagram, SessionSetup};
 use tracing::{debug, info, trace, warn};
 
@@ -42,140 +43,119 @@ impl Node {
             return;
         }
 
-        let rekey_after_secs = self.config().node.rekey.after_secs;
-        let rekey_after_messages = self.config().node.rekey.after_messages;
+        let cfg = RekeyCfg {
+            after_secs: self.config().node.rekey.after_secs,
+            after_messages: self.config().node.rekey.after_messages,
+        };
 
-        // Collect peers that need action (to avoid borrow conflicts)
-        let mut peers_to_cutover: Vec<NodeAddr> = Vec::new();
-        let mut peers_to_drain: Vec<NodeAddr> = Vec::new();
-        let mut peers_to_rekey: Vec<NodeAddr> = Vec::new();
-
-        for (node_addr, peer) in &self.peers {
-            if !peer.has_session() || !peer.is_healthy() {
-                continue;
-            }
-
-            // 1. Initiator-side cutover: we completed a rekey and have
-            //    a pending session ready. Cut over on the next tick.
-            if peer.pending_new_session().is_some() && !peer.rekey_in_progress() {
-                peers_to_cutover.push(*node_addr);
-                continue;
-            }
-
-            // 2. Drain window expiry
-            if peer.is_draining() && peer.drain_expired(DRAIN_WINDOW_SECS) {
-                peers_to_drain.push(*node_addr);
-            }
-
-            // 3. Rekey trigger
-            if peer.rekey_in_progress() {
-                continue;
-            }
-            if peer.pending_new_session().is_some() {
-                // Completed rekey awaiting cutover; don't stack another.
-                continue;
-            }
-            if peer.rekey_msg3_payload().is_some() {
-                // Initiator already cut over on its timer but is still
-                // retransmitting msg3 to a responder not yet confirmed on
-                // the new epoch. Don't start another rekey (which would
-                // overwrite the retained payload) until this cycle's msg3
-                // is delivered or its budget exhausted. Mirrors FSP
-                // check_session_rekey.
-                continue;
-            }
-            if peer.is_rekey_dampened(REKEY_DAMPENING_SECS) {
-                continue;
-            }
-
-            let elapsed = peer.session_established_at().elapsed().as_secs();
-            let counter = peer
-                .noise_session()
-                .map(|s| s.current_send_counter())
-                .unwrap_or(0);
-
-            // Apply per-session symmetric jitter to desynchronize
-            // dual-initiation in symmetric-start meshes.
-            let effective_after_secs =
-                rekey_after_secs.saturating_add_signed(peer.rekey_jitter_secs());
-            if elapsed >= effective_after_secs || counter >= rekey_after_messages {
-                peers_to_rekey.push(*node_addr);
-            }
-        }
-
-        // Execute cutover for initiator side
-        for node_addr in peers_to_cutover {
-            let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
-                if let Some(_old_our_index) = peer.cutover_to_new_session() {
-                    // New index was pre-registered in peers_by_index during
-                    // msg2 handling (handshake.rs). Verify, don't duplicate.
-                    debug_assert!(
-                        peer.transport_id().is_some()
-                            && peer.our_index().is_some()
-                            && self.peers_by_index.contains_key(&(
-                                peer.transport_id().unwrap(),
-                                peer.our_index().unwrap().as_u32()
-                            )),
-                        "peers_by_index should contain pre-registered new index after cutover"
-                    );
-                    let our_index = peer.our_index();
-                    let their_index = peer.their_index();
-                    info!(
-                        peer = %self.peer_display_name(&node_addr),
-                        our_addr = %self.identity().node_addr(),
-                        their_addr = %node_addr,
-                        our_index = ?our_index,
-                        their_index = ?their_index,
-                        "Rekey cutover complete (initiator), K-bit flipped"
-                    );
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            // Re-register the new session with the decrypt worker — the
-            // cache_key (transport_id, our_index) just changed, so the
-            // old worker entry is stale and every packet on the new
-            // session would miss the worker's HashMap lookup.
-            #[cfg(unix)]
-            if did_cutover {
-                self.register_decrypt_worker_session(&node_addr);
-            }
-            #[cfg(not(unix))]
-            let _ = did_cutover;
-        }
-
-        // Execute drain completion
-        for node_addr in peers_to_drain {
-            // Extract the old index and transport_id under the peer
-            // borrow, then drop the borrow so the cache_key cleanup
-            // below can take &mut self for unregister_decrypt_worker_session.
-            let drained = self
-                .peers
-                .get_mut(&node_addr)
-                .and_then(|peer| peer.complete_drain().map(|idx| (idx, peer.transport_id())));
-            if let Some((old_our_index, transport_id)) = drained {
-                if let Some(tid) = transport_id {
-                    let cache_key = (tid, old_our_index.as_u32());
-                    self.peers_by_index.remove(&cache_key);
+        // The shell snapshots each healthy peer's rekey ages/flags (every clock
+        // read resolved here); the core decides cutover/drain/trigger with no
+        // clock, phase-grouped to preserve the pre-refactor execution order.
+        let snapshots = self.rekey_peers();
+        for action in self.fmp.poll_rekey(snapshots, &cfg) {
+            match action {
+                // Execute cutover for initiator side.
+                ConnAction::Cutover { peer: node_addr } => {
+                    let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
+                        if let Some(_old_our_index) = peer.cutover_to_new_session() {
+                            // New index was pre-registered in peers_by_index
+                            // during msg2 handling (handshake.rs).
+                            debug_assert!(
+                                peer.transport_id().is_some()
+                                    && peer.our_index().is_some()
+                                    && self.peers_by_index.contains_key(&(
+                                        peer.transport_id().unwrap(),
+                                        peer.our_index().unwrap().as_u32()
+                                    )),
+                                "peers_by_index should contain pre-registered new index after cutover"
+                            );
+                            let our_index = peer.our_index();
+                            let their_index = peer.their_index();
+                            info!(
+                                peer = %self.peer_display_name(&node_addr),
+                                our_addr = %self.identity().node_addr(),
+                                their_addr = %node_addr,
+                                our_index = ?our_index,
+                                their_index = ?their_index,
+                                "Rekey cutover complete (initiator), K-bit flipped"
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    // Re-register the new session with the decrypt worker — the
+                    // cache_key (transport_id, our_index) just changed, so the
+                    // old worker entry is stale and every packet on the new
+                    // session would miss the worker's HashMap lookup.
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session(cache_key);
+                    if did_cutover {
+                        self.register_decrypt_worker_session(&node_addr);
+                    }
+                    #[cfg(not(unix))]
+                    let _ = did_cutover;
                 }
-                let _ = self.index_allocator.free(old_our_index);
-                trace!(
-                    peer = %self.peer_display_name(&node_addr),
-                    old_index = %old_our_index,
-                    "Drain complete, previous session erased"
-                );
+                // Execute drain completion.
+                ConnAction::Drain { peer: node_addr } => {
+                    // Extract the old index and transport_id under the peer
+                    // borrow, then drop the borrow so the cache_key cleanup
+                    // below can take &mut self for unregister_decrypt_worker_session.
+                    let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
+                        peer.complete_drain().map(|idx| (idx, peer.transport_id()))
+                    });
+                    if let Some((old_our_index, transport_id)) = drained {
+                        if let Some(tid) = transport_id {
+                            let cache_key = (tid, old_our_index.as_u32());
+                            self.peers_by_index.remove(&cache_key);
+                            #[cfg(unix)]
+                            self.unregister_decrypt_worker_session(cache_key);
+                        }
+                        let _ = self.index_allocator.free(old_our_index);
+                        trace!(
+                            peer = %self.peer_display_name(&node_addr),
+                            old_index = %old_our_index,
+                            "Drain complete, previous session erased"
+                        );
+                    }
+                }
+                // Initiate a new rekey.
+                ConnAction::InitiateRekey { peer: node_addr } => {
+                    self.initiate_rekey(&node_addr).await;
+                }
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
+    }
 
-        // Initiate new rekeys
-        for node_addr in peers_to_rekey {
-            self.initiate_rekey(&node_addr).await;
-        }
+    /// Snapshot every healthy peer with a session for the rekey decision,
+    /// pre-computing its monotonic ages and timer predicates so the pure core
+    /// applies the thresholds without reading a clock (see [`PeerSnapshot`]).
+    ///
+    /// Lives here, beside the drain/dampening constants and the FSP analog, so
+    /// the forward-merge onto `next` reconciles rekey timing in one place.
+    pub(in crate::node) fn rekey_peer_snapshots(&self) -> Vec<PeerSnapshot> {
+        self.peers
+            .iter()
+            .filter(|(_, peer)| peer.has_session() && peer.is_healthy())
+            .map(|(node_addr, peer)| PeerSnapshot {
+                addr: *node_addr,
+                has_pending: peer.pending_new_session().is_some(),
+                rekey_in_progress: peer.rekey_in_progress(),
+                is_draining: peer.is_draining(),
+                drain_expired: peer.drain_expired(DRAIN_WINDOW_SECS),
+                is_dampened: peer.is_rekey_dampened(REKEY_DAMPENING_SECS),
+                rekey_msg3_pending: peer.rekey_msg3_payload().is_some(),
+                elapsed_secs: peer.session_established_at().elapsed().as_secs(),
+                counter: peer
+                    .noise_session()
+                    .map(|s| s.current_send_counter())
+                    .unwrap_or(0),
+                jitter_secs: peer.rekey_jitter_secs(),
+            })
+            .collect()
     }
 
     /// Initiate an outbound rekey to a peer.
@@ -285,62 +265,74 @@ impl Node {
         let backoff = self.config().node.rate_limit.handshake_resend_backoff;
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
 
-        // Collect peers needing action
-        let mut to_resend: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
-        let mut to_abandon: Vec<NodeAddr> = Vec::new();
+        // The shell snapshots each in-flight rekey (resend-due predicate
+        // resolved here); the core classifies abandon-vs-resend and computes
+        // the backoff, abandons first.
+        let candidates = self.rekey_resend_candidates(now_ms);
+        for action in
+            self.fmp
+                .poll_rekey_resends(candidates, now_ms, interval_ms, backoff, max_resends)
+        {
+            match action {
+                // Abandon rekey cycles that exhausted their retransmission budget.
+                ConnAction::AbandonRekey { peer: node_addr } => {
+                    if let Some(peer) = self.peers.get_mut(&node_addr) {
+                        peer.abandon_rekey();
+                    }
+                    debug!(
+                        peer = %self.peer_display_name(&node_addr),
+                        "FMP rekey aborted: msg1 unconfirmed after max retransmissions, abandoning cycle"
+                    );
+                }
+                ConnAction::ResendRekeyMsg1 {
+                    peer: node_addr,
+                    bytes,
+                    next_resend_at_ms,
+                } => {
+                    let (transport_id, remote_addr) = match self.peers.get(&node_addr) {
+                        Some(p) => match (p.transport_id(), p.current_addr()) {
+                            (Some(tid), Some(addr)) => (tid, addr.clone()),
+                            _ => continue,
+                        },
+                        None => continue,
+                    };
 
-        for (node_addr, peer) in &self.peers {
-            if !peer.rekey_in_progress() || peer.rekey_msg1().is_none() {
-                continue;
-            }
-            if peer.rekey_msg1_resend_count() >= max_resends {
-                to_abandon.push(*node_addr);
-                continue;
-            }
-            if peer.needs_msg1_resend(now_ms)
-                && let Some(msg1) = peer.rekey_msg1()
-            {
-                to_resend.push((*node_addr, msg1.to_vec()));
-            }
-        }
+                    let sent = if let Some(transport) = self.transports.get(&transport_id) {
+                        transport.send(&remote_addr, &bytes).await.is_ok()
+                    } else {
+                        false
+                    };
 
-        // Abandon rekey cycles that exhausted their retransmission budget.
-        for node_addr in to_abandon {
-            if let Some(peer) = self.peers.get_mut(&node_addr) {
-                peer.abandon_rekey();
-            }
-            debug!(
-                peer = %self.peer_display_name(&node_addr),
-                "FMP rekey aborted: msg1 unconfirmed after max retransmissions, abandoning cycle"
-            );
-        }
-
-        for (node_addr, msg1_bytes) in to_resend {
-            let (transport_id, remote_addr) = match self.peers.get(&node_addr) {
-                Some(p) => match (p.transport_id(), p.current_addr()) {
-                    (Some(tid), Some(addr)) => (tid, addr.clone()),
-                    _ => continue,
-                },
-                None => continue,
-            };
-
-            let sent = if let Some(transport) = self.transports.get(&transport_id) {
-                transport.send(&remote_addr, &msg1_bytes).await.is_ok()
-            } else {
-                false
-            };
-
-            if sent && let Some(peer) = self.peers.get_mut(&node_addr) {
-                let count = peer.rekey_msg1_resend_count() + 1;
-                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
-                peer.record_rekey_msg1_resend(next);
-                trace!(
-                    peer = %self.peer_display_name(&node_addr),
-                    resend = count,
-                    "Resent rekey msg1"
-                );
+                    if sent && let Some(peer) = self.peers.get_mut(&node_addr) {
+                        peer.record_rekey_msg1_resend(next_resend_at_ms);
+                        let count = peer.rekey_msg1_resend_count();
+                        trace!(
+                            peer = %self.peer_display_name(&node_addr),
+                            resend = count,
+                            "Resent rekey msg1"
+                        );
+                    }
+                }
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
+    }
+
+    /// Snapshot every peer with a rekey handshake in flight (and a stored
+    /// msg1) for the retransmission decision, pre-evaluating the resend-due
+    /// predicate against `now_ms` so the core reads no clock.
+    pub(in crate::node) fn rekey_resend_snapshots(&self, now_ms: u64) -> Vec<RekeyResendSnapshot> {
+        self.peers
+            .iter()
+            .filter(|(_, peer)| peer.rekey_in_progress() && peer.rekey_msg1().is_some())
+            .map(|(node_addr, peer)| RekeyResendSnapshot {
+                peer: *node_addr,
+                resend_count: peer.rekey_msg1_resend_count(),
+                needs_resend: peer.needs_msg1_resend(now_ms),
+                msg1: peer.rekey_msg1().unwrap().to_vec(),
+            })
+            .collect()
     }
 
     /// Retransmit FMP rekey msg3 until the responder is confirmed on the

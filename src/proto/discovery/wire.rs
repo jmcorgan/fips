@@ -1,8 +1,8 @@
 //! Discovery messages: LookupRequest and LookupResponse.
 
 use crate::NodeAddr;
+use crate::proto::fmp::TlvEntry;
 use crate::protocol::ProtocolError;
-use crate::protocol::TlvEntry;
 use crate::protocol::session::{decode_coords, encode_coords};
 use crate::tree::TreeCoordinate;
 use secp256k1::schnorr::Signature;

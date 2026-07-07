@@ -8,6 +8,7 @@ use super::{Node, NodeError};
 use crate::PeerIdentity;
 use crate::config::PeerConfig;
 use crate::identity::NodeAddr;
+use crate::proto::fmp::backoff_ms;
 use tracing::{debug, info, warn};
 
 // MAX_BACKOFF_MS is now derived from config: node.retry.max_backoff_secs * 1000
@@ -44,17 +45,6 @@ impl RetryState {
             reconnect: false,
             expires_at_ms: None,
         }
-    }
-
-    /// Calculate the backoff delay in milliseconds for the current retry count.
-    ///
-    /// Uses exponential backoff: `base_interval_ms * 2^retry_count`,
-    /// capped at `MAX_BACKOFF_MS`.
-    pub fn backoff_ms(&self, base_interval_ms: u64, max_backoff_ms: u64) -> u64 {
-        let multiplier = 1u64.checked_shl(self.retry_count).unwrap_or(u64::MAX);
-        base_interval_ms
-            .saturating_mul(multiplier)
-            .min(max_backoff_ms)
     }
 }
 
@@ -93,7 +83,7 @@ impl Node {
                 self.retry_pending.remove(&node_addr);
                 return;
             }
-            let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
+            let delay = backoff_ms(state.retry_count, base_interval_ms, max_backoff_ms);
             state.retry_after_ms = now_ms + delay;
             debug!(
                 peer = %peer_name,
@@ -118,7 +108,7 @@ impl Node {
                 let mut state = RetryState::new(pc);
                 state.retry_count = 1;
                 state.reconnect = true;
-                let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
+                let delay = backoff_ms(state.retry_count, base_interval_ms, max_backoff_ms);
                 state.retry_after_ms = now_ms + delay;
                 debug!(
                     peer = %self.peer_display_name(&node_addr),
@@ -175,7 +165,7 @@ impl Node {
         if let Some(state) = self.retry_pending.get_mut(&node_addr) {
             state.reconnect = true;
             state.retry_count += 1;
-            let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
+            let delay = backoff_ms(state.retry_count, base_interval_ms, max_backoff_ms);
             state.retry_after_ms = now_ms + delay;
             debug!(
                 peer = %peer_name,
@@ -188,7 +178,7 @@ impl Node {
 
         let mut state = RetryState::new(pc);
         state.reconnect = true;
-        let delay = state.backoff_ms(base_interval_ms, max_backoff_ms);
+        let delay = backoff_ms(state.retry_count, base_interval_ms, max_backoff_ms);
         state.retry_after_ms = now_ms + delay;
 
         debug!(
@@ -341,77 +331,5 @@ impl Node {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::PeerConfig;
-
-    const TEST_MAX_BACKOFF_MS: u64 = 300_000;
-
-    #[test]
-    fn test_backoff_exponential() {
-        let state = RetryState {
-            peer_config: PeerConfig::default(),
-            retry_count: 0,
-            retry_after_ms: 0,
-            reconnect: false,
-            expires_at_ms: None,
-        };
-        // base = 5000ms
-        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 5000); // 5s * 2^0
-
-        let state = RetryState {
-            retry_count: 1,
-            ..state
-        };
-        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 10_000); // 5s * 2^1
-
-        let state = RetryState {
-            retry_count: 2,
-            ..state
-        };
-        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 20_000); // 5s * 2^2
-
-        let state = RetryState {
-            retry_count: 3,
-            ..state
-        };
-        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 40_000); // 5s * 2^3
-
-        let state = RetryState {
-            retry_count: 4,
-            ..state
-        };
-        assert_eq!(state.backoff_ms(5000, TEST_MAX_BACKOFF_MS), 80_000); // 5s * 2^4
-    }
-
-    #[test]
-    fn test_backoff_cap() {
-        let state = RetryState {
-            peer_config: PeerConfig::default(),
-            retry_count: 20, // 2^20 * 5000 would be huge
-            retry_after_ms: 0,
-            reconnect: false,
-            expires_at_ms: None,
-        };
-        assert_eq!(
-            state.backoff_ms(5000, TEST_MAX_BACKOFF_MS),
-            TEST_MAX_BACKOFF_MS
-        );
-    }
-
-    #[test]
-    fn test_backoff_zero_base() {
-        let state = RetryState {
-            peer_config: PeerConfig::default(),
-            retry_count: 3,
-            retry_after_ms: 0,
-            reconnect: false,
-            expires_at_ms: None,
-        };
-        assert_eq!(state.backoff_ms(0, TEST_MAX_BACKOFF_MS), 0);
     }
 }

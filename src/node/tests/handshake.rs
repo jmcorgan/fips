@@ -998,8 +998,8 @@ async fn test_duplicate_msg2_dropped() {
 /// Helper: create two test nodes, set their profiles, attempt a handshake,
 /// and return whether they successfully peered.
 async fn attempt_profile_handshake(
-    profile_a: crate::protocol::NodeProfile,
-    profile_b: crate::protocol::NodeProfile,
+    profile_a: crate::proto::fmp::NodeProfile,
+    profile_b: crate::proto::fmp::NodeProfile,
 ) -> (usize, usize) {
     let mut nodes = vec![
         make_test_node_with_profile(profile_a).await,
@@ -1016,7 +1016,7 @@ async fn attempt_profile_handshake(
 
 #[tokio::test]
 async fn test_nonrouting_nonrouting_rejected() {
-    use crate::protocol::NodeProfile;
+    use crate::proto::fmp::NodeProfile;
     let (a, b) = attempt_profile_handshake(NodeProfile::NonRouting, NodeProfile::NonRouting).await;
     assert_eq!(a, 0, "NonRouting↔NonRouting should reject: node A");
     assert_eq!(b, 0, "NonRouting↔NonRouting should reject: node B");
@@ -1024,7 +1024,7 @@ async fn test_nonrouting_nonrouting_rejected() {
 
 #[tokio::test]
 async fn test_leaf_leaf_rejected() {
-    use crate::protocol::NodeProfile;
+    use crate::proto::fmp::NodeProfile;
     let (a, b) = attempt_profile_handshake(NodeProfile::Leaf, NodeProfile::Leaf).await;
     assert_eq!(a, 0, "Leaf↔Leaf should reject: node A");
     assert_eq!(b, 0, "Leaf↔Leaf should reject: node B");
@@ -1032,7 +1032,7 @@ async fn test_leaf_leaf_rejected() {
 
 #[tokio::test]
 async fn test_nonrouting_leaf_rejected() {
-    use crate::protocol::NodeProfile;
+    use crate::proto::fmp::NodeProfile;
     let (a, b) = attempt_profile_handshake(NodeProfile::NonRouting, NodeProfile::Leaf).await;
     assert_eq!(a, 0, "NonRouting↔Leaf should reject: node A");
     assert_eq!(b, 0, "NonRouting↔Leaf should reject: node B");
@@ -1040,7 +1040,7 @@ async fn test_nonrouting_leaf_rejected() {
 
 #[tokio::test]
 async fn test_leaf_nonrouting_rejected() {
-    use crate::protocol::NodeProfile;
+    use crate::proto::fmp::NodeProfile;
     let (a, b) = attempt_profile_handshake(NodeProfile::Leaf, NodeProfile::NonRouting).await;
     assert_eq!(a, 0, "Leaf↔NonRouting should reject: node A");
     assert_eq!(b, 0, "Leaf↔NonRouting should reject: node B");
@@ -1048,7 +1048,7 @@ async fn test_leaf_nonrouting_rejected() {
 
 #[tokio::test]
 async fn test_full_nonrouting_accepted() {
-    use crate::protocol::NodeProfile;
+    use crate::proto::fmp::NodeProfile;
     let (a, b) = attempt_profile_handshake(NodeProfile::Full, NodeProfile::NonRouting).await;
     assert_eq!(a, 1, "Full↔NonRouting should accept: node A");
     assert_eq!(b, 1, "Full↔NonRouting should accept: node B");
@@ -1056,7 +1056,7 @@ async fn test_full_nonrouting_accepted() {
 
 #[tokio::test]
 async fn test_full_leaf_accepted() {
-    use crate::protocol::NodeProfile;
+    use crate::proto::fmp::NodeProfile;
     let (a, b) = attempt_profile_handshake(NodeProfile::Full, NodeProfile::Leaf).await;
     assert_eq!(a, 1, "Full↔Leaf should accept: node A");
     assert_eq!(b, 1, "Full↔Leaf should accept: node B");

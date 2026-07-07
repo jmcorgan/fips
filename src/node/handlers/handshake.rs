@@ -10,8 +10,11 @@ use crate::node::acl::PeerAclContext;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::node::{Node, NodeError};
-use crate::peer::{ActivePeer, PeerConnection, PromotionResult, cross_connection_winner};
-use crate::protocol::{Disconnect, DisconnectReason, NegotiationPayload};
+use crate::peer::{ActivePeer, PeerConnection, PromotionResult};
+use crate::proto::fmp::{
+    Disconnect, DisconnectReason, EstablishSnapshot, InboundDecision, InboundReject,
+    NegotiationPayload, WireOutcome, cross_connection_winner, decide_fmp_negotiation,
+};
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -886,11 +889,15 @@ impl Node {
         let link_id = match self.pending_inbound.remove(&key) {
             Some(id) => id,
             None => {
-                // Check if this is a rekey msg3 for an active peer.
-                // handle_rekey_msg3 records its own UnknownConnection or
-                // BadState classification depending on whether a matching
-                // rekey-responder slot is found.
-                self.handle_rekey_msg3(&packet, &header).await;
+                // No pending inbound handshake matches this msg3. The live
+                // rekey-responder path completes via pending_inbound above, so
+                // a miss here is an unknown connection.
+                debug!(
+                    receiver_idx = %header.receiver_idx,
+                    "No pending inbound or rekey state for msg3"
+                );
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                 return;
             }
         };
@@ -1039,310 +1046,275 @@ impl Node {
         // debug rather than warn (expected policy rejection, not a fault).
         let our_index = our_index.unwrap_or(header.receiver_idx);
 
-        // Identity-based restart/rekey detection.
+        // Identity-based restart/rekey/cross-connection classification.
         //
-        // Now that we know the initiator's identity from msg3, perform the
-        // same checks that the old handle_msg1 used to do after decrypting msg1.
-        if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
-            let new_epoch = remote_epoch;
-            let existing_epoch = existing_peer.remote_epoch();
+        // Now that we know the initiator's identity from msg3, classify this
+        // inbound handshake against any existing active peer. The classification
+        // tree is the pure `Fmp::establish_inbound` decision; each effect it
+        // selects is driven shell-side below, preserving the pre-refactor per-
+        // branch ordering and cleanup exactly. The snapshot resolves the one
+        // clock read (session age) and the config-derived rekey floor up front.
+        //
+        // The rekey age floor sits BELOW the minimum possible rekey interval, or
+        // jittered rekeys are wrongly rejected. It bounds both the
+        // cross-connection branch (`< floor` -> initial cross-connection) and the
+        // rekey-responder branch (`>= floor` -> rekey), so the two partition
+        // cleanly; see the pre-refactor commentary retained on the decision.
+        let our_node_addr = *self.identity().node_addr();
+        let rekey_enabled = self.config().node.rekey.enabled;
+        let rekey_age_floor_secs = {
+            let min_interval = self
+                .config()
+                .node
+                .rekey
+                .after_secs
+                .saturating_sub(crate::node::REKEY_JITTER_SECS.unsigned_abs());
+            min_interval.saturating_sub(5).max(5)
+        };
+        let wire = WireOutcome {
+            peer_node_addr,
+            remote_epoch,
+        };
+        let snap = match self.peers.get(&peer_node_addr) {
+            Some(existing_peer) => EstablishSnapshot {
+                has_existing_peer: true,
+                existing_peer_epoch: existing_peer.remote_epoch(),
+                existing_session_age_secs: existing_peer
+                    .session_established_at()
+                    .elapsed()
+                    .as_secs(),
+                has_session: existing_peer.has_session(),
+                is_healthy: existing_peer.is_healthy(),
+                pending_new_session: existing_peer.pending_new_session().is_some(),
+                rekey_in_progress: existing_peer.rekey_in_progress(),
+                existing_msg2: existing_peer.handshake_msg2().map(|m| m.to_vec()),
+                different_link: existing_peer.link_id() != link_id,
+                rekey_enabled,
+                rekey_age_floor_secs,
+                our_node_addr,
+            },
+            None => EstablishSnapshot {
+                has_existing_peer: false,
+                existing_peer_epoch: None,
+                existing_session_age_secs: 0,
+                has_session: false,
+                is_healthy: false,
+                pending_new_session: false,
+                rekey_in_progress: false,
+                existing_msg2: None,
+                different_link: false,
+                rekey_enabled,
+                rekey_age_floor_secs,
+                our_node_addr,
+            },
+        };
 
-            match (existing_epoch, new_epoch) {
-                (Some(existing), Some(new)) if existing != new => {
-                    // Epoch mismatch — peer restarted. Tear down stale session.
-                    debug!(
-                        peer = %self.peer_display_name(&peer_node_addr),
-                        "Peer restart detected (epoch mismatch), removing stale session"
-                    );
-                    self.remove_active_peer(&peer_node_addr);
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    self.schedule_reconnect(peer_node_addr, now_ms);
-                    // Fall through to process as new connection
-                }
-                _ => {
-                    // Same epoch (or no epoch stored).
-                    let session_age_secs =
-                        existing_peer.session_established_at().elapsed().as_secs();
-
-                    // The minimum plausible age for an inbound XX handshake to
-                    // be a scheduled REKEY rather than an initial-handshake
-                    // cross-connection. Derived from the configured interval
-                    // and jitter so it tracks the real minimum rekey spacing
-                    // (see the rekey-responder gate below, which uses the same
-                    // value). A session at least this old that receives an
-                    // inbound msg3 on a different link is a rekey, NOT an
-                    // initial cross-connection.
-                    let rekey_age_floor_secs = {
-                        let min_interval = self
-                            .config()
-                            .node
-                            .rekey
-                            .after_secs
-                            .saturating_sub(crate::node::REKEY_JITTER_SECS.unsigned_abs());
-                        min_interval.saturating_sub(5).max(5)
-                    };
-
-                    // Simultaneous-init cross-connection (msg2-then-msg3 ordering).
-                    //
-                    // When both sides initiate XX in parallel (typical in
-                    // bootstrap-handoff after Nostr UDP punch), each side runs
-                    // two handshakes concurrently — its own outbound paired with
-                    // the peer's inbound, and the peer's outbound paired with our
-                    // inbound. If our outbound's msg2 arrives before the peer's
-                    // outbound's msg3, handle_msg2 promoted our outbound under
-                    // the "Normal path" (peers_contains_key was false). Now
-                    // msg3 arrives for the unrelated inbound link with the peer
-                    // already promoted at the same epoch — apply the same
-                    // tie-breaker handle_msg2 uses for the inverse ordering, so
-                    // both sides converge on a single Noise session pair.
-                    //
-                    // CRITICAL (jitter × XX rekey): the upper age bound MUST sit
-                    // below the rekey floor. An initial cross-connection always
-                    // resolves within ~1 RTT of promotion (both handshakes race
-                    // in the same sub-second burst); a session old enough to be
-                    // rekeying that receives a concurrent rekey msg3 must NOT be
-                    // routed here. The old fixed `< 30` bound overlapped the
-                    // jittered rekey floor (as low as 15s): under jitter a recent
-                    // cutover resets `session_established_at`, so a concurrent
-                    // rekey msg3 (always on a different temp link_id) landed in
-                    // this branch and, on the "our outbound wins" side, the
-                    // peer's rekey session was DISCARDED (index freed, no pending
-                    // slot) — yet the peer cut over to it regardless, leaving the
-                    // discarding node unable to decrypt the peer until the 30s
-                    // dead-timer fired (Phase-5 link death, green crypto). Gating
-                    // on the rekey floor makes any rekey-aged msg3 fall through to
-                    // the rekey-responder path below, which converges both sides
-                    // (dual-init tie-break) AND installs a `pending` slot.
-                    if existing_peer.link_id() != link_id && session_age_secs < rekey_age_floor_secs
-                    {
-                        let our_inbound_wins = cross_connection_winner(
-                            self.identity().node_addr(),
-                            &peer_node_addr,
-                            false, // this connection is inbound
-                        );
-
-                        if our_inbound_wins {
-                            // Larger node side: swap to the inbound session so
-                            // it pairs with the peer's kept outbound session.
-                            let inbound_session = match self
-                                .connections
-                                .get_mut(&link_id)
-                                .and_then(|c| c.take_session())
-                            {
-                                Some(s) => s,
-                                None => {
-                                    self.connections.remove(&link_id);
-                                    self.remove_link(&link_id);
-                                    self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::BadState,
-                                    ));
-                                    return;
-                                }
-                            };
-                            if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                                let old_our_index = peer.replace_session(
-                                    inbound_session,
-                                    our_index,
-                                    header.sender_idx,
-                                );
-                                let Some(transport_id) = peer.transport_id() else {
-                                    self.connections.remove(&link_id);
-                                    self.remove_link(&link_id);
-                                    self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::BadState,
-                                    ));
-                                    return;
-                                };
-                                if let Some(old_idx) = old_our_index {
-                                    self.peers_by_index
-                                        .remove(&(transport_id, old_idx.as_u32()));
-                                    let _ = self.index_allocator.free(old_idx);
-                                }
-                                self.peers_by_index
-                                    .insert((transport_id, our_index.as_u32()), peer_node_addr);
-
-                                debug!(
-                                    peer = %self.peer_display_name(&peer_node_addr),
-                                    new_our_index = %our_index,
-                                    new_their_index = %header.sender_idx,
-                                    "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
-                                );
-                            }
-                        } else {
-                            // Smaller node side: keep the existing outbound
-                            // session, drop the inbound's allocated index.
-                            let _ = self.index_allocator.free(our_index);
-                            debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
-                            );
-                        }
-
-                        self.connections.remove(&link_id);
-                        self.remove_link(&link_id);
-                        return;
+        match self.fmp.establish_inbound(&snap, &wire) {
+            InboundDecision::Reject {
+                reason: InboundReject::DualRekeyWon,
+            } => {
+                // Dual-init rekey tie-break: we win (smaller addr), drop their msg3.
+                info!(
+                    peer = %self.peer_display_name(&peer_node_addr),
+                    our_addr = %our_node_addr,
+                    their_addr = %peer_node_addr,
+                    rekey_in_progress = snap.rekey_in_progress,
+                    pending_new_session = snap.pending_new_session,
+                    "rekey-msg3 tie-break: we win (smaller addr), drop their msg3"
+                );
+                self.connections.remove(&link_id);
+                self.links.remove(&link_id);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                return;
+            }
+            InboundDecision::ResendMsg2 { msg2 } => {
+                // Not a rekey — duplicate handshake from same epoch. Resend
+                // stored msg2, leaving the active peer untouched.
+                if let Some(msg2) = msg2
+                    && let Some(transport) = self.transports.get(&packet.transport_id)
+                {
+                    match transport.send(&packet.remote_addr, &msg2).await {
+                        Ok(_) => debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            "Resent msg2 for duplicate handshake (same epoch)"
+                        ),
+                        Err(e) => debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            error = %e,
+                            "Failed to resend msg2"
+                        ),
                     }
-
-                    // Check for rekey: session must be old enough that an
-                    // inbound XX handshake is plausibly a scheduled rekey
-                    // rather than a fresh duplicate/restart.
-                    //
-                    // The floor (`rekey_age_floor_secs`, computed above) sits
-                    // BELOW the minimum possible rekey interval, or jittered
-                    // rekeys are wrongly rejected. The initiator's effective
-                    // interval is `after_secs - REKEY_JITTER_SECS` at its lowest
-                    // (20s for 35s ± 15s). A fixed 30s floor exceeds that 20s
-                    // minimum, so under jitter the responder rejects a legitimate
-                    // rekey as a "duplicate handshake" (resends msg2), the
-                    // initiator cuts over anyway, and the endpoints diverge by
-                    // one epoch → receiver starves → 30s link-dead. The same
-                    // floor also bounds the cross-connection branch above, so the
-                    // two paths partition cleanly: `< floor` → initial
-                    // cross-connection, `>= floor` → rekey responder.
-                    if self.config().node.rekey.enabled
-                        && existing_peer.has_session()
-                        && existing_peer.is_healthy()
-                        && session_age_secs >= rekey_age_floor_secs
+                }
+                self.connections.remove(&link_id);
+                self.links.remove(&link_id);
+                return;
+            }
+            InboundDecision::CrossConnect {
+                peer,
+                our_inbound_wins,
+            } => {
+                debug_assert_eq!(peer, peer_node_addr);
+                // Simultaneous-init cross-connection (msg2-then-msg3 ordering):
+                // apply the same tie-breaker handle_msg2 uses for the inverse
+                // ordering so both sides converge on a single Noise session pair.
+                if our_inbound_wins {
+                    // Larger node side: swap to the inbound session so it pairs
+                    // with the peer's kept outbound session.
+                    let inbound_session = match self
+                        .connections
+                        .get_mut(&link_id)
+                        .and_then(|c| c.take_session())
                     {
-                        // Dual-initiation detection: both sides initiated rekey
-                        // simultaneously. Two states can reach this point:
-                        //   - rekey_in_progress=true: both sides still mid-handshake
-                        //   - pending_new_session=Some && !rekey_in_progress: both
-                        //     sides already completed their initiator path
-                        //     (set_pending_session cleared rekey_in_progress)
-                        // The IK fix only caught the first state; the XX three-message
-                        // handshake widens the window so the second state is reached
-                        // when both sides' set_pending_session runs before either's
-                        // msg3 lands at the peer. Apply the smaller-NodeAddr
-                        // tie-breaker uniformly in both states so both sides converge
-                        // on a single Noise session post-cutover.
-                        if existing_peer.rekey_in_progress()
-                            || existing_peer.pending_new_session().is_some()
-                        {
-                            let our_addr = self.identity().node_addr();
-                            if our_addr < &peer_node_addr {
-                                // We win — keep our session, drop their msg3.
-                                info!(
-                                    peer = %self.peer_display_name(&peer_node_addr),
-                                    our_addr = %our_addr,
-                                    their_addr = %peer_node_addr,
-                                    rekey_in_progress = existing_peer.rekey_in_progress(),
-                                    pending_new_session = existing_peer.pending_new_session().is_some(),
-                                    "rekey-msg3 tie-break: we win (smaller addr), drop their msg3"
-                                );
-                                self.connections.remove(&link_id);
-                                self.links.remove(&link_id);
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
-                                return;
-                            }
-                            // We lose — abandon our rekey/pending, fall through as responder.
-                            // abandon_rekey clears both rekey_in_progress and any pending
-                            // session state, returning whichever index needs freeing.
-                            info!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                our_addr = %our_addr,
-                                their_addr = %peer_node_addr,
-                                rekey_in_progress = existing_peer.rekey_in_progress(),
-                                pending_new_session = existing_peer.pending_new_session().is_some(),
-                                "rekey-msg3 tie-break: we lose (larger addr), abandon ours"
-                            );
-                            if let Some(peer) = self.peers.get_mut(&peer_node_addr)
-                                && let Some(idx) = peer.abandon_rekey()
-                            {
-                                if let Some(tid) = peer.transport_id() {
-                                    self.peers_by_index.remove(&(tid, idx.as_u32()));
-                                    self.pending_outbound.remove(&(tid, idx.as_u32()));
-                                }
-                                let _ = self.index_allocator.free(idx);
-                            }
-                            // Fall through to respond as responder
+                        Some(s) => s,
+                        None => {
+                            self.connections.remove(&link_id);
+                            self.remove_link(&link_id);
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                            return;
                         }
-
-                        // Rekey: process as responder, store new session as pending
-                        let noise_session = {
-                            let Some(conn) = self.connections.get_mut(&link_id) else {
-                                warn!(link_id = %link_id, "Connection removed during rekey msg3 processing");
-                                self.links.remove(&link_id);
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::UnknownConnection,
-                                ));
-                                return;
-                            };
-                            conn.take_session()
+                    };
+                    if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                        let old_our_index =
+                            peer.replace_session(inbound_session, our_index, header.sender_idx);
+                        let Some(transport_id) = peer.transport_id() else {
+                            self.connections.remove(&link_id);
+                            self.remove_link(&link_id);
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                            return;
                         };
-                        let our_new_index = our_index;
-
-                        let noise_session = match noise_session {
-                            Some(s) => s,
-                            None => {
-                                warn!("Rekey msg3: no session from handshake");
-                                self.connections.remove(&link_id);
-                                self.links.remove(&link_id);
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
-                                return;
-                            }
-                        };
-
-                        // Store pending session on the existing peer
-                        if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                            peer.set_pending_session(
-                                noise_session,
-                                our_new_index,
-                                header.sender_idx,
-                            );
-                            peer.record_peer_rekey();
+                        if let Some(old_idx) = old_our_index {
+                            self.peers_by_index
+                                .remove(&(transport_id, old_idx.as_u32()));
+                            let _ = self.index_allocator.free(old_idx);
                         }
-
-                        // Register new index in peers_by_index
-                        self.peers_by_index.insert(
-                            (packet.transport_id, our_new_index.as_u32()),
-                            peer_node_addr,
-                        );
-
-                        // Clean up: remove the temporary connection/link.
-                        // Do NOT remove addr_to_link — the entry must remain pointing
-                        // to the original link.
-                        self.connections.remove(&link_id);
-                        self.links.remove(&link_id);
+                        self.peers_by_index
+                            .insert((transport_id, our_index.as_u32()), peer_node_addr);
 
                         debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
-                            our_addr = %self.identity().node_addr(),
-                            new_our_index = %our_new_index,
+                            new_our_index = %our_index,
                             new_their_index = %header.sender_idx,
-                            "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
+                            "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
                         );
+                    }
+                } else {
+                    // Smaller node side: keep the existing outbound session, drop
+                    // the inbound's allocated index.
+                    let _ = self.index_allocator.free(our_index);
+                    debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
+                    );
+                }
+
+                self.connections.remove(&link_id);
+                self.remove_link(&link_id);
+                return;
+            }
+            InboundDecision::RekeyRespond {
+                peer,
+                abandon_first,
+            } => {
+                debug_assert_eq!(peer, peer_node_addr);
+                if abandon_first {
+                    // We lose — abandon our rekey/pending, fall through as
+                    // responder. abandon_rekey clears both rekey_in_progress and
+                    // any pending session state, returning whichever index needs
+                    // freeing.
+                    info!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        our_addr = %our_node_addr,
+                        their_addr = %peer_node_addr,
+                        rekey_in_progress = snap.rekey_in_progress,
+                        pending_new_session = snap.pending_new_session,
+                        "rekey-msg3 tie-break: we lose (larger addr), abandon ours"
+                    );
+                    if let Some(peer) = self.peers.get_mut(&peer_node_addr)
+                        && let Some(idx) = peer.abandon_rekey()
+                    {
+                        if let Some(tid) = peer.transport_id() {
+                            self.peers_by_index.remove(&(tid, idx.as_u32()));
+                            self.pending_outbound.remove(&(tid, idx.as_u32()));
+                        }
+                        let _ = self.index_allocator.free(idx);
+                    }
+                }
+
+                // Rekey: process as responder, store new session as pending.
+                let noise_session = {
+                    let Some(conn) = self.connections.get_mut(&link_id) else {
+                        warn!(link_id = %link_id, "Connection removed during rekey msg3 processing");
+                        self.links.remove(&link_id);
+                        self.stats_mut().record_reject(RejectReason::Handshake(
+                            HandshakeReject::UnknownConnection,
+                        ));
+                        return;
+                    };
+                    conn.take_session()
+                };
+                let our_new_index = our_index;
+
+                let noise_session = match noise_session {
+                    Some(s) => s,
+                    None => {
+                        warn!("Rekey msg3: no session from handshake");
+                        self.connections.remove(&link_id);
+                        self.links.remove(&link_id);
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
                     }
+                };
 
-                    // Not a rekey — duplicate handshake from same epoch.
-                    // Resend stored msg2.
-                    if let Some(msg2) = existing_peer.handshake_msg2().map(|m| m.to_vec())
-                        && let Some(transport) = self.transports.get(&packet.transport_id)
-                    {
-                        match transport.send(&packet.remote_addr, &msg2).await {
-                            Ok(_) => debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                "Resent msg2 for duplicate handshake (same epoch)"
-                            ),
-                            Err(e) => debug!(
-                                peer = %self.peer_display_name(&peer_node_addr),
-                                error = %e,
-                                "Failed to resend msg2"
-                            ),
-                        }
-                    }
-                    self.connections.remove(&link_id);
-                    self.links.remove(&link_id);
-                    return;
+                // Store pending session on the existing peer
+                if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                    peer.set_pending_session(noise_session, our_new_index, header.sender_idx);
+                    peer.record_peer_rekey();
                 }
+
+                // Register new index in peers_by_index
+                self.peers_by_index.insert(
+                    (packet.transport_id, our_new_index.as_u32()),
+                    peer_node_addr,
+                );
+
+                // Clean up: remove the temporary connection/link.
+                // Do NOT remove addr_to_link — the entry must remain pointing
+                // to the original link.
+                self.connections.remove(&link_id);
+                self.links.remove(&link_id);
+
+                debug!(
+                    peer = %self.peer_display_name(&peer_node_addr),
+                    our_addr = %self.identity().node_addr(),
+                    new_our_index = %our_new_index,
+                    new_their_index = %header.sender_idx,
+                    "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
+                );
+                return;
+            }
+            InboundDecision::RestartThenPromote { peer } => {
+                // Epoch mismatch — peer restarted. Tear down stale session, then
+                // fall through to promote the fresh connection in its place.
+                debug!(
+                    peer = %self.peer_display_name(&peer),
+                    "Peer restart detected (epoch mismatch), removing stale session"
+                );
+                self.remove_active_peer(&peer);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.schedule_reconnect(peer, now_ms);
+                // Fall through to process as new connection.
+            }
+            InboundDecision::Promote => {
+                // Net-new inbound (or the post-restart re-promote): fall through
+                // to promote_connection, whose late max-peers cap and
+                // cross-connection won/lost handling stay shell-side.
             }
         }
 
@@ -1460,77 +1432,6 @@ impl Node {
         }
     }
 
-    /// Handle a rekey msg3 for an already-active peer.
-    ///
-    /// When a rekey is in progress (responder side), the ActivePeer holds the
-    /// handshake state. This processes msg3 to complete the rekey responder
-    /// handshake.
-    async fn handle_rekey_msg3(&mut self, packet: &ReceivedPacket, header: &Msg3Header) {
-        // Look for a peer expecting a rekey msg3 as responder.
-        // The responder's rekey handshake state is stored after processing
-        // the initiator's rekey msg1+msg2 exchange via the existing link.
-        let peer_addr = self.peers.iter().find_map(|(addr, peer)| {
-            if peer.has_rekey_responder_handshake()
-                && peer.rekey_responder_our_index() == Some(header.receiver_idx)
-            {
-                Some(*addr)
-            } else {
-                None
-            }
-        });
-
-        let peer_node_addr = match peer_addr {
-            Some(addr) => addr,
-            None => {
-                debug!(
-                    receiver_idx = %header.receiver_idx,
-                    "No pending inbound or rekey state for msg3"
-                );
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
-                return;
-            }
-        };
-
-        let display_name = self.peer_display_name(&peer_node_addr);
-        let noise_msg3 = &packet.data[header.noise_msg3_offset..];
-
-        if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-            match peer.complete_rekey_msg3(noise_msg3) {
-                Ok(session) => {
-                    let our_index = peer
-                        .rekey_responder_our_index()
-                        .unwrap_or(header.receiver_idx);
-                    peer.set_pending_session(session, our_index, header.sender_idx);
-                    peer.record_peer_rekey();
-
-                    if let Some(transport_id) = peer.transport_id() {
-                        self.peers_by_index
-                            .insert((transport_id, our_index.as_u32()), peer_node_addr);
-                    }
-
-                    debug!(
-                        peer = %display_name,
-                        our_addr = %self.identity().node_addr(),
-                        new_our_index = %our_index,
-                        new_their_index = %header.sender_idx,
-                        "rekey-msg3 responder (existing link): pending session set, awaiting K-bit cutover"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        peer = %display_name,
-                        error = %e,
-                        "Rekey msg3 processing failed"
-                    );
-                    peer.clear_rekey_responder();
-                    self.stats_mut()
-                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                }
-            }
-        }
-    }
-
     /// Promote a connection to active peer after successful authentication.
     ///
     /// Handles cross-connection detection and resolution using tie-breaker rules.
@@ -1543,7 +1444,7 @@ impl Node {
     ) -> Result<PromotionResult, NodeError> {
         // Leaf nodes: reject if we already have a peer (single-peer enforcement)
         let peer_node_addr_check = *verified_identity.node_addr();
-        if self.node_profile() == crate::protocol::NodeProfile::Leaf
+        if self.node_profile() == crate::proto::fmp::NodeProfile::Leaf
             && !self.peers.is_empty()
             && !self.peers.contains_key(&peer_node_addr_check)
         {
@@ -1606,7 +1507,7 @@ impl Node {
         let remote_epoch = connection.remote_epoch();
         let peer_profile = connection
             .peer_profile()
-            .unwrap_or(crate::protocol::NodeProfile::Full);
+            .unwrap_or(crate::proto::fmp::NodeProfile::Full);
 
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = connection.is_outbound();
@@ -1700,7 +1601,7 @@ impl Node {
 
                 // Non-routing peers don't send filters; include them as
                 // dependents so our bloom filter advertises their identity.
-                if peer_profile != crate::protocol::NodeProfile::Full {
+                if peer_profile != crate::proto::fmp::NodeProfile::Full {
                     self.bloom_state.add_leaf_dependent(peer_node_addr);
                 }
 
@@ -1814,7 +1715,7 @@ impl Node {
 
             // Non-routing peers don't send filters; include them as
             // dependents so our bloom filter advertises their identity.
-            if peer_profile != crate::protocol::NodeProfile::Full {
+            if peer_profile != crate::proto::fmp::NodeProfile::Full {
                 self.bloom_state.add_leaf_dependent(peer_node_addr);
             }
 
@@ -1844,15 +1745,13 @@ impl Node {
 /// Decodes the payload, validates profile pairing, and stores the
 /// results on the PeerConnection.
 fn process_fmp_negotiation(
-    our_profile: crate::protocol::NodeProfile,
+    our_profile: crate::proto::fmp::NodeProfile,
     conn: &mut PeerConnection,
     neg_bytes: &[u8],
 ) -> Result<(), crate::protocol::ProtocolError> {
-    let their_payload = NegotiationPayload::decode(neg_bytes)?;
-
-    // Validate profile pairing (at least one Full)
-    let their_profile = their_payload.node_profile()?;
-    NegotiationPayload::validate_profiles(our_profile, their_profile)?;
+    // The decode -> validate -> profile decision is the pure core split; the
+    // shell records the result on the connection and logs.
+    let their_profile = decide_fmp_negotiation(our_profile, neg_bytes)?;
 
     conn.set_negotiation_results(their_profile);
 

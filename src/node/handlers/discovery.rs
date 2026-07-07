@@ -39,13 +39,13 @@ impl crate::proto::discovery::RoutingView for NodeRoutingView<'_> {
             .collect()
     }
     fn node_is_leaf(&self) -> bool {
-        self.node.node_profile() == crate::protocol::NodeProfile::Leaf
+        self.node.node_profile() == crate::proto::fmp::NodeProfile::Leaf
     }
     fn peer_is_full(&self, addr: &NodeAddr) -> bool {
         self.node
             .peers
             .get(addr)
-            .is_some_and(|peer| peer.peer_profile() == crate::protocol::NodeProfile::Full)
+            .is_some_and(|peer| peer.peer_profile() == crate::proto::fmp::NodeProfile::Full)
     }
     fn peer_meets_mtu(&self, addr: &NodeAddr, min_mtu: u16) -> bool {
         self.node

@@ -77,7 +77,7 @@ impl Node {
     /// entries — other removal paths (link-dead, decrypt failure, peer
     /// restart) all schedule reconnect.
     pub(in crate::node) fn handle_disconnect(&mut self, from: &NodeAddr, payload: &[u8]) {
-        let disconnect = match crate::protocol::Disconnect::decode(payload) {
+        let disconnect = match crate::proto::fmp::Disconnect::decode(payload) {
             Ok(msg) => msg,
             Err(e) => {
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed disconnect message");

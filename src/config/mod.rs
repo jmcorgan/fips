@@ -593,13 +593,13 @@ impl Config {
     /// leaf_only → Leaf (implies non-routing),
     /// disable_routing → NonRouting,
     /// otherwise → Full.
-    pub fn node_profile(&self) -> crate::protocol::NodeProfile {
+    pub fn node_profile(&self) -> crate::proto::fmp::NodeProfile {
         if self.node.leaf_only {
-            crate::protocol::NodeProfile::Leaf
+            crate::proto::fmp::NodeProfile::Leaf
         } else if self.node.disable_routing {
-            crate::protocol::NodeProfile::NonRouting
+            crate::proto::fmp::NodeProfile::NonRouting
         } else {
-            crate::protocol::NodeProfile::Full
+            crate::proto::fmp::NodeProfile::Full
         }
     }
 

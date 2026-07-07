@@ -23,7 +23,6 @@
 mod error;
 mod filter;
 mod link;
-mod negotiation;
 pub(crate) mod session;
 mod tree;
 
@@ -31,12 +30,7 @@ mod tree;
 pub use error::ProtocolError;
 pub use filter::{FilterAnnounce, FilterNack};
 pub use link::{
-    Disconnect, DisconnectReason, HandshakeMessageType, LinkMessageType,
-    SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
-};
-pub use negotiation::{
-    FMP_FEAT_PROFILE_MASK, FMP_FEAT_PROVIDES_RR, FMP_FEAT_PROVIDES_SR, FMP_FEAT_WANTS_RR,
-    FMP_FEAT_WANTS_SR, NEGOTIATION_HEADER_SIZE, NegotiationPayload, NodeProfile, TlvEntry,
+    LinkMessageType, SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram, SessionDatagramRef,
 };
 pub use session::{
     FspFlags, FspInnerFlags, PATH_MTU_NOTIFICATION_SIZE, PathMtuNotification,

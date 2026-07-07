@@ -24,7 +24,7 @@ impl Node {
         let mut filters = HashMap::new();
         for (addr, peer) in &self.peers {
             if self.is_tree_peer(addr)
-                && peer.peer_profile() == crate::protocol::NodeProfile::Full
+                && peer.peer_profile() == crate::proto::fmp::NodeProfile::Full
                 && let Some(filter) = peer.inbound_filter()
             {
                 filters.insert(*addr, filter.clone());
@@ -179,7 +179,7 @@ impl Node {
     /// Non-routing nodes do not send filters (they receive only).
     pub(super) async fn send_pending_filter_announces(&mut self) {
         // Non-routing and leaf nodes don't send bloom filters
-        if self.node_profile() != crate::protocol::NodeProfile::Full {
+        if self.node_profile() != crate::proto::fmp::NodeProfile::Full {
             return;
         }
 
@@ -402,7 +402,7 @@ impl Node {
     /// and marks all peers for update.
     fn check_adaptive_sizing(&mut self) {
         // Only Full nodes participate in filter sizing
-        if self.node_profile() != crate::protocol::NodeProfile::Full {
+        if self.node_profile() != crate::proto::fmp::NodeProfile::Full {
             return;
         }
 

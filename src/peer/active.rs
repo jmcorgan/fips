@@ -7,7 +7,7 @@ use crate::bloom::BloomFilter;
 use crate::mmp::{MmpConfig, MmpPeerState};
 use crate::node::REKEY_JITTER_SECS;
 use crate::noise::{HandshakeState as NoiseHandshakeState, NoiseError, NoiseSession};
-use crate::protocol::{NegotiationPayload, NodeProfile};
+use crate::proto::fmp::{NegotiationPayload, NodeProfile};
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::tree::{ParentDeclaration, TreeCoordinate};
 use crate::utils::index::SessionIndex;

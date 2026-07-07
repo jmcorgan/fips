@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::protocol::NodeProfile;
+use crate::proto::fmp::NodeProfile;
 use crate::{Config, Identity};
 
 /// Effectively-immutable `Node` state, shared via `Arc<NodeContext>`.
