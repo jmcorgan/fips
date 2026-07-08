@@ -139,6 +139,11 @@ impl BloomFilter {
         self.count_ones() as f64 / self.num_bits as f64
     }
 
+    /// Current false-positive rate: fill ratio raised to the hash count.
+    pub fn fpr(&self) -> f64 {
+        self.fill_ratio().powi(self.hash_count as i32)
+    }
+
     /// Estimate the number of elements in the filter.
     ///
     /// Uses the formula: n = -(m/k) * ln(1 - X/m)
@@ -160,7 +165,7 @@ impl BloomFilter {
         }
 
         let fill = x / m;
-        let fpr = fill.powi(self.hash_count as i32);
+        let fpr = self.fpr();
         if fpr > max_fpr {
             return None;
         }
