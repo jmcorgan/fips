@@ -7,8 +7,8 @@
 
 use crate::node::Node;
 use crate::node::reject::DiscoveryReject;
-use crate::proto::discovery::{
-    DiscoveryAction, LookupRequest, LookupResponse, MAX_RECENT_DISCOVERY_REQUESTS,
+use crate::proto::lookup::{
+    LookupAction, LookupRequest, LookupResponse, MAX_RECENT_LOOKUP_REQUESTS,
 };
 use crate::transport::{TransportAddr, TransportId};
 use crate::{NodeAddr, PeerIdentity};
@@ -26,7 +26,7 @@ struct NodeRoutingView<'a> {
     node: &'a Node,
 }
 
-impl crate::proto::discovery::RoutingView for NodeRoutingView<'_> {
+impl crate::proto::lookup::RoutingView for NodeRoutingView<'_> {
     fn is_tree_peer(&self, addr: &NodeAddr) -> bool {
         self.node.is_tree_peer(addr)
     }
@@ -82,15 +82,15 @@ impl Node {
         let now_ms = Self::now_ms();
         let recent_expiry_ms = self.config().node.discovery.recent_expiry_secs * 1000;
         let my_addr = *self.node_addr();
-        use crate::proto::discovery::RequestOutcome;
-        match crate::proto::discovery::classify_request(
+        use crate::proto::lookup::RequestOutcome;
+        match crate::proto::lookup::classify_request(
             &mut self.discovery,
             &request,
             from,
             &my_addr,
             now_ms,
             recent_expiry_ms,
-            MAX_RECENT_DISCOVERY_REQUESTS,
+            MAX_RECENT_LOOKUP_REQUESTS,
         ) {
             RequestOutcome::Duplicate => {
                 self.metrics()
@@ -110,7 +110,7 @@ impl Node {
                     request_id = request.request_id,
                     from = %self.peer_display_name(from),
                     recent_requests = len,
-                    max_recent_requests = MAX_RECENT_DISCOVERY_REQUESTS,
+                    max_recent_requests = MAX_RECENT_LOOKUP_REQUESTS,
                     "Discovery request dedup cache full, dropping LookupRequest"
                 );
             }
@@ -176,8 +176,8 @@ impl Node {
         let now_ms = Self::now_ms();
 
         // Check if we forwarded this request (transit node) or originated it
-        match crate::proto::discovery::classify_response(&mut self.discovery, response.request_id) {
-            crate::proto::discovery::ResponseRoute::AlreadyForwarded => {
+        match crate::proto::lookup::classify_response(&mut self.discovery, response.request_id) {
+            crate::proto::lookup::ResponseRoute::AlreadyForwarded => {
                 // Already forwarded a response for this request — drop to
                 // prevent response routing loops.
                 debug!(
@@ -186,7 +186,7 @@ impl Node {
                     "Response already forwarded for this request, dropping"
                 );
             }
-            crate::proto::discovery::ResponseRoute::Transit { from_peer } => {
+            crate::proto::lookup::ResponseRoute::Transit { from_peer } => {
                 // Transit node: reverse-path forward
                 self.metrics().discovery.resp_forwarded.inc();
 
@@ -210,7 +210,7 @@ impl Node {
                     );
                 }
             }
-            crate::proto::discovery::ResponseRoute::Originator => {
+            crate::proto::lookup::ResponseRoute::Originator => {
                 // We originated this request — verify proof before caching
                 let target = response.target;
                 let path_mtu = response.path_mtu;
@@ -266,7 +266,7 @@ impl Node {
                 // Apply the accept-side effects: the core clears the success
                 // state (backoff + pending lookup) and returns the
                 // cross-subsystem effects for us to drive.
-                let actions = crate::proto::discovery::on_response_accepted(
+                let actions = crate::proto::lookup::on_response_accepted(
                     &mut self.discovery,
                     &target,
                     response.target_coords,
@@ -281,10 +281,10 @@ impl Node {
     /// Drive the cross-subsystem effects returned by the discovery core's
     /// accept-side planning. Each arm reproduces the original inline effect
     /// exactly (same metrics/logs/writes, same order).
-    async fn drive_response_actions(&mut self, actions: Vec<DiscoveryAction>) {
+    async fn drive_response_actions(&mut self, actions: Vec<LookupAction>) {
         for action in actions {
             match action {
-                DiscoveryAction::CacheCoords {
+                LookupAction::CacheCoords {
                     target,
                     coords,
                     now_ms,
@@ -293,7 +293,7 @@ impl Node {
                     self.coord_cache
                         .insert_with_path_mtu(target, coords, now_ms, path_mtu);
                 }
-                DiscoveryAction::WritePathMtu { target, path_mtu } => {
+                LookupAction::WritePathMtu { target, path_mtu } => {
                     // Mirror path_mtu into the FipsAddress-keyed read-only lookup
                     // map used by the TUN reader/writer at TCP MSS clamp time.
                     let fips_addr = crate::FipsAddress::from_node_addr(&target);
@@ -320,7 +320,7 @@ impl Node {
                         }
                     }
                 }
-                DiscoveryAction::ResetWarmupIfEstablished { target } => {
+                LookupAction::ResetWarmupIfEstablished { target } => {
                     // If an established session exists, reset the warmup counter.
                     let n = self.config().node.session.coords_warmup_packets;
                     if let Some(entry) = self.sessions.get_mut(&target)
@@ -334,7 +334,7 @@ impl Node {
                         );
                     }
                 }
-                DiscoveryAction::RetryQueuedPackets { target } => {
+                LookupAction::RetryQueuedPackets { target } => {
                     // If we have pending TUN packets for this target, retry session
                     // initiation. The coord_cache now has coords, so find_next_hop()
                     // should succeed.
@@ -347,7 +347,7 @@ impl Node {
                         self.retry_session_after_discovery(target).await;
                     }
                 }
-                DiscoveryAction::SendLink { peer, bytes } => {
+                LookupAction::SendLink { peer, bytes } => {
                     if let Err(e) = self.send_encrypted_link_message(&peer, &bytes).await {
                         debug!(
                             peer = %self.peer_display_name(&peer),
@@ -375,8 +375,8 @@ impl Node {
         // Route toward origin. The reverse-path decision (the peer the request
         // arrived from, recorded in recent_requests) is the sans-IO core's; the
         // greedy tree-route fallback is a &mut coord-cache op kept in the shell.
-        use crate::proto::discovery::ResponseRouteDecision;
-        let next_hop_addr = match crate::proto::discovery::plan_response_route(
+        use crate::proto::lookup::ResponseRouteDecision;
+        let next_hop_addr = match crate::proto::lookup::plan_response_route(
             &self.discovery,
             request.request_id,
         ) {
@@ -439,19 +439,19 @@ impl Node {
         // metrics/logging and drives the sends.
         let outcome = {
             let rv = NodeRoutingView { node: self };
-            crate::proto::discovery::plan_forward(&mut request, &rv)
+            crate::proto::lookup::plan_forward(&mut request, &rv)
         };
         match outcome {
-            crate::proto::discovery::ForwardOutcome::TtlExhausted => {}
-            crate::proto::discovery::ForwardOutcome::LeafNoForward => {}
-            crate::proto::discovery::ForwardOutcome::NoPeers => {
+            crate::proto::lookup::ForwardOutcome::TtlExhausted => {}
+            crate::proto::lookup::ForwardOutcome::LeafNoForward => {}
+            crate::proto::lookup::ForwardOutcome::NoPeers => {
                 self.metrics().discovery.req_no_tree_peer.inc();
                 trace!(
                     request_id = request.request_id,
                     "No eligible peers to forward LookupRequest"
                 );
             }
-            crate::proto::discovery::ForwardOutcome::Forward {
+            crate::proto::lookup::ForwardOutcome::Forward {
                 actions,
                 used_fallback,
             } => {
@@ -475,7 +475,7 @@ impl Node {
                     );
                 }
                 for action in actions {
-                    if let DiscoveryAction::SendLink { peer, bytes } = action
+                    if let LookupAction::SendLink { peer, bytes } = action
                         && let Err(e) = self.send_encrypted_link_message(&peer, &bytes).await
                     {
                         debug!(
@@ -512,7 +512,7 @@ impl Node {
         // all metrics/logging.
         let actions = {
             let rv = NodeRoutingView { node: self };
-            crate::proto::discovery::plan_initiate(&request, &rv)
+            crate::proto::lookup::plan_initiate(&request, &rv)
         };
 
         let peer_count = actions.len();
@@ -527,7 +527,7 @@ impl Node {
         );
 
         for action in actions {
-            if let DiscoveryAction::SendLink { peer, bytes } = action
+            if let LookupAction::SendLink { peer, bytes } = action
                 && let Err(e) = self.send_encrypted_link_message(&peer, &bytes).await
             {
                 debug!(
@@ -557,8 +557,8 @@ impl Node {
         // overlapping the immutable peer-table read.
         let reachable = self.peers.values().any(|peer| peer.may_reach(dest));
 
-        use crate::proto::discovery::InitiateDecision;
-        match crate::proto::discovery::initiate_gate(&mut self.discovery, dest, now_ms, reachable) {
+        use crate::proto::lookup::InitiateDecision;
+        match crate::proto::lookup::initiate_gate(&mut self.discovery, dest, now_ms, reachable) {
             InitiateDecision::Deduplicated => {
                 self.metrics().discovery.req_deduplicated.inc();
                 debug!(
@@ -587,7 +587,7 @@ impl Node {
 
                 // If no tree peers had the target, fail immediately
                 if sent == 0 {
-                    crate::proto::discovery::initiate_failed(&mut self.discovery, dest, now_ms);
+                    crate::proto::lookup::initiate_failed(&mut self.discovery, dest, now_ms);
                     debug!(
                         target_node = %self.peer_display_name(dest),
                         "Discovery failed, no tree peers with bloom match"
@@ -610,7 +610,7 @@ impl Node {
     pub(in crate::node) async fn check_pending_lookups(&mut self, now_ms: u64) {
         let attempt_timeouts = self.config().node.discovery.attempt_timeouts_secs.clone();
         let outcome =
-            crate::proto::discovery::poll_pending(&mut self.discovery, now_ms, &attempt_timeouts);
+            crate::proto::lookup::poll_pending(&mut self.discovery, now_ms, &attempt_timeouts);
 
         for (target, attempt) in outcome.retries {
             let ttl = self.config().node.discovery.ttl;

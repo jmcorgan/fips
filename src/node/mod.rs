@@ -56,10 +56,10 @@ use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::bloom::{BloomFilter, BloomState};
-use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use crate::proto::fmp::Fmp;
 use crate::proto::fmp::NodeProfile;
 use crate::proto::fsp::Fsp;
+use crate::proto::lookup::{Lookup, LookupBackoff, LookupForwardRateLimiter};
 use crate::proto::mmp::Mmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 use crate::proto::stp::TreeState;
@@ -353,7 +353,7 @@ pub struct Node {
     // === Discovery ===
     /// Discovery-subsystem state: recent-request dedup cache, in-flight
     /// lookups, originator-side backoff, and transit-side forward limiter.
-    discovery: Discovery,
+    discovery: Lookup,
 
     // === Counters ===
     /// Next link ID to allocate.
@@ -701,9 +701,9 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
-            discovery: Discovery::new(
-                DiscoveryBackoff::with_params(backoff_base_secs, backoff_max_secs),
-                DiscoveryForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
+            discovery: Lookup::new(
+                LookupBackoff::with_params(backoff_base_secs, backoff_max_secs),
+                LookupForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
             ),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
@@ -868,7 +868,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
-            discovery: Discovery::new(DiscoveryBackoff::new(), DiscoveryForwardRateLimiter::new()),
+            discovery: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             nostr_discovery: None,
@@ -2580,7 +2580,7 @@ impl Node {
     /// Iterate over pending discovery lookups for diagnostics.
     pub fn pending_lookups_iter(
         &self,
-    ) -> impl Iterator<Item = (&NodeAddr, &crate::proto::discovery::PendingLookup)> {
+    ) -> impl Iterator<Item = (&NodeAddr, &crate::proto::lookup::PendingLookup)> {
         self.discovery.pending_lookups.iter()
     }
 

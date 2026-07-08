@@ -1,17 +1,17 @@
-//! Sans-IO discovery decision core.
+//! Sans-IO mesh lookup decision core.
 //!
-//! Pure, runtime-agnostic decision logic for the discovery protocol. The
+//! Pure, runtime-agnostic decision logic for the mesh lookup protocol. The
 //! async I/O adapter in `node::handlers::discovery` decodes wire bytes,
 //! calls into this core, and drives the returned actions (the actual
 //! encrypted sends). No I/O, no clock, no metrics, no logging here.
 
 use alloc::sync::Arc;
 
-use super::state::{Discovery, PendingLookup, RecentRequest};
+use super::state::{Lookup, PendingLookup, RecentRequest};
 use super::wire::LookupRequest;
 use crate::NodeAddr;
 
-/// Read-only view of routing state the discovery core needs.
+/// Read-only view of routing state the lookup core needs.
 ///
 /// The core defines this interface; the async shell (`node`) implements it
 /// over the live peer/tree tables. Keeping it a trait keeps `proto` free of
@@ -31,8 +31,8 @@ pub(crate) trait RoutingView {
 }
 
 /// An I/O action the async shell performs on the core's behalf.
-pub(crate) enum DiscoveryAction {
-    /// Send an encoded discovery PDU to a peer as an encrypted link message.
+pub(crate) enum LookupAction {
+    /// Send an encoded lookup PDU to a peer as an encrypted link message.
     /// `bytes` is `Arc`-shared so a fan-out encodes once.
     SendLink { peer: NodeAddr, bytes: Arc<[u8]> },
     /// Cache the verified destination coordinates + path MTU (coord_cache).
@@ -61,7 +61,7 @@ pub(crate) enum ForwardOutcome {
     /// Forward: one SendLink per selected peer. `used_fallback` is true when
     /// the non-tree bloom-match fallback set was used (no tree peer matched).
     Forward {
-        actions: Vec<DiscoveryAction>,
+        actions: Vec<LookupAction>,
         used_fallback: bool,
     },
 }
@@ -77,7 +77,7 @@ pub(crate) fn plan_forward(request: &mut LookupRequest, rv: &impl RoutingView) -
     if !request.forward() {
         return ForwardOutcome::TtlExhausted;
     }
-    // Leaf nodes do not transit-forward discovery requests.
+    // Leaf nodes do not transit-forward lookup requests.
     if rv.node_is_leaf() {
         return ForwardOutcome::LeafNoForward;
     }
@@ -109,7 +109,7 @@ pub(crate) fn plan_forward(request: &mut LookupRequest, rv: &impl RoutingView) -
     let bytes: Arc<[u8]> = Arc::from(request.encode());
     let actions = targets
         .into_iter()
-        .map(|peer| DiscoveryAction::SendLink {
+        .map(|peer| LookupAction::SendLink {
             peer,
             bytes: bytes.clone(),
         })
@@ -132,10 +132,7 @@ pub(crate) fn plan_forward(request: &mut LookupRequest, rv: &impl RoutingView) -
 /// the pre-sans-IO `initiate_lookup` to keep this extraction behavior-neutral;
 /// it is a known origination gap (ISSUE-2026-0059) whose fix adds the fallback
 /// branch as a separate, behavior-changing change.
-pub(crate) fn plan_initiate(
-    request: &LookupRequest,
-    rv: &impl RoutingView,
-) -> Vec<DiscoveryAction> {
+pub(crate) fn plan_initiate(request: &LookupRequest, rv: &impl RoutingView) -> Vec<LookupAction> {
     let min_mtu = request.min_mtu;
     let targets: Vec<NodeAddr> = rv
         .peers_reaching(&request.target)
@@ -150,14 +147,14 @@ pub(crate) fn plan_initiate(
     let bytes: Arc<[u8]> = Arc::from(request.encode());
     targets
         .into_iter()
-        .map(|peer| DiscoveryAction::SendLink {
+        .map(|peer| LookupAction::SendLink {
             peer,
             bytes: bytes.clone(),
         })
         .collect()
 }
 
-/// Classification of an inbound LookupRequest, decided from Discovery state.
+/// Classification of an inbound LookupRequest, decided from Lookup state.
 pub(crate) enum RequestOutcome {
     /// request_id already in the dedup cache — drop.
     Duplicate,
@@ -176,9 +173,9 @@ pub(crate) enum RequestOutcome {
 /// Classify an inbound LookupRequest against the recent-request dedup cache and
 /// the transit forward rate limiter. Purges expired dedup entries, records the
 /// request for reverse-path forwarding on the non-drop paths, and decides the
-/// route. Pure over Discovery state + node addr + injected clock; no I/O, no view.
+/// route. Pure over Lookup state + node addr + injected clock; no I/O, no view.
 pub(crate) fn classify_request(
-    disc: &mut Discovery,
+    lookup: &mut Lookup,
     request: &LookupRequest,
     from: &NodeAddr,
     my_addr: &NodeAddr,
@@ -187,25 +184,30 @@ pub(crate) fn classify_request(
     max_recent: usize,
 ) -> RequestOutcome {
     // Purge expired dedup entries (was purge_expired_requests).
-    disc.recent_requests
+    lookup
+        .recent_requests
         .retain(|_, entry| !entry.is_expired(now_ms, recent_expiry_ms));
 
-    if disc.recent_requests.contains_key(&request.request_id) {
+    if lookup.recent_requests.contains_key(&request.request_id) {
         return RequestOutcome::Duplicate;
     }
-    if disc.recent_requests.len() >= max_recent {
+    if lookup.recent_requests.len() >= max_recent {
         return RequestOutcome::DedupCacheFull {
-            len: disc.recent_requests.len(),
+            len: lookup.recent_requests.len(),
         };
     }
-    disc.recent_requests
+    lookup
+        .recent_requests
         .insert(request.request_id, RecentRequest::new(*from, now_ms));
 
     if request.target == *my_addr {
         return RequestOutcome::RespondAsTarget;
     }
     if request.can_forward() {
-        if disc.forward_limiter.should_forward(&request.target, now_ms) {
+        if lookup
+            .forward_limiter
+            .should_forward(&request.target, now_ms)
+        {
             RequestOutcome::Forward
         } else {
             RequestOutcome::ForwardRateLimited
@@ -229,10 +231,10 @@ pub(crate) enum ResponseRoute {
 
 /// Classify an inbound LookupResponse against the recent-request dedup cache.
 ///
-/// Pure decision over `Discovery` state: sets `response_forwarded` when this is
+/// Pure decision over `Lookup` state: sets `response_forwarded` when this is
 /// the first response we transit for the request. No I/O, no view, no metrics.
-pub(crate) fn classify_response(disc: &mut Discovery, request_id: u64) -> ResponseRoute {
-    match disc.recent_requests.get_mut(&request_id) {
+pub(crate) fn classify_response(lookup: &mut Lookup, request_id: u64) -> ResponseRoute {
+    match lookup.recent_requests.get_mut(&request_id) {
         Some(recent) => {
             if recent.response_forwarded {
                 ResponseRoute::AlreadyForwarded
@@ -257,13 +259,13 @@ pub(crate) enum ResponseRouteDecision {
 }
 
 /// Decide the first hop for a LookupResponse we originate as the target, from
-/// the recent-request reverse-path record. Pure over `Discovery` state.
+/// the recent-request reverse-path record. Pure over `Lookup` state.
 ///
 /// Only the reverse-path decision is pure. The `NeedsTreeRoute` fallback (greedy
 /// tree routing toward the origin) is a `&mut Node` coord-cache operation with a
 /// TTL-touch side effect, so it stays in the shell rather than moving here.
-pub(crate) fn plan_response_route(disc: &Discovery, request_id: u64) -> ResponseRouteDecision {
-    match disc.recent_requests.get(&request_id) {
+pub(crate) fn plan_response_route(lookup: &Lookup, request_id: u64) -> ResponseRouteDecision {
+    match lookup.recent_requests.get(&request_id) {
         Some(recent) => ResponseRouteDecision::ReversePath(recent.from_peer),
         None => ResponseRouteDecision::NeedsTreeRoute,
     }
@@ -271,31 +273,31 @@ pub(crate) fn plan_response_route(disc: &Discovery, request_id: u64) -> Response
 
 /// Apply the accept-side effects of a verified LookupResponse we originated.
 ///
-/// Mutates the Discovery success state (clears backoff, drops the pending
+/// Mutates the Lookup success state (clears backoff, drops the pending
 /// lookup) and returns the cross-subsystem effects for the shell to drive.
 /// Verification is the shell's job — this runs only after the proof checked out.
 pub(crate) fn on_response_accepted(
-    disc: &mut Discovery,
+    lookup: &mut Lookup,
     target: &NodeAddr,
     coords: crate::TreeCoordinate,
     now_ms: u64,
     path_mtu: u16,
-) -> Vec<DiscoveryAction> {
-    disc.backoff.record_success(target);
-    disc.pending_lookups.remove(target);
+) -> Vec<LookupAction> {
+    lookup.backoff.record_success(target);
+    lookup.pending_lookups.remove(target);
     vec![
-        DiscoveryAction::CacheCoords {
+        LookupAction::CacheCoords {
             target: *target,
             coords,
             now_ms,
             path_mtu,
         },
-        DiscoveryAction::WritePathMtu {
+        LookupAction::WritePathMtu {
             target: *target,
             path_mtu,
         },
-        DiscoveryAction::ResetWarmupIfEstablished { target: *target },
-        DiscoveryAction::RetryQueuedPackets { target: *target },
+        LookupAction::ResetWarmupIfEstablished { target: *target },
+        LookupAction::RetryQueuedPackets { target: *target },
     ]
 }
 
@@ -311,11 +313,11 @@ pub(crate) struct PollOutcome {
     pub timeouts: Vec<(NodeAddr, u32)>,
 }
 
-/// Advance the pending-lookup retry ladder. Pure over `Discovery` state +
+/// Advance the pending-lookup retry ladder. Pure over `Lookup` state +
 /// injected clock: partitions due entries into retries (attempt bumped) and
 /// final timeouts (removed + backoff failure recorded). No I/O, no view.
 pub(crate) fn poll_pending(
-    disc: &mut Discovery,
+    lookup: &mut Lookup,
     now_ms: u64,
     attempt_timeouts_secs: &[u64],
 ) -> PollOutcome {
@@ -325,7 +327,7 @@ pub(crate) fn poll_pending(
     let mut retry_targets: Vec<NodeAddr> = Vec::new();
     let mut timeout_targets: Vec<NodeAddr> = Vec::new();
 
-    for (&target, entry) in &disc.pending_lookups {
+    for (&target, entry) in &lookup.pending_lookups {
         let idx = (entry.attempt as usize).saturating_sub(1);
         let to_ms = attempt_timeouts_secs.get(idx).copied().unwrap_or(0) * 1000;
         if now_ms.saturating_sub(entry.last_sent_ms) >= to_ms {
@@ -339,7 +341,7 @@ pub(crate) fn poll_pending(
 
     let mut retries: Vec<(NodeAddr, u8)> = Vec::new();
     for target in retry_targets {
-        if let Some(entry) = disc.pending_lookups.get_mut(&target) {
+        if let Some(entry) = lookup.pending_lookups.get_mut(&target) {
             entry.attempt += 1;
             entry.last_sent_ms = now_ms;
             retries.push((target, entry.attempt));
@@ -348,16 +350,16 @@ pub(crate) fn poll_pending(
 
     let mut timeouts: Vec<(NodeAddr, u32)> = Vec::new();
     for target in timeout_targets {
-        disc.pending_lookups.remove(&target);
-        disc.backoff.record_failure(&target, now_ms);
-        let failures = disc.backoff.failure_count(&target);
+        lookup.pending_lookups.remove(&target);
+        lookup.backoff.record_failure(&target, now_ms);
+        let failures = lookup.backoff.failure_count(&target);
         timeouts.push((target, failures));
     }
 
     PollOutcome { retries, timeouts }
 }
 
-/// Decision for whether/how to initiate a discovery lookup for a target.
+/// Decision for whether/how to initiate a lookup for a target.
 pub(crate) enum InitiateDecision {
     /// A lookup is already pending for this target — skip.
     Deduplicated,
@@ -369,36 +371,37 @@ pub(crate) enum InitiateDecision {
     Proceed,
 }
 
-/// Gate a discovery-lookup initiation against pending-dedup, backoff
+/// Gate a lookup initiation against pending-dedup, backoff
 /// suppression, and bloom reachability (passed in — the shell reads the peer
 /// filters). On BloomMiss records a failure; on Proceed inserts the pending
-/// lookup. Pure over Discovery state + injected clock; no I/O, no view.
+/// lookup. Pure over Lookup state + injected clock; no I/O, no view.
 pub(crate) fn initiate_gate(
-    disc: &mut Discovery,
+    lookup: &mut Lookup,
     dest: &NodeAddr,
     now_ms: u64,
     reachable: bool,
 ) -> InitiateDecision {
-    if disc.pending_lookups.contains_key(dest) {
+    if lookup.pending_lookups.contains_key(dest) {
         return InitiateDecision::Deduplicated;
     }
-    if disc.backoff.is_suppressed(dest, now_ms) {
+    if lookup.backoff.is_suppressed(dest, now_ms) {
         return InitiateDecision::Suppressed {
-            failures: disc.backoff.failure_count(dest),
+            failures: lookup.backoff.failure_count(dest),
         };
     }
     if !reachable {
-        disc.backoff.record_failure(dest, now_ms);
+        lookup.backoff.record_failure(dest, now_ms);
         return InitiateDecision::BloomMiss;
     }
-    disc.pending_lookups
+    lookup
+        .pending_lookups
         .insert(*dest, PendingLookup::new(now_ms));
     InitiateDecision::Proceed
 }
 
 /// Roll back a lookup whose first attempt reached no tree peers (sent == 0):
 /// drop the pending entry and record a backoff failure.
-pub(crate) fn initiate_failed(disc: &mut Discovery, dest: &NodeAddr, now_ms: u64) {
-    disc.pending_lookups.remove(dest);
-    disc.backoff.record_failure(dest, now_ms);
+pub(crate) fn initiate_failed(lookup: &mut Lookup, dest: &NodeAddr, now_ms: u64) {
+    lookup.pending_lookups.remove(dest);
+    lookup.backoff.record_failure(dest, now_ms);
 }

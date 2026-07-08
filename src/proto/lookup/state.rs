@@ -1,14 +1,14 @@
-//! Discovery-subsystem state owned by [`Node`](crate::node::Node).
+//! Mesh lookup subsystem state owned by [`Node`](crate::node::Node).
 //!
-//! Groups the four discovery-related state fields (recent-request dedup
+//! Groups the four lookup-related state fields (recent-request dedup
 //! cache, in-flight lookups, originator-side backoff, transit-side forward
-//! rate limiter) behind a single struct so the discovery handlers can
+//! rate limiter) behind a single struct so the lookup handlers can
 //! evolve toward a sans-IO core without threading four fields through
 //! `Node`.
 
 use alloc::collections::BTreeMap;
 
-use super::limits::{DiscoveryBackoff, DiscoveryForwardRateLimiter};
+use super::limits::{LookupBackoff, LookupForwardRateLimiter};
 use crate::NodeAddr;
 
 /// Recent request tracking for dedup and reverse-path forwarding.
@@ -44,7 +44,7 @@ impl RecentRequest {
     }
 }
 
-/// Tracks a pending discovery lookup with retry state.
+/// Tracks a pending lookup with retry state.
 pub struct PendingLookup {
     /// When the lookup was first initiated.
     pub initiated_ms: u64,
@@ -64,30 +64,27 @@ impl PendingLookup {
     }
 }
 
-/// Discovery-subsystem state.
-pub(crate) struct Discovery {
-    /// Recent discovery requests (dedup + reverse-path forwarding).
+/// Mesh lookup subsystem state.
+pub(crate) struct Lookup {
+    /// Recent lookup requests (dedup + reverse-path forwarding).
     /// Maps request_id → RecentRequest.
     pub(crate) recent_requests: BTreeMap<u64, RecentRequest>,
-    /// Tracks in-flight discovery lookups. Maps target NodeAddr to the
+    /// Tracks in-flight lookups. Maps target NodeAddr to the
     /// initiation timestamp (Unix ms). Prevents duplicate flood queries.
     pub(crate) pending_lookups: BTreeMap<NodeAddr, PendingLookup>,
-    /// Backoff for failed discovery lookups (originator-side).
-    pub(crate) backoff: DiscoveryBackoff,
-    /// Rate limiter for forwarded discovery requests (transit-side).
-    pub(crate) forward_limiter: DiscoveryForwardRateLimiter,
+    /// Backoff for failed lookups (originator-side).
+    pub(crate) backoff: LookupBackoff,
+    /// Rate limiter for forwarded lookup requests (transit-side).
+    pub(crate) forward_limiter: LookupForwardRateLimiter,
 }
 
-impl Discovery {
-    /// Create discovery state with the given backoff and forward limiter.
+impl Lookup {
+    /// Create mesh lookup state with the given backoff and forward limiter.
     ///
     /// The two limiters are constructed by the caller so each `Node`
     /// constructor can supply its own configured/default variant, matching
     /// the pre-refactor initialization exactly.
-    pub(crate) fn new(
-        backoff: DiscoveryBackoff,
-        forward_limiter: DiscoveryForwardRateLimiter,
-    ) -> Self {
+    pub(crate) fn new(backoff: LookupBackoff, forward_limiter: LookupForwardRateLimiter) -> Self {
         Self {
             recent_requests: BTreeMap::new(),
             pending_lookups: BTreeMap::new(),
@@ -96,7 +93,7 @@ impl Discovery {
         }
     }
 
-    /// Reset discovery backoff on topology changes. Returns the number of
+    /// Reset lookup backoff on topology changes. Returns the number of
     /// entries cleared (0 if already empty) so the shell can log the reset —
     /// observability stays out of the pure core.
     pub(crate) fn reset_backoff(&mut self) -> usize {

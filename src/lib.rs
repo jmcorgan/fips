@@ -73,8 +73,8 @@ pub use proto::stp::TreeAnnounce;
 // Re-export bloom wire types (relocated from protocol:: to proto::bloom)
 pub use proto::bloom::FilterAnnounce;
 
-// Re-export discovery wire types (relocated from protocol:: to proto::discovery)
-pub use proto::discovery::{LookupRequest, LookupResponse};
+// Re-export discovery wire types (relocated from protocol:: to proto::lookup)
+pub use proto::lookup::{LookupRequest, LookupResponse};
 
 // Re-export routing wire types (relocated from protocol:: to proto::routing)
 pub use proto::routing::{

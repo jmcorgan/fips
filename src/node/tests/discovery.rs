@@ -5,7 +5,7 @@
 //! response routing.
 
 use super::*;
-use crate::proto::discovery::{LookupRequest, LookupResponse, RecentRequest};
+use crate::proto::lookup::{LookupRequest, LookupResponse, RecentRequest};
 use crate::proto::stp::TreeCoordinate;
 use spanning_tree::{
     cleanup_nodes, generate_random_edges, lock_large_network_test, process_available_packets,
@@ -1162,7 +1162,7 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
 async fn test_check_pending_lookups_default_sequence_unreachable() {
     use crate::peer::ActivePeer;
     use crate::proto::bloom::BloomFilter;
-    use crate::proto::discovery::PendingLookup;
+    use crate::proto::lookup::PendingLookup;
     use crate::transport::LinkId;
     use std::sync::mpsc;
 

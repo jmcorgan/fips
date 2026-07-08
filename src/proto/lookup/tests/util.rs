@@ -1,10 +1,10 @@
-//! Shared test helpers for the discovery subsystem unit tests.
+//! Shared test helpers for the lookup subsystem unit tests.
 
 use sha2::Digest;
 
-use crate::proto::discovery::{
-    Discovery, DiscoveryAction, DiscoveryBackoff, DiscoveryForwardRateLimiter, LookupRequest,
-    LookupResponse, RoutingView,
+use crate::proto::lookup::{
+    Lookup, LookupAction, LookupBackoff, LookupForwardRateLimiter, LookupRequest, LookupResponse,
+    RoutingView,
 };
 use crate::testutil::make_node_addr;
 use crate::{NodeAddr, TreeCoordinate};
@@ -63,29 +63,29 @@ pub(super) fn make_coords(ids: &[u8]) -> TreeCoordinate {
     TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
 }
 
-pub(super) fn action_peers(actions: &[DiscoveryAction]) -> Vec<NodeAddr> {
+pub(super) fn action_peers(actions: &[LookupAction]) -> Vec<NodeAddr> {
     actions
         .iter()
         .map(|action| match action {
-            DiscoveryAction::SendLink { peer, .. } => *peer,
+            LookupAction::SendLink { peer, .. } => *peer,
             _ => panic!("expected SendLink, got a different action variant"),
         })
         .collect()
 }
 
-pub(super) fn empty_discovery() -> Discovery {
-    Discovery::new(
-        DiscoveryBackoff::default(),
-        DiscoveryForwardRateLimiter::default(),
+pub(super) fn empty_lookup() -> Lookup {
+    Lookup::new(
+        LookupBackoff::default(),
+        LookupForwardRateLimiter::default(),
     )
 }
 
-/// A Discovery whose backoff is armed (non-zero base/cap) so that a single
+/// A Lookup whose backoff is armed (non-zero base/cap) so that a single
 /// recorded failure suppresses the target — the default backoff is inert.
-pub(super) fn suppressing_discovery() -> Discovery {
-    Discovery::new(
-        DiscoveryBackoff::with_params(30, 300),
-        DiscoveryForwardRateLimiter::default(),
+pub(super) fn suppressing_lookup() -> Lookup {
+    Lookup::new(
+        LookupBackoff::with_params(30, 300),
+        LookupForwardRateLimiter::default(),
     )
 }
 
