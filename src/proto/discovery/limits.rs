@@ -14,6 +14,7 @@
 //!   nodes generating fresh request_ids at high rate.
 
 use crate::NodeAddr;
+use crate::proto::rate_limit::PerAddrRateLimiter;
 use alloc::collections::BTreeMap;
 
 // ============================================================================
@@ -33,9 +34,6 @@ const DEFAULT_BACKOFF_BASE_SECS: u64 = 0;
 
 /// Default maximum backoff cap. `0` = disabled.
 const DEFAULT_BACKOFF_MAX_SECS: u64 = 0;
-
-/// Backoff multiplier per consecutive failure.
-const BACKOFF_MULTIPLIER: u64 = 2;
 
 /// Exponential backoff for failed discovery lookups.
 ///
@@ -91,10 +89,11 @@ impl DiscoveryBackoff {
     pub fn record_failure(&mut self, target: &NodeAddr, now_ms: u64) {
         let failures = self.entries.get(target).map_or(0, |e| e.failures) + 1;
 
-        let backoff_ms = self
-            .base_ms
-            .saturating_mul(BACKOFF_MULTIPLIER.saturating_pow(failures.saturating_sub(1)))
-            .min(self.max_ms);
+        let backoff_ms = crate::proto::rate_limit::backoff_ms(
+            failures.saturating_sub(1),
+            self.base_ms,
+            self.max_ms,
+        );
 
         self.entries.insert(
             *target,
@@ -160,29 +159,20 @@ const FORWARD_MAX_AGE_MS: u64 = 60_000;
 /// Tracks the last time a LookupRequest was forwarded for each target
 /// and enforces a minimum interval to prevent floods from misbehaving
 /// nodes generating fresh request_ids.
-pub struct DiscoveryForwardRateLimiter {
-    last_forwarded: BTreeMap<NodeAddr, u64>,
-    min_interval_ms: u64,
-    max_age_ms: u64,
-}
+pub struct DiscoveryForwardRateLimiter(PerAddrRateLimiter);
 
 impl DiscoveryForwardRateLimiter {
     /// Create with default parameters (2s interval).
     pub fn new() -> Self {
-        Self {
-            last_forwarded: BTreeMap::new(),
-            min_interval_ms: DEFAULT_FORWARD_MIN_INTERVAL_MS,
-            max_age_ms: FORWARD_MAX_AGE_MS,
-        }
+        Self(PerAddrRateLimiter::new(
+            DEFAULT_FORWARD_MIN_INTERVAL_MS,
+            FORWARD_MAX_AGE_MS,
+        ))
     }
 
     /// Create with a custom minimum interval in milliseconds.
     pub fn with_interval_ms(min_interval_ms: u64) -> Self {
-        Self {
-            last_forwarded: BTreeMap::new(),
-            min_interval_ms,
-            max_age_ms: FORWARD_MAX_AGE_MS,
-        }
+        Self(PerAddrRateLimiter::new(min_interval_ms, FORWARD_MAX_AGE_MS))
     }
 
     /// Check if we should forward a lookup for this target.
@@ -190,32 +180,24 @@ impl DiscoveryForwardRateLimiter {
     /// Returns true if enough time has passed since the last forward
     /// for this target. Updates internal state when returning true.
     pub fn should_forward(&mut self, target: &NodeAddr, now_ms: u64) -> bool {
-        if let Some(&last) = self.last_forwarded.get(target)
-            && now_ms.saturating_sub(last) < self.min_interval_ms
-        {
-            return false;
-        }
-
-        self.last_forwarded.insert(*target, now_ms);
-        self.cleanup(now_ms);
-        true
+        self.0.check_and_record(target, now_ms)
     }
 
     /// Replace the minimum interval in milliseconds (e.g., set to zero to disable).
     #[cfg(test)]
     pub fn set_interval_ms(&mut self, interval_ms: u64) {
-        self.min_interval_ms = interval_ms;
+        self.0.set_interval_ms(interval_ms);
     }
 
     /// Remove entries older than max_age.
+    #[cfg(test)]
     pub(crate) fn cleanup(&mut self, now_ms: u64) {
-        self.last_forwarded
-            .retain(|_, &mut last| now_ms.saturating_sub(last) < self.max_age_ms);
+        self.0.cleanup(now_ms);
     }
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.last_forwarded.len()
+        self.0.len()
     }
 }
 

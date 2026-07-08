@@ -9,8 +9,5 @@
 /// Uses exponential backoff: `base_interval_ms * 2^retry_count`, capped at
 /// `max_backoff_ms`.
 pub(crate) fn backoff_ms(retry_count: u32, base_interval_ms: u64, max_backoff_ms: u64) -> u64 {
-    let multiplier = 1u64.checked_shl(retry_count).unwrap_or(u64::MAX);
-    base_interval_ms
-        .saturating_mul(multiplier)
-        .min(max_backoff_ms)
+    crate::proto::rate_limit::backoff_ms(retry_count, base_interval_ms, max_backoff_ms)
 }
