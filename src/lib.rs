@@ -43,7 +43,9 @@ pub use upper::config::{DnsConfig, TunConfig};
 pub use discovery::{BootstrapHandoffResult, EstablishedTraversal};
 
 // Re-export tree types (relocated from tree:: to proto::stp)
-pub use proto::stp::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
+pub use proto::stp::{
+    CoordEntry, CoordError, ParentDeclaration, TreeCoordinate, TreeError, TreeState,
+};
 
 // Re-export bloom filter types (relocated from bloom:: to proto::bloom)
 pub use proto::bloom::{BloomError, BloomFilter, BloomState};

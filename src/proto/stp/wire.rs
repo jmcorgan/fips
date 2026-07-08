@@ -153,7 +153,7 @@ impl TreeAnnounce {
         let sequence = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad sequence".into()))?,
+                .map_err(|_| Error::Malformed("bad sequence"))?,
         );
         pos += 8;
 
@@ -161,7 +161,7 @@ impl TreeAnnounce {
         let timestamp = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad timestamp".into()))?,
+                .map_err(|_| Error::Malformed("bad timestamp"))?,
         );
         pos += 8;
 
@@ -169,7 +169,7 @@ impl TreeAnnounce {
         let parent = NodeAddr::from_bytes(
             payload[pos..pos + 16]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad parent".into()))?,
+                .map_err(|_| Error::Malformed("bad parent"))?,
         );
         pos += 16;
 
@@ -177,7 +177,7 @@ impl TreeAnnounce {
         let ancestry_count = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad ancestry count".into()))?,
+                .map_err(|_| Error::Malformed("bad ancestry count"))?,
         ) as usize;
         pos += 2;
 
@@ -196,19 +196,19 @@ impl TreeAnnounce {
             let node_addr = NodeAddr::from_bytes(
                 payload[pos..pos + 16]
                     .try_into()
-                    .map_err(|_| Error::Malformed("bad entry node_addr".into()))?,
+                    .map_err(|_| Error::Malformed("bad entry node_addr"))?,
             );
             pos += 16;
             let entry_seq = u64::from_le_bytes(
                 payload[pos..pos + 8]
                     .try_into()
-                    .map_err(|_| Error::Malformed("bad entry sequence".into()))?,
+                    .map_err(|_| Error::Malformed("bad entry sequence"))?,
             );
             pos += 8;
             let entry_ts = u64::from_le_bytes(
                 payload[pos..pos + 8]
                     .try_into()
-                    .map_err(|_| Error::Malformed("bad entry timestamp".into()))?,
+                    .map_err(|_| Error::Malformed("bad entry timestamp"))?,
             );
             pos += 8;
             entries.push(CoordEntry::new(node_addr, entry_seq, entry_ts));
@@ -217,7 +217,7 @@ impl TreeAnnounce {
         // signature (64)
         let sig_bytes: [u8; 64] = payload[pos..pos + 64]
             .try_into()
-            .map_err(|_| Error::Malformed("bad signature".into()))?;
+            .map_err(|_| Error::Malformed("bad signature"))?;
         // Validate the signature parses as a well-formed schnorr signature (the
         // codec's only crypto touch, §11 w2); store the raw bytes so the in-core
         // declaration carries no `secp256k1` dependency. Actual verification is a
@@ -226,17 +226,14 @@ impl TreeAnnounce {
 
         // The first entry's node_addr is the declaring node
         if entries.is_empty() {
-            return Err(Error::Malformed(
-                "ancestry must have at least one entry".into(),
-            ));
+            return Err(Error::Malformed("ancestry must have at least one entry"));
         }
         let node_addr = entries[0].node_addr;
 
         let declaration =
             ParentDeclaration::with_signature(node_addr, parent, sequence, timestamp, sig_bytes);
 
-        let ancestry = TreeCoordinate::new(entries)
-            .map_err(|e| Error::Malformed(format!("bad ancestry: {}", e)))?;
+        let ancestry = TreeCoordinate::new(entries).map_err(Error::BadCoord)?;
 
         Ok(Self {
             declaration,

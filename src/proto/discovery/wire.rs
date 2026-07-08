@@ -98,7 +98,7 @@ impl LookupRequest {
         let request_id = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad request_id".into()))?,
+                .map_err(|_| Error::Malformed("bad request_id"))?,
         );
         pos += 8;
 
@@ -118,7 +118,7 @@ impl LookupRequest {
         let min_mtu = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad min_mtu".into()))?,
+                .map_err(|_| Error::Malformed("bad min_mtu"))?,
         );
         pos += 2;
 
@@ -223,7 +223,7 @@ impl LookupResponse {
         let request_id = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad request_id".into()))?,
+                .map_err(|_| Error::Malformed("bad request_id"))?,
         );
         pos += 8;
 
@@ -235,7 +235,7 @@ impl LookupResponse {
         let path_mtu = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad path_mtu".into()))?,
+                .map_err(|_| Error::Malformed("bad path_mtu"))?,
         );
         pos += 2;
 
@@ -249,7 +249,7 @@ impl LookupResponse {
             });
         }
         let proof = Signature::from_slice(&payload[pos..pos + 64])
-            .map_err(|_| Error::Malformed("bad proof signature".into()))?;
+            .map_err(|_| Error::Malformed("bad proof signature"))?;
 
         Ok(Self {
             request_id,

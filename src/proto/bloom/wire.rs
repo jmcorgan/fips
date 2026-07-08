@@ -81,9 +81,7 @@ impl FilterAnnounce {
     /// ```
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         if !self.is_valid() {
-            return Err(Error::Malformed(
-                "filter size does not match size_class".into(),
-            ));
+            return Err(Error::Malformed("filter size does not match size_class"));
         }
 
         let filter_bytes = self.filter.as_bytes();
@@ -121,7 +119,7 @@ impl FilterAnnounce {
         let sequence = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad sequence".into()))?,
+                .map_err(|_| Error::Malformed("bad sequence"))?,
         );
         pos += 8;
 
@@ -135,18 +133,18 @@ impl FilterAnnounce {
 
         // Validate size_class range
         if size_class > Self::MAX_SIZE_CLASS {
-            return Err(Error::Malformed(format!(
-                "invalid size_class: {size_class} (max {})",
-                Self::MAX_SIZE_CLASS
-            )));
+            return Err(Error::BadSizeClass {
+                got: size_class,
+                max: Self::MAX_SIZE_CLASS,
+            });
         }
 
         // v1 compliance check
         if size_class != super::V1_SIZE_CLASS {
-            return Err(Error::Malformed(format!(
-                "unsupported size_class: {size_class} (v1 requires {})",
-                super::V1_SIZE_CLASS
-            )));
+            return Err(Error::BadSizeClass {
+                got: size_class,
+                max: super::V1_SIZE_CLASS,
+            });
         }
 
         // Expected filter size from size_class
@@ -160,8 +158,8 @@ impl FilterAnnounce {
         }
 
         // Construct BloomFilter from bytes
-        let filter = BloomFilter::from_slice(&payload[pos..], hash_count)
-            .map_err(|e| Error::Malformed(format!("invalid bloom filter: {e}")))?;
+        let filter =
+            BloomFilter::from_slice(&payload[pos..], hash_count).map_err(Error::BadBloom)?;
 
         let announce = Self {
             filter,

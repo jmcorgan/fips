@@ -28,11 +28,9 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-use thiserror::Error;
-
 use crate::{IdentityError, NodeAddr};
 
-pub use crate::proto::coord::{CoordEntry, TreeCoordinate};
+pub use crate::proto::coord::{CoordEntry, CoordError, TreeCoordinate};
 pub(crate) use crate::proto::coord::{
     coords_wire_size, decode_coords, decode_optional_coords, encode_coords, encode_empty_coords,
 };
@@ -42,51 +40,118 @@ pub use state::TreeState;
 pub use wire::TreeAnnounce;
 
 /// Errors related to spanning tree operations.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum TreeError {
-    #[error("invalid tree coordinate: empty path")]
+    /// Coordinate path had zero entries.
     EmptyCoordinate,
 
-    #[error("invalid ancestry: does not reach claimed root")]
+    /// Ancestry path does not reach the claimed root.
     AncestryNotToRoot,
 
-    #[error("invalid ancestry: root declaration must contain only the sender")]
+    /// Root declaration contained hops other than the sender.
     RootDeclarationMismatch,
 
-    #[error("invalid ancestry: non-root declaration must include a parent hop")]
+    /// Non-root declaration was missing its parent hop.
     AncestryTooShort,
 
-    #[error("invalid ancestry: sender {declared} does not match first path entry {ancestry}")]
+    /// Declared sender does not match the first ancestry entry.
     AncestryNodeMismatch {
+        /// The declared sender address.
         declared: NodeAddr,
+        /// The first ancestry path entry.
         ancestry: NodeAddr,
     },
 
-    #[error(
-        "invalid ancestry: signed parent {declared} does not match first ancestry hop {ancestry}"
-    )]
+    /// Signed parent does not match the first ancestry hop.
     AncestryParentMismatch {
+        /// The signed parent address.
         declared: NodeAddr,
+        /// The first ancestry hop.
         ancestry: NodeAddr,
     },
 
-    #[error(
-        "invalid ancestry: advertised root {advertised} is not the minimum path entry {minimum}"
-    )]
+    /// Advertised root is not the minimum path entry.
     AncestryRootNotMinimum {
+        /// The advertised root address.
         advertised: NodeAddr,
+        /// The minimum path entry.
         minimum: NodeAddr,
     },
 
-    #[error("signature verification failed for node {0:?}")]
+    /// Signature verification failed for the given node.
     InvalidSignature(NodeAddr),
 
-    #[error("sequence number regression: got {got}, expected > {expected}")]
-    SequenceRegression { got: u64, expected: u64 },
+    /// Sequence number regressed below the expected value.
+    SequenceRegression {
+        /// The received sequence number.
+        got: u64,
+        /// The value the sequence had to exceed.
+        expected: u64,
+    },
 
-    #[error("parent not in peers: {0:?}")]
+    /// Declared parent was not among the known peers.
     ParentNotPeer(NodeAddr),
 
-    #[error("identity error: {0}")]
-    Identity(#[from] IdentityError),
+    /// An identity operation failed.
+    Identity(IdentityError),
+}
+
+impl ::core::fmt::Display for TreeError {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        match self {
+            TreeError::EmptyCoordinate => write!(f, "invalid tree coordinate: empty path"),
+            TreeError::AncestryNotToRoot => {
+                write!(f, "invalid ancestry: does not reach claimed root")
+            }
+            TreeError::RootDeclarationMismatch => write!(
+                f,
+                "invalid ancestry: root declaration must contain only the sender"
+            ),
+            TreeError::AncestryTooShort => write!(
+                f,
+                "invalid ancestry: non-root declaration must include a parent hop"
+            ),
+            TreeError::AncestryNodeMismatch { declared, ancestry } => write!(
+                f,
+                "invalid ancestry: sender {declared} does not match first path entry {ancestry}"
+            ),
+            TreeError::AncestryParentMismatch { declared, ancestry } => write!(
+                f,
+                "invalid ancestry: signed parent {declared} does not match first ancestry hop {ancestry}"
+            ),
+            TreeError::AncestryRootNotMinimum {
+                advertised,
+                minimum,
+            } => write!(
+                f,
+                "invalid ancestry: advertised root {advertised} is not the minimum path entry {minimum}"
+            ),
+            TreeError::InvalidSignature(node) => {
+                write!(f, "signature verification failed for node {node:?}")
+            }
+            TreeError::SequenceRegression { got, expected } => {
+                write!(
+                    f,
+                    "sequence number regression: got {got}, expected > {expected}"
+                )
+            }
+            TreeError::ParentNotPeer(node) => write!(f, "parent not in peers: {node:?}"),
+            TreeError::Identity(e) => write!(f, "identity error: {e}"),
+        }
+    }
+}
+
+impl ::core::error::Error for TreeError {
+    fn source(&self) -> Option<&(dyn ::core::error::Error + 'static)> {
+        match self {
+            TreeError::Identity(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<IdentityError> for TreeError {
+    fn from(e: IdentityError) -> Self {
+        TreeError::Identity(e)
+    }
 }

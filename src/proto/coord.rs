@@ -6,10 +6,23 @@ use core::fmt;
 
 use crate::NodeAddr;
 use crate::proto::Error;
-// TEMPORARY: coord depends upward on stp's TreeError here. This inversion is
-// intentional and resolved in the next pass when a no_std-clean CoordError is
-// created and TreeCoordinate is cut over to it.
-use crate::proto::stp::TreeError;
+
+/// Errors from constructing a `TreeCoordinate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordError {
+    /// Coordinate path had zero entries.
+    EmptyCoordinate,
+}
+
+impl core::fmt::Display for CoordError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CoordError::EmptyCoordinate => write!(f, "invalid tree coordinate: empty path"),
+        }
+    }
+}
+
+impl core::error::Error for CoordError {}
 
 /// Metadata for a single node in a tree coordinate path.
 ///
@@ -71,9 +84,9 @@ impl TreeCoordinate {
     /// Create a coordinate from a path of entries (self to root).
     ///
     /// The path must be non-empty and ordered from the node to the root.
-    pub fn new(path: Vec<CoordEntry>) -> Result<Self, TreeError> {
+    pub fn new(path: Vec<CoordEntry>) -> Result<Self, CoordError> {
         if path.is_empty() {
-            return Err(TreeError::EmptyCoordinate);
+            return Err(CoordError::EmptyCoordinate);
         }
         Ok(Self(path))
     }
@@ -82,9 +95,9 @@ impl TreeCoordinate {
     ///
     /// Convenience constructor for cases where only routing is needed.
     /// Each entry gets sequence=0, timestamp=0.
-    pub fn from_addrs(addrs: Vec<NodeAddr>) -> Result<Self, TreeError> {
+    pub fn from_addrs(addrs: Vec<NodeAddr>) -> Result<Self, CoordError> {
         if addrs.is_empty() {
-            return Err(TreeError::EmptyCoordinate);
+            return Err(CoordError::EmptyCoordinate);
         }
         Ok(Self(addrs.into_iter().map(CoordEntry::addr_only).collect()))
     }
@@ -271,7 +284,7 @@ pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), Erro
         });
     }
     if count == 0 {
-        return Err(Error::Malformed("coordinate with zero entries".into()));
+        return Err(Error::Malformed("coordinate with zero entries"));
     }
     let mut addrs = Vec::with_capacity(count);
     for i in 0..count {
@@ -280,7 +293,7 @@ pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), Erro
         bytes.copy_from_slice(&data[offset..offset + 16]);
         addrs.push(NodeAddr::from_bytes(bytes));
     }
-    let coord = TreeCoordinate::from_addrs(addrs).map_err(|e| Error::Malformed(e.to_string()))?;
+    let coord = TreeCoordinate::from_addrs(addrs).map_err(Error::BadCoord)?;
     Ok((coord, needed))
 }
 
@@ -314,7 +327,7 @@ pub(crate) fn decode_optional_coords(
         bytes.copy_from_slice(&data[offset..offset + 16]);
         addrs.push(NodeAddr::from_bytes(bytes));
     }
-    let coord = TreeCoordinate::from_addrs(addrs).map_err(|e| Error::Malformed(e.to_string()))?;
+    let coord = TreeCoordinate::from_addrs(addrs).map_err(Error::BadCoord)?;
     Ok((Some(coord), needed))
 }
 
