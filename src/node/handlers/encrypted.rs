@@ -258,7 +258,7 @@ impl Node {
         };
 
         // MMP per-frame processing and statistics
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         let ce_flag = header.flags & FLAG_CE != 0;
         let sp_flag = header.flags & FLAG_SP != 0;
 
@@ -354,7 +354,7 @@ impl Node {
         } else {
             return;
         };
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         let mut address_changed = false;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.reset_decrypt_failures();

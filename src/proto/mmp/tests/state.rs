@@ -1,6 +1,7 @@
 //! Tests for the owned MMP protocol state machines.
 
-use crate::proto::mmp::state::{ReceiverState, SenderState};
+use crate::proto::mmp::receiver::ReceiverState;
+use crate::proto::mmp::sender::SenderState;
 use crate::proto::mmp::{
     COLD_START_SAMPLES, DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MAX_REPORT_INTERVAL_MS,
     MIN_REPORT_INTERVAL_MS, MmpMetrics, MmpMode, ReceiverReport,

@@ -668,7 +668,7 @@ impl SessionEntry {
         self.rekey_jitter_secs = draw_rekey_jitter();
 
         // Reset MMP counters to avoid metric discontinuity
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         if let Some(mmp) = &mut self.mmp {
             mmp.reset_for_rekey(now_ms);
         }

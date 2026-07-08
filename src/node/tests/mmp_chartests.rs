@@ -12,12 +12,12 @@
 //!
 //! Assertions capture what the code does today, surprising or not.
 //!
-//! Report-generation is probed through the reused `src/mmp/` primitives
+//! Report-generation is probed through the reused `proto/mmp/` primitives
 //! (`should_send_report` / `should_send_notification`): after a handler tick,
 //! a *consumed* interval reads as "not due" (the report was built) while an
 //! *ungated* interval still reads as "due" (the report was suppressed by the
 //! mode/flag gate). This survives the later refactor because those primitives
-//! stay in `src/mmp/` unchanged.
+//! stay in `proto/mmp/` unchanged.
 //!
 //! Two `#[cfg(test)]` production seams are used, both on `ActivePeer`:
 //!   * `test_init_mmp(mode)`          — attach link MMP with a chosen mode to a
@@ -55,7 +55,7 @@ fn arm_link_mmp(node: &mut Node, addr: &NodeAddr) {
     let mmp = node.get_peer_mut(addr).unwrap().mmp_mut().unwrap();
     mmp.sender.record_sent(1, 100, 500);
     mmp.receiver
-        .record_recv(1, 100, 500, false, crate::mmp::mono_ms());
+        .record_recv(1, 100, 500, false, crate::time::mono_ms());
 }
 
 /// Complete an in-memory Noise IK handshake, returning the initiator session.
@@ -109,7 +109,7 @@ fn arm_session_mmp(node: &mut Node, addr: &NodeAddr) {
     let mmp = node.sessions.get_mut(addr).unwrap().mmp_mut().unwrap();
     mmp.sender.record_sent(1, 100, 500);
     mmp.receiver
-        .record_recv(1, 100, 500, false, crate::mmp::mono_ms());
+        .record_recv(1, 100, 500, false, crate::time::mono_ms());
 }
 
 // ===========================================================================
@@ -127,7 +127,7 @@ async fn mmp_full_mode_builds_sender_and_receiver_reports() {
     node.check_mmp_reports().await;
 
     let mmp = node.get_peer(&addr).unwrap().mmp().unwrap();
-    let now = crate::mmp::mono_ms();
+    let now = crate::time::mono_ms();
     assert!(
         !mmp.sender.should_send_report(now),
         "Full mode consumes the sender interval (SenderReport built)"
@@ -149,7 +149,7 @@ async fn mmp_lightweight_mode_builds_receiver_report_only() {
     node.check_mmp_reports().await;
 
     let mmp = node.get_peer(&addr).unwrap().mmp().unwrap();
-    let now = crate::mmp::mono_ms();
+    let now = crate::time::mono_ms();
     assert!(
         mmp.sender.should_send_report(now),
         "Lightweight mode suppresses the SenderReport (sender interval intact)"
@@ -170,7 +170,7 @@ async fn mmp_minimal_mode_builds_nothing() {
     node.check_mmp_reports().await;
 
     let mmp = node.get_peer(&addr).unwrap().mmp().unwrap();
-    let now = crate::mmp::mono_ms();
+    let now = crate::time::mono_ms();
     assert!(
         mmp.sender.should_send_report(now),
         "Minimal mode suppresses the SenderReport"
@@ -194,7 +194,7 @@ async fn mmp_should_log_marks_logged_once_per_interval() {
             .unwrap()
             .mmp()
             .unwrap()
-            .should_log(crate::mmp::mono_ms()),
+            .should_log(crate::time::mono_ms()),
         "a freshly created peer is due for its first operator log"
     );
 
@@ -206,7 +206,7 @@ async fn mmp_should_log_marks_logged_once_per_interval() {
             .unwrap()
             .mmp()
             .unwrap()
-            .should_log(crate::mmp::mono_ms()),
+            .should_log(crate::time::mono_ms()),
         "after one tick the log is marked and not due again within the interval"
     );
 }
@@ -226,7 +226,7 @@ async fn session_full_mode_builds_sender_and_receiver_reports() {
     node.check_session_mmp_reports().await;
 
     let mmp = node.get_session(&addr).unwrap().mmp().unwrap();
-    let now = crate::mmp::mono_ms();
+    let now = crate::time::mono_ms();
     assert!(
         !mmp.sender.should_send_report(now),
         "Full session consumes the sender interval"
@@ -254,7 +254,7 @@ async fn session_minimal_mode_still_sends_path_mtu() {
         .path_mtu
         .observe_incoming_mtu(1200);
 
-    let now_before = crate::mmp::mono_ms();
+    let now_before = crate::time::mono_ms();
     assert!(
         node.get_session(&addr)
             .unwrap()
@@ -268,7 +268,7 @@ async fn session_minimal_mode_still_sends_path_mtu() {
     node.check_session_mmp_reports().await;
 
     let mmp = node.get_session(&addr).unwrap().mmp().unwrap();
-    let now = crate::mmp::mono_ms();
+    let now = crate::time::mono_ms();
     assert!(
         mmp.sender.should_send_report(now),
         "Minimal mode suppresses the session SenderReport"

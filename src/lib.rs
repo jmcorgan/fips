@@ -16,7 +16,6 @@ pub mod discovery;
 #[cfg(target_os = "linux")]
 pub mod gateway;
 pub mod identity;
-pub mod mmp;
 pub mod node;
 pub mod noise;
 pub mod peer;
@@ -24,6 +23,7 @@ pub mod perf_profile;
 pub(crate) mod proto;
 #[cfg(test)]
 pub(crate) mod testutil;
+mod time;
 pub mod transport;
 pub mod upper;
 pub mod utils;
