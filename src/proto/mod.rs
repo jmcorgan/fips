@@ -7,6 +7,7 @@ mod error;
 pub use error::Error;
 
 pub(crate) mod bloom;
+pub(crate) mod codec;
 pub(crate) mod coord;
 pub(crate) mod discovery;
 pub(crate) mod fmp;

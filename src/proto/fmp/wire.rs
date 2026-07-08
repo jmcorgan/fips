@@ -7,6 +7,7 @@
 //! in `crate::proto::link`.
 
 use crate::proto::Error;
+use crate::proto::codec::Reader;
 use crate::proto::link::LinkMessageType;
 use std::fmt;
 
@@ -153,13 +154,9 @@ impl Disconnect {
 
     /// Decode from link-layer payload (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.is_empty() {
-            return Err(Error::MessageTooShort {
-                expected: 1,
-                got: 0,
-            });
-        }
-        let reason = DisconnectReason::from_byte(payload[0]).unwrap_or(DisconnectReason::Other);
+        let mut reader = Reader::new(payload);
+        let reason =
+            DisconnectReason::from_byte(reader.read_u8()?).unwrap_or(DisconnectReason::Other);
         Ok(Self { reason })
     }
 }

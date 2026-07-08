@@ -3,6 +3,7 @@
 use super::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
 use crate::NodeAddr;
 use crate::proto::Error;
+use crate::proto::codec::{Reader, Writer};
 use crate::proto::link::LinkMessageType;
 use secp256k1::schnorr::Signature;
 
@@ -103,121 +104,72 @@ impl TreeAnnounce {
         let entries = self.ancestry.entries();
         let ancestry_count = entries.len() as u16;
         let size = 1 + Self::MIN_PAYLOAD_SIZE + entries.len() * CoordEntry::WIRE_SIZE;
-        let mut buf = Vec::with_capacity(size);
+        let mut w = Writer::with_capacity(size);
 
         // msg_type
-        buf.push(LinkMessageType::TreeAnnounce.to_byte());
+        w.write_u8(LinkMessageType::TreeAnnounce.to_byte());
         // version
-        buf.push(Self::VERSION_1);
+        w.write_u8(Self::VERSION_1);
         // sequence (8 LE)
-        buf.extend_from_slice(&self.declaration.sequence().to_le_bytes());
+        w.write_u64_le(self.declaration.sequence());
         // timestamp (8 LE)
-        buf.extend_from_slice(&self.declaration.timestamp().to_le_bytes());
+        w.write_u64_le(self.declaration.timestamp());
         // parent (16)
-        buf.extend_from_slice(self.declaration.parent_id().as_bytes());
+        w.write_bytes(self.declaration.parent_id().as_bytes());
         // ancestry_count (2 LE)
-        buf.extend_from_slice(&ancestry_count.to_le_bytes());
+        w.write_u16_le(ancestry_count);
         // ancestry entries (32 bytes each)
         for entry in entries {
-            buf.extend_from_slice(entry.node_addr.as_bytes()); // 16
-            buf.extend_from_slice(&entry.sequence.to_le_bytes()); // 8
-            buf.extend_from_slice(&entry.timestamp.to_le_bytes()); // 8
+            w.write_bytes(entry.node_addr.as_bytes()); // 16
+            w.write_u64_le(entry.sequence); // 8
+            w.write_u64_le(entry.timestamp); // 8
         }
         // outer signature (64)
-        buf.extend_from_slice(signature.as_ref());
+        w.write_bytes(signature.as_ref());
 
-        Ok(buf)
+        Ok(w.into_vec())
     }
 
     /// Decode from link-layer payload (after msg_type byte stripped by dispatcher).
     ///
     /// The payload starts with the version byte.
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.len() < Self::MIN_PAYLOAD_SIZE {
-            return Err(Error::MessageTooShort {
-                expected: Self::MIN_PAYLOAD_SIZE,
-                got: payload.len(),
-            });
-        }
-
-        let mut pos = 0;
+        let mut reader = Reader::new(payload);
+        reader.require(Self::MIN_PAYLOAD_SIZE)?;
 
         // version
-        let version = payload[pos];
-        pos += 1;
+        let version = reader.read_u8()?;
         if version != Self::VERSION_1 {
             return Err(Error::UnsupportedVersion(version));
         }
 
         // sequence (8 LE)
-        let sequence = u64::from_le_bytes(
-            payload[pos..pos + 8]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad sequence"))?,
-        );
-        pos += 8;
+        let sequence = reader.read_u64_le()?;
 
         // timestamp (8 LE)
-        let timestamp = u64::from_le_bytes(
-            payload[pos..pos + 8]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad timestamp"))?,
-        );
-        pos += 8;
+        let timestamp = reader.read_u64_le()?;
 
         // parent (16)
-        let parent = NodeAddr::from_bytes(
-            payload[pos..pos + 16]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad parent"))?,
-        );
-        pos += 16;
+        let parent = NodeAddr::from_bytes(reader.read_array::<16>()?);
 
         // ancestry_count (2 LE)
-        let ancestry_count = u16::from_le_bytes(
-            payload[pos..pos + 2]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad ancestry count"))?,
-        ) as usize;
-        pos += 2;
+        let ancestry_count = reader.read_u16_le()? as usize;
 
         // Validate remaining length: entries + signature
         let expected_remaining = ancestry_count * CoordEntry::WIRE_SIZE + 64;
-        if payload.len() - pos < expected_remaining {
-            return Err(Error::MessageTooShort {
-                expected: pos + expected_remaining,
-                got: payload.len(),
-            });
-        }
+        reader.require(expected_remaining)?;
 
         // ancestry entries (32 bytes each)
         let mut entries = Vec::with_capacity(ancestry_count);
         for _ in 0..ancestry_count {
-            let node_addr = NodeAddr::from_bytes(
-                payload[pos..pos + 16]
-                    .try_into()
-                    .map_err(|_| Error::Malformed("bad entry node_addr"))?,
-            );
-            pos += 16;
-            let entry_seq = u64::from_le_bytes(
-                payload[pos..pos + 8]
-                    .try_into()
-                    .map_err(|_| Error::Malformed("bad entry sequence"))?,
-            );
-            pos += 8;
-            let entry_ts = u64::from_le_bytes(
-                payload[pos..pos + 8]
-                    .try_into()
-                    .map_err(|_| Error::Malformed("bad entry timestamp"))?,
-            );
-            pos += 8;
+            let node_addr = NodeAddr::from_bytes(reader.read_array::<16>()?);
+            let entry_seq = reader.read_u64_le()?;
+            let entry_ts = reader.read_u64_le()?;
             entries.push(CoordEntry::new(node_addr, entry_seq, entry_ts));
         }
 
         // signature (64)
-        let sig_bytes: [u8; 64] = payload[pos..pos + 64]
-            .try_into()
-            .map_err(|_| Error::Malformed("bad signature"))?;
+        let sig_bytes: [u8; 64] = reader.read_array::<64>()?;
         // Validate the signature parses as a well-formed schnorr signature (the
         // codec's only crypto touch, §11 w2); store the raw bytes so the in-core
         // declaration carries no `secp256k1` dependency. Actual verification is a

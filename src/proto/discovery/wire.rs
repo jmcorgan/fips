@@ -2,6 +2,7 @@
 
 use crate::NodeAddr;
 use crate::proto::Error;
+use crate::proto::codec::Reader;
 use crate::proto::stp::TreeCoordinate;
 use crate::proto::stp::{decode_coords, encode_coords};
 use secp256k1::schnorr::Signature;
@@ -86,43 +87,20 @@ impl LookupRequest {
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // Minimum: request_id(8) + target(16) + origin(16) + ttl(1) + min_mtu(2)
         //          + coords_count(2) = 45 bytes
-        if payload.len() < 45 {
-            return Err(Error::MessageTooShort {
-                expected: 45,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(45)?;
 
-        let mut pos = 0;
+        let request_id = reader.read_u64_le()?;
 
-        let request_id = u64::from_le_bytes(
-            payload[pos..pos + 8]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad request_id"))?,
-        );
-        pos += 8;
+        let target = NodeAddr::from_bytes(reader.read_array::<16>()?);
 
-        let mut target_bytes = [0u8; 16];
-        target_bytes.copy_from_slice(&payload[pos..pos + 16]);
-        let target = NodeAddr::from_bytes(target_bytes);
-        pos += 16;
+        let origin = NodeAddr::from_bytes(reader.read_array::<16>()?);
 
-        let mut origin_bytes = [0u8; 16];
-        origin_bytes.copy_from_slice(&payload[pos..pos + 16]);
-        let origin = NodeAddr::from_bytes(origin_bytes);
-        pos += 16;
+        let ttl = reader.read_u8()?;
 
-        let ttl = payload[pos];
-        pos += 1;
+        let min_mtu = reader.read_u16_le()?;
 
-        let min_mtu = u16::from_le_bytes(
-            payload[pos..pos + 2]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad min_mtu"))?,
-        );
-        pos += 2;
-
-        let (origin_coords, _consumed) = decode_coords(&payload[pos..])?;
+        let (origin_coords, _consumed) = decode_coords(reader.rest())?;
 
         Ok(Self {
             request_id,
@@ -211,44 +189,19 @@ impl LookupResponse {
     /// Decode from wire format (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // Minimum: request_id(8) + target(16) + path_mtu(2) + coords_count(2) + proof(64) = 92
-        if payload.len() < 92 {
-            return Err(Error::MessageTooShort {
-                expected: 92,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(92)?;
 
-        let mut pos = 0;
+        let request_id = reader.read_u64_le()?;
 
-        let request_id = u64::from_le_bytes(
-            payload[pos..pos + 8]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad request_id"))?,
-        );
-        pos += 8;
+        let target = NodeAddr::from_bytes(reader.read_array::<16>()?);
 
-        let mut target_bytes = [0u8; 16];
-        target_bytes.copy_from_slice(&payload[pos..pos + 16]);
-        let target = NodeAddr::from_bytes(target_bytes);
-        pos += 16;
+        let path_mtu = reader.read_u16_le()?;
 
-        let path_mtu = u16::from_le_bytes(
-            payload[pos..pos + 2]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad path_mtu"))?,
-        );
-        pos += 2;
+        let (target_coords, consumed) = decode_coords(reader.rest())?;
+        reader.advance(consumed);
 
-        let (target_coords, consumed) = decode_coords(&payload[pos..])?;
-        pos += consumed;
-
-        if payload.len() < pos + 64 {
-            return Err(Error::MessageTooShort {
-                expected: pos + 64,
-                got: payload.len(),
-            });
-        }
-        let proof = Signature::from_slice(&payload[pos..pos + 64])
+        let proof = Signature::from_slice(reader.read_bytes(64)?)
             .map_err(|_| Error::Malformed("bad proof signature"))?;
 
         Ok(Self {

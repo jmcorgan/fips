@@ -2,6 +2,7 @@
 
 use super::BloomFilter;
 use crate::proto::Error;
+use crate::proto::codec::{Reader, Writer};
 use crate::proto::link::LinkMessageType;
 
 /// Bloom filter announcement for reachability propagation.
@@ -86,50 +87,37 @@ impl FilterAnnounce {
 
         let filter_bytes = self.filter.as_bytes();
         let size = 1 + Self::MIN_PAYLOAD_SIZE + filter_bytes.len();
-        let mut buf = Vec::with_capacity(size);
+        let mut w = Writer::with_capacity(size);
 
         // msg_type
-        buf.push(LinkMessageType::FilterAnnounce.to_byte());
+        w.write_u8(LinkMessageType::FilterAnnounce.to_byte());
         // sequence (8 LE)
-        buf.extend_from_slice(&self.sequence.to_le_bytes());
+        w.write_u64_le(self.sequence);
         // hash_count
-        buf.push(self.hash_count);
+        w.write_u8(self.hash_count);
         // size_class
-        buf.push(self.size_class);
+        w.write_u8(self.size_class);
         // filter_bits
-        buf.extend_from_slice(filter_bytes);
+        w.write_bytes(filter_bytes);
 
-        Ok(buf)
+        Ok(w.into_vec())
     }
 
     /// Decode from link-layer payload (after msg_type byte stripped by dispatcher).
     ///
     /// The payload starts with the sequence field.
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.len() < Self::MIN_PAYLOAD_SIZE {
-            return Err(Error::MessageTooShort {
-                expected: Self::MIN_PAYLOAD_SIZE,
-                got: payload.len(),
-            });
-        }
-
-        let mut pos = 0;
+        let mut reader = Reader::new(payload);
+        reader.require(Self::MIN_PAYLOAD_SIZE)?;
 
         // sequence (8 LE)
-        let sequence = u64::from_le_bytes(
-            payload[pos..pos + 8]
-                .try_into()
-                .map_err(|_| Error::Malformed("bad sequence"))?,
-        );
-        pos += 8;
+        let sequence = reader.read_u64_le()?;
 
         // hash_count
-        let hash_count = payload[pos];
-        pos += 1;
+        let hash_count = reader.read_u8()?;
 
         // size_class
-        let size_class = payload[pos];
-        pos += 1;
+        let size_class = reader.read_u8()?;
 
         // Validate size_class range
         if size_class > Self::MAX_SIZE_CLASS {
@@ -147,9 +135,11 @@ impl FilterAnnounce {
             });
         }
 
-        // Expected filter size from size_class
+        // Expected filter size from size_class. The remaining length must match
+        // exactly (an over-long payload is rejected too), so this stays an
+        // explicit `!=` check rather than a `Reader::require` lower-bound gate.
         let expected_filter_bytes = 512usize << size_class;
-        let remaining = payload.len() - pos;
+        let remaining = reader.remaining();
         if remaining != expected_filter_bytes {
             return Err(Error::MessageTooShort {
                 expected: Self::MIN_PAYLOAD_SIZE + expected_filter_bytes,
@@ -158,8 +148,7 @@ impl FilterAnnounce {
         }
 
         // Construct BloomFilter from bytes
-        let filter =
-            BloomFilter::from_slice(&payload[pos..], hash_count).map_err(Error::BadBloom)?;
+        let filter = BloomFilter::from_slice(reader.rest(), hash_count).map_err(Error::BadBloom)?;
 
         let announce = Self {
             filter,

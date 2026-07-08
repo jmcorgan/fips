@@ -7,6 +7,7 @@
 //! between the two layers. Wire format follows the MMP design doc.
 
 use crate::proto::Error;
+use crate::proto::codec::{Reader, Writer};
 
 // ============================================================================
 // SenderReport (msg_type 0x01, 48-byte body including type byte)
@@ -82,39 +83,35 @@ pub struct ReceiverReport {
 impl SenderReport {
     /// Encode to wire format (48 bytes: msg_type + 3 reserved + 44 payload).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(48);
-        buf.push(0x01); // msg_type
-        buf.extend_from_slice(&[0u8; 3]); // reserved
-        buf.extend_from_slice(&self.interval_start_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_start_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.interval_bytes_sent.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_packets_sent.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_bytes_sent.to_le_bytes());
-        buf
+        let mut w = Writer::with_capacity(48);
+        w.write_u8(0x01); // msg_type
+        w.write_bytes(&[0u8; 3]); // reserved
+        w.write_u64_le(self.interval_start_counter);
+        w.write_u64_le(self.interval_end_counter);
+        w.write_u32_le(self.interval_start_timestamp);
+        w.write_u32_le(self.interval_end_timestamp);
+        w.write_u32_le(self.interval_bytes_sent);
+        w.write_u64_le(self.cumulative_packets_sent);
+        w.write_u64_le(self.cumulative_bytes_sent);
+        w.into_vec()
     }
 
     /// Decode from payload after msg_type byte has been consumed.
     ///
     /// `payload` starts at the reserved bytes (offset 1 in the wire format).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.len() < 47 {
-            return Err(Error::MessageTooShort {
-                expected: 47,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(47)?;
         // Skip 3 reserved bytes
-        let p = &payload[3..];
+        reader.advance(3);
         Ok(Self {
-            interval_start_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            interval_end_counter: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            interval_start_timestamp: u32::from_le_bytes(p[16..20].try_into().unwrap()),
-            interval_end_timestamp: u32::from_le_bytes(p[20..24].try_into().unwrap()),
-            interval_bytes_sent: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            cumulative_packets_sent: u64::from_le_bytes(p[28..36].try_into().unwrap()),
-            cumulative_bytes_sent: u64::from_le_bytes(p[36..44].try_into().unwrap()),
+            interval_start_counter: reader.read_u64_le()?,
+            interval_end_counter: reader.read_u64_le()?,
+            interval_start_timestamp: reader.read_u32_le()?,
+            interval_end_timestamp: reader.read_u32_le()?,
+            interval_bytes_sent: reader.read_u32_le()?,
+            cumulative_packets_sent: reader.read_u64_le()?,
+            cumulative_bytes_sent: reader.read_u64_le()?,
         })
     }
 }
@@ -122,55 +119,54 @@ impl SenderReport {
 impl ReceiverReport {
     /// Encode to wire format (68 bytes: msg_type + 3 reserved + 64 payload).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(68);
-        buf.push(0x02); // msg_type
-        buf.extend_from_slice(&[0u8; 3]); // reserved
-        buf.extend_from_slice(&self.highest_counter.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_packets_recv.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_bytes_recv.to_le_bytes());
-        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
-        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
-        buf.extend_from_slice(&self.max_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&self.mean_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-        buf.extend_from_slice(&self.jitter.to_le_bytes());
-        buf.extend_from_slice(&self.ecn_ce_count.to_le_bytes());
-        buf.extend_from_slice(&self.owd_trend.to_le_bytes());
-        buf.extend_from_slice(&self.burst_loss_count.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_reorder_count.to_le_bytes());
-        buf.extend_from_slice(&self.interval_packets_recv.to_le_bytes());
-        buf.extend_from_slice(&self.interval_bytes_recv.to_le_bytes());
-        buf
+        let mut w = Writer::with_capacity(68);
+        w.write_u8(0x02); // msg_type
+        w.write_bytes(&[0u8; 3]); // reserved
+        w.write_u64_le(self.highest_counter);
+        w.write_u64_le(self.cumulative_packets_recv);
+        w.write_u64_le(self.cumulative_bytes_recv);
+        w.write_u32_le(self.timestamp_echo);
+        w.write_u16_le(self.dwell_time);
+        w.write_u16_le(self.max_burst_loss);
+        w.write_u16_le(self.mean_burst_loss);
+        w.write_bytes(&[0u8; 2]); // reserved
+        w.write_u32_le(self.jitter);
+        w.write_u32_le(self.ecn_ce_count);
+        w.write_bytes(&self.owd_trend.to_le_bytes());
+        w.write_u32_le(self.burst_loss_count);
+        w.write_u32_le(self.cumulative_reorder_count);
+        w.write_u32_le(self.interval_packets_recv);
+        w.write_u32_le(self.interval_bytes_recv);
+        w.into_vec()
     }
 
     /// Decode from payload after msg_type byte has been consumed.
     ///
     /// `payload` starts at the reserved bytes (offset 1 in the wire format).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.len() < 67 {
-            return Err(Error::MessageTooShort {
-                expected: 67,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(67)?;
         // Skip 3 reserved bytes
-        let p = &payload[3..];
+        reader.advance(3);
         Ok(Self {
-            highest_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            cumulative_packets_recv: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            cumulative_bytes_recv: u64::from_le_bytes(p[16..24].try_into().unwrap()),
-            timestamp_echo: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            dwell_time: u16::from_le_bytes(p[28..30].try_into().unwrap()),
-            max_burst_loss: u16::from_le_bytes(p[30..32].try_into().unwrap()),
-            mean_burst_loss: u16::from_le_bytes(p[32..34].try_into().unwrap()),
+            highest_counter: reader.read_u64_le()?,
+            cumulative_packets_recv: reader.read_u64_le()?,
+            cumulative_bytes_recv: reader.read_u64_le()?,
+            timestamp_echo: reader.read_u32_le()?,
+            dwell_time: reader.read_u16_le()?,
+            max_burst_loss: reader.read_u16_le()?,
+            mean_burst_loss: reader.read_u16_le()?,
             // skip 2 reserved bytes at p[34..36]
-            jitter: u32::from_le_bytes(p[36..40].try_into().unwrap()),
-            ecn_ce_count: u32::from_le_bytes(p[40..44].try_into().unwrap()),
-            owd_trend: i32::from_le_bytes(p[44..48].try_into().unwrap()),
-            burst_loss_count: u32::from_le_bytes(p[48..52].try_into().unwrap()),
-            cumulative_reorder_count: u32::from_le_bytes(p[52..56].try_into().unwrap()),
-            interval_packets_recv: u32::from_le_bytes(p[56..60].try_into().unwrap()),
-            interval_bytes_recv: u32::from_le_bytes(p[60..64].try_into().unwrap()),
+            jitter: {
+                reader.advance(2);
+                reader.read_u32_le()?
+            },
+            ecn_ce_count: reader.read_u32_le()?,
+            owd_trend: i32::from_le_bytes(reader.read_array::<4>()?),
+            burst_loss_count: reader.read_u32_le()?,
+            cumulative_reorder_count: reader.read_u32_le()?,
+            interval_packets_recv: reader.read_u32_le()?,
+            interval_bytes_recv: reader.read_u32_le()?,
         })
     }
 }
@@ -214,36 +210,32 @@ pub const SESSION_SENDER_REPORT_SIZE: usize = 46;
 impl SessionSenderReport {
     /// Encode to wire format (46 bytes body).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(SESSION_SENDER_REPORT_SIZE);
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-        buf.extend_from_slice(&self.interval_start_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_counter.to_le_bytes());
-        buf.extend_from_slice(&self.interval_start_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.interval_end_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.interval_bytes_sent.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_packets_sent.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_bytes_sent.to_le_bytes());
-        buf
+        let mut w = Writer::with_capacity(SESSION_SENDER_REPORT_SIZE);
+        w.write_bytes(&[0u8; 2]); // reserved
+        w.write_u64_le(self.interval_start_counter);
+        w.write_u64_le(self.interval_end_counter);
+        w.write_u32_le(self.interval_start_timestamp);
+        w.write_u32_le(self.interval_end_timestamp);
+        w.write_u32_le(self.interval_bytes_sent);
+        w.write_u64_le(self.cumulative_packets_sent);
+        w.write_u64_le(self.cumulative_bytes_sent);
+        w.into_vec()
     }
 
     /// Decode from body (after FSP inner header has been stripped).
     pub fn decode(body: &[u8]) -> Result<Self, Error> {
-        if body.len() < SESSION_SENDER_REPORT_SIZE {
-            return Err(Error::MessageTooShort {
-                expected: SESSION_SENDER_REPORT_SIZE,
-                got: body.len(),
-            });
-        }
+        let mut reader = Reader::new(body);
+        reader.require(SESSION_SENDER_REPORT_SIZE)?;
         // Skip 2 reserved bytes
-        let p = &body[2..];
+        reader.advance(2);
         Ok(Self {
-            interval_start_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            interval_end_counter: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            interval_start_timestamp: u32::from_le_bytes(p[16..20].try_into().unwrap()),
-            interval_end_timestamp: u32::from_le_bytes(p[20..24].try_into().unwrap()),
-            interval_bytes_sent: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            cumulative_packets_sent: u64::from_le_bytes(p[28..36].try_into().unwrap()),
-            cumulative_bytes_sent: u64::from_le_bytes(p[36..44].try_into().unwrap()),
+            interval_start_counter: reader.read_u64_le()?,
+            interval_end_counter: reader.read_u64_le()?,
+            interval_start_timestamp: reader.read_u32_le()?,
+            interval_end_timestamp: reader.read_u32_le()?,
+            interval_bytes_sent: reader.read_u32_le()?,
+            cumulative_packets_sent: reader.read_u64_le()?,
+            cumulative_bytes_sent: reader.read_u64_le()?,
         })
     }
 }
@@ -297,52 +289,51 @@ pub const SESSION_RECEIVER_REPORT_SIZE: usize = 66;
 impl SessionReceiverReport {
     /// Encode to wire format (66 bytes body).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(SESSION_RECEIVER_REPORT_SIZE);
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-        buf.extend_from_slice(&self.highest_counter.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_packets_recv.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_bytes_recv.to_le_bytes());
-        buf.extend_from_slice(&self.timestamp_echo.to_le_bytes());
-        buf.extend_from_slice(&self.dwell_time.to_le_bytes());
-        buf.extend_from_slice(&self.max_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&self.mean_burst_loss.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-        buf.extend_from_slice(&self.jitter.to_le_bytes());
-        buf.extend_from_slice(&self.ecn_ce_count.to_le_bytes());
-        buf.extend_from_slice(&self.owd_trend.to_le_bytes());
-        buf.extend_from_slice(&self.burst_loss_count.to_le_bytes());
-        buf.extend_from_slice(&self.cumulative_reorder_count.to_le_bytes());
-        buf.extend_from_slice(&self.interval_packets_recv.to_le_bytes());
-        buf.extend_from_slice(&self.interval_bytes_recv.to_le_bytes());
-        buf
+        let mut w = Writer::with_capacity(SESSION_RECEIVER_REPORT_SIZE);
+        w.write_bytes(&[0u8; 2]); // reserved
+        w.write_u64_le(self.highest_counter);
+        w.write_u64_le(self.cumulative_packets_recv);
+        w.write_u64_le(self.cumulative_bytes_recv);
+        w.write_u32_le(self.timestamp_echo);
+        w.write_u16_le(self.dwell_time);
+        w.write_u16_le(self.max_burst_loss);
+        w.write_u16_le(self.mean_burst_loss);
+        w.write_bytes(&[0u8; 2]); // reserved
+        w.write_u32_le(self.jitter);
+        w.write_u32_le(self.ecn_ce_count);
+        w.write_bytes(&self.owd_trend.to_le_bytes());
+        w.write_u32_le(self.burst_loss_count);
+        w.write_u32_le(self.cumulative_reorder_count);
+        w.write_u32_le(self.interval_packets_recv);
+        w.write_u32_le(self.interval_bytes_recv);
+        w.into_vec()
     }
 
     /// Decode from body (after FSP inner header has been stripped).
     pub fn decode(body: &[u8]) -> Result<Self, Error> {
-        if body.len() < SESSION_RECEIVER_REPORT_SIZE {
-            return Err(Error::MessageTooShort {
-                expected: SESSION_RECEIVER_REPORT_SIZE,
-                got: body.len(),
-            });
-        }
+        let mut reader = Reader::new(body);
+        reader.require(SESSION_RECEIVER_REPORT_SIZE)?;
         // Skip 2 reserved bytes
-        let p = &body[2..];
+        reader.advance(2);
         Ok(Self {
-            highest_counter: u64::from_le_bytes(p[0..8].try_into().unwrap()),
-            cumulative_packets_recv: u64::from_le_bytes(p[8..16].try_into().unwrap()),
-            cumulative_bytes_recv: u64::from_le_bytes(p[16..24].try_into().unwrap()),
-            timestamp_echo: u32::from_le_bytes(p[24..28].try_into().unwrap()),
-            dwell_time: u16::from_le_bytes(p[28..30].try_into().unwrap()),
-            max_burst_loss: u16::from_le_bytes(p[30..32].try_into().unwrap()),
-            mean_burst_loss: u16::from_le_bytes(p[32..34].try_into().unwrap()),
+            highest_counter: reader.read_u64_le()?,
+            cumulative_packets_recv: reader.read_u64_le()?,
+            cumulative_bytes_recv: reader.read_u64_le()?,
+            timestamp_echo: reader.read_u32_le()?,
+            dwell_time: reader.read_u16_le()?,
+            max_burst_loss: reader.read_u16_le()?,
+            mean_burst_loss: reader.read_u16_le()?,
             // skip 2 reserved bytes at p[34..36]
-            jitter: u32::from_le_bytes(p[36..40].try_into().unwrap()),
-            ecn_ce_count: u32::from_le_bytes(p[40..44].try_into().unwrap()),
-            owd_trend: i32::from_le_bytes(p[44..48].try_into().unwrap()),
-            burst_loss_count: u32::from_le_bytes(p[48..52].try_into().unwrap()),
-            cumulative_reorder_count: u32::from_le_bytes(p[52..56].try_into().unwrap()),
-            interval_packets_recv: u32::from_le_bytes(p[56..60].try_into().unwrap()),
-            interval_bytes_recv: u32::from_le_bytes(p[60..64].try_into().unwrap()),
+            jitter: {
+                reader.advance(2);
+                reader.read_u32_le()?
+            },
+            ecn_ce_count: reader.read_u32_le()?,
+            owd_trend: i32::from_le_bytes(reader.read_array::<4>()?),
+            burst_loss_count: reader.read_u32_le()?,
+            cumulative_reorder_count: reader.read_u32_le()?,
+            interval_packets_recv: reader.read_u32_le()?,
+            interval_bytes_recv: reader.read_u32_le()?,
         })
     }
 }
@@ -380,14 +371,10 @@ impl PathMtuNotification {
 
     /// Decode from body (after FSP inner header has been stripped).
     pub fn decode(body: &[u8]) -> Result<Self, Error> {
-        if body.len() < PATH_MTU_NOTIFICATION_SIZE {
-            return Err(Error::MessageTooShort {
-                expected: PATH_MTU_NOTIFICATION_SIZE,
-                got: body.len(),
-            });
-        }
+        let mut reader = Reader::new(body);
+        reader.require(PATH_MTU_NOTIFICATION_SIZE)?;
         Ok(Self {
-            path_mtu: u16::from_le_bytes([body[0], body[1]]),
+            path_mtu: reader.read_u16_le()?,
         })
     }
 }
