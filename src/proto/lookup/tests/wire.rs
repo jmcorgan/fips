@@ -1,7 +1,7 @@
-//! Tests for the discovery wire codec (`LookupRequest` / `LookupResponse`).
+//! Tests for the lookup wire codec (`LookupRequest` / `LookupResponse`).
 
 use super::util::{make_coords, signed_response};
-use crate::proto::discovery::{LookupRequest, LookupResponse};
+use crate::proto::lookup::{LookupRequest, LookupResponse};
 use crate::testutil::make_node_addr;
 
 #[test]

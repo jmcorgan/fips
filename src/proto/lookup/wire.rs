@@ -1,4 +1,4 @@
-//! Discovery messages: LookupRequest and LookupResponse.
+//! Mesh lookup messages: LookupRequest and LookupResponse.
 
 use crate::NodeAddr;
 use crate::proto::Error;
@@ -7,7 +7,7 @@ use crate::proto::stp::TreeCoordinate;
 use crate::proto::stp::{decode_coords, encode_coords};
 use secp256k1::schnorr::Signature;
 
-/// Request to discover a node's coordinates.
+/// Request to look up a node's coordinates.
 ///
 /// Routed through the spanning tree via bloom-filter-guided forwarding.
 /// Each transit node forwards only to tree peers whose bloom filter

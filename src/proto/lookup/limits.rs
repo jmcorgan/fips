@@ -1,15 +1,15 @@
-//! Discovery protocol rate limiting and backoff.
+//! Mesh lookup protocol rate limiting and backoff.
 //!
 //! Two complementary mechanisms:
 //!
-//! - **`DiscoveryBackoff`** (originator-side, optional): Exponential
+//! - **`LookupBackoff`** (originator-side, optional): Exponential
 //!   suppression of fresh lookups after the per-attempt sequence in
 //!   `node.discovery.attempt_timeouts_secs` has been exhausted.
 //!   **Disabled by default** (base/cap = 0); the per-attempt sequence
 //!   is the only retry pacing in the standard configuration. Reset on
 //!   topology changes (parent change, new peer, first RTT, reconnection).
 //!
-//! - **`DiscoveryForwardRateLimiter`** (transit-side): Per-target minimum
+//! - **`LookupForwardRateLimiter`** (transit-side): Per-target minimum
 //!   interval for forwarded requests. Defense-in-depth against misbehaving
 //!   nodes generating fresh request_ids at high rate.
 
@@ -23,10 +23,10 @@ use alloc::collections::BTreeMap;
 
 /// Maximum number of recent LookupRequests retained for dedup and
 /// reverse-path routing before the cache is treated as full.
-pub(crate) const MAX_RECENT_DISCOVERY_REQUESTS: usize = 4096;
+pub(crate) const MAX_RECENT_LOOKUP_REQUESTS: usize = 4096;
 
 // ============================================================================
-// Originator-side: Discovery Backoff
+// Originator-side: Lookup Backoff
 // ============================================================================
 
 /// Default base backoff after first lookup failure. `0` = disabled.
@@ -35,11 +35,11 @@ const DEFAULT_BACKOFF_BASE_SECS: u64 = 0;
 /// Default maximum backoff cap. `0` = disabled.
 const DEFAULT_BACKOFF_MAX_SECS: u64 = 0;
 
-/// Exponential backoff for failed discovery lookups.
+/// Exponential backoff for failed lookups.
 ///
 /// Tracks targets whose lookups have timed out and suppresses
 /// re-initiation with increasing delays. Cleared on topology changes.
-pub struct DiscoveryBackoff {
+pub struct LookupBackoff {
     /// Maps target → (suppress_until, consecutive_failures).
     pub(crate) entries: BTreeMap<NodeAddr, BackoffEntry>,
     /// Base backoff in milliseconds (first failure).
@@ -55,7 +55,7 @@ pub(crate) struct BackoffEntry {
     failures: u32,
 }
 
-impl DiscoveryBackoff {
+impl LookupBackoff {
     /// Create with default parameters (disabled — base/cap = 0).
     pub fn new() -> Self {
         Self::with_params(DEFAULT_BACKOFF_BASE_SECS, DEFAULT_BACKOFF_MAX_SECS)
@@ -138,14 +138,14 @@ impl DiscoveryBackoff {
     }
 }
 
-impl Default for DiscoveryBackoff {
+impl Default for LookupBackoff {
     fn default() -> Self {
         Self::new()
     }
 }
 
 // ============================================================================
-// Transit-side: Discovery Forward Rate Limiter
+// Transit-side: Lookup Forward Rate Limiter
 // ============================================================================
 
 /// Default minimum interval between forwarded lookups for the same target.
@@ -154,14 +154,14 @@ const DEFAULT_FORWARD_MIN_INTERVAL_MS: u64 = 2_000;
 /// Maximum age of entries before cleanup.
 const FORWARD_MAX_AGE_MS: u64 = 60_000;
 
-/// Rate limiter for forwarded discovery requests.
+/// Rate limiter for forwarded lookup requests.
 ///
 /// Tracks the last time a LookupRequest was forwarded for each target
 /// and enforces a minimum interval to prevent floods from misbehaving
 /// nodes generating fresh request_ids.
-pub struct DiscoveryForwardRateLimiter(PerAddrRateLimiter);
+pub struct LookupForwardRateLimiter(PerAddrRateLimiter);
 
-impl DiscoveryForwardRateLimiter {
+impl LookupForwardRateLimiter {
     /// Create with default parameters (2s interval).
     pub fn new() -> Self {
         Self(PerAddrRateLimiter::new(
@@ -201,7 +201,7 @@ impl DiscoveryForwardRateLimiter {
     }
 }
 
-impl Default for DiscoveryForwardRateLimiter {
+impl Default for LookupForwardRateLimiter {
     fn default() -> Self {
         Self::new()
     }

@@ -1,11 +1,10 @@
-//! Tests for the sans-IO discovery decision core.
+//! Tests for the sans-IO lookup decision core.
 
 use super::util::{
-    MockRoutingView, action_peers, empty_discovery, make_request, make_request_id,
-    suppressing_discovery,
+    MockRoutingView, action_peers, empty_lookup, make_request, make_request_id, suppressing_lookup,
 };
 use crate::TreeCoordinate;
-use crate::proto::discovery::*;
+use crate::proto::lookup::*;
 use crate::testutil::make_node_addr;
 
 #[test]
@@ -125,10 +124,12 @@ fn initiate_returns_empty_when_nothing_reaches_target() {
 
 #[test]
 fn response_route_uses_recorded_reverse_path() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(9);
-    disc.recent_requests.insert(42, RecentRequest::new(from, 0));
-    match plan_response_route(&disc, 42) {
+    lookup
+        .recent_requests
+        .insert(42, RecentRequest::new(from, 0));
+    match plan_response_route(&lookup, 42) {
         ResponseRouteDecision::ReversePath(peer) => assert_eq!(peer, from),
         ResponseRouteDecision::NeedsTreeRoute => panic!("expected ReversePath"),
     }
@@ -136,9 +137,9 @@ fn response_route_uses_recorded_reverse_path() {
 
 #[test]
 fn response_route_needs_tree_route_when_no_record() {
-    let disc = empty_discovery();
+    let lookup = empty_lookup();
     assert!(matches!(
-        plan_response_route(&disc, 42),
+        plan_response_route(&lookup, 42),
         ResponseRouteDecision::NeedsTreeRoute
     ));
 }
@@ -146,40 +147,42 @@ fn response_route_needs_tree_route_when_no_record() {
 #[test]
 fn classify_response_transit_on_fresh_forwarded_request() {
     let from_peer = make_node_addr(0x11);
-    let mut disc = empty_discovery();
-    disc.recent_requests
+    let mut lookup = empty_lookup();
+    lookup
+        .recent_requests
         .insert(42, RecentRequest::new(from_peer, 1000));
 
-    match classify_response(&mut disc, 42) {
+    match classify_response(&mut lookup, 42) {
         ResponseRoute::Transit { from_peer: peer } => assert_eq!(peer, from_peer),
         _ => panic!("expected Transit"),
     }
     // The dedup flag must flip after the first transit.
-    assert!(disc.recent_requests.get(&42).unwrap().response_forwarded);
+    assert!(lookup.recent_requests.get(&42).unwrap().response_forwarded);
 }
 
 #[test]
 fn classify_response_already_forwarded_on_second_call() {
     let from_peer = make_node_addr(0x22);
-    let mut disc = empty_discovery();
-    disc.recent_requests
+    let mut lookup = empty_lookup();
+    lookup
+        .recent_requests
         .insert(7, RecentRequest::new(from_peer, 1000));
 
     assert!(matches!(
-        classify_response(&mut disc, 7),
+        classify_response(&mut lookup, 7),
         ResponseRoute::Transit { .. }
     ));
     assert!(matches!(
-        classify_response(&mut disc, 7),
+        classify_response(&mut lookup, 7),
         ResponseRoute::AlreadyForwarded
     ));
 }
 
 #[test]
 fn classify_response_originator_when_request_absent() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     assert!(matches!(
-        classify_response(&mut disc, 999),
+        classify_response(&mut lookup, 999),
         ResponseRoute::Originator
     ));
 }
@@ -187,34 +190,35 @@ fn classify_response_originator_when_request_absent() {
 #[test]
 fn on_response_accepted_clears_state_and_emits_effects() {
     let target = make_node_addr(0x5A);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
 
     // Seed a backoff entry and a pending lookup for the target.
-    disc.backoff.record_failure(&target, 1000);
-    assert!(!disc.backoff.is_empty(), "precondition: backoff seeded");
-    disc.pending_lookups
+    lookup.backoff.record_failure(&target, 1000);
+    assert!(!lookup.backoff.is_empty(), "precondition: backoff seeded");
+    lookup
+        .pending_lookups
         .insert(target, PendingLookup::new(1000));
-    assert!(disc.pending_lookups.contains_key(&target));
+    assert!(lookup.pending_lookups.contains_key(&target));
 
     let coords = TreeCoordinate::root(target);
     let now_ms = 12_345u64;
     let path_mtu = 1400u16;
-    let actions = on_response_accepted(&mut disc, &target, coords, now_ms, path_mtu);
+    let actions = on_response_accepted(&mut lookup, &target, coords, now_ms, path_mtu);
 
     // Success state must be cleared.
     assert!(
-        disc.backoff.is_empty(),
+        lookup.backoff.is_empty(),
         "backoff entry must clear on success"
     );
     assert!(
-        !disc.pending_lookups.contains_key(&target),
+        !lookup.pending_lookups.contains_key(&target),
         "pending lookup must be dropped"
     );
 
     // Exactly the four effect actions, in order.
     assert_eq!(actions.len(), 4, "expected four effect actions");
     match &actions[0] {
-        DiscoveryAction::CacheCoords {
+        LookupAction::CacheCoords {
             target: t,
             now_ms: n,
             path_mtu: p,
@@ -227,7 +231,7 @@ fn on_response_accepted_clears_state_and_emits_effects() {
         _ => panic!("action[0] must be CacheCoords"),
     }
     match &actions[1] {
-        DiscoveryAction::WritePathMtu {
+        LookupAction::WritePathMtu {
             target: t,
             path_mtu: p,
         } => {
@@ -237,11 +241,11 @@ fn on_response_accepted_clears_state_and_emits_effects() {
         _ => panic!("action[1] must be WritePathMtu"),
     }
     match &actions[2] {
-        DiscoveryAction::ResetWarmupIfEstablished { target: t } => assert_eq!(*t, target),
+        LookupAction::ResetWarmupIfEstablished { target: t } => assert_eq!(*t, target),
         _ => panic!("action[2] must be ResetWarmupIfEstablished"),
     }
     match &actions[3] {
-        DiscoveryAction::RetryQueuedPackets { target: t } => assert_eq!(*t, target),
+        LookupAction::RetryQueuedPackets { target: t } => assert_eq!(*t, target),
         _ => panic!("action[3] must be RetryQueuedPackets"),
     }
 }
@@ -249,17 +253,19 @@ fn on_response_accepted_clears_state_and_emits_effects() {
 #[test]
 fn poll_pending_no_action_before_first_deadline() {
     let target = make_node_addr(0x30);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let t0 = 10_000u64;
-    disc.pending_lookups.insert(target, PendingLookup::new(t0));
+    lookup
+        .pending_lookups
+        .insert(target, PendingLookup::new(t0));
 
     // Just before the attempt-1 deadline (1s): nothing fires.
-    let outcome = poll_pending(&mut disc, t0 + 999, &[1, 2, 4, 8]);
+    let outcome = poll_pending(&mut lookup, t0 + 999, &[1, 2, 4, 8]);
     assert!(outcome.retries.is_empty(), "no retry before deadline");
     assert!(outcome.timeouts.is_empty(), "no timeout before deadline");
 
     // Entry unchanged.
-    let entry = disc.pending_lookups.get(&target).unwrap();
+    let entry = lookup.pending_lookups.get(&target).unwrap();
     assert_eq!(entry.attempt, 1);
     assert_eq!(entry.last_sent_ms, t0);
 }
@@ -267,17 +273,19 @@ fn poll_pending_no_action_before_first_deadline() {
 #[test]
 fn poll_pending_retries_at_first_deadline() {
     let target = make_node_addr(0x31);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let t0 = 10_000u64;
-    disc.pending_lookups.insert(target, PendingLookup::new(t0));
+    lookup
+        .pending_lookups
+        .insert(target, PendingLookup::new(t0));
 
     // At the attempt-1 deadline (t0 + 1000): one retry to attempt 2.
-    let outcome = poll_pending(&mut disc, t0 + 1000, &[1, 2, 4, 8]);
+    let outcome = poll_pending(&mut lookup, t0 + 1000, &[1, 2, 4, 8]);
     assert_eq!(outcome.retries, vec![(target, 2)]);
     assert!(outcome.timeouts.is_empty());
 
     // Entry mutated: attempt bumped, last_sent refreshed.
-    let entry = disc.pending_lookups.get(&target).unwrap();
+    let entry = lookup.pending_lookups.get(&target).unwrap();
     assert_eq!(entry.attempt, 2);
     assert_eq!(entry.last_sent_ms, t0 + 1000);
 }
@@ -285,17 +293,17 @@ fn poll_pending_retries_at_first_deadline() {
 #[test]
 fn poll_pending_final_timeout_at_max_attempt() {
     let target = make_node_addr(0x32);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
 
     // Drive the entry to attempt == max (4) with a known last_sent.
     let tn = 50_000u64;
     let mut entry = PendingLookup::new(tn);
     entry.attempt = 4;
     entry.last_sent_ms = tn;
-    disc.pending_lookups.insert(target, entry);
+    lookup.pending_lookups.insert(target, entry);
 
     // attempt_timeouts_secs[3] == 8 → deadline at tn + 8000.
-    let outcome = poll_pending(&mut disc, tn + 8000, &[1, 2, 4, 8]);
+    let outcome = poll_pending(&mut lookup, tn + 8000, &[1, 2, 4, 8]);
     assert!(outcome.retries.is_empty(), "max attempt cannot retry");
     assert_eq!(
         outcome.timeouts,
@@ -305,89 +313,98 @@ fn poll_pending_final_timeout_at_max_attempt() {
 
     // Entry removed and a backoff failure recorded.
     assert!(
-        !disc.pending_lookups.contains_key(&target),
+        !lookup.pending_lookups.contains_key(&target),
         "timed-out entry must be removed"
     );
-    assert_eq!(disc.backoff.failure_count(&target), 1);
+    assert_eq!(lookup.backoff.failure_count(&target), 1);
 }
 
 // --- classify_request tests ---
 
 #[test]
 fn classify_request_forwards_fresh_and_records_it() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
     let request = make_request_id(1, target, 3);
 
-    let outcome = classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, 4096);
+    let outcome = classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096);
     assert!(matches!(outcome, RequestOutcome::Forward));
     // Recorded for reverse-path forwarding.
-    assert!(disc.recent_requests.contains_key(&1));
-    assert_eq!(disc.recent_requests.get(&1).unwrap().from_peer, from);
+    assert!(lookup.recent_requests.contains_key(&1));
+    assert_eq!(lookup.recent_requests.get(&1).unwrap().from_peer, from);
 }
 
 #[test]
 fn classify_request_duplicate_on_second_call() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
     let request = make_request_id(1, target, 3);
 
     assert!(matches!(
-        classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
         RequestOutcome::Forward
     ));
     assert!(matches!(
-        classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
         RequestOutcome::Duplicate
     ));
 }
 
 #[test]
 fn classify_request_dedup_cache_full() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
     // Fill the cache to max_recent with distinct request_ids.
     let max_recent = 3usize;
     for id in 100..(100 + max_recent as u64) {
-        disc.recent_requests
+        lookup
+            .recent_requests
             .insert(id, RecentRequest::new(from, 1000));
     }
-    assert_eq!(disc.recent_requests.len(), max_recent);
+    assert_eq!(lookup.recent_requests.len(), max_recent);
 
     let request = make_request_id(1, target, 3);
-    match classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, max_recent) {
+    match classify_request(
+        &mut lookup,
+        &request,
+        &from,
+        &my_addr,
+        1000,
+        5000,
+        max_recent,
+    ) {
         RequestOutcome::DedupCacheFull { len } => assert_eq!(len, max_recent),
         _ => panic!("expected DedupCacheFull"),
     }
     // The new request must not have been recorded on the drop path.
-    assert!(!disc.recent_requests.contains_key(&1));
+    assert!(!lookup.recent_requests.contains_key(&1));
 }
 
 #[test]
 fn classify_request_respond_as_target() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0xAA);
     // target == my_addr
     let request = make_request_id(1, my_addr, 3);
 
     assert!(matches!(
-        classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
         RequestOutcome::RespondAsTarget
     ));
     // Recorded before the target decision.
-    assert!(disc.recent_requests.contains_key(&1));
+    assert!(lookup.recent_requests.contains_key(&1));
 }
 
 #[test]
 fn classify_request_ttl_exhausted_for_non_target() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
@@ -395,71 +412,74 @@ fn classify_request_ttl_exhausted_for_non_target() {
     let request = make_request_id(1, target, 0);
 
     assert!(matches!(
-        classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
         RequestOutcome::TtlExhausted
     ));
 }
 
 #[test]
 fn classify_request_forward_rate_limited() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
     // Pre-seed the forward limiter so should_forward(target) returns false
     // on the next call within the (default 2s) min interval.
-    assert!(disc.forward_limiter.should_forward(&target, 1000));
+    assert!(lookup.forward_limiter.should_forward(&target, 1000));
 
     let request = make_request_id(1, target, 3);
     assert!(matches!(
-        classify_request(&mut disc, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
         RequestOutcome::ForwardRateLimited
     ));
 }
 
 #[test]
 fn classify_request_purges_expired_entries() {
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
     // Seed an entry that is expired at now_ms with the given expiry window.
     // is_expired: now - timestamp > expiry_ms → expired.
-    disc.recent_requests
+    lookup
+        .recent_requests
         .insert(55, RecentRequest::new(from, 1000));
     // now_ms = 10_000, expiry_ms = 5000 → 9000 > 5000 → expired.
     let request = make_request_id(1, target, 3);
-    let outcome = classify_request(&mut disc, &request, &from, &my_addr, 10_000, 5000, 4096);
+    let outcome = classify_request(&mut lookup, &request, &from, &my_addr, 10_000, 5000, 4096);
     assert!(matches!(outcome, RequestOutcome::Forward));
     // The expired entry (55) must have been purged.
-    assert!(!disc.recent_requests.contains_key(&55));
+    assert!(!lookup.recent_requests.contains_key(&55));
     // The fresh request is recorded.
-    assert!(disc.recent_requests.contains_key(&1));
+    assert!(lookup.recent_requests.contains_key(&1));
 }
 
 #[test]
 fn poll_pending_full_ladder_end_to_end() {
     let target = make_node_addr(0x33);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let t0 = 0u64;
-    disc.pending_lookups.insert(target, PendingLookup::new(t0));
+    lookup
+        .pending_lookups
+        .insert(target, PendingLookup::new(t0));
     let ladder = [1u64, 2, 4, 8];
 
     // attempt 1 → 2 at deadline 1s
-    let o = poll_pending(&mut disc, t0 + 1000, &ladder);
+    let o = poll_pending(&mut lookup, t0 + 1000, &ladder);
     assert_eq!(o.retries, vec![(target, 2)]);
     // attempt 2 → 3 at deadline 2s after last send
-    let o = poll_pending(&mut disc, t0 + 1000 + 2000, &ladder);
+    let o = poll_pending(&mut lookup, t0 + 1000 + 2000, &ladder);
     assert_eq!(o.retries, vec![(target, 3)]);
     // attempt 3 → 4 at deadline 4s after last send
-    let o = poll_pending(&mut disc, t0 + 1000 + 2000 + 4000, &ladder);
+    let o = poll_pending(&mut lookup, t0 + 1000 + 2000 + 4000, &ladder);
     assert_eq!(o.retries, vec![(target, 4)]);
     // attempt 4 is max → final timeout at deadline 8s after last send
     let last = t0 + 1000 + 2000 + 4000;
-    let o = poll_pending(&mut disc, last + 8000, &ladder);
+    let o = poll_pending(&mut lookup, last + 8000, &ladder);
     assert!(o.retries.is_empty());
     assert_eq!(o.timeouts, vec![(target, 1)]);
-    assert!(!disc.pending_lookups.contains_key(&target));
+    assert!(!lookup.pending_lookups.contains_key(&target));
 }
 
 // --- initiate_gate / initiate_failed tests ---
@@ -467,12 +487,12 @@ fn poll_pending_full_ladder_end_to_end() {
 #[test]
 fn initiate_gate_deduplicated_when_pending() {
     let dest = make_node_addr(0x40);
-    let mut disc = empty_discovery();
-    disc.pending_lookups.insert(dest, PendingLookup::new(500));
+    let mut lookup = empty_lookup();
+    lookup.pending_lookups.insert(dest, PendingLookup::new(500));
 
     // reachable=true would otherwise Proceed, but the pending entry wins.
     assert!(matches!(
-        initiate_gate(&mut disc, &dest, 1000, true),
+        initiate_gate(&mut lookup, &dest, 1000, true),
         InitiateDecision::Deduplicated
     ));
 }
@@ -480,48 +500,48 @@ fn initiate_gate_deduplicated_when_pending() {
 #[test]
 fn initiate_gate_suppressed_by_backoff() {
     let dest = make_node_addr(0x41);
-    let mut disc = suppressing_discovery();
+    let mut lookup = suppressing_lookup();
     // One failure arms suppression under with_params(30, 300).
-    disc.backoff.record_failure(&dest, 1000);
+    lookup.backoff.record_failure(&dest, 1000);
     assert!(
-        disc.backoff.is_suppressed(&dest, 1000),
+        lookup.backoff.is_suppressed(&dest, 1000),
         "precondition: suppressed"
     );
 
-    match initiate_gate(&mut disc, &dest, 1000, true) {
+    match initiate_gate(&mut lookup, &dest, 1000, true) {
         InitiateDecision::Suppressed { failures } => assert_eq!(failures, 1),
         _ => panic!("expected Suppressed"),
     }
     // No pending entry was inserted on the suppress path.
-    assert!(!disc.pending_lookups.contains_key(&dest));
+    assert!(!lookup.pending_lookups.contains_key(&dest));
 }
 
 #[test]
 fn initiate_gate_bloom_miss_records_failure() {
     let dest = make_node_addr(0x42);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
 
     assert!(matches!(
-        initiate_gate(&mut disc, &dest, 1000, false),
+        initiate_gate(&mut lookup, &dest, 1000, false),
         InitiateDecision::BloomMiss
     ));
     // A backoff failure was recorded, and no pending entry created.
-    assert_eq!(disc.backoff.failure_count(&dest), 1);
-    assert!(!disc.pending_lookups.contains_key(&dest));
+    assert_eq!(lookup.backoff.failure_count(&dest), 1);
+    assert!(!lookup.pending_lookups.contains_key(&dest));
 }
 
 #[test]
 fn initiate_gate_proceed_inserts_pending() {
     let dest = make_node_addr(0x43);
-    let mut disc = empty_discovery();
+    let mut lookup = empty_lookup();
     let now_ms = 7_777u64;
 
     assert!(matches!(
-        initiate_gate(&mut disc, &dest, now_ms, true),
+        initiate_gate(&mut lookup, &dest, now_ms, true),
         InitiateDecision::Proceed
     ));
     // The pending entry now exists, stamped with now_ms.
-    let entry = disc
+    let entry = lookup
         .pending_lookups
         .get(&dest)
         .expect("Proceed must insert a pending lookup");
@@ -532,13 +552,15 @@ fn initiate_gate_proceed_inserts_pending() {
 #[test]
 fn initiate_failed_drops_pending_and_records_failure() {
     let dest = make_node_addr(0x44);
-    let mut disc = empty_discovery();
-    disc.pending_lookups.insert(dest, PendingLookup::new(1000));
+    let mut lookup = empty_lookup();
+    lookup
+        .pending_lookups
+        .insert(dest, PendingLookup::new(1000));
 
-    initiate_failed(&mut disc, &dest, 1000);
+    initiate_failed(&mut lookup, &dest, 1000);
     assert!(
-        !disc.pending_lookups.contains_key(&dest),
+        !lookup.pending_lookups.contains_key(&dest),
         "pending entry must be dropped"
     );
-    assert_eq!(disc.backoff.failure_count(&dest), 1);
+    assert_eq!(lookup.backoff.failure_count(&dest), 1);
 }
