@@ -3,10 +3,13 @@
 //! The post-`update_peer` parent-switch / self-root / loop-drop / ancestry-update
 //! ladder that the async `node::tree` handler inlines is extracted here as a pure
 //! decision: [`Stp::classify_announce`] reads a consistent `TreeState` plus the
-//! shell-passed facts (`peer_costs`, `skip`, and the monotonic `now_ms` the
-//! ranking's hold-down / flap-dampening suppression checks read) and returns a
-//! [`TreeDecision`] the shell drives. No I/O, no tracing, no keys, no mutation;
-//! the injected `now_ms` is the only time input, threaded to `evaluate_parent`.
+//! shell-passed facts (`peer_costs`, `skip`, and the pre-computed `switch_suppressed`
+//! verdict of the flap-dampening / hold-down veto) and returns a [`TreeDecision`]
+//! the shell drives. No I/O, no tracing, no keys, no mutation — and no clock: the
+//! classify core is clock-free. The shell reads the monotonic clock at the edge,
+//! computes the veto verdict via `TreeState::is_switch_suppressed`, and passes the
+//! resulting bool in; `evaluate_parent` distinguishes mandatory from discretionary
+//! switches and the ladder applies the veto only to the discretionary arm.
 //!
 //! [`TreeState`] lives beside this module in `proto/stp/state.rs`.
 
@@ -76,22 +79,55 @@ pub(crate) enum TreeDecision {
     NoChange,
 }
 
+/// Outcome of `TreeState::evaluate_parent`: whether a parent switch is warranted
+/// and, if so, whether it is mandatory (bypasses the flap/hold-down veto) or
+/// discretionary (the shell applies the veto before switching).
+pub(crate) enum ParentEval {
+    /// Path-breaking / root-correcting switch — always taken, veto bypassed.
+    Mandatory(NodeAddr),
+    /// Improvement switch — taken only if the shell's veto is not active.
+    Discretionary(NodeAddr),
+    /// No switch warranted.
+    None,
+}
+
+impl ParentEval {
+    /// The switch target if one is warranted IGNORING the veto (i.e. treating a
+    /// discretionary candidate as taken). Convenience for tests/paths that do not
+    /// engage the veto. Returns `None` only for `ParentEval::None`.
+    #[cfg(test)]
+    pub(crate) fn switch_target(&self) -> Option<NodeAddr> {
+        match self {
+            ParentEval::Mandatory(a) | ParentEval::Discretionary(a) => Some(*a),
+            ParentEval::None => Option::None,
+        }
+    }
+}
+
 impl Stp {
     /// Classify an inbound, already-validated TreeAnnounce into a [`TreeDecision`].
     ///
     /// Pure: reads the post-`update_peer` `tree` plus the shell-passed `peer_costs`
-    /// (per-peer link cost) and `skip` (non-full/leaf peers excluded from parent
-    /// candidacy — empty on master, `non_full_peers()` on next). Mirrors the inline
-    /// ladder in `node::tree::handle_tree_announce`: parent-switch, else self-root,
-    /// else (same-parent) loop-drop or ancestry-update, else no change.
+    /// (per-peer link cost), `skip` (non-full/leaf peers excluded from parent
+    /// candidacy — empty on master, `non_full_peers()` on next), and the
+    /// pre-computed `switch_suppressed` veto verdict (the shell reads the clock and
+    /// calls `TreeState::is_switch_suppressed`; a discretionary switch is skipped
+    /// while it is true, a mandatory switch ignores it). Mirrors the inline ladder
+    /// in `node::tree::handle_tree_announce`: parent-switch, else self-root, else
+    /// (same-parent) loop-drop or ancestry-update, else no change.
     pub(crate) fn classify_announce(
         tree: &TreeState,
         from: NodeAddr,
         peer_costs: &BTreeMap<NodeAddr, f64>,
         skip: &BTreeSet<NodeAddr>,
-        now_ms: u64,
+        switch_suppressed: bool,
     ) -> TreeDecision {
-        if let Some(new_parent) = tree.evaluate_parent(peer_costs, skip, now_ms) {
+        let switch = match tree.evaluate_parent(peer_costs, skip) {
+            ParentEval::Mandatory(p) => Some(p),
+            ParentEval::Discretionary(p) if !switch_suppressed => Some(p),
+            ParentEval::Discretionary(_) | ParentEval::None => None,
+        };
+        if let Some(new_parent) = switch {
             let new_seq = tree.my_declaration().sequence() + 1;
             TreeDecision::Switch {
                 new_parent,
@@ -120,20 +156,27 @@ impl Stp {
 
     /// Classify a periodic parent re-evaluation into a [`TreeDecision`].
     ///
-    /// Pure: reads the current `tree` plus the shell-passed `peer_costs` and `skip`
-    /// (empty on master, `non_full_peers()` on next). Mirrors the periodic ladder in
-    /// `node::tree::check_periodic_parent_reeval`: parent-switch, else self-root,
-    /// else re-broadcast for eventual consistency. Unlike `classify_announce`, the
-    /// periodic path has no same-parent loop-drop / ancestry-update arms — a periodic
-    /// tick has no announcing peer, so those cases never arise; the no-change tail is
-    /// a re-broadcast rather than a true no-op.
+    /// Pure: reads the current `tree` plus the shell-passed `peer_costs`, `skip`
+    /// (empty on master, `non_full_peers()` on next), and the pre-computed
+    /// `switch_suppressed` veto verdict (see `classify_announce`; a discretionary
+    /// switch is skipped while true, a mandatory switch ignores it). Mirrors the
+    /// periodic ladder in `node::tree::check_periodic_parent_reeval`: parent-switch,
+    /// else self-root, else re-broadcast for eventual consistency. Unlike
+    /// `classify_announce`, the periodic path has no same-parent loop-drop /
+    /// ancestry-update arms — a periodic tick has no announcing peer, so those cases
+    /// never arise; the no-change tail is a re-broadcast rather than a true no-op.
     pub(crate) fn classify_periodic(
         tree: &TreeState,
         peer_costs: &BTreeMap<NodeAddr, f64>,
         skip: &BTreeSet<NodeAddr>,
-        now_ms: u64,
+        switch_suppressed: bool,
     ) -> TreeDecision {
-        if let Some(new_parent) = tree.evaluate_parent(peer_costs, skip, now_ms) {
+        let switch = match tree.evaluate_parent(peer_costs, skip) {
+            ParentEval::Mandatory(p) => Some(p),
+            ParentEval::Discretionary(p) if !switch_suppressed => Some(p),
+            ParentEval::Discretionary(_) | ParentEval::None => None,
+        };
+        if let Some(new_parent) = switch {
             let new_seq = tree.my_declaration().sequence() + 1;
             TreeDecision::Switch {
                 new_parent,

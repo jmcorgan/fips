@@ -3,6 +3,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt;
 
+use super::core::ParentEval;
 use super::limits::FlapDampener;
 use super::{CoordEntry, TreeCoordinate};
 use crate::NodeAddr;
@@ -316,28 +317,38 @@ impl TreeState {
         self.flap.is_flap_dampened(now_ms)
     }
 
+    /// Whether a *discretionary* parent switch should currently be suppressed by the
+    /// flap-dampening / hold-down veto. `now_ms` is the injected monotonic time.
+    /// Mandatory switches ignore this. Read at the shell edge; the classify core is
+    /// clock-free and takes the resulting bool.
+    pub fn is_switch_suppressed(&self, now_ms: u64) -> bool {
+        self.flap.is_hold_down_active(now_ms) || self.flap.is_flap_dampened(now_ms)
+    }
+
     /// Evaluate whether to switch parents based on current peer tree state.
     ///
     /// Uses effective_depth (depth + link_cost) for parent comparison.
     /// `peer_costs` maps each peer's NodeAddr to its link cost (from local
     /// MMP measurements). Missing entries default to 1.0 (optimistic).
     ///
-    /// Returns `Some(peer_node_addr)` if a parent switch is recommended,
-    /// or `None` if the current parent is adequate.
+    /// Returns a [`ParentEval`] describing whether a parent switch is warranted:
+    /// `Mandatory` (path-breaking / root-correcting — always taken), `Discretionary`
+    /// (an improvement the caller applies only if its veto is inactive), or `None`.
+    ///
+    /// This core is clock-free: it no longer applies the flap-dampening / hold-down
+    /// veto. The caller reads the clock, computes the veto verdict via
+    /// [`is_switch_suppressed`](Self::is_switch_suppressed), and suppresses the
+    /// `Discretionary` arm at the edge; `Mandatory` switches bypass the veto.
     ///
     /// `skip_peers` contains peers that should not be considered as parent
     /// candidates (e.g., non-routing and leaf nodes that don't forward transit).
-    ///
-    /// `now_ms` is the injected monotonic time in milliseconds, used only for
-    /// the hold-down / flap-dampening suppression checks below.
-    pub fn evaluate_parent(
+    pub(crate) fn evaluate_parent(
         &self,
         peer_costs: &BTreeMap<NodeAddr, f64>,
         skip_peers: &BTreeSet<NodeAddr>,
-        now_ms: u64,
-    ) -> Option<NodeAddr> {
+    ) -> ParentEval {
         if self.peer_ancestry.is_empty() {
-            return None;
+            return ParentEval::None;
         }
 
         // Find the smallest root visible across all peers
@@ -356,7 +367,10 @@ impl TreeState {
             });
         }
 
-        let smallest_root = smallest_root?;
+        let smallest_root = match smallest_root {
+            Some(r) => r,
+            None => return ParentEval::None,
+        };
 
         // If our own NodeAddr is smaller than (or equal to) the smallest visible
         // root, we are the network's smallest node and must be root. Returning
@@ -366,7 +380,7 @@ impl TreeState {
         // peer's larger root at the tail — violating "advertised root = min path
         // entry" and getting rejected by recipients' `validate_semantics`.
         if self.my_node_addr <= smallest_root {
-            return None;
+            return ParentEval::None;
         }
 
         // Among peers that reach the smallest root, find the lowest effective_depth.
@@ -404,14 +418,17 @@ impl TreeState {
             }
         }
 
-        let (best_peer_id, best_eff_depth) = best_peer?;
+        let (best_peer_id, best_eff_depth) = match best_peer {
+            Some(b) => b,
+            None => return ParentEval::None,
+        };
 
         // If already using this peer as parent, no switch needed
         if *self.my_declaration.parent_id() == best_peer_id && !self.is_root() {
-            return None;
+            return ParentEval::None;
         }
 
-        // --- Mandatory switches (bypass hold-down and hysteresis) ---
+        // --- Mandatory switches (bypass the shell's hold-down / flap veto) ---
 
         // If our current parent is gone from peer_ancestry, our path is broken — always switch
         if !self.is_root()
@@ -419,32 +436,24 @@ impl TreeState {
                 .peer_ancestry
                 .contains_key(self.my_declaration.parent_id())
         {
-            return Some(best_peer_id);
+            return ParentEval::Mandatory(best_peer_id);
         }
 
         // Switching roots (smaller root found) → always switch
         if smallest_root < self.root || (self.is_root() && smallest_root < self.my_node_addr) {
-            return Some(best_peer_id);
+            return ParentEval::Mandatory(best_peer_id);
         }
 
         // We're root but shouldn't be (peers have a smaller root) — always switch
         if self.is_root() {
-            return Some(best_peer_id);
+            return ParentEval::Mandatory(best_peer_id);
         }
 
-        // --- Hold-down: suppress non-mandatory re-evaluation after recent switch ---
-
-        if self.flap.is_hold_down_active(now_ms) {
-            return None;
-        }
-
-        // --- Flap dampening: suppress after excessive parent switches ---
-
-        if self.flap.is_flap_dampened(now_ms) {
-            return None;
-        }
-
-        // --- Same root, cost-aware comparison with hysteresis ---
+        // --- Discretionary switches (the caller applies the veto before taking) ---
+        //
+        // Same root, cost-aware comparison with hysteresis. Everything below is
+        // veto-gated at the edge: the shell suppresses these `Discretionary` results
+        // while hold-down / flap-dampening is active.
 
         // Current parent's effective_depth.
         // If peer_costs is non-empty but current parent has no entry,
@@ -461,15 +470,17 @@ impl TreeState {
         let current_parent_coords = self.peer_ancestry.get(self.my_declaration.parent_id());
         let current_parent_eff = match current_parent_coords {
             Some(coords) => coords.depth() as f64 + current_parent_cost,
-            None => return Some(best_peer_id), // Parent has no coords — treat as lost
+            // Parent has no coords — treat as lost. This sat BELOW the veto, so it
+            // is veto-gated: Discretionary, not Mandatory.
+            None => return ParentEval::Discretionary(best_peer_id),
         };
 
         // Apply hysteresis: only switch if candidate is significantly better
         if best_eff_depth < current_parent_eff * (1.0 - self.parent_hysteresis) {
-            return Some(best_peer_id);
+            return ParentEval::Discretionary(best_peer_id);
         }
 
-        None
+        ParentEval::None
     }
 
     /// Handle loss of current parent.
@@ -488,8 +499,15 @@ impl TreeState {
         now_secs: u64,
         now_ms: u64,
     ) -> bool {
-        // Try to find an alternative parent
-        if let Some(new_parent) = self.evaluate_parent(peer_costs, &BTreeSet::new(), now_ms) {
+        // Try to find an alternative parent. The veto is computed at the edge and
+        // applied only to a discretionary result; a mandatory switch bypasses it.
+        let suppressed = self.is_switch_suppressed(now_ms);
+        let alt = match self.evaluate_parent(peer_costs, &BTreeSet::new()) {
+            ParentEval::Mandatory(p) => Some(p),
+            ParentEval::Discretionary(p) if !suppressed => Some(p),
+            ParentEval::Discretionary(_) | ParentEval::None => None,
+        };
+        if let Some(new_parent) = alt {
             let new_seq = self.my_declaration.sequence() + 1;
             self.set_parent(new_parent, new_seq, now_secs, now_ms);
             self.recompute_coords();

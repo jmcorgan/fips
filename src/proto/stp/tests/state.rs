@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::util::{add_peer, make_coords, make_costs, make_node_addr, make_tree_state};
-use crate::proto::stp::{ParentDeclaration, TreeCoordinate, TreeState};
+use crate::proto::stp::{ParentDeclaration, ParentEval, TreeCoordinate, TreeState};
 
 // ===== ParentDeclaration Tests =====
 
@@ -214,7 +214,9 @@ fn test_evaluate_parent_picks_smallest_root() {
         make_coords(&[7, 2]),
     );
 
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer3));
 }
 
@@ -240,7 +242,9 @@ fn test_evaluate_parent_prefers_shallowest_depth() {
         make_coords(&[2, 3, 4, 0]),
     );
 
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer1));
 }
 
@@ -258,7 +262,9 @@ fn test_evaluate_parent_stays_root_when_smallest() {
     );
 
     assert_eq!(
-        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
+        state
+            .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+            .switch_target(),
         None
     );
 }
@@ -283,7 +289,9 @@ fn test_evaluate_parent_no_switch_when_already_best() {
 
     // Now evaluate — should return None since peer1 is already our parent
     assert_eq!(
-        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
+        state
+            .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+            .switch_target(),
         None
     );
 }
@@ -294,7 +302,9 @@ fn test_evaluate_parent_no_peers() {
     let state = TreeState::new(my_node, 1000);
 
     assert_eq!(
-        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
+        state
+            .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+            .switch_target(),
         None
     );
 }
@@ -329,7 +339,9 @@ fn test_evaluate_parent_depth_threshold() {
         make_coords(&[3, 0]),
     );
 
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer3));
 }
 
@@ -351,7 +363,9 @@ fn test_evaluate_parent_rejects_loop_candidate() {
 
     // Should return None — the only candidate creates a loop
     assert_eq!(
-        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000),
+        state
+            .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+            .switch_target(),
         None
     );
 }
@@ -378,7 +392,9 @@ fn test_evaluate_parent_picks_loop_free_over_loopy() {
         make_coords(&[2, 3, 4, 0]),
     );
 
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer2));
 }
 
@@ -685,7 +701,9 @@ fn test_effective_depth_selects_lower_cost_deeper_peer() {
     );
 
     let costs = make_costs(&[(1, 6.0), (2, 1.01)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_b));
 }
 
@@ -711,7 +729,9 @@ fn test_effective_depth_equal_cost_degenerates_to_depth() {
     );
 
     let costs = make_costs(&[(1, 1.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer1));
 }
 
@@ -736,7 +756,9 @@ fn test_effective_depth_tiebreak_by_node_addr() {
     );
 
     let costs = make_costs(&[(1, 1.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer1)); // smaller NodeAddr
 }
 
@@ -769,7 +791,9 @@ fn test_hysteresis_prevents_marginal_switch() {
     state.recompute_coords();
 
     let costs = make_costs(&[(1, 2.5), (2, 2.2)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, None); // marginal improvement blocked by hysteresis
 }
 
@@ -802,7 +826,9 @@ fn test_hysteresis_allows_significant_switch() {
     state.recompute_coords();
 
     let costs = make_costs(&[(1, 6.0), (2, 1.01)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_b));
 }
 
@@ -828,7 +854,9 @@ fn test_cold_start_default_cost() {
     );
 
     // Empty cost map — all peers get default 1.0
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer1)); // shallowest wins
 }
 
@@ -859,8 +887,14 @@ fn test_hold_down_suppresses_reeval() {
     // Peer_b now offers better cost, but hold-down suppresses
     let costs = make_costs(&[(1, 5.0), (2, 1.0)]);
     state.set_parent_hysteresis(0.0); // no hysteresis, only hold-down
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
-    assert_eq!(result, None); // suppressed by hold-down
+    // The hold-down veto now lives at the shell edge, not inside evaluate_parent.
+    // The clock-free core still finds peer_b as a discretionary candidate; the shell
+    // suppresses it because hold-down is active — same net "no switch" as before.
+    assert!(state.is_switch_suppressed(1000)); // hold-down active at the edge
+    assert!(matches!(
+        state.evaluate_parent(&costs, &BTreeSet::new()),
+        ParentEval::Discretionary(p) if p == peer_b
+    ));
 }
 
 #[test]
@@ -889,8 +923,13 @@ fn test_mandatory_switch_bypasses_hold_down() {
 
     // Remove peer_a (parent lost) — should bypass hold-down
     state.remove_peer(&peer_a);
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
-    assert_eq!(result, Some(peer_b)); // mandatory switch
+    // Hold-down is active at the edge, but a parent-lost switch is mandatory and
+    // bypasses the veto: the core returns Mandatory and the switch is taken anyway.
+    assert!(state.is_switch_suppressed(1000)); // hold-down active
+    assert!(matches!(
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new()),
+        ParentEval::Mandatory(p) if p == peer_b
+    ));
 }
 
 #[test]
@@ -931,12 +970,16 @@ fn test_heterogeneous_7node_avoids_bottleneck() {
     );
 
     // Without costs (all 1.0): picks peer 1 (smaller addr) — correct by luck
-    let result_no_cost = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 1000);
+    let result_no_cost = state
+        .evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+        .switch_target();
     assert_eq!(result_no_cost, Some(peer1));
 
     // With costs: fiber (1.01) vs LoRa (6.0) — fiber wins definitively
     let costs = make_costs(&[(1, 1.01), (2, 6.0)]);
-    let result_with_cost = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result_with_cost = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result_with_cost, Some(peer1));
 
     // Now test the critical case: node 5 currently has LoRa parent (peer 2).
@@ -945,14 +988,18 @@ fn test_heterogeneous_7node_avoids_bottleneck() {
     state.recompute_coords();
     assert_eq!(state.my_coords().depth(), 2); // depth 2 through LoRa peer
 
-    let result_switch = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result_switch = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result_switch, Some(peer1)); // switches away from LoRa bottleneck
 
     // With hysteresis enabled, still switches because the cost difference is large
     state.set_parent_hysteresis(0.2);
     // current_parent_eff = 1 + 6.0 = 7.0, best_eff = 1 + 1.01 = 2.01
     // threshold = 7.0 * 0.8 = 5.6, 2.01 < 5.6 → switch
-    let result_hyst = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result_hyst = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result_hyst, Some(peer1));
 }
 
@@ -988,14 +1035,18 @@ fn test_cost_degradation_triggers_switch() {
 
     // Initial: both fiber-like costs. Node picks peer_a (smaller addr).
     let initial_costs = make_costs(&[(1, 1.05), (2, 1.08)]);
-    let result = state.evaluate_parent(&initial_costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&initial_costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_a));
 
     state.set_parent(peer_a, 1, 1000, 1000);
     state.recompute_coords();
 
     // Verify stable: no switch with same costs
-    let result = state.evaluate_parent(&initial_costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&initial_costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, None);
 
     // Peer A's link degrades significantly (LoRa-like latency + loss)
@@ -1003,7 +1054,9 @@ fn test_cost_degradation_triggers_switch() {
     // best_eff = 1 + 1.08 = 2.08
     // threshold = 7.0 * 0.8 = 5.6, 2.08 < 5.6 → switch
     let degraded_costs = make_costs(&[(1, 6.0), (2, 1.08)]);
-    let result = state.evaluate_parent(&degraded_costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&degraded_costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_b));
 }
 
@@ -1036,7 +1089,9 @@ fn test_cost_improvement_within_hysteresis_no_switch() {
     // best_eff = 1 + 1.5 = 2.5
     // threshold = 3.0 * 0.8 = 2.4, 2.5 > 2.4 → no switch
     let costs = make_costs(&[(1, 2.0), (2, 1.5)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, None);
 }
 
@@ -1058,7 +1113,9 @@ fn test_single_peer_no_reeval_benefit() {
 
     // Initial selection: picks the only peer
     let costs = make_costs(&[(1, 1.05)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_a));
 
     state.set_parent(peer_a, 1, 1000, 1000);
@@ -1066,6 +1123,8 @@ fn test_single_peer_no_reeval_benefit() {
 
     // Even with terrible cost, no switch (no alternative)
     let bad_costs = make_costs(&[(1, 50.0)]);
-    let result = state.evaluate_parent(&bad_costs, &BTreeSet::new(), 1000);
+    let result = state
+        .evaluate_parent(&bad_costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, None);
 }

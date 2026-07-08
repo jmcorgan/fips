@@ -13,6 +13,7 @@ use crate::proto::mmp::{
     LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, ReceiverReport, RrLog,
     SenderReport,
 };
+use crate::proto::stp::ParentEval;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -198,11 +199,18 @@ impl Node {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let mono_now_ms = crate::time::mono_ms();
-            if let Some(new_parent) = self.tree_state.evaluate_parent(
-                &peer_costs,
-                &std::collections::BTreeSet::new(),
-                mono_now_ms,
-            ) {
+            // Compute the flap-dampening / hold-down veto at the edge; a mandatory
+            // switch bypasses it, a discretionary one is taken only if not suppressed.
+            let switch_suppressed = self.tree_state.is_switch_suppressed(mono_now_ms);
+            let new_parent = match self
+                .tree_state
+                .evaluate_parent(&peer_costs, &std::collections::BTreeSet::new())
+            {
+                ParentEval::Mandatory(p) => Some(p),
+                ParentEval::Discretionary(p) if !switch_suppressed => Some(p),
+                ParentEval::Discretionary(_) | ParentEval::None => None,
+            };
+            if let Some(new_parent) = new_parent {
                 let new_seq = self.tree_state.my_declaration().sequence() + 1;
                 let flap_dampened =
                     self.tree_state

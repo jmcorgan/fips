@@ -32,7 +32,7 @@ use thiserror::Error;
 use crate::{IdentityError, NodeAddr};
 
 pub use coordinate::{CoordEntry, TreeCoordinate};
-pub(crate) use core::{Stp, TreeDecision};
+pub(crate) use core::{ParentEval, Stp, TreeDecision};
 pub use state::{ParentDeclaration, TreeState};
 pub use wire::TreeAnnounce;
 pub(crate) use wire::{

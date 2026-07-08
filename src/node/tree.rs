@@ -329,8 +329,17 @@ impl Node {
         // the wall-clock `now_ms` above used for the peer's tree position). Read
         // once and threaded into classify + the state mutators.
         let mono_now_ms = crate::time::mono_ms();
+        // Compute the flap-dampening / hold-down veto at the edge; the classify core
+        // is clock-free and consumes only this pre-computed verdict.
+        let switch_suppressed = self.tree_state.is_switch_suppressed(mono_now_ms);
 
-        match Stp::classify_announce(&self.tree_state, *from, &peer_costs, &skip, mono_now_ms) {
+        match Stp::classify_announce(
+            &self.tree_state,
+            *from,
+            &peer_costs,
+            &skip,
+            switch_suppressed,
+        ) {
             TreeDecision::Switch {
                 new_parent,
                 new_seq,
@@ -583,8 +592,11 @@ impl Node {
         // Monotonic ms for the flap-dampening / hold-down timers, read once and
         // threaded into classify + the state mutators.
         let mono_now_ms = crate::time::mono_ms();
+        // Compute the flap-dampening / hold-down veto at the edge; the classify core
+        // is clock-free and consumes only this pre-computed verdict.
+        let switch_suppressed = self.tree_state.is_switch_suppressed(mono_now_ms);
 
-        match Stp::classify_periodic(&self.tree_state, &peer_costs, &skip, mono_now_ms) {
+        match Stp::classify_periodic(&self.tree_state, &peer_costs, &skip, switch_suppressed) {
             TreeDecision::Switch {
                 new_parent,
                 new_seq,
