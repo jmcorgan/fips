@@ -33,8 +33,9 @@ fn test_lookup_request_generate() {
     let target = make_node_addr(1);
     let origin = make_node_addr(2);
 
-    let req1 = LookupRequest::generate(target, origin, 5, 0);
-    let req2 = LookupRequest::generate(target, origin, 5, 0);
+    use rand::RngExt;
+    let req1 = LookupRequest::new(rand::rng().random(), target, origin, 5, 0);
+    let req2 = LookupRequest::new(rand::rng().random(), target, origin, 5, 0);
 
     // Random IDs should differ
     assert_ne!(req1.request_id, req2.request_id);

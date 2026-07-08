@@ -12,6 +12,7 @@
 
 use crate::NodeAddr;
 use crate::proto::Error;
+use crate::proto::codec::{Reader, Writer};
 use crate::proto::stp::{
     TreeCoordinate, decode_optional_coords, encode_coords, encode_empty_coords,
 };
@@ -109,34 +110,29 @@ impl CoordsRequired {
     pub fn encode(&self) -> Vec<u8> {
         // Body: msg_type + flags(reserved) + dest_addr + reporter
         let body_len = 1 + 1 + 16 + 16; // 34 bytes
-        let mut buf = Vec::with_capacity(4 + body_len);
+        let mut w = Writer::with_capacity(4 + body_len);
         // FSP prefix: version 0, phase 0x0, U flag set
-        buf.push(0x00); // version 0, phase 0x0
-        buf.push(0x04); // U flag
+        w.write_u8(0x00); // version 0, phase 0x0
+        w.write_u8(0x04); // U flag
         let payload_len = body_len as u16;
-        buf.extend_from_slice(&payload_len.to_le_bytes());
+        w.write_u16_le(payload_len);
         // msg_type byte (after prefix, before body)
-        buf.push(RoutingSignalType::CoordsRequired.to_byte());
-        buf.push(0x00); // reserved flags
-        buf.extend_from_slice(self.dest_addr.as_bytes());
-        buf.extend_from_slice(self.reporter.as_bytes());
-        buf
+        w.write_u8(RoutingSignalType::CoordsRequired.to_byte());
+        w.write_u8(0x00); // reserved flags
+        w.write_bytes(self.dest_addr.as_bytes());
+        w.write_bytes(self.reporter.as_bytes());
+        w.into_vec()
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) = 33
-        if payload.len() < 33 {
-            return Err(Error::MessageTooShort {
-                expected: 33,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(33)?;
         // payload[0] is flags (reserved, ignored)
-        let mut dest_bytes = [0u8; 16];
-        dest_bytes.copy_from_slice(&payload[1..17]);
-        let mut reporter_bytes = [0u8; 16];
-        reporter_bytes.copy_from_slice(&payload[17..33]);
+        reader.advance(1);
+        let dest_bytes = reader.read_array::<16>()?;
+        let reporter_bytes = reader.read_array::<16>()?;
 
         Ok(Self {
             dest_addr: NodeAddr::from_bytes(dest_bytes),
@@ -217,19 +213,14 @@ impl PathBroken {
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) + coords_count(2) = 35 minimum
-        if payload.len() < 35 {
-            return Err(Error::MessageTooShort {
-                expected: 35,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(35)?;
         // payload[0] is flags (reserved, ignored)
-        let mut dest_bytes = [0u8; 16];
-        dest_bytes.copy_from_slice(&payload[1..17]);
-        let mut reporter_bytes = [0u8; 16];
-        reporter_bytes.copy_from_slice(&payload[17..33]);
+        reader.advance(1);
+        let dest_bytes = reader.read_array::<16>()?;
+        let reporter_bytes = reader.read_array::<16>()?;
 
-        let (last_known_coords, _consumed) = decode_optional_coords(&payload[33..])?;
+        let (last_known_coords, _consumed) = decode_optional_coords(reader.rest())?;
 
         Ok(Self {
             dest_addr: NodeAddr::from_bytes(dest_bytes),
@@ -284,36 +275,31 @@ impl MtuExceeded {
     /// Error signals use phase=0x0 with U flag set.
     pub fn encode(&self) -> Vec<u8> {
         let body_len = MTU_EXCEEDED_SIZE; // 36 bytes
-        let mut buf = Vec::with_capacity(4 + body_len);
+        let mut w = Writer::with_capacity(4 + body_len);
         // FSP prefix: version 0, phase 0x0, U flag set
-        buf.push(0x00); // version 0, phase 0x0
-        buf.push(0x04); // U flag
+        w.write_u8(0x00); // version 0, phase 0x0
+        w.write_u8(0x04); // U flag
         let payload_len = body_len as u16;
-        buf.extend_from_slice(&payload_len.to_le_bytes());
+        w.write_u16_le(payload_len);
         // msg_type byte
-        buf.push(RoutingSignalType::MtuExceeded.to_byte());
-        buf.push(0x00); // reserved flags
-        buf.extend_from_slice(self.dest_addr.as_bytes());
-        buf.extend_from_slice(self.reporter.as_bytes());
-        buf.extend_from_slice(&self.mtu.to_le_bytes());
-        buf
+        w.write_u8(RoutingSignalType::MtuExceeded.to_byte());
+        w.write_u8(0x00); // reserved flags
+        w.write_bytes(self.dest_addr.as_bytes());
+        w.write_bytes(self.reporter.as_bytes());
+        w.write_u16_le(self.mtu);
+        w.into_vec()
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) + mtu(2) = 35
-        if payload.len() < 35 {
-            return Err(Error::MessageTooShort {
-                expected: 35,
-                got: payload.len(),
-            });
-        }
+        let mut reader = Reader::new(payload);
+        reader.require(35)?;
         // payload[0] is flags (reserved, ignored)
-        let mut dest_bytes = [0u8; 16];
-        dest_bytes.copy_from_slice(&payload[1..17]);
-        let mut reporter_bytes = [0u8; 16];
-        reporter_bytes.copy_from_slice(&payload[17..33]);
-        let mtu = u16::from_le_bytes([payload[33], payload[34]]);
+        reader.advance(1);
+        let dest_bytes = reader.read_array::<16>()?;
+        let reporter_bytes = reader.read_array::<16>()?;
+        let mtu = reader.read_u16_le()?;
 
         Ok(Self {
             dest_addr: NodeAddr::from_bytes(dest_bytes),

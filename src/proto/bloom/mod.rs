@@ -26,22 +26,44 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-use thiserror::Error;
-
 pub use core::BloomFilter;
 pub use limits::{DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT, V1_SIZE_CLASS};
 pub use state::BloomState;
 pub use wire::FilterAnnounce;
 
 /// Errors related to Bloom filter operations.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum BloomError {
-    #[error("invalid filter size: expected {expected} bits, got {got}")]
-    InvalidSize { expected: usize, got: usize },
+    /// Filter bit length did not match the expected size.
+    InvalidSize {
+        /// Expected number of bits.
+        expected: usize,
+        /// Number of bits received.
+        got: usize,
+    },
 
-    #[error("filter size must be a multiple of 8, got {0}")]
+    /// Filter size was not a multiple of 8 bits.
     SizeNotByteAligned(usize),
 
-    #[error("hash count must be positive")]
+    /// Hash count was zero.
     ZeroHashCount,
 }
+
+impl ::core::fmt::Display for BloomError {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        match self {
+            BloomError::InvalidSize { expected, got } => {
+                write!(
+                    f,
+                    "invalid filter size: expected {expected} bits, got {got}"
+                )
+            }
+            BloomError::SizeNotByteAligned(n) => {
+                write!(f, "filter size must be a multiple of 8, got {n}")
+            }
+            BloomError::ZeroHashCount => write!(f, "hash count must be positive"),
+        }
+    }
+}
+
+impl ::core::error::Error for BloomError {}

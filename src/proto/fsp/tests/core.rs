@@ -9,7 +9,7 @@ use crate::proto::fsp::core::{
 use crate::proto::fsp::limits::FSP_CUTOVER_DELAY_MS;
 use crate::proto::stp::TreeCoordinate;
 use crate::testutil::make_node_addr;
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 
 fn coords(byte: u8) -> TreeCoordinate {
     TreeCoordinate::from_addrs(vec![make_node_addr(byte)]).unwrap()

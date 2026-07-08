@@ -7,10 +7,14 @@ mod error;
 pub use error::Error;
 
 pub(crate) mod bloom;
+pub(crate) mod codec;
+pub(crate) mod coord;
 pub(crate) mod discovery;
 pub(crate) mod fmp;
 pub(crate) mod fsp;
 pub(crate) mod link;
+pub(crate) mod math;
 pub(crate) mod mmp;
+pub(crate) mod rate_limit;
 pub(crate) mod routing;
 pub(crate) mod stp;

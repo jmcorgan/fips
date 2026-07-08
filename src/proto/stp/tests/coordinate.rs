@@ -1,7 +1,7 @@
 //! TreeCoordinate unit tests.
 
 use super::util::{make_coords, make_node_addr};
-use crate::proto::stp::{CoordEntry, TreeCoordinate, TreeError};
+use crate::proto::stp::{CoordEntry, CoordError, TreeCoordinate};
 
 #[test]
 fn test_tree_coordinate_root() {
@@ -33,7 +33,7 @@ fn test_tree_coordinate_path() {
 #[test]
 fn test_tree_coordinate_empty_fails() {
     let result = TreeCoordinate::from_addrs(vec![]);
-    assert!(matches!(result, Err(TreeError::EmptyCoordinate)));
+    assert!(matches!(result, Err(CoordError::EmptyCoordinate)));
 }
 
 #[test]

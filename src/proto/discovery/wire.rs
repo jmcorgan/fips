@@ -42,13 +42,6 @@ impl LookupRequest {
         }
     }
 
-    /// Generate a new request with a random ID.
-    pub fn generate(target: NodeAddr, origin: NodeAddr, ttl: u8, min_mtu: u16) -> Self {
-        use rand::RngExt;
-        let request_id = rand::rng().random();
-        Self::new(request_id, target, origin, ttl, min_mtu)
-    }
-
     /// Add a TLV entry.
     pub fn with_tlv(mut self, field_num: u16, value: Vec<u8>) -> Self {
         self.tlv_entries.push(TlvEntry { field_num, value });
@@ -109,7 +102,7 @@ impl LookupRequest {
         let request_id = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad request_id".into()))?,
+                .map_err(|_| Error::Malformed("bad request_id"))?,
         );
         pos += 8;
 
@@ -129,7 +122,7 @@ impl LookupRequest {
         let min_mtu = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad min_mtu".into()))?,
+                .map_err(|_| Error::Malformed("bad min_mtu"))?,
         );
         pos += 2;
 
@@ -137,18 +130,15 @@ impl LookupRequest {
         let mut tlv_entries = Vec::new();
         while pos < payload.len() {
             if pos + 4 > payload.len() {
-                return Err(Error::Malformed(
-                    "truncated TLV header in LookupRequest".to_string(),
-                ));
+                return Err(Error::Malformed("truncated TLV header in LookupRequest"));
             }
             let field_num = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
             let length = u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + length > payload.len() {
-                return Err(Error::Malformed(format!(
-                    "TLV field {field_num}: declared length {length} exceeds remaining data {}",
-                    payload.len() - pos
-                )));
+                return Err(Error::Malformed(
+                    "TLV field declared length exceeds remaining data",
+                ));
             }
             let value = payload[pos..pos + length].to_vec();
             pos += length;
@@ -271,7 +261,7 @@ impl LookupResponse {
         let request_id = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad request_id".into()))?,
+                .map_err(|_| Error::Malformed("bad request_id"))?,
         );
         pos += 8;
 
@@ -283,7 +273,7 @@ impl LookupResponse {
         let path_mtu = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| Error::Malformed("bad path_mtu".into()))?,
+                .map_err(|_| Error::Malformed("bad path_mtu"))?,
         );
         pos += 2;
 
@@ -297,25 +287,22 @@ impl LookupResponse {
             });
         }
         let proof = Signature::from_slice(&payload[pos..pos + 64])
-            .map_err(|_| Error::Malformed("bad proof signature".into()))?;
+            .map_err(|_| Error::Malformed("bad proof signature"))?;
         pos += 64;
 
         // Parse TLV entries from remaining bytes after proof
         let mut tlv_entries = Vec::new();
         while pos < payload.len() {
             if pos + 4 > payload.len() {
-                return Err(Error::Malformed(
-                    "truncated TLV header in LookupResponse".to_string(),
-                ));
+                return Err(Error::Malformed("truncated TLV header in LookupResponse"));
             }
             let field_num = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap());
             let length = u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + length > payload.len() {
-                return Err(Error::Malformed(format!(
-                    "TLV field {field_num}: declared length {length} exceeds remaining data {}",
-                    payload.len() - pos
-                )));
+                return Err(Error::Malformed(
+                    "TLV field declared length exceeds remaining data",
+                ));
             }
             let value = payload[pos..pos + length].to_vec();
             pos += length;

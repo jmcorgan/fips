@@ -1,9 +1,28 @@
-//! Tree coordinates and distance calculations.
+//! Tree coordinate addressing primitive: the `TreeCoordinate` path type, its
+//! `CoordEntry` elements, and their wire codec. A shared `proto` primitive
+//! (peer of `link.rs`), re-exported from `proto::stp` for source continuity.
 
 use core::fmt;
 
-use super::TreeError;
 use crate::NodeAddr;
+use crate::proto::Error;
+
+/// Errors from constructing a `TreeCoordinate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordError {
+    /// Coordinate path had zero entries.
+    EmptyCoordinate,
+}
+
+impl core::fmt::Display for CoordError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CoordError::EmptyCoordinate => write!(f, "invalid tree coordinate: empty path"),
+        }
+    }
+}
+
+impl core::error::Error for CoordError {}
 
 /// Metadata for a single node in a tree coordinate path.
 ///
@@ -65,9 +84,9 @@ impl TreeCoordinate {
     /// Create a coordinate from a path of entries (self to root).
     ///
     /// The path must be non-empty and ordered from the node to the root.
-    pub fn new(path: Vec<CoordEntry>) -> Result<Self, TreeError> {
+    pub fn new(path: Vec<CoordEntry>) -> Result<Self, CoordError> {
         if path.is_empty() {
-            return Err(TreeError::EmptyCoordinate);
+            return Err(CoordError::EmptyCoordinate);
         }
         Ok(Self(path))
     }
@@ -76,9 +95,9 @@ impl TreeCoordinate {
     ///
     /// Convenience constructor for cases where only routing is needed.
     /// Each entry gets sequence=0, timestamp=0.
-    pub fn from_addrs(addrs: Vec<NodeAddr>) -> Result<Self, TreeError> {
+    pub fn from_addrs(addrs: Vec<NodeAddr>) -> Result<Self, CoordError> {
         if addrs.is_empty() {
-            return Err(TreeError::EmptyCoordinate);
+            return Err(CoordError::EmptyCoordinate);
         }
         Ok(Self(addrs.into_iter().map(CoordEntry::addr_only).collect()))
     }
@@ -222,4 +241,97 @@ impl fmt::Debug for TreeCoordinate {
         }
         write!(f, "])")
     }
+}
+
+// ============================================================================
+// Coordinate Wire Format Helpers
+// ============================================================================
+
+/// Wire size of a TreeCoordinate in address-only format: 2 + entries × 16.
+pub(crate) fn coords_wire_size(coords: &TreeCoordinate) -> usize {
+    2 + coords.entries().len() * 16
+}
+
+/// Encode a TreeCoordinate as address-only wire format: count(u16 LE) + addrs(16 × n).
+///
+/// Session-layer messages serialize coordinates as NodeAddr arrays (16 bytes each),
+/// without the sequence/timestamp metadata used by the tree gossip protocol.
+pub(crate) fn encode_coords(coords: &TreeCoordinate, buf: &mut Vec<u8>) {
+    let addrs: Vec<&NodeAddr> = coords.node_addrs().collect();
+    let count = addrs.len() as u16;
+    buf.extend_from_slice(&count.to_le_bytes());
+    for addr in addrs {
+        buf.extend_from_slice(addr.as_bytes());
+    }
+}
+
+/// Decode a TreeCoordinate from address-only wire format.
+///
+/// Returns the decoded coordinate and the number of bytes consumed.
+pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), Error> {
+    if data.len() < 2 {
+        return Err(Error::MessageTooShort {
+            expected: 2,
+            got: data.len(),
+        });
+    }
+    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let needed = 2 + count * 16;
+    if data.len() < needed {
+        return Err(Error::MessageTooShort {
+            expected: needed,
+            got: data.len(),
+        });
+    }
+    if count == 0 {
+        return Err(Error::Malformed("coordinate with zero entries"));
+    }
+    let mut addrs = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 2 + i * 16;
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&data[offset..offset + 16]);
+        addrs.push(NodeAddr::from_bytes(bytes));
+    }
+    let coord = TreeCoordinate::from_addrs(addrs).map_err(Error::BadCoord)?;
+    Ok((coord, needed))
+}
+
+/// Decode an optional coordinate field (count may be 0).
+///
+/// Returns None if count is 0, Some(coord) otherwise, plus bytes consumed.
+pub(crate) fn decode_optional_coords(
+    data: &[u8],
+) -> Result<(Option<TreeCoordinate>, usize), Error> {
+    if data.len() < 2 {
+        return Err(Error::MessageTooShort {
+            expected: 2,
+            got: data.len(),
+        });
+    }
+    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let needed = 2 + count * 16;
+    if data.len() < needed {
+        return Err(Error::MessageTooShort {
+            expected: needed,
+            got: data.len(),
+        });
+    }
+    if count == 0 {
+        return Ok((None, 2));
+    }
+    let mut addrs = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 2 + i * 16;
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&data[offset..offset + 16]);
+        addrs.push(NodeAddr::from_bytes(bytes));
+    }
+    let coord = TreeCoordinate::from_addrs(addrs).map_err(Error::BadCoord)?;
+    Ok((Some(coord), needed))
+}
+
+/// Encode a count of zero (for empty/absent coordinate fields).
+pub(crate) fn encode_empty_coords(buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&0u16.to_le_bytes());
 }

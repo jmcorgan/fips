@@ -11,8 +11,9 @@
 //! feature helpers) lives in `core.rs`; only the payload codec is here.
 
 use crate::proto::Error;
+use crate::proto::codec::Reader;
 use crate::proto::link::LinkMessageType;
-use std::fmt;
+use ::core::fmt;
 
 /// Handshake message type identifiers.
 ///
@@ -163,13 +164,9 @@ impl Disconnect {
 
     /// Decode from link-layer payload (after msg_type byte has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.is_empty() {
-            return Err(Error::MessageTooShort {
-                expected: 1,
-                got: 0,
-            });
-        }
-        let reason = DisconnectReason::from_byte(payload[0]).unwrap_or(DisconnectReason::Other);
+        let mut reader = Reader::new(payload);
+        let reason =
+            DisconnectReason::from_byte(reader.read_u8()?).unwrap_or(DisconnectReason::Other);
         Ok(Self { reason })
     }
 }
@@ -246,7 +243,7 @@ impl TryFrom<u8> for NodeProfile {
             0 => Ok(Self::Full),
             1 => Ok(Self::NonRouting),
             2 => Ok(Self::Leaf),
-            _ => Err(Error::Malformed(format!("unknown node profile: {value}"))),
+            _ => Err(Error::Malformed("unknown node profile")),
         }
     }
 }
@@ -326,17 +323,13 @@ impl NegotiationPayload {
 
         let format = data[0];
         if format != NEGOTIATION_FORMAT_V0 {
-            return Err(Error::Malformed(format!(
-                "unknown negotiation format: {format}"
-            )));
+            return Err(Error::Malformed("unknown negotiation format"));
         }
 
         let version_min = data[1] >> 4;
         let version_max = data[1] & 0x0F;
         if version_min > version_max {
-            return Err(Error::Malformed(format!(
-                "version_min ({version_min}) > version_max ({version_max})"
-            )));
+            return Err(Error::Malformed("version_min > version_max"));
         }
 
         let features = u64::from_le_bytes(data[2..10].try_into().unwrap());
@@ -346,7 +339,7 @@ impl NegotiationPayload {
         while offset < data.len() {
             // Need at least 4 bytes for field_num + length
             if offset + 4 > data.len() {
-                return Err(Error::Malformed("truncated TLV header".to_string()));
+                return Err(Error::Malformed("truncated TLV header"));
             }
 
             let field_num = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
@@ -355,10 +348,9 @@ impl NegotiationPayload {
             offset += 4;
 
             if offset + length > data.len() {
-                return Err(Error::Malformed(format!(
-                    "TLV field {field_num}: declared length {length} exceeds remaining data {}",
-                    data.len() - offset
-                )));
+                return Err(Error::Malformed(
+                    "TLV field declared length exceeds remaining data",
+                ));
             }
 
             let value = data[offset..offset + length].to_vec();

@@ -16,7 +16,6 @@ pub mod discovery;
 #[cfg(target_os = "linux")]
 pub mod gateway;
 pub mod identity;
-pub mod mmp;
 pub mod node;
 pub mod noise;
 pub mod peer;
@@ -24,6 +23,7 @@ pub mod perf_profile;
 pub(crate) mod proto;
 #[cfg(test)]
 pub(crate) mod testutil;
+mod time;
 pub mod transport;
 pub mod upper;
 pub mod utils;
@@ -43,7 +43,9 @@ pub use upper::config::{DnsConfig, TunConfig};
 pub use discovery::{BootstrapHandoffResult, EstablishedTraversal};
 
 // Re-export tree types (relocated from tree:: to proto::stp)
-pub use proto::stp::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError, TreeState};
+pub use proto::stp::{
+    CoordEntry, CoordError, ParentDeclaration, TreeCoordinate, TreeError, TreeState,
+};
 
 // Re-export bloom filter types (relocated from bloom:: to proto::bloom)
 pub use proto::bloom::{BloomError, BloomFilter, BloomState};

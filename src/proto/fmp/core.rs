@@ -589,7 +589,7 @@ impl Fmp {
 /// arithmetic (the exponent is the resend count *after* this attempt).
 fn next_resend_at_ms(now_ms: u64, interval_ms: u64, backoff: f64, prior_count: u32) -> u64 {
     let count = prior_count + 1;
-    now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64
+    now_ms + (interval_ms as f64 * crate::proto::math::powi(backoff, count)) as u64
 }
 
 // ============================================================================
@@ -609,10 +609,7 @@ impl NegotiationPayload {
     pub fn agree_version(&self, other: &Self) -> Result<u8, Error> {
         let agreed = self.version_max.min(other.version_max);
         if agreed < self.version_min || agreed < other.version_min {
-            return Err(Error::Malformed(format!(
-                "version mismatch: ours [{},{}] theirs [{},{}]",
-                self.version_min, self.version_max, other.version_min, other.version_max
-            )));
+            return Err(Error::Malformed("version mismatch"));
         }
         Ok(agreed)
     }
@@ -675,10 +672,9 @@ impl NegotiationPayload {
     /// At least one side must be `Full` or the link is rejected.
     pub fn validate_profiles(ours: NodeProfile, theirs: NodeProfile) -> Result<(), Error> {
         if ours != NodeProfile::Full && theirs != NodeProfile::Full {
-            return Err(Error::Malformed(format!(
-                "invalid profile pairing: {} <-> {} (at least one must be full)",
-                ours, theirs
-            )));
+            return Err(Error::Malformed(
+                "invalid profile pairing (at least one must be full)",
+            ));
         }
         Ok(())
     }

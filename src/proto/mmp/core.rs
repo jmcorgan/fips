@@ -6,7 +6,7 @@
 //! (pre-computing every clock read into plain `bool` snapshot fields, and
 //! resolving the rekey-suppression predicate shell-side), call the `plan_*`
 //! decisions, and drive the returned [`MmpAction`]s — the actual sends,
-//! registry mutations, `src/mmp/` primitive calls, metrics, and logging. No
+//! registry mutations, `proto/mmp/` primitive calls, metrics, and logging. No
 //! I/O, no clock, no metrics, no logging here.
 //!
 //! Unlike routing/discovery (whose cores do live cross-table reads through a
@@ -50,7 +50,7 @@ pub(crate) struct PeerLivenessSnapshot {
 ///
 /// Every timing read is resolved shell-side into a plain `bool`: `sr_due` /
 /// `rr_due` are the pre-evaluated `should_send_report` gates on the peer's
-/// `src/mmp/` sender/receiver primitives, and `log_due` is the pre-evaluated
+/// `proto/mmp/` sender/receiver primitives, and `log_due` is the pre-evaluated
 /// `should_log` gate. `send_sr`/`send_rr` are the profile provide/want flags:
 /// on the master (IK) line there is no profile negotiation, so the shell sets
 /// them to the behavior-neutral constant `true` (ANDing a runtime `true` is a
@@ -81,7 +81,7 @@ pub(crate) struct LinkReportSnapshot {
 ///
 /// Every timing read is resolved shell-side into a plain `bool`: `sr_due` /
 /// `rr_due` are the pre-evaluated `should_send_report` gates on the session's
-/// `src/mmp/` sender/receiver primitives, `mtu_due` is the pre-evaluated
+/// `proto/mmp/` sender/receiver primitives, `mtu_due` is the pre-evaluated
 /// `path_mtu.should_send_notification` gate, and `log_due` is the pre-evaluated
 /// `should_log` gate. Unlike the link path there is **no** `send_sr`/`send_rr`
 /// profile flag — the session handler has never gated on a profile, so no
@@ -172,7 +172,7 @@ pub(crate) enum MmpAction {
     /// Send a heartbeat to `peer`: the shell runs `mark_heartbeat_sent` and the
     /// encrypted link send.
     Heartbeat { peer: NodeAddr },
-    /// Build (shell: `src/mmp/` `build_report` + `encode`) and send the given
+    /// Build (shell: `proto/mmp/` `build_report` + `encode`) and send the given
     /// link report over the encrypted link. The interval-advancing
     /// `build_report` mutation happens **only** while driving this action, so an
     /// ungated report never advances its interval.
@@ -183,7 +183,7 @@ pub(crate) enum MmpAction {
     /// Emit the periodic link operator log for `peer` (shell owns the `tracing`
     /// call and runs `mark_logged`).
     LogLink { peer: NodeAddr },
-    /// Build (shell: `src/mmp/` `build_report`/`build_notification` + the
+    /// Build (shell: `proto/mmp/` `build_report`/`build_notification` + the
     /// `Session*`/`PathMtuNotification` codec) and send the given session report
     /// over the encrypted session. The interval/notification-advancing build
     /// mutation happens **only** while driving this action.

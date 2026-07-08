@@ -87,7 +87,7 @@ impl Node {
         // operator to see one clear message, not spam.
         let max_fpr = self.config().node.bloom.max_inbound_fpr;
         let out_fill = sent_filter.fill_ratio();
-        let out_fpr = out_fill.powi(sent_filter.hash_count() as i32);
+        let out_fpr = sent_filter.fpr();
         if out_fpr > max_fpr {
             let now = std::time::Instant::now();
             let should_warn = self
@@ -213,7 +213,7 @@ impl Node {
         // to wipe a victim's contribution to aggregation.
         let max_fpr = self.config().node.bloom.max_inbound_fpr;
         let fill = announce.filter.fill_ratio();
-        let fpr = fill.powi(announce.filter.hash_count() as i32);
+        let fpr = announce.filter.fpr();
         if fpr > max_fpr {
             self.metrics()
                 .bloom

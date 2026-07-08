@@ -7,8 +7,12 @@
 //! - `core.rs` — the snapshot read-seams, the [`MmpAction`] effect vocabulary,
 //!   and the pure `plan_*` decisions (line-invariant across the master/next
 //!   report shapes).
-//! - `state.rs` — [`Mmp`] (the reporting anchor) plus the owned sender/receiver/
-//!   metrics/path-MTU state machines (`u64`-ms time seam, `no_std`+`alloc`).
+//! - `state.rs` — [`Mmp`] (the reporting anchor) plus the [`MmpPeerState`]/
+//!   [`MmpSessionState`] per-entity aggregates.
+//! - `sender.rs`/`receiver.rs`/`metrics.rs`/`path_mtu.rs` — the owned sender/
+//!   receiver/derived-metrics/path-MTU role state machines (`u64`-ms time seam,
+//!   `no_std`+`alloc`).
+//! - `limits.rs` — the module tuning constants.
 //! - `algorithms.rs` — the pure estimators (jitter/SRTT/dual-EWMA/OWD-trend/ETX;
 //!   `no_std`+`alloc`).
 //! - `wire.rs` — the link-layer and session-layer report codecs.
@@ -23,6 +27,11 @@ use serde::{Deserialize, Serialize};
 
 mod algorithms;
 mod core;
+mod limits;
+mod metrics;
+mod path_mtu;
+mod receiver;
+mod sender;
 mod state;
 mod wire;
 
@@ -34,7 +43,8 @@ pub(crate) use core::{
     BackoffUpdate, LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, SendResult,
     SessionReportKind, SessionReportSnapshot,
 };
-pub(crate) use state::{Mmp, MmpMetrics, MmpPeerState, MmpSessionState, RrLog};
+pub(crate) use metrics::{MmpMetrics, RrLog};
+pub(crate) use state::{Mmp, MmpPeerState, MmpSessionState};
 pub use wire::{
     PathMtuNotification, ReceiverReport, SenderReport, SessionReceiverReport, SessionSenderReport,
 };
@@ -70,52 +80,11 @@ impl fmt::Display for MmpMode {
 // Constants
 // ============================================================================
 
-// --- EWMA parameters ---
-
-/// Dual EWMA short-term: α = 1/4.
-pub const EWMA_SHORT_ALPHA: f64 = 0.25;
-
-/// Dual EWMA long-term: α = 1/32.
-pub const EWMA_LONG_ALPHA: f64 = 1.0 / 32.0;
-
-// --- Timing defaults (milliseconds) ---
-
-/// Default report interval before SRTT is available (cold start).
-pub const DEFAULT_COLD_START_INTERVAL_MS: u64 = 200;
-
-/// Minimum report interval (SRTT clamp floor).
-///
-/// Raised from 100ms to 1000ms: parent re-evaluation runs every 60s,
-/// so 60 samples/cycle is more than sufficient for EWMA convergence (~10).
-/// The cold-start phase uses `DEFAULT_COLD_START_INTERVAL_MS` (200ms) for
-/// fast initial SRTT convergence before transitioning to this floor.
-pub const MIN_REPORT_INTERVAL_MS: u64 = 1_000;
-
-/// Maximum report interval (SRTT clamp ceiling).
-pub const MAX_REPORT_INTERVAL_MS: u64 = 5_000;
-
-/// Number of SRTT samples before transitioning from cold-start to normal floor.
-///
-/// During cold-start, report intervals use `DEFAULT_COLD_START_INTERVAL_MS` as
-/// the floor to gather SRTT samples quickly. After this many updates, the floor
-/// switches to `MIN_REPORT_INTERVAL_MS`.
-pub const COLD_START_SAMPLES: u32 = 5;
-
-/// Default OWD ring buffer capacity.
-pub const DEFAULT_OWD_WINDOW_SIZE: usize = 32;
-
-/// Default operator log interval in seconds.
-pub const DEFAULT_LOG_INTERVAL_SECS: u64 = 30;
-
-// --- Session-layer timing defaults ---
-// Session reports are routed end-to-end (bandwidth cost on every transit link),
-// so intervals are higher than link-layer.
-
-/// Session-layer minimum report interval.
-pub const MIN_SESSION_REPORT_INTERVAL_MS: u64 = 500;
-
-/// Session-layer maximum report interval.
-pub const MAX_SESSION_REPORT_INTERVAL_MS: u64 = 10_000;
-
-/// Session-layer cold-start report interval (before SRTT is available).
-pub const SESSION_COLD_START_INTERVAL_MS: u64 = 1_000;
+// The module tuning constants live in `limits.rs`; re-exported here so external
+// callers keep the `crate::proto::mmp::<CONST>` path.
+pub use limits::{
+    COLD_START_SAMPLES, DEFAULT_COLD_START_INTERVAL_MS, DEFAULT_LOG_INTERVAL_SECS,
+    DEFAULT_OWD_WINDOW_SIZE, EWMA_LONG_ALPHA, EWMA_SHORT_ALPHA, MAX_REPORT_INTERVAL_MS,
+    MAX_SESSION_REPORT_INTERVAL_MS, MIN_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS,
+    SESSION_COLD_START_INTERVAL_MS,
+};

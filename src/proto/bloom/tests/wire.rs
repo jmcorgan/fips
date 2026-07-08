@@ -1,5 +1,6 @@
 //! Tests for the bloom wire codec (`FilterAnnounce`).
 
+use crate::proto::Error;
 use crate::proto::bloom::BloomFilter;
 use crate::proto::bloom::FilterAnnounce;
 use crate::proto::link::LinkMessageType;
@@ -66,13 +67,10 @@ fn test_filter_announce_decode_rejects_bad_size_class() {
     encoded[10] = 5; // invalid size_class > MAX_SIZE_CLASS
 
     let result = FilterAnnounce::decode(&encoded[1..]);
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid size_class")
-    );
+    assert!(matches!(
+        result,
+        Err(Error::BadSizeClass { got: 5, max: 3 })
+    ));
 }
 
 #[test]
@@ -83,13 +81,10 @@ fn test_filter_announce_decode_rejects_non_v1_size_class() {
     let encoded = announce.encode().unwrap();
 
     let result = FilterAnnounce::decode(&encoded[1..]);
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported size_class")
-    );
+    assert!(matches!(
+        result,
+        Err(Error::BadSizeClass { got: 0, max: 1 })
+    ));
 }
 
 #[test]

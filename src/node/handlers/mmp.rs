@@ -13,6 +13,7 @@ use crate::proto::mmp::{
     LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, ReceiverReport, RrLog,
     SenderReport,
 };
+use crate::proto::stp::ParentEval;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -153,7 +154,7 @@ impl Node {
 
         // Process the report: computes RTT from timestamp echo, updates
         // loss rate, goodput rate, jitter trend, and ETX.
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         let (first_rtt, rr_log) =
             mmp.metrics
                 .process_receiver_report(&rr, our_timestamp_ms, now_ms);
@@ -198,12 +199,17 @@ impl Node {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let mono_now_ms = crate::mmp::mono_ms();
+            let mono_now_ms = crate::time::mono_ms();
             let skip = self.non_full_peers();
-            if let Some(new_parent) =
-                self.tree_state
-                    .evaluate_parent(&peer_costs, &skip, mono_now_ms)
-            {
+            // Compute the flap-dampening / hold-down veto at the edge; a mandatory
+            // switch bypasses it, a discretionary one is taken only if not suppressed.
+            let switch_suppressed = self.tree_state.is_switch_suppressed(mono_now_ms);
+            let new_parent = match self.tree_state.evaluate_parent(&peer_costs, &skip) {
+                ParentEval::Mandatory(p) => Some(p),
+                ParentEval::Discretionary(p) if !switch_suppressed => Some(p),
+                ParentEval::Discretionary(_) | ParentEval::None => None,
+            };
+            if let Some(new_parent) = new_parent {
                 let new_seq = self.tree_state.my_declaration().sequence() + 1;
                 let flap_dampened =
                     self.tree_state
@@ -278,7 +284,7 @@ impl Node {
     ///
     /// Called from the tick handler. Also emits periodic operator logs.
     pub(in crate::node) async fn check_mmp_reports(&mut self) {
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
 
         // Build one report-gating snapshot per peer, resolving every timing read
         // shell-side into a `bool`. `send_sr`/`send_rr` come from the peer's
@@ -427,7 +433,7 @@ impl Node {
         // Monotonic ms for the MMP receiver's injected-`u64` liveness clock; the
         // Instant `now` is still used for the shell-owned heartbeat timing and
         // the session-start fallback (both `ActivePeer` Instants).
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         let heartbeat_interval = Duration::from_secs(self.config().node.heartbeat_interval_secs);
         let dead_timeout = Duration::from_secs(self.config().node.link_dead_timeout_secs);
         let dead_timeout_ms = dead_timeout.as_millis() as u64;

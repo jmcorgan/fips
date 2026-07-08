@@ -7,7 +7,6 @@
 use serde::{Deserialize, Serialize};
 
 use super::IdentityConfig;
-use crate::mmp::MmpConfig;
 use crate::proto::mmp::{DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MmpMode};
 
 // ============================================================================
@@ -731,6 +730,41 @@ impl SessionConfig {
     }
 }
 
+/// MMP configuration (`node.mmp.*`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MmpConfig {
+    /// Operating mode (`node.mmp.mode`).
+    #[serde(default)]
+    pub mode: MmpMode,
+
+    /// Periodic operator log interval in seconds (`node.mmp.log_interval_secs`).
+    #[serde(default = "MmpConfig::default_log_interval_secs")]
+    pub log_interval_secs: u64,
+
+    /// OWD trend ring buffer size (`node.mmp.owd_window_size`).
+    #[serde(default = "MmpConfig::default_owd_window_size")]
+    pub owd_window_size: usize,
+}
+
+impl Default for MmpConfig {
+    fn default() -> Self {
+        Self {
+            mode: MmpMode::default(),
+            log_interval_secs: DEFAULT_LOG_INTERVAL_SECS,
+            owd_window_size: DEFAULT_OWD_WINDOW_SIZE,
+        }
+    }
+}
+
+impl MmpConfig {
+    fn default_log_interval_secs() -> u64 {
+        DEFAULT_LOG_INTERVAL_SECS
+    }
+    fn default_owd_window_size() -> usize {
+        DEFAULT_OWD_WINDOW_SIZE
+    }
+}
+
 /// Session-layer Metrics Measurement Protocol (`node.session_mmp.*`).
 ///
 /// Separate from link-layer `node.mmp.*` to allow independent mode/interval
@@ -1111,6 +1145,36 @@ impl NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_config_default() {
+        let config = MmpConfig::default();
+        assert_eq!(config.mode, MmpMode::Full);
+        assert_eq!(config.log_interval_secs, 30);
+        assert_eq!(config.owd_window_size, 32);
+    }
+
+    #[test]
+    fn test_config_yaml_parse() {
+        let yaml = r#"
+mode: lightweight
+log_interval_secs: 60
+owd_window_size: 48
+"#;
+        let config: MmpConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.mode, MmpMode::Lightweight);
+        assert_eq!(config.log_interval_secs, 60);
+        assert_eq!(config.owd_window_size, 48);
+    }
+
+    #[test]
+    fn test_config_yaml_partial() {
+        let yaml = "mode: minimal";
+        let config: MmpConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.mode, MmpMode::Minimal);
+        assert_eq!(config.log_interval_secs, DEFAULT_LOG_INTERVAL_SECS);
+        assert_eq!(config.owd_window_size, DEFAULT_OWD_WINDOW_SIZE);
+    }
 
     #[test]
     fn test_ecn_config_defaults() {

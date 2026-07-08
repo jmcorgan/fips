@@ -3,7 +3,7 @@
 //! Represents a fully authenticated peer after successful Noise handshake.
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
-use crate::mmp::MmpConfig;
+use crate::config::MmpConfig;
 use crate::node::REKEY_JITTER_SECS;
 use crate::noise::{HandshakeState as NoiseHandshakeState, NoiseError, NoiseSession};
 use crate::proto::bloom::BloomFilter;
@@ -1116,7 +1116,7 @@ impl ActivePeer {
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         if let Some(mmp) = &mut self.mmp {
             mmp.reset_for_rekey(now_ms);
         }
@@ -1153,7 +1153,7 @@ impl ActivePeer {
         self.reset_replay_suppressed();
 
         // Reset MMP counters to avoid metric discontinuity
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
         if let Some(mmp) = &mut self.mmp {
             mmp.reset_for_rekey(now_ms);
         }

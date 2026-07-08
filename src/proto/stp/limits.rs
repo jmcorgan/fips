@@ -11,7 +11,7 @@
 //!   `flap_dampening_duration`.
 //!
 //! The monotonic clock is injected: every timing method takes a `now_ms: u64`
-//! (monotonic milliseconds, read by the shell from `crate::mmp::mono_ms`), and
+//! (monotonic milliseconds, read by the shell from `crate::time::mono_ms`), and
 //! all timers/durations are stored as plain `u64` milliseconds. Configuration
 //! setters accept seconds (matching the node config) and store the value scaled
 //! to milliseconds so the comparisons stay in one unit.

@@ -1,9 +1,9 @@
 //! Flap dampening / hold-down unit tests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::util::{make_coords, make_costs, make_node_addr};
-use crate::proto::stp::{ParentDeclaration, TreeState};
+use crate::proto::stp::{ParentDeclaration, ParentEval, TreeState};
 
 #[test]
 fn test_flap_dampening_engages_after_threshold() {
@@ -43,11 +43,16 @@ fn test_flap_dampening_engages_after_threshold() {
     assert!(dampened);
     assert!(state.is_flap_dampened(3000));
 
-    // evaluate_parent should return None for non-mandatory switches
-    // Make peer_b much better than peer_a
+    // The flap-dampening veto now lives at the shell edge, not inside
+    // evaluate_parent. The clock-free core still finds peer_b as a discretionary
+    // candidate (peer_b much better than peer_a); the shell suppresses it because
+    // dampening is active — same net "no switch" as before.
     let costs = make_costs(&[(1, 10.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 3000);
-    assert_eq!(result, None); // suppressed by flap dampening
+    assert!(state.is_switch_suppressed(3000)); // veto active at the edge
+    assert!(matches!(
+        state.evaluate_parent(&costs, &BTreeSet::new()),
+        ParentEval::Discretionary(p) if p == peer_b
+    ));
 }
 
 #[test]
@@ -82,8 +87,13 @@ fn test_flap_dampening_allows_mandatory_switches() {
 
     // Remove current parent (peer_a) — this is a mandatory switch
     state.remove_peer(&peer_a);
-    let result = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new(), 3000);
-    assert_eq!(result, Some(peer_b)); // mandatory switch bypasses dampening
+    // Dampening is still active at the edge, but a parent-lost switch is mandatory
+    // and bypasses the veto: the core returns Mandatory and the switch is taken.
+    assert!(state.is_switch_suppressed(3000)); // veto still active
+    assert!(matches!(
+        state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new()),
+        ParentEval::Mandatory(p) if p == peer_b
+    ));
 }
 
 #[test]
@@ -119,9 +129,13 @@ fn test_flap_dampening_expires() {
     // With 0-second duration, dampening should have already expired
     assert!(!state.is_flap_dampened(3000));
 
-    // evaluate_parent should work normally now
+    // Dampening has expired: the veto is no longer active at the edge, so the
+    // discretionary switch to peer_b resumes and is taken.
     let costs = make_costs(&[(1, 10.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 3000);
+    assert!(!state.is_switch_suppressed(3000)); // veto cleared
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_b)); // not suppressed
 }
 
@@ -156,9 +170,13 @@ fn test_flap_dampening_below_threshold() {
 
     assert!(!state.is_flap_dampened(3000));
 
-    // evaluate_parent should still work normally
+    // Dampening never engaged, so the veto is inactive at the edge and the
+    // discretionary switch to peer_b is taken normally.
     let costs = make_costs(&[(1, 10.0), (2, 1.0)]);
-    let result = state.evaluate_parent(&costs, &BTreeSet::new(), 3000);
+    assert!(!state.is_switch_suppressed(3000)); // veto never engaged
+    let result = state
+        .evaluate_parent(&costs, &BTreeSet::new())
+        .switch_target();
     assert_eq!(result, Some(peer_b)); // not suppressed
 }
 

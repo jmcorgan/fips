@@ -33,8 +33,9 @@
 //! | 0x3   | -      | Handshake msg3   | SessionMsg3 (Noise XK msg3)       |
 
 use crate::proto::Error;
+use crate::proto::codec::{Reader, Writer};
 use crate::proto::stp::{TreeCoordinate, decode_coords, decode_optional_coords, encode_coords};
-use std::fmt;
+use ::core::fmt;
 
 // ============================================================================
 // Constants
@@ -636,37 +637,18 @@ impl SessionSetup {
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.is_empty() {
-            return Err(Error::MessageTooShort {
-                expected: 1,
-                got: 0,
-            });
-        }
-        let flags = SessionFlags::from_byte(payload[0]);
-        let mut offset = 1;
+        let mut reader = Reader::new(payload);
+        let flags = SessionFlags::from_byte(reader.read_u8()?);
 
-        let (src_coords, consumed) = decode_coords(&payload[offset..])?;
-        offset += consumed;
+        let (src_coords, consumed) = decode_coords(reader.rest())?;
+        reader.advance(consumed);
 
-        let (dest_coords, consumed) = decode_coords(&payload[offset..])?;
-        offset += consumed;
+        let (dest_coords, consumed) = decode_coords(reader.rest())?;
+        reader.advance(consumed);
 
-        if payload.len() < offset + 2 {
-            return Err(Error::MessageTooShort {
-                expected: offset + 2,
-                got: payload.len(),
-            });
-        }
-        let hs_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
-        offset += 2;
+        let hs_len = reader.read_u16_le()? as usize;
 
-        if payload.len() < offset + hs_len {
-            return Err(Error::MessageTooShort {
-                expected: offset + hs_len,
-                got: payload.len(),
-            });
-        }
-        let handshake_payload = payload[offset..offset + hs_len].to_vec();
+        let handshake_payload = reader.read_bytes(hs_len)?.to_vec();
 
         Ok(Self {
             src_coords,
@@ -756,37 +738,18 @@ impl SessionAck {
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.is_empty() {
-            return Err(Error::MessageTooShort {
-                expected: 1,
-                got: 0,
-            });
-        }
-        let flags = payload[0];
-        let mut offset = 1;
+        let mut reader = Reader::new(payload);
+        let flags = reader.read_u8()?;
 
-        let (src_coords, consumed) = decode_coords(&payload[offset..])?;
-        offset += consumed;
+        let (src_coords, consumed) = decode_coords(reader.rest())?;
+        reader.advance(consumed);
 
-        let (dest_coords, consumed) = decode_coords(&payload[offset..])?;
-        offset += consumed;
+        let (dest_coords, consumed) = decode_coords(reader.rest())?;
+        reader.advance(consumed);
 
-        if payload.len() < offset + 2 {
-            return Err(Error::MessageTooShort {
-                expected: offset + 2,
-                got: payload.len(),
-            });
-        }
-        let hs_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
-        offset += 2;
+        let hs_len = reader.read_u16_le()? as usize;
 
-        if payload.len() < offset + hs_len {
-            return Err(Error::MessageTooShort {
-                expected: offset + hs_len,
-                got: payload.len(),
-            });
-        }
-        let handshake_payload = payload[offset..offset + hs_len].to_vec();
+        let handshake_payload = reader.read_bytes(hs_len)?.to_vec();
 
         Ok(Self {
             src_coords,
@@ -837,49 +800,31 @@ impl SessionMsg3 {
     /// where ver_phase = 0x03 (version 0, phase MSG3).
     pub fn encode(&self) -> Vec<u8> {
         // Build body first to compute payload_len
-        let mut body = Vec::new();
-        body.push(self.flags);
+        let mut body = Writer::new();
+        body.write_u8(self.flags);
         let hs_len = self.handshake_payload.len() as u16;
-        body.extend_from_slice(&hs_len.to_le_bytes());
-        body.extend_from_slice(&self.handshake_payload);
+        body.write_u16_le(hs_len);
+        body.write_bytes(&self.handshake_payload);
 
         // Prepend 4-byte FSP common prefix
         let payload_len = body.len() as u16;
-        let mut buf = Vec::with_capacity(4 + body.len());
-        buf.push(0x03); // version 0, phase 0x3 (MSG3)
-        buf.push(0x00); // flags (must be zero for handshake)
-        buf.extend_from_slice(&payload_len.to_le_bytes());
-        buf.extend_from_slice(&body);
-        buf
+        let body = body.into_vec();
+        let mut w = Writer::with_capacity(4 + body.len());
+        w.write_u8(0x03); // version 0, phase 0x3 (MSG3)
+        w.write_u8(0x00); // flags (must be zero for handshake)
+        w.write_u16_le(payload_len);
+        w.write_bytes(&body);
+        w.into_vec()
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
-        if payload.is_empty() {
-            return Err(Error::MessageTooShort {
-                expected: 1,
-                got: 0,
-            });
-        }
-        let flags = payload[0];
-        let mut offset = 1;
+        let mut reader = Reader::new(payload);
+        let flags = reader.read_u8()?;
 
-        if payload.len() < offset + 2 {
-            return Err(Error::MessageTooShort {
-                expected: offset + 2,
-                got: payload.len(),
-            });
-        }
-        let hs_len = u16::from_le_bytes([payload[offset], payload[offset + 1]]) as usize;
-        offset += 2;
+        let hs_len = reader.read_u16_le()? as usize;
 
-        if payload.len() < offset + hs_len {
-            return Err(Error::MessageTooShort {
-                expected: offset + hs_len,
-                got: payload.len(),
-            });
-        }
-        let handshake_payload = payload[offset..offset + hs_len].to_vec();
+        let handshake_payload = reader.read_bytes(hs_len)?.to_vec();
 
         Ok(Self {
             flags,

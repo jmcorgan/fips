@@ -321,7 +321,7 @@ impl Node {
         if let Some(entry) = self.sessions.get_mut(src_addr)
             && let Some(mmp) = entry.mmp_mut()
         {
-            let now_ms = crate::mmp::mono_ms();
+            let now_ms = crate::time::mono_ms();
             mmp.receiver
                 .record_recv(header.counter, timestamp, plaintext.len(), ce_flag, now_ms);
             let _inner_flags = FspInnerFlags::from_byte(inner_flags_byte);
@@ -1031,7 +1031,7 @@ impl Node {
     /// Called from the tick handler. Also emits periodic session MMP logs.
     /// Uses the collect-then-send pattern to avoid borrowing conflicts.
     pub(in crate::node) async fn check_session_mmp_reports(&mut self) {
-        let now_ms = crate::mmp::mono_ms();
+        let now_ms = crate::time::mono_ms();
 
         // Build one report-gating snapshot per session, resolving every timing
         // read shell-side into a `bool`. The snapshots own only
@@ -1298,7 +1298,7 @@ impl Node {
 
         let (_first_rtt, rr_log) =
             mmp.metrics
-                .process_receiver_report(&rr, our_timestamp_ms, crate::mmp::mono_ms());
+                .process_receiver_report(&rr, our_timestamp_ms, crate::time::mono_ms());
         // Re-emit the operator trace the core used to log mid-decision.
         super::mmp::log_rr_outcome(&rr, our_timestamp_ms, rr_log);
 
@@ -1368,7 +1368,7 @@ impl Node {
         let old_mtu = mmp.path_mtu.current_mtu();
         let changed = mmp
             .path_mtu
-            .apply_notification(notif.path_mtu, crate::mmp::mono_ms());
+            .apply_notification(notif.path_mtu, crate::time::mono_ms());
         let new_mtu = mmp.path_mtu.current_mtu();
 
         if !changed {
@@ -1606,7 +1606,7 @@ impl Node {
             let old_mtu = mmp.path_mtu.current_mtu();
             if mmp
                 .path_mtu
-                .apply_notification(msg.mtu, crate::mmp::mono_ms())
+                .apply_notification(msg.mtu, crate::time::mono_ms())
             {
                 let new_mtu = mmp.path_mtu.current_mtu();
                 info!(
