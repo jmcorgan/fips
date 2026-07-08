@@ -22,7 +22,6 @@ pub mod noise;
 pub mod peer;
 pub mod perf_profile;
 pub(crate) mod proto;
-pub mod protocol;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod transport;
@@ -57,11 +56,14 @@ pub use transport::{
     TransportState, TransportType, packet_channel,
 };
 
-// Re-export protocol types
-pub use protocol::{
-    LinkMessageType, ProtocolError, SessionAck, SessionDatagram, SessionFlags, SessionMessageType,
-    SessionSetup,
-};
+// Re-export link-layer types (relocated from protocol:: to proto::link)
+pub use proto::link::{LinkMessageType, SessionDatagram};
+
+// Re-export the shared protocol error (relocated from protocol:: to proto::Error)
+pub use proto::Error;
+
+// Re-export FSP session wire types (relocated from protocol:: to proto::fsp)
+pub use proto::fsp::{SessionAck, SessionFlags, SessionMessageType, SessionSetup};
 
 // Re-export STP wire types (relocated from protocol:: to proto::stp)
 pub use proto::stp::TreeAnnounce;

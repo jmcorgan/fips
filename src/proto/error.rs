@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// Errors related to protocol message handling.
 #[derive(Debug, Error)]
-pub enum ProtocolError {
+pub enum Error {
     #[error("invalid message type: 0x{0:02x}")]
     InvalidMessageType(u8),
 

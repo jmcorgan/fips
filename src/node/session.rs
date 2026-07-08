@@ -801,8 +801,8 @@ impl SessionEntry {
 #[cfg(test)]
 mod overlapping_epoch_tests {
     use super::*;
-    use crate::node::session_wire::{FSP_FLAG_K, build_fsp_header};
     use crate::noise::HandshakeState;
+    use crate::proto::fsp::wire::{FSP_FLAG_K, build_fsp_header};
     use secp256k1::{Keypair, Secp256k1, SecretKey};
 
     /// Deterministic keypair from a single seed byte.
@@ -1264,5 +1264,156 @@ mod overlapping_epoch_tests {
             entry.drain_expired(cutover_ms + DRAIN_MS, DRAIN_MS),
             "window must expire on the plain wall-clock timer when peer is off the old epoch"
         );
+    }
+
+    // ========================================================================
+    // Rekey-policy characterization (pins `check_session_rekey`'s decision
+    // boundaries before the `Fsp::poll_rekey` hoist — these thresholds have no
+    // other test module; see plan §10).
+    // ========================================================================
+
+    /// The initiator liveness-cutover delay used by `check_session_rekey`
+    /// (`FSP_CUTOVER_DELAY_MS`). Mirrored here as the characterization anchor.
+    const CUTOVER_DELAY_MS: u64 = 2000;
+
+    /// Build an established entry that has completed a rekey as initiator and
+    /// holds a pending session awaiting the K-bit cutover.
+    fn entry_pending_cutover(rekey_completed_ms: u64) -> SessionEntry {
+        let (_cur_send, cur_recv) = xk_pair(1, 2);
+        let (_new_send, new_recv) = xk_pair(3, 4);
+        let mut entry = entry_with_current(cur_recv);
+        // Mark ourselves the rekey initiator, then land the completed session
+        // as pending (clears rekey_state, so has_rekey_in_progress() == false).
+        entry.set_rekey_state(HandshakeState::new_xk_responder(keypair(7)), true);
+        entry.set_pending_session(new_recv);
+        entry.set_rekey_completed_ms(rekey_completed_ms);
+        entry
+    }
+
+    // The initiator-side cutover predicate: pending session present, no rekey
+    // in progress, we are the initiator, and the liveness timer has elapsed.
+    #[test]
+    fn rekey_cutover_predicate_boundary() {
+        let completed = 1_000u64;
+        let entry = entry_pending_cutover(completed);
+
+        assert!(entry.pending_new_session().is_some());
+        assert!(!entry.has_rekey_in_progress());
+        assert!(entry.is_rekey_initiator());
+
+        // Not yet eligible one ms before the delay elapses.
+        let just_before = completed + CUTOVER_DELAY_MS - 1;
+        assert!(
+            just_before.saturating_sub(entry.rekey_completed_ms()) < CUTOVER_DELAY_MS,
+            "cutover must not fire before the liveness delay"
+        );
+        // Eligible exactly at the delay.
+        let at = completed + CUTOVER_DELAY_MS;
+        assert!(
+            at.saturating_sub(entry.rekey_completed_ms()) >= CUTOVER_DELAY_MS,
+            "cutover fires once the liveness delay has elapsed"
+        );
+    }
+
+    // Rekey-trigger threshold: elapsed time (with symmetric jitter applied)
+    // OR the send counter crossing its configured bound.
+    #[test]
+    fn rekey_trigger_threshold_arithmetic() {
+        let after_secs = 100u64;
+        let after_messages = 1_000u64;
+
+        // Jitter is always within [-REKEY_JITTER_SECS, +REKEY_JITTER_SECS].
+        let (_s, recv) = xk_pair(1, 2);
+        let entry = entry_with_current(recv);
+        let jitter = entry.rekey_jitter_secs();
+        assert!(
+            jitter.abs() <= REKEY_JITTER_SECS,
+            "jitter within configured bound"
+        );
+
+        // Effective time threshold applies the symmetric jitter.
+        let effective_after = after_secs.saturating_add_signed(jitter);
+
+        // Reproduce the policy's OR predicate directly.
+        let triggers =
+            |elapsed: u64, counter: u64| elapsed >= effective_after || counter >= after_messages;
+
+        // Time arm: fires at/after the effective threshold, not below it.
+        assert!(!triggers(effective_after - 1, 0), "below time threshold");
+        assert!(triggers(effective_after, 0), "at time threshold");
+        // Counter arm: fires independently of elapsed time.
+        assert!(!triggers(0, after_messages - 1), "below counter threshold");
+        assert!(triggers(0, after_messages), "at counter threshold");
+    }
+
+    // Dampening boundary: within `dampening_ms` of the peer's rekey msg1, local
+    // initiation is suppressed; at/after the window it is not.
+    #[test]
+    fn rekey_dampening_boundary() {
+        let (_s, recv) = xk_pair(1, 2);
+        let mut entry = entry_with_current(recv);
+        const DAMP_MS: u64 = 30_000;
+
+        // No peer rekey recorded → never dampened.
+        assert!(!entry.is_rekey_dampened(50_000, DAMP_MS));
+
+        entry.record_peer_rekey(10_000);
+        assert!(
+            entry.is_rekey_dampened(10_000 + DAMP_MS - 1, DAMP_MS),
+            "dampened within the window"
+        );
+        assert!(
+            !entry.is_rekey_dampened(10_000 + DAMP_MS, DAMP_MS),
+            "not dampened once the window has elapsed"
+        );
+    }
+
+    // Epoch-reaction: a frame authenticating against `pending` while a msg3
+    // retransmission is retained confirms the peer on the new epoch (clears the
+    // msg3 payload) and then promotes.
+    #[test]
+    fn epoch_reaction_pending_confirms_then_promotes() {
+        let (mut p_send, p_recv) = xk_pair(3, 4);
+        let (_cur_send, cur_recv) = xk_pair(1, 2);
+        let mut entry = entry_with_current(cur_recv);
+        let k_before = entry.current_k_bit();
+        entry.set_pending_session(p_recv);
+        entry.set_rekey_msg3_payload(vec![0xAB; 8], 5_000);
+        assert!(entry.rekey_msg3_payload().is_some());
+
+        let (ct, counter, hdr) = seal(&mut p_send, b"new-epoch", !k_before);
+        let (_pt, slot) = entry
+            .fsp_trial_decrypt(&ct, counter, &hdr, !k_before, 2_000)
+            .expect("pending frame decrypts");
+        assert_eq!(slot, EpochSlot::Pending);
+
+        // Reaction order: confirm (while pending still held) then promote.
+        entry.confirm_peer_new_epoch();
+        assert!(entry.rekey_msg3_payload().is_none());
+        entry.handle_peer_kbit_flip(2_000);
+        assert!(entry.pending_new_session().is_none());
+        assert_ne!(entry.current_k_bit(), k_before);
+    }
+
+    // Epoch-reaction: as the initiator that already cut over on its own timer
+    // (msg3 retained, no pending), a frame authenticating against `current`
+    // confirms the responder reached the new epoch.
+    #[test]
+    fn epoch_reaction_current_confirms_responder() {
+        let (mut cur_send, cur_recv) = xk_pair(1, 2);
+        let mut entry = entry_with_current(cur_recv);
+        entry.set_rekey_msg3_payload(vec![0xCD; 8], 5_000);
+        assert!(entry.pending_new_session().is_none());
+        assert!(entry.rekey_msg3_payload().is_some());
+
+        let (ct, counter, hdr) = seal(&mut cur_send, b"steady", false);
+        let (_pt, slot) = entry
+            .fsp_trial_decrypt(&ct, counter, &hdr, false, 2_000)
+            .expect("current frame decrypts");
+        assert_eq!(slot, EpochSlot::Current);
+
+        // The Current-with-retained-msg3-and-no-pending arm confirms.
+        entry.confirm_peer_new_epoch();
+        assert!(entry.rekey_msg3_payload().is_none());
     }
 }

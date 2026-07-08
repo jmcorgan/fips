@@ -1,12 +1,13 @@
 //! FMP link-framing messages: handshake message types and orderly disconnect.
 //!
 //! The Noise IK handshake message-type discriminants and the orderly
-//! disconnect codec, relocated from `protocol::link` per the
-//! wire-migrates-with-subsystem policy. `Disconnect::encode` reads the shared
-//! `LinkMessageType::Disconnect` catalog variant (a downward `proto ->
-//! protocol` dependency); the catalog itself stays in `protocol::link`.
+//! disconnect codec, per the wire-migrates-with-subsystem policy.
+//! `Disconnect::encode` reads the shared `LinkMessageType::Disconnect` catalog
+//! variant (a downward `proto -> proto` dependency); the catalog itself lives
+//! in `crate::proto::link`.
 
-use crate::protocol::{LinkMessageType, ProtocolError};
+use crate::proto::Error;
+use crate::proto::link::LinkMessageType;
 use std::fmt;
 
 /// Handshake message type identifiers.
@@ -151,9 +152,9 @@ impl Disconnect {
     }
 
     /// Decode from link-layer payload (after msg_type byte has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.is_empty() {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 1,
                 got: 0,
             });

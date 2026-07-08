@@ -1,21 +1,365 @@
-//! Session-layer message types: setup, ack, data, and error messages.
+//! FSP Wire Format Parsing and Serialization
+//!
+//! Defines the FIPS session-layer wire format (FSP) for packet dispatch.
+//! All FSP messages begin with a 4-byte common prefix followed by phase-specific
+//! fields. Encrypted messages use a 12-byte cleartext header as AAD for AEAD,
+//! and a 6-byte encrypted inner header containing timestamps and message type.
+//!
+//! ## Common Prefix (4 bytes)
+//!
+//! ```text
+//! [ver+phase:1][flags:1][payload_len:2 LE]
+//! ```
+//!
+//! ## DataPacket Port Multiplexing
+//!
+//! DataPacket (msg_type 0x10) payloads inside the AEAD envelope carry a 4-byte
+//! port header for service dispatch:
+//!
+//! ```text
+//! [src_port:2 LE][dst_port:2 LE][service payload...]
+//! ```
+//!
+//! Port 256 (0x100) = IPv6 shim with header compression.
+//!
+//! ## Message Classes
+//!
+//! | Phase | U Flag | Type             | Description                       |
+//! |-------|--------|------------------|-----------------------------------|
+//! | 0x0   | 0      | Encrypted        | Post-handshake encrypted data     |
+//! | 0x0   | 1      | Plaintext error  | CoordsRequired, PathBroken        |
+//! | 0x1   | -      | Handshake msg1   | SessionSetup (Noise XK msg1)      |
+//! | 0x2   | -      | Handshake msg2   | SessionAck (Noise XK msg2)        |
+//! | 0x3   | -      | Handshake msg3   | SessionMsg3 (Noise XK msg3)       |
 
-use super::ProtocolError;
-use crate::NodeAddr;
-use crate::proto::stp::TreeCoordinate;
+use crate::proto::Error;
+use crate::proto::stp::{TreeCoordinate, decode_coords, decode_optional_coords, encode_coords};
 use std::fmt;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// FSP protocol version (4 high bits of byte 0).
+pub const FSP_VERSION: u8 = 0;
+
+/// Phase value for established (encrypted or plaintext error) messages.
+pub const FSP_PHASE_ESTABLISHED: u8 = 0x0;
+
+/// Phase value for SessionSetup (Noise IK message 1).
+pub const FSP_PHASE_MSG1: u8 = 0x1;
+
+/// Phase value for SessionAck (Noise handshake message 2).
+pub const FSP_PHASE_MSG2: u8 = 0x2;
+
+/// Phase value for XK message 3 (initiator's encrypted static).
+pub const FSP_PHASE_MSG3: u8 = 0x3;
+
+/// Size of the common packet prefix (all FSP message types).
+pub const FSP_COMMON_PREFIX_SIZE: usize = 4;
+
+/// Size of the full encrypted message header (prefix + counter).
+pub const FSP_HEADER_SIZE: usize = 12;
+
+/// Size of the encrypted inner header (timestamp + msg_type + inner_flags).
+pub const FSP_INNER_HEADER_SIZE: usize = 6;
+
+/// AEAD authentication tag size (ChaCha20-Poly1305).
+pub(crate) const TAG_SIZE: usize = 16;
+
+/// Minimum size for an encrypted FSP message: header + tag (no plaintext).
+pub const FSP_ENCRYPTED_MIN_SIZE: usize = FSP_HEADER_SIZE + TAG_SIZE; // 28 bytes
+
+// FSP DataPacket port header constants.
+
+/// Size of the FSP DataPacket port header (src_port + dst_port).
+pub const FSP_PORT_HEADER_SIZE: usize = 4;
+
+/// FSP port: IPv6 shim service.
+pub const FSP_PORT_IPV6_SHIM: u16 = 256;
+
+// Cleartext flag bit constants (byte 1 of common prefix, phase 0x0 only).
+
+/// Coords Present — source and destination coordinates follow the header.
+pub const FSP_FLAG_CP: u8 = 0x01;
+
+/// Key Epoch — selects active key during rekeying.
+#[allow(dead_code)]
+pub const FSP_FLAG_K: u8 = 0x02;
+
+/// Unencrypted — payload is plaintext (error signals).
+pub const FSP_FLAG_U: u8 = 0x04;
+
+// Inner flag bit constants (byte 5 of decrypted inner header).
+
+/// Spin bit for end-to-end RTT measurement (inside AEAD).
+#[allow(dead_code)]
+pub const FSP_INNER_FLAG_SP: u8 = 0x01;
+
+// ============================================================================
+// Common Prefix
+// ============================================================================
+
+/// Parsed FSP common packet prefix (first 4 bytes of every FSP message).
+///
+/// Wire format:
+/// ```text
+/// [ver(4bits)+phase(4bits)][flags:1][payload_len:2 LE]
+/// ```
+#[derive(Clone, Debug)]
+pub struct FspCommonPrefix {
+    /// Protocol version (high nibble of byte 0).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub version: u8,
+    /// Session lifecycle phase (low nibble of byte 0).
+    pub phase: u8,
+    /// Per-message signal flags.
+    pub flags: u8,
+    /// Length of payload following the phase-specific header.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub payload_len: u16,
+}
+
+impl FspCommonPrefix {
+    /// Parse a common prefix from the first 4 bytes of FSP message data.
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < FSP_COMMON_PREFIX_SIZE {
+            return None;
+        }
+
+        let version = data[0] >> 4;
+        let phase = data[0] & 0x0F;
+        let flags = data[1];
+        let payload_len = u16::from_le_bytes([data[2], data[3]]);
+
+        Some(Self {
+            version,
+            phase,
+            flags,
+            payload_len,
+        })
+    }
+
+    /// Check if the Unencrypted flag is set.
+    pub fn is_unencrypted(&self) -> bool {
+        self.flags & FSP_FLAG_U != 0
+    }
+
+    /// Check if the Coords Present flag is set.
+    pub fn has_coords(&self) -> bool {
+        self.flags & FSP_FLAG_CP != 0
+    }
+
+    /// Encode the ver+phase byte.
+    fn ver_phase_byte(version: u8, phase: u8) -> u8 {
+        (version << 4) | (phase & 0x0F)
+    }
+}
+
+// ============================================================================
+// Encrypted Message Header
+// ============================================================================
+
+/// Parsed FSP encrypted message header (phase 0x0, U flag clear).
+///
+/// Wire format (12 bytes):
+/// ```text
+/// [ver+phase:1][flags:1][payload_len:2 LE][counter:8 LE]
+/// ```
+///
+/// The full 12-byte header is used as AAD for the AEAD construction.
+/// No receiver_idx — unlike FMP, FSP is end-to-end (dispatched by src_addr
+/// from the SessionDatagram envelope, not by index).
+#[derive(Clone, Debug)]
+pub struct FspEncryptedHeader {
+    /// Per-message flags (CP, K).
+    pub flags: u8,
+    /// Length of encrypted payload (excluding AEAD tag).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub payload_len: u16,
+    /// Monotonic counter used as AEAD nonce.
+    pub counter: u64,
+    /// Raw 12-byte header for use as AEAD AAD.
+    pub header_bytes: [u8; FSP_HEADER_SIZE],
+}
+
+impl FspEncryptedHeader {
+    /// Parse an encrypted message header from FSP message data.
+    ///
+    /// Returns None if the data is too short or has wrong version/phase,
+    /// or if the U flag is set (plaintext messages use a different path).
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < FSP_ENCRYPTED_MIN_SIZE {
+            return None;
+        }
+
+        let version = data[0] >> 4;
+        let phase = data[0] & 0x0F;
+
+        if version != FSP_VERSION || phase != FSP_PHASE_ESTABLISHED {
+            return None;
+        }
+
+        let flags = data[1];
+
+        // U flag means plaintext — not an encrypted message
+        if flags & FSP_FLAG_U != 0 {
+            return None;
+        }
+
+        let payload_len = u16::from_le_bytes([data[2], data[3]]);
+        let counter = u64::from_le_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
+
+        let mut header_bytes = [0u8; FSP_HEADER_SIZE];
+        header_bytes.copy_from_slice(&data[..FSP_HEADER_SIZE]);
+
+        Some(Self {
+            flags,
+            payload_len,
+            counter,
+            header_bytes,
+        })
+    }
+
+    /// Check if the Coords Present flag is set.
+    pub fn has_coords(&self) -> bool {
+        self.flags & FSP_FLAG_CP != 0
+    }
+
+    /// Offset where ciphertext (or coords if CP) begins in the original data.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn data_offset(&self) -> usize {
+        FSP_HEADER_SIZE
+    }
+}
+
+// ============================================================================
+// Serialization Helpers
+// ============================================================================
+
+/// Build the 12-byte cleartext header for an encrypted FSP message.
+///
+/// Returns the header bytes for use as AEAD AAD.
+pub fn build_fsp_header(counter: u64, flags: u8, payload_len: u16) -> [u8; FSP_HEADER_SIZE] {
+    let mut header = [0u8; FSP_HEADER_SIZE];
+    header[0] = FspCommonPrefix::ver_phase_byte(FSP_VERSION, FSP_PHASE_ESTABLISHED);
+    header[1] = flags;
+    header[2..4].copy_from_slice(&payload_len.to_le_bytes());
+    header[4..12].copy_from_slice(&counter.to_le_bytes());
+    header
+}
+
+/// Assemble a wire-format encrypted FSP message.
+///
+/// Format: `[header:12][ciphertext+tag]`
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build_fsp_encrypted(header: &[u8; FSP_HEADER_SIZE], ciphertext: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(FSP_HEADER_SIZE + ciphertext.len());
+    packet.extend_from_slice(header);
+    packet.extend_from_slice(ciphertext);
+    packet
+}
+
+/// Build a 4-byte common prefix for a handshake message.
+///
+/// `phase` should be `FSP_PHASE_MSG1`, `FSP_PHASE_MSG2`, or `FSP_PHASE_MSG3`.
+/// Flags are zero during handshake.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build_fsp_handshake_prefix(phase: u8, payload_len: u16) -> [u8; FSP_COMMON_PREFIX_SIZE] {
+    let mut prefix = [0u8; FSP_COMMON_PREFIX_SIZE];
+    prefix[0] = FspCommonPrefix::ver_phase_byte(FSP_VERSION, phase);
+    prefix[1] = 0x00; // flags must be zero during handshake
+    prefix[2..4].copy_from_slice(&payload_len.to_le_bytes());
+    prefix
+}
+
+/// Build a 4-byte common prefix for a plaintext error signal.
+///
+/// Sets phase 0x0 and U flag.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build_fsp_error_prefix(payload_len: u16) -> [u8; FSP_COMMON_PREFIX_SIZE] {
+    let mut prefix = [0u8; FSP_COMMON_PREFIX_SIZE];
+    prefix[0] = FspCommonPrefix::ver_phase_byte(FSP_VERSION, FSP_PHASE_ESTABLISHED);
+    prefix[1] = FSP_FLAG_U;
+    prefix[2..4].copy_from_slice(&payload_len.to_le_bytes());
+    prefix
+}
+
+// ============================================================================
+// Inner Header Helpers
+// ============================================================================
+
+/// Prepend the 6-byte FSP inner header to a message payload.
+///
+/// Inner header: `[timestamp:4 LE][msg_type:1][inner_flags:1]`
+///
+/// The caller provides the message-type-specific payload (e.g., application
+/// data for msg_type 0x10, report fields for SenderReport). This function
+/// prepends the inner header.
+pub fn fsp_prepend_inner_header(
+    timestamp_ms: u32,
+    msg_type: u8,
+    inner_flags: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(FSP_INNER_HEADER_SIZE + payload.len());
+    buf.extend_from_slice(&timestamp_ms.to_le_bytes());
+    buf.push(msg_type);
+    buf.push(inner_flags);
+    buf.extend_from_slice(payload);
+    buf
+}
+
+/// Strip the 6-byte FSP inner header from a decrypted payload.
+///
+/// Returns `(timestamp, msg_type, inner_flags, &rest)` or None if too short.
+pub fn fsp_strip_inner_header(plaintext: &[u8]) -> Option<(u32, u8, u8, &[u8])> {
+    if plaintext.len() < FSP_INNER_HEADER_SIZE {
+        return None;
+    }
+    let timestamp = u32::from_le_bytes([plaintext[0], plaintext[1], plaintext[2], plaintext[3]]);
+    let msg_type = plaintext[4];
+    let inner_flags = plaintext[5];
+    Some((
+        timestamp,
+        msg_type,
+        inner_flags,
+        &plaintext[FSP_INNER_HEADER_SIZE..],
+    ))
+}
+
+// ============================================================================
+// Coordinate Parsing (for transit nodes and receive path)
+// ============================================================================
+
+/// Parse source and destination coordinates from the cleartext section
+/// of an encrypted FSP message when the CP flag is set.
+///
+/// Coordinates appear between the 12-byte header and the ciphertext:
+/// `[src_coords_count:2 LE][src_coords:16×n][dest_coords_count:2 LE][dest_coords:16×m]`
+///
+/// Returns `(src_coords, dest_coords, bytes_consumed)`.
+pub fn parse_encrypted_coords(
+    data: &[u8],
+) -> Result<(Option<TreeCoordinate>, Option<TreeCoordinate>, usize), Error> {
+    let (src_coords, src_consumed) = decode_optional_coords(data)?;
+    let (dest_coords, dest_consumed) = decode_optional_coords(&data[src_consumed..])?;
+    Ok((src_coords, dest_coords, src_consumed + dest_consumed))
+}
 
 // ============================================================================
 // Session Layer Message Types
 // ============================================================================
 
-/// SessionDatagram payload message type identifiers.
+/// FSP encrypted-inner message type identifiers (`0x10`–`0x1F`).
 ///
-/// These messages are carried as payloads inside `SessionDatagram` (link
-/// message type 0x00). Post-handshake messages (data, reports) are end-to-end
-/// encrypted with session keys via the FSP pipeline. Error signals
-/// (CoordsRequired, PathBroken) are plaintext messages generated by transit
-/// routers that cannot establish e2e sessions with the source.
+/// These messages are carried end-to-end encrypted inside the FSP AEAD
+/// envelope; the type is the `msg_type` byte of the encrypted inner header.
+/// The plaintext link-layer error signals (`0x20`–`0x2F`) are a separate
+/// registry — [`RoutingSignalType`](crate::proto::routing::RoutingSignalType)
+/// — since they are dispatched on the cleartext (U-flag) path with no session.
 ///
 /// Handshake messages (SessionSetup, SessionAck, SessionMsg3) are **not**
 /// identified by a message-type byte; they are dispatched by the FSP phase
@@ -36,14 +380,6 @@ pub enum SessionMessageType {
     PathMtuNotification = 0x13,
     /// Standalone coordinate cache warming (empty body, coords in CP flag).
     CoordsWarmup = 0x14,
-
-    // Link-layer error signals (0x20-0x2F) — plaintext, from transit routers
-    /// Router cache miss — needs coordinates (link-layer error signal).
-    CoordsRequired = 0x20,
-    /// Routing failure — local minimum or unreachable (link-layer error signal).
-    PathBroken = 0x21,
-    /// MTU exceeded — forwarded packet too large for next-hop transport (link-layer error signal).
-    MtuExceeded = 0x22,
 }
 
 impl SessionMessageType {
@@ -55,9 +391,6 @@ impl SessionMessageType {
             0x12 => Some(SessionMessageType::ReceiverReport),
             0x13 => Some(SessionMessageType::PathMtuNotification),
             0x14 => Some(SessionMessageType::CoordsWarmup),
-            0x20 => Some(SessionMessageType::CoordsRequired),
-            0x21 => Some(SessionMessageType::PathBroken),
-            0x22 => Some(SessionMessageType::MtuExceeded),
             _ => None,
         }
     }
@@ -76,109 +409,9 @@ impl fmt::Display for SessionMessageType {
             SessionMessageType::ReceiverReport => "ReceiverReport",
             SessionMessageType::PathMtuNotification => "PathMtuNotification",
             SessionMessageType::CoordsWarmup => "CoordsWarmup",
-            SessionMessageType::CoordsRequired => "CoordsRequired",
-            SessionMessageType::PathBroken => "PathBroken",
-            SessionMessageType::MtuExceeded => "MtuExceeded",
         };
         write!(f, "{}", name)
     }
-}
-
-// ============================================================================
-// Coordinate Wire Format Helpers
-// ============================================================================
-
-/// Wire size of a TreeCoordinate in address-only format: 2 + entries × 16.
-pub(crate) fn coords_wire_size(coords: &TreeCoordinate) -> usize {
-    2 + coords.entries().len() * 16
-}
-
-/// Encode a TreeCoordinate as address-only wire format: count(u16 LE) + addrs(16 × n).
-///
-/// Session-layer messages serialize coordinates as NodeAddr arrays (16 bytes each),
-/// without the sequence/timestamp metadata used by the tree gossip protocol.
-pub(crate) fn encode_coords(coords: &TreeCoordinate, buf: &mut Vec<u8>) {
-    let addrs: Vec<&NodeAddr> = coords.node_addrs().collect();
-    let count = addrs.len() as u16;
-    buf.extend_from_slice(&count.to_le_bytes());
-    for addr in addrs {
-        buf.extend_from_slice(addr.as_bytes());
-    }
-}
-
-/// Decode a TreeCoordinate from address-only wire format.
-///
-/// Returns the decoded coordinate and the number of bytes consumed.
-pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), ProtocolError> {
-    if data.len() < 2 {
-        return Err(ProtocolError::MessageTooShort {
-            expected: 2,
-            got: data.len(),
-        });
-    }
-    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    let needed = 2 + count * 16;
-    if data.len() < needed {
-        return Err(ProtocolError::MessageTooShort {
-            expected: needed,
-            got: data.len(),
-        });
-    }
-    if count == 0 {
-        return Err(ProtocolError::Malformed(
-            "coordinate with zero entries".into(),
-        ));
-    }
-    let mut addrs = Vec::with_capacity(count);
-    for i in 0..count {
-        let offset = 2 + i * 16;
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&data[offset..offset + 16]);
-        addrs.push(NodeAddr::from_bytes(bytes));
-    }
-    let coord =
-        TreeCoordinate::from_addrs(addrs).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-    Ok((coord, needed))
-}
-
-/// Decode an optional coordinate field (count may be 0).
-///
-/// Returns None if count is 0, Some(coord) otherwise, plus bytes consumed.
-pub(crate) fn decode_optional_coords(
-    data: &[u8],
-) -> Result<(Option<TreeCoordinate>, usize), ProtocolError> {
-    if data.len() < 2 {
-        return Err(ProtocolError::MessageTooShort {
-            expected: 2,
-            got: data.len(),
-        });
-    }
-    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    let needed = 2 + count * 16;
-    if data.len() < needed {
-        return Err(ProtocolError::MessageTooShort {
-            expected: needed,
-            got: data.len(),
-        });
-    }
-    if count == 0 {
-        return Ok((None, 2));
-    }
-    let mut addrs = Vec::with_capacity(count);
-    for i in 0..count {
-        let offset = 2 + i * 16;
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&data[offset..offset + 16]);
-        addrs.push(NodeAddr::from_bytes(bytes));
-    }
-    let coord =
-        TreeCoordinate::from_addrs(addrs).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-    Ok((Some(coord), needed))
-}
-
-/// Encode a count of zero (for empty/absent coordinate fields).
-pub(crate) fn encode_empty_coords(buf: &mut Vec<u8>) {
-    buf.extend_from_slice(&0u16.to_le_bytes());
 }
 
 // ============================================================================
@@ -245,6 +478,7 @@ impl SessionFlags {
 /// | 1   | K    | Key epoch (for rekeying)                       |
 /// | 2   | U    | Unencrypted payload (error signals)            |
 /// | 3-7 |      | Reserved                                       |
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FspFlags {
     /// Coordinates present between header and ciphertext.
@@ -255,6 +489,8 @@ pub struct FspFlags {
     pub unencrypted: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::wrong_self_convention)]
 impl FspFlags {
     /// Create default flags (all clear).
     pub fn new() -> Self {
@@ -298,8 +534,10 @@ pub struct FspInnerFlags {
     pub spin_bit: bool,
 }
 
+#[allow(clippy::wrong_self_convention)]
 impl FspInnerFlags {
     /// Create default inner flags (all clear).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -408,9 +646,9 @@ impl SessionSetup {
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.is_empty() {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 1,
                 got: 0,
             });
@@ -425,7 +663,7 @@ impl SessionSetup {
         offset += consumed;
 
         if payload.len() < offset + 2 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: offset + 2,
                 got: payload.len(),
             });
@@ -434,7 +672,7 @@ impl SessionSetup {
         offset += 2;
 
         if payload.len() < offset + hs_len {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: offset + hs_len,
                 got: payload.len(),
             });
@@ -535,9 +773,9 @@ impl SessionAck {
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.is_empty() {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 1,
                 got: 0,
             });
@@ -552,7 +790,7 @@ impl SessionAck {
         offset += consumed;
 
         if payload.len() < offset + 2 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: offset + 2,
                 got: payload.len(),
             });
@@ -561,7 +799,7 @@ impl SessionAck {
         offset += 2;
 
         if payload.len() < offset + hs_len {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: offset + hs_len,
                 got: payload.len(),
             });
@@ -634,9 +872,9 @@ impl SessionMsg3 {
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.is_empty() {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 1,
                 got: 0,
             });
@@ -645,7 +883,7 @@ impl SessionMsg3 {
         let mut offset = 1;
 
         if payload.len() < offset + 2 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: offset + 2,
                 got: payload.len(),
             });
@@ -654,7 +892,7 @@ impl SessionMsg3 {
         offset += 2;
 
         if payload.len() < offset + hs_len {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: offset + hs_len,
                 got: payload.len(),
             });
@@ -665,319 +903,5 @@ impl SessionMsg3 {
             flags,
             handshake_payload,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_node_addr(val: u8) -> NodeAddr {
-        let mut bytes = [0u8; 16];
-        bytes[0] = val;
-        NodeAddr::from_bytes(bytes)
-    }
-
-    fn make_coords(ids: &[u8]) -> TreeCoordinate {
-        TreeCoordinate::from_addrs(ids.iter().map(|&v| make_node_addr(v)).collect()).unwrap()
-    }
-
-    // ===== SessionMessageType Tests =====
-
-    #[test]
-    fn test_session_message_type_roundtrip() {
-        let types = [
-            SessionMessageType::DataPacket,
-            SessionMessageType::SenderReport,
-            SessionMessageType::ReceiverReport,
-            SessionMessageType::PathMtuNotification,
-            SessionMessageType::CoordsWarmup,
-            SessionMessageType::CoordsRequired,
-            SessionMessageType::PathBroken,
-            SessionMessageType::MtuExceeded,
-        ];
-
-        for ty in types {
-            let byte = ty.to_byte();
-            let restored = SessionMessageType::from_byte(byte);
-            assert_eq!(restored, Some(ty));
-        }
-    }
-
-    #[test]
-    fn test_session_message_type_invalid() {
-        assert!(SessionMessageType::from_byte(0xFF).is_none());
-        assert!(SessionMessageType::from_byte(0x99).is_none());
-    }
-
-    // ===== SessionFlags Tests =====
-
-    #[test]
-    fn test_session_flags() {
-        let flags = SessionFlags::new().with_ack().bidirectional();
-
-        assert!(flags.request_ack);
-        assert!(flags.bidirectional);
-
-        let byte = flags.to_byte();
-        let restored = SessionFlags::from_byte(byte);
-
-        assert_eq!(flags, restored);
-    }
-
-    #[test]
-    fn test_session_flags_default() {
-        let flags = SessionFlags::new();
-        assert!(!flags.request_ack);
-        assert!(!flags.bidirectional);
-        assert_eq!(flags.to_byte(), 0);
-    }
-
-    // ===== SessionSetup Tests =====
-
-    #[test]
-    fn test_session_setup() {
-        let setup = SessionSetup::new(make_coords(&[1, 0]), make_coords(&[2, 0]))
-            .with_flags(SessionFlags::new().with_ack());
-
-        assert!(setup.flags.request_ack);
-        assert!(!setup.flags.bidirectional);
-    }
-
-    // ===== Encode/Decode Roundtrip Tests =====
-
-    #[test]
-    fn test_session_setup_encode_decode() {
-        let handshake = vec![0xAA; 82]; // typical Noise IK msg1
-        let setup = SessionSetup::new(make_coords(&[1, 2, 0]), make_coords(&[3, 4, 0]))
-            .with_flags(SessionFlags::new().with_ack().bidirectional())
-            .with_handshake(handshake.clone());
-
-        let encoded = setup.encode();
-
-        // Verify FSP prefix: ver_phase=0x01 (version 0, phase MSG1)
-        assert_eq!(encoded[0], 0x01);
-        assert_eq!(encoded[1], 0x00); // flags = 0 for handshake
-        let payload_len = u16::from_le_bytes([encoded[2], encoded[3]]);
-        assert_eq!(payload_len as usize, encoded.len() - 4);
-
-        // Decode (skip 4-byte FSP prefix)
-        let decoded = SessionSetup::decode(&encoded[4..]).unwrap();
-
-        assert_eq!(decoded.flags, setup.flags);
-        assert_eq!(decoded.src_coords, setup.src_coords);
-        assert_eq!(decoded.dest_coords, setup.dest_coords);
-        assert_eq!(decoded.handshake_payload, handshake);
-    }
-
-    #[test]
-    fn test_session_setup_no_handshake() {
-        let setup = SessionSetup::new(make_coords(&[5, 0]), make_coords(&[6, 0]));
-
-        let encoded = setup.encode();
-        let decoded = SessionSetup::decode(&encoded[4..]).unwrap();
-
-        assert!(decoded.handshake_payload.is_empty());
-        assert_eq!(decoded.src_coords, setup.src_coords);
-        assert_eq!(decoded.dest_coords, setup.dest_coords);
-    }
-
-    #[test]
-    fn test_session_ack_encode_decode() {
-        let handshake = vec![0xBB; 33]; // typical Noise IK msg2
-        let ack = SessionAck::new(make_coords(&[7, 8, 0]), make_coords(&[3, 4, 0]))
-            .with_handshake(handshake.clone());
-
-        let encoded = ack.encode();
-        // Verify FSP prefix: ver_phase=0x02 (version 0, phase MSG2)
-        assert_eq!(encoded[0], 0x02);
-        assert_eq!(encoded[1], 0x00); // flags = 0 for handshake
-
-        let decoded = SessionAck::decode(&encoded[4..]).unwrap();
-        assert_eq!(decoded.src_coords, ack.src_coords);
-        assert_eq!(decoded.dest_coords, ack.dest_coords);
-        assert_eq!(decoded.handshake_payload, handshake);
-    }
-
-    #[test]
-    fn test_session_setup_decode_too_short() {
-        assert!(SessionSetup::decode(&[]).is_err());
-    }
-
-    #[test]
-    fn test_session_ack_decode_too_short() {
-        assert!(SessionAck::decode(&[]).is_err());
-    }
-
-    #[test]
-    fn test_session_setup_deep_coords() {
-        // Depth-10 coordinate (11 entries: self + 10 ancestors)
-        let addrs: Vec<u8> = (0..11).collect();
-        let src = make_coords(&addrs);
-        let dest = make_coords(&[20, 21, 22, 23, 24]);
-        let setup = SessionSetup::new(src.clone(), dest.clone()).with_handshake(vec![0x55; 82]);
-
-        let encoded = setup.encode();
-        let decoded = SessionSetup::decode(&encoded[4..]).unwrap();
-
-        assert_eq!(decoded.src_coords, src);
-        assert_eq!(decoded.dest_coords, dest);
-    }
-
-    // ===== FspFlags Tests =====
-
-    #[test]
-    fn test_fsp_flags_default() {
-        let flags = FspFlags::new();
-        assert!(!flags.coords_present);
-        assert!(!flags.key_epoch);
-        assert!(!flags.unencrypted);
-        assert_eq!(flags.to_byte(), 0x00);
-    }
-
-    #[test]
-    fn test_fsp_flags_roundtrip() {
-        // All combinations of 3 bits
-        for byte in 0u8..=0x07 {
-            let flags = FspFlags::from_byte(byte);
-            assert_eq!(flags.to_byte(), byte);
-        }
-    }
-
-    #[test]
-    fn test_fsp_flags_individual_bits() {
-        let cp = FspFlags::from_byte(0x01);
-        assert!(cp.coords_present);
-        assert!(!cp.key_epoch);
-        assert!(!cp.unencrypted);
-
-        let k = FspFlags::from_byte(0x02);
-        assert!(!k.coords_present);
-        assert!(k.key_epoch);
-        assert!(!k.unencrypted);
-
-        let u = FspFlags::from_byte(0x04);
-        assert!(!u.coords_present);
-        assert!(!u.key_epoch);
-        assert!(u.unencrypted);
-    }
-
-    #[test]
-    fn test_fsp_flags_ignores_reserved_bits() {
-        // Reserved bits in upper 5 bits are not preserved
-        let flags = FspFlags::from_byte(0xFF);
-        assert!(flags.coords_present);
-        assert!(flags.key_epoch);
-        assert!(flags.unencrypted);
-        assert_eq!(flags.to_byte(), 0x07); // only lower 3 bits
-    }
-
-    // ===== FspInnerFlags Tests =====
-
-    #[test]
-    fn test_fsp_inner_flags_default() {
-        let flags = FspInnerFlags::new();
-        assert!(!flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x00);
-    }
-
-    #[test]
-    fn test_fsp_inner_flags_roundtrip() {
-        let flags = FspInnerFlags::from_byte(0x01);
-        assert!(flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x01);
-
-        let flags = FspInnerFlags::from_byte(0x00);
-        assert!(!flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x00);
-    }
-
-    #[test]
-    fn test_fsp_inner_flags_ignores_reserved() {
-        let flags = FspInnerFlags::from_byte(0xFE);
-        assert!(!flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x00);
-
-        let flags = FspInnerFlags::from_byte(0xFF);
-        assert!(flags.spin_bit);
-        assert_eq!(flags.to_byte(), 0x01);
-    }
-
-    // ===== New SessionMessageType Values =====
-
-    #[test]
-    fn test_session_message_type_new_values() {
-        assert_eq!(SessionMessageType::SenderReport.to_byte(), 0x11);
-        assert_eq!(SessionMessageType::ReceiverReport.to_byte(), 0x12);
-        assert_eq!(SessionMessageType::PathMtuNotification.to_byte(), 0x13);
-    }
-
-    #[test]
-    fn test_session_message_type_display() {
-        assert_eq!(
-            format!("{}", SessionMessageType::SenderReport),
-            "SenderReport"
-        );
-        assert_eq!(
-            format!("{}", SessionMessageType::ReceiverReport),
-            "ReceiverReport"
-        );
-        assert_eq!(
-            format!("{}", SessionMessageType::PathMtuNotification),
-            "PathMtuNotification"
-        );
-    }
-
-    // ===== MtuExceeded Tests =====
-
-    #[test]
-    fn test_mtu_exceeded_message_type_value() {
-        assert_eq!(SessionMessageType::MtuExceeded.to_byte(), 0x22);
-        assert_eq!(
-            SessionMessageType::from_byte(0x22),
-            Some(SessionMessageType::MtuExceeded)
-        );
-    }
-
-    #[test]
-    fn test_mtu_exceeded_display() {
-        assert_eq!(
-            format!("{}", SessionMessageType::MtuExceeded),
-            "MtuExceeded"
-        );
-    }
-
-    // ===== SessionMsg3 Tests =====
-
-    #[test]
-    fn test_session_msg3_encode_decode() {
-        let handshake = vec![0xCC; 73]; // typical XK msg3
-        let msg3 = SessionMsg3::new(handshake.clone());
-
-        let encoded = msg3.encode();
-        // Verify FSP prefix: ver_phase=0x03 (version 0, phase MSG3)
-        assert_eq!(encoded[0], 0x03);
-        assert_eq!(encoded[1], 0x00); // flags = 0 for handshake
-        let payload_len = u16::from_le_bytes([encoded[2], encoded[3]]);
-        assert_eq!(payload_len as usize, encoded.len() - 4);
-
-        // Decode (skip 4-byte FSP prefix)
-        let decoded = SessionMsg3::decode(&encoded[4..]).unwrap();
-        assert_eq!(decoded.flags, 0);
-        assert_eq!(decoded.handshake_payload, handshake);
-    }
-
-    #[test]
-    fn test_session_msg3_decode_too_short() {
-        assert!(SessionMsg3::decode(&[]).is_err());
-        assert!(SessionMsg3::decode(&[0x00]).is_err()); // flags only, no hs_len
-    }
-
-    #[test]
-    fn test_session_msg3_empty_handshake() {
-        let msg3 = SessionMsg3::new(vec![]);
-        let encoded = msg3.encode();
-        let decoded = SessionMsg3::decode(&encoded[4..]).unwrap();
-        assert!(decoded.handshake_payload.is_empty());
     }
 }

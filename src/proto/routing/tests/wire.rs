@@ -4,8 +4,40 @@
 use super::util::make_coords;
 use crate::proto::routing::{
     COORDS_REQUIRED_SIZE, CoordsRequired, MTU_EXCEEDED_SIZE, MtuExceeded, PathBroken,
+    RoutingSignalType,
 };
 use crate::testutil::make_node_addr;
+
+#[test]
+fn test_routing_signal_type_roundtrip() {
+    let types = [
+        RoutingSignalType::CoordsRequired,
+        RoutingSignalType::PathBroken,
+        RoutingSignalType::MtuExceeded,
+    ];
+    for ty in types {
+        assert_eq!(RoutingSignalType::from_byte(ty.to_byte()), Some(ty));
+    }
+}
+
+#[test]
+fn test_routing_signal_type_values_and_invalid() {
+    assert_eq!(RoutingSignalType::CoordsRequired.to_byte(), 0x20);
+    assert_eq!(RoutingSignalType::PathBroken.to_byte(), 0x21);
+    assert_eq!(RoutingSignalType::MtuExceeded.to_byte(), 0x22);
+    // The 0x10-0x1F FSP encrypted-inner range is not part of this registry.
+    assert!(RoutingSignalType::from_byte(0x10).is_none());
+    assert!(RoutingSignalType::from_byte(0xFF).is_none());
+}
+
+#[test]
+fn test_routing_signal_type_display() {
+    assert_eq!(format!("{}", RoutingSignalType::MtuExceeded), "MtuExceeded");
+    assert_eq!(
+        format!("{}", RoutingSignalType::CoordsRequired),
+        "CoordsRequired"
+    );
+}
 
 #[test]
 fn test_coords_required() {

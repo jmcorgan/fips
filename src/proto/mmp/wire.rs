@@ -6,7 +6,7 @@
 //! [`SessionReceiverReport`]/[`PathMtuNotification`]), plus the conversions
 //! between the two layers. Wire format follows the MMP design doc.
 
-use crate::protocol::ProtocolError;
+use crate::proto::Error;
 
 // ============================================================================
 // SenderReport (msg_type 0x01, 48-byte body including type byte)
@@ -98,9 +98,9 @@ impl SenderReport {
     /// Decode from payload after msg_type byte has been consumed.
     ///
     /// `payload` starts at the reserved bytes (offset 1 in the wire format).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.len() < 47 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 47,
                 got: payload.len(),
             });
@@ -146,9 +146,9 @@ impl ReceiverReport {
     /// Decode from payload after msg_type byte has been consumed.
     ///
     /// `payload` starts at the reserved bytes (offset 1 in the wire format).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.len() < 67 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 67,
                 got: payload.len(),
             });
@@ -227,9 +227,9 @@ impl SessionSenderReport {
     }
 
     /// Decode from body (after FSP inner header has been stripped).
-    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(body: &[u8]) -> Result<Self, Error> {
         if body.len() < SESSION_SENDER_REPORT_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: SESSION_SENDER_REPORT_SIZE,
                 got: body.len(),
             });
@@ -318,9 +318,9 @@ impl SessionReceiverReport {
     }
 
     /// Decode from body (after FSP inner header has been stripped).
-    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(body: &[u8]) -> Result<Self, Error> {
         if body.len() < SESSION_RECEIVER_REPORT_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: SESSION_RECEIVER_REPORT_SIZE,
                 got: body.len(),
             });
@@ -379,9 +379,9 @@ impl PathMtuNotification {
     }
 
     /// Decode from body (after FSP inner header has been stripped).
-    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(body: &[u8]) -> Result<Self, Error> {
         if body.len() < PATH_MTU_NOTIFICATION_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: PATH_MTU_NOTIFICATION_SIZE,
                 got: body.len(),
             });

@@ -1,8 +1,8 @@
 //! FilterAnnounce message: bloom filter reachability propagation.
 
 use super::BloomFilter;
-use crate::protocol::LinkMessageType;
-use crate::protocol::ProtocolError;
+use crate::proto::Error;
+use crate::proto::link::LinkMessageType;
 
 /// Bloom filter announcement for reachability propagation.
 ///
@@ -79,9 +79,9 @@ impl FilterAnnounce {
     /// ```text
     /// [0x20][sequence:8 LE][hash_count:1][size_class:1][filter_bits:variable]
     /// ```
-    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
         if !self.is_valid() {
-            return Err(ProtocolError::Malformed(
+            return Err(Error::Malformed(
                 "filter size does not match size_class".into(),
             ));
         }
@@ -107,9 +107,9 @@ impl FilterAnnounce {
     /// Decode from link-layer payload (after msg_type byte stripped by dispatcher).
     ///
     /// The payload starts with the sequence field.
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.len() < Self::MIN_PAYLOAD_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: Self::MIN_PAYLOAD_SIZE,
                 got: payload.len(),
             });
@@ -121,7 +121,7 @@ impl FilterAnnounce {
         let sequence = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad sequence".into()))?,
+                .map_err(|_| Error::Malformed("bad sequence".into()))?,
         );
         pos += 8;
 
@@ -135,7 +135,7 @@ impl FilterAnnounce {
 
         // Validate size_class range
         if size_class > Self::MAX_SIZE_CLASS {
-            return Err(ProtocolError::Malformed(format!(
+            return Err(Error::Malformed(format!(
                 "invalid size_class: {size_class} (max {})",
                 Self::MAX_SIZE_CLASS
             )));
@@ -143,7 +143,7 @@ impl FilterAnnounce {
 
         // v1 compliance check
         if size_class != super::V1_SIZE_CLASS {
-            return Err(ProtocolError::Malformed(format!(
+            return Err(Error::Malformed(format!(
                 "unsupported size_class: {size_class} (v1 requires {})",
                 super::V1_SIZE_CLASS
             )));
@@ -153,7 +153,7 @@ impl FilterAnnounce {
         let expected_filter_bytes = 512usize << size_class;
         let remaining = payload.len() - pos;
         if remaining != expected_filter_bytes {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: Self::MIN_PAYLOAD_SIZE + expected_filter_bytes,
                 got: payload.len(),
             });
@@ -161,7 +161,7 @@ impl FilterAnnounce {
 
         // Construct BloomFilter from bytes
         let filter = BloomFilter::from_slice(&payload[pos..], hash_count)
-            .map_err(|e| ProtocolError::Malformed(format!("invalid bloom filter: {e}")))?;
+            .map_err(|e| Error::Malformed(format!("invalid bloom filter: {e}")))?;
 
         let announce = Self {
             filter,

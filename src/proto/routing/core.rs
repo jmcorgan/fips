@@ -18,7 +18,7 @@
 
 use super::state::Router;
 use super::wire::{CoordsRequired, MtuExceeded, PathBroken};
-use crate::protocol::{SessionDatagram, SessionDatagramRef};
+use crate::proto::link::{SessionDatagram, SessionDatagramRef};
 use crate::{NodeAddr, TreeCoordinate};
 
 /// Read-only view of routing state the routing core needs.

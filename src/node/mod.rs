@@ -19,7 +19,6 @@ pub(crate) mod reject;
 mod reloadable;
 mod retry;
 pub(crate) mod session;
-pub(crate) mod session_wire;
 pub(crate) mod stats;
 pub(crate) mod stats_history;
 #[cfg(test)]
@@ -46,6 +45,7 @@ use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::discovery::{Discovery, DiscoveryBackoff, DiscoveryForwardRateLimiter};
 use crate::proto::fmp::Fmp;
+use crate::proto::fsp::Fsp;
 use crate::proto::mmp::Mmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 use crate::proto::stp::TreeState;
@@ -421,6 +421,9 @@ pub struct Node {
     /// FMP connection-lifecycle decision anchor (stateless; drives the
     /// tick-poll maintain/teardown decisions).
     fmp: Fmp,
+    /// FSP session-lifecycle decision anchor (stateless; drives the rekey /
+    /// epoch-reaction decisions).
+    fsp: Fsp,
     /// MMP reporting decision anchor (stateless; drives the report-fan-out /
     /// liveness / heartbeat decisions).
     mmp: Mmp,
@@ -670,6 +673,7 @@ impl Node {
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
             fmp: Fmp::new(),
+            fsp: Fsp::new(),
             mmp: Mmp::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
@@ -834,6 +838,7 @@ impl Node {
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
             fmp: Fmp::new(),
+            fsp: Fsp::new(),
             mmp: Mmp::new(),
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
