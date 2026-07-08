@@ -1748,7 +1748,7 @@ fn process_fmp_negotiation(
     our_profile: crate::proto::fmp::NodeProfile,
     conn: &mut PeerConnection,
     neg_bytes: &[u8],
-) -> Result<(), crate::protocol::ProtocolError> {
+) -> Result<(), crate::proto::Error> {
     // The decode -> validate -> profile decision is the pure core split; the
     // shell records the result on the connection and logs.
     let their_profile = decide_fmp_negotiation(our_profile, neg_bytes)?;

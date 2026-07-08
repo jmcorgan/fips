@@ -257,7 +257,7 @@ impl Node {
             .collect();
 
         for (dest_addr, payload) in candidates {
-            use crate::protocol::SessionDatagram;
+            use crate::proto::link::SessionDatagram;
 
             let mut datagram = SessionDatagram::new(my_addr, dest_addr, payload).with_ttl(ttl);
             let sent = match self.send_session_datagram(&mut datagram).await {

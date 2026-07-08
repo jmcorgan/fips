@@ -22,7 +22,7 @@ use super::wire::{
     FMP_FEAT_WANTS_SR, NegotiationPayload, NodeProfile,
 };
 use crate::NodeAddr;
-use crate::protocol::ProtocolError;
+use crate::proto::Error;
 use crate::transport::LinkId;
 
 /// Determine winner of cross-connection tie-breaker.
@@ -606,10 +606,10 @@ impl NegotiationPayload {
     ///
     /// Returns `min(our_max, their_max)`, rejecting if the agreed version
     /// is below either side's minimum.
-    pub fn agree_version(&self, other: &Self) -> Result<u8, ProtocolError> {
+    pub fn agree_version(&self, other: &Self) -> Result<u8, Error> {
         let agreed = self.version_max.min(other.version_max);
         if agreed < self.version_min || agreed < other.version_min {
-            return Err(ProtocolError::Malformed(format!(
+            return Err(Error::Malformed(format!(
                 "version mismatch: ours [{},{}] theirs [{},{}]",
                 self.version_min, self.version_max, other.version_min, other.version_max
             )));
@@ -645,7 +645,7 @@ impl NegotiationPayload {
     }
 
     /// Extract the node profile from the FMP feature bitfield.
-    pub fn node_profile(&self) -> Result<NodeProfile, ProtocolError> {
+    pub fn node_profile(&self) -> Result<NodeProfile, Error> {
         let raw = (self.features & FMP_FEAT_PROFILE_MASK) as u8;
         NodeProfile::try_from(raw)
     }
@@ -673,9 +673,9 @@ impl NegotiationPayload {
     /// Validate that two profiles form a valid link pairing.
     ///
     /// At least one side must be `Full` or the link is rejected.
-    pub fn validate_profiles(ours: NodeProfile, theirs: NodeProfile) -> Result<(), ProtocolError> {
+    pub fn validate_profiles(ours: NodeProfile, theirs: NodeProfile) -> Result<(), Error> {
         if ours != NodeProfile::Full && theirs != NodeProfile::Full {
-            return Err(ProtocolError::Malformed(format!(
+            return Err(Error::Malformed(format!(
                 "invalid profile pairing: {} <-> {} (at least one must be full)",
                 ours, theirs
             )));
@@ -693,7 +693,7 @@ impl NegotiationPayload {
 pub(crate) fn decide_fmp_negotiation(
     our_profile: NodeProfile,
     neg_bytes: &[u8],
-) -> Result<NodeProfile, ProtocolError> {
+) -> Result<NodeProfile, Error> {
     let their_payload = NegotiationPayload::decode(neg_bytes)?;
     let their_profile = their_payload.node_profile()?;
     NegotiationPayload::validate_profiles(our_profile, their_profile)?;

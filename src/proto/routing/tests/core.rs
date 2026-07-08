@@ -2,10 +2,11 @@
 
 use super::util::{MockPeer, MockRoutingView, make_coords, make_datagram_ref, make_next_hop};
 use crate::TreeCoordinate;
+use crate::proto::link::SessionDatagramRef;
+use crate::proto::routing::RoutingSignalType;
 use crate::proto::routing::{
     DropReason, RouteAction, RouteOutcome, Router, RoutingView, routing_candidates,
 };
-use crate::protocol::{SessionDatagramRef, SessionMessageType};
 use crate::testutil::make_node_addr;
 
 /// Decode a forwarded byte buffer (which carries the leading msg_type byte)
@@ -255,7 +256,7 @@ fn synth_uses_pathbroken_when_coords_cached() {
     );
     assert_eq!(
         error_pdu_type(&action),
-        SessionMessageType::PathBroken.to_byte(),
+        RoutingSignalType::PathBroken.to_byte(),
         "cached coords select PathBroken",
     );
 }
@@ -272,7 +273,7 @@ fn synth_uses_coords_required_when_not_cached() {
         .expect("gate passes on first call");
     assert_eq!(
         error_pdu_type(&action),
-        SessionMessageType::CoordsRequired.to_byte(),
+        RoutingSignalType::CoordsRequired.to_byte(),
         "absent coords select CoordsRequired",
     );
 }
@@ -333,7 +334,7 @@ fn synth_mtu_exceeded_carries_bottleneck_and_targets_source() {
     );
     assert_eq!(
         error_pdu_type(&action),
-        SessionMessageType::MtuExceeded.to_byte(),
+        RoutingSignalType::MtuExceeded.to_byte(),
         "PDU is an MtuExceeded signal",
     );
     assert_eq!(

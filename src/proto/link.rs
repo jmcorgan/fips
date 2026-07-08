@@ -1,7 +1,7 @@
 //! Link-layer message types: the shared frame catalog and session datagram.
 
-use super::ProtocolError;
 use crate::NodeAddr;
+use crate::proto::Error;
 use std::fmt;
 
 // ============================================================================
@@ -199,7 +199,7 @@ impl SessionDatagram {
     }
 
     /// Decode from link-layer payload (after msg_type byte has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         let view = SessionDatagramRef::decode(payload)?;
         Ok(view.into_owned())
     }
@@ -207,10 +207,10 @@ impl SessionDatagram {
 
 impl<'a> SessionDatagramRef<'a> {
     /// Decode a borrowed view from link-layer payload after the msg_type byte.
-    pub fn decode(payload: &'a [u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &'a [u8]) -> Result<Self, Error> {
         // ttl(1) + path_mtu(2) + src_addr(16) + dest_addr(16) = 35
         if payload.len() < 35 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 35,
                 got: payload.len(),
             });
@@ -242,10 +242,6 @@ impl<'a> SessionDatagramRef<'a> {
         }
     }
 }
-
-// Legacy type alias for compatibility during transition
-#[deprecated(note = "Use LinkMessageType or SessionMessageType instead")]
-pub type MessageType = LinkMessageType;
 
 #[cfg(test)]
 mod tests {

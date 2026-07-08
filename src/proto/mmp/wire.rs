@@ -10,7 +10,7 @@
 //! decoders skip unknown trailing bytes via total_length for forward
 //! compatibility.
 
-use crate::protocol::ProtocolError;
+use crate::proto::Error;
 
 /// Current format version for MMP reports.
 const FORMAT_VERSION: u8 = 0;
@@ -99,10 +99,10 @@ impl SenderReport {
     /// `payload` starts at format_version (offset 1 in the wire format).
     /// Unknown trailing bytes (from future format extensions) are skipped
     /// via total_length.
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // Need at least: format_version(1) + total_length(2) + v0 payload(16) = 19
         if payload.len() < 19 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 19,
                 got: payload.len(),
             });
@@ -112,7 +112,7 @@ impl SenderReport {
 
         // Verify we have enough data for the declared length
         if payload.len() < 3 + total_length {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 3 + total_length,
                 got: payload.len(),
             });
@@ -122,7 +122,7 @@ impl SenderReport {
         if format_version > 0 {
             // Future versions: we can still parse v0 fields if total_length >= 14
             if total_length < SENDER_REPORT_PAYLOAD as usize {
-                return Err(ProtocolError::MessageTooShort {
+                return Err(Error::MessageTooShort {
                     expected: SENDER_REPORT_PAYLOAD as usize,
                     got: total_length,
                 });
@@ -163,10 +163,10 @@ impl ReceiverReport {
     /// `payload` starts at format_version (offset 1 in the wire format).
     /// Unknown trailing bytes (from future format extensions) are skipped
     /// via total_length.
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // Need at least: format_version(1) + total_length(2) + v0 payload(50) = 53
         if payload.len() < 53 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 53,
                 got: payload.len(),
             });
@@ -175,14 +175,14 @@ impl ReceiverReport {
         let total_length = u16::from_le_bytes(payload[1..3].try_into().unwrap()) as usize;
 
         if payload.len() < 3 + total_length {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 3 + total_length,
                 got: payload.len(),
             });
         }
 
         if format_version > 0 && total_length < RECEIVER_REPORT_PAYLOAD as usize {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: RECEIVER_REPORT_PAYLOAD as usize,
                 got: total_length,
             });
@@ -250,9 +250,9 @@ impl SessionSenderReport {
     }
 
     /// Decode from body (after FSP inner header has been stripped).
-    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(body: &[u8]) -> Result<Self, Error> {
         if body.len() < SESSION_SENDER_REPORT_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: SESSION_SENDER_REPORT_SIZE,
                 got: body.len(),
             });
@@ -260,7 +260,7 @@ impl SessionSenderReport {
         let _format_version = body[0];
         let total_length = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
         if body.len() < 3 + total_length {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 3 + total_length,
                 got: body.len(),
             });
@@ -336,9 +336,9 @@ impl SessionReceiverReport {
     }
 
     /// Decode from body (after FSP inner header has been stripped).
-    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(body: &[u8]) -> Result<Self, Error> {
         if body.len() < SESSION_RECEIVER_REPORT_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: SESSION_RECEIVER_REPORT_SIZE,
                 got: body.len(),
             });
@@ -346,7 +346,7 @@ impl SessionReceiverReport {
         let _format_version = body[0];
         let total_length = u16::from_le_bytes(body[1..3].try_into().unwrap()) as usize;
         if body.len() < 3 + total_length {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 3 + total_length,
                 got: body.len(),
             });
@@ -399,9 +399,9 @@ impl PathMtuNotification {
     }
 
     /// Decode from body (after FSP inner header has been stripped).
-    pub fn decode(body: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(body: &[u8]) -> Result<Self, Error> {
         if body.len() < PATH_MTU_NOTIFICATION_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: PATH_MTU_NOTIFICATION_SIZE,
                 got: body.len(),
             });

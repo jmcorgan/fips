@@ -5,9 +5,11 @@
 //! multi-hop forwarding through live node topologies.
 
 use super::*;
-use crate::node::session_wire::{FSP_FLAG_CP, build_fsp_header};
+use crate::proto::fsp::wire::{FSP_FLAG_CP, build_fsp_header};
+use crate::proto::fsp::{SessionAck, SessionSetup};
+use crate::proto::link::SessionDatagram;
 use crate::proto::stp::TreeCoordinate;
-use crate::protocol::{SessionAck, SessionDatagram, SessionSetup, encode_coords};
+use crate::proto::stp::encode_coords;
 use spanning_tree::{
     TestNode, cleanup_nodes, process_available_packets, run_tree_test, verify_tree_convergence,
 };
@@ -591,7 +593,7 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
 // ============================================================================
 
 use crate::node::TransportDropState;
-use crate::node::handlers::session::mark_ipv6_ecn_ce;
+use crate::proto::fsp::mark_ipv6_ecn_ce;
 use crate::transport::TransportId;
 
 /// Build a minimal IPv6 header (40 bytes) with specified ECN bits.

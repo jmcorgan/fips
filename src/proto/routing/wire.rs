@@ -3,17 +3,66 @@
 //! Plaintext link-layer error signals emitted by a transit router that
 //! cannot forward a `SessionDatagram`: `CoordsRequired` (coordinate cache
 //! miss), `PathBroken` (routing failure / local minimum), and `MtuExceeded`
-//! (next-hop transport MTU too small). Relocated verbatim from
-//! `protocol::session`; the shared coordinate helpers and the
-//! `SessionMessageType` discriminant stay in `protocol` and are imported
-//! downward here (a `proto -> protocol` dependency is allowed).
+//! (next-hop transport MTU too small). Their `0x20`–`0x2F` discriminants form
+//! the routing-owned [`RoutingSignalType`] registry, split off from the FSP
+//! `SessionMessageType` (which keeps the encrypted-inner `0x10`–`0x1F` range).
+//! The shared address-only coordinate helpers are imported downward from
+//! `crate::proto::stp`, and [`Error`] from `crate::proto` (both
+//! allowed `proto -> proto` dependencies).
 
 use crate::NodeAddr;
-use crate::proto::stp::TreeCoordinate;
-use crate::protocol::ProtocolError;
-use crate::protocol::session::{
-    SessionMessageType, decode_optional_coords, encode_coords, encode_empty_coords,
+use crate::proto::Error;
+use crate::proto::stp::{
+    TreeCoordinate, decode_optional_coords, encode_coords, encode_empty_coords,
 };
+use core::fmt;
+
+/// Plaintext link-layer routing error-signal message types (`0x20`–`0x2F`).
+///
+/// Emitted by transit routers that cannot forward a `SessionDatagram` and have
+/// no end-to-end session with the source, so they are carried on the FSP
+/// cleartext (U-flag) path rather than the AEAD-encrypted inner path. Split
+/// from the FSP `SessionMessageType` (encrypted-inner `0x10`–`0x1F`): the two
+/// decode sites are partitioned by byte-range and crypto context, so neither
+/// registry references the other's range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RoutingSignalType {
+    /// Router cache miss — needs coordinates.
+    CoordsRequired = 0x20,
+    /// Routing failure — local minimum or unreachable.
+    PathBroken = 0x21,
+    /// MTU exceeded — forwarded packet too large for next-hop transport.
+    MtuExceeded = 0x22,
+}
+
+impl RoutingSignalType {
+    /// Try to convert from a byte.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x20 => Some(RoutingSignalType::CoordsRequired),
+            0x21 => Some(RoutingSignalType::PathBroken),
+            0x22 => Some(RoutingSignalType::MtuExceeded),
+            _ => None,
+        }
+    }
+
+    /// Convert to a byte.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+impl fmt::Display for RoutingSignalType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            RoutingSignalType::CoordsRequired => "CoordsRequired",
+            RoutingSignalType::PathBroken => "PathBroken",
+            RoutingSignalType::MtuExceeded => "MtuExceeded",
+        };
+        write!(f, "{}", name)
+    }
+}
 
 /// Link-layer error signal indicating router cache miss.
 ///
@@ -67,7 +116,7 @@ impl CoordsRequired {
         let payload_len = body_len as u16;
         buf.extend_from_slice(&payload_len.to_le_bytes());
         // msg_type byte (after prefix, before body)
-        buf.push(SessionMessageType::CoordsRequired.to_byte());
+        buf.push(RoutingSignalType::CoordsRequired.to_byte());
         buf.push(0x00); // reserved flags
         buf.extend_from_slice(self.dest_addr.as_bytes());
         buf.extend_from_slice(self.reporter.as_bytes());
@@ -75,10 +124,10 @@ impl CoordsRequired {
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) = 33
         if payload.len() < 33 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 33,
                 got: payload.len(),
             });
@@ -145,7 +194,7 @@ impl PathBroken {
     pub fn encode(&self) -> Vec<u8> {
         // Build body first to compute length
         let mut body = Vec::new();
-        body.push(SessionMessageType::PathBroken.to_byte());
+        body.push(RoutingSignalType::PathBroken.to_byte());
         body.push(0x00); // reserved flags
         body.extend_from_slice(self.dest_addr.as_bytes());
         body.extend_from_slice(self.reporter.as_bytes());
@@ -166,10 +215,10 @@ impl PathBroken {
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) + coords_count(2) = 35 minimum
         if payload.len() < 35 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 35,
                 got: payload.len(),
             });
@@ -242,7 +291,7 @@ impl MtuExceeded {
         let payload_len = body_len as u16;
         buf.extend_from_slice(&payload_len.to_le_bytes());
         // msg_type byte
-        buf.push(SessionMessageType::MtuExceeded.to_byte());
+        buf.push(RoutingSignalType::MtuExceeded.to_byte());
         buf.push(0x00); // reserved flags
         buf.extend_from_slice(self.dest_addr.as_bytes());
         buf.extend_from_slice(self.reporter.as_bytes());
@@ -251,10 +300,10 @@ impl MtuExceeded {
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) + mtu(2) = 35
         if payload.len() < 35 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 35,
                 got: payload.len(),
             });

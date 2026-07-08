@@ -1,7 +1,7 @@
 //! Shared test helpers for the routing subsystem unit tests.
 
+use crate::proto::link::SessionDatagramRef;
 use crate::proto::routing::{NextHop, RoutingView};
-use crate::protocol::SessionDatagramRef;
 use crate::testutil::make_node_addr;
 use crate::{NodeAddr, TreeCoordinate};
 

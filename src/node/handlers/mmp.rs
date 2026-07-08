@@ -8,12 +8,11 @@ use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::reject::{MmpReject, RejectReason, TreeReject};
 use crate::node::tree::sign_declaration;
+use crate::proto::link::LinkMessageType;
 use crate::proto::mmp::{
-    BackoffUpdate, LinkReportKind, LinkReportSnapshot, MmpAction, MmpSessionState,
-    PathMtuNotification, PeerLivenessSnapshot, ReceiverReport, RrLog, SendResult, SenderReport,
-    SessionReceiverReport, SessionReportKind, SessionReportSnapshot, SessionSenderReport,
+    LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, ReceiverReport, RrLog,
+    SenderReport,
 };
-use crate::protocol::{LinkMessageType, SessionMessageType};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -58,7 +57,7 @@ pub(super) fn log_rr_outcome(rr: &ReceiverReport, our_timestamp_ms: u32, log: Rr
 }
 
 /// Format bytes/sec as human-readable throughput.
-fn format_throughput(bps: f64) -> String {
+pub(in crate::node) fn format_throughput(bps: f64) -> String {
     if bps == 0.0 {
         "n/a".to_string()
     } else if bps >= 1_000_000.0 {
@@ -415,222 +414,6 @@ impl Node {
             rx_pkts = mmp.receiver.cumulative_packets_recv(),
             rx_bytes = mmp.receiver.cumulative_bytes_recv(),
             "MMP link teardown"
-        );
-    }
-
-    // === Session-layer MMP ===
-
-    /// Check all sessions for pending MMP reports and send them.
-    ///
-    /// Called from the tick handler. Also emits periodic session MMP logs.
-    /// Uses the collect-then-send pattern to avoid borrowing conflicts.
-    pub(in crate::node) async fn check_session_mmp_reports(&mut self) {
-        let now_ms = crate::mmp::mono_ms();
-
-        // Build one report-gating snapshot per session, resolving every timing
-        // read shell-side into a `bool`. The snapshots own only
-        // `NodeAddr`/`MmpMode`/`bool`, so the session-iteration borrow is released
-        // before the pure decision runs and the driving loop mutates the
-        // reporting state / performs the sends.
-        let snapshots: Vec<SessionReportSnapshot> = self
-            .sessions
-            .iter()
-            .filter_map(|(dest_addr, entry)| {
-                let mmp = entry.mmp()?;
-                Some(SessionReportSnapshot {
-                    dest: *dest_addr,
-                    mode: mmp.mode(),
-                    sr_due: mmp.sender.should_send_report(now_ms),
-                    rr_due: mmp.receiver.should_send_report(now_ms),
-                    mtu_due: mmp.path_mtu.should_send_notification(now_ms),
-                    log_due: mmp.should_log(now_ms),
-                })
-            })
-            .collect();
-
-        let actions = self.mmp.plan_session_reports(&snapshots);
-
-        // Drive the planned actions in phase-grouped order (all logs, then the
-        // sends in per-session SR/RR/MTU order). Logs run first because the
-        // session operator log reads cumulative_packets_sent, which each send
-        // advances (send_session_msg -> sender.record_sent); the pre-refactor
-        // handler logged during its collect pass, before any send. Each build
-        // (`build_report`/`build_notification`, which advance interval/
-        // notification state) runs only on its SendSessionReport action, exactly
-        // as the pre-refactor collect pass did. Per-destination success/failure
-        // is collected for the backoff dedup + failure-log suppression.
-        let mut send_results: Vec<SendResult> = Vec::new();
-        for action in actions {
-            match action {
-                MmpAction::LogSession { dest } => {
-                    // Resolve the display name exactly as the pre-refactor loop
-                    // did (alias, else short_npub from the session's remote key).
-                    let session_name = self.peer_aliases.get(&dest).cloned().unwrap_or_else(|| {
-                        self.sessions
-                            .get(&dest)
-                            .map(|entry| {
-                                let (xonly, _) = entry.remote_pubkey().x_only_public_key();
-                                crate::PeerIdentity::from_pubkey(xonly).short_npub()
-                            })
-                            .unwrap_or_default()
-                    });
-                    if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
-                        Self::log_session_mmp_metrics(&session_name, mmp);
-                        mmp.mark_logged(now_ms);
-                    }
-                }
-                MmpAction::SendSessionReport { dest, kind } => {
-                    let built = self
-                        .sessions
-                        .get_mut(&dest)
-                        .and_then(|entry| entry.mmp_mut())
-                        .and_then(|mmp| match kind {
-                            SessionReportKind::Sender => {
-                                mmp.sender.build_report(now_ms).map(|sr| {
-                                    (
-                                        SessionMessageType::SenderReport.to_byte(),
-                                        SessionSenderReport::from(&sr).encode(),
-                                    )
-                                })
-                            }
-                            SessionReportKind::Receiver => {
-                                mmp.receiver.build_report(now_ms).map(|rr| {
-                                    (
-                                        SessionMessageType::ReceiverReport.to_byte(),
-                                        SessionReceiverReport::from(&rr).encode(),
-                                    )
-                                })
-                            }
-                            SessionReportKind::PathMtu => {
-                                mmp.path_mtu.build_notification(now_ms).map(|mtu_value| {
-                                    (
-                                        SessionMessageType::PathMtuNotification.to_byte(),
-                                        PathMtuNotification::new(mtu_value).encode(),
-                                    )
-                                })
-                            }
-                        });
-
-                    let Some((msg_type, body)) = built else {
-                        continue;
-                    };
-
-                    match self.send_session_msg(&dest, msg_type, &body).await {
-                        Ok(()) => send_results.push(SendResult { dest, ok: true }),
-                        Err(e) => {
-                            // Peek at current failure count for log suppression
-                            // (unchanged by the backoff apply, which runs later).
-                            let failures = self
-                                .sessions
-                                .get(&dest)
-                                .and_then(|entry| entry.mmp())
-                                .map(|mmp| mmp.sender.consecutive_send_failures())
-                                .unwrap_or(0);
-
-                            if failures < 3 {
-                                debug!(
-                                    dest = %self.peer_display_name(&dest),
-                                    msg_type,
-                                    error = %e,
-                                    "Failed to send session MMP report"
-                                );
-                            } else if failures == 3 {
-                                debug!(
-                                    dest = %self.peer_display_name(&dest),
-                                    "Suppressing further session MMP send failure logs"
-                                );
-                            }
-                            // failures > 3: silently suppressed
-
-                            send_results.push(SendResult { dest, ok: false });
-                        }
-                    }
-                }
-                MmpAction::ReapPeer { .. }
-                | MmpAction::Heartbeat { .. }
-                | MmpAction::SendLinkReport { .. }
-                | MmpAction::LogLink { .. } => {}
-            }
-        }
-
-        // Deduplicate send results per destination (any-ok -> success, all-fail
-        // -> failure) and apply the backoff state transition for each dest.
-        for update in self.mmp.plan_backoff(&send_results) {
-            match update {
-                BackoffUpdate::Success { dest } => {
-                    if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
-                        let prev = mmp.sender.record_send_success();
-                        if prev > 3 {
-                            debug!(
-                                dest = %self.peer_display_name(&dest),
-                                consecutive_failures = prev,
-                                "Resumed session MMP reporting"
-                            );
-                        }
-                    }
-                }
-                BackoffUpdate::Failure { dest } => {
-                    if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
-                        mmp.sender.record_send_failure();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Emit periodic session MMP metrics.
-    fn log_session_mmp_metrics(session_name: &str, mmp: &MmpSessionState) {
-        let m = &mmp.metrics;
-
-        let rtt_str = if m.rtt_trend.initialized() {
-            format!("{:.1}ms", m.rtt_trend.long() / 1000.0)
-        } else {
-            "n/a".to_string()
-        };
-        let loss_str = if m.loss_trend.initialized() {
-            format!("{:.1}%", m.loss_trend.long() * 100.0)
-        } else {
-            "n/a".to_string()
-        };
-        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
-
-        debug!(
-            session = %session_name,
-            rtt = %rtt_str,
-            loss = %loss_str,
-            jitter = format_args!("{:.1}ms", jitter_ms),
-            goodput = %format_throughput(m.goodput_bps()),
-            mtu = mmp.path_mtu.last_observed_mtu(),
-            tx_pkts = mmp.sender.cumulative_packets_sent(),
-            rx_pkts = mmp.receiver.cumulative_packets_recv(),
-            "MMP session metrics"
-        );
-    }
-
-    /// Emit a teardown log summarizing lifetime session MMP metrics.
-    pub(in crate::node) fn log_session_mmp_teardown(session_name: &str, mmp: &MmpSessionState) {
-        let m = &mmp.metrics;
-        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
-
-        let rtt_str = match m.srtt_ms() {
-            Some(rtt) => format!("{:.1}ms", rtt),
-            None => "n/a".to_string(),
-        };
-        let loss_str = format!("{:.1}%", m.loss_rate() * 100.0);
-
-        debug!(
-            session = %session_name,
-            rtt = %rtt_str,
-            loss = %loss_str,
-            jitter = format_args!("{:.1}ms", jitter_ms),
-            etx = format_args!("{:.2}", m.etx),
-            goodput = %format_throughput(m.goodput_bps()),
-            send_mtu = mmp.path_mtu.current_mtu(),
-            observed_mtu = mmp.path_mtu.last_observed_mtu(),
-            tx_pkts = mmp.sender.cumulative_packets_sent(),
-            rx_pkts = mmp.receiver.cumulative_packets_recv(),
-            rx_bytes = mmp.receiver.cumulative_bytes_recv(),
-            "MMP session teardown"
         );
     }
 

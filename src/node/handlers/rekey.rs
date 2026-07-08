@@ -11,25 +11,21 @@ use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::wire::build_msg1;
 use crate::noise::HandshakeState;
 use crate::proto::fmp::{ConnAction, LifecycleView, PeerSnapshot, RekeyCfg, RekeyResendSnapshot};
-use crate::protocol::{SessionDatagram, SessionSetup};
+use crate::proto::fsp::{
+    FspAction, RekeyMsg3ResendSnapshot, SessionSetup, SessionSnapshot, cutover_timer_elapsed,
+};
+use crate::proto::link::SessionDatagram;
 use tracing::{debug, info, trace, warn};
 
 /// Keep previous session alive for this long after cutover.
+///
+/// FMP-scoped copy for `check_rekey`; the FSP session-rekey timing bounds live
+/// in `crate::proto::fsp::limits`.
 const DRAIN_WINDOW_SECS: u64 = 10;
 
 /// Suppress local rekey initiation for this long after receiving
-/// a peer's rekey msg1.
+/// a peer's rekey msg1. FMP-scoped copy for `check_rekey`.
 const REKEY_DAMPENING_SECS: u64 = 30;
-
-/// Liveness bound on how long the FSP rekey initiator holds the
-/// `current` + `pending` state before cutting over to the new epoch.
-///
-/// This is NOT safety-critical: overlapping-epoch trial-decrypt covers
-/// any skew between the two endpoints' cutovers. The timer only bounds
-/// how long the initiator advertises the old K-bit. An opportunistic
-/// early cutover also fires if the initiator authenticates a peer frame
-/// against its own `pending` session (the responder cut over first).
-const FSP_CUTOVER_DELAY_MS: u64 = 2000;
 
 impl Node {
     /// Periodic rekey check. Called from the tick loop.
@@ -458,64 +454,75 @@ impl Node {
         let ttl = self.config().node.session.default_ttl;
         let my_addr = *self.node_addr();
 
-        // Collect rekey initiators whose msg3 retransmission is due.
-        let mut to_resend: Vec<(NodeAddr, Vec<u8>)> = Vec::new();
-        let mut to_abandon: Vec<NodeAddr> = Vec::new();
-
-        for (node_addr, entry) in &self.sessions {
-            // Only the rekey initiator retains a msg3 payload.
-            let payload = match entry.rekey_msg3_payload() {
-                Some(p) => p,
-                None => continue,
-            };
-            if entry.rekey_msg3_next_resend_ms() == 0 || now_ms < entry.rekey_msg3_next_resend_ms()
-            {
-                continue;
-            }
-            if entry.rekey_msg3_resend_count() >= max_resends {
-                to_abandon.push(*node_addr);
-                continue;
-            }
-            to_resend.push((*node_addr, payload.to_vec()));
-        }
-
-        // Abandon rekey cycles that exhausted their retransmission budget.
-        for node_addr in to_abandon {
-            if let Some(entry) = self.sessions.get_mut(&node_addr) {
-                entry.abandon_rekey();
-            }
-            debug!(
-                peer = %self.peer_display_name(&node_addr),
-                "FSP rekey aborted: msg3 unconfirmed after max retransmissions, abandoning cycle"
-            );
-        }
-
-        // Retransmit msg3 for cycles still within budget.
-        for (node_addr, payload) in to_resend {
-            let mut datagram = SessionDatagram::new(my_addr, node_addr, payload).with_ttl(ttl);
-            let sent = match self.send_session_datagram(&mut datagram).await {
-                Ok(_) => true,
-                Err(e) => {
+        // The shell snapshots each session retaining a msg3 payload (resend-due
+        // predicate resolved here); the core classifies abandon-vs-resend,
+        // abandons first.
+        let candidates = self.rekey_msg3_resend_snapshots(now_ms);
+        for action in self.fsp.poll_rekey_msg3_resends(candidates, max_resends) {
+            match action {
+                FspAction::AbandonRekey { addr } => {
+                    if let Some(entry) = self.sessions.get_mut(&addr) {
+                        entry.abandon_rekey();
+                    }
                     debug!(
-                        peer = %self.peer_display_name(&node_addr),
-                        error = %e,
-                        "FSP rekey msg3 retransmission failed"
+                        peer = %self.peer_display_name(&addr),
+                        "FSP rekey aborted: msg3 unconfirmed after max retransmissions, abandoning cycle"
                     );
-                    false
                 }
-            };
+                FspAction::ResendSessionMsg3 { addr } => {
+                    let payload = match self
+                        .sessions
+                        .get(&addr)
+                        .and_then(|e| e.rekey_msg3_payload())
+                    {
+                        Some(p) => p.to_vec(),
+                        None => continue,
+                    };
+                    let mut datagram = SessionDatagram::new(my_addr, addr, payload).with_ttl(ttl);
+                    let sent = match self.send_session_datagram(&mut datagram).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            debug!(
+                                peer = %self.peer_display_name(&addr),
+                                error = %e,
+                                "FSP rekey msg3 retransmission failed"
+                            );
+                            false
+                        }
+                    };
 
-            if sent && let Some(entry) = self.sessions.get_mut(&node_addr) {
-                let count = entry.rekey_msg3_resend_count() + 1;
-                let next = now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
-                entry.record_rekey_msg3_resend(next);
-                trace!(
-                    peer = %self.peer_display_name(&node_addr),
-                    resend = count,
-                    "Resent FSP rekey msg3"
-                );
+                    if sent && let Some(entry) = self.sessions.get_mut(&addr) {
+                        let count = entry.rekey_msg3_resend_count() + 1;
+                        let next =
+                            now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                        entry.record_rekey_msg3_resend(next);
+                        trace!(
+                            peer = %self.peer_display_name(&addr),
+                            resend = count,
+                            "Resent FSP rekey msg3"
+                        );
+                    }
+                }
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
+    }
+
+    /// Snapshot every session retaining a rekey-msg3 payload for the
+    /// retransmission decision, pre-evaluating the resend-due predicate against
+    /// `now_ms` so the core reads no clock.
+    fn rekey_msg3_resend_snapshots(&self, now_ms: u64) -> Vec<RekeyMsg3ResendSnapshot> {
+        self.sessions
+            .iter()
+            .filter(|(_, entry)| entry.rekey_msg3_payload().is_some())
+            .map(|(node_addr, entry)| RekeyMsg3ResendSnapshot {
+                addr: *node_addr,
+                resend_count: entry.rekey_msg3_resend_count(),
+                resend_due: entry.rekey_msg3_next_resend_ms() != 0
+                    && now_ms >= entry.rekey_msg3_next_resend_ms(),
+            })
+            .collect()
     }
 
     /// Periodic session (FSP) rekey check. Called from the tick loop.
@@ -525,7 +532,7 @@ impl Node {
     ///   timer, perform the K-bit cutover (overlapping-epoch decrypt
     ///   makes this safe on any schedule — see `FSP_CUTOVER_DELAY_MS`)
     /// - If the drain window has expired, clean up the previous session
-    /// - If the rekey timer/counter fires, initiate a new XX handshake
+    /// - If the rekey timer/counter fires, initiate a new XK handshake
     ///
     /// msg3 retransmission is handled separately by
     /// `resend_pending_session_msg3`; its lifetime is tied to the
@@ -535,100 +542,71 @@ impl Node {
             return;
         }
 
-        let rekey_after_secs = self.config().node.rekey.after_secs;
-        let rekey_after_messages = self.config().node.rekey.after_messages;
+        let cfg = crate::proto::fsp::RekeyCfg {
+            after_secs: self.config().node.rekey.after_secs,
+            after_messages: self.config().node.rekey.after_messages,
+        };
         let now_ms = Self::now_ms();
-        let drain_ms = DRAIN_WINDOW_SECS * 1000;
-        let dampening_ms = REKEY_DAMPENING_SECS * 1000;
 
-        let mut sessions_to_cutover: Vec<NodeAddr> = Vec::new();
-        let mut sessions_to_drain: Vec<NodeAddr> = Vec::new();
-        let mut sessions_to_rekey: Vec<NodeAddr> = Vec::new();
-
-        for (node_addr, entry) in &self.sessions {
-            if !entry.is_established() {
-                continue;
-            }
-
-            // 1. Initiator-side cutover (option A): completed rekey,
-            //    pending session ready, liveness timer elapsed. This is
-            //    an unconditional timer, NOT gated on responder progress —
-            //    overlapping-epoch trial-decrypt covers the cutover skew,
-            //    so flipping the K-bit here is always safe. An
-            //    opportunistic early cutover also happens in
-            //    `handle_encrypted_session_msg` if the initiator
-            //    authenticates a peer frame against its own `pending`.
-            if entry.pending_new_session().is_some()
-                && !entry.has_rekey_in_progress()
-                && entry.is_rekey_initiator()
-                && now_ms.saturating_sub(entry.rekey_completed_ms()) >= FSP_CUTOVER_DELAY_MS
-            {
-                sessions_to_cutover.push(*node_addr);
-                continue;
-            }
-
-            // 2. Drain window expiry
-            if entry.is_draining() && entry.drain_expired(now_ms, drain_ms) {
-                sessions_to_drain.push(*node_addr);
-            }
-
-            // 3. Rekey trigger
-            if entry.has_rekey_in_progress() {
-                continue;
-            }
-            if entry.pending_new_session().is_some() {
-                continue; // Pending session present, awaiting cutover
-            }
-            if entry.rekey_msg3_payload().is_some() {
-                // Initiator already cut over on its liveness timer but is
-                // still retransmitting msg3 to a responder not yet
-                // confirmed on the new epoch. Don't start another rekey
-                // until the current cycle's msg3 is delivered or abandoned.
-                continue;
-            }
-            if entry.is_rekey_dampened(now_ms, dampening_ms) {
-                continue;
-            }
-
-            let elapsed_secs = now_ms.saturating_sub(entry.session_start_ms()) / 1000;
-            let counter = entry.send_counter();
-
-            // Apply per-session symmetric jitter to desynchronize
-            // dual-initiation in symmetric-start meshes.
-            let effective_after_secs =
-                rekey_after_secs.saturating_add_signed(entry.rekey_jitter_secs());
-            if elapsed_secs >= effective_after_secs || counter >= rekey_after_messages {
-                sessions_to_rekey.push(*node_addr);
+        // The shell snapshots each established session's rekey ages/flags
+        // (every clock read resolved here); the core decides
+        // cutover/drain/trigger with no clock, phase-grouped to preserve the
+        // pre-refactor execution order.
+        let snapshots = self.session_rekey_snapshots(now_ms);
+        for action in self.fsp.poll_rekey(snapshots, &cfg) {
+            match action {
+                FspAction::CutOver { addr } => {
+                    if let Some(entry) = self.sessions.get_mut(&addr)
+                        && entry.cutover_to_new_session(now_ms)
+                    {
+                        debug!(
+                            peer = %self.peer_display_name(&addr),
+                            "FSP rekey cutover complete (initiator), K-bit flipped"
+                        );
+                    }
+                }
+                FspAction::CompleteDrain { addr } => {
+                    if let Some(entry) = self.sessions.get_mut(&addr) {
+                        entry.complete_drain();
+                        trace!(
+                            peer = %self.peer_display_name(&addr),
+                            "FSP drain complete, previous session erased"
+                        );
+                    }
+                }
+                FspAction::InitiateRekey { addr } => {
+                    self.initiate_session_rekey(&addr).await;
+                }
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
+    }
 
-        // Execute cutover for initiator side
-        for node_addr in sessions_to_cutover {
-            if let Some(entry) = self.sessions.get_mut(&node_addr)
-                && entry.cutover_to_new_session(now_ms)
-            {
-                debug!(
-                    peer = %self.peer_display_name(&node_addr),
-                    "FSP rekey cutover complete (initiator), K-bit flipped"
-                );
-            }
-        }
-
-        // Execute drain completion
-        for node_addr in sessions_to_drain {
-            if let Some(entry) = self.sessions.get_mut(&node_addr) {
-                entry.complete_drain();
-                trace!(
-                    peer = %self.peer_display_name(&node_addr),
-                    "FSP drain complete, previous session erased"
-                );
-            }
-        }
-
-        // Initiate new rekeys
-        for node_addr in sessions_to_rekey {
-            self.initiate_session_rekey(&node_addr).await;
-        }
+    /// Snapshot every established session for the FSP rekey decision,
+    /// pre-computing its monotonic age and timer predicates so the pure core
+    /// applies the thresholds without reading a clock (see [`SessionSnapshot`]).
+    fn session_rekey_snapshots(&self, now_ms: u64) -> Vec<SessionSnapshot> {
+        let drain_ms = crate::proto::fsp::limits::DRAIN_WINDOW_SECS * 1000;
+        let dampening_ms = crate::proto::fsp::limits::REKEY_DAMPENING_SECS * 1000;
+        self.sessions
+            .iter()
+            .filter(|(_, entry)| entry.is_established())
+            .map(|(node_addr, entry)| SessionSnapshot {
+                addr: *node_addr,
+                has_pending: entry.pending_new_session().is_some(),
+                rekey_in_progress: entry.has_rekey_in_progress(),
+                is_rekey_initiator: entry.is_rekey_initiator(),
+                cutover_timer_elapsed: cutover_timer_elapsed(now_ms, entry.rekey_completed_ms()),
+                is_draining: entry.is_draining(),
+                drain_expired: entry.drain_expired(now_ms, drain_ms),
+                has_rekey_msg3_payload: entry.rekey_msg3_payload().is_some(),
+                is_dampened: entry.is_rekey_dampened(now_ms, dampening_ms),
+                elapsed_secs: now_ms.saturating_sub(entry.session_start_ms()) / 1000,
+                counter: entry.send_counter(),
+                jitter_secs: entry.rekey_jitter_secs(),
+            })
+            .collect()
     }
 
     /// Initiate an FSP session rekey.

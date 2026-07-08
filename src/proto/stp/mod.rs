@@ -5,8 +5,8 @@
 //! data, and the flap-dampening limiter all live here. The async I/O handlers
 //! remain in `node::tree`. The STP wire codec lives in `wire.rs` (the
 //! `TreeAnnounce` struct + `validate_semantics`), per the
-//! wire-migrates-with-subsystem policy. It imports the shared `ProtocolError`
-//! and `LinkMessageType` downward from `crate::protocol`.
+//! wire-migrates-with-subsystem policy. It imports the shared
+//! [`crate::proto::Error`] and [`crate::proto::link::LinkMessageType`] downward.
 //!
 //! - `core.rs` — the pure classify ladder (`Stp::classify_announce` /
 //!   `classify_periodic` / `should_echo`) over an in-core `TreeState`.
@@ -35,6 +35,9 @@ pub use coordinate::{CoordEntry, TreeCoordinate};
 pub(crate) use core::{Stp, TreeDecision};
 pub use state::{ParentDeclaration, TreeState};
 pub use wire::TreeAnnounce;
+pub(crate) use wire::{
+    coords_wire_size, decode_coords, decode_optional_coords, encode_coords, encode_empty_coords,
+};
 
 /// Errors related to spanning tree operations.
 #[derive(Debug, Error)]

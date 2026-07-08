@@ -1,10 +1,10 @@
 //! Discovery messages: LookupRequest and LookupResponse.
 
 use crate::NodeAddr;
+use crate::proto::Error;
 use crate::proto::fmp::TlvEntry;
 use crate::proto::stp::TreeCoordinate;
-use crate::protocol::ProtocolError;
-use crate::protocol::session::{decode_coords, encode_coords};
+use crate::proto::stp::{decode_coords, encode_coords};
 use secp256k1::schnorr::Signature;
 
 /// Request to discover a node's coordinates.
@@ -95,10 +95,10 @@ impl LookupRequest {
     }
 
     /// Decode from wire format (after msg_type byte has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // Minimum: request_id(8) + target(16) + origin(16) + ttl(1) + min_mtu(2) = 43 bytes
         if payload.len() < 43 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 43,
                 got: payload.len(),
             });
@@ -109,7 +109,7 @@ impl LookupRequest {
         let request_id = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad request_id".into()))?,
+                .map_err(|_| Error::Malformed("bad request_id".into()))?,
         );
         pos += 8;
 
@@ -129,7 +129,7 @@ impl LookupRequest {
         let min_mtu = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad min_mtu".into()))?,
+                .map_err(|_| Error::Malformed("bad min_mtu".into()))?,
         );
         pos += 2;
 
@@ -137,7 +137,7 @@ impl LookupRequest {
         let mut tlv_entries = Vec::new();
         while pos < payload.len() {
             if pos + 4 > payload.len() {
-                return Err(ProtocolError::Malformed(
+                return Err(Error::Malformed(
                     "truncated TLV header in LookupRequest".to_string(),
                 ));
             }
@@ -145,7 +145,7 @@ impl LookupRequest {
             let length = u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + length > payload.len() {
-                return Err(ProtocolError::Malformed(format!(
+                return Err(Error::Malformed(format!(
                     "TLV field {field_num}: declared length {length} exceeds remaining data {}",
                     payload.len() - pos
                 )));
@@ -257,10 +257,10 @@ impl LookupResponse {
     }
 
     /// Decode from wire format (after msg_type byte has been consumed).
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // Minimum: request_id(8) + target(16) + path_mtu(2) + coords_count(2) + proof(64) = 92
         if payload.len() < 92 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: 92,
                 got: payload.len(),
             });
@@ -271,7 +271,7 @@ impl LookupResponse {
         let request_id = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad request_id".into()))?,
+                .map_err(|_| Error::Malformed("bad request_id".into()))?,
         );
         pos += 8;
 
@@ -283,7 +283,7 @@ impl LookupResponse {
         let path_mtu = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad path_mtu".into()))?,
+                .map_err(|_| Error::Malformed("bad path_mtu".into()))?,
         );
         pos += 2;
 
@@ -291,20 +291,20 @@ impl LookupResponse {
         pos += consumed;
 
         if payload.len() < pos + 64 {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: pos + 64,
                 got: payload.len(),
             });
         }
         let proof = Signature::from_slice(&payload[pos..pos + 64])
-            .map_err(|_| ProtocolError::Malformed("bad proof signature".into()))?;
+            .map_err(|_| Error::Malformed("bad proof signature".into()))?;
         pos += 64;
 
         // Parse TLV entries from remaining bytes after proof
         let mut tlv_entries = Vec::new();
         while pos < payload.len() {
             if pos + 4 > payload.len() {
-                return Err(ProtocolError::Malformed(
+                return Err(Error::Malformed(
                     "truncated TLV header in LookupResponse".to_string(),
                 ));
             }
@@ -312,7 +312,7 @@ impl LookupResponse {
             let length = u16::from_le_bytes(payload[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + length > payload.len() {
-                return Err(ProtocolError::Malformed(format!(
+                return Err(Error::Malformed(format!(
                     "TLV field {field_num}: declared length {length} exceeds remaining data {}",
                     payload.len() - pos
                 )));

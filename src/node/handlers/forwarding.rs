@@ -7,13 +7,14 @@
 
 use crate::NodeAddr;
 use crate::node::reject::ForwardingReject;
-use crate::node::session_wire::{
+use crate::node::{Node, NodeError, NodeRoutingView};
+use crate::proto::fsp::wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
     FspCommonPrefix, parse_encrypted_coords,
 };
-use crate::node::{Node, NodeError, NodeRoutingView};
+use crate::proto::fsp::{SessionAck, SessionSetup};
+use crate::proto::link::{SessionDatagram, SessionDatagramRef};
 use crate::proto::routing::{DropReason, NextHop, RouteAction, RouteOutcome};
-use crate::protocol::{SessionAck, SessionDatagram, SessionDatagramRef, SessionSetup};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 

@@ -6,32 +6,36 @@
 //! encrypted data, and error signals (CoordsRequired, PathBroken).
 
 use crate::NodeAddr;
+use crate::node::handlers::mmp::format_throughput;
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{EndToEndState, EpochSlot, SessionEntry};
-use crate::node::session_wire::{
-    FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
-    FSP_PHASE_MSG1, FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,
-    FspCommonPrefix, FspEncryptedHeader, build_fsp_header, fsp_prepend_inner_header,
-    fsp_strip_inner_header, parse_encrypted_coords,
-};
 #[cfg(unix)]
 use crate::node::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::node::{Node, NodeError};
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
 use crate::proto::fmp::NegotiationPayload;
-use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
+use crate::proto::fsp::wire::{
+    FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
+    FSP_PHASE_MSG1, FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,
+    FspCommonPrefix, FspEncryptedHeader, build_fsp_header, fsp_prepend_inner_header,
+    fsp_strip_inner_header, parse_encrypted_coords,
+};
+use crate::proto::fsp::{
+    DecryptSlot, EpochReaction, FspAction, FspInnerFlags, SessionAck, SessionMessageType,
+    SessionMsg3, SessionSetup, mark_ipv6_ecn_ce,
+};
+#[cfg(unix)]
+use crate::proto::link::LinkMessageType;
+#[cfg(unix)]
+use crate::proto::link::SESSION_DATAGRAM_HEADER_SIZE;
+use crate::proto::link::SessionDatagram;
 use crate::proto::mmp::{
-    PathMtuNotification, ReceiverReport, SessionReceiverReport, SessionSenderReport,
+    BackoffUpdate, MmpAction, MmpSessionState, PathMtuNotification, ReceiverReport, SendResult,
+    SessionReceiverReport, SessionReportKind, SessionReportSnapshot, SessionSenderReport,
 };
-use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken};
-#[cfg(unix)]
-use crate::protocol::LinkMessageType;
-#[cfg(unix)]
-use crate::protocol::SESSION_DATAGRAM_HEADER_SIZE;
-use crate::protocol::{
-    FspInnerFlags, SessionAck, SessionDatagram, SessionMessageType, SessionMsg3, SessionSetup,
-};
-use crate::protocol::{coords_wire_size, encode_coords};
+use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
+use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken, RoutingSignalType};
+use crate::proto::stp::{coords_wire_size, encode_coords};
 #[cfg(unix)]
 use crate::transport::TransportHandle;
 use crate::upper::icmp::FIPS_OVERHEAD;
@@ -102,14 +106,14 @@ impl Node {
                 }
                 let error_type = inner[0];
                 let error_body = &inner[1..];
-                match SessionMessageType::from_byte(error_type) {
-                    Some(SessionMessageType::CoordsRequired) => {
+                match RoutingSignalType::from_byte(error_type) {
+                    Some(RoutingSignalType::CoordsRequired) => {
                         self.handle_coords_required(error_body).await;
                     }
-                    Some(SessionMessageType::PathBroken) => {
+                    Some(RoutingSignalType::PathBroken) => {
                         self.handle_path_broken(error_body).await;
                     }
-                    Some(SessionMessageType::MtuExceeded) => {
+                    Some(RoutingSignalType::MtuExceeded) => {
                         self.handle_mtu_exceeded(error_body).await;
                     }
                     _ => {
@@ -164,11 +168,14 @@ impl Node {
             match parse_encrypted_coords(coord_data) {
                 Ok((src_coords, dest_coords, bytes_consumed)) => {
                     let now_ms = Self::now_ms();
-                    if let Some(coords) = src_coords {
-                        self.coord_cache.insert(*src_addr, coords, now_ms);
-                    }
-                    if let Some(coords) = dest_coords {
-                        self.coord_cache.insert(*self.node_addr(), coords, now_ms);
+                    let my_addr = *self.node_addr();
+                    for action in
+                        self.fsp
+                            .plan_cache_coords(*src_addr, my_addr, src_coords, dest_coords)
+                    {
+                        if let FspAction::CacheCoords { addr, coords } = action {
+                            self.coord_cache.insert(addr, coords, now_ms);
+                        }
                     }
                     ciphertext_offset += bytes_consumed;
                 }
@@ -246,44 +253,55 @@ impl Node {
             }
         };
 
-        // React to the epoch the frame decrypted against.
-        match slot {
-            EpochSlot::Pending => {
-                // A frame that authenticates against `pending` is itself
-                // the cutover signal — proof the peer derived the new
-                // session and moved to it. Promote now: current →
-                // previous, pending → current, flip the K-bit. The
-                // header K-bit is no longer the gating event; the
-                // authenticated decrypt is.
+        // React to the epoch the frame decrypted against. The shell opened
+        // the frame; the core classifies the post-decrypt reaction over the
+        // plain-data slot + session flags, and the shell applies the
+        // `SessionEntry` mutation.
+        let decrypt_slot = match slot {
+            EpochSlot::Current => DecryptSlot::Current,
+            EpochSlot::Pending => DecryptSlot::Pending,
+            EpochSlot::Previous => DecryptSlot::Previous,
+        };
+        match self.fsp.classify_epoch(
+            decrypt_slot,
+            entry.rekey_msg3_payload().is_some(),
+            entry.pending_new_session().is_some(),
+        ) {
+            EpochReaction::PromoteConfirming => {
+                // A frame that authenticates against `pending` is itself the
+                // cutover signal — proof the peer derived the new session and
+                // moved to it. The peer received msg3, so confirm it on the new
+                // epoch (stop retransmitting) before `handle_peer_kbit_flip`
+                // consumes the pending session, then promote.
                 info!(
                     peer = %self.peer_display_name(src_addr),
                     "Peer FSP new-epoch frame authenticated, FSP rekey cutover complete, promoting new session"
                 );
-                // The peer derived the new session, so it received msg3:
-                // confirm it on the new epoch and stop retransmitting.
-                // `handle_peer_kbit_flip` consumes the pending session,
-                // so confirm first.
-                if entry.rekey_msg3_payload().is_some() {
-                    entry.confirm_peer_new_epoch();
-                }
+                entry.confirm_peer_new_epoch();
                 entry.handle_peer_kbit_flip(now_ms);
             }
-            EpochSlot::Current => {
-                // If we still retain a msg3 retransmission payload but no
-                // longer hold a `pending` session, we are the rekey
-                // initiator that already cut over on its own timer:
-                // `current` is now the new epoch, so a frame decrypting
-                // against it confirms the responder reached the new
-                // epoch. Stop retransmitting msg3.
-                if entry.rekey_msg3_payload().is_some() && entry.pending_new_session().is_none() {
-                    entry.confirm_peer_new_epoch();
-                }
+            EpochReaction::Promote => {
+                // Promote now: current → previous, pending → current, flip the
+                // K-bit. The header K-bit is only a hint; the authenticated
+                // decrypt is the gating event.
+                info!(
+                    peer = %self.peer_display_name(src_addr),
+                    "Peer FSP new-epoch frame authenticated, FSP rekey cutover complete, promoting new session"
+                );
+                entry.handle_peer_kbit_flip(now_ms);
             }
-            EpochSlot::Previous => {
-                // The peer is still on the old epoch. `fsp_trial_decrypt`
-                // already refreshed the drain deadline so the `previous`
-                // slot is not retired while the peer keeps using it —
-                // no further state change here, just deliver.
+            EpochReaction::ConfirmResponder => {
+                // We are the rekey initiator that already cut over on its own
+                // timer: `current` is now the new epoch, so a frame decrypting
+                // against it confirms the responder reached it. Stop
+                // retransmitting msg3.
+                entry.confirm_peer_new_epoch();
+            }
+            EpochReaction::None => {
+                // Steady-state `current`, or an old-epoch `previous` straggler:
+                // `fsp_trial_decrypt` already refreshed the drain deadline so
+                // the `previous` slot is not retired while the peer keeps using
+                // it — no further state change, just deliver.
             }
         }
 
@@ -436,7 +454,7 @@ impl Node {
         if let Some(existing) = self.sessions.get(src_addr) {
             if existing.is_initiating() {
                 // Simultaneous initiation: smaller NodeAddr wins as initiator
-                if self.identity().node_addr() < src_addr {
+                if crate::proto::fsp::initiation_winner(self.identity().node_addr(), src_addr) {
                     // We win — drop their setup, they'll process ours
                     debug!(
                         src = %self.peer_display_name(src_addr),
@@ -481,7 +499,10 @@ impl Node {
                     // Apply the smaller-NodeAddr tie-breaker uniformly so
                     // both sides converge on a single Noise session.
                     if rekey_in_progress || has_pending {
-                        if self.identity().node_addr() < src_addr {
+                        if crate::proto::fsp::initiation_winner(
+                            self.identity().node_addr(),
+                            src_addr,
+                        ) {
                             // We win — keep our session, drop their msg1.
                             info!(
                                 src = %self.peer_display_name(src_addr),
@@ -1005,6 +1026,220 @@ impl Node {
 
     // === Session-layer MMP report handlers ===
 
+    /// Check all sessions for pending MMP reports and send them.
+    ///
+    /// Called from the tick handler. Also emits periodic session MMP logs.
+    /// Uses the collect-then-send pattern to avoid borrowing conflicts.
+    pub(in crate::node) async fn check_session_mmp_reports(&mut self) {
+        let now_ms = crate::mmp::mono_ms();
+
+        // Build one report-gating snapshot per session, resolving every timing
+        // read shell-side into a `bool`. The snapshots own only
+        // `NodeAddr`/`MmpMode`/`bool`, so the session-iteration borrow is released
+        // before the pure decision runs and the driving loop mutates the
+        // reporting state / performs the sends.
+        let snapshots: Vec<SessionReportSnapshot> = self
+            .sessions
+            .iter()
+            .filter_map(|(dest_addr, entry)| {
+                let mmp = entry.mmp()?;
+                Some(SessionReportSnapshot {
+                    dest: *dest_addr,
+                    mode: mmp.mode(),
+                    sr_due: mmp.sender.should_send_report(now_ms),
+                    rr_due: mmp.receiver.should_send_report(now_ms),
+                    mtu_due: mmp.path_mtu.should_send_notification(now_ms),
+                    log_due: mmp.should_log(now_ms),
+                })
+            })
+            .collect();
+
+        let actions = self.mmp.plan_session_reports(&snapshots);
+
+        // Drive the planned actions in phase-grouped order (all logs, then the
+        // sends in per-session SR/RR/MTU order). Logs run first because the
+        // session operator log reads cumulative_packets_sent, which each send
+        // advances (send_session_msg -> sender.record_sent); the pre-refactor
+        // handler logged during its collect pass, before any send. Each build
+        // (`build_report`/`build_notification`, which advance interval/
+        // notification state) runs only on its SendSessionReport action, exactly
+        // as the pre-refactor collect pass did. Per-destination success/failure
+        // is collected for the backoff dedup + failure-log suppression.
+        let mut send_results: Vec<SendResult> = Vec::new();
+        for action in actions {
+            match action {
+                MmpAction::LogSession { dest } => {
+                    // Resolve the display name exactly as the pre-refactor loop
+                    // did (alias, else short_npub from the session's remote key).
+                    let session_name = self.peer_aliases.get(&dest).cloned().unwrap_or_else(|| {
+                        self.sessions
+                            .get(&dest)
+                            .map(|entry| {
+                                let (xonly, _) = entry.remote_pubkey().x_only_public_key();
+                                crate::PeerIdentity::from_pubkey(xonly).short_npub()
+                            })
+                            .unwrap_or_default()
+                    });
+                    if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
+                        Self::log_session_mmp_metrics(&session_name, mmp);
+                        mmp.mark_logged(now_ms);
+                    }
+                }
+                MmpAction::SendSessionReport { dest, kind } => {
+                    let built = self
+                        .sessions
+                        .get_mut(&dest)
+                        .and_then(|entry| entry.mmp_mut())
+                        .and_then(|mmp| match kind {
+                            SessionReportKind::Sender => {
+                                mmp.sender.build_report(now_ms).map(|sr| {
+                                    (
+                                        SessionMessageType::SenderReport.to_byte(),
+                                        SessionSenderReport::from(&sr).encode(),
+                                    )
+                                })
+                            }
+                            SessionReportKind::Receiver => {
+                                mmp.receiver.build_report(now_ms).map(|rr| {
+                                    (
+                                        SessionMessageType::ReceiverReport.to_byte(),
+                                        SessionReceiverReport::from(&rr).encode(),
+                                    )
+                                })
+                            }
+                            SessionReportKind::PathMtu => {
+                                mmp.path_mtu.build_notification(now_ms).map(|mtu_value| {
+                                    (
+                                        SessionMessageType::PathMtuNotification.to_byte(),
+                                        PathMtuNotification::new(mtu_value).encode(),
+                                    )
+                                })
+                            }
+                        });
+
+                    let Some((msg_type, body)) = built else {
+                        continue;
+                    };
+
+                    match self.send_session_msg(&dest, msg_type, &body).await {
+                        Ok(()) => send_results.push(SendResult { dest, ok: true }),
+                        Err(e) => {
+                            // Peek at current failure count for log suppression
+                            // (unchanged by the backoff apply, which runs later).
+                            let failures = self
+                                .sessions
+                                .get(&dest)
+                                .and_then(|entry| entry.mmp())
+                                .map(|mmp| mmp.sender.consecutive_send_failures())
+                                .unwrap_or(0);
+
+                            if failures < 3 {
+                                debug!(
+                                    dest = %self.peer_display_name(&dest),
+                                    msg_type,
+                                    error = %e,
+                                    "Failed to send session MMP report"
+                                );
+                            } else if failures == 3 {
+                                debug!(
+                                    dest = %self.peer_display_name(&dest),
+                                    "Suppressing further session MMP send failure logs"
+                                );
+                            }
+                            // failures > 3: silently suppressed
+
+                            send_results.push(SendResult { dest, ok: false });
+                        }
+                    }
+                }
+                MmpAction::ReapPeer { .. }
+                | MmpAction::Heartbeat { .. }
+                | MmpAction::SendLinkReport { .. }
+                | MmpAction::LogLink { .. } => {}
+            }
+        }
+
+        // Deduplicate send results per destination (any-ok -> success, all-fail
+        // -> failure) and apply the backoff state transition for each dest.
+        for update in self.mmp.plan_backoff(&send_results) {
+            match update {
+                BackoffUpdate::Success { dest } => {
+                    if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
+                        let prev = mmp.sender.record_send_success();
+                        if prev > 3 {
+                            debug!(
+                                dest = %self.peer_display_name(&dest),
+                                consecutive_failures = prev,
+                                "Resumed session MMP reporting"
+                            );
+                        }
+                    }
+                }
+                BackoffUpdate::Failure { dest } => {
+                    if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
+                        mmp.sender.record_send_failure();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit periodic session MMP metrics.
+    fn log_session_mmp_metrics(session_name: &str, mmp: &MmpSessionState) {
+        let m = &mmp.metrics;
+
+        let rtt_str = if m.rtt_trend.initialized() {
+            format!("{:.1}ms", m.rtt_trend.long() / 1000.0)
+        } else {
+            "n/a".to_string()
+        };
+        let loss_str = if m.loss_trend.initialized() {
+            format!("{:.1}%", m.loss_trend.long() * 100.0)
+        } else {
+            "n/a".to_string()
+        };
+        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
+
+        debug!(
+            session = %session_name,
+            rtt = %rtt_str,
+            loss = %loss_str,
+            jitter = format_args!("{:.1}ms", jitter_ms),
+            goodput = %format_throughput(m.goodput_bps()),
+            mtu = mmp.path_mtu.last_observed_mtu(),
+            tx_pkts = mmp.sender.cumulative_packets_sent(),
+            rx_pkts = mmp.receiver.cumulative_packets_recv(),
+            "MMP session metrics"
+        );
+    }
+
+    /// Emit a teardown log summarizing lifetime session MMP metrics.
+    pub(in crate::node) fn log_session_mmp_teardown(session_name: &str, mmp: &MmpSessionState) {
+        let m = &mmp.metrics;
+        let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
+
+        let rtt_str = match m.srtt_ms() {
+            Some(rtt) => format!("{:.1}ms", rtt),
+            None => "n/a".to_string(),
+        };
+        let loss_str = format!("{:.1}%", m.loss_rate() * 100.0);
+
+        debug!(
+            session = %session_name,
+            rtt = %rtt_str,
+            loss = %loss_str,
+            jitter = format_args!("{:.1}ms", jitter_ms),
+            etx = format_args!("{:.2}", m.etx),
+            goodput = %format_throughput(m.goodput_bps()),
+            send_mtu = mmp.path_mtu.current_mtu(),
+            observed_mtu = mmp.path_mtu.last_observed_mtu(),
+            tx_pkts = mmp.sender.cumulative_packets_sent(),
+            rx_pkts = mmp.receiver.cumulative_packets_recv(),
+            rx_bytes = mmp.receiver.cumulative_bytes_recv(),
+            "MMP session teardown"
+        );
+    }
+
     /// Handle an incoming session-layer SenderReport (msg_type 0x11).
     ///
     /// Informational only — the peer is telling us about what they sent.
@@ -1155,28 +1390,34 @@ impl Node {
         // tighter of existing-or-new — never loosen the clamp.
         let fips_addr = crate::FipsAddress::from_node_addr(src_addr);
         match self.path_mtu_lookup.write() {
-            Ok(mut map) => match map.get(&fips_addr).copied() {
-                Some(existing) if existing <= new_mtu => {
+            Ok(mut map) => {
+                // Read existing, decide, and apply the write under one guard so
+                // the keep-tighter update stays atomic.
+                let prior = map.get(&fips_addr).copied();
+                let actions = self.fsp.plan_path_mtu_tighten(fips_addr, prior, new_mtu);
+                if actions.is_empty() {
                     debug!(
                         dest = %peer_name,
                         fips_addr = %fips_addr,
                         new_mtu,
-                        existing,
+                        existing = prior.unwrap_or(new_mtu),
                         "PathMtuNotification: keeping tighter existing path_mtu_lookup value"
                     );
                 }
-                other => {
-                    map.insert(fips_addr, new_mtu);
-                    debug!(
-                        dest = %peer_name,
-                        fips_addr = %fips_addr,
-                        new_mtu,
-                        prior = ?other,
-                        map_len = map.len(),
-                        "PathMtuNotification: tightened path_mtu_lookup"
-                    );
+                for action in actions {
+                    if let FspAction::TightenPathMtuLookup { fips_addr, mtu } = action {
+                        map.insert(fips_addr, mtu);
+                        debug!(
+                            dest = %peer_name,
+                            fips_addr = %fips_addr,
+                            new_mtu,
+                            prior = ?prior,
+                            map_len = map.len(),
+                            "PathMtuNotification: tightened path_mtu_lookup"
+                        );
+                    }
                 }
-            },
+            }
             Err(e) => {
                 warn!(
                     dest = %peer_name,
@@ -1231,11 +1472,18 @@ impl Node {
 
         // Only trigger discovery if we have the target's identity cached —
         // otherwise we can't verify the LookupResponse proof.
-        if self.has_cached_identity(&msg.dest_addr) {
-            self.maybe_initiate_lookup(&msg.dest_addr).await;
-        } else {
+        let has_cached_identity = self.has_cached_identity(&msg.dest_addr);
+        let actions = self
+            .fsp
+            .plan_coords_required_lookup(msg.dest_addr, has_cached_identity);
+        if actions.is_empty() {
             debug!(dest = %msg.dest_addr,
                 "Skipping discovery after CoordsRequired: no cached identity for target");
+        }
+        for action in actions {
+            if let FspAction::InitiateLookup { dest } = action {
+                self.maybe_initiate_lookup(&dest).await;
+            }
         }
 
         // Reset coords warmup counter so the next N packets also include
@@ -1290,16 +1538,26 @@ impl Node {
                 "PathBroken response rate-limited, skipping standalone CoordsWarmup");
         }
 
-        // Invalidate stale cached coordinates
-        self.coord_cache.remove(&msg.dest_addr);
-
-        // Trigger re-discovery to get fresh coordinates, but only if we have
-        // the target's identity cached — otherwise we can't verify the
-        // LookupResponse proof. This avoids a race when the XX responder
-        // receives PathBroken before msg3 completes (identity unknown).
-        if self.has_cached_identity(&msg.dest_addr) {
-            self.maybe_initiate_lookup(&msg.dest_addr).await;
-        } else {
+        // Invalidate stale cached coordinates, then (only if the target's
+        // identity is cached — else the LookupResponse proof cannot be verified,
+        // e.g. when the XX responder receives PathBroken before msg3 completes)
+        // trigger re-discovery. The core emits invalidate-then-lookup in order.
+        let has_cached_identity = self.has_cached_identity(&msg.dest_addr);
+        let actions = self
+            .fsp
+            .plan_path_broken(msg.dest_addr, has_cached_identity);
+        for action in actions {
+            match action {
+                FspAction::InvalidateCoords { addr } => {
+                    self.coord_cache.remove(&addr);
+                }
+                FspAction::InitiateLookup { dest } => {
+                    self.maybe_initiate_lookup(&dest).await;
+                }
+                _ => {}
+            }
+        }
+        if !has_cached_identity {
             debug!(dest = %msg.dest_addr,
                 "Skipping discovery after PathBroken: no cached identity for target");
         }
@@ -1369,28 +1627,34 @@ impl Node {
         // tighter of existing-or-new — never loosen the clamp.
         let fips_addr = crate::FipsAddress::from_node_addr(&msg.dest_addr);
         match self.path_mtu_lookup.write() {
-            Ok(mut map) => match map.get(&fips_addr).copied() {
-                Some(existing) if existing <= msg.mtu => {
+            Ok(mut map) => {
+                // Read existing, decide, and apply the write under one guard so
+                // the keep-tighter update stays atomic.
+                let prior = map.get(&fips_addr).copied();
+                let actions = self.fsp.plan_path_mtu_tighten(fips_addr, prior, msg.mtu);
+                if actions.is_empty() {
                     debug!(
                         dest = %peer_name,
                         fips_addr = %fips_addr,
                         bottleneck_mtu = msg.mtu,
-                        existing,
+                        existing = prior.unwrap_or(msg.mtu),
                         "Reactive MtuExceeded: keeping tighter existing path_mtu_lookup value"
                     );
                 }
-                other => {
-                    map.insert(fips_addr, msg.mtu);
-                    debug!(
-                        dest = %peer_name,
-                        fips_addr = %fips_addr,
-                        bottleneck_mtu = msg.mtu,
-                        prior = ?other,
-                        map_len = map.len(),
-                        "Reactive MtuExceeded: tightened path_mtu_lookup"
-                    );
+                for action in actions {
+                    if let FspAction::TightenPathMtuLookup { fips_addr, mtu } = action {
+                        map.insert(fips_addr, mtu);
+                        debug!(
+                            dest = %peer_name,
+                            fips_addr = %fips_addr,
+                            bottleneck_mtu = msg.mtu,
+                            prior = ?prior,
+                            map_len = map.len(),
+                            "Reactive MtuExceeded: tightened path_mtu_lookup"
+                        );
+                    }
                 }
-            },
+            }
             Err(e) => {
                 warn!(
                     dest = %peer_name,
@@ -2326,10 +2590,7 @@ impl Node {
 
         let per_dest = self.config().node.session.pending_packets_per_dest;
         let queue = self.pending_tun_packets.entry(dest_addr).or_default();
-        if queue.len() >= per_dest {
-            queue.pop_front(); // Drop oldest
-        }
-        queue.push_back(packet);
+        crate::proto::fsp::push_bounded_pending(queue, packet, per_dest);
     }
 
     /// Flush pending packets for a destination whose session just reached Established.
@@ -2379,32 +2640,4 @@ impl Node {
             }
         }
     }
-}
-
-/// Mark ECN-CE in an IPv6 packet's Traffic Class field.
-///
-/// IPv6 Traffic Class occupies bits across bytes 0 and 1:
-///   byte[0] bits[3:0] = TC[7:4]
-///   byte[1] bits[7:4] = TC[3:0]
-/// ECN is TC[1:0]. Only marks CE (0b11) if the packet is ECN-capable
-/// (ECT(0) or ECT(1)). Packets with ECN=0b00 (Not-ECT) are never marked
-/// per RFC 3168.
-///
-/// No checksum update needed: IPv6 has no header checksum, and the Traffic
-/// Class field is not part of the TCP/UDP pseudo-header.
-pub(in crate::node) fn mark_ipv6_ecn_ce(packet: &mut [u8]) {
-    if packet.len() < 2 {
-        return;
-    }
-    // Extract 8-bit Traffic Class from IPv6 header bytes 0-1
-    let tc = ((packet[0] & 0x0F) << 4) | (packet[1] >> 4);
-    let ecn = tc & 0x03;
-    // Only mark CE on ECN-capable packets (ECT(0)=0b10 or ECT(1)=0b01)
-    if ecn == 0 {
-        return;
-    }
-    // Set both ECN bits to 1 (CE = 0b11)
-    let new_tc = tc | 0x03;
-    packet[0] = (packet[0] & 0xF0) | (new_tc >> 4);
-    packet[1] = (new_tc << 4) | (packet[1] & 0x0F);
 }

@@ -14,7 +14,8 @@
 //! - `state.rs` — `Router`, the routing-subsystem state owned by `Node`.
 //! - `limits.rs` — the routing error-signal rate limiter.
 //! - `wire.rs` — the routing error-signal PDUs (`CoordsRequired`,
-//!   `PathBroken`, `MtuExceeded`), relocated from `protocol::session`.
+//!   `PathBroken`, `MtuExceeded`) and the `RoutingSignalType` (`0x20`–`0x2F`)
+//!   message-type registry split off from the FSP `SessionMessageType`.
 
 mod core;
 mod limits;
@@ -30,4 +31,7 @@ pub(crate) use core::{
 };
 pub(crate) use limits::RoutingErrorRateLimiter;
 pub(crate) use state::Router;
-pub use wire::{COORDS_REQUIRED_SIZE, CoordsRequired, MTU_EXCEEDED_SIZE, MtuExceeded, PathBroken};
+pub use wire::{
+    COORDS_REQUIRED_SIZE, CoordsRequired, MTU_EXCEEDED_SIZE, MtuExceeded, PathBroken,
+    RoutingSignalType,
+};

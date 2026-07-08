@@ -2,8 +2,8 @@
 
 use super::{CoordEntry, ParentDeclaration, TreeCoordinate, TreeError};
 use crate::NodeAddr;
-use crate::protocol::LinkMessageType;
-use crate::protocol::ProtocolError;
+use crate::proto::Error;
+use crate::proto::link::LinkMessageType;
 use secp256k1::schnorr::Signature;
 
 /// Spanning tree announcement carrying parent declaration and ancestry.
@@ -94,11 +94,11 @@ impl TreeAnnounce {
     /// [0x10][version:1][sequence:8 LE][timestamp:8 LE][parent:16]
     /// [ancestry_count:2 LE][entries:32×n][signature:64]
     /// ```
-    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let signature = self
             .declaration
             .signature()
-            .ok_or(ProtocolError::InvalidSignature)?;
+            .ok_or(Error::InvalidSignature)?;
 
         let entries = self.ancestry.entries();
         let ancestry_count = entries.len() as u16;
@@ -132,9 +132,9 @@ impl TreeAnnounce {
     /// Decode from link-layer payload (after msg_type byte stripped by dispatcher).
     ///
     /// The payload starts with the version byte.
-    pub fn decode(payload: &[u8]) -> Result<Self, ProtocolError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         if payload.len() < Self::MIN_PAYLOAD_SIZE {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: Self::MIN_PAYLOAD_SIZE,
                 got: payload.len(),
             });
@@ -146,14 +146,14 @@ impl TreeAnnounce {
         let version = payload[pos];
         pos += 1;
         if version != Self::VERSION_1 {
-            return Err(ProtocolError::UnsupportedVersion(version));
+            return Err(Error::UnsupportedVersion(version));
         }
 
         // sequence (8 LE)
         let sequence = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad sequence".into()))?,
+                .map_err(|_| Error::Malformed("bad sequence".into()))?,
         );
         pos += 8;
 
@@ -161,7 +161,7 @@ impl TreeAnnounce {
         let timestamp = u64::from_le_bytes(
             payload[pos..pos + 8]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad timestamp".into()))?,
+                .map_err(|_| Error::Malformed("bad timestamp".into()))?,
         );
         pos += 8;
 
@@ -169,7 +169,7 @@ impl TreeAnnounce {
         let parent = NodeAddr::from_bytes(
             payload[pos..pos + 16]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad parent".into()))?,
+                .map_err(|_| Error::Malformed("bad parent".into()))?,
         );
         pos += 16;
 
@@ -177,14 +177,14 @@ impl TreeAnnounce {
         let ancestry_count = u16::from_le_bytes(
             payload[pos..pos + 2]
                 .try_into()
-                .map_err(|_| ProtocolError::Malformed("bad ancestry count".into()))?,
+                .map_err(|_| Error::Malformed("bad ancestry count".into()))?,
         ) as usize;
         pos += 2;
 
         // Validate remaining length: entries + signature
         let expected_remaining = ancestry_count * CoordEntry::WIRE_SIZE + 64;
         if payload.len() - pos < expected_remaining {
-            return Err(ProtocolError::MessageTooShort {
+            return Err(Error::MessageTooShort {
                 expected: pos + expected_remaining,
                 got: payload.len(),
             });
@@ -196,19 +196,19 @@ impl TreeAnnounce {
             let node_addr = NodeAddr::from_bytes(
                 payload[pos..pos + 16]
                     .try_into()
-                    .map_err(|_| ProtocolError::Malformed("bad entry node_addr".into()))?,
+                    .map_err(|_| Error::Malformed("bad entry node_addr".into()))?,
             );
             pos += 16;
             let entry_seq = u64::from_le_bytes(
                 payload[pos..pos + 8]
                     .try_into()
-                    .map_err(|_| ProtocolError::Malformed("bad entry sequence".into()))?,
+                    .map_err(|_| Error::Malformed("bad entry sequence".into()))?,
             );
             pos += 8;
             let entry_ts = u64::from_le_bytes(
                 payload[pos..pos + 8]
                     .try_into()
-                    .map_err(|_| ProtocolError::Malformed("bad entry timestamp".into()))?,
+                    .map_err(|_| Error::Malformed("bad entry timestamp".into()))?,
             );
             pos += 8;
             entries.push(CoordEntry::new(node_addr, entry_seq, entry_ts));
@@ -217,16 +217,16 @@ impl TreeAnnounce {
         // signature (64)
         let sig_bytes: [u8; 64] = payload[pos..pos + 64]
             .try_into()
-            .map_err(|_| ProtocolError::Malformed("bad signature".into()))?;
+            .map_err(|_| Error::Malformed("bad signature".into()))?;
         // Validate the signature parses as a well-formed schnorr signature (the
         // codec's only crypto touch, §11 w2); store the raw bytes so the in-core
         // declaration carries no `secp256k1` dependency. Actual verification is a
         // shell concern (§6).
-        Signature::from_slice(&sig_bytes).map_err(|_| ProtocolError::InvalidSignature)?;
+        Signature::from_slice(&sig_bytes).map_err(|_| Error::InvalidSignature)?;
 
         // The first entry's node_addr is the declaring node
         if entries.is_empty() {
-            return Err(ProtocolError::Malformed(
+            return Err(Error::Malformed(
                 "ancestry must have at least one entry".into(),
             ));
         }
@@ -236,13 +236,105 @@ impl TreeAnnounce {
             ParentDeclaration::with_signature(node_addr, parent, sequence, timestamp, sig_bytes);
 
         let ancestry = TreeCoordinate::new(entries)
-            .map_err(|e| ProtocolError::Malformed(format!("bad ancestry: {}", e)))?;
+            .map_err(|e| Error::Malformed(format!("bad ancestry: {}", e)))?;
 
         Ok(Self {
             declaration,
             ancestry,
         })
     }
+}
+// ============================================================================
+// Coordinate Wire Format Helpers
+// ============================================================================
+
+/// Wire size of a TreeCoordinate in address-only format: 2 + entries × 16.
+pub(crate) fn coords_wire_size(coords: &TreeCoordinate) -> usize {
+    2 + coords.entries().len() * 16
+}
+
+/// Encode a TreeCoordinate as address-only wire format: count(u16 LE) + addrs(16 × n).
+///
+/// Session-layer messages serialize coordinates as NodeAddr arrays (16 bytes each),
+/// without the sequence/timestamp metadata used by the tree gossip protocol.
+pub(crate) fn encode_coords(coords: &TreeCoordinate, buf: &mut Vec<u8>) {
+    let addrs: Vec<&NodeAddr> = coords.node_addrs().collect();
+    let count = addrs.len() as u16;
+    buf.extend_from_slice(&count.to_le_bytes());
+    for addr in addrs {
+        buf.extend_from_slice(addr.as_bytes());
+    }
+}
+
+/// Decode a TreeCoordinate from address-only wire format.
+///
+/// Returns the decoded coordinate and the number of bytes consumed.
+pub(crate) fn decode_coords(data: &[u8]) -> Result<(TreeCoordinate, usize), Error> {
+    if data.len() < 2 {
+        return Err(Error::MessageTooShort {
+            expected: 2,
+            got: data.len(),
+        });
+    }
+    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let needed = 2 + count * 16;
+    if data.len() < needed {
+        return Err(Error::MessageTooShort {
+            expected: needed,
+            got: data.len(),
+        });
+    }
+    if count == 0 {
+        return Err(Error::Malformed("coordinate with zero entries".into()));
+    }
+    let mut addrs = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 2 + i * 16;
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&data[offset..offset + 16]);
+        addrs.push(NodeAddr::from_bytes(bytes));
+    }
+    let coord = TreeCoordinate::from_addrs(addrs).map_err(|e| Error::Malformed(e.to_string()))?;
+    Ok((coord, needed))
+}
+
+/// Decode an optional coordinate field (count may be 0).
+///
+/// Returns None if count is 0, Some(coord) otherwise, plus bytes consumed.
+pub(crate) fn decode_optional_coords(
+    data: &[u8],
+) -> Result<(Option<TreeCoordinate>, usize), Error> {
+    if data.len() < 2 {
+        return Err(Error::MessageTooShort {
+            expected: 2,
+            got: data.len(),
+        });
+    }
+    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let needed = 2 + count * 16;
+    if data.len() < needed {
+        return Err(Error::MessageTooShort {
+            expected: needed,
+            got: data.len(),
+        });
+    }
+    if count == 0 {
+        return Ok((None, 2));
+    }
+    let mut addrs = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 2 + i * 16;
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&data[offset..offset + 16]);
+        addrs.push(NodeAddr::from_bytes(bytes));
+    }
+    let coord = TreeCoordinate::from_addrs(addrs).map_err(|e| Error::Malformed(e.to_string()))?;
+    Ok((Some(coord), needed))
+}
+
+/// Encode a count of zero (for empty/absent coordinate fields).
+pub(crate) fn encode_empty_coords(buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&0u16.to_le_bytes());
 }
 
 #[cfg(test)]
@@ -388,10 +480,7 @@ mod tests {
         encoded[1] = 0xFF;
 
         let result = TreeAnnounce::decode(&encoded[1..]);
-        assert!(matches!(
-            result,
-            Err(ProtocolError::UnsupportedVersion(0xFF))
-        ));
+        assert!(matches!(result, Err(Error::UnsupportedVersion(0xFF))));
     }
 
     #[test]
@@ -400,7 +489,7 @@ mod tests {
         let result = TreeAnnounce::decode(&[0x01]);
         assert!(matches!(
             result,
-            Err(ProtocolError::MessageTooShort { expected: 99, .. })
+            Err(Error::MessageTooShort { expected: 99, .. })
         ));
 
         // Just under minimum (98 bytes)
@@ -408,7 +497,7 @@ mod tests {
         let result = TreeAnnounce::decode(&short);
         assert!(matches!(
             result,
-            Err(ProtocolError::MessageTooShort { expected: 99, .. })
+            Err(Error::MessageTooShort { expected: 99, .. })
         ));
     }
 
@@ -432,7 +521,7 @@ mod tests {
         encoded[35] = 0;
 
         let result = TreeAnnounce::decode(&encoded[1..]);
-        assert!(matches!(result, Err(ProtocolError::MessageTooShort { .. })));
+        assert!(matches!(result, Err(Error::MessageTooShort { .. })));
     }
 
     #[test]
@@ -443,7 +532,7 @@ mod tests {
 
         let announce = TreeAnnounce::new(decl, ancestry);
         let result = announce.encode();
-        assert!(matches!(result, Err(ProtocolError::InvalidSignature)));
+        assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
     /// Tests that a well-formed non-root ancestry is accepted.

@@ -15,8 +15,8 @@
 //!   computation + the send-debounce decision).
 //! - `limits.rs` — the v1 sizing constants.
 //! - `wire.rs` — `FilterAnnounce` + `encode`/`decode` (the std-tethered file).
-//!   It imports the shared `ProtocolError` and `LinkMessageType` downward from
-//!   `crate::protocol`.
+//!   It imports the shared [`crate::proto::Error`] and
+//!   [`crate::proto::link::LinkMessageType`] downward.
 
 mod core;
 mod limits;

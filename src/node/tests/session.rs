@@ -6,7 +6,8 @@ use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, generate_random_edges, lock_large_network_test,
     process_available_packets, run_tree_test, run_tree_test_with_mtus, verify_tree_convergence,
 };
-use crate::protocol::{SessionAck, SessionDatagram};
+use crate::proto::fsp::SessionAck;
+use crate::proto::link::SessionDatagram;
 
 /// Populate all nodes' coordinate caches with each other's coords.
 ///

@@ -2,7 +2,7 @@
 
 use crate::proto::bloom::BloomFilter;
 use crate::proto::bloom::FilterAnnounce;
-use crate::protocol::LinkMessageType;
+use crate::proto::link::LinkMessageType;
 use crate::testutil::make_node_addr;
 
 #[test]
