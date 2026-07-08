@@ -141,7 +141,7 @@ impl BloomFilter {
 
     /// Current false-positive rate: fill ratio raised to the hash count.
     pub fn fpr(&self) -> f64 {
-        self.fill_ratio().powi(self.hash_count as i32)
+        crate::proto::math::powi(self.fill_ratio(), self.hash_count as u32)
     }
 
     /// Estimate the number of elements in the filter.
@@ -170,7 +170,7 @@ impl BloomFilter {
             return None;
         }
 
-        Some(-(m / k) * (1.0 - fill).ln())
+        Some(-(m / k) * libm::log(1.0 - fill))
     }
 
     /// Check if the filter is empty.

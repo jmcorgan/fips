@@ -1,6 +1,6 @@
 //! Flap dampening / hold-down unit tests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::util::{make_coords, make_costs, make_node_addr};
 use crate::proto::stp::{ParentDeclaration, ParentEval, TreeState};

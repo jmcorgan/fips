@@ -1087,6 +1087,7 @@ dependencies = [
  "hex",
  "hkdf",
  "libc",
+ "libm",
  "mdns-sd",
  "nostr",
  "nostr-sdk",

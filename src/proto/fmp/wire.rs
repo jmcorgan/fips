@@ -9,7 +9,7 @@
 use crate::proto::Error;
 use crate::proto::codec::Reader;
 use crate::proto::link::LinkMessageType;
-use std::fmt;
+use ::core::fmt;
 
 /// Handshake message type identifiers.
 ///

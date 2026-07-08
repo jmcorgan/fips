@@ -1,6 +1,6 @@
 //! Tests for `BloomState` (announcement state management).
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::testutil::make_node_addr;

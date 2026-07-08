@@ -640,5 +640,5 @@ impl Fmp {
 /// arithmetic (the exponent is the resend count *after* this attempt).
 fn next_resend_at_ms(now_ms: u64, interval_ms: u64, backoff: f64, prior_count: u32) -> u64 {
     let count = prior_count + 1;
-    now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64
+    now_ms + (interval_ms as f64 * crate::proto::math::powi(backoff, count)) as u64
 }

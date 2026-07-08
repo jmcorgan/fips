@@ -1,6 +1,6 @@
 //! ParentDeclaration, TreeState, parent-selection, and find_next_hop unit tests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::util::{add_peer, make_coords, make_costs, make_node_addr, make_tree_state};
 use crate::proto::stp::{ParentDeclaration, ParentEval, TreeCoordinate, TreeState};

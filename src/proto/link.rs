@@ -2,7 +2,7 @@
 
 use crate::NodeAddr;
 use crate::proto::Error;
-use std::fmt;
+use core::fmt;
 
 // ============================================================================
 // Link-Layer Message Types

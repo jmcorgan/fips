@@ -35,7 +35,7 @@
 use crate::proto::Error;
 use crate::proto::codec::{Reader, Writer};
 use crate::proto::stp::{TreeCoordinate, decode_coords, decode_optional_coords, encode_coords};
-use std::fmt;
+use ::core::fmt;
 
 // ============================================================================
 // Constants

@@ -1,6 +1,6 @@
 //! Shared test helpers for the STP primitive unit tests.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use crate::NodeAddr;
 use crate::proto::stp::{ParentDeclaration, TreeCoordinate, TreeState};
