@@ -4,3 +4,4 @@ mod coordinate;
 mod limits;
 mod state;
 mod util;
+mod wire;

@@ -13,13 +13,14 @@
 //! - `state.rs` — `TreeState` + `ParentDeclaration` data + the `&self`
 //!   ranking/election methods (`evaluate_parent`, `should_be_root`,
 //!   `find_next_hop`).
-//! - `coordinate.rs` — `TreeCoordinate` / `CoordEntry`.
+//! - `TreeCoordinate` / `CoordEntry` now live in the shared
+//!   [`crate::proto::coord`] primitive and are re-exported here for continuity.
 //! - `limits.rs` — the flap-dampening / hold-down state machine.
 //! - `wire.rs` — `TreeAnnounce` + `validate_semantics` (the one std-tethered
 //!   file).
 
-mod coordinate;
 mod core;
+mod declaration;
 mod limits;
 mod state;
 mod wire;
@@ -31,13 +32,14 @@ use thiserror::Error;
 
 use crate::{IdentityError, NodeAddr};
 
-pub use coordinate::{CoordEntry, TreeCoordinate};
-pub(crate) use core::{ParentEval, Stp, TreeDecision};
-pub use state::{ParentDeclaration, TreeState};
-pub use wire::TreeAnnounce;
-pub(crate) use wire::{
+pub use crate::proto::coord::{CoordEntry, TreeCoordinate};
+pub(crate) use crate::proto::coord::{
     coords_wire_size, decode_coords, decode_optional_coords, encode_coords, encode_empty_coords,
 };
+pub(crate) use core::{ParentEval, Stp, TreeDecision};
+pub use declaration::ParentDeclaration;
+pub use state::TreeState;
+pub use wire::TreeAnnounce;
 
 /// Errors related to spanning tree operations.
 #[derive(Debug, Error)]
