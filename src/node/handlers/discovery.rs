@@ -7,12 +7,12 @@
 
 use crate::node::Node;
 use crate::node::reject::DiscoveryReject;
-use crate::proto::discovery::{DiscoveryAction, LookupRequest, LookupResponse};
+use crate::proto::discovery::{
+    DiscoveryAction, LookupRequest, LookupResponse, MAX_RECENT_DISCOVERY_REQUESTS,
+};
 use crate::transport::{TransportAddr, TransportId};
 use crate::{NodeAddr, PeerIdentity};
 use tracing::{debug, info, trace, warn};
-
-const MAX_RECENT_DISCOVERY_REQUESTS: usize = 4096;
 
 /// Shell adapter exposing the live routing tables to the sans-IO discovery
 /// core's `RoutingView` read seam. Lives in `node` so it can read `Node`'s
@@ -483,7 +483,11 @@ impl Node {
 
         let origin = *self.node_addr();
         let origin_coords = self.tree_state().my_coords().clone();
-        let request = LookupRequest::generate(*target, origin, origin_coords, ttl, 0);
+        let request_id = {
+            use rand::RngExt;
+            rand::rng().random()
+        };
+        let request = LookupRequest::new(request_id, *target, origin, origin_coords, ttl, 0);
 
         // Tree-peer bloom-match selection + single encode live in the sans-IO
         // core. The core keeps the tree-only (no non-tree fallback) behavior;

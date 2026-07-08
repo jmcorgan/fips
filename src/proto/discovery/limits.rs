@@ -17,6 +17,14 @@ use crate::NodeAddr;
 use alloc::collections::BTreeMap;
 
 // ============================================================================
+// Receive-side: Request dedup cache bound
+// ============================================================================
+
+/// Maximum number of recent LookupRequests retained for dedup and
+/// reverse-path routing before the cache is treated as full.
+pub(crate) const MAX_RECENT_DISCOVERY_REQUESTS: usize = 4096;
+
+// ============================================================================
 // Originator-side: Discovery Backoff
 // ============================================================================
 

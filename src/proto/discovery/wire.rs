@@ -48,19 +48,6 @@ impl LookupRequest {
         }
     }
 
-    /// Generate a new request with a random ID.
-    pub fn generate(
-        target: NodeAddr,
-        origin: NodeAddr,
-        origin_coords: TreeCoordinate,
-        ttl: u8,
-        min_mtu: u16,
-    ) -> Self {
-        use rand::RngExt;
-        let request_id = rand::rng().random();
-        Self::new(request_id, target, origin, origin_coords, ttl, min_mtu)
-    }
-
     /// Decrement TTL for forwarding.
     ///
     /// Returns false if TTL was already 0.

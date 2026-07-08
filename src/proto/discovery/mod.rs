@@ -26,7 +26,9 @@ pub(crate) use core::{
     initiate_gate, on_response_accepted, plan_forward, plan_initiate, plan_response_route,
     poll_pending,
 };
-pub(crate) use limits::{DiscoveryBackoff, DiscoveryForwardRateLimiter};
+pub(crate) use limits::{
+    DiscoveryBackoff, DiscoveryForwardRateLimiter, MAX_RECENT_DISCOVERY_REQUESTS,
+};
 #[cfg(test)]
 pub(crate) use state::RecentRequest;
 pub(crate) use state::{Discovery, PendingLookup};
