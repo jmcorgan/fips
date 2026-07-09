@@ -1,6 +1,6 @@
 use nostr::prelude::{EventBuilder, Kind, Tag, Timestamp};
 
-use super::runtime::{NostrDiscovery, suppress_responder_for_own_initiator};
+use super::runtime::{NostrRendezvous, suppress_responder_for_own_initiator};
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
     estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
@@ -104,7 +104,7 @@ fn rejects_invalid_overlay_adverts() {
         signal_relays: None,
         stun_servers: None,
     };
-    assert!(NostrDiscovery::validate_overlay_advert(missing_nat_metadata).is_err());
+    assert!(NostrRendezvous::validate_overlay_advert(missing_nat_metadata).is_err());
 
     let wrong_identifier = OverlayAdvert {
         identifier: "not-fips-overlay".to_string(),
@@ -116,7 +116,7 @@ fn rejects_invalid_overlay_adverts() {
         signal_relays: None,
         stun_servers: None,
     };
-    assert!(NostrDiscovery::validate_overlay_advert(wrong_identifier).is_err());
+    assert!(NostrRendezvous::validate_overlay_advert(wrong_identifier).is_err());
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn validate_overlay_advert_filters_unroutable_direct_endpoints() {
         stun_servers: None,
     };
 
-    let validated = NostrDiscovery::validate_overlay_advert(advert).unwrap();
+    let validated = NostrRendezvous::validate_overlay_advert(advert).unwrap();
     assert_eq!(validated.endpoints.len(), 1);
     assert_eq!(validated.endpoints[0].addr, "8.8.8.8:443");
 }
@@ -166,7 +166,7 @@ fn validate_overlay_advert_rejects_only_unroutable_direct_endpoints() {
         stun_servers: None,
     };
 
-    let err = NostrDiscovery::validate_overlay_advert(advert).unwrap_err();
+    let err = NostrRendezvous::validate_overlay_advert(advert).unwrap_err();
     assert!(err.to_string().contains("missing publicly routable"));
 }
 
@@ -175,7 +175,7 @@ fn advert_freshness_rejects_expired_events() {
     let now_secs = Timestamp::now().as_secs();
     let event = signed_overlay_advert_event(now_secs, Some(now_secs.saturating_sub(1)));
     let valid_until =
-        NostrDiscovery::compute_advert_valid_until_ms(&event, 600_000, now_secs * 1000);
+        NostrRendezvous::compute_advert_valid_until_ms(&event, 600_000, now_secs * 1000);
     assert!(valid_until.is_none());
 }
 
@@ -185,7 +185,7 @@ fn advert_freshness_rejects_stale_created_at_without_expiration() {
     let stale_created = now_secs.saturating_sub(10_000);
     let event = signed_overlay_advert_event(stale_created, None);
     let valid_until =
-        NostrDiscovery::compute_advert_valid_until_ms(&event, 600_000, now_secs * 1000);
+        NostrRendezvous::compute_advert_valid_until_ms(&event, 600_000, now_secs * 1000);
     assert!(valid_until.is_none());
 }
 
@@ -194,7 +194,7 @@ fn advert_freshness_uses_earliest_expiration_bound() {
     let now_secs = Timestamp::now().as_secs();
     let event = signed_overlay_advert_event(now_secs.saturating_sub(10), Some(now_secs + 30));
     let valid_until =
-        NostrDiscovery::compute_advert_valid_until_ms(&event, 3_600_000, now_secs * 1000)
+        NostrRendezvous::compute_advert_valid_until_ms(&event, 3_600_000, now_secs * 1000)
             .expect("event should be fresh");
     assert_eq!(valid_until, (now_secs + 30) * 1000);
 }

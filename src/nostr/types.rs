@@ -1,5 +1,5 @@
+use super::handoff::EstablishedTraversal;
 use crate::config::PeerConfig;
-use crate::discovery::EstablishedTraversal;
 use serde::{Deserialize, Serialize};
 
 pub const ADVERT_KIND: u16 = 37195;
@@ -13,9 +13,9 @@ pub const ADVERT_KIND: u16 = 37195;
 pub const ADVERT_IDENTIFIER: &str = "fips-overlay-v1-next";
 pub const ADVERT_VERSION: u32 = 1;
 pub const SIGNAL_KIND: u16 = 21059;
-// Defined at the top-level `discovery` module; re-exported here so the
+// Defined in the nostr `handoff` submodule; re-exported here so the
 // existing punch sender / receiver imports remain unchanged.
-pub use crate::discovery::{PUNCH_ACK_MAGIC, PUNCH_MAGIC};
+pub use super::handoff::{PUNCH_ACK_MAGIC, PUNCH_MAGIC};
 pub const PROTOCOL_VERSION: &str = "1";
 
 #[derive(Debug, thiserror::Error)]
@@ -196,7 +196,7 @@ pub struct PunchPacket {
     pub session_hash: [u8; 16],
 }
 
-/// Outcome of `NostrDiscovery::record_traversal_failure`.
+/// Outcome of `NostrRendezvous::record_traversal_failure`.
 #[derive(Debug, Clone, Copy)]
 pub struct NostrFailureDecision {
     pub consecutive_failures: u32,
@@ -219,7 +219,7 @@ pub struct NostrPeerFailureView {
     pub last_observed_skew_ms: Option<i64>,
 }
 
-/// Outcome of `NostrDiscovery::refetch_advert_for_stale_check` (B6).
+/// Outcome of `NostrRendezvous::refetch_advert_for_stale_check` (B6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NostrRefetchOutcome {
     Evicted,

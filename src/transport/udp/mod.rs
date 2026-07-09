@@ -16,7 +16,7 @@ pub(crate) mod socket;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
-use crate::discovery::is_punch_packet;
+use crate::nostr::is_punch_packet;
 use socket::{AsyncUdpSocket, UdpRawSocket};
 use stats::UdpStats;
 use std::collections::HashMap;
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn test_is_punch_packet_helper() {
-        use crate::discovery::is_punch_packet;
+        use crate::nostr::is_punch_packet;
         // PUNCH_MAGIC ("NPTC", be)
         assert!(is_punch_packet(&[0x4E, 0x50, 0x54, 0x43, 0xAA, 0xBB]));
         // PUNCH_ACK_MAGIC ("NPTA", be)

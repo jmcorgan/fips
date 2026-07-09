@@ -178,7 +178,7 @@ The resolution itself happens at debug-log level, so you will
 not see it in the default-level journal. The user-facing way to
 confirm everything worked is `fipsctl show peers` in the next
 step. (To watch the resolution in the journal, run the daemon
-manually with `RUST_LOG=fips::discovery::nostr=debug`; not
+manually with `RUST_LOG=fips::nostr=debug`; not
 necessary for this tutorial.)
 
 ## Step 5: Verify the resolved endpoint

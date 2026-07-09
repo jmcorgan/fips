@@ -2,13 +2,10 @@
 
 use super::{Node, NodeError, NodeState};
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
-use crate::discovery::nostr::{
-    ADVERT_IDENTIFIER, ADVERT_VERSION, BootstrapEvent, NostrDiscovery, OverlayAdvert,
-    OverlayEndpointAdvert, OverlayTransportKind,
-};
-use crate::discovery::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::node::acl::PeerAclContext;
 use crate::node::wire::build_msg1;
+use crate::nostr::{BootstrapEvent, NostrRendezvous};
+use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::PeerConnection;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
@@ -266,7 +263,7 @@ impl Node {
                 // would loop on the same dead address until expiry. Force a
                 // re-fetch so the next retry tick picks up fresh endpoints.
                 if matches!(e, crate::node::NodeError::NoTransportForType(_))
-                    && let Some(bootstrap) = self.nostr_discovery.clone()
+                    && let Some(bootstrap) = self.nostr_rendezvous.engine_arc()
                 {
                     let npub = peer_config.npub.clone();
                     tokio::spawn(async move {
@@ -360,7 +357,7 @@ impl Node {
             .filter(|(id, handle)| {
                 handle.transport_type().name == "udp"
                     && handle.is_operational()
-                    && !self.bootstrap_transports.contains(id)
+                    && !self.nostr_rendezvous.is_bootstrap_transport(id)
             })
             .filter_map(|(id, handle)| {
                 let local_addr = handle.local_addr()?;
@@ -736,8 +733,8 @@ impl Node {
         }
     }
 
-    pub(super) async fn poll_nostr_discovery(&mut self) {
-        let Some(bootstrap) = self.nostr_discovery.clone() else {
+    pub(super) async fn poll_nostr_rendezvous(&mut self) {
+        let Some(bootstrap) = self.nostr_rendezvous.engine_arc() else {
             return;
         };
 
@@ -883,19 +880,19 @@ impl Node {
                         tokio::spawn(async move {
                             let outcome = bootstrap.refetch_advert_for_stale_check(&npub).await;
                             match outcome {
-                                crate::discovery::nostr::NostrRefetchOutcome::Evicted => info!(
+                                crate::nostr::NostrRefetchOutcome::Evicted => info!(
                                     npub = %npub,
                                     "stale-advert sweep: peer evicted from advert cache"
                                 ),
-                                crate::discovery::nostr::NostrRefetchOutcome::Refreshed => info!(
+                                crate::nostr::NostrRefetchOutcome::Refreshed => info!(
                                     npub = %npub,
                                     "stale-advert sweep: peer republished, cache refreshed and streak reset"
                                 ),
-                                crate::discovery::nostr::NostrRefetchOutcome::SameAdvert => debug!(
+                                crate::nostr::NostrRefetchOutcome::SameAdvert => debug!(
                                     npub = %npub,
                                     "stale-advert sweep: advert unchanged, cooldown stands"
                                 ),
-                                crate::discovery::nostr::NostrRefetchOutcome::Skipped => debug!(
+                                crate::nostr::NostrRefetchOutcome::Skipped => debug!(
                                     npub = %npub,
                                     "stale-advert sweep: skipped (relay error or no advert_relays)"
                                 ),
@@ -934,7 +931,7 @@ impl Node {
     /// changing the public Nostr discovery `app` tag. The older fallback
     /// extracts a scope from the Nostr app tag used by default scoped
     /// discovery.
-    pub(super) fn lan_discovery_scope(&self) -> Option<String> {
+    pub(super) fn lan_rendezvous_scope(&self) -> Option<String> {
         if let Some(scope) = self.config().node.rendezvous.lan.scope.as_deref() {
             let scope = scope.trim();
             if !scope.is_empty() {
@@ -961,8 +958,8 @@ impl Node {
     /// Drain mDNS-discovered peers and initiate Noise XX handshakes.
     /// The handshake itself is the authentication — a spoofed mDNS advert
     /// with someone else's npub fails the XX exchange and is dropped.
-    pub(super) async fn poll_lan_discovery(&mut self) {
-        let Some(runtime) = self.lan_discovery.clone() else {
+    pub(super) async fn poll_lan_rendezvous(&mut self) {
+        let Some(runtime) = self.lan_rendezvous.clone() else {
             return;
         };
         let events = runtime.drain_events().await;
@@ -970,7 +967,7 @@ impl Node {
             return;
         }
         for event in events {
-            let crate::discovery::lan::LanEvent::Discovered(peer) = event;
+            let crate::mdns::LanEvent::Discovered(peer) = event;
             let Some((transport_id, local_addr)) =
                 self.find_udp_transport_for_remote_addr(peer.addr)
             else {
@@ -1198,7 +1195,7 @@ impl Node {
         }
 
         if self.config().node.rendezvous.nostr.enabled {
-            match NostrDiscovery::start(
+            match NostrRendezvous::start(
                 self.identity(),
                 self.config().node.rendezvous.nostr.clone(),
             )
@@ -1208,8 +1205,8 @@ impl Node {
                     if let Err(err) = self.refresh_overlay_advert(&runtime).await {
                         warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                     }
-                    self.nostr_discovery = Some(runtime);
-                    self.nostr_discovery_started_at_ms = Some(Self::now_ms());
+                    self.nostr_rendezvous.set_engine(runtime);
+                    self.nostr_rendezvous.set_started_at_ms(Self::now_ms());
                     info!("Nostr overlay discovery enabled");
                 }
                 Err(err) => {
@@ -1234,14 +1231,14 @@ impl Node {
                 .filter(|(id, h)| {
                     h.transport_type().name == "udp"
                         && h.is_operational()
-                        && !self.bootstrap_transports.contains(id)
+                        && !self.nostr_rendezvous.is_bootstrap_transport(id)
                 })
                 .filter_map(|(id, h)| h.local_addr().map(|addr| (*id, addr.port())))
                 .min_by_key(|(id, _)| id.as_u32())
                 .map(|(_, port)| port)
                 .unwrap_or(0);
-            let scope = self.lan_discovery_scope();
-            match crate::discovery::lan::LanDiscovery::start(
+            let scope = self.lan_rendezvous_scope();
+            match crate::mdns::LanRendezvous::start(
                 self.identity(),
                 scope,
                 advertised_udp_port,
@@ -1250,7 +1247,7 @@ impl Node {
             .await
             {
                 Ok(runtime) => {
-                    self.lan_discovery = Some(runtime);
+                    self.lan_rendezvous = Some(runtime);
                     info!("LAN mDNS discovery enabled");
                 }
                 Err(err) => {
@@ -1538,7 +1535,7 @@ impl Node {
             .await;
 
         // Stop Nostr overlay discovery background work and withdraw any advert.
-        if let Some(bootstrap) = self.nostr_discovery.take()
+        if let Some(bootstrap) = self.nostr_rendezvous.take_engine()
             && let Err(e) = bootstrap.shutdown().await
         {
             warn!(error = %e, "Failed to shutdown Nostr overlay discovery");
@@ -1547,7 +1544,7 @@ impl Node {
         // Tear down LAN mDNS responder + browser. Best-effort: the
         // OS will eventually time the advert out via its TTL even if
         // we don't get a clean unregister out before the daemon exits.
-        if let Some(lan) = self.lan_discovery.take() {
+        if let Some(lan) = self.lan_rendezvous.take() {
             lan.shutdown().await;
         }
 
@@ -1680,89 +1677,6 @@ impl Node {
             .collect()
     }
 
-    async fn nostr_peer_fallback_addresses(
-        &self,
-        peer_config: &PeerConfig,
-        existing: &[PeerAddress],
-    ) -> Vec<PeerAddress> {
-        if !self.config().node.rendezvous.nostr.enabled
-            || !peer_config.via_nostr
-            || self.config().node.rendezvous.nostr.policy
-                == crate::config::NostrDiscoveryPolicy::Disabled
-        {
-            return Vec::new();
-        }
-
-        let Some(bootstrap) = self.nostr_discovery.clone() else {
-            return Vec::new();
-        };
-        let endpoints = match bootstrap.advert_endpoints_for_peer(&peer_config.npub).await {
-            Ok(endpoints) => endpoints,
-            Err(err) => {
-                debug!(
-                    npub = %peer_config.npub,
-                    error = %err,
-                    "Failed to resolve Nostr advert endpoints for configured peer"
-                );
-                return Vec::new();
-            }
-        };
-
-        let mut fallback = Vec::new();
-        let mut next_priority = existing
-            .iter()
-            .map(|addr| addr.priority)
-            .max()
-            .unwrap_or(100)
-            .saturating_add(1);
-        let seen_at_ms = Self::now_ms();
-        for endpoint in endpoints {
-            let Some(candidate) =
-                Self::overlay_endpoint_to_peer_address(&endpoint, next_priority, seen_at_ms)
-            else {
-                continue;
-            };
-            if existing
-                .iter()
-                .any(|addr| addr.transport == candidate.transport && addr.addr == candidate.addr)
-                || fallback.iter().any(|addr: &PeerAddress| {
-                    addr.transport == candidate.transport && addr.addr == candidate.addr
-                })
-            {
-                continue;
-            }
-            fallback.push(candidate);
-            next_priority = next_priority.saturating_add(1);
-        }
-        fallback
-    }
-
-    fn overlay_endpoint_to_peer_address(
-        endpoint: &OverlayEndpointAdvert,
-        priority: u8,
-        seen_at_ms: u64,
-    ) -> Option<PeerAddress> {
-        let transport = match endpoint.transport {
-            OverlayTransportKind::Udp => "udp",
-            OverlayTransportKind::Tcp => "tcp",
-            OverlayTransportKind::Tor => "tor",
-        };
-        Some(
-            PeerAddress::with_priority(transport, endpoint.addr.clone(), priority)
-                .with_seen_at_ms(seen_at_ms),
-        )
-    }
-
-    async fn request_nostr_bootstrap(&self, peer_config: &PeerConfig) -> bool {
-        let Some(bootstrap) = self.nostr_discovery.clone() else {
-            debug!(npub = %peer_config.npub, "No Nostr overlay runtime for udp:nat address");
-            return false;
-        };
-        bootstrap.request_connect(peer_config.clone()).await;
-        info!(npub = %peer_config.npub, "Started Nostr UDP NAT traversal attempt");
-        true
-    }
-
     async fn attempt_peer_address_list(
         &mut self,
         peer_config: &PeerConfig,
@@ -1788,7 +1702,11 @@ impl Node {
                 if !allow_bootstrap_nat {
                     continue;
                 }
-                if self.request_nostr_bootstrap(peer_config).await {
+                if self
+                    .nostr_rendezvous
+                    .request_nostr_bootstrap(peer_config)
+                    .await
+                {
                     attempted = attempted.saturating_add(1);
                 }
                 continue;
@@ -1890,7 +1808,7 @@ impl Node {
         )))
     }
 
-    async fn queue_open_discovery_retries(&mut self, bootstrap: &std::sync::Arc<NostrDiscovery>) {
+    async fn queue_open_discovery_retries(&mut self, bootstrap: &std::sync::Arc<NostrRendezvous>) {
         self.run_open_discovery_sweep(bootstrap, None, "per-tick")
             .await;
     }
@@ -1907,13 +1825,13 @@ impl Node {
     /// startup sweeps are distinguishable in operator-facing logs.
     pub(in crate::node) async fn run_open_discovery_sweep(
         &mut self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
         max_age_secs: Option<u64>,
         caller: &'static str,
     ) {
         if !self.config().node.rendezvous.nostr.enabled
             || self.config().node.rendezvous.nostr.policy
-                != crate::config::NostrDiscoveryPolicy::Open
+                != crate::config::NostrRendezvousPolicy::Open
         {
             return;
         }
@@ -2019,7 +1937,9 @@ impl Node {
             let seen_at_ms = Self::now_ms();
             for endpoint in endpoints {
                 let Some(candidate) =
-                    Self::overlay_endpoint_to_peer_address(&endpoint, priority, seen_at_ms)
+                    crate::nostr::RendezvousDriver::overlay_endpoint_to_peer_address(
+                        &endpoint, priority, seen_at_ms,
+                    )
                 else {
                     continue;
                 };
@@ -2105,20 +2025,20 @@ impl Node {
     /// `node.rendezvous.nostr.enabled` and `policy == open`.
     async fn maybe_run_startup_open_discovery_sweep(
         &mut self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) {
-        if self.startup_open_discovery_sweep_done {
+        if self.nostr_rendezvous.startup_sweep_done() {
             return;
         }
         if !self.config().node.rendezvous.nostr.enabled
             || self.config().node.rendezvous.nostr.policy
-                != crate::config::NostrDiscoveryPolicy::Open
+                != crate::config::NostrRendezvousPolicy::Open
         {
             // Mark done so we don't keep re-checking on every tick.
-            self.startup_open_discovery_sweep_done = true;
+            self.nostr_rendezvous.set_startup_sweep_done();
             return;
         }
-        let Some(started_at_ms) = self.nostr_discovery_started_at_ms else {
+        let Some(started_at_ms) = self.nostr_rendezvous.started_at_ms() else {
             return;
         };
         let now_ms = Self::now_ms();
@@ -2141,7 +2061,7 @@ impl Node {
             .startup_sweep_max_age_secs;
         self.run_open_discovery_sweep(bootstrap, Some(max_age_secs), "startup")
             .await;
-        self.startup_open_discovery_sweep_done = true;
+        self.nostr_rendezvous.set_startup_sweep_done();
     }
 
     fn available_outbound_slots(&self) -> usize {
@@ -2254,163 +2174,66 @@ impl Node {
         )
     }
 
-    async fn build_overlay_advert(
-        &self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
-    ) -> Option<OverlayAdvert> {
-        if !self.config().node.rendezvous.nostr.enabled {
-            return None;
-        }
-
-        let mut endpoints = Vec::new();
-        let mut has_udp_nat = false;
-
+    /// Capture the advertisable-endpoint inputs of every operational
+    /// transport into a snapshot the rendezvous driver can turn into an
+    /// `OverlayAdvert` without borrowing the transport table across the
+    /// STUN await. Iteration order matches `self.transports.values()`, and
+    /// only transports whose type matched a configured listener are
+    /// included, mirroring the original per-transport branch structure.
+    fn advert_transport_snapshot(&self) -> Vec<crate::nostr::AdvertTransportSnapshot> {
+        use crate::nostr::AdvertTransportSnapshot;
+        let mut snapshot = Vec::new();
         for handle in self.transports.values() {
             if !handle.is_operational() {
                 continue;
             }
-
             match handle.transport_type().name {
                 "udp" => {
                     let Some(cfg) = self.lookup_udp_config(handle.name()) else {
                         continue;
                     };
-                    if !cfg.advertise_on_nostr() {
-                        continue;
-                    }
-                    if cfg.is_public() {
-                        // Precedence:
-                        // 1. operator-supplied `external_addr` (skips STUN)
-                        // 2. non-wildcard `local_addr` (operator bound to
-                        //    a specific public IP directly)
-                        // 3. STUN auto-discovery against ephemeral socket
-                        // 4. loud warn + omit endpoint
-                        if let Some(explicit) = cfg.external_advert_addr() {
-                            endpoints.push(OverlayEndpointAdvert {
-                                transport: OverlayTransportKind::Udp,
-                                addr: explicit.to_string(),
-                            });
-                        } else {
-                            match handle.local_addr() {
-                                Some(addr) if !addr.ip().is_unspecified() => {
-                                    endpoints.push(OverlayEndpointAdvert {
-                                        transport: OverlayTransportKind::Udp,
-                                        addr: addr.to_string(),
-                                    });
-                                }
-                                Some(addr) => {
-                                    let key = handle.transport_id().as_u32();
-                                    let port = addr.port();
-                                    if let Some(public) =
-                                        bootstrap.learn_public_udp_addr(key, port).await
-                                    {
-                                        endpoints.push(OverlayEndpointAdvert {
-                                            transport: OverlayTransportKind::Udp,
-                                            addr: public.to_string(),
-                                        });
-                                    } else {
-                                        warn!(
-                                            transport_id = key,
-                                            bind_addr = %addr,
-                                            "advert: udp public=true bound to wildcard but \
-                                            STUN observation failed; advertising no UDP \
-                                            endpoint. Either set transports.udp.external_addr, \
-                                            bind to a specific public IP, or ensure \
-                                            node.rendezvous.nostr.stun_servers is reachable"
-                                        );
-                                    }
-                                }
-                                None => {}
-                            }
-                        }
-                    } else {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Udp,
-                            addr: "nat".to_string(),
-                        });
-                        has_udp_nat = true;
-                    }
+                    snapshot.push(AdvertTransportSnapshot::Udp {
+                        advertise: cfg.advertise_on_nostr(),
+                        is_public: cfg.is_public(),
+                        external_addr: cfg.external_advert_addr(),
+                        local_addr: handle.local_addr(),
+                        transport_key: handle.transport_id().as_u32(),
+                    });
                 }
                 "tcp" => {
                     let Some(cfg) = self.lookup_tcp_config(handle.name()) else {
                         continue;
                     };
-                    if !cfg.advertise_on_nostr() {
-                        continue;
-                    }
-                    // Precedence:
-                    // 1. operator-supplied `external_addr` (only path that
-                    //    works on cloud-NAT setups where the public IP is
-                    //    not on a host interface).
-                    // 2. non-wildcard `local_addr` (operator bound to a
-                    //    specific public IP directly).
-                    // 3. loud warn + omit endpoint (no TCP STUN equivalent).
-                    if let Some(explicit) = cfg.external_advert_addr() {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Tcp,
-                            addr: explicit.to_string(),
-                        });
-                    } else {
-                        match handle.local_addr() {
-                            Some(addr) if !addr.ip().is_unspecified() => {
-                                endpoints.push(OverlayEndpointAdvert {
-                                    transport: OverlayTransportKind::Tcp,
-                                    addr: addr.to_string(),
-                                });
-                            }
-                            Some(addr) => {
-                                warn!(
-                                    bind_addr = %addr,
-                                    "advert: tcp advertise_on_nostr=true bound to wildcard \
-                                    and no transports.tcp.external_addr set; advertising no \
-                                    TCP endpoint. Either set external_addr to the public \
-                                    IP (recommended for cloud 1:1-NAT setups) or bind \
-                                    explicitly to the public IP"
-                                );
-                            }
-                            None => {}
-                        }
-                    }
+                    snapshot.push(AdvertTransportSnapshot::Tcp {
+                        advertise: cfg.advertise_on_nostr(),
+                        external_addr: cfg.external_advert_addr(),
+                        local_addr: handle.local_addr(),
+                    });
                 }
                 "tor" => {
                     let Some(cfg) = self.lookup_tor_config(handle.name()) else {
                         continue;
                     };
-                    if !cfg.advertise_on_nostr() {
-                        continue;
-                    }
-                    if let Some(addr) = handle.onion_address() {
-                        endpoints.push(OverlayEndpointAdvert {
-                            transport: OverlayTransportKind::Tor,
-                            addr: format!("{}:{}", addr, cfg.advertised_port()),
-                        });
-                    }
+                    snapshot.push(AdvertTransportSnapshot::Tor {
+                        advertise: cfg.advertise_on_nostr(),
+                        onion_addr: handle.onion_address().map(|s| s.to_string()),
+                        advertised_port: cfg.advertised_port(),
+                    });
                 }
                 _ => {}
             }
         }
-
-        if endpoints.is_empty() {
-            return None;
-        }
-
-        Some(OverlayAdvert {
-            identifier: ADVERT_IDENTIFIER.to_string(),
-            version: ADVERT_VERSION,
-            endpoints,
-            signal_relays: has_udp_nat
-                .then(|| self.config().node.rendezvous.nostr.dm_relays.clone()),
-            stun_servers: has_udp_nat
-                .then(|| self.config().node.rendezvous.nostr.stun_servers.clone()),
-        })
+        snapshot
     }
 
     async fn refresh_overlay_advert(
         &self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
-    ) -> Result<(), crate::discovery::nostr::BootstrapError> {
-        let advert = self.build_overlay_advert(bootstrap).await;
-        bootstrap.update_local_advert(advert).await
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
+    ) -> Result<(), crate::nostr::BootstrapError> {
+        let snapshot = self.advert_transport_snapshot();
+        self.nostr_rendezvous
+            .refresh_overlay_advert(bootstrap, snapshot, &self.config().node.rendezvous.nostr)
+            .await
     }
 
     fn lookup_udp_config(&self, transport_name: Option<&str>) -> Option<&crate::config::UdpConfig> {
@@ -2527,7 +2350,13 @@ impl Node {
     async fn peer_address_candidates(&self, peer_config: &PeerConfig) -> Vec<PeerAddress> {
         let static_addresses = self.static_peer_addresses(peer_config);
         let overlay_addresses = self
-            .nostr_peer_fallback_addresses(peer_config, &static_addresses)
+            .nostr_rendezvous
+            .nostr_peer_fallback_addresses(
+                peer_config,
+                &static_addresses,
+                &self.config().node.rendezvous.nostr,
+                Self::now_ms(),
+            )
             .await;
 
         let mut candidates = Vec::with_capacity(overlay_addresses.len() + static_addresses.len());
@@ -2595,7 +2424,7 @@ impl Node {
         };
         if peer
             .transport_id()
-            .map(|id| self.bootstrap_transports.contains(&id))
+            .map(|id| self.nostr_rendezvous.is_bootstrap_transport(&id))
             .unwrap_or(false)
         {
             return false;
@@ -2791,17 +2620,16 @@ impl Node {
             transport_id,
             crate::transport::TransportHandle::Udp(transport),
         );
-        self.bootstrap_transports.insert(transport_id);
-        self.bootstrap_transport_npubs
-            .insert(transport_id, traversal.peer_npub.clone());
+        self.nostr_rendezvous
+            .insert_bootstrap_transport(transport_id, traversal.peer_npub.clone());
 
         let remote_addr = TransportAddr::from_string(&traversal.remote_addr.to_string());
         if let Err(err) = self
             .initiate_connection(transport_id, remote_addr.clone(), Some(peer_identity))
             .await
         {
-            self.bootstrap_transports.remove(&transport_id);
-            self.bootstrap_transport_npubs.remove(&transport_id);
+            self.nostr_rendezvous
+                .remove_bootstrap_transport(&transport_id);
             if let Some(mut handle) = self.transports.remove(&transport_id) {
                 let _ = handle.stop().await;
             }

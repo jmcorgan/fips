@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::Identity;
 use mdns_sd::ScopedIp;
 
-use super::{LanDiscovery, LanDiscoveryConfig, LanEvent};
+use super::{LanEvent, LanRendezvous, LanRendezvousConfig};
 
 /// Distinct service type per test run so concurrent cargo-test workers
 /// on the same machine don't cross-feed each other's adverts via the
@@ -15,8 +15,8 @@ fn isolated_service_type(tag: &str) -> String {
     format!("_fipstest-{tag}-{rand:08x}._udp.local.")
 }
 
-fn config_for(service_type: String) -> LanDiscoveryConfig {
-    LanDiscoveryConfig {
+fn config_for(service_type: String) -> LanRendezvousConfig {
+    LanRendezvousConfig {
         enabled: true,
         service_type,
         scope: None,
@@ -47,7 +47,7 @@ fn non_link_local_ipv6_advert_is_preserved() {
 }
 
 async fn wait_for_peer(
-    discovery: &LanDiscovery,
+    discovery: &LanRendezvous,
     expected_npub: &str,
     timeout: Duration,
 ) -> Option<super::LanDiscoveredPeer> {
@@ -64,7 +64,7 @@ async fn wait_for_peer(
     None
 }
 
-/// Two LanDiscovery instances on isolated service types — `a` browses
+/// Two LanRendezvous instances on isolated service types — `a` browses
 /// only its own type and never sees `b`, and vice versa. Sanity check
 /// that the scope-isolation defense works (we'd lose isolation if mdns-
 /// sd ever leaked across service types).
@@ -76,7 +76,7 @@ async fn isolated_service_types_do_not_cross_feed() {
     let service_a = isolated_service_type("isolated-a");
     let service_b = isolated_service_type("isolated-b");
 
-    let lan_a = LanDiscovery::start(
+    let lan_a = LanRendezvous::start(
         &identity_a,
         Some("scope-x".to_string()),
         61001,
@@ -84,7 +84,7 @@ async fn isolated_service_types_do_not_cross_feed() {
     )
     .await
     .expect("start a");
-    let lan_b = LanDiscovery::start(
+    let lan_b = LanRendezvous::start(
         &identity_b,
         Some("scope-x".to_string()),
         61002,
@@ -118,7 +118,7 @@ async fn isolated_service_types_do_not_cross_feed() {
     assert!(!saw_a_from_b, "isolated service types must not cross-feed");
 }
 
-/// Two LanDiscovery instances on the same service type and the same
+/// Two LanRendezvous instances on the same service type and the same
 /// scope: each should observe the other's advert within a few seconds.
 /// Exercises the responder + browser + TXT plumbing end-to-end.
 ///
@@ -136,7 +136,7 @@ async fn matched_scope_peers_observe_each_other() {
 
     let service = isolated_service_type("matched");
 
-    let lan_a = LanDiscovery::start(
+    let lan_a = LanRendezvous::start(
         &identity_a,
         Some("scope-shared".to_string()),
         61101,
@@ -144,7 +144,7 @@ async fn matched_scope_peers_observe_each_other() {
     )
     .await
     .expect("start a");
-    let lan_b = LanDiscovery::start(
+    let lan_b = LanRendezvous::start(
         &identity_b,
         Some("scope-shared".to_string()),
         61102,
@@ -181,7 +181,7 @@ async fn cross_scope_advert_is_filtered() {
 
     let service = isolated_service_type("cross-scope");
 
-    let lan_a = LanDiscovery::start(
+    let lan_a = LanRendezvous::start(
         &identity_a,
         Some("scope-a".to_string()),
         61201,
@@ -189,7 +189,7 @@ async fn cross_scope_advert_is_filtered() {
     )
     .await
     .expect("start a");
-    let lan_b = LanDiscovery::start(
+    let lan_b = LanRendezvous::start(
         &identity_b,
         Some("scope-b".to_string()),
         61202,

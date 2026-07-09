@@ -27,7 +27,7 @@ x-fips-common: &fips-common
     - net.ipv6.conf.all.disable_ipv6=0
   restart: "no"
   environment:
-    - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+    - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
 
 services:
   relay:
@@ -115,7 +115,7 @@ services:
     entrypoint:
       - /usr/local/bin/nat-node-entrypoint.sh
     environment:
-      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
       - ROUTE_SUBNET=172.31.254.0/24
       - ROUTE_VIA=172.31.1.254
@@ -141,7 +141,7 @@ services:
     entrypoint:
       - /usr/local/bin/nat-node-entrypoint.sh
     environment:
-      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
       - ROUTE_SUBNET=172.31.254.0/24
       - ROUTE_VIA=172.31.2.254
@@ -167,7 +167,7 @@ services:
     entrypoint:
       - /usr/local/bin/nat-node-entrypoint.sh
     environment:
-      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
       - ROUTE_SUBNET=172.31.254.0/24
       - ROUTE_VIA=172.31.1.254
@@ -193,7 +193,7 @@ services:
     entrypoint:
       - /usr/local/bin/nat-node-entrypoint.sh
     environment:
-      - RUST_LOG=info,fips::discovery::nostr=debug,fips::node::lifecycle=debug
+      - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
       - ROUTE_SUBNET=172.31.254.0/24
       - ROUTE_VIA=172.31.2.254

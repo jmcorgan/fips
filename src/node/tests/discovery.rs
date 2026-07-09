@@ -1043,20 +1043,20 @@ async fn test_response_path_mtu_four_node_chain() {
 /// Pin the iterate-filter-queue contract of `run_open_discovery_sweep`.
 ///
 /// Builds a `Node` with `nostr.policy = Open` and an empty peer list,
-/// then injects three cached adverts into a test `NostrDiscovery` and
+/// then injects three cached adverts into a test `NostrRendezvous` and
 /// asserts the sweep:
 ///   - queues a retry for an eligible (unknown, not-self) advert,
 ///   - skips the advert whose author is our own node identity, and
 ///   - skips the advert whose author is an already-connected peer.
 ///
-/// Uses `NostrDiscovery::new_for_test()` and `insert_advert_for_test()`
+/// Uses `NostrRendezvous::new_for_test()` and `insert_advert_for_test()`
 /// (both `#[cfg(test)]`-gated test escape hatches in
 /// `src/discovery/nostr/runtime.rs`) to populate the cache without
 /// requiring live relay subscriptions.
 #[tokio::test]
 async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
-    use crate::config::NostrDiscoveryPolicy;
-    use crate::discovery::nostr::{NostrDiscovery, OverlayEndpointAdvert, OverlayTransportKind};
+    use crate::config::NostrRendezvousPolicy;
+    use crate::nostr::{NostrRendezvous, OverlayEndpointAdvert, OverlayTransportKind};
     use crate::peer::ActivePeer;
     use crate::transport::LinkId;
     use std::sync::Arc;
@@ -1064,7 +1064,7 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
     // Build node with open-discovery enabled.
     let mut config = crate::Config::new();
     config.node.rendezvous.nostr.enabled = true;
-    config.node.rendezvous.nostr.policy = NostrDiscoveryPolicy::Open;
+    config.node.rendezvous.nostr.policy = NostrRendezvousPolicy::Open;
     let mut node = crate::Node::new(config).unwrap();
 
     // Identity of an already-connected peer; insert into node.peers
@@ -1087,8 +1087,8 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
     let self_npub = crate::encode_npub(&node.identity().pubkey());
     let self_node_addr = *node.identity().node_addr();
 
-    // Build a NostrDiscovery test instance and inject the three adverts.
-    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    // Build a NostrRendezvous test instance and inject the three adverts.
+    let bootstrap = Arc::new(NostrRendezvous::new_for_test());
     let endpoint = OverlayEndpointAdvert {
         transport: OverlayTransportKind::Udp,
         addr: "203.0.113.7:2121".to_string(),
@@ -1099,7 +1099,7 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
         .unwrap_or(0);
     for npub in [&eligible_npub, &connected_npub, &self_npub] {
         let advert =
-            NostrDiscovery::cached_advert_for_test(npub.clone(), endpoint.clone(), now_secs);
+            NostrRendezvous::cached_advert_for_test(npub.clone(), endpoint.clone(), now_secs);
         bootstrap.insert_advert_for_test(npub.clone(), advert).await;
     }
 

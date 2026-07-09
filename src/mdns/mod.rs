@@ -54,8 +54,12 @@ pub const TXT_KEY_SCOPE: &str = "scope";
 /// `PROTOCOL_VERSION`).
 pub const TXT_KEY_VERSION: &str = "v";
 
+/// FIPS protocol version advertised in the mDNS TXT `v` key. Kept in sync
+/// with the Nostr rendezvous `PROTOCOL_VERSION` (same value, `"1"`).
+const TXT_PROTOCOL_VERSION: &str = "1";
+
 #[derive(Debug, Error)]
-pub enum LanDiscoveryError {
+pub enum LanRendezvousError {
     #[error("mDNS daemon init failed: {0}")]
     Daemon(String),
     #[error("mDNS register failed: {0}")]
@@ -79,7 +83,7 @@ pub struct LanDiscoveredPeer {
     pub observed_at: Instant,
 }
 
-/// Browser-side events surfaced by `LanDiscovery::drain_events`.
+/// Browser-side events surfaced by `LanRendezvous::drain_events`.
 #[derive(Debug, Clone)]
 pub enum LanEvent {
     Discovered(LanDiscoveredPeer),
@@ -87,17 +91,17 @@ pub enum LanEvent {
 
 /// Runtime configuration for the mDNS responder + browser.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LanDiscoveryConfig {
+pub struct LanRendezvousConfig {
     /// Master switch. Default: `false` — LAN discovery is opt-in. Operators
     /// who want sub-second same-LAN pairing enable it via
     /// `node.rendezvous.lan.enabled: true`. Default-off avoids reintroducing
     /// a per-LAN identity broadcast on nodes that have deliberately disabled
     /// other discovery channels, and avoids any multicast surprise on upgrade.
-    #[serde(default = "LanDiscoveryConfig::default_enabled")]
+    #[serde(default = "LanRendezvousConfig::default_enabled")]
     pub enabled: bool,
     /// Overridable service type, primarily so integration tests can run
     /// multiple isolated services on the same loopback interface.
-    #[serde(default = "LanDiscoveryConfig::default_service_type")]
+    #[serde(default = "LanRendezvousConfig::default_service_type")]
     pub service_type: String,
     /// Optional application/network scope carried in the LAN-only TXT
     /// record. Browsers that set a scope ignore adverts for other scopes.
@@ -109,7 +113,7 @@ pub struct LanDiscoveryConfig {
     pub scope: Option<String>,
 }
 
-impl Default for LanDiscoveryConfig {
+impl Default for LanRendezvousConfig {
     fn default() -> Self {
         Self {
             enabled: Self::default_enabled(),
@@ -119,7 +123,7 @@ impl Default for LanDiscoveryConfig {
     }
 }
 
-impl LanDiscoveryConfig {
+impl LanRendezvousConfig {
     fn default_enabled() -> bool {
         false
     }
@@ -129,7 +133,7 @@ impl LanDiscoveryConfig {
 }
 
 /// Running mDNS responder + browser bound to the node's UDP advert port.
-pub struct LanDiscovery {
+pub struct LanRendezvous {
     daemon: ServiceDaemon,
     own_npub: String,
     instance_fullname: String,
@@ -137,7 +141,7 @@ pub struct LanDiscovery {
     event_pump: tokio::task::JoinHandle<()>,
 }
 
-impl LanDiscovery {
+impl LanRendezvous {
     /// Start the mDNS responder and browser.
     ///
     /// `advertised_port` is the UDP port the operational UDP transport
@@ -148,16 +152,16 @@ impl LanDiscovery {
         identity: &Identity,
         scope: Option<String>,
         advertised_port: u16,
-        config: LanDiscoveryConfig,
-    ) -> Result<Arc<Self>, LanDiscoveryError> {
+        config: LanRendezvousConfig,
+    ) -> Result<Arc<Self>, LanRendezvousError> {
         if !config.enabled {
-            return Err(LanDiscoveryError::Disabled);
+            return Err(LanRendezvousError::Disabled);
         }
         if advertised_port == 0 {
-            return Err(LanDiscoveryError::NoAdvertisedPort);
+            return Err(LanRendezvousError::NoAdvertisedPort);
         }
 
-        let daemon = ServiceDaemon::new().map_err(|e| LanDiscoveryError::Daemon(e.to_string()))?;
+        let daemon = ServiceDaemon::new().map_err(|e| LanRendezvousError::Daemon(e.to_string()))?;
 
         let npub = identity.npub();
         // mDNS DNS labels are capped at 63 bytes. 16 bech32 chars of npub
@@ -176,7 +180,7 @@ impl LanDiscovery {
         }
         props.insert(
             TXT_KEY_VERSION.to_string(),
-            super::nostr::PROTOCOL_VERSION.to_string(),
+            TXT_PROTOCOL_VERSION.to_string(),
         );
 
         // host_ipv4 is set to "127.0.0.1" *and* enable_addr_auto() is
@@ -193,18 +197,18 @@ impl LanDiscovery {
             advertised_port,
             Some(props),
         )
-        .map_err(|e| LanDiscoveryError::Register(e.to_string()))?
+        .map_err(|e| LanRendezvousError::Register(e.to_string()))?
         .enable_addr_auto();
 
         let instance_fullname = service_info.get_fullname().to_string();
 
         daemon
             .register(service_info)
-            .map_err(|e| LanDiscoveryError::Register(e.to_string()))?;
+            .map_err(|e| LanRendezvousError::Register(e.to_string()))?;
 
         let browse_rx = daemon
             .browse(&config.service_type)
-            .map_err(|e| LanDiscoveryError::Browse(e.to_string()))?;
+            .map_err(|e| LanRendezvousError::Browse(e.to_string()))?;
 
         let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let own_npub = npub.clone();

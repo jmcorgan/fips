@@ -259,13 +259,13 @@ impl Node {
                     // is polled separately from `reload_peer_acl` because the
                     // ACL's embedded alias reloader and this snapshot are
                     // distinct resources; the `path_mtu_lookup` cache and the
-                    // `nostr_discovery` subsystem are deliberately excluded
+                    // `nostr_rendezvous` subsystem are deliberately excluded
                     // from `Reloadable` since neither reloads from a backing
                     // file (see `node::reloadable`).
                     self.reload_host_map().await;
                     self.poll_pending_connects().await;
-                    self.poll_nostr_discovery().await;
-                    self.poll_lan_discovery().await;
+                    self.poll_nostr_rendezvous().await;
+                    self.poll_lan_rendezvous().await;
                     self.resend_pending_handshakes(now_ms).await;
                     self.resend_pending_rekeys(now_ms).await;
                     self.resend_pending_fmp_rekey_msg3(now_ms).await;
@@ -322,12 +322,14 @@ impl Node {
             // though no msg1/msg2 exchange can ever succeed. Bump the
             // discovery-layer cooldown to the long protocol-mismatch
             // window and emit a single WARN per fresh observation.
-            if self.bootstrap_transports.contains(&packet.transport_id)
+            if self
+                .nostr_rendezvous
+                .is_bootstrap_transport(&packet.transport_id)
                 && let Some(npub) = self
-                    .bootstrap_transport_npubs
-                    .get(&packet.transport_id)
+                    .nostr_rendezvous
+                    .bootstrap_transport_npub(&packet.transport_id)
                     .cloned()
-                && let Some(handle) = self.nostr_discovery_handle()
+                && let Some(handle) = self.nostr_rendezvous_handle()
             {
                 let now_ms = Self::now_ms();
                 let cooldown_secs = handle.protocol_mismatch_cooldown_secs();

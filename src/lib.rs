@@ -12,12 +12,13 @@ extern crate alloc;
 pub mod cache;
 pub mod config;
 pub mod control;
-pub mod discovery;
 #[cfg(target_os = "linux")]
 pub mod gateway;
 pub mod identity;
+pub mod mdns;
 pub mod node;
 pub mod noise;
+pub mod nostr;
 pub mod peer;
 pub mod perf_profile;
 pub(crate) mod proto;
@@ -39,8 +40,8 @@ pub use identity::{
 pub use config::{Config, ConfigError, IdentityConfig, NymConfig, TorConfig, UdpConfig};
 pub use upper::config::{DnsConfig, TunConfig};
 
-// Re-export discovery types
-pub use discovery::{BootstrapHandoffResult, EstablishedTraversal};
+// Re-export nostr rendezvous handoff types
+pub use nostr::{BootstrapHandoffResult, EstablishedTraversal, is_punch_packet};
 
 // Re-export tree types (relocated from tree:: to proto::stp)
 pub use proto::stp::{

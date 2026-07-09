@@ -263,13 +263,13 @@ impl LookupConfig {
 pub struct RendezvousConfig {
     /// Nostr-mediated overlay endpoint rendezvous (`node.rendezvous.nostr.*`).
     #[serde(default)]
-    pub nostr: NostrDiscoveryConfig,
+    pub nostr: NostrRendezvousConfig,
     /// mDNS / DNS-SD peer rendezvous on the local link (`node.rendezvous.lan.*`).
     /// Identity surface is a strict subset of what `nostr.advertise` already
     /// publishes publicly, so there's no marginal privacy cost; the latency
     /// win for same-LAN peers is large (sub-second pairing, no relay).
     #[serde(default)]
-    pub lan: crate::discovery::lan::LanDiscoveryConfig,
+    pub lan: crate::mdns::LanRendezvousConfig,
 }
 
 /// COMPAT (drop at the v2 cutover): a deprecated legacy `node.discovery:` block.
@@ -290,8 +290,8 @@ pub(crate) struct DiscoveryConfigCompat {
     pub backoff_base_secs: Option<u64>,
     pub backoff_max_secs: Option<u64>,
     pub forward_min_interval_secs: Option<u64>,
-    pub nostr: Option<NostrDiscoveryConfig>,
-    pub lan: Option<crate::discovery::lan::LanDiscoveryConfig>,
+    pub nostr: Option<NostrRendezvousConfig>,
+    pub lan: Option<crate::mdns::LanRendezvousConfig>,
 }
 
 /// Nostr advert discovery policy.
@@ -303,7 +303,7 @@ pub(crate) struct DiscoveryConfigCompat {
 /// - `open`: also consider adverts for non-configured peers
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NostrDiscoveryPolicy {
+pub enum NostrRendezvousPolicy {
     Disabled,
     #[default]
     ConfiguredOnly,
@@ -313,23 +313,23 @@ pub enum NostrDiscoveryPolicy {
 /// Nostr-mediated overlay endpoint discovery (`node.rendezvous.nostr.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NostrDiscoveryConfig {
+pub struct NostrRendezvousConfig {
     /// Enable Nostr-signaled traversal bootstrap.
     #[serde(default)]
     pub enabled: bool,
     /// Publish service advertisements so remote peers can bootstrap inbound.
-    #[serde(default = "NostrDiscoveryConfig::default_advertise")]
+    #[serde(default = "NostrRendezvousConfig::default_advertise")]
     pub advertise: bool,
     /// Relay URLs used for service advertisements.
-    #[serde(default = "NostrDiscoveryConfig::default_advert_relays")]
+    #[serde(default = "NostrRendezvousConfig::default_advert_relays")]
     pub advert_relays: Vec<String>,
     /// Relay URLs used for encrypted signaling events.
-    #[serde(default = "NostrDiscoveryConfig::default_dm_relays")]
+    #[serde(default = "NostrRendezvousConfig::default_dm_relays")]
     pub dm_relays: Vec<String>,
     /// STUN servers used for local reflexive address discovery.
     /// Outbound observation uses only this local list; peer-advertised STUN
     /// values are informational and are not treated as egress targets.
-    #[serde(default = "NostrDiscoveryConfig::default_stun_servers")]
+    #[serde(default = "NostrRendezvousConfig::default_stun_servers")]
     pub stun_servers: Vec<String>,
     /// Whether to advertise local (RFC 1918 / ULA) interface addresses as
     /// host candidates in the traversal offer.
@@ -343,85 +343,85 @@ pub struct NostrDiscoveryConfig {
     #[serde(default)]
     pub share_local_candidates: bool,
     /// Traversal application namespace and advert identifier suffix.
-    #[serde(default = "NostrDiscoveryConfig::default_app")]
+    #[serde(default = "NostrRendezvousConfig::default_app")]
     pub app: String,
     /// Signaling TTL in seconds.
-    #[serde(default = "NostrDiscoveryConfig::default_signal_ttl_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_signal_ttl_secs")]
     pub signal_ttl_secs: u64,
     /// Policy for advert-derived endpoint discovery.
     #[serde(default)]
-    pub policy: NostrDiscoveryPolicy,
+    pub policy: NostrRendezvousPolicy,
     /// Max number of open-discovery peers queued for outbound retry/connection
     /// at once. Prevents unbounded queue growth from ambient advert traffic.
-    #[serde(default = "NostrDiscoveryConfig::default_open_discovery_max_pending")]
+    #[serde(default = "NostrRendezvousConfig::default_open_discovery_max_pending")]
     pub open_discovery_max_pending: usize,
     /// Max concurrent inbound traversal offers processed at once.
     /// Acts as a rate limit against offer spam from relays.
-    #[serde(default = "NostrDiscoveryConfig::default_max_concurrent_incoming_offers")]
+    #[serde(default = "NostrRendezvousConfig::default_max_concurrent_incoming_offers")]
     pub max_concurrent_incoming_offers: usize,
     /// Max cached overlay adverts retained from relay traffic.
     /// Bounds memory under ambient advert volume.
-    #[serde(default = "NostrDiscoveryConfig::default_advert_cache_max_entries")]
+    #[serde(default = "NostrRendezvousConfig::default_advert_cache_max_entries")]
     pub advert_cache_max_entries: usize,
     /// Max seen-session IDs retained for replay detection.
     /// Oldest entries are evicted when the cap is exceeded.
-    #[serde(default = "NostrDiscoveryConfig::default_seen_sessions_max_entries")]
+    #[serde(default = "NostrRendezvousConfig::default_seen_sessions_max_entries")]
     pub seen_sessions_max_entries: usize,
     /// Overall punch attempt timeout in seconds.
-    #[serde(default = "NostrDiscoveryConfig::default_attempt_timeout_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_attempt_timeout_secs")]
     pub attempt_timeout_secs: u64,
     /// Replay tracking retention window in seconds.
-    #[serde(default = "NostrDiscoveryConfig::default_replay_window_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_replay_window_secs")]
     pub replay_window_secs: u64,
     /// Delay before punch traffic starts.
-    #[serde(default = "NostrDiscoveryConfig::default_punch_start_delay_ms")]
+    #[serde(default = "NostrRendezvousConfig::default_punch_start_delay_ms")]
     pub punch_start_delay_ms: u64,
     /// Interval between punch packets.
-    #[serde(default = "NostrDiscoveryConfig::default_punch_interval_ms")]
+    #[serde(default = "NostrRendezvousConfig::default_punch_interval_ms")]
     pub punch_interval_ms: u64,
     /// How long to keep punching before failure.
-    #[serde(default = "NostrDiscoveryConfig::default_punch_duration_ms")]
+    #[serde(default = "NostrRendezvousConfig::default_punch_duration_ms")]
     pub punch_duration_ms: u64,
     /// Advert TTL in seconds.
-    #[serde(default = "NostrDiscoveryConfig::default_advert_ttl_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_advert_ttl_secs")]
     pub advert_ttl_secs: u64,
     /// How often adverts are refreshed in seconds.
-    #[serde(default = "NostrDiscoveryConfig::default_advert_refresh_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_advert_refresh_secs")]
     pub advert_refresh_secs: u64,
     /// Settle delay in seconds after Nostr discovery starts before the
     /// one-shot startup sweep of cached adverts runs. Allows the relay
     /// subscription backlog to populate the in-memory advert cache.
     /// Only used under `policy: open`. Default: 5.
-    #[serde(default = "NostrDiscoveryConfig::default_startup_sweep_delay_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_startup_sweep_delay_secs")]
     pub startup_sweep_delay_secs: u64,
     /// Maximum age in seconds for cached adverts considered by the
     /// one-shot startup sweep. Adverts whose `created_at` is older than
     /// `now - startup_sweep_max_age_secs` are skipped. Only used under
     /// `policy: open`. Default: 3600 (1 hour).
-    #[serde(default = "NostrDiscoveryConfig::default_startup_sweep_max_age_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_startup_sweep_max_age_secs")]
     pub startup_sweep_max_age_secs: u64,
     /// Number of consecutive NAT-traversal failures against a peer before
     /// an extended cooldown is applied to throttle further offer publishes.
     /// At this threshold the daemon also actively re-fetches the peer's
     /// advert from `advert_relays` to evict cache entries for peers that
     /// have gone away. Default: 5.
-    #[serde(default = "NostrDiscoveryConfig::default_failure_streak_threshold")]
+    #[serde(default = "NostrRendezvousConfig::default_failure_streak_threshold")]
     pub failure_streak_threshold: u32,
     /// Cooldown applied to a peer once `failure_streak_threshold` is hit.
     /// Suppresses both open-discovery sweep enqueues and per-attempt
     /// retry firings until elapsed. Default: 1800 (30 minutes).
-    #[serde(default = "NostrDiscoveryConfig::default_extended_cooldown_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_extended_cooldown_secs")]
     pub extended_cooldown_secs: u64,
     /// Minimum interval between `NAT traversal failed` WARN log lines for
     /// the same peer. Subsequent failures inside the window log at DEBUG.
     /// Reduces log spam on public-test nodes with many cache-learned
     /// peers. Default: 300 (5 minutes).
-    #[serde(default = "NostrDiscoveryConfig::default_warn_log_interval_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_warn_log_interval_secs")]
     pub warn_log_interval_secs: u64,
     /// Maximum entries retained in the per-npub failure-state map.
     /// Bounds memory under high cache turnover. Oldest entries (by last
     /// failure time) evicted when the cap is exceeded. Default: 4096.
-    #[serde(default = "NostrDiscoveryConfig::default_failure_state_max_entries")]
+    #[serde(default = "NostrRendezvousConfig::default_failure_state_max_entries")]
     pub failure_state_max_entries: usize,
     /// Cooldown applied after observing a fatal protocol mismatch on a
     /// Nostr-adopted bootstrap transport (e.g. `Unknown FMP version`
@@ -429,11 +429,11 @@ pub struct NostrDiscoveryConfig {
     /// of `extended_cooldown_secs` and much longer because the mismatch
     /// is structural — re-traversing the peer is wasted effort until one
     /// side upgrades. Default: 86400 (24 hours).
-    #[serde(default = "NostrDiscoveryConfig::default_protocol_mismatch_cooldown_secs")]
+    #[serde(default = "NostrRendezvousConfig::default_protocol_mismatch_cooldown_secs")]
     pub protocol_mismatch_cooldown_secs: u64,
 }
 
-impl Default for NostrDiscoveryConfig {
+impl Default for NostrRendezvousConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -444,7 +444,7 @@ impl Default for NostrDiscoveryConfig {
             share_local_candidates: false,
             app: Self::default_app(),
             signal_ttl_secs: Self::default_signal_ttl_secs(),
-            policy: NostrDiscoveryPolicy::default(),
+            policy: NostrRendezvousPolicy::default(),
             open_discovery_max_pending: Self::default_open_discovery_max_pending(),
             max_concurrent_incoming_offers: Self::default_max_concurrent_incoming_offers(),
             advert_cache_max_entries: Self::default_advert_cache_max_entries(),
@@ -467,7 +467,7 @@ impl Default for NostrDiscoveryConfig {
     }
 }
 
-impl NostrDiscoveryConfig {
+impl NostrRendezvousConfig {
     fn default_advertise() -> bool {
         true
     }
@@ -1241,27 +1241,27 @@ owd_window_size: 48
     }
 
     #[test]
-    fn test_nostr_discovery_startup_sweep_defaults() {
-        let c = NostrDiscoveryConfig::default();
+    fn test_nostr_rendezvous_startup_sweep_defaults() {
+        let c = NostrRendezvousConfig::default();
         assert_eq!(c.startup_sweep_delay_secs, 5);
         assert_eq!(c.startup_sweep_max_age_secs, 3_600);
     }
 
     #[test]
-    fn test_nostr_discovery_startup_sweep_yaml_override() {
+    fn test_nostr_rendezvous_startup_sweep_yaml_override() {
         let yaml = "enabled: true\npolicy: open\nstartup_sweep_delay_secs: 10\nstartup_sweep_max_age_secs: 1800\n";
-        let c: NostrDiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        let c: NostrRendezvousConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(c.enabled);
-        assert_eq!(c.policy, NostrDiscoveryPolicy::Open);
+        assert_eq!(c.policy, NostrRendezvousPolicy::Open);
         assert_eq!(c.startup_sweep_delay_secs, 10);
         assert_eq!(c.startup_sweep_max_age_secs, 1_800);
     }
 
     #[test]
-    fn test_nostr_discovery_startup_sweep_partial_yaml_uses_defaults() {
+    fn test_nostr_rendezvous_startup_sweep_partial_yaml_uses_defaults() {
         // Only override delay; max_age should fall back to default.
         let yaml = "enabled: true\nstartup_sweep_delay_secs: 30\n";
-        let c: NostrDiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        let c: NostrRendezvousConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(c.startup_sweep_delay_secs, 30);
         assert_eq!(c.startup_sweep_max_age_secs, 3_600);
     }

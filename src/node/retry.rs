@@ -282,7 +282,7 @@ impl Node {
             // evicts if the relay has nothing, otherwise leaves it. Cheap
             // (one Filter fetch with 2s timeout) and bounded by the retry
             // backoff cadence.
-            if let Some(bootstrap) = self.nostr_discovery.clone() {
+            if let Some(bootstrap) = self.nostr_rendezvous.engine_arc() {
                 let _ = bootstrap
                     .refetch_advert_for_stale_check(&peer_config.npub)
                     .await;
@@ -318,7 +318,7 @@ impl Node {
                     // entry expires. Force a re-fetch so the next retry tick
                     // picks up fresh endpoints.
                     if matches!(e, NodeError::NoTransportForType(_))
-                        && let Some(bootstrap) = self.nostr_discovery.clone()
+                        && let Some(bootstrap) = self.nostr_rendezvous.engine_arc()
                     {
                         let npub = peer_config.npub.clone();
                         tokio::spawn(async move {
