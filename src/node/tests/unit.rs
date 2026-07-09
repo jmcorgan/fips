@@ -1130,7 +1130,7 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
         peer_config: crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9"),
         reason: "stale traversal failure".to_string(),
     });
-    node.nostr_rendezvous = Some(bootstrap.clone());
+    node.nostr_rendezvous.set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
 
@@ -1170,7 +1170,7 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
             socket,
         ),
     });
-    node.nostr_rendezvous = Some(bootstrap.clone());
+    node.nostr_rendezvous.set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
 
@@ -1727,7 +1727,7 @@ async fn poll_nostr_rendezvous_established_gated_at_capacity() {
             socket,
         ),
     });
-    node.nostr_rendezvous = Some(bootstrap.clone());
+    node.nostr_rendezvous.set_engine(bootstrap.clone());
 
     let before_peers = node.peer_count();
     let before_links = node.link_count();

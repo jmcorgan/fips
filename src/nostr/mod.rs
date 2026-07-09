@@ -1,3 +1,4 @@
+mod driver;
 mod failure_state;
 mod handoff;
 mod runtime;
@@ -9,6 +10,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use driver::{AdvertTransportSnapshot, RendezvousDriver};
 pub use handoff::{BootstrapHandoffResult, EstablishedTraversal, is_punch_packet};
 pub use runtime::NostrRendezvous;
 pub use types::{
