@@ -1,5 +1,5 @@
 use super::*;
-use crate::discovery::nostr::{BootstrapEvent, NostrDiscovery};
+use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::peer::PromotionResult;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{TransportHandle, packet_channel};
@@ -171,7 +171,7 @@ async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
     config.node.control.enabled = false;
     config.node.rendezvous.nostr.enabled = true;
     config.node.rendezvous.nostr.advertise = true;
-    config.node.rendezvous.nostr.policy = crate::config::NostrDiscoveryPolicy::Open;
+    config.node.rendezvous.nostr.policy = crate::config::NostrRendezvousPolicy::Open;
     config.node.rendezvous.nostr.advert_relays = vec!["wss://127.0.0.1:9".to_string()];
     config.node.rendezvous.nostr.dm_relays = vec!["wss://127.0.0.1:9".to_string()];
     config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
@@ -189,7 +189,7 @@ async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
         .unwrap();
 
     assert!(node.is_running());
-    assert!(node.nostr_discovery_handle().is_some());
+    assert!(node.nostr_rendezvous_handle().is_some());
 
     node.stop().await.unwrap();
 }
@@ -1125,14 +1125,14 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
     node.promote_connection(link_id, peer_identity, 2000)
         .unwrap();
 
-    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    let bootstrap = Arc::new(NostrRendezvous::new_for_test());
     bootstrap.push_event_for_test(BootstrapEvent::Failed {
         peer_config: crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9"),
         reason: "stale traversal failure".to_string(),
     });
-    node.nostr_discovery = Some(bootstrap.clone());
+    node.nostr_rendezvous = Some(bootstrap.clone());
 
-    node.poll_nostr_discovery().await;
+    node.poll_nostr_rendezvous().await;
 
     assert!(
         bootstrap.failure_state_snapshot().is_empty(),
@@ -1146,7 +1146,7 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
 
 #[tokio::test]
 async fn test_nostr_traversal_established_skips_connected_peer() {
-    use crate::discovery::EstablishedTraversal;
+    use crate::nostr::EstablishedTraversal;
     use std::net::UdpSocket;
 
     let mut node = make_node();
@@ -1159,7 +1159,7 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
     let link_count = node.link_count();
     let connection_count = node.connection_count();
 
-    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    let bootstrap = Arc::new(NostrRendezvous::new_for_test());
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind local UDP socket");
     let remote_addr = "127.0.0.1:9999".parse().expect("parse remote addr");
     bootstrap.push_event_for_test(BootstrapEvent::Established {
@@ -1170,9 +1170,9 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
             socket,
         ),
     });
-    node.nostr_discovery = Some(bootstrap.clone());
+    node.nostr_rendezvous = Some(bootstrap.clone());
 
-    node.poll_nostr_discovery().await;
+    node.poll_nostr_rendezvous().await;
 
     assert_eq!(
         node.link_count(),
@@ -1708,14 +1708,14 @@ async fn process_pending_retries_gated_at_capacity() {
 }
 
 #[tokio::test]
-async fn poll_nostr_discovery_established_gated_at_capacity() {
-    use crate::discovery::EstablishedTraversal;
+async fn poll_nostr_rendezvous_established_gated_at_capacity() {
+    use crate::nostr::EstablishedTraversal;
     use std::net::UdpSocket;
 
     let mut node = make_node_with_max_peers(2);
     inject_dummy_peers(&mut node, 2);
 
-    let bootstrap = Arc::new(NostrDiscovery::new_for_test());
+    let bootstrap = Arc::new(NostrRendezvous::new_for_test());
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind local UDP socket");
     let remote_addr = "127.0.0.1:9999".parse().expect("parse remote addr");
     let peer_identity = Identity::generate();
@@ -1727,13 +1727,13 @@ async fn poll_nostr_discovery_established_gated_at_capacity() {
             socket,
         ),
     });
-    node.nostr_discovery = Some(bootstrap.clone());
+    node.nostr_rendezvous = Some(bootstrap.clone());
 
     let before_peers = node.peer_count();
     let before_links = node.link_count();
     let before_connections = node.connection_count();
 
-    node.poll_nostr_discovery().await;
+    node.poll_nostr_rendezvous().await;
 
     assert_eq!(
         node.peer_count(),
@@ -1753,11 +1753,11 @@ async fn poll_nostr_discovery_established_gated_at_capacity() {
 }
 
 #[test]
-fn nostr_discovery_outbound_admission_atomic_roundtrip() {
+fn nostr_rendezvous_outbound_admission_atomic_roundtrip() {
     // Verifies the runtime-side plumbing for the two NAT-traversal gate
     // points: the setter mutates the atomic and the (super-visible)
     // reader observes the value the Node-side wiring would publish.
-    let bootstrap = NostrDiscovery::new_for_test();
+    let bootstrap = NostrRendezvous::new_for_test();
     assert!(
         bootstrap.outbound_admission_allowed(),
         "default must allow (start unsaturated)"

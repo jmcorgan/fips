@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
 use super::failure_state::FailureState;
+use super::handoff::EstablishedTraversal;
 use super::signal::{
     FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
     create_traversal_offer, estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
@@ -30,8 +31,7 @@ use super::types::{
     OverlayAdvert, OverlayEndpointAdvert, PROTOCOL_VERSION, PunchHint, SIGNAL_KIND,
     TraversalAnswer, TraversalOffer,
 };
-use crate::config::{NostrDiscoveryConfig, PeerConfig};
-use crate::discovery::EstablishedTraversal;
+use crate::config::{NostrRendezvousConfig, PeerConfig};
 use crate::{NodeAddr, PeerIdentity};
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
@@ -157,7 +157,7 @@ fn endpoint_advert_is_publicly_usable(endpoint: &OverlayEndpointAdvert) -> bool 
 }
 
 /// Cached STUN-derived public address for an advert-eligible UDP transport
-/// bound to a wildcard. Lives on `NostrDiscovery` so the freshness window
+/// bound to a wildcard. Lives on `NostrRendezvous` so the freshness window
 /// survives advert refresh cycles.
 struct CachedPublicUdpAddr {
     /// Most recent STUN observation. `None` means the last attempt failed
@@ -177,12 +177,12 @@ const PUBLIC_UDP_ADDR_FAILURE_TTL: Duration = Duration::from_secs(60);
 const RELAY_STARTUP_OP_TIMEOUT: Duration = Duration::from_secs(5);
 const ADVERT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub struct NostrDiscovery {
+pub struct NostrRendezvous {
     client: Client,
     keys: nostr::Keys,
     pubkey: PublicKey,
     npub: String,
-    config: NostrDiscoveryConfig,
+    config: NostrRendezvousConfig,
     advert_cache: RwLock<HashMap<String, CachedOverlayAdvert>>,
     local_advert: RwLock<Option<OverlayAdvert>>,
     current_advert_event_id: RwLock<Option<EventId>>,
@@ -212,10 +212,10 @@ pub struct NostrDiscovery {
     outbound_admission: AtomicBool,
 }
 
-impl NostrDiscovery {
+impl NostrRendezvous {
     pub async fn start(
         identity: &crate::Identity,
-        config: NostrDiscoveryConfig,
+        config: NostrRendezvousConfig,
     ) -> Result<Arc<Self>, BootstrapError> {
         if !config.enabled {
             return Err(BootstrapError::Disabled);
@@ -1733,8 +1733,8 @@ impl NostrDiscovery {
 }
 
 #[cfg(test)]
-impl NostrDiscovery {
-    /// Build a minimal `NostrDiscovery` for unit tests. No relay client is
+impl NostrRendezvous {
+    /// Build a minimal `NostrRendezvous` for unit tests. No relay client is
     /// connected and no background tasks are spawned; only the in-memory
     /// `advert_cache` and `npub` are usable. Intended for cache-injection
     /// tests of consumers (e.g. `Node::run_open_discovery_sweep`).
@@ -1746,7 +1746,7 @@ impl NostrDiscovery {
             .signer(keys.clone())
             .opts(ClientOptions::new().autoconnect(false))
             .build();
-        let config = NostrDiscoveryConfig::default();
+        let config = NostrRendezvousConfig::default();
         let offer_slots = Arc::new(Semaphore::new(config.max_concurrent_incoming_offers));
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let failure_state = FailureState::new(

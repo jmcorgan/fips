@@ -6,9 +6,6 @@
 //! it hands the live socket and selected remote endpoint to FIPS so the
 //! existing Noise/FMP transport path can take over.
 
-pub mod lan;
-pub mod nostr;
-
 use crate::config::UdpConfig;
 use crate::{NodeAddr, TransportId};
 use std::net::{SocketAddr, UdpSocket};
@@ -16,9 +13,9 @@ use std::net::{SocketAddr, UdpSocket};
 /// Punch-probe magic ("NPTC", network byte order). First byte `0x4E`
 /// collides with FMP's prefix-version high-nibble check, so the UDP
 /// transport silently filters packets carrying this magic to keep
-/// post-adoption handshake logs clean. Defined at the top-level
-/// `discovery` module so the UDP filter and the nostr submodule's
-/// punch sender share the same constant.
+/// post-adoption handshake logs clean. Defined in the nostr rendezvous
+/// home so the UDP filter and the nostr submodule's punch sender share
+/// the same constant.
 pub const PUNCH_MAGIC: u32 = 0x4E505443;
 
 /// Punch-probe-ack magic ("NPTA", network byte order). Same filter as

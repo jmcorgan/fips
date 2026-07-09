@@ -2,13 +2,13 @@
 
 use super::{Node, NodeError, NodeState};
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
-use crate::discovery::nostr::{
-    ADVERT_IDENTIFIER, ADVERT_VERSION, BootstrapEvent, NostrDiscovery, OverlayAdvert,
-    OverlayEndpointAdvert, OverlayTransportKind,
-};
-use crate::discovery::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::node::acl::PeerAclContext;
 use crate::node::wire::build_msg1;
+use crate::nostr::{
+    ADVERT_IDENTIFIER, ADVERT_VERSION, BootstrapEvent, NostrRendezvous, OverlayAdvert,
+    OverlayEndpointAdvert, OverlayTransportKind,
+};
+use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::PeerConnection;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
@@ -266,7 +266,7 @@ impl Node {
                 // would loop on the same dead address until expiry. Force a
                 // re-fetch so the next retry tick picks up fresh endpoints.
                 if matches!(e, crate::node::NodeError::NoTransportForType(_))
-                    && let Some(bootstrap) = self.nostr_discovery.clone()
+                    && let Some(bootstrap) = self.nostr_rendezvous.clone()
                 {
                     let npub = peer_config.npub.clone();
                     tokio::spawn(async move {
@@ -679,8 +679,8 @@ impl Node {
         }
     }
 
-    pub(super) async fn poll_nostr_discovery(&mut self) {
-        let Some(bootstrap) = self.nostr_discovery.clone() else {
+    pub(super) async fn poll_nostr_rendezvous(&mut self) {
+        let Some(bootstrap) = self.nostr_rendezvous.clone() else {
             return;
         };
 
@@ -826,19 +826,19 @@ impl Node {
                         tokio::spawn(async move {
                             let outcome = bootstrap.refetch_advert_for_stale_check(&npub).await;
                             match outcome {
-                                crate::discovery::nostr::NostrRefetchOutcome::Evicted => info!(
+                                crate::nostr::NostrRefetchOutcome::Evicted => info!(
                                     npub = %npub,
                                     "stale-advert sweep: peer evicted from advert cache"
                                 ),
-                                crate::discovery::nostr::NostrRefetchOutcome::Refreshed => info!(
+                                crate::nostr::NostrRefetchOutcome::Refreshed => info!(
                                     npub = %npub,
                                     "stale-advert sweep: peer republished, cache refreshed and streak reset"
                                 ),
-                                crate::discovery::nostr::NostrRefetchOutcome::SameAdvert => debug!(
+                                crate::nostr::NostrRefetchOutcome::SameAdvert => debug!(
                                     npub = %npub,
                                     "stale-advert sweep: advert unchanged, cooldown stands"
                                 ),
-                                crate::discovery::nostr::NostrRefetchOutcome::Skipped => debug!(
+                                crate::nostr::NostrRefetchOutcome::Skipped => debug!(
                                     npub = %npub,
                                     "stale-advert sweep: skipped (relay error or no advert_relays)"
                                 ),
@@ -877,7 +877,7 @@ impl Node {
     /// changing the public Nostr discovery `app` tag. The older fallback
     /// extracts a scope from the Nostr app tag used by default scoped
     /// discovery.
-    pub(super) fn lan_discovery_scope(&self) -> Option<String> {
+    pub(super) fn lan_rendezvous_scope(&self) -> Option<String> {
         if let Some(scope) = self.config().node.rendezvous.lan.scope.as_deref() {
             let scope = scope.trim();
             if !scope.is_empty() {
@@ -904,8 +904,8 @@ impl Node {
     /// Drain mDNS-discovered peers and initiate Noise IK handshakes.
     /// The handshake itself is the authentication — a spoofed mDNS advert
     /// with someone else's npub fails the IK exchange and is dropped.
-    pub(super) async fn poll_lan_discovery(&mut self) {
-        let Some(runtime) = self.lan_discovery.clone() else {
+    pub(super) async fn poll_lan_rendezvous(&mut self) {
+        let Some(runtime) = self.lan_rendezvous.clone() else {
             return;
         };
         let events = runtime.drain_events().await;
@@ -913,7 +913,7 @@ impl Node {
             return;
         }
         for event in events {
-            let crate::discovery::lan::LanEvent::Discovered(peer) = event;
+            let crate::mdns::LanEvent::Discovered(peer) = event;
             let Some((transport_id, local_addr)) =
                 self.find_udp_transport_for_remote_addr(peer.addr)
             else {
@@ -1139,7 +1139,7 @@ impl Node {
         }
 
         if self.config().node.rendezvous.nostr.enabled {
-            match NostrDiscovery::start(
+            match NostrRendezvous::start(
                 self.identity(),
                 self.config().node.rendezvous.nostr.clone(),
             )
@@ -1149,8 +1149,8 @@ impl Node {
                     if let Err(err) = self.refresh_overlay_advert(&runtime).await {
                         warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                     }
-                    self.nostr_discovery = Some(runtime);
-                    self.nostr_discovery_started_at_ms = Some(Self::now_ms());
+                    self.nostr_rendezvous = Some(runtime);
+                    self.nostr_rendezvous_started_at_ms = Some(Self::now_ms());
                     info!("Nostr overlay discovery enabled");
                 }
                 Err(err) => {
@@ -1181,8 +1181,8 @@ impl Node {
                 .min_by_key(|(id, _)| id.as_u32())
                 .map(|(_, port)| port)
                 .unwrap_or(0);
-            let scope = self.lan_discovery_scope();
-            match crate::discovery::lan::LanDiscovery::start(
+            let scope = self.lan_rendezvous_scope();
+            match crate::mdns::LanRendezvous::start(
                 self.identity(),
                 scope,
                 advertised_udp_port,
@@ -1191,7 +1191,7 @@ impl Node {
             .await
             {
                 Ok(runtime) => {
-                    self.lan_discovery = Some(runtime);
+                    self.lan_rendezvous = Some(runtime);
                     info!("LAN mDNS discovery enabled");
                 }
                 Err(err) => {
@@ -1479,7 +1479,7 @@ impl Node {
             .await;
 
         // Stop Nostr overlay discovery background work and withdraw any advert.
-        if let Some(bootstrap) = self.nostr_discovery.take()
+        if let Some(bootstrap) = self.nostr_rendezvous.take()
             && let Err(e) = bootstrap.shutdown().await
         {
             warn!(error = %e, "Failed to shutdown Nostr overlay discovery");
@@ -1488,7 +1488,7 @@ impl Node {
         // Tear down LAN mDNS responder + browser. Best-effort: the
         // OS will eventually time the advert out via its TTL even if
         // we don't get a clean unregister out before the daemon exits.
-        if let Some(lan) = self.lan_discovery.take() {
+        if let Some(lan) = self.lan_rendezvous.take() {
             lan.shutdown().await;
         }
 
@@ -1629,12 +1629,12 @@ impl Node {
         if !self.config().node.rendezvous.nostr.enabled
             || !peer_config.via_nostr
             || self.config().node.rendezvous.nostr.policy
-                == crate::config::NostrDiscoveryPolicy::Disabled
+                == crate::config::NostrRendezvousPolicy::Disabled
         {
             return Vec::new();
         }
 
-        let Some(bootstrap) = self.nostr_discovery.clone() else {
+        let Some(bootstrap) = self.nostr_rendezvous.clone() else {
             return Vec::new();
         };
         let endpoints = match bootstrap.advert_endpoints_for_peer(&peer_config.npub).await {
@@ -1695,7 +1695,7 @@ impl Node {
     }
 
     async fn request_nostr_bootstrap(&self, peer_config: &PeerConfig) -> bool {
-        let Some(bootstrap) = self.nostr_discovery.clone() else {
+        let Some(bootstrap) = self.nostr_rendezvous.clone() else {
             debug!(npub = %peer_config.npub, "No Nostr overlay runtime for udp:nat address");
             return false;
         };
@@ -1831,7 +1831,7 @@ impl Node {
         )))
     }
 
-    async fn queue_open_discovery_retries(&mut self, bootstrap: &std::sync::Arc<NostrDiscovery>) {
+    async fn queue_open_discovery_retries(&mut self, bootstrap: &std::sync::Arc<NostrRendezvous>) {
         self.run_open_discovery_sweep(bootstrap, None, "per-tick")
             .await;
     }
@@ -1848,13 +1848,13 @@ impl Node {
     /// startup sweeps are distinguishable in operator-facing logs.
     pub(in crate::node) async fn run_open_discovery_sweep(
         &mut self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
         max_age_secs: Option<u64>,
         caller: &'static str,
     ) {
         if !self.config().node.rendezvous.nostr.enabled
             || self.config().node.rendezvous.nostr.policy
-                != crate::config::NostrDiscoveryPolicy::Open
+                != crate::config::NostrRendezvousPolicy::Open
         {
             return;
         }
@@ -2046,20 +2046,20 @@ impl Node {
     /// `node.rendezvous.nostr.enabled` and `policy == open`.
     async fn maybe_run_startup_open_discovery_sweep(
         &mut self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) {
         if self.startup_open_discovery_sweep_done {
             return;
         }
         if !self.config().node.rendezvous.nostr.enabled
             || self.config().node.rendezvous.nostr.policy
-                != crate::config::NostrDiscoveryPolicy::Open
+                != crate::config::NostrRendezvousPolicy::Open
         {
             // Mark done so we don't keep re-checking on every tick.
             self.startup_open_discovery_sweep_done = true;
             return;
         }
-        let Some(started_at_ms) = self.nostr_discovery_started_at_ms else {
+        let Some(started_at_ms) = self.nostr_rendezvous_started_at_ms else {
             return;
         };
         let now_ms = Self::now_ms();
@@ -2192,7 +2192,7 @@ impl Node {
 
     async fn build_overlay_advert(
         &self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) -> Option<OverlayAdvert> {
         if !self.config().node.rendezvous.nostr.enabled {
             return None;
@@ -2343,8 +2343,8 @@ impl Node {
 
     async fn refresh_overlay_advert(
         &self,
-        bootstrap: &std::sync::Arc<NostrDiscovery>,
-    ) -> Result<(), crate::discovery::nostr::BootstrapError> {
+        bootstrap: &std::sync::Arc<NostrRendezvous>,
+    ) -> Result<(), crate::nostr::BootstrapError> {
         let advert = self.build_overlay_advert(bootstrap).await;
         bootstrap.update_local_advert(advert).await
     }

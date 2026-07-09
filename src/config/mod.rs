@@ -34,7 +34,7 @@ use thiserror::Error;
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
-    NodeConfig, NostrDiscoveryConfig, NostrDiscoveryPolicy, RateLimitConfig, RekeyConfig,
+    NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy, RateLimitConfig, RekeyConfig,
     RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
@@ -1344,7 +1344,7 @@ peers:
         assert_eq!(config.node.rendezvous.nostr.signal_ttl_secs, 45);
         assert_eq!(
             config.node.rendezvous.nostr.policy,
-            NostrDiscoveryPolicy::ConfiguredOnly
+            NostrRendezvousPolicy::ConfiguredOnly
         );
         assert_eq!(config.node.rendezvous.nostr.open_discovery_max_pending, 12);
         assert_eq!(

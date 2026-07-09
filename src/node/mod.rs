@@ -445,17 +445,17 @@ pub struct Node {
     retry_pending: HashMap<NodeAddr, retry::RetryState>,
 
     /// Optional Nostr/STUN overlay discovery coordinator for `udp:nat` peers.
-    nostr_discovery: Option<Arc<crate::discovery::nostr::NostrDiscovery>>,
+    nostr_rendezvous: Option<Arc<crate::nostr::NostrRendezvous>>,
     /// mDNS / DNS-SD responder + browser for local-link peer discovery.
     /// Identity is unverified at this layer — the Noise XX handshake
     /// initiated against an mDNS-observed endpoint is what proves the
     /// peer holds the matching private key.
-    lan_discovery: Option<Arc<crate::discovery::lan::LanDiscovery>>,
+    lan_rendezvous: Option<Arc<crate::mdns::LanRendezvous>>,
     /// Wall-clock ms when Nostr discovery successfully started, used to
     /// schedule the one-shot startup advert sweep after a settle delay.
     /// `None` until discovery comes up; remains `None` if discovery is
     /// disabled or failed to start.
-    nostr_discovery_started_at_ms: Option<u64>,
+    nostr_rendezvous_started_at_ms: Option<u64>,
     /// Whether the one-shot startup advert sweep has run. Set to true
     /// after the first sweep fires (under `policy: open`); thereafter
     /// only the per-tick `queue_open_discovery_retries` continues.
@@ -684,9 +684,9 @@ impl Node {
             ),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
-            nostr_discovery: None,
-            nostr_discovery_started_at_ms: None,
-            lan_discovery: None,
+            nostr_rendezvous: None,
+            nostr_rendezvous_started_at_ms: None,
+            lan_rendezvous: None,
             startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             bootstrap_transport_npubs: HashMap::new(),
@@ -846,9 +846,9 @@ impl Node {
             lookup: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
-            nostr_discovery: None,
-            nostr_discovery_started_at_ms: None,
-            lan_discovery: None,
+            nostr_rendezvous: None,
+            nostr_rendezvous_started_at_ms: None,
+            lan_rendezvous: None,
             startup_open_discovery_sweep_done: false,
             bootstrap_transports: HashSet::new(),
             bootstrap_transport_npubs: HashMap::new(),
@@ -1834,7 +1834,7 @@ impl Node {
         // Per-npub Nostr-traversal failure-state, indexed by npub for O(1)
         // per-peer lookup (empty when Nostr discovery is disabled).
         let nostr_state: std::collections::HashMap<String, _> = self
-            .nostr_discovery_handle()
+            .nostr_rendezvous_handle()
             .map(|d| {
                 d.failure_state_snapshot()
                     .into_iter()
@@ -2398,8 +2398,8 @@ impl Node {
     /// Reference to the Nostr discovery handle if discovery is enabled.
     /// Used by control queries (`show_peers` per-peer Nostr-traversal
     /// state) to read failure-state without taking shared ownership.
-    pub fn nostr_discovery_handle(&self) -> Option<&crate::discovery::nostr::NostrDiscovery> {
-        self.nostr_discovery.as_deref()
+    pub fn nostr_rendezvous_handle(&self) -> Option<&crate::nostr::NostrRendezvous> {
+        self.nostr_rendezvous.as_deref()
     }
 
     /// Iterate over all peer node IDs.

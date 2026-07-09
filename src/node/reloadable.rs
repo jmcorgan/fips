@@ -41,7 +41,7 @@
 //!   file. There is nothing to poll. (Its read side could adopt the same
 //!   lock-free `ArcSwap` shape in the future, but that is an optimization, not
 //!   a reload.)
-//! - `nostr_discovery` is an async spawned subsystem, not a snapshot of disk
+//! - `nostr_rendezvous` is an async spawned subsystem, not a snapshot of disk
 //!   state.
 //!
 //! Both [`HostMapReloadable`] and the peer ACL reloader currently stat

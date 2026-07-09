@@ -236,7 +236,7 @@ pub fn show_peers(node: &Node) -> Value {
     // Per-npub Nostr-traversal failure-state snapshot, indexed by npub
     // for O(1) per-peer lookup. Empty if Nostr discovery is disabled.
     let nostr_state: std::collections::HashMap<String, _> = node
-        .nostr_discovery_handle()
+        .nostr_rendezvous_handle()
         .map(|d| {
             d.failure_state_snapshot()
                 .into_iter()

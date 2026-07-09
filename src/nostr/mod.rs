@@ -1,4 +1,5 @@
 mod failure_state;
+mod handoff;
 mod runtime;
 mod signal;
 mod stun;
@@ -8,7 +9,8 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use runtime::NostrDiscovery;
+pub use handoff::{BootstrapHandoffResult, EstablishedTraversal, is_punch_packet};
+pub use runtime::NostrRendezvous;
 pub use types::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, BootstrapError, BootstrapEvent,
     CachedOverlayAdvert, NostrFailureDecision, NostrPeerFailureView, NostrRefetchOutcome,
