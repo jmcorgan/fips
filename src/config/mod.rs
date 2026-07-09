@@ -33,9 +33,9 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use node::{
-    BloomConfig, BuffersConfig, CacheConfig, ControlConfig, DiscoveryConfig, LimitsConfig,
-    MmpConfig, NodeConfig, NostrDiscoveryConfig, NostrDiscoveryPolicy, RateLimitConfig,
-    RekeyConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
+    BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
+    NodeConfig, NostrDiscoveryConfig, NostrDiscoveryPolicy, RateLimitConfig, RekeyConfig,
+    RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
 pub use transport::{
@@ -489,10 +489,59 @@ impl Config {
             source: e,
         })?;
 
-        serde_yaml::from_str(&contents).map_err(|e| ConfigError::ParseYaml {
-            path: path.to_path_buf(),
-            source: e,
-        })
+        let mut config: Config =
+            serde_yaml::from_str(&contents).map_err(|e| ConfigError::ParseYaml {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+        config.normalize_deprecated_keys();
+        Ok(config)
+    }
+
+    /// COMPAT (drop at the v2 cutover): fold a deprecated `node.discovery:`
+    /// block into the `node.lookup.*` (mesh-lookup scalars) and
+    /// `node.rendezvous.*` (nostr/LAN peer rendezvous) tables that replaced it.
+    ///
+    /// Runs at every deserialize boundary (see `load_file`). A present legacy
+    /// field fills the corresponding new-table field, so a config that predates
+    /// the split keeps behaving identically. When a legacy block is seen, a
+    /// one-time deprecation warning names the old→new key moves. Exposed to the
+    /// crate so config tests that deserialize directly can invoke it.
+    pub(crate) fn normalize_deprecated_keys(&mut self) {
+        let Some(compat) = self.node.discovery.take() else {
+            return;
+        };
+        tracing::warn!(
+            target: "fips::config",
+            "`node.discovery.*` is deprecated and will be removed: mesh-lookup \
+             scalars moved to `node.lookup.*`, and peer-rendezvous keys moved to \
+             `node.rendezvous.nostr.*` / `node.rendezvous.lan.*`. Please migrate; \
+             a legacy `node.discovery` block still applies for now."
+        );
+        if let Some(v) = compat.ttl {
+            self.node.lookup.ttl = v;
+        }
+        if let Some(v) = compat.attempt_timeouts_secs {
+            self.node.lookup.attempt_timeouts_secs = v;
+        }
+        if let Some(v) = compat.recent_expiry_secs {
+            self.node.lookup.recent_expiry_secs = v;
+        }
+        if let Some(v) = compat.backoff_base_secs {
+            self.node.lookup.backoff_base_secs = v;
+        }
+        if let Some(v) = compat.backoff_max_secs {
+            self.node.lookup.backoff_max_secs = v;
+        }
+        if let Some(v) = compat.forward_min_interval_secs {
+            self.node.lookup.forward_min_interval_secs = v;
+        }
+        if let Some(v) = compat.nostr {
+            self.node.rendezvous.nostr = v;
+        }
+        if let Some(v) = compat.lan {
+            self.node.rendezvous.lan = v;
+        }
     }
 
     /// Get the standard search paths in priority order (lowest to highest).
@@ -615,7 +664,7 @@ impl Config {
 
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let nostr = &self.node.discovery.nostr;
+        let nostr = &self.node.rendezvous.nostr;
 
         let any_transport_advertises_on_nostr = self
             .transports
@@ -635,13 +684,13 @@ impl Config {
 
         if any_transport_advertises_on_nostr && !nostr.enabled {
             return Err(ConfigError::Validation(
-                "at least one transport has `advertise_on_nostr = true`, but `node.discovery.nostr.enabled` is false".to_string(),
+                "at least one transport has `advertise_on_nostr = true`, but `node.rendezvous.nostr.enabled` is false".to_string(),
             ));
         }
 
         if self.peers.iter().any(|peer| peer.via_nostr) && !nostr.enabled {
             return Err(ConfigError::Validation(
-                "at least one peer has `via_nostr = true`, but `node.discovery.nostr.enabled` is false".to_string(),
+                "at least one peer has `via_nostr = true`, but `node.rendezvous.nostr.enabled` is false".to_string(),
             ));
         }
 
@@ -663,12 +712,12 @@ impl Config {
         if nostr.enabled && has_nat_udp_advert {
             if nostr.dm_relays.is_empty() {
                 return Err(ConfigError::Validation(
-                    "NAT UDP advert publishing requires `node.discovery.nostr.dm_relays` to be non-empty".to_string(),
+                    "NAT UDP advert publishing requires `node.rendezvous.nostr.dm_relays` to be non-empty".to_string(),
                 ));
             }
             if nostr.stun_servers.is_empty() {
                 return Err(ConfigError::Validation(
-                    "NAT UDP advert publishing requires `node.discovery.nostr.stun_servers` to be non-empty".to_string(),
+                    "NAT UDP advert publishing requires `node.rendezvous.nostr.stun_servers` to be non-empty".to_string(),
                 ));
             }
         }
@@ -1276,7 +1325,9 @@ peers:
     }
 
     #[test]
-    fn test_parse_nostr_discovery_config() {
+    fn test_parse_legacy_discovery_nostr_config_compat() {
+        // COMPAT (drop at the v2 cutover): a deprecated `node.discovery.nostr`
+        // block must fold into `node.rendezvous.nostr` via normalize.
         let yaml = r#"
 node:
   discovery:
@@ -1300,26 +1351,27 @@ peers:
       - transport: udp
         addr: "nat"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.node.discovery.nostr.enabled);
-        assert!(!config.node.discovery.nostr.advertise);
-        assert_eq!(config.node.discovery.nostr.app, "fips.nat.test.v1");
-        assert_eq!(config.node.discovery.nostr.signal_ttl_secs, 45);
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.normalize_deprecated_keys();
+        assert!(config.node.rendezvous.nostr.enabled);
+        assert!(!config.node.rendezvous.nostr.advertise);
+        assert_eq!(config.node.rendezvous.nostr.app, "fips.nat.test.v1");
+        assert_eq!(config.node.rendezvous.nostr.signal_ttl_secs, 45);
         assert_eq!(
-            config.node.discovery.nostr.policy,
+            config.node.rendezvous.nostr.policy,
             NostrDiscoveryPolicy::ConfiguredOnly
         );
-        assert_eq!(config.node.discovery.nostr.open_discovery_max_pending, 12);
+        assert_eq!(config.node.rendezvous.nostr.open_discovery_max_pending, 12);
         assert_eq!(
-            config.node.discovery.nostr.advert_relays,
+            config.node.rendezvous.nostr.advert_relays,
             vec!["wss://relay-a.example".to_string()]
         );
         assert_eq!(
-            config.node.discovery.nostr.dm_relays,
+            config.node.rendezvous.nostr.dm_relays,
             vec!["wss://relay-b.example".to_string()]
         );
         assert_eq!(
-            config.node.discovery.nostr.stun_servers,
+            config.node.rendezvous.nostr.stun_servers,
             vec!["stun:stun.example.org:3478".to_string()]
         );
         assert_eq!(
@@ -1330,13 +1382,62 @@ peers:
     }
 
     #[test]
+    fn test_parse_lookup_and_rendezvous_new_keys() {
+        // The post-split keys parse directly, with no deprecated block and no
+        // normalize warning.
+        let yaml = r#"
+node:
+  lookup:
+    ttl: 7
+    attempt_timeouts_secs: [3, 6]
+    forward_min_interval_secs: 9
+  rendezvous:
+    nostr:
+      enabled: true
+      app: "fips.new.keys.v1"
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.normalize_deprecated_keys();
+        assert_eq!(config.node.lookup.ttl, 7);
+        assert_eq!(config.node.lookup.attempt_timeouts_secs, vec![3, 6]);
+        assert_eq!(config.node.lookup.forward_min_interval_secs, 9);
+        // Unset scalar keeps its default.
+        assert_eq!(config.node.lookup.recent_expiry_secs, 10);
+        assert!(config.node.rendezvous.nostr.enabled);
+        assert_eq!(config.node.rendezvous.nostr.app, "fips.new.keys.v1");
+        assert!(config.node.discovery.is_none());
+    }
+
+    #[test]
+    fn test_legacy_discovery_lookup_scalars_compat() {
+        // COMPAT (drop at the v2 cutover): legacy `node.discovery` mesh-lookup
+        // scalars must fold into `node.lookup`; unset keys keep their defaults.
+        let yaml = r#"
+node:
+  discovery:
+    ttl: 5
+    backoff_base_secs: 4
+    backoff_max_secs: 30
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.normalize_deprecated_keys();
+        assert_eq!(config.node.lookup.ttl, 5);
+        assert_eq!(config.node.lookup.backoff_base_secs, 4);
+        assert_eq!(config.node.lookup.backoff_max_secs, 30);
+        // Unset legacy scalar leaves the new-table default intact.
+        assert_eq!(config.node.lookup.attempt_timeouts_secs, vec![1, 2, 4, 8]);
+        // The compat block is consumed by normalize.
+        assert!(config.node.discovery.is_none());
+    }
+
+    #[test]
     fn test_validate_transport_advert_requires_nostr_enabled() {
         let mut config = Config::default();
         config.transports.udp = TransportInstances::Single(UdpConfig {
             advertise_on_nostr: Some(true),
             ..Default::default()
         });
-        config.node.discovery.nostr.enabled = false;
+        config.node.rendezvous.nostr.enabled = false;
 
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("advertise_on_nostr"));
@@ -1353,7 +1454,7 @@ peers:
             }],
             ..Default::default()
         };
-        config.node.discovery.nostr.enabled = false;
+        config.node.rendezvous.nostr.enabled = false;
 
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("via_nostr"));
@@ -1375,7 +1476,7 @@ peers:
 
         // Empty addresses + via_nostr=true + nostr.enabled=true → ok.
         config.peers[0].via_nostr = true;
-        config.node.discovery.nostr.enabled = true;
+        config.node.rendezvous.nostr.enabled = true;
         config
             .validate()
             .expect("via_nostr should allow empty addresses");
@@ -1384,8 +1485,8 @@ peers:
     #[test]
     fn test_validate_nat_udp_advert_requires_relays_and_stun() {
         let mut config = Config::default();
-        config.node.discovery.nostr.enabled = true;
-        config.node.discovery.nostr.dm_relays.clear();
+        config.node.rendezvous.nostr.enabled = true;
+        config.node.rendezvous.nostr.dm_relays.clear();
         config.transports.udp = TransportInstances::Single(UdpConfig {
             advertise_on_nostr: Some(true),
             public: Some(false),
@@ -1395,8 +1496,8 @@ peers:
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("dm_relays"));
 
-        config.node.discovery.nostr.dm_relays = vec!["wss://relay.example".to_string()];
-        config.node.discovery.nostr.stun_servers.clear();
+        config.node.rendezvous.nostr.dm_relays = vec!["wss://relay.example".to_string()];
+        config.node.rendezvous.nostr.stun_servers.clear();
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("stun_servers"));
     }

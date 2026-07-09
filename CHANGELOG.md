@@ -129,6 +129,27 @@ with v0.4.x or earlier peers.
   dialing, e.g. configured `auto_connect` peers — is handled by that
   late check, since those peers return earlier via the cross-connection
   paths and are not subject to the cap.
+- The mesh-lookup control-metrics family is now emitted under the key
+  `lookup` in `fipsctl stats metrics` and `show routing`. The former key
+  `discovery` is still emitted as a deprecated alias carrying identical
+  counters; update dashboards and alerts to read `lookup`.
+- The overloaded `node.discovery.*` config table was split into
+  `node.lookup.*` (mesh-lookup scalars: `ttl`, `attempt_timeouts_secs`,
+  `recent_expiry_secs`, `backoff_base_secs`, `backoff_max_secs`,
+  `forward_min_interval_secs`) and `node.rendezvous.*` (peer rendezvous:
+  `nostr.*`, `lan.*`). A deployed `node.discovery:` block still loads and is
+  folded into the new tables with a one-time deprecation warning; migrate your
+  `fips.yaml` to the new keys.
+
+### Deprecated
+
+- The `discovery` metric-family key (control-socket JSON). It is dual-emitted
+  alongside the new `lookup` key during a migration window and will be removed.
+  Migrate dashboards/alerts from `discovery.*` to `lookup.*`.
+- The `node.discovery.*` config table. Its keys were split into `node.lookup.*`
+  (mesh-lookup) and `node.rendezvous.*` (peer rendezvous). A legacy
+  `node.discovery:` block still applies for now with a deprecation warning and
+  will be removed; migrate to `node.lookup.*` / `node.rendezvous.*`.
 
 ### Fixed
 

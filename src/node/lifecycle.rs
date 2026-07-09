@@ -930,19 +930,19 @@ impl Node {
     }
 
     /// Resolve the LAN-only discovery scope. Applications with explicit
-    /// connectivity config can set `node.discovery.lan.scope` without
+    /// connectivity config can set `node.rendezvous.lan.scope` without
     /// changing the public Nostr discovery `app` tag. The older fallback
     /// extracts a scope from the Nostr app tag used by default scoped
     /// discovery.
     pub(super) fn lan_discovery_scope(&self) -> Option<String> {
-        if let Some(scope) = self.config().node.discovery.lan.scope.as_deref() {
+        if let Some(scope) = self.config().node.rendezvous.lan.scope.as_deref() {
             let scope = scope.trim();
             if !scope.is_empty() {
                 return Some(scope.to_string());
             }
         }
 
-        let app = self.config().node.discovery.nostr.app.trim();
+        let app = self.config().node.rendezvous.nostr.app.trim();
         if app.is_empty() {
             return None;
         }
@@ -1197,9 +1197,12 @@ impl Node {
             }
         }
 
-        if self.config().node.discovery.nostr.enabled {
-            match NostrDiscovery::start(self.identity(), self.config().node.discovery.nostr.clone())
-                .await
+        if self.config().node.rendezvous.nostr.enabled {
+            match NostrDiscovery::start(
+                self.identity(),
+                self.config().node.rendezvous.nostr.clone(),
+            )
+            .await
             {
                 Ok(runtime) => {
                     if let Err(err) = self.refresh_overlay_advert(&runtime).await {
@@ -1218,7 +1221,7 @@ impl Node {
         // mDNS / DNS-SD LAN discovery. Independent of Nostr — runs even
         // when Nostr is disabled, since it gives us sub-second pairing
         // on the same link without any relay or NAT-traversal roundtrip.
-        if self.config().node.discovery.lan.enabled {
+        if self.config().node.rendezvous.lan.enabled {
             // Advertise the port of a non-bootstrap operational UDP transport.
             // Bootstrap transports must be excluded (they are not the node's
             // listening data-plane socket), and a stable selector (lowest
@@ -1242,7 +1245,7 @@ impl Node {
                 self.identity(),
                 scope,
                 advertised_udp_port,
-                self.config().node.discovery.lan.clone(),
+                self.config().node.rendezvous.lan.clone(),
             )
             .await
             {
@@ -1682,9 +1685,9 @@ impl Node {
         peer_config: &PeerConfig,
         existing: &[PeerAddress],
     ) -> Vec<PeerAddress> {
-        if !self.config().node.discovery.nostr.enabled
+        if !self.config().node.rendezvous.nostr.enabled
             || !peer_config.via_nostr
-            || self.config().node.discovery.nostr.policy
+            || self.config().node.rendezvous.nostr.policy
                 == crate::config::NostrDiscoveryPolicy::Disabled
         {
             return Vec::new();
@@ -1908,8 +1911,8 @@ impl Node {
         max_age_secs: Option<u64>,
         caller: &'static str,
     ) {
-        if !self.config().node.discovery.nostr.enabled
-            || self.config().node.discovery.nostr.policy
+        if !self.config().node.rendezvous.nostr.enabled
+            || self.config().node.rendezvous.nostr.policy
                 != crate::config::NostrDiscoveryPolicy::Open
         {
             return;
@@ -2099,7 +2102,7 @@ impl Node {
     /// configured statically or established a link to.
     ///
     /// Gated identically to [`run_open_discovery_sweep`]: requires
-    /// `node.discovery.nostr.enabled` and `policy == open`.
+    /// `node.rendezvous.nostr.enabled` and `policy == open`.
     async fn maybe_run_startup_open_discovery_sweep(
         &mut self,
         bootstrap: &std::sync::Arc<NostrDiscovery>,
@@ -2107,8 +2110,8 @@ impl Node {
         if self.startup_open_discovery_sweep_done {
             return;
         }
-        if !self.config().node.discovery.nostr.enabled
-            || self.config().node.discovery.nostr.policy
+        if !self.config().node.rendezvous.nostr.enabled
+            || self.config().node.rendezvous.nostr.policy
                 != crate::config::NostrDiscoveryPolicy::Open
         {
             // Mark done so we don't keep re-checking on every tick.
@@ -2122,7 +2125,7 @@ impl Node {
         let delay_ms = self
             .config()
             .node
-            .discovery
+            .rendezvous
             .nostr
             .startup_sweep_delay_secs
             .saturating_mul(1000);
@@ -2133,7 +2136,7 @@ impl Node {
         let max_age_secs = self
             .config()
             .node
-            .discovery
+            .rendezvous
             .nostr
             .startup_sweep_max_age_secs;
         self.run_open_discovery_sweep(bootstrap, Some(max_age_secs), "startup")
@@ -2231,7 +2234,7 @@ impl Node {
         let cap_remaining = self
             .config()
             .node
-            .discovery
+            .rendezvous
             .nostr
             .open_discovery_max_pending
             .saturating_sub(current_open_discovery_pending);
@@ -2243,7 +2246,7 @@ impl Node {
         now_ms.saturating_add(
             self.config()
                 .node
-                .discovery
+                .rendezvous
                 .nostr
                 .advert_ttl_secs
                 .saturating_mul(1000)
@@ -2255,7 +2258,7 @@ impl Node {
         &self,
         bootstrap: &std::sync::Arc<NostrDiscovery>,
     ) -> Option<OverlayAdvert> {
-        if !self.config().node.discovery.nostr.enabled {
+        if !self.config().node.rendezvous.nostr.enabled {
             return None;
         }
 
@@ -2313,7 +2316,7 @@ impl Node {
                                             STUN observation failed; advertising no UDP \
                                             endpoint. Either set transports.udp.external_addr, \
                                             bind to a specific public IP, or ensure \
-                                            node.discovery.nostr.stun_servers is reachable"
+                                            node.rendezvous.nostr.stun_servers is reachable"
                                         );
                                     }
                                 }
@@ -2396,9 +2399,9 @@ impl Node {
             version: ADVERT_VERSION,
             endpoints,
             signal_relays: has_udp_nat
-                .then(|| self.config().node.discovery.nostr.dm_relays.clone()),
+                .then(|| self.config().node.rendezvous.nostr.dm_relays.clone()),
             stun_servers: has_udp_nat
-                .then(|| self.config().node.discovery.nostr.stun_servers.clone()),
+                .then(|| self.config().node.rendezvous.nostr.stun_servers.clone()),
         })
     }
 

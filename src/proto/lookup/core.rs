@@ -1,7 +1,7 @@
 //! Sans-IO mesh lookup decision core.
 //!
 //! Pure, runtime-agnostic decision logic for the mesh lookup protocol. The
-//! async I/O adapter in `node::handlers::discovery` decodes wire bytes,
+//! async I/O adapter in `node::handlers::lookup` decodes wire bytes,
 //! calls into this core, and drives the returned actions (the actual
 //! encrypted sends). No I/O, no clock, no metrics, no logging here.
 

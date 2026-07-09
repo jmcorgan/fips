@@ -31,7 +31,7 @@ fn test_node_with_identity() {
 fn test_node_with_identity_validates_config() {
     let identity = Identity::generate();
     let mut config = Config::new();
-    config.node.discovery.nostr.enabled = false;
+    config.node.rendezvous.nostr.enabled = false;
     config.peers = vec![crate::config::PeerConfig {
         npub: "npub1peer".to_string(),
         via_nostr: true,
@@ -169,11 +169,11 @@ async fn test_node_state_transitions() {
 async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
     let mut config = Config::new();
     config.node.control.enabled = false;
-    config.node.discovery.nostr.enabled = true;
-    config.node.discovery.nostr.advertise = true;
-    config.node.discovery.nostr.policy = crate::config::NostrDiscoveryPolicy::Open;
-    config.node.discovery.nostr.advert_relays = vec!["wss://127.0.0.1:9".to_string()];
-    config.node.discovery.nostr.dm_relays = vec!["wss://127.0.0.1:9".to_string()];
+    config.node.rendezvous.nostr.enabled = true;
+    config.node.rendezvous.nostr.advertise = true;
+    config.node.rendezvous.nostr.policy = crate::config::NostrDiscoveryPolicy::Open;
+    config.node.rendezvous.nostr.advert_relays = vec!["wss://127.0.0.1:9".to_string()];
+    config.node.rendezvous.nostr.dm_relays = vec!["wss://127.0.0.1:9".to_string()];
     config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
         advertise_on_nostr: Some(true),

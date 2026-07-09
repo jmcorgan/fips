@@ -9,7 +9,7 @@ pub const ADVERT_KIND: u16 = 37195;
 /// (and vice versa) — the `next`-branch FMP wire format is incompatible
 /// with `master`'s, so cross-branch discovery only ever produces failed
 /// handshakes. Operators who genuinely want cross-branch reach can
-/// override per-peer via `node.discovery.nostr.app` in config.
+/// override per-peer via `node.rendezvous.nostr.app` in config.
 pub const ADVERT_IDENTIFIER: &str = "fips-overlay-v1-next";
 pub const ADVERT_VERSION: u32 = 1;
 pub const SIGNAL_KIND: u16 = 21059;

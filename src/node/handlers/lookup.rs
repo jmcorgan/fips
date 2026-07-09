@@ -1,6 +1,6 @@
-//! LookupRequest/LookupResponse discovery protocol handlers.
+//! LookupRequest/LookupResponse mesh lookup protocol handlers.
 //!
-//! Handles coordinate discovery via bloom-filter-guided tree routing.
+//! Handles coordinate lookup via bloom-filter-guided tree routing.
 //! Requests are forwarded only to tree peers (parent + children) whose
 //! bloom filter contains the target. TTL and request_id dedup provide
 //! safety bounds.
@@ -19,7 +19,7 @@ use tracing::{debug, info, trace, warn};
 /// private `peers` map and call the crate-private tree/bloom predicates.
 ///
 /// Holding `&Node` whole is fine for the forward path because it does not
-/// also need `&mut self.discovery` concurrently. A later commit whose core
+/// also need `&mut self.lookup` concurrently. A later commit whose core
 /// step needs `&mut discovery` while reading routing state should narrow this
 /// to borrow only `peers` + `tree_state` instead of the whole node.
 struct NodeRoutingView<'a> {
@@ -66,13 +66,13 @@ impl Node {
     /// 5. If we're the target, generate and send response
     /// 6. If TTL > 0, forward to tree peers whose bloom filter matches
     pub(in crate::node) async fn handle_lookup_request(&mut self, from: &NodeAddr, payload: &[u8]) {
-        self.metrics().discovery.req_received.inc();
+        self.metrics().lookup.req_received.inc();
 
         let request = match LookupRequest::decode(payload) {
             Ok(req) => req,
             Err(e) => {
                 self.metrics()
-                    .discovery
+                    .lookup
                     .record_reject(DiscoveryReject::ReqDecodeError);
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupRequest");
                 return;
@@ -80,11 +80,11 @@ impl Node {
         };
 
         let now_ms = Self::now_ms();
-        let recent_expiry_ms = self.config().node.discovery.recent_expiry_secs * 1000;
+        let recent_expiry_ms = self.config().node.lookup.recent_expiry_secs * 1000;
         let my_addr = *self.node_addr();
         use crate::proto::lookup::RequestOutcome;
         match crate::proto::lookup::classify_request(
-            &mut self.discovery,
+            &mut self.lookup,
             &request,
             from,
             &my_addr,
@@ -94,7 +94,7 @@ impl Node {
         ) {
             RequestOutcome::Duplicate => {
                 self.metrics()
-                    .discovery
+                    .lookup
                     .record_reject(DiscoveryReject::ReqDuplicate);
                 debug!(
                     request_id = request.request_id,
@@ -104,7 +104,7 @@ impl Node {
             }
             RequestOutcome::DedupCacheFull { len } => {
                 self.metrics()
-                    .discovery
+                    .lookup
                     .record_reject(DiscoveryReject::ReqDedupCacheFull);
                 debug!(
                     request_id = request.request_id,
@@ -115,7 +115,7 @@ impl Node {
                 );
             }
             RequestOutcome::RespondAsTarget => {
-                self.metrics().discovery.req_target_is_us.inc();
+                self.metrics().lookup.req_target_is_us.inc();
                 debug!(
                     request_id = request.request_id,
                     origin = %self.peer_display_name(&request.origin),
@@ -124,11 +124,11 @@ impl Node {
                 self.send_lookup_response(&request).await;
             }
             RequestOutcome::Forward => {
-                self.metrics().discovery.req_forwarded.inc();
+                self.metrics().lookup.req_forwarded.inc();
                 self.forward_lookup_request(request).await;
             }
             RequestOutcome::ForwardRateLimited => {
-                self.metrics().discovery.req_forward_rate_limited.inc();
+                self.metrics().lookup.req_forward_rate_limited.inc();
                 debug!(
                     request_id = request.request_id,
                     target = %self.peer_display_name(&request.target),
@@ -137,7 +137,7 @@ impl Node {
             }
             RequestOutcome::TtlExhausted => {
                 self.metrics()
-                    .discovery
+                    .lookup
                     .record_reject(DiscoveryReject::ReqTtlExhausted);
                 debug!(
                     request_id = request.request_id,
@@ -160,13 +160,13 @@ impl Node {
         from: &NodeAddr,
         payload: &[u8],
     ) {
-        self.metrics().discovery.resp_received.inc();
+        self.metrics().lookup.resp_received.inc();
 
         let mut response = match LookupResponse::decode(payload) {
             Ok(resp) => resp,
             Err(e) => {
                 self.metrics()
-                    .discovery
+                    .lookup
                     .record_reject(DiscoveryReject::RespDecodeError);
                 debug!(from = %self.peer_display_name(from), error = %e, "Malformed LookupResponse");
                 return;
@@ -176,7 +176,7 @@ impl Node {
         let now_ms = Self::now_ms();
 
         // Check if we forwarded this request (transit node) or originated it
-        match crate::proto::lookup::classify_response(&mut self.discovery, response.request_id) {
+        match crate::proto::lookup::classify_response(&mut self.lookup, response.request_id) {
             crate::proto::lookup::ResponseRoute::AlreadyForwarded => {
                 // Already forwarded a response for this request — drop to
                 // prevent response routing loops.
@@ -188,7 +188,7 @@ impl Node {
             }
             crate::proto::lookup::ResponseRoute::Transit { from_peer } => {
                 // Transit node: reverse-path forward
-                self.metrics().discovery.resp_forwarded.inc();
+                self.metrics().lookup.resp_forwarded.inc();
 
                 // Apply path_mtu min() from the outgoing link's transport MTU
                 self.apply_outgoing_link_mtu_to_response(&mut response, &from_peer);
@@ -222,7 +222,7 @@ impl Node {
                     Some((_addr, pubkey)) => pubkey,
                     None => {
                         self.metrics()
-                            .discovery
+                            .lookup
                             .record_reject(DiscoveryReject::RespIdentityMiss);
                         warn!(
                             request_id = response.request_id,
@@ -243,7 +243,7 @@ impl Node {
                 );
                 if !peer_id.verify(&proof_data, &response.proof) {
                     self.metrics()
-                        .discovery
+                        .lookup
                         .record_reject(DiscoveryReject::RespProofFailed);
                     warn!(
                         request_id = response.request_id,
@@ -253,7 +253,7 @@ impl Node {
                     return;
                 }
 
-                self.metrics().discovery.resp_accepted.inc();
+                self.metrics().lookup.resp_accepted.inc();
 
                 info!(
                     request_id = response.request_id,
@@ -267,7 +267,7 @@ impl Node {
                 // state (backoff + pending lookup) and returns the
                 // cross-subsystem effects for us to drive.
                 let actions = crate::proto::lookup::on_response_accepted(
-                    &mut self.discovery,
+                    &mut self.lookup,
                     &target,
                     response.target_coords,
                     now_ms,
@@ -377,7 +377,7 @@ impl Node {
         // greedy tree-route fallback is a &mut coord-cache op kept in the shell.
         use crate::proto::lookup::ResponseRouteDecision;
         let next_hop_addr = match crate::proto::lookup::plan_response_route(
-            &self.discovery,
+            &self.lookup,
             request.request_id,
         ) {
             ResponseRouteDecision::ReversePath(peer) => peer,
@@ -389,7 +389,7 @@ impl Node {
                         "Cannot route LookupResponse: no reverse path or tree route to origin"
                     );
                     self.metrics()
-                        .discovery
+                        .lookup
                         .record_reject(DiscoveryReject::RespNoRoute);
                     return;
                 }
@@ -445,7 +445,7 @@ impl Node {
             crate::proto::lookup::ForwardOutcome::TtlExhausted => {}
             crate::proto::lookup::ForwardOutcome::LeafNoForward => {}
             crate::proto::lookup::ForwardOutcome::NoPeers => {
-                self.metrics().discovery.req_no_tree_peer.inc();
+                self.metrics().lookup.req_no_tree_peer.inc();
                 trace!(
                     request_id = request.request_id,
                     "No eligible peers to forward LookupRequest"
@@ -457,7 +457,7 @@ impl Node {
             } => {
                 let peer_count = actions.len();
                 if used_fallback {
-                    self.metrics().discovery.req_fallback_forwarded.inc();
+                    self.metrics().lookup.req_fallback_forwarded.inc();
                     debug!(
                         request_id = request.request_id,
                         target = %self.peer_display_name(&request.target),
@@ -496,7 +496,7 @@ impl Node {
     /// The originator does NOT record the request_id in recent_requests,
     /// so when the response arrives, it's recognized as "our request".
     pub(in crate::node) async fn initiate_lookup(&mut self, target: &NodeAddr, ttl: u8) -> usize {
-        self.metrics().discovery.req_initiated.inc();
+        self.metrics().lookup.req_initiated.inc();
 
         let origin = *self.node_addr();
         let min_mtu = self.config().tun.mtu();
@@ -547,27 +547,27 @@ impl Node {
     /// filter pre-check. If all pass, sends the first attempt's LookupRequest.
     /// Subsequent attempts (with fresh request_ids) are scheduled by
     /// [`Self::check_pending_lookups`] when each attempt's per-attempt timeout
-    /// expires, using the sequence in `node.discovery.attempt_timeouts_secs`.
+    /// expires, using the sequence in `node.lookup.attempt_timeouts_secs`.
     pub(in crate::node) async fn maybe_initiate_lookup(&mut self, dest: &NodeAddr) {
         let now_ms = Self::now_ms();
 
         // Bloom filter pre-check (view read) BEFORE the core call: if no peer's
         // filter contains the target, it's not in the mesh. Reading `self.peers`
-        // here keeps the `&mut self.discovery` borrow in `initiate_gate` from
+        // here keeps the `&mut self.lookup` borrow in `initiate_gate` from
         // overlapping the immutable peer-table read.
         let reachable = self.peers.values().any(|peer| peer.may_reach(dest));
 
         use crate::proto::lookup::InitiateDecision;
-        match crate::proto::lookup::initiate_gate(&mut self.discovery, dest, now_ms, reachable) {
+        match crate::proto::lookup::initiate_gate(&mut self.lookup, dest, now_ms, reachable) {
             InitiateDecision::Deduplicated => {
-                self.metrics().discovery.req_deduplicated.inc();
+                self.metrics().lookup.req_deduplicated.inc();
                 debug!(
                     target_node = %self.peer_display_name(dest),
                     "Discovery lookup deduplicated, already pending"
                 );
             }
             InitiateDecision::Suppressed { failures } => {
-                self.metrics().discovery.req_backoff_suppressed.inc();
+                self.metrics().lookup.req_backoff_suppressed.inc();
                 debug!(
                     target_node = %self.peer_display_name(dest),
                     failures = failures,
@@ -575,19 +575,19 @@ impl Node {
                 );
             }
             InitiateDecision::BloomMiss => {
-                self.metrics().discovery.req_bloom_miss.inc();
+                self.metrics().lookup.req_bloom_miss.inc();
                 debug!(
                     target_node = %self.peer_display_name(dest),
                     "Discovery skipped, target not in any peer bloom filter"
                 );
             }
             InitiateDecision::Proceed => {
-                let ttl = self.config().node.discovery.ttl;
+                let ttl = self.config().node.lookup.ttl;
                 let sent = self.initiate_lookup(dest, ttl).await;
 
                 // If no tree peers had the target, fail immediately
                 if sent == 0 {
-                    crate::proto::lookup::initiate_failed(&mut self.discovery, dest, now_ms);
+                    crate::proto::lookup::initiate_failed(&mut self.lookup, dest, now_ms);
                     debug!(
                         target_node = %self.peer_display_name(dest),
                         "Discovery failed, no tree peers with bloom match"
@@ -600,7 +600,7 @@ impl Node {
     /// Check pending lookups for next-attempt or final timeout.
     ///
     /// Called periodically from the tick handler. The lookup state machine
-    /// runs through `node.discovery.attempt_timeouts_secs` (default
+    /// runs through `node.lookup.attempt_timeouts_secs` (default
     /// `[1, 2, 4, 8]`): each entry is the deadline for one attempt. When the
     /// current attempt's deadline elapses:
     /// - If more entries remain: send the next attempt with a fresh
@@ -608,12 +608,12 @@ impl Node {
     /// - Otherwise: declare the destination unreachable, drop queued packets,
     ///   and emit ICMPv6 destination-unreachable for each.
     pub(in crate::node) async fn check_pending_lookups(&mut self, now_ms: u64) {
-        let attempt_timeouts = self.config().node.discovery.attempt_timeouts_secs.clone();
+        let attempt_timeouts = self.config().node.lookup.attempt_timeouts_secs.clone();
         let outcome =
-            crate::proto::lookup::poll_pending(&mut self.discovery, now_ms, &attempt_timeouts);
+            crate::proto::lookup::poll_pending(&mut self.lookup, now_ms, &attempt_timeouts);
 
         for (target, attempt) in outcome.retries {
-            let ttl = self.config().node.discovery.ttl;
+            let ttl = self.config().node.lookup.ttl;
             let sent = self.initiate_lookup(&target, ttl).await;
             if sent > 0 {
                 debug!(
@@ -625,7 +625,7 @@ impl Node {
         }
 
         for (addr, failures) in outcome.timeouts {
-            self.metrics().discovery.resp_timed_out.inc();
+            self.metrics().lookup.resp_timed_out.inc();
             let queued = self.pending_tun_packets.remove(&addr);
             let pkt_count = queued.as_ref().map_or(0, |p| p.len());
             info!(
@@ -643,8 +643,8 @@ impl Node {
     }
 
     /// Reset discovery backoff on topology changes.
-    pub(in crate::node) fn reset_discovery_backoff(&mut self) {
-        let cleared = self.discovery.reset_backoff();
+    pub(in crate::node) fn reset_lookup_backoff(&mut self) {
+        let cleared = self.lookup.reset_backoff();
         if cleared > 0 {
             debug!(
                 entries = cleared,

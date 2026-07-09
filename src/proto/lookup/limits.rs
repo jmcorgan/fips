@@ -4,7 +4,7 @@
 //!
 //! - **`LookupBackoff`** (originator-side, optional): Exponential
 //!   suppression of fresh lookups after the per-attempt sequence in
-//!   `node.discovery.attempt_timeouts_secs` has been exhausted.
+//!   `node.lookup.attempt_timeouts_secs` has been exhausted.
 //!   **Disabled by default** (base/cap = 0); the per-attempt sequence
 //!   is the only retry pacing in the standard configuration. Reset on
 //!   topology changes (parent change, new peer, first RTT, reconnection).

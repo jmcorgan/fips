@@ -277,7 +277,7 @@ struct PendingConnect {
 ///
 /// The `addr_to_link` map enables dispatching incoming packets to the right
 /// connection before authentication completes.
-// Discovery lookup constants moved to config: node.discovery.attempt_timeouts_secs, node.discovery.ttl
+// Discovery lookup constants moved to config: node.lookup.attempt_timeouts_secs, node.lookup.ttl
 pub struct Node {
     // === Immutable Context ===
     /// Shared immutable context bundle: the single source of truth for the
@@ -353,7 +353,7 @@ pub struct Node {
     // === Discovery ===
     /// Discovery-subsystem state: recent-request dedup cache, in-flight
     /// lookups, originator-side backoff, and transit-side forward limiter.
-    discovery: Lookup,
+    lookup: Lookup,
 
     // === Counters ===
     /// Next link ID to allocate.
@@ -615,9 +615,9 @@ impl Node {
         let max_peers = config.node.limits.max_peers;
         let max_links = config.node.limits.max_links;
         let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
-        let backoff_base_secs = config.node.discovery.backoff_base_secs;
-        let backoff_max_secs = config.node.discovery.backoff_max_secs;
-        let forward_min_interval_secs = config.node.discovery.forward_min_interval_secs;
+        let backoff_base_secs = config.node.lookup.backoff_base_secs;
+        let backoff_max_secs = config.node.lookup.backoff_max_secs;
+        let forward_min_interval_secs = config.node.lookup.forward_min_interval_secs;
 
         let base_host_map = HostMap::from_peer_configs(config.peers());
         let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
@@ -701,7 +701,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
-            discovery: Lookup::new(
+            lookup: Lookup::new(
                 LookupBackoff::with_params(backoff_base_secs, backoff_max_secs),
                 LookupForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
             ),
@@ -868,7 +868,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
-            discovery: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
+            lookup: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             nostr_discovery: None,
@@ -2462,7 +2462,7 @@ impl Node {
     /// Disable the discovery forward rate limiter (for tests).
     #[cfg(test)]
     pub(crate) fn disable_discovery_forward_rate_limit(&mut self) {
-        self.discovery.forward_limiter.set_interval_ms(0);
+        self.lookup.forward_limiter.set_interval_ms(0);
     }
 
     #[cfg(test)]
@@ -2574,19 +2574,19 @@ impl Node {
 
     /// Number of pending discovery lookups.
     pub fn pending_lookup_count(&self) -> usize {
-        self.discovery.pending_lookups.len()
+        self.lookup.pending_lookups.len()
     }
 
     /// Iterate over pending discovery lookups for diagnostics.
     pub fn pending_lookups_iter(
         &self,
     ) -> impl Iterator<Item = (&NodeAddr, &crate::proto::lookup::PendingLookup)> {
-        self.discovery.pending_lookups.iter()
+        self.lookup.pending_lookups.iter()
     }
 
     /// Number of recent discovery requests tracked.
     pub fn recent_request_count(&self) -> usize {
-        self.discovery.recent_requests.len()
+        self.lookup.recent_requests.len()
     }
 
     /// Count of destinations with queued TUN packets awaiting session setup.
