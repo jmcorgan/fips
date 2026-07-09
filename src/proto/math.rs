@@ -13,8 +13,9 @@
 /// This is a strict improvement over `f64::powi`, which is not portably
 /// bit-stable: Linux and macOS lower it to compiler-rt's `__powidf2` (whose
 /// multiply-then-square order this mirrors, so we match them exactly), but
-/// Windows/MSVC rounds ~1 ULP differently. The `powi_deterministic_and_close`
-/// test pins our output to golden bits and bounds the drift from `std` at 2 ULP.
+/// Windows/MSVC rounds differently (and by more as the exponent grows). The
+/// `powi_deterministic_and_close` test pins our output to golden bits and bounds
+/// the relative drift from `std`.
 pub(crate) fn powi(base: f64, exp: u32) -> f64 {
     let mut result = 1.0_f64;
     let mut b = base;
@@ -53,6 +54,7 @@ mod tests {
             ((0.1, 3), 4562254508917369341),
             ((0.5493, 4), 4591224636877479401),
             ((0.5508, 4), 4591296588123960286),
+            ((0.5469, 14), 4552032634403898040),
         ];
         for ((base, exp), bits) in golden {
             assert_eq!(
@@ -62,23 +64,34 @@ mod tests {
             );
         }
 
-        // Correctness: stay within a couple ULP of `std::powi` across every base
-        // and exponent the protocol math reaches — a broad sanity sweep backing
-        // the exact golden pins above. `f64::powi` is not portably bit-stable
-        // (Windows/MSVC drifts from Linux/macOS by ~1 ULP), so we bound the drift
-        // rather than assert exact equality; 2 ULP leaves margin over the
-        // observed 1-ULP delta while still catching a grossly wrong impl.
+        // Correctness: stay within a loose relative tolerance of `std::powi`
+        // across every base and exponent the protocol math reaches — a broad
+        // sanity sweep backing the exact golden pins above. `f64::powi` is not
+        // portably bit-stable: Windows/MSVC drifts from Linux/macOS, and that
+        // drift grows with the exponent (3 ULP already by exp=14), so an absolute
+        // ULP bound is not portable. Relative error of any sane libm stays around
+        // 1e-15 regardless of exponent, so 1e-11 clears the drift by ~1000x while
+        // still catching a grossly wrong impl (multiply-order subtleties are
+        // caught by the golden pins, not here).
         let bases = [
             0.0, 1.0, 0.5, 0.5469, 0.5493, 0.5508, 0.9999, 1.5, 2.0, 3.7, 0.1, 1e-3,
         ];
         for &base in &bases {
             for exp in 0u32..=64 {
-                let ours = powi(base, exp).to_bits() as i64;
-                let std = base.powi(exp as i32).to_bits() as i64;
-                assert!(
-                    (ours - std).abs() <= 2,
-                    "powi drift >2 ULP at base={base}, exp={exp}: ours={ours}, std={std}"
-                );
+                let ours = powi(base, exp);
+                let std = base.powi(exp as i32);
+                if std == 0.0 {
+                    assert_eq!(
+                        ours, 0.0,
+                        "powi zero-case mismatch at base={base}, exp={exp}"
+                    );
+                } else {
+                    let rel = ((ours - std) / std).abs();
+                    assert!(
+                        rel <= 1e-11,
+                        "powi relative drift at base={base}, exp={exp}: ours={ours:e}, std={std:e}, rel={rel:e}"
+                    );
+                }
             }
         }
     }
