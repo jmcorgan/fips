@@ -2,7 +2,7 @@
 # relevant to NAT-traversal handshake-completion flake evidence
 # collection (ISSUE-2026-0027):
 #
-#   - fips::discovery::nostr            — overlay advert publish/consume
+#   - fips::nostr            — overlay advert publish/consume
 #                                          (where the cross-init race begins)
 #   - fips::transport::udp              — UDP socket bind/send/recv
 #                                          (where the punch packets flow)
@@ -33,7 +33,7 @@
 # is set and the suite is nat-lan.
 
 x-trace-rust-log: &trace-rust-log
-  RUST_LOG: "info,fips::discovery::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::handlers::forwarding=trace"
+  RUST_LOG: "info,fips::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::handlers::forwarding=trace"
 
 services:
   lan-a:
