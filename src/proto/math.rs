@@ -6,13 +6,15 @@
 
 /// Raise `base` to a non-negative integer power via square-and-multiply.
 ///
-/// Bit-identical to `f64::powi` for the exponents the codecs use: it mirrors the
-/// compiler-rt `__powidf2` multiply order (multiply-then-square, skipping the
-/// final square), so — floating-point multiplication being non-associative — it
-/// reproduces `powi` exactly rather than a naive left-to-right product. The
-/// `powi_bit_identical_to_std` test pins this. Keeping it bit-identical matters:
-/// the bloom false-positive-rate feeds a reject comparison and the FMP backoff
-/// feeds a `u64` timer, so any drift could change a decision.
+/// Built from `core`-only IEEE-754 `f64` multiplication, so the result is
+/// **deterministic across every platform** — the property that matters here,
+/// since the bloom false-positive-rate feeds a reject comparison and the FMP
+/// backoff feeds a `u64` timer, and mesh nodes must agree regardless of OS.
+/// This is a strict improvement over `f64::powi`, which is not portably
+/// bit-stable: Linux and macOS lower it to compiler-rt's `__powidf2` (whose
+/// multiply-then-square order this mirrors, so we match them exactly), but
+/// Windows/MSVC rounds ~1 ULP differently. The `powi_deterministic_and_close`
+/// test pins our output to golden bits and bounds the drift from `std` at 2 ULP.
 pub(crate) fn powi(base: f64, exp: u32) -> f64 {
     let mut result = 1.0_f64;
     let mut b = base;
@@ -35,19 +37,47 @@ mod tests {
     use super::powi;
 
     #[test]
-    fn powi_bit_identical_to_std() {
-        // The core square-and-multiply must match f64::powi bit-for-bit across
-        // representative bases and every exponent the protocol math reaches, so
-        // the FPR reject decision and the backoff timer are unchanged.
+    fn powi_deterministic_and_close() {
+        // Determinism: our square-and-multiply is pure IEEE-754 f64 arithmetic,
+        // so these outputs are identical on every platform. Pinning the bits
+        // guards cross-node agreement and locks against future drift. (The bit
+        // patterns were captured from the impl itself; they also match Linux and
+        // macOS `f64::powi` — see the golden vs Windows note below.)
+        let golden = [
+            ((0.5469, 4), 4591110734581567521u64),
+            ((0.5, 2), 4598175219545276416),
+            ((2.0, 10), 4652218415073722368),
+            ((0.9999, 64), 4607124953935219716),
+            ((1.5, 8), 4627907113471967232),
+            ((3.7, 5), 4649310774781981293),
+            ((0.1, 3), 4562254508917369341),
+            ((0.5493, 4), 4591224636877479401),
+            ((0.5508, 4), 4591296588123960286),
+        ];
+        for ((base, exp), bits) in golden {
+            assert_eq!(
+                powi(base, exp).to_bits(),
+                bits,
+                "powi determinism drift at base={base}, exp={exp}"
+            );
+        }
+
+        // Correctness: stay within a couple ULP of `std::powi` across every base
+        // and exponent the protocol math reaches — a broad sanity sweep backing
+        // the exact golden pins above. `f64::powi` is not portably bit-stable
+        // (Windows/MSVC drifts from Linux/macOS by ~1 ULP), so we bound the drift
+        // rather than assert exact equality; 2 ULP leaves margin over the
+        // observed 1-ULP delta while still catching a grossly wrong impl.
         let bases = [
             0.0, 1.0, 0.5, 0.5469, 0.5493, 0.5508, 0.9999, 1.5, 2.0, 3.7, 0.1, 1e-3,
         ];
         for &base in &bases {
             for exp in 0u32..=64 {
-                assert_eq!(
-                    powi(base, exp).to_bits(),
-                    base.powi(exp as i32).to_bits(),
-                    "powi mismatch at base={base}, exp={exp}"
+                let ours = powi(base, exp).to_bits() as i64;
+                let std = base.powi(exp as i32).to_bits() as i64;
+                assert!(
+                    (ours - std).abs() <= 2,
+                    "powi drift >2 ULP at base={base}, exp={exp}: ours={ours}, std={std}"
                 );
             }
         }
