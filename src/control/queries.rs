@@ -1487,7 +1487,9 @@ pub fn show_routing(node: &Node) -> Value {
         "recent_requests": node.recent_request_count(),
         "retries": retries,
         "forwarding": serde_json::to_value(metrics.forwarding.snapshot()).unwrap_or_default(),
-        "discovery": serde_json::to_value(metrics.discovery.snapshot()).unwrap_or_default(),
+        // COMPAT: `discovery` is the deprecated alias for `lookup`; drop at the v2 cutover.
+        "discovery": serde_json::to_value(metrics.lookup.snapshot()).unwrap_or_default(),
+        "lookup": serde_json::to_value(metrics.lookup.snapshot()).unwrap_or_default(),
         "error_signals": serde_json::to_value(metrics.errors.snapshot()).unwrap_or_default(),
         "congestion": serde_json::to_value(metrics.congestion.snapshot()).unwrap_or_default(),
     })
@@ -1543,7 +1545,9 @@ pub(crate) fn show_routing_from_handle(handle: &super::read_handle::ControlReadH
         "recent_requests": view.recent_requests,
         "retries": retries,
         "forwarding": serde_json::to_value(metrics.forwarding.snapshot()).unwrap_or_default(),
-        "discovery": serde_json::to_value(metrics.discovery.snapshot()).unwrap_or_default(),
+        // COMPAT: `discovery` is the deprecated alias for `lookup`; drop at the v2 cutover.
+        "discovery": serde_json::to_value(metrics.lookup.snapshot()).unwrap_or_default(),
+        "lookup": serde_json::to_value(metrics.lookup.snapshot()).unwrap_or_default(),
         "error_signals": serde_json::to_value(metrics.errors.snapshot()).unwrap_or_default(),
         "congestion": serde_json::to_value(metrics.congestion.snapshot()).unwrap_or_default(),
     })
@@ -2328,7 +2332,9 @@ pub(crate) fn show_metrics_from_handle(handle: &super::read_handle::ControlReadH
     let m = handle.metrics();
     json!({
         "forwarding": m.forwarding.snapshot(),
-        "discovery": m.discovery.snapshot(),
+        // COMPAT: `discovery` is the deprecated alias for `lookup`; drop at the v2 cutover.
+        "discovery": m.lookup.snapshot(),
+        "lookup": m.lookup.snapshot(),
         "tree": m.tree.snapshot(),
         "bloom": m.bloom.snapshot(),
         "congestion": m.congestion.snapshot(),
@@ -2794,7 +2800,9 @@ mod tests {
 
         let expected_families = [
             ("forwarding", "received_packets"),
+            // `discovery` is the deprecated dual-emit alias for `lookup`; drop at the v2 cutover.
             ("discovery", "req_received"),
+            ("lookup", "req_received"),
             ("tree", "accepted"),
             ("bloom", "accepted"),
             ("congestion", "ce_forwarded"),

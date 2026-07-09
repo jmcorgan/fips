@@ -10,12 +10,21 @@ node:
     #
     # Or set an explicit key (overrides persistent):
     # nsec: "nsec1..."
-  discovery:
-    # Optional Nostr-mediated overlay endpoint discovery.
+  # Mesh-lookup protocol (node.lookup.*): the overlay coordinate-lookup engine
+  # (mesh address -> coordinates). Defaults shown; uncomment to override.
+  # lookup:
+  #   ttl: 64
+  #   attempt_timeouts_secs: [1, 2, 4, 8]
+  #   recent_expiry_secs: 10
+  #   backoff_base_secs: 0
+  #   backoff_max_secs: 0
+  #   forward_min_interval_secs: 2
+  rendezvous:
+    # Optional Nostr-mediated overlay endpoint rendezvous.
     # nostr:
     #   enabled: true
     #   policy: configured_only  # disabled | configured_only | open
-    #   open_discovery_max_pending: 64 # caps queued open-discovery retries
+    #   open_discovery_max_pending: 64 # caps queued open-rendezvous retries
     #   app: "fips-overlay-v1"
     #   advertise: true
     #   advert_relays:
@@ -121,5 +130,5 @@ peers: []
   #     - transport: udp
   #       addr: "test-us01.fips.network:2121"  # IP or hostname (e.g., "peer.example.com:2121")
   #     - transport: udp
-  #       addr: "nat"  # Use node.discovery.nostr for Nostr/STUN hole punching
+  #       addr: "nat"  # Use node.rendezvous.nostr for Nostr/STUN hole punching
   #   connect_policy: auto_connect

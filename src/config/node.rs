@@ -186,48 +186,42 @@ impl CacheConfig {
     }
 }
 
-/// Discovery protocol (`node.discovery.*`).
+/// Mesh-lookup protocol (`node.lookup.*`): the overlay coordinate-lookup
+/// engine (address → coordinates). The peer-rendezvous keys that used to
+/// share this table (`nostr`/`lan`) now live under [`RendezvousConfig`]
+/// (`node.rendezvous.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiscoveryConfig {
-    /// Hop limit for LookupRequest flood (`node.discovery.ttl`).
-    #[serde(default = "DiscoveryConfig::default_ttl")]
+pub struct LookupConfig {
+    /// Hop limit for LookupRequest flood (`node.lookup.ttl`).
+    #[serde(default = "LookupConfig::default_ttl")]
     pub ttl: u8,
-    /// Per-attempt timeouts in seconds (`node.discovery.attempt_timeouts_secs`).
+    /// Per-attempt timeouts in seconds (`node.lookup.attempt_timeouts_secs`).
     /// Each entry is the time to wait for a response before sending the next
     /// LookupRequest (with a fresh request_id). Sequence length determines the
     /// total number of attempts before declaring the destination unreachable.
     /// Default `[1, 2, 4, 8]` gives 4 attempts and a 15s total budget.
-    #[serde(default = "DiscoveryConfig::default_attempt_timeouts_secs")]
+    #[serde(default = "LookupConfig::default_attempt_timeouts_secs")]
     pub attempt_timeouts_secs: Vec<u64>,
-    /// Dedup cache expiry in seconds (`node.discovery.recent_expiry_secs`).
-    #[serde(default = "DiscoveryConfig::default_recent_expiry_secs")]
+    /// Dedup cache expiry in seconds (`node.lookup.recent_expiry_secs`).
+    #[serde(default = "LookupConfig::default_recent_expiry_secs")]
     pub recent_expiry_secs: u64,
-    /// Base backoff after lookup failure in seconds (`node.discovery.backoff_base_secs`).
+    /// Base backoff after lookup failure in seconds (`node.lookup.backoff_base_secs`).
     /// Doubles per consecutive failure up to `backoff_max_secs`. Defaults to 0
     /// (no post-failure suppression); the per-attempt sequence in
     /// `attempt_timeouts_secs` provides the only retry pacing.
-    #[serde(default = "DiscoveryConfig::default_backoff_base_secs")]
+    #[serde(default = "LookupConfig::default_backoff_base_secs")]
     pub backoff_base_secs: u64,
-    /// Maximum backoff cap in seconds (`node.discovery.backoff_max_secs`).
-    #[serde(default = "DiscoveryConfig::default_backoff_max_secs")]
+    /// Maximum backoff cap in seconds (`node.lookup.backoff_max_secs`).
+    #[serde(default = "LookupConfig::default_backoff_max_secs")]
     pub backoff_max_secs: u64,
     /// Minimum interval between forwarded lookups for the same target in seconds
-    /// (`node.discovery.forward_min_interval_secs`).
+    /// (`node.lookup.forward_min_interval_secs`).
     /// Defense-in-depth against misbehaving nodes.
-    #[serde(default = "DiscoveryConfig::default_forward_min_interval_secs")]
+    #[serde(default = "LookupConfig::default_forward_min_interval_secs")]
     pub forward_min_interval_secs: u64,
-    /// Nostr-mediated overlay endpoint discovery.
-    #[serde(default = "DiscoveryConfig::default_nostr")]
-    pub nostr: NostrDiscoveryConfig,
-    /// mDNS / DNS-SD peer discovery on the local link. Identity surface
-    /// is a strict subset of what `nostr.advertise` already publishes
-    /// publicly, so there's no marginal privacy cost; the latency win
-    /// for same-LAN peers is large (sub-second pairing, no relay).
-    #[serde(default = "DiscoveryConfig::default_lan")]
-    pub lan: crate::discovery::lan::LanDiscoveryConfig,
 }
 
-impl Default for DiscoveryConfig {
+impl Default for LookupConfig {
     fn default() -> Self {
         Self {
             ttl: 64,
@@ -236,13 +230,11 @@ impl Default for DiscoveryConfig {
             backoff_base_secs: 0,
             backoff_max_secs: 0,
             forward_min_interval_secs: 2,
-            nostr: NostrDiscoveryConfig::default(),
-            lan: crate::discovery::lan::LanDiscoveryConfig::default(),
         }
     }
 }
 
-impl DiscoveryConfig {
+impl LookupConfig {
     fn default_ttl() -> u8 {
         64
     }
@@ -261,12 +253,45 @@ impl DiscoveryConfig {
     fn default_forward_min_interval_secs() -> u64 {
         2
     }
-    fn default_nostr() -> NostrDiscoveryConfig {
-        NostrDiscoveryConfig::default()
-    }
-    fn default_lan() -> crate::discovery::lan::LanDiscoveryConfig {
-        crate::discovery::lan::LanDiscoveryConfig::default()
-    }
+}
+
+/// Peer rendezvous (`node.rendezvous.*`): how the node finds peers to connect
+/// to at all — Nostr-mediated overlay endpoints and mDNS/DNS-SD on the local
+/// link. Distinct from mesh lookup ([`LookupConfig`]), which finds coordinates
+/// for an already-known mesh address.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RendezvousConfig {
+    /// Nostr-mediated overlay endpoint rendezvous (`node.rendezvous.nostr.*`).
+    #[serde(default)]
+    pub nostr: NostrDiscoveryConfig,
+    /// mDNS / DNS-SD peer rendezvous on the local link (`node.rendezvous.lan.*`).
+    /// Identity surface is a strict subset of what `nostr.advertise` already
+    /// publishes publicly, so there's no marginal privacy cost; the latency
+    /// win for same-LAN peers is large (sub-second pairing, no relay).
+    #[serde(default)]
+    pub lan: crate::discovery::lan::LanDiscoveryConfig,
+}
+
+/// COMPAT (drop at the v2 cutover): a deprecated legacy `node.discovery:` block.
+///
+/// The `node.discovery.*` table was split into `node.lookup.*` (mesh-lookup
+/// scalars) and `node.rendezvous.*` (nostr/LAN peer rendezvous). Because
+/// `NodeConfig` does not deny unknown fields, a still-deployed `node.discovery:`
+/// block would otherwise deserialize into nothing and silently revert every
+/// lookup/rendezvous setting to its default. This all-`Option` mirror captures
+/// it so [`Config::normalize_deprecated_keys`] can fold it into the new tables
+/// with a one-time deprecation warning; unset legacy keys stay `None` and leave
+/// the new-table defaults intact.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DiscoveryConfigCompat {
+    pub ttl: Option<u8>,
+    pub attempt_timeouts_secs: Option<Vec<u64>>,
+    pub recent_expiry_secs: Option<u64>,
+    pub backoff_base_secs: Option<u64>,
+    pub backoff_max_secs: Option<u64>,
+    pub forward_min_interval_secs: Option<u64>,
+    pub nostr: Option<NostrDiscoveryConfig>,
+    pub lan: Option<crate::discovery::lan::LanDiscoveryConfig>,
 }
 
 /// Nostr advert discovery policy.
@@ -285,7 +310,7 @@ pub enum NostrDiscoveryPolicy {
     Open,
 }
 
-/// Nostr-mediated overlay endpoint discovery (`node.discovery.nostr.*`).
+/// Nostr-mediated overlay endpoint discovery (`node.rendezvous.nostr.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NostrDiscoveryConfig {
@@ -1021,9 +1046,19 @@ pub struct NodeConfig {
     #[serde(default)]
     pub cache: CacheConfig,
 
-    /// Discovery protocol (`node.discovery.*`).
+    /// Mesh-lookup protocol (`node.lookup.*`).
     #[serde(default)]
-    pub discovery: DiscoveryConfig,
+    pub lookup: LookupConfig,
+
+    /// Peer rendezvous (`node.rendezvous.*`).
+    #[serde(default)]
+    pub rendezvous: RendezvousConfig,
+
+    /// COMPAT (drop at the v2 cutover): a deprecated legacy `node.discovery:`
+    /// block, folded into `lookup`/`rendezvous` by
+    /// [`Config::normalize_deprecated_keys`]. Never re-serialized.
+    #[serde(default, skip_serializing)]
+    pub(crate) discovery: Option<DiscoveryConfigCompat>,
 
     /// Spanning tree (`node.tree.*`).
     #[serde(default)]
@@ -1080,7 +1115,9 @@ impl Default for NodeConfig {
             rate_limit: RateLimitConfig::default(),
             retry: RetryConfig::default(),
             cache: CacheConfig::default(),
-            discovery: DiscoveryConfig::default(),
+            lookup: LookupConfig::default(),
+            rendezvous: RendezvousConfig::default(),
+            discovery: None,
             tree: TreeConfig::default(),
             bloom: BloomConfig::default(),
             session: SessionConfig::default(),

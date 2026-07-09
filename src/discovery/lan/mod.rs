@@ -90,7 +90,7 @@ pub enum LanEvent {
 pub struct LanDiscoveryConfig {
     /// Master switch. Default: `false` — LAN discovery is opt-in. Operators
     /// who want sub-second same-LAN pairing enable it via
-    /// `node.discovery.lan.enabled: true`. Default-off avoids reintroducing
+    /// `node.rendezvous.lan.enabled: true`. Default-off avoids reintroducing
     /// a per-LAN identity broadcast on nodes that have deliberately disabled
     /// other discovery channels, and avoids any multicast surprise on upgrade.
     #[serde(default = "LanDiscoveryConfig::default_enabled")]

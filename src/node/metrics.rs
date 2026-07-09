@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::node::reject::{BloomReject, DiscoveryReject, ForwardingReject, TreeReject};
 use crate::node::stats::{
-    BloomStatsSnapshot, CongestionStatsSnapshot, DiscoveryStatsSnapshot, ErrorSignalStatsSnapshot,
-    ForwardingStatsSnapshot, TreeStatsSnapshot,
+    BloomStatsSnapshot, CongestionStatsSnapshot, ErrorSignalStatsSnapshot, ForwardingStatsSnapshot,
+    LookupStatsSnapshot, TreeStatsSnapshot,
 };
 
 /// An atomic counter.
@@ -202,7 +202,7 @@ impl ForwardingMetrics {
 
 /// Discovery metric counters.
 #[derive(Default)]
-pub struct DiscoveryMetrics {
+pub struct LookupMetrics {
     pub req_received: Padded<Counter>,
     pub req_decode_error: Counter,
     pub req_duplicate: Counter,
@@ -227,7 +227,7 @@ pub struct DiscoveryMetrics {
     pub resp_timed_out: Counter,
 }
 
-impl DiscoveryMetrics {
+impl LookupMetrics {
     /// Mirror of `DiscoveryStats::record_reject`: route a typed discovery
     /// rejection to its counter.
     #[inline]
@@ -245,8 +245,8 @@ impl DiscoveryMetrics {
     }
 
     /// Sample every counter into a serializable snapshot.
-    pub fn snapshot(&self) -> DiscoveryStatsSnapshot {
-        DiscoveryStatsSnapshot {
+    pub fn snapshot(&self) -> LookupStatsSnapshot {
+        LookupStatsSnapshot {
             req_received: self.req_received.get(),
             req_decode_error: self.req_decode_error.get(),
             req_duplicate: self.req_duplicate.get(),
@@ -429,7 +429,7 @@ impl ErrorMetrics {
 #[derive(Default)]
 pub struct MetricsRegistry {
     pub forwarding: ForwardingMetrics,
-    pub discovery: DiscoveryMetrics,
+    pub lookup: LookupMetrics,
     pub tree: TreeMetrics,
     pub bloom: BloomMetrics,
     pub congestion: CongestionMetrics,
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn discovery_record_reject_routes_to_field() {
-        let m = DiscoveryMetrics::default();
+        let m = LookupMetrics::default();
         m.record_reject(DiscoveryReject::ReqDuplicate);
         m.record_reject(DiscoveryReject::ReqDuplicate);
         m.record_reject(DiscoveryReject::RespNoRoute);
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn discovery_direct_counters_increment() {
-        let m = DiscoveryMetrics::default();
+        let m = LookupMetrics::default();
         m.req_received.inc();
         m.req_forwarded.inc();
         m.req_forwarded.inc();
@@ -501,9 +501,9 @@ mod tests {
     fn registry_subcounters_are_independent() {
         let r = MetricsRegistry::new();
         r.forwarding.record_received(10);
-        r.discovery.req_received.inc();
+        r.lookup.req_received.inc();
         assert_eq!(r.forwarding.received_packets.get(), 1);
         assert_eq!(r.forwarding.received_bytes.get(), 10);
-        assert_eq!(r.discovery.req_received.get(), 1);
+        assert_eq!(r.lookup.req_received.get(), 1);
     }
 }

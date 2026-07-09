@@ -526,7 +526,7 @@ impl Node {
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_discovery_backoff();
+                        self.reset_lookup_backoff();
                     }
                     PromotionResult::CrossConnectionWon {
                         loser_link_id,
@@ -557,7 +557,7 @@ impl Node {
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_discovery_backoff();
+                        self.reset_lookup_backoff();
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
                         // Close the losing TCP connection (no-op for connectionless)
@@ -928,7 +928,7 @@ impl Node {
             }
             // Schedule filter announce (sent on next tick via debounce)
             self.bloom_state.mark_update_needed(peer_node_addr);
-            self.reset_discovery_backoff();
+            self.reset_lookup_backoff();
             return;
         }
 
@@ -951,7 +951,7 @@ impl Node {
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_discovery_backoff();
+                        self.reset_lookup_backoff();
                     }
                     PromotionResult::CrossConnectionWon {
                         loser_link_id,
@@ -981,7 +981,7 @@ impl Node {
                         }
                         // Schedule filter announce (sent on next tick via debounce)
                         self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_discovery_backoff();
+                        self.reset_lookup_backoff();
                     }
                     PromotionResult::CrossConnectionLost { winner_link_id } => {
                         // Close the losing TCP connection (no-op for connectionless)

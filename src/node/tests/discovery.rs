@@ -22,7 +22,7 @@ async fn test_request_decode_error() {
     let from = make_node_addr(0xAA);
     // Too-short payload: should log error and return without panic
     node.handle_lookup_request(&from, &[0x00; 5]).await;
-    assert!(node.discovery.recent_requests.is_empty());
+    assert!(node.lookup.recent_requests.is_empty());
 }
 
 #[tokio::test]
@@ -38,11 +38,11 @@ async fn test_request_dedup() {
 
     // First request: accepted
     node.handle_lookup_request(&from, payload).await;
-    assert_eq!(node.discovery.recent_requests.len(), 1);
+    assert_eq!(node.lookup.recent_requests.len(), 1);
 
     // Duplicate request: dropped
     node.handle_lookup_request(&from, payload).await;
-    assert_eq!(node.discovery.recent_requests.len(), 1);
+    assert_eq!(node.lookup.recent_requests.len(), 1);
 }
 
 #[tokio::test]
@@ -60,7 +60,7 @@ async fn test_request_target_is_self() {
     // Should succeed without panic (response send will fail silently
     // since we have no peers to route toward origin)
     node.handle_lookup_request(&from, payload).await;
-    assert!(node.discovery.recent_requests.contains_key(&777));
+    assert!(node.lookup.recent_requests.contains_key(&777));
 }
 
 #[tokio::test]
@@ -76,7 +76,7 @@ async fn test_request_ttl_zero_not_forwarded() {
 
     node.handle_lookup_request(&from, payload).await;
     // Request recorded, but not forwarded (TTL=0, and no peers anyway)
-    assert!(node.discovery.recent_requests.contains_key(&666));
+    assert!(node.lookup.recent_requests.contains_key(&666));
 }
 
 // ============================================================================
@@ -114,7 +114,7 @@ async fn test_response_originator_caches_route() {
     let payload = &response.encode()[1..]; // skip msg_type
 
     // No entry in recent_requests for 555 → we're the originator
-    assert!(!node.discovery.recent_requests.contains_key(&555));
+    assert!(!node.lookup.recent_requests.contains_key(&555));
 
     node.handle_lookup_response(&from, payload).await;
 
@@ -148,7 +148,7 @@ async fn test_response_transit_needs_recent_request() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    node.discovery
+    node.lookup
         .recent_requests
         .insert(444, RecentRequest::new(make_node_addr(0xDD), now_ms));
 
@@ -319,16 +319,16 @@ async fn test_recent_request_expiry() {
         .as_millis() as u64;
 
     // Insert an old request (11 seconds ago)
-    node.discovery
+    node.lookup
         .recent_requests
         .insert(123, RecentRequest::new(make_node_addr(1), now_ms - 11_000));
 
     // Insert a recent request
-    node.discovery
+    node.lookup
         .recent_requests
         .insert(456, RecentRequest::new(make_node_addr(2), now_ms));
 
-    assert_eq!(node.discovery.recent_requests.len(), 2);
+    assert_eq!(node.lookup.recent_requests.len(), 2);
 
     // Trigger purge via a new lookup request
     let target = make_node_addr(0xBB);
@@ -340,9 +340,9 @@ async fn test_recent_request_expiry() {
         .await;
 
     // Old entry (123) should be purged, recent entry (456) and new entry (789) kept
-    assert!(!node.discovery.recent_requests.contains_key(&123));
-    assert!(node.discovery.recent_requests.contains_key(&456));
-    assert!(node.discovery.recent_requests.contains_key(&789));
+    assert!(!node.lookup.recent_requests.contains_key(&123));
+    assert!(node.lookup.recent_requests.contains_key(&456));
+    assert!(node.lookup.recent_requests.contains_key(&789));
 }
 
 // ============================================================================
@@ -381,7 +381,7 @@ async fn test_request_forwarding_two_node() {
 
     // Node1 should have recorded the request
     assert!(
-        nodes[1].node.discovery.recent_requests.contains_key(&42),
+        nodes[1].node.lookup.recent_requests.contains_key(&42),
         "Node 1 should have recorded the forwarded request"
     );
 
@@ -449,13 +449,13 @@ async fn test_request_three_node_chain() {
 
     // Node1 should have been a transit node (has the request_id in recent_requests)
     assert!(
-        !nodes[1].node.discovery.recent_requests.is_empty(),
+        !nodes[1].node.lookup.recent_requests.is_empty(),
         "Node 1 should have recorded the forwarded request"
     );
 
     // Node2 should have received the request (it's the target)
     assert!(
-        !nodes[2].node.discovery.recent_requests.is_empty(),
+        !nodes[2].node.lookup.recent_requests.is_empty(),
         "Node 2 should have received the request"
     );
 
@@ -504,7 +504,7 @@ async fn test_request_dedup_convergent_paths() {
 
     // Node2 (the target) must have received the request
     assert!(
-        nodes[2].node.discovery.recent_requests.contains_key(&300),
+        nodes[2].node.lookup.recent_requests.contains_key(&300),
         "Node 2 (target) should have received the request"
     );
 
@@ -941,8 +941,8 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
 
     // Build node with open-discovery enabled.
     let mut config = crate::Config::new();
-    config.node.discovery.nostr.enabled = true;
-    config.node.discovery.nostr.policy = NostrDiscoveryPolicy::Open;
+    config.node.rendezvous.nostr.enabled = true;
+    config.node.rendezvous.nostr.policy = NostrDiscoveryPolicy::Open;
     let mut node = crate::Node::new(config).unwrap();
 
     // Identity of an already-connected peer; insert into node.peers
@@ -1016,7 +1016,7 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
 /// Pin the per-attempt timeout sequence in `check_pending_lookups`.
 ///
 /// Drives the state machine deterministically through the default
-/// `node.discovery.attempt_timeouts_secs = [1, 2, 4, 8]` sequence.
+/// `node.lookup.attempt_timeouts_secs = [1, 2, 4, 8]` sequence.
 /// Asserts:
 ///   1. **Sequence timing** — retries fire at the cumulative deadlines
 ///      (t=1100ms, 3100ms, 7100ms) and unreachable at t=15100ms.
@@ -1049,7 +1049,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     // Default attempt_timeouts_secs is [1, 2, 4, 8]. Confirm so the test
     // cannot silently drift if the default changes.
     assert_eq!(
-        node.config().node.discovery.attempt_timeouts_secs,
+        node.config().node.lookup.attempt_timeouts_secs,
         vec![1, 2, 4, 8],
         "test pins the [1,2,4,8] default; update the test if the default changes"
     );
@@ -1108,18 +1108,18 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     // Inject a PendingLookup directly: attempt=1, last_sent_ms=0. This
     // mirrors the post-condition of a successful `maybe_initiate_lookup`
     // at t=0 without depending on wall-clock-derived `Self::now_ms()`.
-    node.discovery
+    node.lookup
         .pending_lookups
         .insert(target_addr, PendingLookup::new(0));
 
-    let baseline_initiated = node.metrics().discovery.req_initiated.get();
-    let baseline_timed_out = node.metrics().discovery.resp_timed_out.get();
+    let baseline_initiated = node.metrics().lookup.req_initiated.get();
+    let baseline_timed_out = node.metrics().lookup.resp_timed_out.get();
 
     // --- t = 1100ms: first retry deadline (1*1000) ---
     node.check_pending_lookups(1100).await;
     {
         let entry = node
-            .discovery
+            .lookup
             .pending_lookups
             .get(&target_addr)
             .expect("still pending");
@@ -1127,7 +1127,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         assert_eq!(entry.last_sent_ms, 1100);
     }
     assert_eq!(
-        node.metrics().discovery.req_initiated.get(),
+        node.metrics().lookup.req_initiated.get(),
         baseline_initiated + 1,
         "retry #1 must invoke initiate_lookup exactly once"
     );
@@ -1136,7 +1136,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     node.check_pending_lookups(3100).await;
     {
         let entry = node
-            .discovery
+            .lookup
             .pending_lookups
             .get(&target_addr)
             .expect("still pending");
@@ -1144,7 +1144,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         assert_eq!(entry.last_sent_ms, 3100);
     }
     assert_eq!(
-        node.metrics().discovery.req_initiated.get(),
+        node.metrics().lookup.req_initiated.get(),
         baseline_initiated + 2,
         "retry #2 must invoke initiate_lookup exactly once more"
     );
@@ -1153,7 +1153,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     node.check_pending_lookups(7100).await;
     {
         let entry = node
-            .discovery
+            .lookup
             .pending_lookups
             .get(&target_addr)
             .expect("still pending");
@@ -1161,7 +1161,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         assert_eq!(entry.last_sent_ms, 7100);
     }
     assert_eq!(
-        node.metrics().discovery.req_initiated.get(),
+        node.metrics().lookup.req_initiated.get(),
         baseline_initiated + 3,
         "retry #3 must invoke initiate_lookup exactly once more"
     );
@@ -1169,16 +1169,16 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     // --- Just-before-final: at t=15099ms the 8s window is not yet reached ---
     node.check_pending_lookups(15_099).await;
     assert!(
-        node.discovery.pending_lookups.contains_key(&target_addr),
+        node.lookup.pending_lookups.contains_key(&target_addr),
         "8s window not yet expired: pending_lookup must persist"
     );
     assert_eq!(
-        node.metrics().discovery.req_initiated.get(),
+        node.metrics().lookup.req_initiated.get(),
         baseline_initiated + 3,
         "no new attempt before final deadline"
     );
     assert_eq!(
-        node.metrics().discovery.resp_timed_out.get(),
+        node.metrics().lookup.resp_timed_out.get(),
         baseline_timed_out,
         "no timeout before final deadline"
     );
@@ -1192,18 +1192,18 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
 
     // Pending lookup is dropped.
     assert!(
-        !node.discovery.pending_lookups.contains_key(&target_addr),
+        !node.lookup.pending_lookups.contains_key(&target_addr),
         "final timeout must remove the pending_lookups entry"
     );
     // resp_timed_out counter ticked.
     assert_eq!(
-        node.metrics().discovery.resp_timed_out.get(),
+        node.metrics().lookup.resp_timed_out.get(),
         baseline_timed_out + 1,
         "final timeout must increment discovery.resp_timed_out"
     );
     // No additional initiate_lookup on the timeout step.
     assert_eq!(
-        node.metrics().discovery.req_initiated.get(),
+        node.metrics().lookup.req_initiated.get(),
         baseline_initiated + 3,
         "the final-timeout step must NOT call initiate_lookup"
     );

@@ -2,7 +2,7 @@
 //!
 //! Pure, runtime-agnostic mesh lookup state and rate limiting, migrated out
 //! of the async node shell. The async I/O handlers remain in
-//! `node::handlers::discovery`. The mesh lookup wire codec now lives here in
+//! `node::handlers::lookup`. The mesh lookup wire codec now lives here in
 //! `wire.rs` (the `LookupRequest` / `LookupResponse` structs), per the
 //! wire-migrates-with-subsystem policy.
 //!

@@ -238,7 +238,7 @@ pub struct ForwardingStatsSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct DiscoveryStatsSnapshot {
+pub struct LookupStatsSnapshot {
     pub req_received: u64,
     pub req_decode_error: u64,
     pub req_duplicate: u64,

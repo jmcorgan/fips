@@ -2,11 +2,11 @@
 
 #[cfg(unix)]
 pub(crate) mod connected_udp;
-pub(crate) mod discovery;
 mod dispatch;
 mod encrypted;
 mod forwarding;
 mod handshake;
+pub(crate) mod lookup;
 mod mmp;
 mod rekey;
 mod rx_loop;

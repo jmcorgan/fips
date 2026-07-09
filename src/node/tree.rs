@@ -371,7 +371,7 @@ impl Node {
                 // Surgical invalidation — see CoordCache::invalidate_via_node doc.
                 self.coord_cache
                     .invalidate_via_node(our_identity.node_addr());
-                self.reset_discovery_backoff();
+                self.reset_lookup_backoff();
 
                 self.metrics().tree.parent_switched.inc();
                 self.metrics().tree.parent_switches.inc();
@@ -417,7 +417,7 @@ impl Node {
                 // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
                 self.coord_cache
                     .invalidate_other_roots(our_identity.node_addr());
-                self.reset_discovery_backoff();
+                self.reset_lookup_backoff();
                 self.metrics().tree.parent_switched.inc();
                 self.metrics().tree.parent_switches.inc();
                 info!(
@@ -460,7 +460,7 @@ impl Node {
                         .invalidate_via_node(our_identity.node_addr());
                     self.coord_cache
                         .invalidate_other_roots(self.tree_state.root());
-                    self.reset_discovery_backoff();
+                    self.reset_lookup_backoff();
                     self.send_tree_announce_to_all().await;
                 }
             }
@@ -504,7 +504,7 @@ impl Node {
                 // Surgical invalidation — see CoordCache::invalidate_via_node doc.
                 self.coord_cache
                     .invalidate_via_node(our_identity.node_addr());
-                self.reset_discovery_backoff();
+                self.reset_lookup_backoff();
 
                 let new_addrs: Vec<NodeAddr> =
                     self.tree_state.my_coords().node_addrs().copied().collect();
@@ -625,7 +625,7 @@ impl Node {
                 // Surgical invalidation — see CoordCache::invalidate_via_node doc.
                 self.coord_cache
                     .invalidate_via_node(our_identity.node_addr());
-                self.reset_discovery_backoff();
+                self.reset_lookup_backoff();
 
                 self.metrics().tree.parent_switched.inc();
                 self.metrics().tree.parent_switches.inc();
@@ -669,7 +669,7 @@ impl Node {
                 // Surgical invalidation — see CoordCache::invalidate_other_roots doc.
                 self.coord_cache
                     .invalidate_other_roots(our_identity.node_addr());
-                self.reset_discovery_backoff();
+                self.reset_lookup_backoff();
                 self.metrics().tree.parent_switched.inc();
                 self.metrics().tree.parent_switches.inc();
                 info!(
