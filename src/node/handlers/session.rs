@@ -9,11 +9,11 @@ use crate::NodeAddr;
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{EndToEndState, EpochSlot, SessionEntry};
-#[cfg(unix)]
-use crate::node::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::node::{Node, NodeError};
 use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
 use crate::proto::fmp::NegotiationPayload;
+#[cfg(unix)]
+use crate::proto::fmp::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::proto::fsp::wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
     FSP_PHASE_MSG1, FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,

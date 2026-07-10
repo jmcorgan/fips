@@ -1,8 +1,8 @@
 //! Encrypted frame handling (hot path).
 
 use crate::node::Node;
-use crate::node::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, strip_inner_header};
 use crate::noise::NoiseError;
+use crate::proto::fmp::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, strip_inner_header};
 use crate::transport::ReceivedPacket;
 use tracing::{debug, trace, warn};
 

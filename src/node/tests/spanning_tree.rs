@@ -126,7 +126,7 @@ async fn make_test_node_inner(config: Config, mtu: u16) -> TestNode {
 /// Sends msg1 over UDP. The drain loop will handle msg1 processing,
 /// msg2 response, and subsequent TreeAnnounce exchange.
 pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usize) {
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
 
     // Extract responder info before mutably borrowing initiator
     let responder_addr = nodes[j].addr.clone();
@@ -288,7 +288,7 @@ pub(super) fn print_tree_snapshot(label: &str, nodes: &[TestNode]) {
 ///
 /// Returns the number of packets processed.
 pub(super) async fn process_available_packets(nodes: &mut [TestNode]) -> usize {
-    use crate::node::wire::{
+    use crate::proto::fmp::wire::{
         COMMON_PREFIX_SIZE, CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2,
         PHASE_MSG3,
     };

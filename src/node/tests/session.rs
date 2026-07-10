@@ -999,7 +999,7 @@ fn build_ipv6_packet(
 
 #[test]
 fn test_identity_cache_populated_on_promote() {
-    use crate::peer::PromotionResult;
+    use crate::proto::fmp::PromotionResult;
 
     let mut node = make_node();
     let transport_id = TransportId::new(1);

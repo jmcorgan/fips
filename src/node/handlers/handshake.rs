@@ -8,12 +8,13 @@
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::reject::{HandshakeReject, RejectReason};
-use crate::node::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::node::{Node, NodeError};
-use crate::peer::{ActivePeer, PeerConnection, PromotionResult};
+use crate::peer::{ActivePeer, PeerConnection};
+use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
     Disconnect, DisconnectReason, EstablishSnapshot, InboundDecision, InboundReject,
-    NegotiationPayload, WireOutcome, cross_connection_winner, decide_fmp_negotiation,
+    NegotiationPayload, PromotionResult, WireOutcome, cross_connection_winner,
+    decide_fmp_negotiation,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use std::time::Duration;

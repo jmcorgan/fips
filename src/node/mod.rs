@@ -24,7 +24,6 @@ pub(crate) mod stats_history;
 #[cfg(test)]
 mod tests;
 mod tree;
-pub(crate) mod wire;
 
 use self::rate_limit::HandshakeRateLimiter;
 use self::reloadable::Reloadable;
@@ -48,16 +47,16 @@ use self::reloadable::Reloadable;
 /// bounding that cross-connection branch below the rekey age floor so a
 /// rekey-aged msg3 falls through to the rekey-responder path. See CHANGELOG.
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
-use self::wire::{
-    ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
-    prepend_inner_header,
-};
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::fmp::Fmp;
 use crate::proto::fmp::NodeProfile;
+use crate::proto::fmp::wire::{
+    ESTABLISHED_HEADER_SIZE, FLAG_CE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
+    prepend_inner_header,
+};
 use crate::proto::fsp::Fsp;
 use crate::proto::lookup::{Lookup, LookupBackoff, LookupForwardRateLimiter};
 use crate::proto::mmp::Mmp;

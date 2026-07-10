@@ -2,7 +2,7 @@ use super::*;
 use crate::ReceivedPacket;
 use crate::node::acl::PeerAclReloader;
 use crate::node::reloadable::HostMapReloadable;
-use crate::node::wire::build_msg2;
+use crate::proto::fmp::wire::build_msg2;
 use crate::upper::hosts::HostMap;
 use crate::utils::index::SessionIndex;
 use std::path::PathBuf;
@@ -123,7 +123,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
 async fn test_inbound_msg3_denied_triggers_disconnect() {
     use crate::config::UdpConfig;
     use crate::node::acl::PeerAclReloader;
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
     use crate::transport::udp::UdpTransport;
     use crate::transport::{TransportHandle, packet_channel};
     use tokio::time::{Duration, timeout};

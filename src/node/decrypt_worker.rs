@@ -560,7 +560,7 @@ mod tests {
         let open_cipher = LessSafeKey::new(unbound2);
 
         let counter: u64 = 7;
-        const HDR: usize = crate::node::wire::ESTABLISHED_HEADER_SIZE;
+        const HDR: usize = crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE;
         // Build a wire packet `[16-byte header][4-byte inner ts][1 byte link msg]`
         // with capacity for the trailing AEAD tag. Header bytes
         // double as AAD and as the on-wire prefix.
@@ -568,7 +568,7 @@ mod tests {
         // Header: fill the flags byte (the second byte) with both
         // FLAG_CE and FLAG_KEY_EPOCH set; the rest is uninterpreted by
         // the worker (it just AADs the whole 16 bytes).
-        let flags_byte = crate::node::wire::FLAG_CE | crate::node::wire::FLAG_KEY_EPOCH;
+        let flags_byte = crate::proto::fmp::wire::FLAG_CE | crate::proto::fmp::wire::FLAG_KEY_EPOCH;
         let mut header = [0u8; HDR];
         header[1] = flags_byte;
         wire.extend_from_slice(&header);
@@ -625,11 +625,11 @@ mod tests {
             "fmp_flags must round-trip from DecryptJob to DecryptFallback"
         );
         assert!(
-            fallback.fmp_flags & crate::node::wire::FLAG_CE != 0,
+            fallback.fmp_flags & crate::proto::fmp::wire::FLAG_CE != 0,
             "FLAG_CE bit lost on worker path"
         );
         assert!(
-            fallback.fmp_flags & crate::node::wire::FLAG_KEY_EPOCH != 0,
+            fallback.fmp_flags & crate::proto::fmp::wire::FLAG_KEY_EPOCH != 0,
             "FLAG_KEY_EPOCH bit lost on worker path"
         );
     }
@@ -723,7 +723,7 @@ mod tests {
         let open_cipher = LessSafeKey::new(unbound);
 
         let counter: u64 = 11;
-        const HDR: usize = crate::node::wire::ESTABLISHED_HEADER_SIZE;
+        const HDR: usize = crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE;
         let header = [0u8; HDR];
         let mut wire = Vec::with_capacity(HDR + 4 + 1 + 16);
         wire.extend_from_slice(&header);

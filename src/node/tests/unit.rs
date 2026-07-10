@@ -1,6 +1,6 @@
 use super::*;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
-use crate::peer::PromotionResult;
+use crate::proto::fmp::PromotionResult;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{TransportHandle, packet_channel};
 use std::sync::Arc;
@@ -1799,7 +1799,7 @@ async fn drive_xx_handshake(
     packet_rx_a: &mut crate::transport::PacketRx,
     packet_rx_b: &mut crate::transport::PacketRx,
 ) -> NodeAddr {
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
     use tokio::time::{Duration, timeout};
 
     let remote_addr_b = TransportAddr::from_string(&addr_b.to_string());

@@ -91,13 +91,12 @@ pub use proto::fmp::{NegotiationPayload, NodeProfile, TlvEntry};
 // Re-export cache types
 pub use cache::{CacheEntry, CacheError, CacheStats, CoordCache};
 
-// Re-export FMP tie-break helper (relocated from peer:: to proto::fmp)
-pub use proto::fmp::cross_connection_winner;
+// Re-export FMP tie-break helper and promotion result (relocated from peer:: to proto::fmp)
+pub use proto::fmp::{PromotionResult, cross_connection_winner};
 
 // Re-export peer types
 pub use peer::{
     ActivePeer, ConnectivityState, HandshakeState, PeerConnection, PeerError, PeerSlot,
-    PromotionResult,
 };
 
 // Re-export node types

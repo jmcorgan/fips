@@ -1,11 +1,11 @@
 //! RX event loop and packet dispatch.
 
 use crate::control::{ControlSocket, commands};
-use crate::node::wire::{
+use crate::node::{Node, NodeError};
+use crate::proto::fmp::wire::{
     COMMON_PREFIX_SIZE, CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2,
     PHASE_MSG3,
 };
-use crate::node::{Node, NodeError};
 use crate::transport::ReceivedPacket;
 use std::time::Duration;
 use tracing::{debug, info, warn};

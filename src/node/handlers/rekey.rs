@@ -8,8 +8,8 @@
 use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::reject::{HandshakeReject, RejectReason};
-use crate::node::wire::build_msg1;
 use crate::noise::HandshakeState;
+use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{ConnAction, LifecycleView, PeerSnapshot, RekeyCfg, RekeyResendSnapshot};
 use crate::proto::fsp::{
     FspAction, RekeyMsg3ResendSnapshot, SessionSetup, SessionSnapshot, cutover_timer_elapsed,

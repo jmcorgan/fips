@@ -3,7 +3,7 @@
 use super::*;
 use crate::EstablishedTraversal;
 use crate::config::{TransportInstances, UdpConfig};
-use crate::node::wire::{PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
+use crate::proto::fmp::wire::{PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
 use crate::transport::udp::UdpTransport;
 use crate::utils::index::IndexAllocator;
 use std::collections::HashMap;

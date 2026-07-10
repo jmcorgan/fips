@@ -24,20 +24,23 @@
 //!   (stateless) lifecycle anchor owned by `Node`.
 //! - `wire.rs` — the FMP wire codec: XX handshake message types, disconnect
 //!   reasons, the orderly disconnect message, and the negotiation payload.
+//!   Also carries the relocated FMP link wire framing (moved from
+//!   `node/wire.rs`): the common prefix, encrypted/established headers, and
+//!   the msg1/msg2/msg3 handshake framing.
 
 mod core;
 mod limits;
 mod state;
-mod wire;
+pub(crate) mod wire;
 
 #[cfg(test)]
 mod tests;
 
-pub use core::cross_connection_winner;
 pub(crate) use core::{
     ConnAction, ConnSnapshot, EstablishSnapshot, InboundDecision, InboundReject, LifecycleView,
     PeerSnapshot, RekeyCfg, RekeyResendSnapshot, WireOutcome, decide_fmp_negotiation,
 };
+pub use core::{PromotionResult, cross_connection_winner};
 pub(crate) use limits::backoff_ms;
 pub use state::HandshakeState;
 pub(crate) use state::{ConnectionState, Fmp};
