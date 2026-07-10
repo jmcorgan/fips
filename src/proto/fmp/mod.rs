@@ -33,12 +33,12 @@ pub(crate) mod wire;
 #[cfg(test)]
 mod tests;
 
-pub use core::cross_connection_winner;
 pub(crate) use core::{
     ConnAction, ConnSnapshot, EstablishSnapshot, EstablishView, InboundDecision, InboundReject,
     LifecycleView, OutboundDecision, OutboundSnapshot, PeerSnapshot, RekeyCfg, RekeyResendSnapshot,
     WireOutcome,
 };
+pub use core::{PromotionResult, cross_connection_winner};
 pub(crate) use limits::backoff_ms;
 pub use state::HandshakeState;
 pub(crate) use state::{ConnectionState, Fmp};

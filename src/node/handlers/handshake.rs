@@ -5,11 +5,11 @@ use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::{ActivePeer, PeerConnection, PromotionResult};
+use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
     ConnAction, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundDecision,
-    OutboundSnapshot, WireOutcome, cross_connection_winner,
+    OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use std::time::Duration;

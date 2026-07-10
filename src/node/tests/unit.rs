@@ -1,6 +1,6 @@
 use super::*;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
-use crate::peer::PromotionResult;
+use crate::proto::fmp::PromotionResult;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{TransportHandle, packet_channel};
 use std::sync::Arc;

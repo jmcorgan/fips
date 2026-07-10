@@ -51,6 +51,62 @@ pub fn cross_connection_winner(
     }
 }
 
+/// Result of attempting to promote a connection to active peer.
+///
+/// When a handshake completes, we may discover that we already have a
+/// connection to this peer (cross-connection). The tie-breaker rule
+/// determines which connection survives.
+///
+/// Note: Returns NodeAddr instead of ActivePeer because ActivePeer cannot
+/// be cloned (it contains NoiseSession which has cryptographic state).
+/// Callers can look up the peer from the peers map using the NodeAddr.
+#[derive(Debug, Clone, Copy)]
+pub enum PromotionResult {
+    /// New peer created successfully.
+    Promoted(NodeAddr),
+
+    /// Cross-connection detected. This connection lost the tie-breaker
+    /// and should be closed.
+    CrossConnectionLost {
+        /// The link that won (existing connection).
+        winner_link_id: LinkId,
+    },
+
+    /// Cross-connection detected. This connection won the tie-breaker.
+    /// The existing connection was replaced.
+    CrossConnectionWon {
+        /// The link that lost (previous connection, now closed).
+        loser_link_id: LinkId,
+        /// The node ID of the peer.
+        node_addr: NodeAddr,
+    },
+}
+
+impl PromotionResult {
+    /// Get the node ID if promotion succeeded.
+    pub fn node_addr(&self) -> Option<NodeAddr> {
+        match self {
+            PromotionResult::Promoted(node_addr) => Some(*node_addr),
+            PromotionResult::CrossConnectionWon { node_addr, .. } => Some(*node_addr),
+            PromotionResult::CrossConnectionLost { .. } => None,
+        }
+    }
+
+    /// Check if this connection should be closed.
+    pub fn should_close_this_connection(&self) -> bool {
+        matches!(self, PromotionResult::CrossConnectionLost { .. })
+    }
+
+    /// Get the link that should be closed, if any.
+    pub fn link_to_close(&self) -> Option<LinkId> {
+        match self {
+            PromotionResult::CrossConnectionLost { .. } => None, // Caller's link
+            PromotionResult::CrossConnectionWon { loser_link_id, .. } => Some(*loser_link_id),
+            PromotionResult::Promoted(_) => None,
+        }
+    }
+}
+
 /// A snapshot of one handshake connection's lifecycle-relevant state, taken by
 /// the shell so the core decides without touching live `Node` state or reading
 /// a clock.
