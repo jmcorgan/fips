@@ -1,6 +1,6 @@
 use nostr::prelude::{EventBuilder, Kind, Tag, Timestamp};
 
-use super::runtime::{NostrRendezvous, suppress_responder_for_own_initiator};
+use super::runtime::NostrRendezvous;
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
     estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
@@ -10,6 +10,7 @@ use super::traversal::{
     PunchStrategy, build_punch_packet, parse_punch_packet, plan_punch_targets,
     planned_remote_endpoints, session_hash,
 };
+use super::traversal_machine::suppress_responder_for_own_initiator;
 use super::{
     ADVERT_IDENTIFIER, ADVERT_KIND, ADVERT_VERSION, OverlayAdvert, OverlayEndpointAdvert,
     OverlayTransportKind, PunchHint, PunchPacketKind, TraversalAddress,
