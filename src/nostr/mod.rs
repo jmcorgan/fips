@@ -1,3 +1,4 @@
+mod advert;
 mod driver;
 mod failure_state;
 mod handoff;
@@ -5,6 +6,7 @@ mod runtime;
 mod signal;
 mod stun;
 mod traversal;
+mod traversal_machine;
 mod types;
 
 #[cfg(test)]

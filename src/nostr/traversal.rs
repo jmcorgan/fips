@@ -177,17 +177,15 @@ pub(super) async fn run_punch_attempt(
         let Ok(Ok((len, remote))) = recv else {
             break Err(BootstrapError::PunchTimeout(session_id.to_string()));
         };
-        let Ok(packet) = parse_punch_packet(&buf[..len]) else {
-            continue;
-        };
-        if packet.session_hash != expected_hash {
-            continue;
+        match classify_punch_packet(&buf[..len], expected_hash) {
+            PunchAction::Ignore => continue,
+            PunchAction::Ack { sequence } => {
+                let ack = build_punch_packet(PunchPacketKind::Ack, sequence, session_id);
+                let _ = udp.send_to(&ack, remote).await;
+                break Ok(remote);
+            }
+            PunchAction::Matched => break Ok(remote),
         }
-        if packet.kind == PunchPacketKind::Probe {
-            let ack = build_punch_packet(PunchPacketKind::Ack, packet.sequence, session_id);
-            let _ = udp.send_to(&ack, remote).await;
-        }
-        break Ok(remote);
     };
     send_handle.abort();
     result
@@ -273,4 +271,83 @@ pub(super) fn parse_punch_packet(bytes: &[u8]) -> Result<PunchPacket, BootstrapE
         sequence,
         session_hash: hash,
     })
+}
+
+/// Classification of a received UDP datagram on the punch socket. Returned
+/// by [`classify_punch_packet`]; the timing loop performs the actual ack
+/// send / break described by the variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PunchAction {
+    /// Not a valid punch packet for this session — keep listening.
+    Ignore,
+    /// A matching probe: the driver builds and sends an ack for `sequence`,
+    /// then treats the peer as reached.
+    Ack { sequence: u32 },
+    /// A matching non-probe (ack) packet: the peer is reached, no ack to send.
+    Matched,
+}
+
+/// Pure classification of a received datagram against the expected session
+/// hash. No I/O: the caller sends any ack and decides control flow.
+pub(super) fn classify_punch_packet(bytes: &[u8], expected_hash: [u8; 16]) -> PunchAction {
+    let Ok(packet) = parse_punch_packet(bytes) else {
+        return PunchAction::Ignore;
+    };
+    if packet.session_hash != expected_hash {
+        return PunchAction::Ignore;
+    }
+    if packet.kind == PunchPacketKind::Probe {
+        PunchAction::Ack {
+            sequence: packet.sequence,
+        }
+    } else {
+        PunchAction::Matched
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SESSION: &str = "session-classify-vectors";
+
+    #[test]
+    fn classify_ignores_unparseable_bytes() {
+        // P1: too short to parse.
+        assert_eq!(
+            classify_punch_packet(&[0u8; 4], session_hash(SESSION)),
+            PunchAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_ignores_mismatched_session_hash() {
+        // P2: parseable, but hash is for a different session.
+        let packet = build_punch_packet(PunchPacketKind::Probe, 7, SESSION);
+        let other_hash = session_hash("some-other-session");
+        assert_eq!(
+            classify_punch_packet(&packet, other_hash),
+            PunchAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_probe_matching_hash_acks_with_sequence() {
+        // P3: matching probe -> Ack carrying the packet's sequence.
+        let packet = build_punch_packet(PunchPacketKind::Probe, 42, SESSION);
+        assert_eq!(
+            classify_punch_packet(&packet, session_hash(SESSION)),
+            PunchAction::Ack { sequence: 42 }
+        );
+    }
+
+    #[test]
+    fn classify_ack_matching_hash_is_matched() {
+        // P4: matching non-probe (ack) -> Matched.
+        let packet = build_punch_packet(PunchPacketKind::Ack, 3, SESSION);
+        assert_eq!(
+            classify_punch_packet(&packet, session_hash(SESSION)),
+            PunchAction::Matched
+        );
+    }
 }
