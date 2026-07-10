@@ -21,12 +21,14 @@
 //!   handles) and its [`HandshakeState`] phase enum, plus [`Fmp`], the
 //!   (stateless) lifecycle anchor owned by `Node`.
 //! - `wire.rs` — the FMP link-framing codec: handshake message types,
-//!   disconnect reasons, and the orderly disconnect message.
+//!   disconnect reasons, and the orderly disconnect message. Also carries the
+//!   FMP link wire framing relocated from `node/wire.rs` — the common prefix,
+//!   encrypted/msg1/msg2 headers, and the `build_*`/inner-header codec fns.
 
 mod core;
 mod limits;
 mod state;
-mod wire;
+pub(crate) mod wire;
 
 #[cfg(test)]
 mod tests;

@@ -50,7 +50,7 @@
 // warnings rather than gate every function individually.
 #![cfg_attr(not(unix), allow(dead_code))]
 
-use crate::node::wire::ESTABLISHED_HEADER_SIZE;
+use crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE;
 use crate::proto::fsp::wire::FSP_HEADER_SIZE;
 use crate::transport::udp::socket::AsyncUdpSocket;
 #[cfg(not(target_os = "macos"))]
@@ -1904,8 +1904,8 @@ mod unix_tests {
     #[test]
     fn pipelined_send_wire_layout_roundtrips_canonical_decoders() {
         use crate::NodeAddr;
-        use crate::node::wire::{EncryptedHeader, FLAG_KEY_EPOCH, build_established_header};
         use crate::noise::TAG_SIZE;
+        use crate::proto::fmp::wire::{EncryptedHeader, FLAG_KEY_EPOCH, build_established_header};
         use crate::proto::fsp::wire::build_fsp_header;
         use crate::proto::link::{
             LinkMessageType, SESSION_DATAGRAM_HEADER_SIZE, SessionDatagramRef,

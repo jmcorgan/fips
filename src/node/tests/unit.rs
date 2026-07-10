@@ -1788,7 +1788,7 @@ async fn craft_and_send_msg1(
     addr_b: std::net::SocketAddr,
     timestamp_ms: u64,
 ) -> NodeAddr {
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
     use crate::utils::index::SessionIndex;
 
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());

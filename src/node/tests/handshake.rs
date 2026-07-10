@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn test_two_node_handshake_udp() {
     use crate::config::UdpConfig;
-    use crate::node::wire::{
+    use crate::proto::fmp::wire::{
         build_encrypted, build_established_header, build_msg1, prepend_inner_header,
     };
     use crate::transport::udp::UdpTransport;
@@ -243,7 +243,7 @@ async fn test_two_node_handshake_udp() {
 #[tokio::test]
 async fn test_run_rx_loop_handshake() {
     use crate::config::UdpConfig;
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
     use crate::transport::udp::UdpTransport;
     use tokio::time::Duration;
 
@@ -434,7 +434,7 @@ async fn test_run_rx_loop_handshake() {
 #[tokio::test]
 async fn test_cross_connection_both_initiate() {
     use crate::config::UdpConfig;
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
     use crate::transport::udp::UdpTransport;
     use tokio::time::{Duration, timeout};
 
@@ -788,7 +788,7 @@ async fn test_failed_connection_cleanup() {
 /// Test that msg1 bytes are stored on connection for resend.
 #[tokio::test]
 async fn test_msg1_stored_for_resend() {
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
 
     let mut node = make_node();
     let transport_id = TransportId::new(1);
@@ -846,7 +846,7 @@ async fn test_resend_scheduling() {
     conn.set_source_addr(remote_addr.clone());
 
     // Store msg1 with first resend at now + 1000ms
-    let wire_msg1 = crate::node::wire::build_msg1(our_index, &noise_msg1);
+    let wire_msg1 = crate::proto::fmp::wire::build_msg1(our_index, &noise_msg1);
     conn.set_handshake_msg1(wire_msg1, now_ms + 1000);
 
     let link = Link::connectionless(
@@ -924,7 +924,7 @@ fn test_resend_count_tracking() {
 /// Test that duplicate msg2 is silently dropped when pending_outbound is already cleared.
 #[tokio::test]
 async fn test_duplicate_msg2_dropped() {
-    use crate::node::wire::build_msg2;
+    use crate::proto::fmp::wire::build_msg2;
     use crate::transport::ReceivedPacket;
 
     let mut node = make_node();

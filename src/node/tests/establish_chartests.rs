@@ -46,7 +46,7 @@ fn craft_msg1_wire(
     sender_index: SessionIndex,
     ts: u64,
 ) -> Vec<u8> {
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
     let peer_b_identity = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let link_id = LinkId::new(0x0BAD_C0DE);
     let mut conn = PeerConnection::outbound(link_id, peer_b_identity, ts);
@@ -453,7 +453,7 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
 /// index it assigned while promoting the peer's msg1.
 #[tokio::test]
 async fn chartest_cross_connection_tiebreak_winner_and_loser() {
-    use crate::node::wire::build_msg1;
+    use crate::proto::fmp::wire::build_msg1;
 
     let mut node_a = make_node();
     let mut node_b = make_node();

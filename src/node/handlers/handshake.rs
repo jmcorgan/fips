@@ -4,9 +4,9 @@ use crate::NodeAddr;
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::reject::{HandshakeReject, RejectReason};
-use crate::node::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::node::{Node, NodeError};
 use crate::peer::{ActivePeer, PeerConnection, PromotionResult};
+use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
     ConnAction, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundDecision,
     OutboundSnapshot, WireOutcome, cross_connection_winner,

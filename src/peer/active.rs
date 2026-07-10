@@ -1567,7 +1567,7 @@ mod tests {
         plaintext: &[u8],
         k_bit: bool,
     ) -> (Vec<u8>, u64, [u8; 16]) {
-        use crate::node::wire::{FLAG_KEY_EPOCH, build_established_header};
+        use crate::proto::fmp::wire::{FLAG_KEY_EPOCH, build_established_header};
         let counter = sender.current_send_counter();
         let flags = if k_bit { FLAG_KEY_EPOCH } else { 0 };
         let header = build_established_header(receiver_idx, counter, flags, plaintext.len() as u16);
