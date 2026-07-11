@@ -2,6 +2,8 @@
 
 use portable_atomic::{AtomicU64, Ordering};
 
+use serde::Serialize;
+
 /// Statistics for an Ethernet transport instance.
 ///
 /// Uses atomic counters for lock-free updates from the receive loop
@@ -92,7 +94,7 @@ impl Default for EthernetStats {
 }
 
 /// Point-in-time snapshot of Ethernet stats (non-atomic, copyable).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct EthernetStatsSnapshot {
     pub frames_sent: u64,
     pub frames_recv: u64,

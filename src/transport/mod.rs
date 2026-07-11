@@ -1022,19 +1022,7 @@ impl TransportHandle {
             }
             #[cfg(unix)]
             TransportHandle::Ethernet(t) => {
-                let snap = t.stats().snapshot();
-                serde_json::json!({
-                    "frames_sent": snap.frames_sent,
-                    "frames_recv": snap.frames_recv,
-                    "bytes_sent": snap.bytes_sent,
-                    "bytes_recv": snap.bytes_recv,
-                    "send_errors": snap.send_errors,
-                    "recv_errors": snap.recv_errors,
-                    "beacons_sent": snap.beacons_sent,
-                    "beacons_recv": snap.beacons_recv,
-                    "frames_too_short": snap.frames_too_short,
-                    "frames_too_long": snap.frames_too_long,
-                })
+                serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
             TransportHandle::Tcp(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
