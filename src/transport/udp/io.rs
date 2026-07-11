@@ -784,6 +784,232 @@ mod platform {
 
 pub use platform::{AsyncUdpSocket, UdpRawSocket};
 
+/// Per-peer connected-UDP fast-path fd construction.
+///
+/// One of the levers boringtun uses to hit 2.5–3.2 Gbps on a real
+/// NIC: after a peer is established, give them their **own UDP socket
+/// `connect()`-ed to their address**. The kernel then routes inbound
+/// packets from that peer directly to the connected socket
+/// (most-specific-match wins over the wildcard listen socket under
+/// `SO_REUSEPORT`), and lets us `send(2)` with `msg_name = NULL` —
+/// skipping the per-packet sockaddr copy + route lookup + neighbor
+/// resolve. This module owns the fd-construction syscall sequence only
+/// (socket / sockopt / bind / connect + buffer sizing); the owning
+/// handle type that adopts the returned fd lives in
+/// `crate::peer::connected_udp`.
+///
+/// Gated to Linux/macOS: the rest of `io.rs` compiles more broadly
+/// (Windows uses `tokio::net::UdpSocket`), but the connected fast path
+/// is libc-syscall + `sockopts_macos` specific.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod connected {
+    // The connected-UDP fast path is infra-ready but not yet wired into
+    // the encrypt-worker dispatch site (a follow-up PR will refcount-clone
+    // the socket into each FmpSendJob). Keep the API surface in tree.
+    #![allow(dead_code)]
+
+    use std::io;
+    use std::net::SocketAddr;
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    /// Open a `connect()`-ed UDP socket for one peer and return the owning
+    /// fd. Performs the full socket / sockopt / bind / connect syscall
+    /// sequence. On any mid-construction failure the fd is closed (via the
+    /// `OwnedFd` RAII guard) before the error is returned; on success
+    /// ownership of the fd transfers to the returned `OwnedFd`. Callers
+    /// adopt it into a `crate::peer::connected_udp::ConnectedPeerSocket`
+    /// via `ConnectedPeerSocket::from_fd`.
+    ///
+    /// `local_addr` is the wildcard bind address (e.g. `0.0.0.0:51820`
+    /// or `[::]:51820`) — the same address the listen socket bound to.
+    /// `peer_addr` is the kernel `SocketAddr` of the established peer's
+    /// UDP endpoint. `recv_buf` / `send_buf` are the requested buffer
+    /// sizes; they're applied with `SO_*BUFFORCE` first and fall back to
+    /// the normal `SO_*BUF` if the process can't bypass the kernel
+    /// ceiling.
+    pub(crate) fn open_connected_fd(
+        local_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        recv_buf: usize,
+        send_buf: usize,
+    ) -> io::Result<OwnedFd> {
+        // Family must match between local and peer.
+        if local_addr.is_ipv4() != peer_addr.is_ipv4() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ConnectedPeerSocket: local + peer address families differ",
+            ));
+        }
+
+        let domain = if local_addr.is_ipv4() {
+            libc::AF_INET
+        } else {
+            libc::AF_INET6
+        };
+        // Linux accepts SOCK_NONBLOCK | SOCK_CLOEXEC directly. Darwin
+        // does not, so we set the equivalent fd flags with fcntl below.
+        #[cfg(target_os = "linux")]
+        let typ = libc::SOCK_DGRAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let typ = libc::SOCK_DGRAM;
+        let fd = unsafe { libc::socket(domain, typ, libc::IPPROTO_UDP) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Adopt the fd into an OwnedFd immediately: from here its Drop
+        // closes the fd on any early `return Err` / `?` below. Ownership
+        // transfers to the caller only via the final `Ok(owned)`.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        let raw = owned.as_raw_fd();
+
+        #[cfg(not(target_os = "linux"))]
+        set_nonblocking_cloexec(raw)?;
+
+        // SO_REUSEADDR lets us bind to the same local port the listen
+        // socket already holds. SO_REUSEPORT lets the UDP demux permit
+        // several sockets bound to the same address and route the peer
+        // 5-tuple to the connected sibling.
+        set_sockopt_int(raw, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
+        set_sockopt_int(raw, libc::SOL_SOCKET, libc::SO_REUSEPORT, 1)?;
+
+        #[cfg(target_os = "macos")]
+        crate::transport::udp::sockopts_macos::apply_udp_socket_tuning(raw, "connected-udp-peer");
+
+        // Buffer sizes — try the FORCE variants first (succeed if we
+        // have CAP_NET_ADMIN), then fall back to the ceiling-clamped
+        // normal variants. The ceiling-clamped path always succeeds
+        // even if it gives us less than we asked for.
+        #[cfg(target_os = "linux")]
+        {
+            set_buf_size(raw, libc::SO_RCVBUFFORCE, libc::SO_RCVBUF, recv_buf);
+            set_buf_size(raw, libc::SO_SNDBUFFORCE, libc::SO_SNDBUF, send_buf);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            set_buf_size(raw, libc::SO_RCVBUF, recv_buf);
+            set_buf_size(raw, libc::SO_SNDBUF, send_buf);
+        }
+
+        // Bind to the wildcard local address (same port as listen socket).
+        let local_sa: socket2::SockAddr = local_addr.into();
+        let bind_r = unsafe {
+            libc::bind(
+                raw,
+                local_sa.as_ptr() as *const libc::sockaddr,
+                local_sa.len(),
+            )
+        };
+        if bind_r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Connect to the peer — locks in the per-packet kernel route.
+        let peer_sa: socket2::SockAddr = peer_addr.into();
+        let conn_r = unsafe {
+            libc::connect(
+                raw,
+                peer_sa.as_ptr() as *const libc::sockaddr,
+                peer_sa.len(),
+            )
+        };
+        if conn_r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(owned)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_nonblocking_cloexec(fd: RawFd) -> io::Result<()> {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if fd_flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Set an integer-valued socket option on `fd`. Returns the kernel
+    /// error on failure so the caller can `?`-propagate.
+    fn set_sockopt_int(
+        fd: RawFd,
+        level: libc::c_int,
+        name: libc::c_int,
+        value: libc::c_int,
+    ) -> io::Result<()> {
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                name,
+                &value as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Try `SO_*BUFFORCE` first (bypasses the rmem/wmem ceiling) and
+    /// fall back to `SO_*BUF` if that fails. Returns silently — buffer
+    /// sizing is best-effort.
+    #[cfg(target_os = "linux")]
+    fn set_buf_size(fd: RawFd, force_name: libc::c_int, normal_name: libc::c_int, size: usize) {
+        let value: libc::c_int = size as libc::c_int;
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                force_name,
+                &value as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r < 0 {
+            // Fall back to non-force — kernel may clamp.
+            let _ = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    normal_name,
+                    &value as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_buf_size(fd: RawFd, normal_name: libc::c_int, size: usize) {
+        let value: libc::c_int = size as libc::c_int;
+        let _ = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                normal_name,
+                &value as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use connected::open_connected_fd;
+
 #[cfg(test)]
 mod tests {
     use super::*;
