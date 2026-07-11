@@ -6,9 +6,9 @@ use super::{
     DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
     TransportId, TransportState, TransportType,
 };
-#[cfg(target_os = "macos")]
-pub(crate) mod darwin_sockopts;
 pub(crate) mod io;
+#[cfg(target_os = "macos")]
+pub(crate) mod sockopts_macos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use io::open_connected_fd;
 mod stats;

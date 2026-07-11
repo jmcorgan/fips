@@ -1,6 +1,5 @@
-// Applied inside `io::open_connected_fd` (dormant in this PR; see
-// `io.rs`). Linux toolchain only checks gates — keep the module
-// visible on Linux so clippy doesn't lose track.
+// Applied inside `io::open_connected_fd` (see `io.rs`), dormant until
+// the connected-UDP fast path is wired into dispatch — hence the allow.
 #![allow(dead_code)]
 
 //! Darwin UDP socket tuning.
@@ -9,8 +8,6 @@
 //! Wi-Fi sends are often limited by per-datagram kernel scheduling. The
 //! service type is the one low-cost Darwin hint that can change how the
 //! socket is queued by the host networking stack and Wi-Fi WMM.
-
-#![cfg(target_os = "macos")]
 
 use std::io;
 use std::os::fd::RawFd;

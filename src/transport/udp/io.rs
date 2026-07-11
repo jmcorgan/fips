@@ -800,7 +800,7 @@ pub use platform::{AsyncUdpSocket, UdpRawSocket};
 ///
 /// Gated to Linux/macOS: the rest of `io.rs` compiles more broadly
 /// (Windows uses `tokio::net::UdpSocket`), but the connected fast path
-/// is libc-syscall + `darwin_sockopts` specific.
+/// is libc-syscall + `sockopts_macos` specific.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod connected {
     // The connected-UDP fast path is infra-ready but not yet wired into
@@ -873,7 +873,7 @@ mod connected {
         set_sockopt_int(raw, libc::SOL_SOCKET, libc::SO_REUSEPORT, 1)?;
 
         #[cfg(target_os = "macos")]
-        crate::transport::udp::darwin_sockopts::apply_udp_socket_tuning(raw, "connected-udp-peer");
+        crate::transport::udp::sockopts_macos::apply_udp_socket_tuning(raw, "connected-udp-peer");
 
         // Buffer sizes — try the FORCE variants first (succeed if we
         // have CAP_NET_ADMIN), then fall back to the ceiling-clamped
