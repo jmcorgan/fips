@@ -6,8 +6,8 @@
 //! 802.11 transparently on Linux).
 
 pub mod addr;
-pub mod discovery;
 pub mod io;
+pub mod neighbor;
 pub mod stats;
 
 pub use addr::parse_mac_string;
@@ -17,8 +17,8 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
-use discovery::{DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA, build_beacon, parse_beacon};
 use io::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
+use neighbor::{FRAME_TYPE_BEACON, FRAME_TYPE_DATA, NeighborBuffer, build_beacon, parse_beacon};
 use stats::EthernetStats;
 
 use secp256k1::XOnlyPublicKey;
@@ -56,8 +56,8 @@ pub struct EthernetTransport {
     /// (`[type:1][length:2 LE][payload]`). The 2-byte length field is required
     /// to trim NIC minimum-frame padding before AEAD verification.
     effective_mtu: u16,
-    /// Discovery buffer for discovered peers.
-    discovery_buffer: Arc<DiscoveryBuffer>,
+    /// Neighbor buffer for discovered peers.
+    neighbor_buffer: Arc<NeighborBuffer>,
     /// Transport-level statistics.
     stats: Arc<EthernetStats>,
     /// Node's public key for beacon construction.
@@ -73,7 +73,7 @@ impl EthernetTransport {
         packet_tx: PacketTx,
     ) -> Self {
         let interface = config.interface.clone();
-        let discovery_buffer = Arc::new(DiscoveryBuffer::new(transport_id));
+        let neighbor_buffer = Arc::new(NeighborBuffer::new(transport_id));
         let stats = Arc::new(EthernetStats::new());
 
         Self {
@@ -88,7 +88,7 @@ impl EthernetTransport {
             local_mac: None,
             interface,
             effective_mtu: 1499, // default, updated on start
-            discovery_buffer,
+            neighbor_buffer,
             stats,
             local_pubkey: None,
         }
@@ -164,7 +164,7 @@ impl EthernetTransport {
         let packet_tx = self.packet_tx.clone();
         let mtu = self.effective_mtu;
         let discovery_enabled = self.config.discovery();
-        let discovery_buffer = self.discovery_buffer.clone();
+        let neighbor_buffer = self.neighbor_buffer.clone();
         let stats = self.stats.clone();
         let recv_socket = socket.clone();
 
@@ -175,7 +175,7 @@ impl EthernetTransport {
                 packet_tx,
                 mtu,
                 discovery_enabled,
-                discovery_buffer,
+                neighbor_buffer,
                 stats,
             )
             .await;
@@ -368,7 +368,7 @@ impl Transport for EthernetTransport {
     }
 
     fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> {
-        Ok(self.discovery_buffer.take())
+        Ok(self.neighbor_buffer.take())
     }
 
     fn auto_connect(&self) -> bool {
@@ -391,7 +391,7 @@ async fn ethernet_receive_loop(
     packet_tx: PacketTx,
     mtu: u16,
     discovery_enabled: bool,
-    discovery_buffer: Arc<DiscoveryBuffer>,
+    neighbor_buffer: Arc<NeighborBuffer>,
     stats: Arc<EthernetStats>,
 ) {
     // Buffer with headroom: frame type prefix + MTU + some extra
@@ -449,11 +449,11 @@ async fn ethernet_receive_loop(
                         stats.record_beacon_recv();
 
                         if discovery_enabled && let Some(pubkey) = parse_beacon(&buf[..len]) {
-                            discovery_buffer.add_peer(src_mac, pubkey);
+                            neighbor_buffer.add_peer(src_mac, pubkey);
                             trace!(
                                 transport_id = %transport_id,
                                 remote_mac = %format_mac(&src_mac),
-                                "Discovery beacon received"
+                                "Neighbor beacon received"
                             );
                         }
                     }
@@ -735,6 +735,6 @@ mod tests {
 
     #[test]
     fn test_beacon_size() {
-        assert_eq!(discovery::BEACON_SIZE, 34);
+        assert_eq!(neighbor::BEACON_SIZE, 34);
     }
 }

@@ -1,18 +1,18 @@
-//! Ethernet LAN discovery via broadcast beacons.
+//! Ethernet LAN neighbor detection via broadcast beacons.
 //!
 //! Beacon format (34 bytes total):
-//! - `0x01` (1 byte): frame type = discovery announcement
-//! - `0x01` (1 byte): discovery protocol version
+//! - `0x01` (1 byte): frame type = neighbor beacon
+//! - `0x01` (1 byte): beacon protocol version
 //! - x-only public key (32 bytes): node's Nostr identity
 
 use crate::transport::{DiscoveredPeer, TransportAddr, TransportId};
 use secp256k1::XOnlyPublicKey;
 use std::sync::Mutex;
 
-/// Discovery protocol version.
-pub const DISCOVERY_VERSION: u8 = 0x01;
+/// Beacon protocol version.
+pub const BEACON_VERSION: u8 = 0x01;
 
-/// Frame type prefix for discovery announcement beacons.
+/// Frame type prefix for neighbor beacon frames.
 pub const FRAME_TYPE_BEACON: u8 = 0x01;
 
 /// Frame type prefix for FIPS data frames.
@@ -21,16 +21,16 @@ pub const FRAME_TYPE_DATA: u8 = 0x00;
 /// Total beacon payload size: type(1) + version(1) + pubkey(32).
 pub const BEACON_SIZE: usize = 34;
 
-/// Build a discovery announcement beacon payload.
+/// Build a neighbor beacon payload.
 pub fn build_beacon(pubkey: &XOnlyPublicKey) -> [u8; BEACON_SIZE] {
     let mut buf = [0u8; BEACON_SIZE];
     buf[0] = FRAME_TYPE_BEACON;
-    buf[1] = DISCOVERY_VERSION;
+    buf[1] = BEACON_VERSION;
     buf[2..BEACON_SIZE].copy_from_slice(&pubkey.serialize());
     buf
 }
 
-/// Parse a discovery announcement beacon payload.
+/// Parse a neighbor beacon payload.
 ///
 /// Returns the sender's public key, or None if the payload is invalid.
 pub fn parse_beacon(data: &[u8]) -> Option<XOnlyPublicKey> {
@@ -40,20 +40,20 @@ pub fn parse_beacon(data: &[u8]) -> Option<XOnlyPublicKey> {
     if data[0] != FRAME_TYPE_BEACON {
         return None;
     }
-    if data[1] != DISCOVERY_VERSION {
+    if data[1] != BEACON_VERSION {
         return None;
     }
     XOnlyPublicKey::from_slice(&data[2..34]).ok()
 }
 
 /// Buffer for discovered peers, drained by `discover()`.
-pub struct DiscoveryBuffer {
+pub struct NeighborBuffer {
     transport_id: TransportId,
     peers: Mutex<Vec<DiscoveredPeer>>,
 }
 
-impl DiscoveryBuffer {
-    /// Create a new empty discovery buffer.
+impl NeighborBuffer {
+    /// Create a new empty neighbor buffer.
     pub fn new(transport_id: TransportId) -> Self {
         Self {
             transport_id,
@@ -101,7 +101,7 @@ mod tests {
 
         assert_eq!(beacon.len(), BEACON_SIZE);
         assert_eq!(beacon[0], FRAME_TYPE_BEACON);
-        assert_eq!(beacon[1], DISCOVERY_VERSION);
+        assert_eq!(beacon[1], BEACON_VERSION);
 
         let parsed = parse_beacon(&beacon).unwrap();
         assert_eq!(parsed, pubkey);
@@ -134,8 +134,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         let pubkey = test_pubkey();
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 
@@ -152,8 +152,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer_dedup() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer_dedup() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         let pubkey = test_pubkey();
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 
