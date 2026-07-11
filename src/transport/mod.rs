@@ -34,6 +34,9 @@ use tor::TorTransport;
 use tor::control::TorMonitoringInfo;
 use udp::UdpTransport;
 
+mod stats_common;
+pub(crate) use stats_common::PoolCounters;
+
 mod types;
 pub use types::*;
 
