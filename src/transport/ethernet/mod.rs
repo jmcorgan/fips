@@ -5,9 +5,12 @@
 //! Works on wired Ethernet and WiFi interfaces (kernel mac80211 abstracts
 //! 802.11 transparently on Linux).
 
+pub mod addr;
 pub mod discovery;
-pub mod socket;
+pub mod io;
 pub mod stats;
+
+pub use addr::parse_mac_string;
 
 use super::{
     DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
@@ -15,7 +18,7 @@ use super::{
 };
 use crate::config::EthernetConfig;
 use discovery::{DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA, build_beacon, parse_beacon};
-use socket::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
+use io::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
 use stats::EthernetStats;
 
 use std::sync::Arc;
@@ -607,24 +610,6 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     )
-}
-
-/// Parse a colon-separated MAC string (e.g., "aa:bb:cc:dd:ee:ff") into bytes.
-pub fn parse_mac_string(s: &str) -> Result<[u8; 6], TransportError> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 6 {
-        return Err(TransportError::InvalidAddress(format!(
-            "invalid MAC format: expected 6 colon-separated hex bytes, got '{}'",
-            s
-        )));
-    }
-    let mut mac = [0u8; 6];
-    for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16).map_err(|_| {
-            TransportError::InvalidAddress(format!("invalid hex byte '{}' in MAC address", part))
-        })?;
-    }
-    Ok(mac)
 }
 
 // ============================================================================

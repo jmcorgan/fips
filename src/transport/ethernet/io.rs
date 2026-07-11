@@ -1,7 +1,7 @@
 //! Raw Ethernet socket abstraction.
 //!
-//! Platform-specific implementations live in `socket_linux.rs` (AF_PACKET)
-//! and `socket_macos.rs` (BPF). This module re-exports `PacketSocket` and
+//! Platform-specific implementations live in `io_linux.rs` (AF_PACKET)
+//! and `io_macos.rs` (BPF). This module re-exports `PacketSocket` and
 //! provides `AsyncPacketSocket`.
 
 use crate::transport::TransportError;
@@ -11,11 +11,11 @@ pub const ETHERNET_BROADCAST: [u8; 6] = [0xff; 6];
 
 // Platform-specific PacketSocket implementation.
 #[cfg(target_os = "linux")]
-#[path = "socket_linux.rs"]
+#[path = "io_linux.rs"]
 mod platform;
 
 #[cfg(target_os = "macos")]
-#[path = "socket_macos.rs"]
+#[path = "io_macos.rs"]
 mod platform;
 
 #[cfg(unix)]
