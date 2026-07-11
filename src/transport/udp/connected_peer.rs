@@ -37,7 +37,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
 /// A `connect()`-ed UDP socket for one established peer.
 ///
@@ -77,93 +77,12 @@ impl ConnectedPeerSocket {
         recv_buf: usize,
         send_buf: usize,
     ) -> io::Result<Self> {
-        // Family must match between local and peer.
-        if local_addr.is_ipv4() != peer_addr.is_ipv4() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ConnectedPeerSocket: local + peer address families differ",
-            ));
-        }
-
-        let domain = if local_addr.is_ipv4() {
-            libc::AF_INET
-        } else {
-            libc::AF_INET6
-        };
-        // Linux accepts SOCK_NONBLOCK | SOCK_CLOEXEC directly. Darwin
-        // does not, so we set the equivalent fd flags with fcntl below.
-        #[cfg(target_os = "linux")]
-        let typ = libc::SOCK_DGRAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
-        #[cfg(not(target_os = "linux"))]
-        let typ = libc::SOCK_DGRAM;
-        let fd = unsafe { libc::socket(domain, typ, libc::IPPROTO_UDP) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // Take ownership of the fd so we close it on any error below.
-        let sock = ConnectedPeerSocket {
-            fd,
+        let fd = open_connected_fd(local_addr, peer_addr, recv_buf, send_buf)?;
+        Ok(Self {
+            fd: fd.into_raw_fd(),
             peer_addr,
             local_addr,
-        };
-        #[cfg(not(target_os = "linux"))]
-        sock.set_nonblocking_cloexec()?;
-
-        // SO_REUSEADDR lets us bind to the same local port the listen
-        // socket already holds. SO_REUSEPORT lets the UDP demux permit
-        // several sockets bound to the same address and route the peer
-        // 5-tuple to the connected sibling.
-        sock.set_sockopt_int(libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
-        sock.set_sockopt_int(libc::SOL_SOCKET, libc::SO_REUSEPORT, 1)?;
-
-        #[cfg(target_os = "macos")]
-        crate::transport::udp::darwin_sockopts::apply_udp_socket_tuning(
-            sock.fd,
-            "connected-udp-peer",
-        );
-
-        // Buffer sizes — try the FORCE variants first (succeed if we
-        // have CAP_NET_ADMIN), then fall back to the ceiling-clamped
-        // normal variants. The ceiling-clamped path always succeeds
-        // even if it gives us less than we asked for.
-        #[cfg(target_os = "linux")]
-        {
-            sock.set_buf_size(libc::SO_RCVBUFFORCE, libc::SO_RCVBUF, recv_buf);
-            sock.set_buf_size(libc::SO_SNDBUFFORCE, libc::SO_SNDBUF, send_buf);
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            sock.set_buf_size(libc::SO_RCVBUF, recv_buf);
-            sock.set_buf_size(libc::SO_SNDBUF, send_buf);
-        }
-
-        // Bind to the wildcard local address (same port as listen socket).
-        let local_sa: socket2::SockAddr = local_addr.into();
-        let bind_r = unsafe {
-            libc::bind(
-                sock.fd,
-                local_sa.as_ptr() as *const libc::sockaddr,
-                local_sa.len(),
-            )
-        };
-        if bind_r < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // Connect to the peer — locks in the per-packet kernel route.
-        let peer_sa: socket2::SockAddr = peer_addr.into();
-        let conn_r = unsafe {
-            libc::connect(
-                sock.fd,
-                peer_sa.as_ptr() as *const libc::sockaddr,
-                peer_sa.len(),
-            )
-        };
-        if conn_r < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(sock)
+        })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -262,6 +181,113 @@ impl ConnectedPeerSocket {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
+}
+
+/// Open a `connect()`-ed UDP socket for one peer and return the owning
+/// fd. Performs the full socket / sockopt / bind / connect syscall
+/// sequence (see [`ConnectedPeerSocket`] for the rationale). On any
+/// mid-construction failure the fd is closed before the error is
+/// returned; on success ownership of the fd transfers to the returned
+/// [`OwnedFd`]. `ConnectedPeerSocket::open` is a thin wrapper that
+/// adopts this fd into the struct.
+pub(crate) fn open_connected_fd(
+    local_addr: SocketAddr,
+    peer_addr: SocketAddr,
+    recv_buf: usize,
+    send_buf: usize,
+) -> io::Result<OwnedFd> {
+    // Family must match between local and peer.
+    if local_addr.is_ipv4() != peer_addr.is_ipv4() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ConnectedPeerSocket: local + peer address families differ",
+        ));
+    }
+
+    let domain = if local_addr.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    // Linux accepts SOCK_NONBLOCK | SOCK_CLOEXEC directly. Darwin
+    // does not, so we set the equivalent fd flags with fcntl below.
+    #[cfg(target_os = "linux")]
+    let typ = libc::SOCK_DGRAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let typ = libc::SOCK_DGRAM;
+    let fd = unsafe { libc::socket(domain, typ, libc::IPPROTO_UDP) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Take ownership of the fd in a temporary wrapper so its Drop
+    // closes the fd on any error path below. Ownership is transferred
+    // out (via mem::forget + OwnedFd) only after connect() succeeds.
+    let sock = ConnectedPeerSocket {
+        fd,
+        peer_addr,
+        local_addr,
+    };
+    #[cfg(not(target_os = "linux"))]
+    sock.set_nonblocking_cloexec()?;
+
+    // SO_REUSEADDR lets us bind to the same local port the listen
+    // socket already holds. SO_REUSEPORT lets the UDP demux permit
+    // several sockets bound to the same address and route the peer
+    // 5-tuple to the connected sibling.
+    sock.set_sockopt_int(libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
+    sock.set_sockopt_int(libc::SOL_SOCKET, libc::SO_REUSEPORT, 1)?;
+
+    #[cfg(target_os = "macos")]
+    crate::transport::udp::darwin_sockopts::apply_udp_socket_tuning(sock.fd, "connected-udp-peer");
+
+    // Buffer sizes — try the FORCE variants first (succeed if we
+    // have CAP_NET_ADMIN), then fall back to the ceiling-clamped
+    // normal variants. The ceiling-clamped path always succeeds
+    // even if it gives us less than we asked for.
+    #[cfg(target_os = "linux")]
+    {
+        sock.set_buf_size(libc::SO_RCVBUFFORCE, libc::SO_RCVBUF, recv_buf);
+        sock.set_buf_size(libc::SO_SNDBUFFORCE, libc::SO_SNDBUF, send_buf);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        sock.set_buf_size(libc::SO_RCVBUF, recv_buf);
+        sock.set_buf_size(libc::SO_SNDBUF, send_buf);
+    }
+
+    // Bind to the wildcard local address (same port as listen socket).
+    let local_sa: socket2::SockAddr = local_addr.into();
+    let bind_r = unsafe {
+        libc::bind(
+            sock.fd,
+            local_sa.as_ptr() as *const libc::sockaddr,
+            local_sa.len(),
+        )
+    };
+    if bind_r < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Connect to the peer — locks in the per-packet kernel route.
+    let peer_sa: socket2::SockAddr = peer_addr.into();
+    let conn_r = unsafe {
+        libc::connect(
+            sock.fd,
+            peer_sa.as_ptr() as *const libc::sockaddr,
+            peer_sa.len(),
+        )
+    };
+    if conn_r < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Success: transfer ownership of the fd to an OwnedFd. Neutralize
+    // the temporary wrapper's Drop so the fd is not closed here — its
+    // close-on-error role is done. Every early error above still drops
+    // `sock` and closes the fd, unchanged from before.
+    let raw = sock.fd;
+    std::mem::forget(sock);
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
 impl AsRawFd for ConnectedPeerSocket {
