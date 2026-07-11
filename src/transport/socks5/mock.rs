@@ -1,15 +1,21 @@
-//! Mock SOCKS5 server for testing the Nym transport's connect path.
+//! Mock SOCKS5 server for testing the proxied (Tor / Nym) transports.
 //!
-//! A copy of the Tor transport's mock, implementing just enough of the
-//! SOCKS5 protocol (RFC 1928) to support the no-auth (and, defensively,
-//! username/password) CONNECT flow, then proxying bytes bidirectionally to a
-//! fixed target.
+//! Implements just enough of the SOCKS5 protocol (RFC 1928) to support the
+//! no-auth and username/password (RFC 1929) CONNECT flows, then proxies bytes
+//! bidirectionally to a fixed target.
 //!
-//! Difference from the Tor mock: this one accepts connections in a loop and
-//! handles each on its own task. `NymTransport::start_async` first probes the
-//! proxy port for readiness (opening and immediately dropping a connection);
-//! looping lets the mock shrug that probe off — its handler returns on the
-//! short first read — and still serve the real data connection that follows.
+//! Combines the supersets of the two former per-transport mocks:
+//!
+//! - **Accept loop with per-connection spawn** (from the Nym mock).
+//!   `NymTransport::start_async` first probes the proxy port for readiness
+//!   (opening and immediately dropping a connection); handling each connection
+//!   on its own task lets the mock shrug that probe off — the handler returns
+//!   on the short first read — and still serve the real data connection that
+//!   follows.
+//! - **`with_reply_code` / `reply_code` injection** (from the Tor mock). A
+//!   non-success REP code (e.g. `0x05` Connection refused) is sent as an error
+//!   reply and the connection is closed without proxying, exercising the
+//!   client's connect-error path.
 
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,14 +37,19 @@ const AUTH_SUBNEG_SUCCESS: u8 = 0x00;
 
 /// A minimal mock SOCKS5 proxy server for testing.
 ///
-/// Accepts connections in a loop, performs the SOCKS5 handshake (supporting
-/// both no-auth and username/password auth), then connects to a fixed target
-/// address and proxies bytes bidirectionally.
+/// Accepts connections in a loop, handling each on its own task: performs the
+/// SOCKS5 handshake (supporting both no-auth and username/password auth), then
+/// connects to a fixed target address and proxies bytes bidirectionally.
 pub struct MockSocks5Server {
     /// Address the mock proxy is listening on.
     addr: SocketAddr,
     /// The real target address to connect to (ignores SOCKS5 requested target).
     target_addr: SocketAddr,
+    /// SOCKS5 reply code (REP field) to send in the CONNECT reply. When this
+    /// is `REP_SUCCESS` (0x00) the server proxies to `target_addr`; any other
+    /// value is sent as an error reply and the connection is closed without
+    /// proxying. Use `0x05` (Connection refused) to drive the refused path.
+    reply_code: u8,
     /// Listener handle.
     listener: Option<TcpListener>,
 }
@@ -46,18 +57,28 @@ pub struct MockSocks5Server {
 impl MockSocks5Server {
     /// Create a new mock SOCKS5 server that forwards to the given target.
     ///
-    /// Binds to `127.0.0.1:0` (OS-assigned port).
+    /// Binds to `127.0.0.1:0` (OS-assigned port). Replies with success and
+    /// proxies bytes bidirectionally.
     pub async fn new(target_addr: SocketAddr) -> std::io::Result<Self> {
+        Self::with_reply_code(target_addr, REP_SUCCESS).await
+    }
+
+    /// Create a mock SOCKS5 server that replies to the CONNECT request with
+    /// the given REP code. A non-success code (e.g. `0x05` Connection refused)
+    /// causes the server to send the error reply and close the connection
+    /// without proxying, exercising the client's connect-error path.
+    pub async fn with_reply_code(target_addr: SocketAddr, reply_code: u8) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         Ok(Self {
             addr,
             target_addr,
+            reply_code,
             listener: Some(listener),
         })
     }
 
-    /// Get the proxy's listen address (for `NymConfig.socks5_addr`).
+    /// Get the proxy's listen address (for `socks5_addr` config).
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -68,6 +89,7 @@ impl MockSocks5Server {
     pub fn spawn(mut self) -> JoinHandle<()> {
         let listener = self.listener.take().expect("listener already consumed");
         let target_addr = self.target_addr;
+        let reply_code = self.reply_code;
 
         tokio::spawn(async move {
             loop {
@@ -78,14 +100,14 @@ impl MockSocks5Server {
                 // Handle each connection independently so the readiness probe
                 // (which opens and drops a connection) cannot block the real
                 // data connection behind it.
-                tokio::spawn(handle_conn(client, target_addr));
+                tokio::spawn(handle_conn(client, target_addr, reply_code));
             }
         })
     }
 }
 
 /// Handle a single accepted connection: SOCKS5 handshake then byte proxy.
-async fn handle_conn(mut client: tokio::net::TcpStream, target_addr: SocketAddr) {
+async fn handle_conn(mut client: tokio::net::TcpStream, target_addr: SocketAddr, reply_code: u8) {
     // === Method negotiation ===
     // Client sends: [version, nmethods, methods...]
     let mut ver_nmethods = [0u8; 2];
@@ -137,6 +159,7 @@ async fn handle_conn(mut client: tokio::net::TcpStream, target_addr: SocketAddr)
         let mut passwd = vec![0u8; plen];
         client.read_exact(&mut passwd).await.expect("read password");
 
+        // Always accept (Tor uses these as isolation keys, not real auth).
         client
             .write_all(&[AUTH_SUBNEG_VERSION, AUTH_SUBNEG_SUCCESS])
             .await
@@ -176,6 +199,28 @@ async fn handle_conn(mut client: tokio::net::TcpStream, target_addr: SocketAddr)
                 .expect("read domain addr");
         }
         other => panic!("unsupported ATYP: {}", other),
+    }
+
+    // Error path: reply with the configured REP code and close without
+    // proxying (the client maps the REP code to a tokio_socks::Error).
+    if reply_code != REP_SUCCESS {
+        let reply = [
+            SOCKS_VERSION,
+            reply_code,
+            0x00, // RSV
+            ATYP_IPV4,
+            0,
+            0,
+            0,
+            0, // bind addr
+            0,
+            0, // bind port
+        ];
+        client
+            .write_all(&reply)
+            .await
+            .expect("write error connect reply");
+        return;
     }
 
     // Connect to the real target.
