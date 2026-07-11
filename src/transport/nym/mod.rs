@@ -14,19 +14,17 @@
 
 pub mod stats;
 
-#[cfg(test)]
-mod mock_socks5;
-
 use super::{
-    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
-    TransportError, TransportId, TransportState, TransportType,
+    ConnectionState, DiscoveredPeer, PacketTx, Transport, TransportAddr, TransportError,
+    TransportId, TransportState, TransportType,
 };
 use crate::config::NymConfig;
-use crate::transport::framing::read_fmp_packet;
+use crate::transport::socks5::{
+    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, Socks5Auth,
+    Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
+};
 use stats::NymStats;
 
-use futures::FutureExt;
-use socket2::TcpKeepalive;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,40 +33,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tokio_socks::tcp::Socks5Stream;
 use tracing::{debug, info, trace, warn};
-
-// ============================================================================
-// Connection Pool
-// ============================================================================
-
-/// State for a single Nym connection to a peer.
-struct NymConnection {
-    /// Write half of the split stream.
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-    /// Receive task for this connection.
-    recv_task: JoinHandle<()>,
-    /// MTU for this connection.
-    #[allow(dead_code)]
-    mtu: u16,
-    /// When the connection was established.
-    #[allow(dead_code)]
-    established_at: Instant,
-}
-
-/// Shared connection pool.
-type ConnectionPool = Arc<Mutex<HashMap<TransportAddr, NymConnection>>>;
-
-/// A pending background connection attempt.
-struct ConnectingEntry {
-    /// Background task performing SOCKS5 connect + socket configuration.
-    task: JoinHandle<Result<(TcpStream, u16), TransportError>>,
-}
-
-/// Map of addresses with background connection attempts in progress.
-type ConnectingPool = Arc<Mutex<HashMap<TransportAddr, ConnectingEntry>>>;
 
 // ============================================================================
 // Nym Transport
@@ -89,7 +55,7 @@ pub struct NymTransport {
     /// Current state.
     state: TransportState,
     /// Connection pool: addr -> per-connection state.
-    pool: ConnectionPool,
+    pool: ProxiedPool<()>,
     /// Pending connection attempts: addr -> background connect task.
     connecting: ConnectingPool,
     /// Channel for delivering received packets to Node.
@@ -347,20 +313,16 @@ impl NymTransport {
             "Connecting via Nym mixnet SOCKS5 proxy"
         );
 
-        let connect_start = Instant::now();
-        let socks_result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-            match target_addr {
-                TargetAddr::Ip(socket_addr) => Socks5Stream::connect(proxy_addr, socket_addr).await,
-                TargetAddr::Hostname(host, port) => {
-                    Socks5Stream::connect(proxy_addr, (host.as_str(), port)).await
-                }
-            }
-        })
-        .await;
+        let dialer = Socks5Dialer {
+            proxy_addr: proxy_addr.to_string(),
+            connect_timeout: Duration::from_millis(timeout_ms),
+            auth: Socks5Auth::None,
+        };
 
-        let stream = match socks_result {
-            Ok(Ok(socks_stream)) => socks_stream.into_inner(),
-            Ok(Err(e)) => {
+        let connect_start = Instant::now();
+        let stream = match dialer.dial(&target_addr).await {
+            Ok(stream) => stream,
+            Err(DialError::Socks(e)) => {
                 self.stats.record_socks5_error();
                 warn!(
                     transport_id = %self.transport_id,
@@ -371,7 +333,7 @@ impl NymTransport {
                 );
                 return Err(TransportError::ConnectionRefused);
             }
-            Err(_) => {
+            Err(DialError::Timeout) => {
                 self.stats.record_connect_timeout();
                 warn!(
                     transport_id = %self.transport_id,
@@ -381,17 +343,8 @@ impl NymTransport {
                 );
                 return Err(TransportError::Timeout);
             }
+            Err(DialError::Setup(e)) => return Err(e),
         };
-
-        // Configure socket options via socket2
-        let std_stream = stream
-            .into_std()
-            .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
-        configure_socket(&std_stream)?;
-
-        // Convert back to tokio
-        let stream = TcpStream::from_std(std_stream)
-            .map_err(|e| TransportError::StartFailed(format!("from_std: {}", e)))?;
 
         // Split and spawn receive task
         let (read_half, write_half) = stream.into_split();
@@ -417,11 +370,12 @@ impl NymTransport {
             .await;
         });
 
-        let conn = NymConnection {
+        let conn = ProxiedConnection {
             writer: writer.clone(),
             recv_task,
             mtu,
             established_at: Instant::now(),
+            meta: (),
         };
 
         let mut pool = self.pool.lock().await;
@@ -485,29 +439,23 @@ impl NymTransport {
                 "Nym SOCKS5 CONNECT starting (this may take several minutes through mixnet)"
             );
 
-            let socks_result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-                match target_addr {
-                    TargetAddr::Ip(socket_addr) => {
-                        Socks5Stream::connect(proxy_addr.as_str(), socket_addr).await
-                    }
-                    TargetAddr::Hostname(host, port) => {
-                        Socks5Stream::connect(proxy_addr.as_str(), (host.as_str(), port)).await
-                    }
-                }
-            })
-            .await;
+            let dialer = Socks5Dialer {
+                proxy_addr,
+                connect_timeout: Duration::from_millis(timeout_ms),
+                auth: Socks5Auth::None,
+            };
 
-            let stream = match socks_result {
-                Ok(Ok(socks_stream)) => {
+            let stream = match dialer.dial(&target_addr).await {
+                Ok(stream) => {
                     debug!(
                         transport_id = %transport_id,
                         remote_addr = %remote_addr,
                         elapsed_secs = connect_start.elapsed().as_secs(),
                         "Nym SOCKS5 CONNECT succeeded"
                     );
-                    socks_stream.into_inner()
+                    stream
                 }
-                Ok(Err(e)) => {
+                Err(DialError::Socks(e)) => {
                     warn!(
                         transport_id = %transport_id,
                         remote_addr = %remote_addr,
@@ -517,7 +465,7 @@ impl NymTransport {
                     );
                     return Err(TransportError::ConnectionRefused);
                 }
-                Err(_) => {
+                Err(DialError::Timeout) => {
                     warn!(
                         transport_id = %transport_id,
                         remote_addr = %remote_addr,
@@ -528,19 +476,10 @@ impl NymTransport {
                     );
                     return Err(TransportError::Timeout);
                 }
+                Err(DialError::Setup(e)) => return Err(e),
             };
 
-            // Configure socket options via socket2
-            let std_stream = stream
-                .into_std()
-                .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
-            configure_socket(&std_stream)?;
-
             let mtu = config.mtu();
-
-            // Convert back to tokio
-            let stream = TcpStream::from_std(std_stream)
-                .map_err(|e| TransportError::StartFailed(format!("from_std: {}", e)))?;
 
             Ok((stream, mtu))
         });
@@ -553,43 +492,9 @@ impl NymTransport {
 
     /// Query the state of a connection to a remote address.
     pub fn connection_state_sync(&self, addr: &TransportAddr) -> ConnectionState {
-        // Check established pool first
-        if let Ok(pool) = self.pool.try_lock() {
-            if pool.contains_key(addr) {
-                return ConnectionState::Connected;
-            }
-        } else {
-            return ConnectionState::Connecting;
-        }
-
-        // Check connecting pool
-        let mut connecting = match self.connecting.try_lock() {
-            Ok(c) => c,
-            Err(_) => return ConnectionState::Connecting,
-        };
-
-        let entry = match connecting.get_mut(addr) {
-            Some(e) => e,
-            None => return ConnectionState::None,
-        };
-
-        if !entry.task.is_finished() {
-            return ConnectionState::Connecting;
-        }
-
-        // Task is done — take the result
-        let addr_clone = addr.clone();
-        let task = connecting.remove(&addr_clone).unwrap().task;
-
-        match task.now_or_never() {
-            Some(Ok(Ok((stream, mtu)))) => {
-                self.promote_connection(addr, stream, mtu);
-                ConnectionState::Connected
-            }
-            Some(Ok(Err(e))) => ConnectionState::Failed(format!("{}", e)),
-            Some(Err(e)) => ConnectionState::Failed(format!("task failed: {}", e)),
-            None => ConnectionState::Connecting,
-        }
+        poll_connecting(&self.pool, &self.connecting, addr, |stream, mtu| {
+            self.promote_connection(addr, stream, mtu)
+        })
     }
 
     /// Promote a completed background connection to the established pool.
@@ -616,11 +521,12 @@ impl NymTransport {
             .await;
         });
 
-        let conn = NymConnection {
+        let conn = ProxiedConnection {
             writer,
             recv_task,
             mtu,
             established_at: Instant::now(),
+            meta: (),
         };
 
         if let Ok(mut pool) = self.pool.try_lock() {
@@ -707,23 +613,14 @@ impl Transport for NymTransport {
 // Address Parsing
 // ============================================================================
 
-/// Target address for the SOCKS5 CONNECT request.
-#[derive(Clone, Debug)]
-enum TargetAddr {
-    /// Numeric IP:port.
-    Ip(SocketAddr),
-    /// Hostname:port (DNS resolved by the exit node).
-    Hostname(String, u16),
-}
-
-/// Parse a TransportAddr string into a target address.
-fn parse_target_addr(addr: &TransportAddr) -> Result<TargetAddr, TransportError> {
+/// Parse a TransportAddr string into a shared SOCKS5 target address.
+fn parse_target_addr(addr: &TransportAddr) -> Result<SocksTarget, TransportError> {
     let s = addr.as_str().ok_or_else(|| {
         TransportError::InvalidAddress("Nym address must be a valid UTF-8 string".into())
     })?;
 
     if let Ok(socket_addr) = s.parse::<SocketAddr>() {
-        Ok(TargetAddr::Ip(socket_addr))
+        Ok(SocksTarget::Ip(socket_addr))
     } else {
         let (host, port_str) = s.rsplit_once(':').ok_or_else(|| {
             TransportError::InvalidAddress(format!("invalid address (expected host:port): {}", s))
@@ -731,7 +628,7 @@ fn parse_target_addr(addr: &TransportAddr) -> Result<TargetAddr, TransportError>
         let port: u16 = port_str
             .parse()
             .map_err(|_| TransportError::InvalidAddress(format!("invalid port: {}", s)))?;
-        Ok(TargetAddr::Hostname(host.to_string(), port))
+        Ok(SocksTarget::Hostname(host.to_string(), port))
     }
 }
 
@@ -740,87 +637,38 @@ fn parse_target_addr(addr: &TransportAddr) -> Result<TargetAddr, TransportError>
 // ============================================================================
 
 /// Per-connection Nym receive loop.
+///
+/// Thin wrapper over the shared `proxied_receive_loop`: nym has no pool
+/// counters, so its teardown hook is a no-op. Emits the terminal
+/// "receive loop stopped" debug (without a `direction` field) that the
+/// shared loop deliberately leaves to each transport.
 async fn nym_receive_loop(
-    mut reader: tokio::net::tcp::OwnedReadHalf,
+    reader: tokio::net::tcp::OwnedReadHalf,
     transport_id: TransportId,
     remote_addr: TransportAddr,
     packet_tx: PacketTx,
-    pool: ConnectionPool,
+    pool: ProxiedPool<()>,
     mtu: u16,
     stats: Arc<NymStats>,
 ) {
-    debug!(
-        transport_id = %transport_id,
-        remote_addr = %remote_addr,
-        "Nym receive loop starting"
-    );
-
-    loop {
-        match read_fmp_packet(&mut reader, mtu).await {
-            Ok(data) => {
-                stats.record_recv(data.len());
-
-                trace!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    bytes = data.len(),
-                    "Nym packet received"
-                );
-
-                let packet = ReceivedPacket::new(transport_id, remote_addr.clone(), data);
-
-                if packet_tx.send(packet).await.is_err() {
-                    debug!(
-                        transport_id = %transport_id,
-                        "Packet channel closed, stopping Nym receive loop"
-                    );
-                    break;
-                }
-            }
-            Err(e) => {
-                stats.record_recv_error();
-                debug!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    error = %e,
-                    "Nym receive error, removing connection"
-                );
-                break;
-            }
-        }
-    }
-
-    // Clean up: remove ourselves from the pool
-    let mut pool_guard = pool.lock().await;
-    pool_guard.remove(&remote_addr);
+    proxied_receive_loop(
+        reader,
+        transport_id,
+        remote_addr.clone(),
+        packet_tx,
+        pool,
+        mtu,
+        stats,
+        "Nym",
+        |_stats, _meta| {},
+    )
+    .await;
 
     debug!(
         transport_id = %transport_id,
         remote_addr = %remote_addr,
         "Nym receive loop stopped"
     );
-}
-
-// ============================================================================
-// Socket Configuration
-// ============================================================================
-
-/// Configure socket options on a SOCKS5-connected stream.
-fn configure_socket(stream: &std::net::TcpStream) -> Result<(), TransportError> {
-    let socket = socket2::SockRef::from(stream);
-
-    // TCP_NODELAY — always enable for FIPS (latency-sensitive protocol messages)
-    socket
-        .set_tcp_nodelay(true)
-        .map_err(|e| TransportError::StartFailed(format!("set nodelay: {}", e)))?;
-
-    // TCP keepalive (30s, matching TCP transport)
-    let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(30));
-    socket
-        .set_tcp_keepalive(&keepalive)
-        .map_err(|e| TransportError::StartFailed(format!("set keepalive: {}", e)))?;
-
-    Ok(())
 }
 
 // ============================================================================
@@ -869,7 +717,7 @@ mod tests {
     fn test_parse_target_addr_ipv4() {
         let addr = TransportAddr::from_string("192.0.2.10:2121");
         match parse_target_addr(&addr).unwrap() {
-            TargetAddr::Ip(socket_addr) => {
+            SocksTarget::Ip(socket_addr) => {
                 assert_eq!(
                     socket_addr,
                     "192.0.2.10:2121".parse::<SocketAddr>().unwrap()
@@ -886,7 +734,7 @@ mod tests {
         // correctly (this is the path that actually dials peers).
         let addr = TransportAddr::from_string("[2001:db8::1]:443");
         match parse_target_addr(&addr).unwrap() {
-            TargetAddr::Ip(socket_addr) => {
+            SocksTarget::Ip(socket_addr) => {
                 assert_eq!(
                     socket_addr,
                     "[2001:db8::1]:443".parse::<SocketAddr>().unwrap()
@@ -900,7 +748,7 @@ mod tests {
     fn test_parse_target_addr_hostname() {
         let addr = TransportAddr::from_string("peer.example.com:8443");
         match parse_target_addr(&addr).unwrap() {
-            TargetAddr::Hostname(host, port) => {
+            SocksTarget::Hostname(host, port) => {
                 assert_eq!(host, "peer.example.com");
                 assert_eq!(port, 8443);
             }
@@ -1074,8 +922,8 @@ mod tests {
     // ========================================================================
 
     use crate::config::TcpConfig;
+    use crate::transport::socks5::mock::MockSocks5Server;
     use crate::transport::tcp::TcpTransport;
-    use mock_socks5::MockSocks5Server;
 
     /// msg1 wire size for the XX handshake: 4 prefix + 37 payload = 41 bytes.
     const MSG1_WIRE_SIZE: usize = 41;

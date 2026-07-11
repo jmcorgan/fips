@@ -7,6 +7,7 @@
 #[cfg(test)]
 pub mod loopback;
 pub mod nym;
+pub mod socks5;
 pub mod tcp;
 pub mod tor;
 pub mod udp;

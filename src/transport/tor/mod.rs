@@ -23,19 +23,19 @@ pub mod stats;
 
 #[cfg(test)]
 mod mock_control;
-#[cfg(test)]
-mod mock_socks5;
 
 use super::{
-    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
-    TransportError, TransportId, TransportState, TransportType,
+    ConnectionState, DiscoveredPeer, PacketTx, Transport, TransportAddr, TransportError,
+    TransportId, TransportState, TransportType,
 };
 use crate::config::TorConfig;
-use crate::transport::framing::read_fmp_packet;
+use crate::transport::socks5::{
+    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, Socks5Auth,
+    Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
+};
 use control::{ControlAuth, TorControlClient, TorMonitoringInfo};
 use stats::TorStats;
 
-use futures::FutureExt;
 use socket2::TcpKeepalive;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -47,32 +47,22 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tokio_socks::tcp::Socks5Stream;
 use tracing::{debug, info, trace, warn};
 
 // ============================================================================
-// Tor Address Types
+// Address Parsing
 // ============================================================================
 
-/// Tor-specific address type for SOCKS5 CONNECT.
-#[derive(Clone, Debug)]
-pub enum TorAddr {
-    /// .onion hidden service address (hostname, port).
-    Onion(String, u16),
-    /// Clearnet address routed through Tor (IP, port).
-    Clearnet(SocketAddr),
-    /// Clearnet hostname routed through Tor (hostname, port).
-    /// Passed as hostname to SOCKS5 so Tor resolves it — avoids local
-    /// DNS leaks and is compatible with SafeSocks 1.
-    ClearnetHostname(String, u16),
-}
-
-/// Parse a TransportAddr string into a TorAddr.
+/// Parse a TransportAddr string into a shared SOCKS5 target address.
 ///
-/// If the address contains ".onion:", parse as an onion address.
-/// If it parses as a numeric IP:port, use Clearnet.
+/// If the address contains ".onion:", parse as an onion hostname.
+/// If it parses as a numeric IP:port, use an IP target.
 /// Otherwise, treat as a clearnet hostname:port for Tor-side DNS resolution.
-fn parse_tor_addr(addr: &TransportAddr) -> Result<TorAddr, TransportError> {
+/// Onion and clearnet hostnames both become `SocksTarget::Hostname` — they
+/// were already dialed identically (`connect_with_password` with a domain
+/// target) — while the per-transport parse rules (onion detection, the
+/// fully-qualified-hostname requirement) are preserved here.
+fn parse_tor_addr(addr: &TransportAddr) -> Result<SocksTarget, TransportError> {
     let s = addr.as_str().ok_or_else(|| {
         TransportError::InvalidAddress("Tor address must be a valid UTF-8 string".into())
     })?;
@@ -85,10 +75,10 @@ fn parse_tor_addr(addr: &TransportAddr) -> Result<TorAddr, TransportError> {
         let port: u16 = port_str.parse().map_err(|_| {
             TransportError::InvalidAddress(format!("invalid port in onion address: {}", s))
         })?;
-        Ok(TorAddr::Onion(host.to_string(), port))
+        Ok(SocksTarget::Hostname(host.to_string(), port))
     } else if let Ok(socket_addr) = s.parse::<SocketAddr>() {
         // Numeric IP:port
-        Ok(TorAddr::Clearnet(socket_addr))
+        Ok(SocksTarget::Ip(socket_addr))
     } else {
         // Hostname:port — pass through SOCKS5 for Tor-side DNS resolution
         let (host, port_str) = s.rsplit_once(':').ok_or_else(|| {
@@ -103,7 +93,7 @@ fn parse_tor_addr(addr: &TransportAddr) -> Result<TorAddr, TransportError> {
                 host
             )));
         }
-        Ok(TorAddr::ClearnetHostname(host.to_string(), port))
+        Ok(SocksTarget::Hostname(host.to_string(), port))
     }
 }
 
@@ -121,37 +111,6 @@ enum Direction {
     /// Outbound — initiated via SOCKS5 connect to a remote onion.
     Outbound,
 }
-
-/// State for a single Tor connection to a peer.
-struct TorConnection {
-    /// Write half of the split stream.
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-    /// Receive task for this connection.
-    recv_task: JoinHandle<()>,
-    /// MTU for this connection.
-    #[allow(dead_code)]
-    mtu: u16,
-    /// When the connection was established.
-    #[allow(dead_code)]
-    established_at: Instant,
-    /// Direction of the connection — drives pool-inbound/outbound accounting.
-    direction: Direction,
-}
-
-/// Shared connection pool.
-type ConnectionPool = Arc<Mutex<HashMap<TransportAddr, TorConnection>>>;
-
-/// A pending background connection attempt.
-///
-/// Holds the JoinHandle for a spawned SOCKS5 connect task. The task
-/// produces a configured `TcpStream` and MTU on success.
-struct ConnectingEntry {
-    /// Background task performing SOCKS5 connect + socket configuration.
-    task: JoinHandle<Result<(TcpStream, u16), TransportError>>,
-}
-
-/// Map of addresses with background connection attempts in progress.
-type ConnectingPool = Arc<Mutex<HashMap<TransportAddr, ConnectingEntry>>>;
 
 // ============================================================================
 // Tor Transport
@@ -173,7 +132,7 @@ pub struct TorTransport {
     /// Current state.
     state: TransportState,
     /// Connection pool: addr -> per-connection state.
-    pool: ConnectionPool,
+    pool: ProxiedPool<Direction>,
     /// Pending connection attempts: addr -> background connect task.
     connecting: ConnectingPool,
     /// Channel for delivering received packets to Node.
@@ -537,14 +496,14 @@ impl TorTransport {
         for (addr, conn) in pool.drain() {
             conn.recv_task.abort();
             let _ = conn.recv_task.await;
-            match conn.direction {
+            match conn.meta {
                 Direction::Inbound => self.stats.record_pool_inbound_removed(),
                 Direction::Outbound => self.stats.record_pool_outbound_removed(),
             }
             debug!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
-                direction = ?conn.direction,
+                direction = ?conn.meta,
                 "Tor connection closed (transport stopping)"
             );
         }
@@ -711,7 +670,7 @@ impl TorTransport {
                 let mut pool = self.pool.lock().await;
                 if let Some(conn) = pool.remove(addr) {
                     conn.recv_task.abort();
-                    match conn.direction {
+                    match conn.meta {
                         Direction::Inbound => self.stats.record_pool_inbound_removed(),
                         Direction::Outbound => self.stats.record_pool_outbound_removed(),
                     }
@@ -746,35 +705,19 @@ impl TorTransport {
         // Uses username/password auth for stream isolation: each destination
         // gets its own Tor circuit via IsolateSOCKSAuth. The credentials are
         // not verified by Tor — they serve purely as circuit isolation keys.
-        let isolation_key = addr.to_string();
-        let connect_start = Instant::now();
-        let socks_result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-            match &tor_addr {
-                TorAddr::Onion(host, port) | TorAddr::ClearnetHostname(host, port) => {
-                    Socks5Stream::connect_with_password(
-                        proxy_addr,
-                        (host.as_str(), *port),
-                        "fips",
-                        &isolation_key,
-                    )
-                    .await
-                }
-                TorAddr::Clearnet(socket_addr) => {
-                    Socks5Stream::connect_with_password(
-                        proxy_addr,
-                        *socket_addr,
-                        "fips",
-                        &isolation_key,
-                    )
-                    .await
-                }
-            }
-        })
-        .await;
+        let dialer = Socks5Dialer {
+            proxy_addr: proxy_addr.to_string(),
+            connect_timeout: Duration::from_millis(timeout_ms),
+            auth: Socks5Auth::Password {
+                username: "fips".to_string(),
+                password: addr.to_string(),
+            },
+        };
 
-        let stream = match socks_result {
-            Ok(Ok(socks_stream)) => socks_stream.into_inner(),
-            Ok(Err(e)) => {
+        let connect_start = Instant::now();
+        let stream = match dialer.dial(&tor_addr).await {
+            Ok(stream) => stream,
+            Err(DialError::Socks(e)) => {
                 // A SOCKS5 REP=0x05 reply is a genuine connection refusal;
                 // every other failure mode (unreachable proxy, ruleset,
                 // protocol/parse, I/O) is a generic SOCKS5 error.
@@ -792,7 +735,7 @@ impl TorTransport {
                 );
                 return Err(TransportError::ConnectionRefused);
             }
-            Err(_) => {
+            Err(DialError::Timeout) => {
                 self.stats.record_connect_timeout();
                 warn!(
                     transport_id = %self.transport_id,
@@ -802,17 +745,8 @@ impl TorTransport {
                 );
                 return Err(TransportError::Timeout);
             }
+            Err(DialError::Setup(e)) => return Err(e),
         };
-
-        // Configure socket options via socket2
-        let std_stream = stream
-            .into_std()
-            .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
-        configure_socket(&std_stream, &self.config)?;
-
-        // Convert back to tokio
-        let stream = TcpStream::from_std(std_stream)
-            .map_err(|e| TransportError::StartFailed(format!("from_std: {}", e)))?;
 
         // Split and spawn receive task
         let (read_half, write_half) = stream.into_split();
@@ -839,12 +773,12 @@ impl TorTransport {
             .await;
         });
 
-        let conn = TorConnection {
+        let conn = ProxiedConnection {
             writer: writer.clone(),
             recv_task,
             mtu,
             established_at: Instant::now(),
-            direction: Direction::Outbound,
+            meta: Direction::Outbound,
         };
 
         let mut pool = self.pool.lock().await;
@@ -913,33 +847,18 @@ impl TorTransport {
         let task = tokio::spawn(async move {
             // SOCKS5 CONNECT through proxy with timeout.
             // Uses username/password auth for stream isolation (see connect()).
-            let socks_result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-                match &tor_addr {
-                    TorAddr::Onion(host, port) | TorAddr::ClearnetHostname(host, port) => {
-                        Socks5Stream::connect_with_password(
-                            proxy_addr.as_str(),
-                            (host.as_str(), *port),
-                            "fips",
-                            &isolation_key,
-                        )
-                        .await
-                    }
-                    TorAddr::Clearnet(socket_addr) => {
-                        Socks5Stream::connect_with_password(
-                            proxy_addr.as_str(),
-                            *socket_addr,
-                            "fips",
-                            &isolation_key,
-                        )
-                        .await
-                    }
-                }
-            })
-            .await;
+            let dialer = Socks5Dialer {
+                proxy_addr,
+                connect_timeout: Duration::from_millis(timeout_ms),
+                auth: Socks5Auth::Password {
+                    username: "fips".to_string(),
+                    password: isolation_key,
+                },
+            };
 
-            let stream = match socks_result {
-                Ok(Ok(socks_stream)) => socks_stream.into_inner(),
-                Ok(Err(e)) => {
+            let stream = match dialer.dial(&tor_addr).await {
+                Ok(stream) => stream,
+                Err(DialError::Socks(e)) => {
                     // Mirror the synchronous path: count a genuine REP=0x05
                     // refusal precisely, everything else as a SOCKS5 error.
                     if matches!(e, tokio_socks::Error::ConnectionRefused) {
@@ -955,7 +874,7 @@ impl TorTransport {
                     );
                     return Err(TransportError::ConnectionRefused);
                 }
-                Err(_) => {
+                Err(DialError::Timeout) => {
                     debug!(
                         transport_id = %transport_id,
                         remote_addr = %remote_addr,
@@ -963,19 +882,10 @@ impl TorTransport {
                     );
                     return Err(TransportError::Timeout);
                 }
+                Err(DialError::Setup(e)) => return Err(e),
             };
 
-            // Configure socket options via socket2
-            let std_stream = stream
-                .into_std()
-                .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
-            configure_socket(&std_stream, &config)?;
-
             let mtu = config.mtu();
-
-            // Convert back to tokio
-            let stream = TcpStream::from_std(std_stream)
-                .map_err(|e| TransportError::StartFailed(format!("from_std: {}", e)))?;
 
             Ok((stream, mtu))
         });
@@ -995,52 +905,9 @@ impl TorTransport {
     /// This method is synchronous but uses `try_lock` internally.
     /// Returns `ConnectionState::Connecting` if locks can't be acquired.
     pub fn connection_state_sync(&self, addr: &TransportAddr) -> ConnectionState {
-        // Check established pool first
-        if let Ok(pool) = self.pool.try_lock() {
-            if pool.contains_key(addr) {
-                return ConnectionState::Connected;
-            }
-        } else {
-            return ConnectionState::Connecting; // can't tell, assume still going
-        }
-
-        // Check connecting pool
-        let mut connecting = match self.connecting.try_lock() {
-            Ok(c) => c,
-            Err(_) => return ConnectionState::Connecting,
-        };
-
-        let entry = match connecting.get_mut(addr) {
-            Some(e) => e,
-            None => return ConnectionState::None,
-        };
-
-        // Check if the background task has completed
-        if !entry.task.is_finished() {
-            return ConnectionState::Connecting;
-        }
-
-        // Task is done — take the result and remove from connecting pool.
-        let addr_clone = addr.clone();
-        let task = connecting.remove(&addr_clone).unwrap().task;
-
-        // Since the task is finished, we can safely poll it with now_or_never.
-        match task.now_or_never() {
-            Some(Ok(Ok((stream, mtu)))) => {
-                // Promote to established pool
-                self.promote_connection(addr, stream, mtu);
-                ConnectionState::Connected
-            }
-            Some(Ok(Err(e))) => ConnectionState::Failed(format!("{}", e)),
-            Some(Err(e)) => {
-                // JoinError (panic or cancel)
-                ConnectionState::Failed(format!("task failed: {}", e))
-            }
-            None => {
-                // Shouldn't happen since is_finished() was true
-                ConnectionState::Connecting
-            }
-        }
+        poll_connecting(&self.pool, &self.connecting, addr, |stream, mtu| {
+            self.promote_connection(addr, stream, mtu)
+        })
     }
 
     /// Promote a completed background connection to the established pool.
@@ -1071,12 +938,12 @@ impl TorTransport {
             .await;
         });
 
-        let conn = TorConnection {
+        let conn = ProxiedConnection {
             writer,
             recv_task,
             mtu,
             established_at: Instant::now(),
-            direction: Direction::Outbound,
+            meta: Direction::Outbound,
         };
 
         // Use try_lock since we're in a sync context and the pool
@@ -1106,7 +973,7 @@ impl TorTransport {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = pool.remove(addr) {
             conn.recv_task.abort();
-            match conn.direction {
+            match conn.meta {
                 Direction::Inbound => self.stats.record_pool_inbound_removed(),
                 Direction::Outbound => self.stats.record_pool_outbound_removed(),
             }
@@ -1173,76 +1040,38 @@ impl Transport for TorTransport {
 
 /// Per-connection Tor receive loop.
 ///
-/// Reads complete FMP packets using the stream reader, delivers them to
-/// the node via the packet channel. On error or EOF, removes the
-/// connection from the pool and exits. `direction` is captured so the
-/// cleanup path can decrement the correct `pool_inbound` /
-/// `pool_outbound` counter.
+/// Thin wrapper over the shared `proxied_receive_loop`. The teardown hook
+/// decrements the direction-specific `pool_inbound` / `pool_outbound` counter
+/// using the metadata on the removed pool entry, conditional on this loop
+/// actually removing it (so a concurrent close/stop never drives the counter
+/// below zero). `direction` is retained for the terminal "receive loop
+/// stopped" debug field the shared loop deliberately leaves to each transport.
 #[allow(clippy::too_many_arguments)]
 async fn tor_receive_loop(
-    mut reader: tokio::net::tcp::OwnedReadHalf,
+    reader: tokio::net::tcp::OwnedReadHalf,
     transport_id: TransportId,
     remote_addr: TransportAddr,
     packet_tx: PacketTx,
-    pool: ConnectionPool,
+    pool: ProxiedPool<Direction>,
     mtu: u16,
     stats: Arc<TorStats>,
     direction: Direction,
 ) {
-    debug!(
-        transport_id = %transport_id,
-        remote_addr = %remote_addr,
-        "Tor receive loop starting"
-    );
-
-    loop {
-        match read_fmp_packet(&mut reader, mtu).await {
-            Ok(data) => {
-                stats.record_recv(data.len());
-
-                trace!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    bytes = data.len(),
-                    "Tor packet received"
-                );
-
-                let packet = ReceivedPacket::new(transport_id, remote_addr.clone(), data);
-
-                if packet_tx.send(packet).await.is_err() {
-                    debug!(
-                        transport_id = %transport_id,
-                        "Packet channel closed, stopping Tor receive loop"
-                    );
-                    break;
-                }
-            }
-            Err(e) => {
-                stats.record_recv_error();
-                debug!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    error = %e,
-                    "Tor receive error, removing connection"
-                );
-                break;
-            }
-        }
-    }
-
-    // Clean up: remove ourselves from the pool, then decrement the
-    // direction-specific pool counter. Decrement is conditional on the
-    // entry actually being removed so a double-cleanup never drives
-    // the counter below zero.
-    let mut pool_guard = pool.lock().await;
-    let removed = pool_guard.remove(&remote_addr).is_some();
-    drop(pool_guard);
-    if removed {
-        match direction {
+    proxied_receive_loop(
+        reader,
+        transport_id,
+        remote_addr.clone(),
+        packet_tx,
+        pool,
+        mtu,
+        stats,
+        "Tor",
+        |stats, meta| match meta {
             Direction::Inbound => stats.record_pool_inbound_removed(),
             Direction::Outbound => stats.record_pool_outbound_removed(),
-        }
-    }
+        },
+    )
+    .await;
 
     debug!(
         transport_id = %transport_id,
@@ -1250,36 +1079,6 @@ async fn tor_receive_loop(
         direction = ?direction,
         "Tor receive loop stopped"
     );
-}
-
-// ============================================================================
-// Socket Configuration
-// ============================================================================
-
-/// Configure socket options on a SOCKS5-connected stream.
-///
-/// Sets TCP_NODELAY and keepalive on the underlying TCP connection.
-fn configure_socket(
-    stream: &std::net::TcpStream,
-    _config: &TorConfig,
-) -> Result<(), TransportError> {
-    let socket = socket2::SockRef::from(stream);
-
-    // TCP_NODELAY — always enable for FIPS (latency-sensitive protocol messages)
-    socket
-        .set_tcp_nodelay(true)
-        .map_err(|e| TransportError::StartFailed(format!("set nodelay: {}", e)))?;
-
-    // TCP keepalive (30s default, matching TCP transport)
-    let keepalive_secs = 30u64;
-    if keepalive_secs > 0 {
-        let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(keepalive_secs));
-        socket
-            .set_tcp_keepalive(&keepalive)
-            .map_err(|e| TransportError::StartFailed(format!("set keepalive: {}", e)))?;
-    }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -1296,7 +1095,7 @@ async fn tor_accept_loop(
     listener: TcpListener,
     transport_id: TransportId,
     packet_tx: PacketTx,
-    pool: ConnectionPool,
+    pool: ProxiedPool<Direction>,
     mtu: u16,
     max_inbound: usize,
     stats: Arc<TorStats>,
@@ -1390,12 +1189,12 @@ async fn tor_accept_loop(
             .await;
         });
 
-        let conn = TorConnection {
+        let conn = ProxiedConnection {
             writer,
             recv_task,
             mtu,
             established_at: Instant::now(),
-            direction: Direction::Inbound,
+            meta: Direction::Inbound,
         };
 
         {
@@ -1455,11 +1254,11 @@ mod tests {
         let addr = TransportAddr::from_string("abcdef1234567890.onion:2121");
         let tor_addr = parse_tor_addr(&addr).unwrap();
         match tor_addr {
-            TorAddr::Onion(host, port) => {
+            SocksTarget::Hostname(host, port) => {
                 assert_eq!(host, "abcdef1234567890.onion");
                 assert_eq!(port, 2121);
             }
-            _ => panic!("expected Onion variant"),
+            _ => panic!("expected Hostname variant"),
         }
     }
 
@@ -1468,13 +1267,13 @@ mod tests {
         let addr = TransportAddr::from_string("192.168.1.1:8080");
         let tor_addr = parse_tor_addr(&addr).unwrap();
         match tor_addr {
-            TorAddr::Clearnet(socket_addr) => {
+            SocksTarget::Ip(socket_addr) => {
                 assert_eq!(
                     socket_addr,
                     "192.168.1.1:8080".parse::<SocketAddr>().unwrap()
                 );
             }
-            _ => panic!("expected Clearnet variant"),
+            _ => panic!("expected Ip variant"),
         }
     }
 
@@ -1483,11 +1282,11 @@ mod tests {
         let addr = TransportAddr::from_string("peer1.example.com:2121");
         let tor_addr = parse_tor_addr(&addr).unwrap();
         match tor_addr {
-            TorAddr::ClearnetHostname(host, port) => {
+            SocksTarget::Hostname(host, port) => {
                 assert_eq!(host, "peer1.example.com");
                 assert_eq!(port, 2121);
             }
-            _ => panic!("expected ClearnetHostname variant"),
+            _ => panic!("expected Hostname variant"),
         }
     }
 
@@ -1537,11 +1336,11 @@ mod tests {
 
         let parsed = parse_tor_addr(&TransportAddr::from_string(&advertised)).unwrap();
         match parsed {
-            TorAddr::Onion(host, port) => {
+            SocksTarget::Hostname(host, port) => {
                 assert_eq!(host, onion);
                 assert_eq!(port, 443);
             }
-            other => panic!("expected Onion variant, got {:?}", other),
+            other => panic!("expected Hostname variant, got {:?}", other),
         }
 
         // Sanity-check the inverse: the bare-onion form (the bug) must
@@ -1655,8 +1454,8 @@ mod tests {
     // ========================================================================
 
     use crate::config::TcpConfig;
+    use crate::transport::socks5::mock::MockSocks5Server;
     use crate::transport::tcp::TcpTransport;
-    use mock_socks5::MockSocks5Server;
 
     /// msg1 wire size: 4 prefix + 4 sender_idx + 106 noise_msg1 = 114 bytes.
     const MSG1_WIRE_SIZE: usize = 41;
@@ -1858,6 +1657,66 @@ mod tests {
 
         tor.stop_async().await.unwrap();
         dest.stop_async().await.unwrap();
+    }
+
+    /// A receive-loop exit and a `close_connection_async` on the same address
+    /// must decrement the outbound pool counter exactly once. The recv-loop
+    /// teardown and `close_connection_async` both remove-then-decrement only
+    /// when their own `remove()` returned the entry, so whichever runs second
+    /// finds nothing and does not double-decrement (which would wrap the
+    /// counter far below zero).
+    #[tokio::test]
+    async fn test_recv_exit_and_close_decrement_pool_once() {
+        let (dest_tx, _dest_rx) = packet_channel(32);
+        let dest_config = TcpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            ..Default::default()
+        };
+        let mut dest = TcpTransport::new(TransportId::new(100), None, dest_config, dest_tx);
+        dest.start_async().await.unwrap();
+        let dest_addr = dest.local_addr().unwrap();
+
+        let mock = MockSocks5Server::new(dest_addr).await.unwrap();
+        let proxy_addr = mock.addr();
+        let _proxy_handle = mock.spawn();
+
+        let (tor_tx, _tor_rx) = packet_channel(32);
+        let tor_config = TorConfig {
+            socks5_addr: Some(proxy_addr.to_string()),
+            ..Default::default()
+        };
+        let mut tor = TorTransport::new(TransportId::new(200), None, tor_config, tor_tx);
+        tor.start_async().await.unwrap();
+
+        // Establish an outbound connection: pool_outbound == 1.
+        let target = TransportAddr::from_string(&dest_addr.to_string());
+        tor.send_async(&target, &build_msg1_frame()).await.unwrap();
+        assert_eq!(tor.stats().snapshot().pool_outbound, 1);
+
+        // Drop the destination so the recv loop hits EOF and runs its
+        // teardown, removing the entry and decrementing exactly once.
+        dest.stop_async().await.unwrap();
+
+        let mut waited = 0;
+        while tor.stats().snapshot().pool_outbound != 0 && waited < 100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            waited += 1;
+        }
+        assert_eq!(
+            tor.stats().snapshot().pool_outbound,
+            0,
+            "recv-loop teardown should decrement the outbound counter once"
+        );
+
+        // A close on the now-absent address must not decrement again.
+        tor.close_connection_async(&target).await;
+        assert_eq!(
+            tor.stats().snapshot().pool_outbound,
+            0,
+            "the second remover must not decrement (no underflow below zero)"
+        );
+
+        tor.stop_async().await.unwrap();
     }
 
     // ========================================================================
