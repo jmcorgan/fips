@@ -206,15 +206,14 @@ pub struct ActivePeer {
     /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
     /// in-flight worker jobs survive rekey/address-change rotations.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    connected_udp:
-        Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>>,
+    connected_udp: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
 
     /// Per-peer recv drain thread. Always paired with `connected_udp`:
     /// the kernel routes inbound packets from this peer to the
     /// connected socket, so it *must* be drained or the kernel recv
     /// buffer fills. Drop signals shutdown via self-pipe.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    peer_recv_drain: Option<crate::transport::udp::peer_drain::PeerRecvDrain>,
+    peer_recv_drain: Option<crate::peer::connected_udp::PeerRecvDrain>,
 }
 
 impl ActivePeer {
@@ -374,7 +373,7 @@ impl ActivePeer {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn connected_udp(
         &self,
-    ) -> Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>> {
+    ) -> Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>> {
         self.connected_udp.clone()
     }
 
@@ -384,8 +383,8 @@ impl ActivePeer {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn set_connected_udp(
         &mut self,
-        socket: std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>,
-        drain: crate::transport::udp::peer_drain::PeerRecvDrain,
+        socket: std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>,
+        drain: crate::peer::connected_udp::PeerRecvDrain,
     ) {
         // Drop the old drain BEFORE the old socket so its last fd
         // reference is released cleanly.

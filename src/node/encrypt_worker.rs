@@ -132,8 +132,7 @@ pub(crate) struct FmpSendJob {
     /// the job completes and the worker drops it, only the peer's
     /// strong ref remains.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub connected_socket:
-        Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>>,
+    pub connected_socket: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
     /// Bulk endpoint data may be dropped when the kernel reports UDP
     /// send-queue exhaustion. Control/rekey frames keep retrying so
     /// congestion cannot strand the session.
@@ -716,8 +715,7 @@ fn mac_now_ms() -> u64 {
 struct MacSequencedSendFlow {
     key: MacSendFlowKey,
     socket: AsyncUdpSocket,
-    connected_socket:
-        Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>>,
+    connected_socket: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
     dest_addr: SocketAddr,
     next_seq: std::sync::atomic::AtomicU64,
     last_used_ms: std::sync::atomic::AtomicU64,
@@ -754,9 +752,7 @@ impl MacSequencedSendFlow {
     fn spawn(
         key: MacSendFlowKey,
         socket: AsyncUdpSocket,
-        connected_socket: Option<
-            std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>,
-        >,
+        connected_socket: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
         dest_addr: SocketAddr,
         now_ms: u64,
     ) -> Arc<Self> {
@@ -1024,8 +1020,7 @@ fn flush_batch_sync(
     struct EncryptedGroup {
         socket: AsyncUdpSocket,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        connected_socket:
-            Option<std::sync::Arc<crate::transport::udp::connected_peer::ConnectedPeerSocket>>,
+        connected_socket: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
         dest_addr: SocketAddr,
         wire_packets: Vec<Vec<u8>>,
         drop_on_backpressure: bool,

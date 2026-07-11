@@ -142,20 +142,24 @@ impl Node {
             (peer_sa, local, recv_buf, send_buf, tx)
         };
 
-        // Open the connected socket on the kernel side.
-        let socket = std::sync::Arc::new(
-            crate::transport::udp::connected_peer::ConnectedPeerSocket::open(
-                local_addr,
-                peer_socket_addr,
-                recv_buf,
-                send_buf,
-            )
-            .map_err(|e| format!("ConnectedPeerSocket::open: {e}"))?,
-        );
+        // Open the connected socket on the kernel side, then adopt the
+        // fd into the owning handle.
+        let owned = crate::transport::udp::open_connected_fd(
+            local_addr,
+            peer_socket_addr,
+            recv_buf,
+            send_buf,
+        )
+        .map_err(|e| format!("open_connected_fd: {e}"))?;
+        let socket = std::sync::Arc::new(crate::peer::connected_udp::ConnectedPeerSocket::from_fd(
+            owned,
+            peer_socket_addr,
+            local_addr,
+        ));
 
         // Spawn the drain thread. It feeds `packet_tx` exactly like
         // the wildcard listen socket — rx_loop dispatches identically.
-        let drain = crate::transport::udp::peer_drain::PeerRecvDrain::spawn(
+        let drain = crate::peer::connected_udp::PeerRecvDrain::spawn(
             socket.clone(),
             transport_id,
             peer_socket_addr,

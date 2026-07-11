@@ -6,13 +6,11 @@ use super::{
     DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
     TransportId, TransportState, TransportType,
 };
-#[cfg(unix)]
-pub(crate) mod connected_peer;
 #[cfg(target_os = "macos")]
 pub(crate) mod darwin_sockopts;
 pub(crate) mod io;
-#[cfg(unix)]
-pub(crate) mod peer_drain;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use io::open_connected_fd;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;

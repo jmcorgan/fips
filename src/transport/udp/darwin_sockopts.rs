@@ -1,6 +1,6 @@
-// Applied at `ConnectedPeerSocket::open` (dormant in this PR; see
-// `connected_peer.rs`). Linux toolchain only checks gates — keep
-// the module visible on Linux so clippy doesn't lose track.
+// Applied inside `io::open_connected_fd` (dormant in this PR; see
+// `io.rs`). Linux toolchain only checks gates — keep the module
+// visible on Linux so clippy doesn't lose track.
 #![allow(dead_code)]
 
 //! Darwin UDP socket tuning.

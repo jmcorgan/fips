@@ -1,5 +1,6 @@
-// Paired with `connected_peer.rs`: dormant in this PR until the
-// activation handler is wired into the node tick (follow-up).
+// Paired with the connected-socket opener (`io::open_connected_fd`):
+// dormant in this PR until the activation handler is wired into the
+// node tick (follow-up).
 #![allow(dead_code)]
 
 //! Recv-side drain thread for a per-peer connected UDP socket.
@@ -23,11 +24,8 @@
 //! of a dedicated OS thread. The drain *function* `drain_loop` stays
 //! useful in either shape; only the wakeup mechanism differs.
 
-#![cfg(any(target_os = "linux", target_os = "macos"))]
-
-use super::super::{ReceivedPacket, TransportAddr, TransportId};
-use super::PacketTx;
-use super::connected_peer::ConnectedPeerSocket;
+use super::socket::ConnectedPeerSocket;
+use crate::transport::{PacketTx, ReceivedPacket, TransportAddr, TransportId};
 use std::io;
 use std::net::SocketAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -448,10 +446,10 @@ mod tests {
         // Our connected socket. Use an ephemeral local port so we
         // don't conflict with anything else on the test host.
         let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let socket = Arc::new(
-            ConnectedPeerSocket::open(local_addr, peer_addr, 1 << 20, 1 << 20)
-                .expect("ConnectedPeerSocket::open"),
-        );
+        let owned =
+            crate::transport::udp::open_connected_fd(local_addr, peer_addr, 1 << 20, 1 << 20)
+                .expect("open_connected_fd");
+        let socket = Arc::new(ConnectedPeerSocket::from_fd(owned, peer_addr, local_addr));
 
         // packet_tx for the drain thread to push into.
         let (tx, mut rx) = mpsc::channel::<ReceivedPacket>(64);

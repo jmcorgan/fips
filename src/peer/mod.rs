@@ -8,6 +8,8 @@
 //! while maintaining type safety for phase-specific operations.
 
 mod active;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod connected_udp;
 mod connection;
 
 pub use active::{ActivePeer, ConnectivityState};
