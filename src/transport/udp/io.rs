@@ -844,7 +844,7 @@ mod tests {
     /// drained over a fixed wall-clock window per mode.
     ///
     /// Run with:
-    ///   cargo test --release -p fips --lib transport::udp::socket::tests::bench_udp_recv_amortization -- --ignored --nocapture
+    ///   cargo test --release -p fips --lib transport::udp::io::tests::bench_udp_recv_amortization -- --ignored --nocapture
     ///
     /// Sender runs on a dedicated *blocking* OS thread (std::net::UdpSocket
     /// in default blocking mode) so it always saturates the kernel rx queue

@@ -52,7 +52,7 @@
 
 use crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE;
 use crate::proto::fsp::wire::FSP_HEADER_SIZE;
-use crate::transport::udp::socket::AsyncUdpSocket;
+use crate::transport::udp::io::AsyncUdpSocket;
 #[cfg(not(target_os = "macos"))]
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError, bounded};
 use ring::aead::{Aad, LessSafeKey, Nonce};
@@ -1710,7 +1710,7 @@ fn send_batch_gso(
 }
 
 /// Direct `sendmmsg(2)` wrapper for the sync worker. The
-/// `transport::udp::socket` module's existing `send_batch` is
+/// `transport::udp::io` module's existing `send_batch` is
 /// pub(crate) on `UdpRawSocket`, but we don't have a handle to the
 /// raw socket from here — we just have the FD. Re-implementing
 /// inline is ~15 lines and avoids tunnelling the inner socket
@@ -1780,7 +1780,7 @@ fn send_batch_raw(
 #[cfg(all(test, unix))]
 mod unix_tests {
     use super::*;
-    use crate::transport::udp::socket::UdpRawSocket;
+    use crate::transport::udp::io::UdpRawSocket;
     use ring::aead::{LessSafeKey, UnboundKey};
     use std::net::UdpSocket;
 
@@ -2220,7 +2220,7 @@ mod tests {
     /// AsRawFd impl.
     #[test]
     fn flush_batch_routes_each_target_separately() {
-        use crate::transport::udp::socket::UdpRawSocket;
+        use crate::transport::udp::io::UdpRawSocket;
         use ring::aead::{LessSafeKey, UnboundKey};
         use std::net::UdpSocket;
 
@@ -2266,7 +2266,7 @@ mod tests {
             const B_WIRE: usize = 16 + B_PLAINTEXT + 16; // 96
 
             fn make_job(
-                socket: crate::transport::udp::socket::AsyncUdpSocket,
+                socket: crate::transport::udp::io::AsyncUdpSocket,
                 cipher: &LessSafeKey,
                 counter: u64,
                 dest: SocketAddr,

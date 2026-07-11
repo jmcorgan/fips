@@ -10,14 +10,14 @@ use super::{
 pub(crate) mod connected_peer;
 #[cfg(target_os = "macos")]
 pub(crate) mod darwin_sockopts;
+pub(crate) mod io;
 #[cfg(unix)]
 pub(crate) mod peer_drain;
-pub(crate) mod socket;
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;
 use crate::nostr::is_punch_packet;
-use socket::{AsyncUdpSocket, UdpRawSocket};
+use io::{AsyncUdpSocket, UdpRawSocket};
 use stats::UdpStats;
 use std::collections::HashMap;
 use std::net::SocketAddr;
