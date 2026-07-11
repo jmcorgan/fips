@@ -22,6 +22,7 @@
 //! No additional framing overhead — packets are written directly to the
 //! TCP stream and the receiver uses phase-dependent size computation.
 
+mod pool;
 pub mod stats;
 
 use super::resolve_socket_addr;
@@ -31,6 +32,7 @@ use super::{
 };
 use crate::config::TcpConfig;
 use crate::transport::framing::read_fmp_packet;
+use pool::{ConnectingEntry, ConnectingPool, ConnectionPool, Direction, TcpConnection};
 use stats::TcpStats;
 
 use futures::FutureExt;
@@ -46,52 +48,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
-
-// ============================================================================
-// Connection Pool
-// ============================================================================
-
-/// Direction of a pooled connection, used to drive separate
-/// `pool_inbound` / `pool_outbound` accounting for the
-/// `max_inbound_connections` admission cap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Direction {
-    /// Inbound — accepted by the listener.
-    Inbound,
-    /// Outbound — initiated by connect-on-send or background connect.
-    Outbound,
-}
-
-/// State for a single TCP connection to a peer.
-struct TcpConnection {
-    /// Write half of the split stream.
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-    /// Receive task for this connection.
-    recv_task: JoinHandle<()>,
-    /// MSS-derived MTU for this connection (used for dynamic MTU re-reading).
-    #[allow(dead_code)]
-    mtu: u16,
-    /// When the connection was established.
-    #[allow(dead_code)]
-    established_at: Instant,
-    /// Direction of the connection — drives pool-inbound/outbound accounting.
-    direction: Direction,
-}
-
-/// Shared connection pool.
-type ConnectionPool = Arc<Mutex<HashMap<TransportAddr, TcpConnection>>>;
-
-/// A pending background connection attempt.
-///
-/// Holds the JoinHandle for a spawned TCP connect task. The task
-/// produces a configured `TcpStream` and MSS-derived MTU on success.
-struct ConnectingEntry {
-    /// Background task performing TCP connect + socket configuration.
-    task: JoinHandle<Result<(TcpStream, u16), TransportError>>,
-}
-
-/// Map of addresses with background connection attempts in progress.
-type ConnectingPool = Arc<Mutex<HashMap<TransportAddr, ConnectingEntry>>>;
 
 // ============================================================================
 // TCP Transport
