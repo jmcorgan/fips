@@ -6,7 +6,7 @@
 //! 802.11 transparently on Linux).
 
 pub mod discovery;
-pub mod socket;
+pub mod io;
 pub mod stats;
 
 use super::{
@@ -15,7 +15,7 @@ use super::{
 };
 use crate::config::EthernetConfig;
 use discovery::{DiscoveryBuffer, FRAME_TYPE_BEACON, FRAME_TYPE_DATA, build_beacon, parse_beacon};
-use socket::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
+use io::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket};
 use stats::EthernetStats;
 
 use secp256k1::XOnlyPublicKey;

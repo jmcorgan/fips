@@ -555,8 +555,8 @@ fn get_mac_addr(interface: &str) -> Result<[u8; 6], TransportError> {
 // ============================================================================
 // Unit tests
 //
-// The whole `socket_macos.rs` file is `#[cfg(target_os = "macos")]`-included
-// by `socket.rs`, so this `#[cfg(test)]` mod naturally only compiles on macOS.
+// The whole `io_macos.rs` file is `#[cfg(target_os = "macos")]`-included
+// by `io.rs`, so this `#[cfg(test)]` mod naturally only compiles on macOS.
 // The redundant `#[cfg(target_os = "macos")]` below is belt-and-suspenders:
 // it makes the macOS-only intent explicit so that any future refactor that
 // includes this file on additional targets won't silently activate macOS-
