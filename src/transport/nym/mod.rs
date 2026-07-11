@@ -9,7 +9,7 @@
 //!
 //! Outbound-only: connects to remote TCP peers through the local
 //! nym-socks5-client SOCKS5 proxy. Like the Tor transport, reuses FMP
-//! stream framing from `tcp::stream` and follows the same connection
+//! stream framing from `transport::framing` and follows the same connection
 //! pool pattern. No inbound service is supported.
 
 pub mod stats;
@@ -22,7 +22,7 @@ use super::{
     TransportError, TransportId, TransportState, TransportType,
 };
 use crate::config::NymConfig;
-use crate::transport::tcp::stream::read_fmp_packet;
+use crate::transport::framing::read_fmp_packet;
 use stats::NymStats;
 
 use futures::FutureExt;

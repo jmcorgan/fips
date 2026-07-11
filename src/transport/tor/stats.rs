@@ -4,6 +4,8 @@ use portable_atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
+use crate::transport::PoolCounters;
+
 /// Statistics for a Tor transport instance.
 ///
 /// Uses atomic counters for lock-free updates from per-connection
@@ -23,12 +25,10 @@ pub struct TorStats {
     pub connections_accepted: AtomicU64,
     pub connections_rejected: AtomicU64,
     pub control_errors: AtomicU64,
-    /// Current number of inbound (accepted via onion service) connections
-    /// held in the pool. Drives the `max_inbound_connections` admission check.
-    pub pool_inbound: AtomicU64,
-    /// Current number of outbound (SOCKS5 connect) connections held in
-    /// the pool. Independent of the inbound cap.
-    pub pool_outbound: AtomicU64,
+    /// Inbound (accepted via onion service) / outbound (SOCKS5 connect)
+    /// connection-pool occupancy. Inbound drives the
+    /// `max_inbound_connections` admission check.
+    pub pool: PoolCounters,
 }
 
 impl TorStats {
@@ -49,8 +49,7 @@ impl TorStats {
             connections_accepted: AtomicU64::new(0),
             connections_rejected: AtomicU64::new(0),
             control_errors: AtomicU64::new(0),
-            pool_inbound: AtomicU64::new(0),
-            pool_outbound: AtomicU64::new(0),
+            pool: PoolCounters::new(),
         }
     }
 
@@ -118,27 +117,27 @@ impl TorStats {
 
     /// Increment the inbound pool count (called on accept).
     pub fn record_pool_inbound_added(&self) {
-        self.pool_inbound.fetch_add(1, Ordering::Relaxed);
+        self.pool.record_inbound_added();
     }
 
     /// Decrement the inbound pool count (called on inbound receive-loop exit).
     pub fn record_pool_inbound_removed(&self) {
-        self.pool_inbound.fetch_sub(1, Ordering::Relaxed);
+        self.pool.record_inbound_removed();
     }
 
     /// Increment the outbound pool count (called on SOCKS5-connect promote).
     pub fn record_pool_outbound_added(&self) {
-        self.pool_outbound.fetch_add(1, Ordering::Relaxed);
+        self.pool.record_outbound_added();
     }
 
     /// Decrement the outbound pool count (called on outbound receive-loop exit).
     pub fn record_pool_outbound_removed(&self) {
-        self.pool_outbound.fetch_sub(1, Ordering::Relaxed);
+        self.pool.record_outbound_removed();
     }
 
     /// Load the current inbound pool count for the admission gate.
     pub fn pool_inbound_count(&self) -> u64 {
-        self.pool_inbound.load(Ordering::Relaxed)
+        self.pool.inbound_count()
     }
 
     /// Take a snapshot of all counters.
@@ -158,8 +157,8 @@ impl TorStats {
             connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
             connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
             control_errors: self.control_errors.load(Ordering::Relaxed),
-            pool_inbound: self.pool_inbound.load(Ordering::Relaxed),
-            pool_outbound: self.pool_outbound.load(Ordering::Relaxed),
+            pool_inbound: self.pool.inbound_count(),
+            pool_outbound: self.pool.outbound_count(),
         }
     }
 }

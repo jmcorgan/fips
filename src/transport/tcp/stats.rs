@@ -4,6 +4,8 @@ use portable_atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
+use crate::transport::PoolCounters;
+
 /// Statistics for a TCP transport instance.
 ///
 /// Uses atomic counters for lock-free updates from per-connection
@@ -21,12 +23,9 @@ pub struct TcpStats {
     pub connections_rejected: AtomicU64,
     pub connect_timeouts: AtomicU64,
     pub connect_refused: AtomicU64,
-    /// Current number of inbound (accepted) connections held in the pool.
-    /// Drives the `max_inbound_connections` admission check.
-    pub pool_inbound: AtomicU64,
-    /// Current number of outbound (connect-on-send / promoted) connections
-    /// held in the pool. Independent of the inbound cap.
-    pub pool_outbound: AtomicU64,
+    /// Inbound/outbound connection-pool occupancy. Inbound drives the
+    /// `max_inbound_connections` admission check.
+    pub pool: PoolCounters,
 }
 
 impl TcpStats {
@@ -45,8 +44,7 @@ impl TcpStats {
             connections_rejected: AtomicU64::new(0),
             connect_timeouts: AtomicU64::new(0),
             connect_refused: AtomicU64::new(0),
-            pool_inbound: AtomicU64::new(0),
-            pool_outbound: AtomicU64::new(0),
+            pool: PoolCounters::new(),
         }
     }
 
@@ -104,27 +102,27 @@ impl TcpStats {
 
     /// Increment the inbound pool count (called on accept).
     pub fn record_pool_inbound_added(&self) {
-        self.pool_inbound.fetch_add(1, Ordering::Relaxed);
+        self.pool.record_inbound_added();
     }
 
     /// Decrement the inbound pool count (called on inbound receive-loop exit).
     pub fn record_pool_inbound_removed(&self) {
-        self.pool_inbound.fetch_sub(1, Ordering::Relaxed);
+        self.pool.record_inbound_removed();
     }
 
     /// Increment the outbound pool count (called on connect-on-send / promote).
     pub fn record_pool_outbound_added(&self) {
-        self.pool_outbound.fetch_add(1, Ordering::Relaxed);
+        self.pool.record_outbound_added();
     }
 
     /// Decrement the outbound pool count (called on outbound receive-loop exit).
     pub fn record_pool_outbound_removed(&self) {
-        self.pool_outbound.fetch_sub(1, Ordering::Relaxed);
+        self.pool.record_outbound_removed();
     }
 
     /// Load the current inbound pool count for the admission gate.
     pub fn pool_inbound_count(&self) -> u64 {
-        self.pool_inbound.load(Ordering::Relaxed)
+        self.pool.inbound_count()
     }
 
     /// Take a snapshot of all counters.
@@ -142,8 +140,8 @@ impl TcpStats {
             connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
             connect_timeouts: self.connect_timeouts.load(Ordering::Relaxed),
             connect_refused: self.connect_refused.load(Ordering::Relaxed),
-            pool_inbound: self.pool_inbound.load(Ordering::Relaxed),
-            pool_outbound: self.pool_outbound.load(Ordering::Relaxed),
+            pool_inbound: self.pool.inbound_count(),
+            pool_outbound: self.pool.outbound_count(),
         }
     }
 }
