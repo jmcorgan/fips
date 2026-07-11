@@ -1,16 +1,16 @@
-//! Ethernet LAN discovery via broadcast beacons.
+//! Ethernet LAN neighbor detection via broadcast beacons.
 //!
 //! Beacon format (5 bytes total):
 //! - Unified header (4 bytes): `[type:1][flags:1][length:2 LE]`
-//! - Version (1 byte): discovery protocol version
+//! - Version (1 byte): beacon protocol version
 
 use crate::transport::{DiscoveredPeer, TransportAddr, TransportId};
 use std::sync::Mutex;
 
-/// Discovery protocol version.
-pub const DISCOVERY_VERSION: u8 = 0x01;
+/// Beacon protocol version.
+pub const BEACON_VERSION: u8 = 0x01;
 
-/// Frame type prefix for discovery announcement beacons.
+/// Frame type prefix for neighbor beacon frames.
 pub const FRAME_TYPE_BEACON: u8 = 0x01;
 
 /// Frame type prefix for FIPS data frames.
@@ -25,17 +25,17 @@ pub const BEACON_PAYLOAD_SIZE: usize = 1;
 /// Total beacon size: header(4) + payload(1).
 pub const BEACON_SIZE: usize = ETHERNET_HEADER_SIZE + BEACON_PAYLOAD_SIZE;
 
-/// Build a discovery announcement beacon payload.
+/// Build a neighbor beacon payload.
 pub fn build_beacon() -> [u8; BEACON_SIZE] {
     let mut buf = [0u8; BEACON_SIZE];
     buf[0] = FRAME_TYPE_BEACON;
     buf[1] = 0x00; // flags (reserved)
     buf[2..4].copy_from_slice(&(BEACON_PAYLOAD_SIZE as u16).to_le_bytes());
-    buf[4] = DISCOVERY_VERSION;
+    buf[4] = BEACON_VERSION;
     buf
 }
 
-/// Parse a discovery announcement beacon payload.
+/// Parse a neighbor beacon payload.
 ///
 /// Returns true if the payload is a valid beacon, false otherwise.
 pub fn parse_beacon(data: &[u8]) -> bool {
@@ -50,17 +50,17 @@ pub fn parse_beacon(data: &[u8]) -> bool {
     if length < 1 {
         return false;
     }
-    data[4] == DISCOVERY_VERSION
+    data[4] == BEACON_VERSION
 }
 
 /// Buffer for discovered peers, drained by `discover()`.
-pub struct DiscoveryBuffer {
+pub struct NeighborBuffer {
     transport_id: TransportId,
     peers: Mutex<Vec<DiscoveredPeer>>,
 }
 
-impl DiscoveryBuffer {
-    /// Create a new empty discovery buffer.
+impl NeighborBuffer {
+    /// Create a new empty neighbor buffer.
     pub fn new(transport_id: TransportId) -> Self {
         Self {
             transport_id,
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(beacon[0], FRAME_TYPE_BEACON);
         assert_eq!(beacon[1], 0x00); // flags
         assert_eq!(u16::from_le_bytes([beacon[2], beacon[3]]), 1); // length
-        assert_eq!(beacon[4], DISCOVERY_VERSION);
+        assert_eq!(beacon[4], BEACON_VERSION);
 
         assert!(parse_beacon(&beacon));
     }
@@ -139,8 +139,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 
         buffer.add_peer(mac);
@@ -156,8 +156,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer_dedup() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer_dedup() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 
         buffer.add_peer(mac);

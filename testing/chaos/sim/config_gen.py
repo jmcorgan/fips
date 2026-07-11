@@ -67,7 +67,7 @@ def _build_ethernet_config(iface: str) -> dict:
     """Build an Ethernet transport config dict for a single interface."""
     return {
         "interface": iface,
-        "discovery": True,
+        "listen": True,
         "announce": True,
         "auto_connect": True,
         "accept_connections": True,

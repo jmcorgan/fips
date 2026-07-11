@@ -262,7 +262,7 @@ UDP (1500 vs 1472 MTU).
 - **No IP dependency**: Operates below the IP layer. Nodes on the same
   Ethernet segment can communicate without IP addresses or routing
   infrastructure
-- **Broadcast discovery**: Nodes discover each other via periodic beacon
+- **Broadcast neighbor detection**: Nodes discover each other via periodic beacon
   broadcasts on the shared medium, with no static peer configuration required
 - **Higher MTU**: Standard Ethernet frames carry 1500 bytes of payload,
   yielding an effective FIPS MTU of 1499 after the frame type prefix
@@ -290,7 +290,7 @@ that would otherwise corrupt AEAD verification. Frame types: `0x00` (data),
 | Addressing | 6-byte MAC address |
 | Platform | Linux only (`CAP_NET_RAW` required) |
 
-### Beacon Discovery
+### Neighbor Beacons
 
 Ethernet nodes discover peers via broadcast beacons sent to
 ff:ff:ff:ff:ff:ff. Beacons are minimal 5-byte frames (4-byte header +
@@ -299,7 +299,7 @@ learned from the Noise XX handshake after the connection is established.
 Receiving nodes extract the MAC source address from the frame and report
 the discovered address to FMP.
 
-Four configuration flags control discovery behavior — `discovery`
+Four configuration flags control neighbor behavior — `listen`
 (listen for beacons), `announce` (broadcast beacons), `auto_connect`
 (initiate handshakes to discovered peers), and `accept_connections`
 (accept inbound handshakes). The flag table and per-flag defaults
@@ -308,13 +308,13 @@ under `transports.ethernet.*`.
 
 A typical discoverable node sets `announce`, `auto_connect`, and
 `accept_connections` all true. A passive listener uses just
-`discovery: true` to observe the network without announcing itself.
+`listen: true` to observe the network without announcing itself.
 
 ### WiFi Compatibility
 
 WiFi interfaces in infrastructure (managed) mode work transparently for
 unicast — the mac80211 subsystem handles frame translation between 802.11
-and 802.3. Broadcast beacon discovery is unreliable in managed mode because
+and 802.3. Broadcast neighbor detection is unreliable in managed mode because
 access points commonly isolate clients from each other's broadcast traffic.
 
 Startup logging:
@@ -893,7 +893,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, AsyncFd/recvmsg, SO_RXQ_OVFL kernel drop detection |
 | TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect, per-connection MSS MTU |
-| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
+| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, neighbor beacons, Linux only |
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
 | Nym | **Implemented** | Outbound-only SOCKS5 through nym-socks5-client, mixnet anonymity, IP/hostname addressing |

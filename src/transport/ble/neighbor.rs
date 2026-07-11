@@ -1,4 +1,4 @@
-//! BLE discovery via advertising and scanning.
+//! BLE neighbor detection via advertising and scanning.
 //!
 //! BLE advertisements carry a 128-bit FIPS service UUID for identification.
 //! Post-forklift, advertisements are UUID-only (no identity material);
@@ -11,15 +11,15 @@ use super::addr::BleAddr;
 
 /// Buffer for discovered BLE peers, drained by `discover()`.
 ///
-/// Follows the same pattern as Ethernet's `DiscoveryBuffer`: peers are
-/// added from the scan loop and drained by the node's discovery polling.
-pub struct DiscoveryBuffer {
+/// Follows the same pattern as Ethernet's `NeighborBuffer`: peers are
+/// added from the scan loop and drained by the node's neighbor polling.
+pub struct NeighborBuffer {
     transport_id: TransportId,
     peers: Mutex<Vec<DiscoveredPeer>>,
 }
 
-impl DiscoveryBuffer {
-    /// Create a new empty discovery buffer.
+impl NeighborBuffer {
+    /// Create a new empty neighbor buffer.
     pub fn new(transport_id: TransportId) -> Self {
         Self {
             transport_id,
@@ -64,8 +64,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer_add_take() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer_add_take() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         buffer.add_peer(&test_addr(1));
 
         let peers = buffer.take();
@@ -77,8 +77,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer_dedup() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer_dedup() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         buffer.add_peer(&test_addr(1));
         buffer.add_peer(&test_addr(1)); // same address again
 
@@ -87,8 +87,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer_multiple_peers() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer_multiple_peers() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         buffer.add_peer(&test_addr(1));
         buffer.add_peer(&test_addr(2));
         buffer.add_peer(&test_addr(3));
@@ -98,8 +98,8 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_buffer_transport_addr_format() {
-        let buffer = DiscoveryBuffer::new(TransportId::new(1));
+    fn test_neighbor_buffer_transport_addr_format() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
         buffer.add_peer(&test_addr(0x42));
 
         let peers = buffer.take();

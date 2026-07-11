@@ -83,19 +83,19 @@ transports:
   ethernet:
     wan:
       interface: "eth0"
-      discovery: true
+      listen: true
       announce: true
       auto_connect: true
       accept_connections: true
     wwan:
       interface: "phy0-sta0"
-      discovery: true
+      listen: true
       announce: true
       auto_connect: true
       accept_connections: true
     lan:
       interface: "br-lan"
-      discovery: true
+      listen: true
       announce: true
       auto_connect: true
       accept_connections: true

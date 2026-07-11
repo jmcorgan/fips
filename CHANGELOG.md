@@ -129,6 +129,13 @@ with v0.4.x or earlier peers.
   dialing, e.g. configured `auto_connect` peers — is handled by that
   late check, since those peers return earlier via the cross-connection
   paths and are not subject to the cap.
+- The Ethernet transport's per-interface `discovery` flag was renamed to
+  `listen` (`transports.ethernet.*`) to match the symmetric `announce`
+  (transmit) / `listen` (receive) neighbor-beacon vocabulary. The old
+  `discovery:` key is still accepted via a serde alias, so deployed configs
+  continue to load unchanged; `Config::to_yaml()` re-emits it under the
+  canonical `listen:` name. Update your `fips.yaml` to `listen:`.
+
 - The mesh-lookup control-metrics family is now emitted under the key
   `lookup` in `fipsctl stats metrics` and `show routing`. The former key
   `discovery` is still emitted as a deprecated alias carrying identical
@@ -150,6 +157,9 @@ with v0.4.x or earlier peers.
   (mesh-lookup) and `node.rendezvous.*` (peer rendezvous). A legacy
   `node.discovery:` block still applies for now with a deprecation warning and
   will be removed; migrate to `node.lookup.*` / `node.rendezvous.*`.
+- The Ethernet `transports.ethernet.discovery` flag, renamed to
+  `transports.ethernet.listen`. The old key is still accepted via a serde
+  alias and will be removed at the v2 cutover; migrate to `listen`.
 
 ### Fixed
 

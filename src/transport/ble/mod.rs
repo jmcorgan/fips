@@ -7,7 +7,7 @@
 //!
 //! ## Architecture
 //!
-//! Transport logic (pool, discovery, lifecycle) is separated from the
+//! Transport logic (pool, neighbor, lifecycle) is separated from the
 //! BlueZ/bluer stack via the `BleIo` trait. `BluerIo` provides the real
 //! implementation (behind `cfg(bluer_available)`); `MockBleIo` provides
 //! an in-memory test double for CI without hardware.
@@ -19,8 +19,8 @@
 //! static (configured) peers get priority over discovered peers.
 
 pub mod addr;
-pub mod discovery;
 pub mod io;
+pub mod neighbor;
 pub mod pool;
 pub mod stats;
 
@@ -30,8 +30,8 @@ use super::{
 };
 use crate::config::BleConfig;
 use addr::BleAddr;
-use discovery::DiscoveryBuffer;
 use io::{BleIo, BleScanner, BleStream};
+use neighbor::NeighborBuffer;
 use pool::{BleConnection, ConnectionPool};
 use stats::BleStats;
 
@@ -86,8 +86,8 @@ pub struct BleTransport<I: BleIo> {
     accept_task: Option<JoinHandle<()>>,
     /// Combined scan + probe loop task handle.
     scan_probe_task: Option<JoinHandle<()>>,
-    /// Discovery buffer for discovered peers.
-    discovery_buffer: Arc<DiscoveryBuffer>,
+    /// Neighbor buffer for discovered peers.
+    neighbor_buffer: Arc<NeighborBuffer>,
     /// Transport statistics.
     stats: Arc<BleStats>,
 }
@@ -118,7 +118,7 @@ impl<I: BleIo> BleTransport<I> {
             packet_tx,
             accept_task: None,
             scan_probe_task: None,
-            discovery_buffer: Arc::new(DiscoveryBuffer::new(transport_id)),
+            neighbor_buffer: Arc::new(NeighborBuffer::new(transport_id)),
             stats: Arc::new(BleStats::new()),
         }
     }
@@ -165,7 +165,7 @@ impl<I: BleIo> BleTransport<I> {
                         transport_id,
                         stats,
                         max_conns,
-                        Arc::clone(&self.discovery_buffer),
+                        Arc::clone(&self.neighbor_buffer),
                     )));
                     debug!(adapter = %adapter, psm = psm, "BLE accept loop started");
                 }
@@ -195,7 +195,7 @@ impl<I: BleIo> BleTransport<I> {
                         scanner,
                         Arc::clone(&self.io),
                         Arc::clone(&self.pool),
-                        Arc::clone(&self.discovery_buffer),
+                        Arc::clone(&self.neighbor_buffer),
                         Arc::clone(&self.stats),
                         self.config.psm(),
                         self.config.connect_timeout_ms(),
@@ -575,7 +575,7 @@ impl<I: BleIo> Transport for BleTransport<I> {
     }
 
     fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> {
-        Ok(self.discovery_buffer.take())
+        Ok(self.neighbor_buffer.take())
     }
 
     fn auto_connect(&self) -> bool {
@@ -604,7 +604,7 @@ async fn accept_loop<A>(
     transport_id: TransportId,
     stats: Arc<BleStats>,
     _max_conns: usize,
-    discovery_buffer: Arc<DiscoveryBuffer>,
+    neighbor_buffer: Arc<NeighborBuffer>,
 ) where
     A: io::BleAcceptor,
     A::Stream: 'static,
@@ -627,7 +627,7 @@ async fn accept_loop<A>(
                 let send_mtu = stream.send_mtu();
                 let recv_mtu = stream.recv_mtu();
 
-                discovery_buffer.add_peer(&addr);
+                neighbor_buffer.add_peer(&addr);
 
                 let stream = Arc::new(stream);
 
@@ -721,7 +721,7 @@ async fn receive_loop<S: BleStream>(
 /// Each scan result is probed immediately unless the address is in cooldown
 /// (recently probed) or already connected. On successful probe, the
 /// connection is promoted directly into the pool (no second L2CAP connect
-/// needed) and the peer is reported to the discovery buffer for the node
+/// needed) and the peer is reported to the neighbor buffer for the node
 /// layer to auto-connect.
 ///
 /// Cooldown prevents rapid re-probing of the same address: after any probe
@@ -732,7 +732,7 @@ async fn scan_probe_loop<I: io::BleIo>(
     mut scanner: I::Scanner,
     io: Arc<I>,
     pool: Arc<Mutex<ConnectionPool<Arc<I::Stream>>>>,
-    buffer: Arc<DiscoveryBuffer>,
+    buffer: Arc<NeighborBuffer>,
     stats: Arc<BleStats>,
     psm: u16,
     connect_timeout_ms: u64,
@@ -938,7 +938,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_scan_discovers_peers() {
         let io = MockBleIo::new("hci0", test_addr(1));
-        // Probe connect must succeed for peers to reach the discovery buffer
+        // Probe connect must succeed for peers to reach the neighbor buffer
         let local = test_addr(1);
         io.set_connect_handler(move |addr, _psm| {
             let (stream, _peer) = io::MockBleStream::pair(local.clone(), addr.clone(), 2048);
@@ -958,8 +958,8 @@ mod tests {
         // Let the expired entries get processed
         tokio::task::yield_now().await;
 
-        // Scan results go to discovery buffer as bare addresses after probe
-        let peers = transport.discovery_buffer.take();
+        // Scan results go to neighbor buffer as bare addresses after probe
+        let peers = transport.neighbor_buffer.take();
         assert_eq!(peers.len(), 2);
     }
 
@@ -983,7 +983,7 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(6)).await;
         tokio::task::yield_now().await;
 
-        let peers = transport.discovery_buffer.take();
+        let peers = transport.neighbor_buffer.take();
         assert_eq!(peers.len(), 1);
     }
 

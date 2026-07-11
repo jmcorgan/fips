@@ -437,7 +437,7 @@ Requires `CAP_NET_RAW` or running as root. Linux only.
 | `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 3 (for frame type + length prefix) |
 | `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
 | `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
-| `discovery` | bool | `true` | Listen for discovery beacons from other nodes |
+| `listen` | bool | `true` | Listen for neighbor beacons from other nodes |
 | `announce` | bool | `false` | Broadcast announcement beacons on the LAN |
 | `auto_connect` | bool | `false` | Auto-connect to discovered peers |
 | `accept_connections` | bool | `false` | Accept incoming connection attempts from discovered peers |
@@ -451,7 +451,7 @@ transports:
   ethernet:
     lan:
       interface: "eth0"
-      discovery: true
+      listen: true
       announce: true
     backbone:
       interface: "eth1"
@@ -459,7 +459,7 @@ transports:
 ```
 
 Each named instance operates independently with its own socket and
-discovery state. The instance name is used in log messages and the
+neighbor state. The instance name is used in log messages and the
 `name()` method on the Transport trait.
 
 ### TCP (`transports.tcp.*`)
@@ -841,7 +841,7 @@ peers:
 ### Mixed UDP + Ethernet Example
 
 A node bridging internet peers (UDP) and a local Ethernet segment with
-beacon discovery:
+neighbor beacons:
 
 ```yaml
 node:
@@ -857,7 +857,7 @@ transports:
     mtu: 1472
   ethernet:
     interface: "eth0"
-    discovery: true
+    listen: true
     announce: true
     auto_connect: true
     accept_connections: true
@@ -1001,7 +1001,7 @@ transports:
   #   mtu: null                      # null = interface MTU - 3 (typically 1497)
   #   recv_buf_size: 2097152         # 2 MB
   #   send_buf_size: 2097152         # 2 MB
-  #   discovery: true                # listen for beacons
+  #   listen: true                   # listen for beacons
   #   announce: false                # broadcast beacons
   #   auto_connect: false            # connect to discovered peers
   #   accept_connections: false      # accept inbound handshakes
