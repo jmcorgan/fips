@@ -109,3 +109,8 @@ path = "src/bin/fips-gateway.rs"
 [[bin]]
 name = "fipstop"
 path = "src/bin/fipstop/main.rs"
+
+[[bench]]
+name = "routing_next_hop"
+path = "benches/routing_next_hop.rs"
+harness = false
