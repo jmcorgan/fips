@@ -23,7 +23,6 @@
 //! TCP stream and the receiver uses phase-dependent size computation.
 
 pub mod stats;
-pub mod stream;
 
 use super::resolve_socket_addr;
 use super::{
@@ -31,8 +30,8 @@ use super::{
     TransportError, TransportId, TransportState, TransportType,
 };
 use crate::config::TcpConfig;
+use crate::transport::framing::read_fmp_packet;
 use stats::TcpStats;
-use stream::read_fmp_packet;
 
 use futures::FutureExt;
 use socket2::TcpKeepalive;

@@ -14,8 +14,8 @@
 //! ## Architecture
 //!
 //! Like TCP, each peer has its own connection. The transport reuses FMP
-//! stream framing from `tcp::stream` and follows the same connection pool
-//! pattern as the TCP transport. Inbound connections arrive via a local
+//! stream framing from `transport::framing` and follows the same connection
+//! pool pattern as the TCP transport. Inbound connections arrive via a local
 //! TCP listener that the Tor daemon forwards onion service traffic to.
 
 pub mod control;
@@ -31,7 +31,7 @@ use super::{
     TransportError, TransportId, TransportState, TransportType,
 };
 use crate::config::TorConfig;
-use crate::transport::tcp::stream::read_fmp_packet;
+use crate::transport::framing::read_fmp_packet;
 use control::{ControlAuth, TorControlClient, TorMonitoringInfo};
 use stats::TorStats;
 

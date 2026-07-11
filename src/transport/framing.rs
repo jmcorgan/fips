@@ -3,8 +3,8 @@
 //! Recovers FIPS packet boundaries from a TCP byte stream using the
 //! existing 4-byte FMP common prefix `[ver+phase:1][flags:1][payload_len:2 LE]`.
 //!
-//! This module is deliberately separate from the TCP transport so it can
-//! be reused by the future Tor transport.
+//! This module is deliberately separate from any single transport so it can
+//! be shared by the stream-oriented transports (TCP, Tor, Nym).
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
