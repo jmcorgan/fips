@@ -69,16 +69,18 @@ impl BloomFilter {
 
     /// Insert a NodeAddr into the filter.
     pub fn insert(&mut self, node_addr: &NodeAddr) {
+        let (h1, h2) = Self::base_hashes(node_addr.as_bytes());
         for i in 0..self.hash_count {
-            let bit_index = self.hash(node_addr.as_bytes(), i);
+            let bit_index = self.bit_index(h1, h2, i);
             self.set_bit(bit_index);
         }
     }
 
     /// Insert raw bytes into the filter.
     pub fn insert_bytes(&mut self, data: &[u8]) {
+        let (h1, h2) = Self::base_hashes(data);
         for i in 0..self.hash_count {
-            let bit_index = self.hash(data, i);
+            let bit_index = self.bit_index(h1, h2, i);
             self.set_bit(bit_index);
         }
     }
@@ -93,8 +95,9 @@ impl BloomFilter {
 
     /// Check if the filter might contain raw bytes.
     pub fn contains_bytes(&self, data: &[u8]) -> bool {
+        let (h1, h2) = Self::base_hashes(data);
         for i in 0..self.hash_count {
-            let bit_index = self.hash(data, i);
+            let bit_index = self.bit_index(h1, h2, i);
             if !self.get_bit(bit_index) {
                 return false;
             }
@@ -196,21 +199,28 @@ impl BloomFilter {
         self.hash_count
     }
 
-    /// Compute a hash index for the given data and hash function number.
+    /// Compute the two base hashes for `data` with a single SHA-256 digest.
     ///
-    /// Uses double hashing: h(x,i) = (h1(x) + i*h2(x)) mod m
-    fn hash(&self, data: &[u8], k: u8) -> usize {
-        // Use first 16 bytes of SHA-256 for h1 and h2
+    /// Double hashing derives the k hash functions from two base hashes:
+    /// h(x,i) = (h1(x) + i*h2(x)) mod m. Computing the digest once here and
+    /// reusing `(h1, h2)` across all k functions avoids re-hashing per k.
+    fn base_hashes(data: &[u8]) -> (u64, u64) {
+        // Use first 16 bytes of SHA-256 for h1 and h2.
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(data);
         let hash = hasher.finalize();
 
-        // h1 from first 8 bytes
+        // h1 from first 8 bytes, h2 from next 8 bytes (little-endian).
         let h1 = u64::from_le_bytes(hash[0..8].try_into().unwrap());
-        // h2 from next 8 bytes
         let h2 = u64::from_le_bytes(hash[8..16].try_into().unwrap());
+        (h1, h2)
+    }
 
+    /// Derive the bit index for hash function `k` from the base hashes.
+    ///
+    /// Uses double hashing: h(x,k) = (h1(x) + k*h2(x)) mod m.
+    fn bit_index(&self, h1: u64, h2: u64, k: u8) -> usize {
         let combined = h1.wrapping_add((k as u64).wrapping_mul(h2));
         (combined as usize) % self.num_bits
     }

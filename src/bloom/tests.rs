@@ -229,6 +229,84 @@ fn test_bloom_filter_insert_bytes_contains_bytes() {
 }
 
 #[test]
+fn test_bloom_filter_bit_indices_match_double_hashing_formula() {
+    use sha2::{Digest, Sha256};
+
+    // Independently recompute the documented double-hashing bit indices:
+    // one SHA-256 digest of the input, h1 = bytes[0..8] LE, h2 = bytes[8..16]
+    // LE, then for k in 0..hash_count: (h1 + k*h2) mod num_bits. This pins
+    // bit-identical behavior regardless of the internal implementation.
+    fn expected_indices(data: &[u8], num_bits: usize, hash_count: u8) -> Vec<usize> {
+        let digest = Sha256::digest(data);
+        let h1 = u64::from_le_bytes(digest[0..8].try_into().unwrap());
+        let h2 = u64::from_le_bytes(digest[8..16].try_into().unwrap());
+        (0..hash_count)
+            .map(|k| {
+                let combined = h1.wrapping_add((k as u64).wrapping_mul(h2));
+                (combined as usize) % num_bits
+            })
+            .collect()
+    }
+
+    fn bit_is_set(filter: &BloomFilter, index: usize) -> bool {
+        let byte = filter.as_bytes()[index / 8];
+        (byte >> (index % 8)) & 1 == 1
+    }
+
+    let configs = [(1024usize, 5u8), (8192usize, 7u8)];
+    let inputs: [&[u8]; 4] = [b"", b"alpha", b"the quick brown fox", &[0u8, 1, 2, 3, 255]];
+
+    for (num_bits, hash_count) in configs {
+        for data in inputs {
+            let mut filter = BloomFilter::with_params(num_bits, hash_count).unwrap();
+            let expected = expected_indices(data, num_bits, hash_count);
+
+            filter.insert_bytes(data);
+
+            // Every expected bit is set.
+            for &idx in &expected {
+                assert!(
+                    bit_is_set(&filter, idx),
+                    "expected bit {} set for input {:?} (num_bits={}, k={})",
+                    idx,
+                    data,
+                    num_bits,
+                    hash_count
+                );
+            }
+
+            // No unexpected bits are set: the set-bit count never exceeds the
+            // number of distinct expected indices.
+            use std::collections::HashSet;
+            let distinct: HashSet<usize> = expected.iter().copied().collect();
+            assert_eq!(
+                filter.count_ones(),
+                distinct.len(),
+                "unexpected bits set for input {:?}",
+                data
+            );
+
+            // contains reports the inserted item as present.
+            assert!(filter.contains_bytes(data));
+        }
+    }
+
+    // NodeAddr path uses the same formula over its byte view.
+    let node = make_node_addr(7);
+    let mut filter = BloomFilter::with_params(1024, 5).unwrap();
+    let expected = expected_indices(node.as_bytes(), 1024, 5);
+    filter.insert(&node);
+    for &idx in &expected {
+        assert!(bit_is_set(&filter, idx));
+    }
+    assert!(filter.contains(&node));
+
+    // Spot-check a definitely-absent item is reported absent.
+    let absent = make_node_addr(200);
+    assert!(!filter.contains(&absent));
+}
+
+#[test]
 fn test_bloom_filter_estimated_count_saturated() {
     // Create a small filter with all bits set
     let bytes = vec![0xFF; 8]; // all bits set
