@@ -83,7 +83,7 @@ async fn make_test_node_ethernet(interface: &str) -> TestNode {
 
     let config = EthernetConfig {
         interface: interface.to_string(),
-        discovery: Some(false),
+        listen: Some(false),
         announce: Some(false),
         accept_connections: Some(true),
         ..Default::default()

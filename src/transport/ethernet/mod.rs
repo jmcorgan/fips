@@ -163,7 +163,7 @@ impl EthernetTransport {
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
         let mtu = self.effective_mtu;
-        let discovery_enabled = self.config.discovery();
+        let listen_enabled = self.config.listen();
         let neighbor_buffer = self.neighbor_buffer.clone();
         let stats = self.stats.clone();
         let recv_socket = socket.clone();
@@ -174,7 +174,7 @@ impl EthernetTransport {
                 transport_id,
                 packet_tx,
                 mtu,
-                discovery_enabled,
+                listen_enabled,
                 neighbor_buffer,
                 stats,
             )
@@ -390,7 +390,7 @@ async fn ethernet_receive_loop(
     transport_id: TransportId,
     packet_tx: PacketTx,
     mtu: u16,
-    discovery_enabled: bool,
+    listen_enabled: bool,
     neighbor_buffer: Arc<NeighborBuffer>,
     stats: Arc<EthernetStats>,
 ) {
@@ -448,7 +448,7 @@ async fn ethernet_receive_loop(
                     FRAME_TYPE_BEACON => {
                         stats.record_beacon_recv();
 
-                        if discovery_enabled && let Some(pubkey) = parse_beacon(&buf[..len]) {
+                        if listen_enabled && let Some(pubkey) = parse_beacon(&buf[..len]) {
                             neighbor_buffer.add_peer(src_mac, pubkey);
                             trace!(
                                 transport_id = %transport_id,

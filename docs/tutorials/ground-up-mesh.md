@@ -71,7 +71,7 @@ supplies the rest:
 - **Addressing**: the `fips0` adapter takes an `fd97:...` ULA
   derived from the npub. No DHCP. No SLAAC. The address is
   cryptographically tied to the identity.
-- **Discovery**: each daemon broadcasts a small beacon on the
+- **Neighbor detection**: each daemon broadcasts a small beacon on the
   link advertising its npub; the other daemon's listener picks
   it up and dials in over the same link.
 - **Routing**: the FIPS mesh layer builds its own spanning tree
@@ -177,7 +177,7 @@ different interface names — that is normal.
 
 Edit `/etc/fips/fips.yaml` on **both** nodes. Under
 `transports:`, add an `ethernet:` block. The key settings are
-the four discovery flags — both nodes must opt in to all four,
+the four neighbor flags — both nodes must opt in to all four,
 and they default to off:
 
 ```yaml
@@ -185,7 +185,7 @@ transports:
   ethernet:
     interface: "<eth>"        # the name from Step 1
     announce: true            # broadcast our beacon on the link
-    discovery: true           # listen for beacons (default; shown for clarity)
+    listen: true              # listen for beacons (default; shown for clarity)
     auto_connect: true        # dial peers we discover
     accept_connections: true  # accept dial-ins from peers we discover
 ```
@@ -194,7 +194,7 @@ Each flag does one thing:
 
 - `announce: true` — emit a small beacon every
   `beacon_interval_secs` (default 30s) carrying our npub.
-- `discovery: true` — listen for incoming beacons; populate a
+- `listen: true` — listen for incoming beacons; populate a
   candidate-peer list keyed by source MAC and observed npub.
 - `auto_connect: true` — when we see a beacon from an npub
   we have not yet peered with, initiate the outbound Noise
@@ -218,7 +218,7 @@ is "all four flags on both ends."
 >     lan:
 >       interface: "eth0"
 >       announce: true
->       discovery: true
+>       listen: true
 >       auto_connect: true
 >       accept_connections: true
 >     dongle:
@@ -227,7 +227,7 @@ is "all four flags on both ends."
 >       # ...
 > ```
 >
-> Each named instance runs its own socket and discovery state.
+> Each named instance runs its own socket and neighbor state.
 > A single ground-up link only needs the flat form shown
 > first; named instances become useful when the same node
 > bridges multiple physical segments.
@@ -390,7 +390,7 @@ What you do need on the AP side:
   networks and "secure" enterprise APs ship with it on.
   When client isolation is on, the AP refuses to forward
   station-to-station frames — the broadcast beacons never
-  arrive at the other node, and discovery fails silently.
+  arrive at the other node, and neighbor detection fails silently.
   If beacons aren't crossing, this is the first thing to
   check.
 
@@ -401,7 +401,7 @@ adapter name.
 ### Bluetooth LE (experimental but works)
 
 BLE is a separate transport (`transports.ble.*`) with its own
-discovery model — L2CAP advertisements rather than raw L2
+neighbor-detection model — L2CAP advertisements rather than raw L2
 broadcasts. The shape of the tutorial is the same (advertise +
 scan + auto-connect + accept), but the prerequisites are
 different: BlueZ, `bluetoothd`, an HCI adapter, and the
@@ -424,7 +424,7 @@ Windows builds skip it.
   a radio link), `CAP_NET_RAW`, and a few config flags on each
   end are sufficient. The mesh supplies its own identity,
   addressing, discovery, and routing.
-- **Discovery is a four-flag opt-in.** `announce`, `discovery`,
+- **Neighbor detection is a four-flag opt-in.** `announce`, `listen`,
   `auto_connect`, and `accept_connections` each control one
   thing; both ends must agree before a link will form.
 - **The two modes coexist.** Overlay peers and ground-up peers

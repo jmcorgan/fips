@@ -282,9 +282,10 @@ pub struct EthernetConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_buf_size: Option<usize>,
 
-    /// Listen for discovery beacons from other nodes. Default: true.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery: Option<bool>,
+    /// Listen for neighbor beacons from other nodes. Default: true.
+    /// (Renamed from `discovery`; the old key is still accepted.)
+    #[serde(default, alias = "discovery", skip_serializing_if = "Option::is_none")]
+    pub listen: Option<bool>,
 
     /// Broadcast announcement beacons on the LAN. Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,9 +320,9 @@ impl EthernetConfig {
         self.send_buf_size.unwrap_or(DEFAULT_ETHERNET_SEND_BUF)
     }
 
-    /// Whether to listen for discovery beacons. Default: true.
-    pub fn discovery(&self) -> bool {
-        self.discovery.unwrap_or(true)
+    /// Whether to listen for neighbor beacons. Default: true.
+    pub fn listen(&self) -> bool {
+        self.listen.unwrap_or(true)
     }
 
     /// Whether to broadcast announcement beacons. Default: false.
@@ -1045,5 +1046,23 @@ mod tests {
         assert_eq!(parse_bind_port("0.0.0.0:2121"), Some(2121));
         assert_eq!(parse_bind_port("[::]:443"), Some(443));
         assert_eq!(parse_bind_port("not-a-socket-addr"), None);
+    }
+
+    #[test]
+    fn ethernet_listen_accepts_legacy_discovery_alias_and_rejects_unknown() {
+        // (a) The legacy `discovery:` key is still accepted via serde alias.
+        let legacy: EthernetConfig =
+            serde_yaml::from_str("interface: eth0\ndiscovery: true\n").unwrap();
+        assert_eq!(legacy.listen, Some(true));
+
+        // (b) The new canonical `listen:` key parses into the renamed field.
+        let renamed: EthernetConfig =
+            serde_yaml::from_str("interface: eth0\nlisten: true\n").unwrap();
+        assert_eq!(renamed.listen, Some(true));
+
+        // (c) `deny_unknown_fields` still rejects an unknown ethernet key.
+        let bogus: Result<EthernetConfig, _> =
+            serde_yaml::from_str("interface: eth0\nbogus: true\n");
+        assert!(bogus.is_err());
     }
 }

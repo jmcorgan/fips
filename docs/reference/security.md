@@ -209,7 +209,7 @@ for the metadata-privacy model and the rejection of onion routing.
 | --------- | --------------- | ------------ | ------ |
 | UDP | None until `bind_addr` set | `0.0.0.0:2121` typical | Operator sets `transports.udp.bind_addr` |
 | TCP | None until `bind_addr` set | None — outbound-only without bind | Operator sets `transports.tcp.bind_addr` |
-| Ethernet | Listens on configured interface (raw `AF_PACKET`) | EtherType 0x2121 on selected interface | Per-flag `discovery`, `announce`, `auto_connect`, `accept_connections` |
+| Ethernet | Listens on configured interface (raw `AF_PACKET`) | EtherType 0x2121 on selected interface | Per-flag `listen`, `announce`, `auto_connect`, `accept_connections` |
 | Tor | None until `directory_service` configured | `127.0.0.1:8443` (loopback only) | Operator sets `transports.tor.directory_service` and configures `HiddenServiceDir` in `torrc` |
 | BLE | Off by default | n/a | Operator enables `transports.ble.*` |
 | Nostr discovery | Off by default | n/a (relay client, not a listener) | Operator sets `node.discovery.nostr.enabled: true` |

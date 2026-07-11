@@ -68,7 +68,7 @@ and set the interface name:
 transports:
   ethernet:
     interface: "eth0"
-    discovery: true
+    listen: true
     announce: true
     auto_connect: true
     accept_connections: true
