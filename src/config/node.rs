@@ -1030,6 +1030,19 @@ pub struct NodeConfig {
     #[serde(default = "NodeConfig::default_link_dead_timeout_secs")]
     pub link_dead_timeout_secs: u64,
 
+    /// Graceful-shutdown drain deadline in seconds (`node.drain_timeout_secs`).
+    /// The bounded `Draining` phase broadcasts a shutdown `Disconnect` and then
+    /// waits up to this long for peers to clear before tearing down, early-
+    /// exiting as soon as all peers are gone. `None` selects the 2-second
+    /// default (see [`NodeConfig::drain_timeout`]).
+    ///
+    /// Kept `Option` deliberately: `NodeConfig` has no `deny_unknown_fields`, so
+    /// a naive non-`Option` add with a `default` fn would silently rewrite the
+    /// value into deployed configs on the next serialize. The `Option` +
+    /// `skip_serializing_if` keeps absent configs absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_timeout_secs: Option<u64>,
+
     /// Resource limits (`node.limits.*`).
     #[serde(default)]
     pub limits: LimitsConfig,
@@ -1111,6 +1124,7 @@ impl Default for NodeConfig {
             base_rtt_ms: 100,
             heartbeat_interval_secs: 10,
             link_dead_timeout_secs: 30,
+            drain_timeout_secs: None,
             limits: LimitsConfig::default(),
             rate_limit: RateLimitConfig::default(),
             retry: RetryConfig::default(),
@@ -1161,6 +1175,14 @@ impl NodeConfig {
     fn default_link_dead_timeout_secs() -> u64 {
         30
     }
+
+    /// Graceful-shutdown drain deadline as a `Duration`.
+    ///
+    /// Returns the configured `drain_timeout_secs`, or the 2-second default
+    /// when unset. Used by the daemon's bounded `Draining` phase.
+    pub fn drain_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.drain_timeout_secs.unwrap_or(2))
+    }
 }
 
 #[cfg(test)]
@@ -1195,6 +1217,28 @@ owd_window_size: 48
         assert_eq!(config.mode, MmpMode::Minimal);
         assert_eq!(config.log_interval_secs, DEFAULT_LOG_INTERVAL_SECS);
         assert_eq!(config.owd_window_size, DEFAULT_OWD_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn test_drain_timeout_default_and_override() {
+        // Unset → the 2-second default.
+        let c = NodeConfig::default();
+        assert_eq!(c.drain_timeout_secs, None);
+        assert_eq!(c.drain_timeout(), std::time::Duration::from_secs(2));
+
+        // Explicit override is honored.
+        let c2 = NodeConfig {
+            drain_timeout_secs: Some(10),
+            ..NodeConfig::default()
+        };
+        assert_eq!(c2.drain_timeout(), std::time::Duration::from_secs(10));
+
+        // A zero override is a valid (immediate) drain, not the default.
+        let c3 = NodeConfig {
+            drain_timeout_secs: Some(0),
+            ..NodeConfig::default()
+        };
+        assert_eq!(c3.drain_timeout(), std::time::Duration::from_secs(0));
     }
 
     #[test]

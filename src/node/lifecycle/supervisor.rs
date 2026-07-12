@@ -22,15 +22,30 @@
 //! - teardown runs in today's order and, faithfully, does **not** stop the
 //!   encrypt/decrypt worker pools (they are spawned in `start()` but never torn
 //!   down in `stop()`);
-//! - the machine authors only the `SpawnChild`/`StopChild` *ordering*. The
-//!   `self.state` field writes stay verbatim in the driver at their current
-//!   positions, so the published `NodeState` transitions are byte-for-byte
-//!   unchanged. FSM-owned published state (`PublishState`) is introduced with
-//!   the `Draining`/`Degraded` additions, which need it.
+//! - the machine authors only the `SpawnChild`/`StopChild` *ordering*, and the
+//!   driver keeps its `self.state` writes at their current positions. The
+//!   behavior-neutral relocation left the published `NodeState` transitions
+//!   byte-for-byte unchanged; the bounded-drain phase below adds exactly one new
+//!   published transition (`Draining`), written directly like the others.
 //!
-//! The `Draining` phase and the `Running{Full|Degraded}` health split (design
-//! doc §6/§9.1) land as the two subsequent, separately-flagged commits and
-//! extend the [`SupState`], [`Event`], and [`Action`] enums below.
+//! ## Scope: the bounded `Draining` phase (this commit)
+//!
+//! This commit adds the operator-visible bounded-drain additions and nothing
+//! else: the [`SupState::Draining`] state, the [`Event::Drain`] /
+//! [`Event::DrainDeadlineElapsed`] events, the drain [`Action`]s
+//! ([`Action::BroadcastDisconnect`], [`Action::SetTimer`],
+//! [`Action::SetPeeringDesired`], [`Action::SuspendReplenish`]), and the new
+//! published [`NodeState::Draining`](crate::node::NodeState::Draining) —
+//! written directly by the driver at drain entry, exactly like the other
+//! `self.state` transitions this milestone uses. The existing immediate `Stop`
+//! path is untouched. `Draining` and `Stop` share a single teardown-plan author
+//! (`begin_stopping`), so the teardown ordering is defined once.
+//!
+//! What is deferred is only the FSM-owned `PublishState` *action* (published
+//! state authored by the machine rather than the driver): it lands with the
+//! `Running{Full|Degraded}` health split (design doc §6/§9.1), which needs it
+//! because a single direct `self.state` write cannot express the health fork.
+//! The `Draining` published state itself is **not** deferred — it is here.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -68,9 +83,9 @@ pub(crate) enum Child {
 /// An input to the supervisor. Results of executing [`Action`]s are fed back as
 /// `SubstrateUp` / `SubstrateFailed` / `ChildStopped`.
 ///
-/// Only the events the behavior-neutral rewrite needs are present; `Tick`,
-/// `ChildExited`, and `DrainDeadlineElapsed` (design doc §6) arrive with the
-/// `Draining` / `Degraded` commits.
+/// `Tick` and `ChildExited` (design doc §6) arrive with the `Degraded`/health
+/// commit; the bounded-drain events (`Drain` / `DrainDeadlineElapsed`) are
+/// present here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
     /// Begin bring-up. `transports` are the ids the driver has already created
@@ -106,8 +121,23 @@ pub(crate) enum Event {
         /// The child that failed to start.
         child: Child,
     },
-    /// Begin teardown. Valid from `Running`.
+    /// Begin an immediate teardown (no drain). Valid from `Running`. This is
+    /// the path `node.stop()` uses; unchanged from the behavior-neutral rewrite.
     Stop,
+    /// Begin a bounded graceful drain. Valid from `Running`. Emits the drain
+    /// entry actions (broadcast Disconnect, arm the deadline timer, gate the
+    /// reconciler off) and moves to `Draining`; the driver then runs the
+    /// bounded drain window before feeding `DrainDeadlineElapsed`.
+    Drain {
+        /// Absolute drain deadline in driver-clock milliseconds, carried into
+        /// `Draining` and the `SetTimer` action for observability. The driver
+        /// owns the actual bounded wait.
+        deadline_ms: u64,
+    },
+    /// The bounded drain window has closed — either the deadline elapsed or all
+    /// peers drained early. Valid from `Draining`; begins the (shared) teardown
+    /// plan, transitioning to `Stopping`.
+    DrainDeadlineElapsed,
     /// A child the driver was asked to stop has finished stopping.
     ChildStopped {
         /// The child that has been torn down.
@@ -115,11 +145,33 @@ pub(crate) enum Event {
     },
 }
 
+/// A driver-scheduled timer the supervisor can arm (design doc §6). Only the
+/// drain deadline exists for now; the handshake/rekey/liveness timers named in
+/// §8 arrive with later cores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Timer {
+    /// Fires when the bounded drain window closes. The driver feeds
+    /// [`Event::DrainDeadlineElapsed`] when it elapses (or earlier, when all
+    /// peers have drained).
+    DrainDeadline,
+}
+
+/// The reconciler's desired peering set (design doc §8 drain gate). Only
+/// `Empty` is needed in this commit; the populated variants that the Step-1b
+/// homeostatic reconciler converges toward land with that core.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PeeringDesired {
+    /// No peers desired. Entering `Draining` sets this so the reconciler stops
+    /// reconnecting the peers the drain just closed (§8: "Draining switches the
+    /// homeostat off").
+    Empty,
+}
+
 /// An effect the driver must perform. The core never performs I/O itself.
 ///
-/// `PublishState` (design doc §6) is intentionally absent from the
-/// behavior-neutral rewrite: the driver keeps its verbatim `self.state` writes,
-/// so no published-state action is needed until `Draining`/`Degraded`.
+/// `PublishState` (design doc §6) is intentionally absent until the
+/// `Running{Full|Degraded}` health commit: the driver keeps its verbatim
+/// `self.state` writes, so no published-state action is needed yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     /// Bring up this child (the driver performs the spawn / start I/O and
@@ -128,6 +180,21 @@ pub(crate) enum Action {
     /// Tear down this child (the driver performs the stop / join I/O and
     /// reports `ChildStopped`).
     StopChild(Child),
+    /// Broadcast a shutdown `Disconnect` to all sendable peers. Emitted once,
+    /// at drain entry; the drain teardown does not re-broadcast.
+    BroadcastDisconnect,
+    /// Arm a driver timer at the given absolute driver-clock milliseconds. In
+    /// this commit only `DrainDeadline` exists; the driver notes the deadline
+    /// and owns the bounded drain wait, so this is a documented no-op beyond
+    /// bookkeeping.
+    SetTimer(Timer, u64),
+    /// Set the reconciler's desired peering set (§8 drain gate). Documented
+    /// **no-op in this commit** — the reconciler that consumes it lands in
+    /// Step 1b; the driver logs/ignores it for now.
+    SetPeeringDesired(PeeringDesired),
+    /// Suspend peer replenishment (§8 drain gate). Documented **no-op in this
+    /// commit** for the same reason as `SetPeeringDesired`.
+    SuspendReplenish,
 }
 
 /// Internal supervisor state (design doc §6). Richer than the published
@@ -145,6 +212,16 @@ pub(crate) enum SupState {
     },
     /// All children resolved; node operational.
     Running,
+    /// Bounded graceful-drain window (design doc §6/§8). Broadcast Disconnect
+    /// has gone out and the reconciler is gated off (desired peering set
+    /// emptied, replenishment suspended); teardown begins when
+    /// `DrainDeadlineElapsed` arrives. Logically sits between `Running` and
+    /// `Stopping`.
+    Draining {
+        /// Absolute drain deadline in driver-clock milliseconds (carried for
+        /// observability; the driver owns the actual wait).
+        deadline_ms: u64,
+    },
     /// Tearing children down; `pending` is the set not yet stopped.
     Stopping {
         /// Children asked to stop that have not yet reported stopped.
@@ -196,6 +273,13 @@ impl SupervisorFsm {
         &self.state
     }
 
+    /// Whether the machine is in the bounded-drain window. The driver uses this
+    /// after the rx loop returns to decide between the drain-teardown path and
+    /// the immediate-`stop()` fallback.
+    pub(crate) fn is_draining(&self) -> bool {
+        matches!(self.state, SupState::Draining { .. })
+    }
+
     /// Advance the machine by one event, returning the effects to perform.
     pub(crate) fn step(&mut self, event: Event) -> Vec<Action> {
         match event {
@@ -219,6 +303,8 @@ impl SupervisorFsm {
             Event::SubstrateUp { child } => self.on_substrate_up(child),
             Event::SubstrateFailed { child } => self.on_substrate_failed(child),
             Event::Stop => self.on_stop(),
+            Event::Drain { deadline_ms } => self.on_drain(deadline_ms),
+            Event::DrainDeadlineElapsed => self.on_drain_deadline_elapsed(),
             Event::ChildStopped { child } => self.on_child_stopped(child),
         }
     }
@@ -306,6 +392,43 @@ impl SupervisorFsm {
         if !matches!(self.state, SupState::Running) {
             return Vec::new();
         }
+        self.begin_stopping()
+    }
+
+    fn on_drain(&mut self, deadline_ms: u64) -> Vec<Action> {
+        // Only a graceful drain from a running node. Inert otherwise (matching
+        // `Stop`'s guard).
+        if !matches!(self.state, SupState::Running) {
+            return Vec::new();
+        }
+        self.state = SupState::Draining { deadline_ms };
+        // Drain entry, in order: broadcast the shutdown Disconnect, arm the
+        // deadline timer, then gate the reconciler off (desired = ∅, suspend
+        // replenishment) so it cannot reconnect the peers the drain just closed
+        // (§8). The up-set is left intact for the eventual teardown plan.
+        vec![
+            Action::BroadcastDisconnect,
+            Action::SetTimer(Timer::DrainDeadline, deadline_ms),
+            Action::SetPeeringDesired(PeeringDesired::Empty),
+            Action::SuspendReplenish,
+        ]
+    }
+
+    fn on_drain_deadline_elapsed(&mut self) -> Vec<Action> {
+        // The bounded drain window closed (deadline or all-peers-gone). Author
+        // the same teardown plan `Stop` produces.
+        if !matches!(self.state, SupState::Draining { .. }) {
+            return Vec::new();
+        }
+        self.begin_stopping()
+    }
+
+    /// Author the teardown plan over the current up-set, transition to
+    /// `Stopping`, and return the ordered `StopChild` actions. Shared by the
+    /// immediate `Stop` path ([`Self::on_stop`]) and the drain-window-close path
+    /// ([`Self::on_drain_deadline_elapsed`]) so the teardown ordering is defined
+    /// exactly once.
+    fn begin_stopping(&mut self) -> Vec<Action> {
         let order = self.teardown_order();
         self.state = SupState::Stopping {
             pending: order.iter().copied().collect(),
@@ -653,6 +776,103 @@ mod tests {
             }),
             vec![]
         );
+        assert_eq!(s.state(), &SupState::Running);
+    }
+
+    #[test]
+    fn drain_from_running_emits_entry_actions_and_enters_draining() {
+        let mut s = SupervisorFsm::running_with([
+            Child::Dns,
+            Child::Nostr,
+            Child::Transport(tid(1)),
+            Child::Tun,
+        ]);
+        let actions = s.step(Event::Drain { deadline_ms: 5_000 });
+        // Order matters: broadcast → arm timer → gate reconciler off.
+        assert_eq!(
+            actions,
+            vec![
+                Action::BroadcastDisconnect,
+                Action::SetTimer(Timer::DrainDeadline, 5_000),
+                Action::SetPeeringDesired(PeeringDesired::Empty),
+                Action::SuspendReplenish,
+            ]
+        );
+        assert_eq!(s.state(), &SupState::Draining { deadline_ms: 5_000 });
+    }
+
+    #[test]
+    fn drain_deadline_elapsed_yields_teardown_and_enters_stopping() {
+        let mut s = SupervisorFsm::running_with([
+            Child::Dns,
+            Child::Nostr,
+            Child::Mdns,
+            Child::Transport(tid(2)),
+            Child::Transport(tid(1)),
+            Child::Tun,
+        ]);
+        s.step(Event::Drain { deadline_ms: 2_000 });
+        let stops = s.step(Event::DrainDeadlineElapsed);
+        // Same ordering the immediate `Stop` path authors: dns → nostr → mdns →
+        // transports (ascending id) → tun.
+        assert_eq!(
+            stops,
+            vec![
+                Action::StopChild(Child::Dns),
+                Action::StopChild(Child::Nostr),
+                Action::StopChild(Child::Mdns),
+                Action::StopChild(Child::Transport(tid(1))),
+                Action::StopChild(Child::Transport(tid(2))),
+                Action::StopChild(Child::Tun),
+            ]
+        );
+        assert!(matches!(s.state(), SupState::Stopping { .. }));
+    }
+
+    #[test]
+    fn drain_teardown_matches_immediate_stop_teardown() {
+        // The drain path and the immediate-stop path must produce the identical
+        // StopChild plan over the same up-set (single teardown author).
+        let up = [
+            Child::Dns,
+            Child::Nostr,
+            Child::Mdns,
+            Child::Transport(tid(1)),
+            Child::Transport(tid(3)),
+            Child::Tun,
+        ];
+        let mut immediate = SupervisorFsm::running_with(up);
+        let stop_plan = immediate.step(Event::Stop);
+
+        let mut drained = SupervisorFsm::running_with(up);
+        drained.step(Event::Drain { deadline_ms: 1_000 });
+        let drain_plan = drained.step(Event::DrainDeadlineElapsed);
+
+        assert_eq!(stop_plan, drain_plan);
+    }
+
+    #[test]
+    fn drain_is_inert_from_non_running() {
+        // From `Created`.
+        let mut s = SupervisorFsm::new();
+        assert_eq!(s.step(Event::Drain { deadline_ms: 1_000 }), vec![]);
+        assert_eq!(s.state(), &SupState::Created);
+
+        // From `Stopping` (seed a drain, close its window, then try to drain
+        // again — inert).
+        let mut s2 = SupervisorFsm::running_with([Child::Transport(tid(1))]);
+        s2.step(Event::Drain { deadline_ms: 1_000 });
+        s2.step(Event::DrainDeadlineElapsed);
+        assert!(matches!(s2.state(), SupState::Stopping { .. }));
+        assert_eq!(s2.step(Event::Drain { deadline_ms: 1_000 }), vec![]);
+        assert!(matches!(s2.state(), SupState::Stopping { .. }));
+    }
+
+    #[test]
+    fn drain_deadline_elapsed_is_inert_outside_draining() {
+        // Inert from `Running` (no drain in progress).
+        let mut s = SupervisorFsm::running_with([Child::Transport(tid(1))]);
+        assert_eq!(s.step(Event::DrainDeadlineElapsed), vec![]);
         assert_eq!(s.state(), &SupState::Running);
     }
 }

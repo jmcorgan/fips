@@ -168,6 +168,12 @@ pub enum NodeState {
     Starting,
     /// Fully operational.
     Running,
+    /// Bounded graceful drain in progress (design doc §6): a shutdown
+    /// `Disconnect` has been broadcast and the node is waiting for peers to
+    /// clear (bounded by `node.drain_timeout_secs`) before teardown. Not
+    /// operational; the daemon drain path advances to `Stopping` via the
+    /// supervisor's `DrainDeadlineElapsed`, never through `stop()`.
+    Draining,
     /// Shutting down.
     Stopping,
     /// Stopped.
@@ -197,6 +203,7 @@ impl fmt::Display for NodeState {
             NodeState::Created => "created",
             NodeState::Starting => "starting",
             NodeState::Running => "running",
+            NodeState::Draining => "draining",
             NodeState::Stopping => "stopping",
             NodeState::Stopped => "stopped",
         };

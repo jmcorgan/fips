@@ -166,6 +166,41 @@ async fn test_node_state_transitions() {
 }
 
 #[tokio::test]
+async fn test_drain_publishes_draining_state() {
+    let mut node = make_node();
+    node.start().await.unwrap();
+    assert_eq!(node.state(), NodeState::Running);
+    assert!(node.state().is_operational());
+
+    // Enter the bounded drain in place: publishes the operator-visible
+    // `Draining` state (not operational) without tearing down.
+    node.enter_drain().await;
+    assert_eq!(node.state(), NodeState::Draining);
+    assert!(!node.state().is_operational());
+    // `Draining` is neither startable nor externally stoppable; the daemon
+    // drain finishes via the supervisor's `DrainDeadlineElapsed`, not `stop()`.
+    assert!(!node.state().can_start());
+    assert!(!node.state().can_stop());
+
+    // Finishing shutdown from `Draining` tears down to `Stopped`.
+    node.finish_shutdown().await;
+    assert_eq!(node.state(), NodeState::Stopped);
+}
+
+#[tokio::test]
+async fn test_immediate_stop_never_publishes_draining() {
+    let mut node = make_node();
+    node.start().await.unwrap();
+    assert_eq!(node.state(), NodeState::Running);
+
+    // The immediate stop() path (used by tests and the stop-now path)
+    // transitions Running → Stopping → Stopped and never enters `Draining`.
+    node.stop().await.unwrap();
+    assert_eq!(node.state(), NodeState::Stopped);
+    assert_ne!(node.state(), NodeState::Draining);
+}
+
+#[tokio::test]
 async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
     let mut config = Config::new();
     config.node.control.enabled = false;

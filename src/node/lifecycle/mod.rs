@@ -1576,32 +1576,39 @@ impl Node {
 
         // Reconstruct the supervised up-set from observed runtime presence and
         // let the FSM author the teardown order (dns → nostr → mdns →
-        // transports (ascending id) → tun). Worker pools are deliberately
-        // absent from the up-set: today's stop() never tears them down.
-        let mut up: Vec<Child> = Vec::new();
-        if self.supervisor.dns_task.is_some() {
-            up.push(Child::Dns);
-        }
-        if self.supervisor.nostr_rendezvous.engine().is_some() {
-            up.push(Child::Nostr);
-        }
-        if self.supervisor.lan_rendezvous.is_some() {
-            up.push(Child::Mdns);
-        }
-        for id in self.transports.keys() {
-            up.push(Child::Transport(*id));
-        }
-        if self.tun_name.is_some() {
-            up.push(Child::Tun);
-        }
+        // transports (ascending id) → tun).
+        let up = self.reconstruct_supervised_up();
         self.supervisor.fsm = SupervisorFsm::running_with(up);
         let actions = self.supervisor.fsm.step(Event::Stop);
 
-        // Execute each StopChild as today's verbatim block. Two driver seams
-        // are woven in at their current positions: the shutdown-disconnect
-        // fan-out (after Dns, before Nostr), and dropping the packet channels
-        // (after all transports, before TUN).
-        let mut disconnect_done = false;
+        // Execute the teardown plan. `broadcast_disconnect = true`: the
+        // immediate-stop path owns the single shutdown-Disconnect fan-out,
+        // which the helper emits at the Dns→rest seam.
+        self.execute_teardown(actions, true).await;
+
+        self.supervisor.state = NodeState::Stopped;
+        info!(state = %self.supervisor.state, "Node stopped");
+        Ok(())
+    }
+
+    /// Execute an ordered `StopChild` teardown plan authored by the supervisor
+    /// FSM, reporting each `ChildStopped` back so the machine reaches `Stopped`.
+    ///
+    /// This is the teardown body factored out of [`Self::stop`] so the drain
+    /// path can reuse the exact same per-child teardown and channel-drop
+    /// ordering. Two driver seams are woven in at their current positions:
+    ///
+    /// - **Seam (a), the shutdown-Disconnect fan-out** (after any Dns teardown,
+    ///   before everything else) is gated on `broadcast_disconnect`. The
+    ///   immediate `stop()` path passes `true` and emits it here; the drain path
+    ///   passes `false` because it already broadcast once at drain entry and
+    ///   must not re-broadcast.
+    /// - **Seam (b), dropping the packet channels** (after all transports, before
+    ///   TUN) always runs.
+    async fn execute_teardown(&mut self, actions: Vec<Action>, broadcast_disconnect: bool) {
+        // `broadcast_disconnect = false` (drain path) marks the fan-out already
+        // done so neither the in-loop seam nor the trailing seam fires.
+        let mut disconnect_done = !broadcast_disconnect;
         let mut packet_taken = false;
         for action in actions {
             let Action::StopChild(child) = action else {
@@ -1723,10 +1730,112 @@ impl Node {
             self.supervisor.packet_tx.take();
             self.packet_rx.take();
         }
+    }
 
-        self.supervisor.state = NodeState::Stopped;
-        info!(state = %self.supervisor.state, "Node stopped");
-        Ok(())
+    /// Reconstruct the supervised up-set from observed runtime presence, so the
+    /// FSM authors the teardown order regardless of how the node reached
+    /// `Running`. Worker pools are deliberately excluded: today's teardown never
+    /// stops them. Shared by [`Self::stop`] and [`Self::enter_drain`].
+    fn reconstruct_supervised_up(&self) -> Vec<Child> {
+        let mut up: Vec<Child> = Vec::new();
+        if self.supervisor.dns_task.is_some() {
+            up.push(Child::Dns);
+        }
+        if self.supervisor.nostr_rendezvous.engine().is_some() {
+            up.push(Child::Nostr);
+        }
+        if self.supervisor.lan_rendezvous.is_some() {
+            up.push(Child::Mdns);
+        }
+        for id in self.transports.keys() {
+            up.push(Child::Transport(*id));
+        }
+        if self.tun_name.is_some() {
+            up.push(Child::Tun);
+        }
+        up
+    }
+
+    /// Enter the bounded graceful drain **in place**, called once by
+    /// [`Self::run_rx_loop_with_shutdown`] when the shutdown signal fires.
+    ///
+    /// Seeds the FSM at `Running` from observed presence (same pattern as
+    /// [`Self::stop`]), steps it into `Draining`, and executes the entry
+    /// actions: broadcast a single shutdown `Disconnect`, and no-op the §8
+    /// reconciler-gate actions (the reconciler that consumes them lands in
+    /// Step 1b; the `SetTimer` is likewise a no-op — the bounded wait is the rx
+    /// loop's deadline arm). Teardown is deferred to [`Self::finish_shutdown`].
+    ///
+    /// Called from an rx-loop `select!` arm body: the channel receivers are
+    /// already moved into the loop's locals, so borrowing `self` here is sound.
+    pub(in crate::node) async fn enter_drain(&mut self) {
+        let up = self.reconstruct_supervised_up();
+        self.supervisor.fsm = SupervisorFsm::running_with(up);
+
+        let drain_timeout = self.config().node.drain_timeout();
+        // Absolute driver-clock ms, carried into `Draining`/`SetTimer` for
+        // observability; the real bounded wait is the rx loop's deadline arm.
+        let deadline_ms = Self::now_ms().saturating_add(drain_timeout.as_millis() as u64);
+
+        let actions = self.supervisor.fsm.step(Event::Drain { deadline_ms });
+
+        // Publish the operator-visible `Draining` state (a direct write, like
+        // the other `self.state` transitions this milestone uses). The
+        // FSM-owned `PublishState` *action* is not needed for this single
+        // transition; it arrives with the Full/Degraded health split (c), which
+        // a direct write cannot express.
+        self.supervisor.state = NodeState::Draining;
+        info!(state = %self.supervisor.state, "Node draining");
+
+        for action in actions {
+            match action {
+                Action::BroadcastDisconnect => {
+                    self.send_disconnect_to_all_peers(DisconnectReason::Shutdown)
+                        .await;
+                }
+                Action::SetTimer(_, _) => {
+                    // The rx loop owns the bounded wait; the FSM's timer is
+                    // carried for observability only. No-op here.
+                }
+                Action::SetPeeringDesired(_) | Action::SuspendReplenish => {
+                    // §8 reconciler drain-gate. Documented no-op in this commit:
+                    // the homeostatic reconciler that consumes these lands in
+                    // Step 1b. Without it there is nothing to reconnect the peers
+                    // the drain closes, so the gate is implicitly satisfied.
+                }
+                Action::SpawnChild(_) | Action::StopChild(_) => {
+                    // Drain entry never emits child actions; ignore defensively.
+                }
+            }
+        }
+
+        info!(
+            drain_timeout_secs = drain_timeout.as_secs(),
+            peers = self.peers.len(),
+            "Draining: broadcast shutdown Disconnect, waiting for peers to clear"
+        );
+    }
+
+    /// Finish shutdown after [`Self::run_rx_loop_with_shutdown`] returns.
+    ///
+    /// Branches on the supervisor's state:
+    /// - if the loop drained (FSM in `Draining`), close the window
+    ///   (`DrainDeadlineElapsed`) and tear down **without re-broadcasting** —
+    ///   the fan-out already went out at drain entry;
+    /// - otherwise the loop exited some other way (the packet channel closed
+    ///   while still `Running` — the degenerate/error path), so fall back to the
+    ///   immediate [`Self::stop`] (which broadcasts and tears down).
+    pub async fn finish_shutdown(&mut self) {
+        if self.supervisor.fsm.is_draining() {
+            self.supervisor.state = NodeState::Stopping;
+            info!(state = %self.supervisor.state, "Node stopping (drain complete)");
+            let stop_actions = self.supervisor.fsm.step(Event::DrainDeadlineElapsed);
+            self.execute_teardown(stop_actions, false).await;
+            self.supervisor.state = NodeState::Stopped;
+            info!(state = %self.supervisor.state, "Node stopped");
+        } else if let Err(e) = self.stop().await {
+            warn!(error = %e, "Error during shutdown");
+        }
     }
 
     /// Send disconnect notifications to all active peers.
