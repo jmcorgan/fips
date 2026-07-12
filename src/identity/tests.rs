@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::Ipv6Addr;
 
-use secp256k1::{Keypair, Secp256k1, SecretKey};
+use secp256k1::{Keypair, SecretKey};
 
 use super::*;
 
@@ -161,10 +161,10 @@ fn test_identity_sign() {
     let sig = identity.sign(data);
 
     // Verify the signature manually
-    let secp = secp256k1::Secp256k1::new();
     let digest = super::sha256(data);
     assert!(
-        secp.verify_schnorr(&sig, &digest, &identity.pubkey())
+        super::SECP
+            .verify_schnorr(&sig, &digest, &identity.pubkey())
             .is_ok()
     );
 }
@@ -580,13 +580,12 @@ fn test_peer_identity_pubkey_full_even_parity_fallback() {
 #[test]
 fn test_peer_identity_pubkey_full_preserved_parity() {
     // Create two identities and find one with odd parity to make this test meaningful
-    let secp = Secp256k1::new();
     let secret_bytes: [u8; 32] = [
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
         0x1f, 0x20,
     ];
-    let keypair = Keypair::from_seckey_slice(&secp, &secret_bytes).unwrap();
+    let keypair = Keypair::from_seckey_slice(&super::SECP, &secret_bytes).unwrap();
     let full_pubkey = keypair.public_key();
 
     let peer = PeerIdentity::from_pubkey_full(full_pubkey);

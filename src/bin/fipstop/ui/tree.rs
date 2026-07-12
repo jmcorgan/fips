@@ -175,10 +175,6 @@ fn draw_stats(frame: &mut Frame, data: &serde_json::Value, scroll: u16, focused:
         ),
         helpers::kv_line("Stale", &helpers::nested_u64(data, "stats", "stale")),
         helpers::kv_line(
-            "Parent Switched",
-            &helpers::nested_u64(data, "stats", "parent_switched"),
-        ),
-        helpers::kv_line(
             "Loop Detected",
             &helpers::nested_u64(data, "stats", "loop_detected"),
         ),

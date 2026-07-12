@@ -1,7 +1,7 @@
 //! Authentication challenge-response protocol.
 
 use rand::Rng;
-use secp256k1::{Secp256k1, XOnlyPublicKey};
+use secp256k1::XOnlyPublicKey;
 use sha2::{Digest, Sha256};
 
 use super::{IdentityError, NodeAddr};
@@ -34,9 +34,9 @@ impl AuthChallenge {
     /// Verify a response to this challenge.
     pub fn verify(&self, response: &AuthResponse) -> Result<NodeAddr, IdentityError> {
         let digest = auth_challenge_digest(&self.0, response.timestamp);
-        let secp = Secp256k1::new();
 
-        secp.verify_schnorr(&response.signature, &digest, &response.pubkey)
+        super::SECP
+            .verify_schnorr(&response.signature, &digest, &response.pubkey)
             .map_err(|_| IdentityError::SignatureVerificationFailed)?;
 
         Ok(NodeAddr::from_pubkey(&response.pubkey))

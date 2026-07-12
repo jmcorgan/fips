@@ -35,13 +35,13 @@ pub(crate) enum TreeDecision {
     /// `evaluate_parent` picked a (different) parent: switch to it. Shell:
     /// `set_parent(new_parent, new_seq, ts)` -> flap_dampened; `recompute_coords`;
     /// sign; `invalidate_via_node`; reset_backoff;
-    /// metrics(parent_switched/parent_switches[, flap_dampened]); send_all;
+    /// metrics(parent_switches[, flap_dampened]); send_all;
     /// bloom.mark_all_updates_needed.
     Switch { new_parent: NodeAddr, new_seq: u64 },
 
     /// `evaluate_parent` None && !is_root && should_be_root: self-promote to root.
     /// Shell: `become_root`; sign; `invalidate_other_roots`; reset_backoff;
-    /// metrics(parent_switched/parent_switches); send_all;
+    /// metrics(parent_switches); send_all;
     /// bloom.mark_all_updates_needed.
     SelfRoot,
 

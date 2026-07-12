@@ -1228,7 +1228,7 @@ async fn test_tree_announce_self_root_promotion() {
     let announce = TreeAnnounce::new(decl, TreeCoordinate::from_addrs(vec![l_addr]).unwrap());
     let encoded = announce.encode().unwrap();
 
-    let switched_before = nodes[p_idx].node.metrics().tree.parent_switched.get();
+    let switched_before = nodes[p_idx].node.metrics().tree.parent_switches.get();
     nodes[p_idx]
         .node
         .handle_tree_announce(&l_addr, &encoded[1..])
@@ -1240,7 +1240,7 @@ async fn test_tree_announce_self_root_promotion() {
     );
     assert_eq!(*nodes[p_idx].node.tree_state().root(), p_addr);
     assert_eq!(
-        nodes[p_idx].node.metrics().tree.parent_switched.get(),
+        nodes[p_idx].node.metrics().tree.parent_switches.get(),
         switched_before + 1
     );
 
