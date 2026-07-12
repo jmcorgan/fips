@@ -1529,7 +1529,7 @@ mod tests {
     // === FMP rekey cutover: authenticate-before-promote ===
     //
     // IK-adapted analogue of the FSP trial-decrypt tests
-    // (node/session.rs `trial_decrypt_picks_pending_and_promotes` /
+    // (node/session/mod.rs `trial_decrypt_picks_pending_and_promotes` /
     // `trial_decrypt_failed_slot_leaves_replay_window_intact`). The FMP
     // cutover is gated on an authenticated decrypt against `pending`, not
     // the bare header K-bit. These tests exercise that primitive:

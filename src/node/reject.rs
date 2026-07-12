@@ -222,7 +222,7 @@ pub enum MmpReject {
 /// Forwarding-path rejection reasons.
 ///
 /// Each variant corresponds to a silent-rejection path in
-/// `src/node/handlers/forwarding.rs::handle_session_datagram`. Matching
+/// `src/node/dataplane/forwarding.rs::handle_session_datagram`. Matching
 /// `ForwardingStats` counters already track packets and bytes for each
 /// outcome; `record_reject` mirrors the packet-count side of the bump
 /// for parity with the other rejection clusters.

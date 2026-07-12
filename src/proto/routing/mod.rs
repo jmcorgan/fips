@@ -2,7 +2,7 @@
 //!
 //! Pure, runtime-agnostic routing state and decision core, migrated out of
 //! the async node shell. The async I/O handlers remain in
-//! `node::handlers::forwarding`.
+//! `node::dataplane::forwarding`.
 //!
 //! - `core.rs` — the `RoutingView` read-seam trait, the `NextHop` /
 //!   `RouteOutcome` types, `Router::route`, the pure transit-forward

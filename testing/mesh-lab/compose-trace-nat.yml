@@ -12,7 +12,7 @@
 #                                          cross-init tie-breaker
 #                                          ("Ignoring established NAT
 #                                          traversal..." emits here)
-#   - fips::node::handlers::forwarding  — transit/local datagram routing
+#   - fips::node::dataplane::forwarding — transit/local datagram routing
 #                                          (catches drops post-adoption)
 #
 # Other modules stay at info to keep log volume manageable. The base
@@ -33,7 +33,7 @@
 # is set and the suite is nat-lan.
 
 x-trace-rust-log: &trace-rust-log
-  RUST_LOG: "info,fips::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::handlers::forwarding=trace"
+  RUST_LOG: "info,fips::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::dataplane::forwarding=trace"
 
 services:
   lan-a:
