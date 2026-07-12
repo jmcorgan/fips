@@ -1,6 +1,6 @@
 //! Remote peer identity (public key only, no signing capability).
 
-use secp256k1::{Parity, PublicKey, Secp256k1, XOnlyPublicKey};
+use secp256k1::{Parity, PublicKey, XOnlyPublicKey};
 use std::fmt;
 
 use super::encoding::{decode_npub, encode_npub};
@@ -107,9 +107,9 @@ impl PeerIdentity {
 
     /// Verify a signature from this peer.
     pub fn verify(&self, data: &[u8], signature: &secp256k1::schnorr::Signature) -> bool {
-        let secp = Secp256k1::new();
         let digest = sha256(data);
-        secp.verify_schnorr(signature, &digest, &self.pubkey)
+        super::SECP
+            .verify_schnorr(signature, &digest, &self.pubkey)
             .is_ok()
     }
 }
