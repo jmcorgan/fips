@@ -56,7 +56,7 @@ async fn test_nat_bootstrap_failure_falls_back_to_direct_udp_address() {
     let peer_identity = Identity::generate();
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx.clone());
+    node.supervisor.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
 
     let transport_id = TransportId::new(1);
@@ -102,7 +102,7 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
     let peer_identity = Identity::generate();
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx.clone());
+    node.supervisor.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
 
     let transport_id = TransportId::new(1);
@@ -1050,7 +1050,7 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     config.peers = vec![old_peer.clone()];
     let mut node = make_node_with(config);
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx.clone());
+    node.supervisor.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
 
     let transport_id = TransportId::new(1);
@@ -1130,7 +1130,9 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
         peer_config: crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9"),
         reason: "stale traversal failure".to_string(),
     });
-    node.nostr_rendezvous.set_engine(bootstrap.clone());
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
 
@@ -1170,7 +1172,9 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
             socket,
         ),
     });
-    node.nostr_rendezvous.set_engine(bootstrap.clone());
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
 
@@ -1424,7 +1428,7 @@ async fn test_transport_mtu_returns_min_across_operational() {
     // iteration order. This is the core ISSUE-2026-0011 regression test.
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp1 = make_udp_transport_with_mtu(1, 1497).await;
@@ -1461,7 +1465,7 @@ async fn test_transport_mtu_min_with_single_operational() {
     // operational.
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
@@ -1484,7 +1488,7 @@ async fn test_transport_mtu_min_with_single_operational() {
 async fn test_seed_path_mtu_inserts_when_empty() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
@@ -1517,7 +1521,7 @@ async fn test_seed_path_mtu_inserts_when_empty() {
 async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
@@ -1557,7 +1561,7 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
 async fn test_seed_path_mtu_tightens_looser_existing_value() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1280).await;
@@ -1727,7 +1731,9 @@ async fn poll_nostr_rendezvous_established_gated_at_capacity() {
             socket,
         ),
     });
-    node.nostr_rendezvous.set_engine(bootstrap.clone());
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(bootstrap.clone());
 
     let before_peers = node.peer_count();
     let before_links = node.link_count();

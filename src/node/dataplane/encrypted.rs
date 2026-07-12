@@ -172,7 +172,7 @@ impl Node {
         #[cfg(unix)]
         {
             let cache_key = (packet.transport_id, header.receiver_idx.as_u32());
-            if let Some(workers) = self.decrypt_workers.as_ref().cloned()
+            if let Some(workers) = self.supervisor.decrypt_workers.as_ref().cloned()
                 && self.decrypt_registered_sessions.contains(&cache_key)
             {
                 let job = crate::node::decrypt_worker::DecryptJob {
@@ -451,7 +451,7 @@ impl Node {
     /// black-hole the session.
     #[cfg(unix)]
     pub(in crate::node) fn register_decrypt_worker_session(&mut self, node_addr: &crate::NodeAddr) {
-        let Some(workers) = self.decrypt_workers.as_ref().cloned() else {
+        let Some(workers) = self.supervisor.decrypt_workers.as_ref().cloned() else {
             return;
         };
         let (cache_key, state) = {
@@ -492,7 +492,7 @@ impl Node {
         &mut self,
         cache_key: (crate::transport::TransportId, u32),
     ) {
-        if let Some(workers) = self.decrypt_workers.as_ref() {
+        if let Some(workers) = self.supervisor.decrypt_workers.as_ref() {
             workers.unregister_session(cache_key);
         }
         self.decrypt_registered_sessions.remove(&cache_key);

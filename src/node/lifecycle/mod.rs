@@ -1,6 +1,10 @@
 //! Node lifecycle management: start, stop, and peer connection initiation.
 
+pub(crate) mod supervisor;
+
 use super::{Node, NodeError, NodeState};
+use supervisor::{Action, Child, Event, SupervisorFsm};
+
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::acl::PeerAclContext;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
@@ -263,7 +267,7 @@ impl Node {
                 // would loop on the same dead address until expiry. Force a
                 // re-fetch so the next retry tick picks up fresh endpoints.
                 if matches!(e, crate::node::NodeError::NoTransportForType(_))
-                    && let Some(bootstrap) = self.nostr_rendezvous.engine_arc()
+                    && let Some(bootstrap) = self.supervisor.nostr_rendezvous.engine_arc()
                 {
                     let npub = peer_config.npub.clone();
                     tokio::spawn(async move {
@@ -354,7 +358,7 @@ impl Node {
             .filter(|(id, handle)| {
                 handle.transport_type().name == "udp"
                     && handle.is_operational()
-                    && !self.nostr_rendezvous.is_bootstrap_transport(id)
+                    && !self.supervisor.nostr_rendezvous.is_bootstrap_transport(id)
             })
             .filter_map(|(id, handle)| {
                 let local_addr = handle.local_addr()?;
@@ -677,7 +681,7 @@ impl Node {
     }
 
     pub(super) async fn poll_nostr_rendezvous(&mut self) {
-        let Some(bootstrap) = self.nostr_rendezvous.engine_arc() else {
+        let Some(bootstrap) = self.supervisor.nostr_rendezvous.engine_arc() else {
             return;
         };
 
@@ -902,7 +906,7 @@ impl Node {
     /// The handshake itself is the authentication — a spoofed mDNS advert
     /// with someone else's npub fails the IK exchange and is dropped.
     pub(super) async fn poll_lan_rendezvous(&mut self) {
-        let Some(runtime) = self.lan_rendezvous.clone() else {
+        let Some(runtime) = self.supervisor.lan_rendezvous.clone() else {
             return;
         };
         let events = runtime.drain_events().await;
@@ -1052,51 +1056,41 @@ impl Node {
     /// Initializes the TUN interface (if configured), spawns I/O threads,
     /// and transitions to the Running state.
     pub async fn start(&mut self) -> Result<(), NodeError> {
-        if !self.state.can_start() {
+        if !self.supervisor.state.can_start() {
             return Err(NodeError::AlreadyStarted);
         }
-        self.state = NodeState::Starting;
+        self.supervisor.state = NodeState::Starting;
 
         // Create packet channel for transport -> Node communication
         let packet_buffer_size = self.config().node.buffers.packet_channel;
         let (packet_tx, packet_rx) = packet_channel(packet_buffer_size);
-        self.packet_tx = Some(packet_tx.clone());
+        self.supervisor.packet_tx = Some(packet_tx.clone());
         self.packet_rx = Some(packet_rx);
 
         // Initialize transports first (before TUN, before Nostr discovery).
+        // Creation allocates each transport's id; the supervisor FSM authors
+        // the start order over those ids.
         let transport_handles = self.create_transports(&packet_tx).await;
+        let transport_ids: Vec<TransportId> =
+            transport_handles.iter().map(|h| h.transport_id()).collect();
+        let mut pending_handles: HashMap<_, _> = transport_handles
+            .into_iter()
+            .map(|h| (h.transport_id(), h))
+            .collect();
 
-        for mut handle in transport_handles {
-            let transport_id = handle.transport_id();
-            let transport_type = handle.transport_type().name;
-            let name = handle.name().map(|s| s.to_string());
+        // Singleton child booleans, with today's exact enable conditions.
+        let nostr = self.config().node.rendezvous.nostr.enabled;
+        let mdns = self.config().node.rendezvous.lan.enabled;
+        let tun = self.config().tun.enabled;
+        let dns = self.config().dns.enabled;
 
-            match handle.start().await {
-                Ok(()) => {
-                    self.transports.insert(transport_id, handle);
-                }
-                Err(e) => {
-                    if let Some(ref n) = name {
-                        warn!(transport_type, name = %n, error = %e, "Transport failed to start");
-                    } else {
-                        warn!(transport_type, error = %e, "Transport failed to start");
-                    }
-                }
-            }
-        }
-
-        if !self.transports.is_empty() {
-            info!(count = self.transports.len(), "Transports initialized");
-        }
-
-        // Spawn the off-task FMP-encrypt + UDP-send worker pool.
-        // Unix only — the worker issues sendmmsg(2) / sendmsg+UDP_GSO
-        // calls on raw fds via `AsRawFd`, a unix-only trait. Worker
-        // count defaults to num_cpus, overridable via FIPS_ENCRYPT_WORKERS.
-        // Hash-by-destination pins a TCP flow to one worker (preserves
-        // wire ordering); additional workers light up under multi-flow load.
+        // Worker-pool booleans + counts. Unix only — the workers issue
+        // sendmmsg(2) / sendmsg+UDP_GSO on raw fds via `AsRawFd`. Encrypt
+        // always spawns on unix; decrypt spawns iff FIPS_DECRYPT_WORKERS != 0.
+        // Counts are parsed up-front so the FSM can decide whether the decrypt
+        // child exists; the actual spawns run when the SpawnChild actions do.
         #[cfg(unix)]
-        {
+        let (encrypt_workers, decrypt_workers, encrypt_worker_count, decrypt_worker_count) = {
             let cpu_default = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1)
@@ -1106,273 +1100,388 @@ impl Node {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(cpu_default)
                 .max(1);
-            self.encrypt_workers = Some(super::encrypt_worker::EncryptWorkerPool::spawn(
-                encrypt_worker_count,
-            ));
-            info!(
-                workers = encrypt_worker_count,
-                "Spawned FMP-encrypt worker pool"
-            );
-
-            // `FIPS_DECRYPT_WORKERS=0` disables the pool entirely and
-            // forces the in-line rx_loop decrypt path (useful as an A/B
-            // against the worker pipeline). Any non-zero value (env or
-            // default) spawns the shard-owned decrypt pool.
             let decrypt_worker_count: usize = std::env::var("FIPS_DECRYPT_WORKERS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(cpu_default);
-            if decrypt_worker_count == 0 {
-                info!("FIPS_DECRYPT_WORKERS=0 → in-line decrypt in rx_loop");
-            } else {
-                self.decrypt_workers = Some(super::decrypt_worker::DecryptWorkerPool::spawn(
-                    decrypt_worker_count,
-                ));
-                info!(
-                    workers = decrypt_worker_count,
-                    "Spawned FMP-decrypt worker pool"
-                );
-            }
-        }
-
-        if self.config().node.rendezvous.nostr.enabled {
-            match NostrRendezvous::start(
-                self.identity(),
-                self.config().node.rendezvous.nostr.clone(),
+            (
+                true,
+                decrypt_worker_count != 0,
+                encrypt_worker_count,
+                decrypt_worker_count,
             )
-            .await
-            {
-                Ok(runtime) => {
-                    if let Err(err) = self.refresh_overlay_advert(&runtime).await {
-                        warn!(error = %err, "Failed to publish initial Nostr overlay advert");
-                    }
-                    self.nostr_rendezvous.set_engine(runtime);
-                    self.nostr_rendezvous.set_started_at_ms(Self::now_ms());
-                    info!("Nostr overlay discovery enabled");
+        };
+        #[cfg(not(unix))]
+        let (encrypt_workers, decrypt_workers) = (false, false);
+
+        // Ask the supervisor FSM for the canonical spawn order.
+        let actions = self.supervisor.fsm.step(Event::Start {
+            transports: transport_ids,
+            encrypt_workers,
+            decrypt_workers,
+            nostr,
+            mdns,
+            tun,
+            dns,
+        });
+
+        // Execute each SpawnChild in order, reporting the outcome back so the
+        // FSM's up-set tracks what actually came up. Optional failures are
+        // warn/debug-and-continue (today's behavior); start still reaches
+        // Running. Two driver seams are woven in at their current positions:
+        // the post-transport-loop "Transports initialized" info!, and the
+        // peer-connect that today sits after mDNS and before TUN.
+        let mut transports_info_emitted = false;
+        let mut peer_connect_done = false;
+        for action in actions {
+            let Action::SpawnChild(child) = action else {
+                continue;
+            };
+
+            // Post-transport-loop seam: once, after all transport spawns and
+            // before the first non-transport child.
+            if !transports_info_emitted && !matches!(child, Child::Transport(_)) {
+                if !self.transports.is_empty() {
+                    info!(count = self.transports.len(), "Transports initialized");
                 }
-                Err(err) => {
-                    warn!(error = %err, "Failed to start Nostr overlay discovery");
-                }
+                transports_info_emitted = true;
             }
-        }
 
-        // mDNS / DNS-SD LAN discovery. Independent of Nostr — runs even
-        // when Nostr is disabled, since it gives us sub-second pairing
-        // on the same link without any relay or NAT-traversal roundtrip.
-        if self.config().node.rendezvous.lan.enabled {
-            // Advertise the port of a non-bootstrap operational UDP transport.
-            // Bootstrap transports must be excluded (they are not the node's
-            // listening data-plane socket), and a stable selector (lowest
-            // TransportId) is used so the advertised port is deterministic
-            // across restarts rather than dependent on HashMap iteration
-            // order. This mirrors find_udp_transport_for_remote_addr.
-            let advertised_udp_port = self
-                .transports
-                .iter()
-                .filter(|(id, h)| {
-                    h.transport_type().name == "udp"
-                        && h.is_operational()
-                        && !self.nostr_rendezvous.is_bootstrap_transport(id)
-                })
-                .filter_map(|(id, h)| h.local_addr().map(|addr| (*id, addr.port())))
-                .min_by_key(|(id, _)| id.as_u32())
-                .map(|(_, port)| port)
-                .unwrap_or(0);
-            let scope = self.lan_rendezvous_scope();
-            match crate::mdns::LanRendezvous::start(
-                self.identity(),
-                scope,
-                advertised_udp_port,
-                self.config().node.rendezvous.lan.clone(),
-            )
-            .await
-            {
-                Ok(runtime) => {
-                    self.lan_rendezvous = Some(runtime);
-                    info!("LAN mDNS discovery enabled");
-                }
-                Err(err) => {
-                    debug!(error = %err, "LAN mDNS discovery not started");
-                }
+            // Peer-connect seam: once, immediately before the first Tun-or-Dns
+            // child. Connect to static peers before TUN is active so handshake
+            // messages can be sent before we start accepting packets.
+            if !peer_connect_done && matches!(child, Child::Tun | Child::Dns) {
+                self.initiate_peer_connections().await;
+                peer_connect_done = true;
             }
-        }
 
-        // Connect to static peers before TUN is active
-        // This allows handshake messages to be sent before we start accepting packets
-        self.initiate_peer_connections().await;
+            let feedback = match child {
+                Child::Transport(id) => {
+                    let mut handle = pending_handles
+                        .remove(&id)
+                        .expect("supervisor emitted SpawnChild for a created transport");
+                    let transport_type = handle.transport_type().name;
+                    let name = handle.name().map(|s| s.to_string());
 
-        // Initialize TUN interface last, after transports and peers are ready
-        if self.config().tun.enabled {
-            let address = *self.identity().address();
-            match TunDevice::create(&self.config().tun, address).await {
-                Ok(device) => {
-                    let mtu = device.mtu();
-                    let name = device.name().to_string();
-                    let our_addr = *device.address();
-
-                    info!("TUN device active:");
-                    info!("     name: {}", name);
-                    info!("  address: {}", device.address());
-                    info!("      mtu: {}", mtu);
-
-                    // Calculate max MSS for TCP clamping
-                    let effective_mtu = self.effective_ipv6_mtu();
-                    let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
-
-                    info!("effective MTU: {} bytes", effective_mtu);
-                    debug!("   max TCP MSS: {} bytes", max_mss);
-
-                    // On macOS, create a shutdown pipe. Writing to it unblocks the
-                    // reader thread's select() loop without closing the TUN fd
-                    // (which would cause a double-close when TunDevice drops).
-                    #[cfg(target_os = "macos")]
-                    let (shutdown_read_fd, shutdown_write_fd) = {
-                        let mut fds = [0i32; 2];
-                        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-                            return Err(NodeError::Tun(crate::upper::tun::TunError::Configure(
-                                "failed to create shutdown pipe".into(),
-                            )));
-                        }
-                        (fds[0], fds[1])
-                    };
-
-                    // Create writer (dups the fd for independent write access).
-                    // Pass path_mtu_lookup so inbound SYN-ACK clamp can read
-                    // per-destination path MTU learned via discovery.
-                    let (writer, tun_tx) =
-                        device.create_writer(max_mss, self.path_mtu_lookup.clone())?;
-
-                    // Spawn writer thread
-                    let writer_handle = thread::spawn(move || {
-                        writer.run();
-                    });
-
-                    // Clone tun_tx for the reader
-                    let reader_tun_tx = tun_tx.clone();
-
-                    // Create outbound channel for TUN reader → Node
-                    let tun_channel_size = self.config().node.buffers.tun_channel;
-                    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
-
-                    // Spawn reader thread
-                    let transport_mtu = self.transport_mtu();
-                    let path_mtu_lookup = self.path_mtu_lookup.clone();
-                    #[cfg(target_os = "macos")]
-                    let reader_handle = thread::spawn(move || {
-                        run_tun_reader(
-                            device,
-                            mtu,
-                            our_addr,
-                            reader_tun_tx,
-                            outbound_tx,
-                            transport_mtu,
-                            path_mtu_lookup,
-                            shutdown_read_fd,
-                        );
-                    });
-                    #[cfg(not(target_os = "macos"))]
-                    let reader_handle = thread::spawn(move || {
-                        run_tun_reader(
-                            device,
-                            mtu,
-                            our_addr,
-                            reader_tun_tx,
-                            outbound_tx,
-                            transport_mtu,
-                            path_mtu_lookup,
-                        );
-                    });
-
-                    self.tun_state = TunState::Active;
-                    self.tun_name = Some(name);
-                    self.tun_tx = Some(tun_tx);
-                    self.tun_outbound_rx = Some(outbound_rx);
-                    self.tun_reader_handle = Some(reader_handle);
-                    self.tun_writer_handle = Some(writer_handle);
-                    #[cfg(target_os = "macos")]
-                    {
-                        self.tun_shutdown_fd = Some(shutdown_write_fd);
-                    }
-                }
-                Err(e) => {
-                    self.tun_state = TunState::Failed;
-                    warn!(error = %e, "Failed to initialize TUN, continuing without it");
-                }
-            }
-        }
-
-        // Initialize DNS responder (independent of TUN).
-        //
-        // Default bind_addr is "::1" (IPv6 loopback). The shipped
-        // fips-dns-setup configures systemd-resolved via a global
-        // /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
-        // [::1]:5354, which sidesteps a Linux IPV6_PKTINFO behaviour
-        // where self-destined traffic to fips0's address is attributed
-        // to fips0 in PKTINFO and gets silently dropped by the
-        // mesh-interface filter in src/upper/dns.rs.
-        //
-        // For mesh-reachable resolution (rare), set bind_addr: "::"
-        // in fips.yaml. The mesh-interface filter remains active to
-        // prevent hosts-file alias enumeration in that mode.
-        // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
-        // 127.0.0.1 still reach us regardless of kernel sysctl
-        // defaults — but only when bind is on a wildcard / IPv6 path.
-        if self.config().dns.enabled {
-            let addr_str = self.config().dns.bind_addr();
-            match addr_str.parse::<std::net::IpAddr>() {
-                Ok(ip) => {
-                    let bind = std::net::SocketAddr::new(ip, self.config().dns.port());
-                    match Self::bind_dns_socket(bind) {
-                        Ok(socket) => {
-                            let dns_channel_size = self.config().node.buffers.dns_channel;
-                            let (identity_tx, identity_rx) =
-                                tokio::sync::mpsc::channel(dns_channel_size);
-                            let dns_ttl = self.config().dns.ttl();
-                            let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(
-                                self.config().peers(),
-                            );
-                            let hosts_path =
-                                std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
-                            let reloader =
-                                crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
-                            // Resolve the TUN ifindex so the responder can
-                            // drop queries arriving on the mesh interface
-                            // (fips0). Without this, the `::` bind exposes
-                            // /etc/fips/hosts alias probing to any mesh peer.
-                            // When TUN isn't enabled or the name can't be
-                            // resolved, `None` disables the filter (there
-                            // is no mesh surface to defend anyway).
-                            let mesh_ifindex = Self::lookup_mesh_ifindex(self.config().tun.name());
-                            info!(
-                                bind = %bind,
-                                hosts = reloader.hosts().len(),
-                                mesh_ifindex = ?mesh_ifindex,
-                                "DNS responder started for .fips domain (auto-reload enabled)"
-                            );
-                            let handle = tokio::spawn(crate::upper::dns::run_dns_responder(
-                                socket,
-                                identity_tx,
-                                dns_ttl,
-                                reloader,
-                                mesh_ifindex,
-                            ));
-                            self.dns_identity_rx = Some(identity_rx);
-                            self.dns_task = Some(handle);
+                    match handle.start().await {
+                        Ok(()) => {
+                            self.transports.insert(id, handle);
+                            Event::SubstrateUp { child }
                         }
                         Err(e) => {
-                            warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+                            if let Some(ref n) = name {
+                                warn!(transport_type, name = %n, error = %e, "Transport failed to start");
+                            } else {
+                                warn!(transport_type, error = %e, "Transport failed to start");
+                            }
+                            Event::SubstrateFailed { child }
                         }
                     }
                 }
-                Err(e) => {
-                    warn!(addr = %addr_str, error = %e, "Invalid dns.bind_addr; DNS responder not started");
+                Child::EncryptWorkers => {
+                    // Hash-by-destination pins a TCP flow to one worker
+                    // (preserves wire ordering); additional workers light up
+                    // under multi-flow load. Infallible → always up.
+                    #[cfg(unix)]
+                    {
+                        self.supervisor.encrypt_workers = Some(
+                            super::encrypt_worker::EncryptWorkerPool::spawn(encrypt_worker_count),
+                        );
+                        info!(
+                            workers = encrypt_worker_count,
+                            "Spawned FMP-encrypt worker pool"
+                        );
+
+                        // `FIPS_DECRYPT_WORKERS=0` disables the pool entirely
+                        // and forces the in-line rx_loop decrypt path. When 0
+                        // no DecryptWorkers child is emitted, so this info!
+                        // sits here — exactly where the decrypt spawn would be
+                        // in today's sequence (after the encrypt spawn+info,
+                        // before nostr).
+                        if decrypt_worker_count == 0 {
+                            info!("FIPS_DECRYPT_WORKERS=0 → in-line decrypt in rx_loop");
+                        }
+                    }
+                    Event::SubstrateUp { child }
                 }
-            }
+                Child::DecryptWorkers => {
+                    // Shard-owned decrypt pool. Infallible → always up.
+                    #[cfg(unix)]
+                    {
+                        self.supervisor.decrypt_workers = Some(
+                            super::decrypt_worker::DecryptWorkerPool::spawn(decrypt_worker_count),
+                        );
+                        info!(
+                            workers = decrypt_worker_count,
+                            "Spawned FMP-decrypt worker pool"
+                        );
+                    }
+                    Event::SubstrateUp { child }
+                }
+                Child::Nostr => {
+                    match NostrRendezvous::start(
+                        self.identity(),
+                        self.config().node.rendezvous.nostr.clone(),
+                    )
+                    .await
+                    {
+                        Ok(runtime) => {
+                            if let Err(err) = self.refresh_overlay_advert(&runtime).await {
+                                warn!(error = %err, "Failed to publish initial Nostr overlay advert");
+                            }
+                            self.supervisor.nostr_rendezvous.set_engine(runtime);
+                            self.supervisor
+                                .nostr_rendezvous
+                                .set_started_at_ms(Self::now_ms());
+                            info!("Nostr overlay discovery enabled");
+                            Event::SubstrateUp { child }
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "Failed to start Nostr overlay discovery");
+                            Event::SubstrateFailed { child }
+                        }
+                    }
+                }
+                Child::Mdns => {
+                    // Advertise the port of a non-bootstrap operational UDP
+                    // transport. Bootstrap transports must be excluded (they
+                    // are not the node's listening data-plane socket), and a
+                    // stable selector (lowest TransportId) is used so the
+                    // advertised port is deterministic across restarts rather
+                    // than dependent on HashMap iteration order. This mirrors
+                    // find_udp_transport_for_remote_addr.
+                    let advertised_udp_port = self
+                        .transports
+                        .iter()
+                        .filter(|(id, h)| {
+                            h.transport_type().name == "udp"
+                                && h.is_operational()
+                                && !self.supervisor.nostr_rendezvous.is_bootstrap_transport(id)
+                        })
+                        .filter_map(|(id, h)| h.local_addr().map(|addr| (*id, addr.port())))
+                        .min_by_key(|(id, _)| id.as_u32())
+                        .map(|(_, port)| port)
+                        .unwrap_or(0);
+                    let scope = self.lan_rendezvous_scope();
+                    match crate::mdns::LanRendezvous::start(
+                        self.identity(),
+                        scope,
+                        advertised_udp_port,
+                        self.config().node.rendezvous.lan.clone(),
+                    )
+                    .await
+                    {
+                        Ok(runtime) => {
+                            self.supervisor.lan_rendezvous = Some(runtime);
+                            info!("LAN mDNS discovery enabled");
+                            Event::SubstrateUp { child }
+                        }
+                        Err(err) => {
+                            debug!(error = %err, "LAN mDNS discovery not started");
+                            Event::SubstrateFailed { child }
+                        }
+                    }
+                }
+                Child::Tun => {
+                    // Initialize TUN interface after transports and peers are
+                    // ready.
+                    let address = *self.identity().address();
+                    match TunDevice::create(&self.config().tun, address).await {
+                        Ok(device) => {
+                            let mtu = device.mtu();
+                            let name = device.name().to_string();
+                            let our_addr = *device.address();
+
+                            info!("TUN device active:");
+                            info!("     name: {}", name);
+                            info!("  address: {}", device.address());
+                            info!("      mtu: {}", mtu);
+
+                            // Calculate max MSS for TCP clamping
+                            let effective_mtu = self.effective_ipv6_mtu();
+                            let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
+
+                            info!("effective MTU: {} bytes", effective_mtu);
+                            debug!("   max TCP MSS: {} bytes", max_mss);
+
+                            // On macOS, create a shutdown pipe. Writing to it unblocks the
+                            // reader thread's select() loop without closing the TUN fd
+                            // (which would cause a double-close when TunDevice drops).
+                            #[cfg(target_os = "macos")]
+                            let (shutdown_read_fd, shutdown_write_fd) = {
+                                let mut fds = [0i32; 2];
+                                if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+                                    return Err(NodeError::Tun(
+                                        crate::upper::tun::TunError::Configure(
+                                            "failed to create shutdown pipe".into(),
+                                        ),
+                                    ));
+                                }
+                                (fds[0], fds[1])
+                            };
+
+                            // Create writer (dups the fd for independent write access).
+                            // Pass path_mtu_lookup so inbound SYN-ACK clamp can read
+                            // per-destination path MTU learned via discovery.
+                            let (writer, tun_tx) =
+                                device.create_writer(max_mss, self.path_mtu_lookup.clone())?;
+
+                            // Spawn writer thread
+                            let writer_handle = thread::spawn(move || {
+                                writer.run();
+                            });
+
+                            // Clone tun_tx for the reader
+                            let reader_tun_tx = tun_tx.clone();
+
+                            // Create outbound channel for TUN reader → Node
+                            let tun_channel_size = self.config().node.buffers.tun_channel;
+                            let (outbound_tx, outbound_rx) =
+                                tokio::sync::mpsc::channel(tun_channel_size);
+
+                            // Spawn reader thread
+                            let transport_mtu = self.transport_mtu();
+                            let path_mtu_lookup = self.path_mtu_lookup.clone();
+                            #[cfg(target_os = "macos")]
+                            let reader_handle = thread::spawn(move || {
+                                run_tun_reader(
+                                    device,
+                                    mtu,
+                                    our_addr,
+                                    reader_tun_tx,
+                                    outbound_tx,
+                                    transport_mtu,
+                                    path_mtu_lookup,
+                                    shutdown_read_fd,
+                                );
+                            });
+                            #[cfg(not(target_os = "macos"))]
+                            let reader_handle = thread::spawn(move || {
+                                run_tun_reader(
+                                    device,
+                                    mtu,
+                                    our_addr,
+                                    reader_tun_tx,
+                                    outbound_tx,
+                                    transport_mtu,
+                                    path_mtu_lookup,
+                                );
+                            });
+
+                            self.tun_state = TunState::Active;
+                            self.tun_name = Some(name);
+                            self.supervisor.tun_tx = Some(tun_tx);
+                            self.supervisor.tun_outbound_rx = Some(outbound_rx);
+                            self.supervisor.tun_reader_handle = Some(reader_handle);
+                            self.supervisor.tun_writer_handle = Some(writer_handle);
+                            #[cfg(target_os = "macos")]
+                            {
+                                self.supervisor.tun_shutdown_fd = Some(shutdown_write_fd);
+                            }
+                            Event::SubstrateUp { child }
+                        }
+                        Err(e) => {
+                            self.tun_state = TunState::Failed;
+                            warn!(error = %e, "Failed to initialize TUN, continuing without it");
+                            Event::SubstrateFailed { child }
+                        }
+                    }
+                }
+                Child::Dns => {
+                    // Initialize DNS responder (independent of TUN).
+                    //
+                    // Default bind_addr is "::1" (IPv6 loopback). The shipped
+                    // fips-dns-setup configures systemd-resolved via a global
+                    // /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
+                    // [::1]:5354, which sidesteps a Linux IPV6_PKTINFO behaviour
+                    // where self-destined traffic to fips0's address is attributed
+                    // to fips0 in PKTINFO and gets silently dropped by the
+                    // mesh-interface filter in src/upper/dns.rs.
+                    //
+                    // For mesh-reachable resolution (rare), set bind_addr: "::"
+                    // in fips.yaml. The mesh-interface filter remains active to
+                    // prevent hosts-file alias enumeration in that mode.
+                    // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
+                    // 127.0.0.1 still reach us regardless of kernel sysctl
+                    // defaults — but only when bind is on a wildcard / IPv6 path.
+                    let addr_str = self.config().dns.bind_addr();
+                    match addr_str.parse::<std::net::IpAddr>() {
+                        Ok(ip) => {
+                            let bind = std::net::SocketAddr::new(ip, self.config().dns.port());
+                            match Self::bind_dns_socket(bind) {
+                                Ok(socket) => {
+                                    let dns_channel_size = self.config().node.buffers.dns_channel;
+                                    let (identity_tx, identity_rx) =
+                                        tokio::sync::mpsc::channel(dns_channel_size);
+                                    let dns_ttl = self.config().dns.ttl();
+                                    let base_hosts =
+                                        crate::upper::hosts::HostMap::from_peer_configs(
+                                            self.config().peers(),
+                                        );
+                                    let hosts_path = std::path::PathBuf::from(
+                                        crate::upper::hosts::DEFAULT_HOSTS_PATH,
+                                    );
+                                    let reloader = crate::upper::hosts::HostMapReloader::new(
+                                        base_hosts, hosts_path,
+                                    );
+                                    // Resolve the TUN ifindex so the responder can
+                                    // drop queries arriving on the mesh interface
+                                    // (fips0). Without this, the `::` bind exposes
+                                    // /etc/fips/hosts alias probing to any mesh peer.
+                                    // When TUN isn't enabled or the name can't be
+                                    // resolved, `None` disables the filter (there
+                                    // is no mesh surface to defend anyway).
+                                    let mesh_ifindex =
+                                        Self::lookup_mesh_ifindex(self.config().tun.name());
+                                    info!(
+                                        bind = %bind,
+                                        hosts = reloader.hosts().len(),
+                                        mesh_ifindex = ?mesh_ifindex,
+                                        "DNS responder started for .fips domain (auto-reload enabled)"
+                                    );
+                                    let handle =
+                                        tokio::spawn(crate::upper::dns::run_dns_responder(
+                                            socket,
+                                            identity_tx,
+                                            dns_ttl,
+                                            reloader,
+                                            mesh_ifindex,
+                                        ));
+                                    self.supervisor.dns_identity_rx = Some(identity_rx);
+                                    self.supervisor.dns_task = Some(handle);
+                                    Event::SubstrateUp { child }
+                                }
+                                Err(e) => {
+                                    warn!(bind = %bind, error = %e, "Failed to start DNS responder");
+                                    Event::SubstrateFailed { child }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(addr = %addr_str, error = %e, "Invalid dns.bind_addr; DNS responder not started");
+                            Event::SubstrateFailed { child }
+                        }
+                    }
+                }
+            };
+
+            self.supervisor.fsm.step(feedback);
         }
 
-        self.state = NodeState::Running;
+        // Seams that never triggered inside the loop: the "Transports
+        // initialized" info! when there was no non-transport child, and the
+        // peer-connect when there was no Tun/Dns child (today it still runs,
+        // after mDNS).
+        if !transports_info_emitted && !self.transports.is_empty() {
+            info!(count = self.transports.len(), "Transports initialized");
+        }
+        if !peer_connect_done {
+            self.initiate_peer_connections().await;
+        }
+
+        self.supervisor.state = NodeState::Running;
         info!("Node started:");
-        info!("       state: {}", self.state);
+        info!("       state: {}", self.supervisor.state);
         info!("  transports: {}", self.transports.len());
         info!(" connections: {}", self.connections.len());
         Ok(())
@@ -1459,96 +1568,164 @@ impl Node {
     /// Shuts down TUN interface, stops I/O threads, and transitions to
     /// the Stopped state.
     pub async fn stop(&mut self) -> Result<(), NodeError> {
-        if !self.state.can_stop() {
+        if !self.supervisor.state.can_stop() {
             return Err(NodeError::NotStarted);
         }
-        self.state = NodeState::Stopping;
-        info!(state = %self.state, "Node stopping");
+        self.supervisor.state = NodeState::Stopping;
+        info!(state = %self.supervisor.state, "Node stopping");
 
-        // Stop DNS responder
-        if let Some(handle) = self.dns_task.take() {
-            handle.abort();
-            debug!("DNS responder stopped");
+        // Reconstruct the supervised up-set from observed runtime presence and
+        // let the FSM author the teardown order (dns → nostr → mdns →
+        // transports (ascending id) → tun). Worker pools are deliberately
+        // absent from the up-set: today's stop() never tears them down.
+        let mut up: Vec<Child> = Vec::new();
+        if self.supervisor.dns_task.is_some() {
+            up.push(Child::Dns);
         }
-
-        // Send disconnect notifications to all active peers before closing transports
-        self.send_disconnect_to_all_peers(DisconnectReason::Shutdown)
-            .await;
-
-        // Stop Nostr overlay discovery background work and withdraw any advert.
-        if let Some(bootstrap) = self.nostr_rendezvous.take_engine()
-            && let Err(e) = bootstrap.shutdown().await
-        {
-            warn!(error = %e, "Failed to shutdown Nostr overlay discovery");
+        if self.supervisor.nostr_rendezvous.engine().is_some() {
+            up.push(Child::Nostr);
         }
-
-        // Tear down LAN mDNS responder + browser. Best-effort: the
-        // OS will eventually time the advert out via its TTL even if
-        // we don't get a clean unregister out before the daemon exits.
-        if let Some(lan) = self.lan_rendezvous.take() {
-            lan.shutdown().await;
+        if self.supervisor.lan_rendezvous.is_some() {
+            up.push(Child::Mdns);
         }
+        for id in self.transports.keys() {
+            up.push(Child::Transport(*id));
+        }
+        if self.tun_name.is_some() {
+            up.push(Child::Tun);
+        }
+        self.supervisor.fsm = SupervisorFsm::running_with(up);
+        let actions = self.supervisor.fsm.step(Event::Stop);
 
-        // Shutdown transports (they're packet producers)
-        let transport_ids: Vec<_> = self.transports.keys().cloned().collect();
-        for transport_id in transport_ids {
-            if let Some(mut handle) = self.transports.remove(&transport_id) {
-                let transport_type = handle.transport_type().name;
-                match handle.stop().await {
-                    Ok(()) => {
-                        info!(transport_id = %transport_id, transport_type, "Transport stopped");
-                    }
-                    Err(e) => {
-                        warn!(
-                            transport_id = %transport_id,
-                            transport_type,
-                            error = %e,
-                            "Transport stop failed"
-                        );
+        // Execute each StopChild as today's verbatim block. Two driver seams
+        // are woven in at their current positions: the shutdown-disconnect
+        // fan-out (after Dns, before Nostr), and dropping the packet channels
+        // (after all transports, before TUN).
+        let mut disconnect_done = false;
+        let mut packet_taken = false;
+        for action in actions {
+            let Action::StopChild(child) = action else {
+                continue;
+            };
+
+            // Seam (a): send disconnect notifications to all active peers
+            // before closing transports — after any Dns teardown, before
+            // everything else.
+            if !disconnect_done && !matches!(child, Child::Dns) {
+                self.send_disconnect_to_all_peers(DisconnectReason::Shutdown)
+                    .await;
+                disconnect_done = true;
+            }
+
+            // Seam (b): drop the packet channels after all transports have
+            // stopped and before the TUN teardown.
+            if !packet_taken && matches!(child, Child::Tun) {
+                self.supervisor.packet_tx.take();
+                self.packet_rx.take();
+                packet_taken = true;
+            }
+
+            match child {
+                Child::Dns => {
+                    // Stop DNS responder
+                    if let Some(handle) = self.supervisor.dns_task.take() {
+                        handle.abort();
+                        debug!("DNS responder stopped");
                     }
                 }
-            }
-        }
+                Child::Nostr => {
+                    // Stop Nostr overlay discovery background work and withdraw
+                    // any advert.
+                    if let Some(bootstrap) = self.supervisor.nostr_rendezvous.take_engine()
+                        && let Err(e) = bootstrap.shutdown().await
+                    {
+                        warn!(error = %e, "Failed to shutdown Nostr overlay discovery");
+                    }
+                }
+                Child::Mdns => {
+                    // Tear down LAN mDNS responder + browser. Best-effort: the
+                    // OS will eventually time the advert out via its TTL even if
+                    // we don't get a clean unregister out before the daemon exits.
+                    if let Some(lan) = self.supervisor.lan_rendezvous.take() {
+                        lan.shutdown().await;
+                    }
+                }
+                Child::Transport(id) => {
+                    // Shutdown transport (they're packet producers)
+                    if let Some(mut handle) = self.transports.remove(&id) {
+                        let transport_type = handle.transport_type().name;
+                        match handle.stop().await {
+                            Ok(()) => {
+                                info!(transport_id = %id, transport_type, "Transport stopped");
+                            }
+                            Err(e) => {
+                                warn!(
+                                    transport_id = %id,
+                                    transport_type,
+                                    error = %e,
+                                    "Transport stop failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                Child::Tun => {
+                    // Shutdown TUN interface
+                    if let Some(name) = self.tun_name.take() {
+                        info!(name = %name, "Shutting down TUN interface");
 
-        // Drop packet channels
-        self.packet_tx.take();
-        self.packet_rx.take();
+                        // Drop the tun_tx to signal the writer to stop
+                        self.supervisor.tun_tx.take();
 
-        // Shutdown TUN interface
-        if let Some(name) = self.tun_name.take() {
-            info!(name = %name, "Shutting down TUN interface");
+                        // Delete the interface (on Linux, causes reader to get EFAULT)
+                        if let Err(e) = shutdown_tun_interface(&name).await {
+                            warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
+                        }
 
-            // Drop the tun_tx to signal the writer to stop
-            self.tun_tx.take();
+                        // On macOS, signal the reader thread to exit by writing to the
+                        // shutdown pipe. The reader's select() will wake up and break.
+                        #[cfg(target_os = "macos")]
+                        if let Some(fd) = self.supervisor.tun_shutdown_fd.take() {
+                            unsafe {
+                                libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);
+                                libc::close(fd);
+                            }
+                        }
 
-            // Delete the interface (on Linux, causes reader to get EFAULT)
-            if let Err(e) = shutdown_tun_interface(&name).await {
-                warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
-            }
+                        // Wait for threads to finish
+                        if let Some(handle) = self.supervisor.tun_reader_handle.take() {
+                            let _ = handle.join();
+                        }
+                        if let Some(handle) = self.supervisor.tun_writer_handle.take() {
+                            let _ = handle.join();
+                        }
 
-            // On macOS, signal the reader thread to exit by writing to the
-            // shutdown pipe. The reader's select() will wake up and break.
-            #[cfg(target_os = "macos")]
-            if let Some(fd) = self.tun_shutdown_fd.take() {
-                unsafe {
-                    libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);
-                    libc::close(fd);
+                        self.tun_state = TunState::Disabled;
+                    }
+                }
+                Child::EncryptWorkers | Child::DecryptWorkers => {
+                    // Worker pools are never torn down in stop() (matches
+                    // today); the FSM never emits StopChild for them, so this
+                    // is unreachable.
                 }
             }
 
-            // Wait for threads to finish
-            if let Some(handle) = self.tun_reader_handle.take() {
-                let _ = handle.join();
-            }
-            if let Some(handle) = self.tun_writer_handle.take() {
-                let _ = handle.join();
-            }
-
-            self.tun_state = TunState::Disabled;
+            self.supervisor.fsm.step(Event::ChildStopped { child });
         }
 
-        self.state = NodeState::Stopped;
-        info!(state = %self.state, "Node stopped");
+        // Seams that never triggered inside the loop (no non-Dns child for the
+        // disconnect fan-out, no Tun child for dropping the packet channels).
+        if !disconnect_done {
+            self.send_disconnect_to_all_peers(DisconnectReason::Shutdown)
+                .await;
+        }
+        if !packet_taken {
+            self.supervisor.packet_tx.take();
+            self.packet_rx.take();
+        }
+
+        self.supervisor.state = NodeState::Stopped;
+        info!(state = %self.supervisor.state, "Node stopped");
         Ok(())
     }
 
@@ -1644,6 +1821,7 @@ impl Node {
                     continue;
                 }
                 if self
+                    .supervisor
                     .nostr_rendezvous
                     .request_nostr_bootstrap(peer_config)
                     .await
@@ -1968,7 +2146,7 @@ impl Node {
         &mut self,
         bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) {
-        if self.nostr_rendezvous.startup_sweep_done() {
+        if self.supervisor.nostr_rendezvous.startup_sweep_done() {
             return;
         }
         if !self.config().node.rendezvous.nostr.enabled
@@ -1976,10 +2154,10 @@ impl Node {
                 != crate::config::NostrRendezvousPolicy::Open
         {
             // Mark done so we don't keep re-checking on every tick.
-            self.nostr_rendezvous.set_startup_sweep_done();
+            self.supervisor.nostr_rendezvous.set_startup_sweep_done();
             return;
         }
-        let Some(started_at_ms) = self.nostr_rendezvous.started_at_ms() else {
+        let Some(started_at_ms) = self.supervisor.nostr_rendezvous.started_at_ms() else {
             return;
         };
         let now_ms = Self::now_ms();
@@ -2002,7 +2180,7 @@ impl Node {
             .startup_sweep_max_age_secs;
         self.run_open_discovery_sweep(bootstrap, Some(max_age_secs), "startup")
             .await;
-        self.nostr_rendezvous.set_startup_sweep_done();
+        self.supervisor.nostr_rendezvous.set_startup_sweep_done();
     }
 
     fn available_outbound_slots(&self) -> usize {
@@ -2167,7 +2345,8 @@ impl Node {
         bootstrap: &std::sync::Arc<NostrRendezvous>,
     ) -> Result<(), crate::nostr::BootstrapError> {
         let snapshot = self.advert_transport_snapshot();
-        self.nostr_rendezvous
+        self.supervisor
+            .nostr_rendezvous
             .refresh_overlay_advert(bootstrap, snapshot, &self.config().node.rendezvous.nostr)
             .await
     }
@@ -2286,6 +2465,7 @@ impl Node {
     async fn peer_address_candidates(&self, peer_config: &PeerConfig) -> Vec<PeerAddress> {
         let static_addresses = self.static_peer_addresses(peer_config);
         let overlay_addresses = self
+            .supervisor
             .nostr_rendezvous
             .nostr_peer_fallback_addresses(
                 peer_config,
@@ -2360,7 +2540,7 @@ impl Node {
         };
         if peer
             .transport_id()
-            .map(|id| self.nostr_rendezvous.is_bootstrap_transport(&id))
+            .map(|id| self.supervisor.nostr_rendezvous.is_bootstrap_transport(&id))
             .unwrap_or(false)
         {
             return false;
@@ -2475,11 +2655,15 @@ impl Node {
             "adopting established traversal socket"
         );
 
-        if !self.state.is_operational() {
+        if !self.supervisor.state.is_operational() {
             return Err(NodeError::NotStarted);
         }
 
-        let packet_tx = self.packet_tx.clone().ok_or(NodeError::NotStarted)?;
+        let packet_tx = self
+            .supervisor
+            .packet_tx
+            .clone()
+            .ok_or(NodeError::NotStarted)?;
         let peer_identity = PeerIdentity::from_npub(&traversal.peer_npub).map_err(|e| {
             NodeError::InvalidPeerNpub {
                 npub: traversal.peer_npub.clone(),
@@ -2556,7 +2740,8 @@ impl Node {
             transport_id,
             crate::transport::TransportHandle::Udp(transport),
         );
-        self.nostr_rendezvous
+        self.supervisor
+            .nostr_rendezvous
             .insert_bootstrap_transport(transport_id, traversal.peer_npub.clone());
 
         let remote_addr = TransportAddr::from_string(&traversal.remote_addr.to_string());
@@ -2564,7 +2749,8 @@ impl Node {
             .initiate_connection(transport_id, remote_addr.clone(), peer_identity)
             .await
         {
-            self.nostr_rendezvous
+            self.supervisor
+                .nostr_rendezvous
                 .remove_bootstrap_transport(&transport_id);
             if let Some(mut handle) = self.transports.remove(&transport_id) {
                 let _ = handle.stop().await;

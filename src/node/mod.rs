@@ -61,14 +61,13 @@ use crate::transport::{
 };
 use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
-use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
+use crate::upper::tun::{TunError, TunState, TunTx};
 use crate::utils::index::IndexAllocator;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity, TreeCoordinate};
 use rand::Rng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use thiserror::Error;
 
 /// Errors related to node operations.
@@ -271,9 +270,13 @@ pub struct Node {
     /// `update_peers`; readers reach it through the accessors.
     context: Arc<context::NodeContext>,
 
-    // === State ===
-    /// Node operational state.
-    state: NodeState,
+    // === Lifecycle Supervisor ===
+    /// Owner of the lifecycle-managed substrate handles (packet-send channel,
+    /// TUN plumbing, DNS task, Nostr/LAN rendezvous, encrypt/decrypt worker
+    /// pools) plus the published `NodeState` and the sans-IO supervisor FSM
+    /// that authors their spawn/teardown ordering. Reached via
+    /// `self.supervisor.*`.
+    supervisor: lifecycle::supervisor::Supervisor,
 
     // === Spanning Tree ===
     /// Local spanning tree state.
@@ -304,8 +307,6 @@ pub struct Node {
     addr_to_link: HashMap<AddrKey, LinkId>,
 
     // === Packet Channel ===
-    /// Packet sender for transports.
-    packet_tx: Option<PacketTx>,
     /// Packet receiver (for event loop).
     packet_rx: Option<PacketRx>,
 
@@ -382,24 +383,6 @@ pub struct Node {
     tun_state: TunState,
     /// TUN interface name (for cleanup).
     tun_name: Option<String>,
-    /// TUN packet sender channel.
-    tun_tx: Option<TunTx>,
-    /// Receiver for outbound packets from the TUN reader.
-    tun_outbound_rx: Option<TunOutboundRx>,
-    /// TUN reader thread handle.
-    tun_reader_handle: Option<JoinHandle<()>>,
-    /// TUN writer thread handle.
-    tun_writer_handle: Option<JoinHandle<()>>,
-    /// Shutdown pipe: writing to this fd unblocks the TUN reader thread on macOS.
-    /// On Linux, deleting the interface via netlink serves the same purpose.
-    #[cfg(target_os = "macos")]
-    tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
-
-    // === DNS Responder ===
-    /// Receiver for resolved identities from the DNS responder.
-    dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
-    /// DNS responder task handle.
-    dns_task: Option<tokio::task::JoinHandle<()>>,
 
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
@@ -444,17 +427,6 @@ pub struct Node {
     /// are exhausted.
     retry_pending: HashMap<NodeAddr, retry::RetryState>,
 
-    /// Node-side driver state for the Nostr overlay peer-rendezvous
-    /// subsystem: the engine handle, its startup timestamp, the one-shot
-    /// startup-sweep latch, and the per-peer bootstrap-transport bookkeeping
-    /// adopted from NAT-traversal handoffs.
-    nostr_rendezvous: crate::nostr::RendezvousDriver,
-    /// mDNS / DNS-SD responder + browser for local-link peer discovery.
-    /// Identity is unverified at this layer — the Noise XX handshake
-    /// initiated against an mDNS-observed endpoint is what proves the
-    /// peer holds the matching private key.
-    lan_rendezvous: Option<Arc<crate::mdns::LanRendezvous>>,
-
     // === Periodic Parent Re-evaluation ===
     /// Timestamp of last periodic parent re-evaluation (for pacing).
     last_parent_reeval: Option<std::time::Instant>,
@@ -489,20 +461,6 @@ pub struct Node {
     /// Built at construction from peer aliases and /etc/fips/hosts, and
     /// published through a lock-free snapshot for the display path.
     host_map: reloadable::HostMapReloadable,
-
-    /// Off-task FMP-encrypt + UDP-send worker pool. Unix-only —
-    /// the worker issues direct sendmmsg(2) / sendmsg+UDP_GSO calls
-    /// on raw fds via `AsRawFd`. None on Windows or when the worker
-    /// pool failed to spawn.
-    #[cfg(unix)]
-    pub(crate) encrypt_workers: Option<encrypt_worker::EncryptWorkerPool>,
-
-    /// Off-task FMP decrypt worker pool — receiver-side mirror of
-    /// `encrypt_workers`. Workers are shards: each owns its session
-    /// state directly in a thread-local `HashMap` (no `RwLock`,
-    /// no `Mutex` per packet). Hash-by-cache-key dispatch.
-    #[cfg(unix)]
-    pub(crate) decrypt_workers: Option<decrypt_worker::DecryptWorkerPool>,
 
     /// Sessions whose recv cipher + replay window have been handed
     /// off to a decrypt shard worker. Lookup gate on the hot receive
@@ -612,7 +570,7 @@ impl Node {
 
         Ok(Self {
             context,
-            state: NodeState::Created,
+            supervisor: lifecycle::supervisor::Supervisor::new(),
             tree_state,
             bloom_state,
             coord_cache,
@@ -620,7 +578,6 @@ impl Node {
             transport_drops: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
-            packet_tx: None,
             packet_rx: None,
             connections: HashMap::new(),
             peers: HashMap::new(),
@@ -643,14 +600,6 @@ impl Node {
             )),
             tun_state,
             tun_name: None,
-            tun_tx: None,
-            tun_outbound_rx: None,
-            tun_reader_handle: None,
-            tun_writer_handle: None,
-            #[cfg(target_os = "macos")]
-            tun_shutdown_fd: None,
-            dns_identity_rx: None,
-            dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -669,8 +618,6 @@ impl Node {
             ),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
-            nostr_rendezvous: crate::nostr::RendezvousDriver::default(),
-            lan_rendezvous: None,
             last_parent_reeval: None,
             last_congestion_log: None,
             estimated_mesh_size: None,
@@ -680,10 +627,6 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            #[cfg(unix)]
-            encrypt_workers: None,
-            #[cfg(unix)]
-            decrypt_workers: None,
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
             #[cfg(unix)]
@@ -773,7 +716,7 @@ impl Node {
 
         Ok(Self {
             context,
-            state: NodeState::Created,
+            supervisor: lifecycle::supervisor::Supervisor::new(),
             tree_state,
             bloom_state,
             coord_cache,
@@ -781,7 +724,6 @@ impl Node {
             transport_drops: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
-            packet_tx: None,
             packet_rx: None,
             connections: HashMap::new(),
             peers: HashMap::new(),
@@ -804,14 +746,6 @@ impl Node {
             )),
             tun_state,
             tun_name: None,
-            tun_tx: None,
-            tun_outbound_rx: None,
-            tun_reader_handle: None,
-            tun_writer_handle: None,
-            #[cfg(target_os = "macos")]
-            tun_shutdown_fd: None,
-            dns_identity_rx: None,
-            dns_task: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -827,8 +761,6 @@ impl Node {
             lookup: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
             pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
-            nostr_rendezvous: crate::nostr::RendezvousDriver::default(),
-            lan_rendezvous: None,
             last_parent_reeval: None,
             last_congestion_log: None,
             estimated_mesh_size: None,
@@ -838,10 +770,6 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            #[cfg(unix)]
-            encrypt_workers: None,
-            #[cfg(unix)]
-            decrypt_workers: None,
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
             #[cfg(unix)]
@@ -1210,7 +1138,7 @@ impl Node {
 
     /// Get the node state.
     pub fn state(&self) -> NodeState {
-        self.state
+        self.supervisor.state
     }
 
     /// Get the node uptime.
@@ -1220,7 +1148,7 @@ impl Node {
 
     /// Check if node is operational.
     pub fn is_running(&self) -> bool {
-        self.state.is_operational()
+        self.supervisor.state.is_operational()
     }
 
     /// Check if this is a leaf-only node.
@@ -1520,7 +1448,7 @@ impl Node {
         let snapshot = crate::control::snapshot::StatsSnapshot {
             history: std::sync::Arc::new(self.stats_history.clone()),
             estimated_mesh_size: self.estimated_mesh_size,
-            state: self.state,
+            state: self.supervisor.state,
             tun_state: self.tun_state,
             tun_name: self.tun_name.clone(),
             effective_ipv6_mtu: self.effective_ipv6_mtu(),
@@ -2269,7 +2197,11 @@ impl Node {
     }
 
     pub(crate) fn cleanup_bootstrap_transport_if_unused(&mut self, transport_id: TransportId) {
-        if !self.nostr_rendezvous.is_bootstrap_transport(&transport_id) {
+        if !self
+            .supervisor
+            .nostr_rendezvous
+            .is_bootstrap_transport(&transport_id)
+        {
             return;
         }
 
@@ -2299,7 +2231,8 @@ impl Node {
             "bootstrap transport has no remaining references; dropping"
         );
 
-        self.nostr_rendezvous
+        self.supervisor
+            .nostr_rendezvous
             .remove_bootstrap_transport(&transport_id);
         self.transport_drops.remove(&transport_id);
         self.transports.remove(&transport_id);
@@ -2376,7 +2309,7 @@ impl Node {
     /// Used by control queries (`show_peers` per-peer Nostr-traversal
     /// state) to read failure-state without taking shared ownership.
     pub fn nostr_rendezvous_handle(&self) -> Option<&crate::nostr::NostrRendezvous> {
-        self.nostr_rendezvous.engine()
+        self.supervisor.nostr_rendezvous.engine()
     }
 
     /// Iterate over all peer node IDs.
@@ -2669,7 +2602,7 @@ impl Node {
     ///
     /// Returns None if TUN is not active or the node hasn't been started.
     pub fn tun_tx(&self) -> Option<&TunTx> {
-        self.tun_tx.as_ref()
+        self.supervisor.tun_tx.as_ref()
     }
 
     // === Sending ===
@@ -2765,7 +2698,7 @@ impl Node {
         {
             let send_cipher_opt = session.send_cipher_clone();
             if let Some(fmp_cipher) = send_cipher_opt
-                && let Some(workers) = self.encrypt_workers.as_ref().cloned()
+                && let Some(workers) = self.supervisor.encrypt_workers.as_ref().cloned()
                 && let Some(transport) = self.transports.get(&transport_id)
                 && let TransportHandle::Udp(udp) = transport
                 && let Some(socket) = udp.async_socket()
@@ -2999,7 +2932,7 @@ impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("node_addr", self.node_addr())
-            .field("state", &self.state)
+            .field("state", &self.supervisor.state)
             .field("is_leaf_only", &self.is_leaf_only())
             .field("connections", &self.connection_count())
             .field("peers", &self.peer_count())

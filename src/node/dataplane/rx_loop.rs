@@ -47,7 +47,7 @@ impl Node {
         // Take the TUN outbound receiver, or create a dummy channel that never
         // produces messages (when TUN is disabled). Holding the sender prevents
         // the channel from closing.
-        let (mut tun_outbound_rx, _tun_guard) = match self.tun_outbound_rx.take() {
+        let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.tun_outbound_rx.take() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -57,7 +57,7 @@ impl Node {
 
         // Take the DNS identity receiver, or create a dummy channel (when DNS
         // is disabled). Same pattern as TUN outbound.
-        let (mut dns_identity_rx, _dns_guard) = match self.dns_identity_rx.take() {
+        let (mut dns_identity_rx, _dns_guard) = match self.supervisor.dns_identity_rx.take() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -320,9 +320,11 @@ impl Node {
             // discovery-layer cooldown to the long protocol-mismatch
             // window and emit a single WARN per fresh observation.
             if self
+                .supervisor
                 .nostr_rendezvous
                 .is_bootstrap_transport(&packet.transport_id)
                 && let Some(npub) = self
+                    .supervisor
                     .nostr_rendezvous
                     .bootstrap_transport_npub(&packet.transport_id)
                     .cloned()

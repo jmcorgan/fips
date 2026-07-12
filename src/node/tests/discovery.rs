@@ -1095,7 +1095,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
 
     // Inject a TUN sender so `send_icmpv6_dest_unreachable` is observable.
     let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
-    node.tun_tx = Some(tun_tx);
+    node.supervisor.tun_tx = Some(tun_tx);
 
     // Build a target identity (the unreachable destination).
     let target_identity = Identity::generate();
