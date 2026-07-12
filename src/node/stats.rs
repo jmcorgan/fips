@@ -273,7 +273,6 @@ pub struct TreeStatsSnapshot {
     pub stale: u64,
     pub ancestry_invalid: u64,
     pub accepted: u64,
-    pub parent_switched: u64,
     pub loop_detected: u64,
     pub ancestry_changed: u64,
     pub sent: u64,

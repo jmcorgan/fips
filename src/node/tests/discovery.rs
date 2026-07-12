@@ -905,6 +905,45 @@ async fn test_originator_stores_path_mtu_in_cache() {
     );
 }
 
+#[tokio::test]
+async fn test_originator_lookup_response_keeps_tighter_path_mtu_lookup() {
+    // Regression: a LookupResponse carrying a looser (larger) path_mtu must
+    // NOT clobber a tighter (smaller) value already in path_mtu_lookup that a
+    // reactive MtuExceeded or PathMtuNotification learned. Cross-carrier
+    // keep-tighter: the clamp must never loosen.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    node.register_identity(target, target_identity.pubkey_full());
+
+    // Pre-seed a tighter value, as if a reactive signal already narrowed it.
+    let target_fips = crate::FipsAddress::from_node_addr(&target);
+    node.path_mtu_lookup_insert(target_fips, 1280);
+
+    let proof_data = LookupResponse::proof_bytes(800, &target, &coords);
+    let proof = target_identity.sign(&proof_data);
+
+    let mut response = LookupResponse::new(800, target, coords.clone(), proof);
+    // Looser discovery estimate that must be rejected in favor of the tighter
+    // existing entry.
+    response.path_mtu = 1500;
+
+    let payload = &response.encode()[1..];
+
+    node.handle_lookup_response(&from, payload).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&target_fips),
+        Some(1280),
+        "LookupResponse must not loosen a tighter existing path_mtu_lookup value"
+    );
+}
+
 // ============================================================================
 // Integration Tests — min_mtu transit pruning
 // ============================================================================

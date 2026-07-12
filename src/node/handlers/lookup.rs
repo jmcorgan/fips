@@ -298,17 +298,33 @@ impl Node {
                     // map used by the TUN reader/writer at TCP MSS clamp time.
                     let fips_addr = crate::FipsAddress::from_node_addr(&target);
                     match self.path_mtu_lookup.write() {
-                        Ok(mut map) => {
-                            let prior = map.insert(fips_addr, path_mtu);
-                            debug!(
-                                target = %self.peer_display_name(&target),
-                                fips_addr = %fips_addr,
-                                path_mtu = path_mtu,
-                                prior = ?prior,
-                                map_len = map.len(),
-                                "Wrote path_mtu_lookup from discovery LookupResponse"
-                            );
-                        }
+                        Ok(mut map) => match map.get(&fips_addr).copied() {
+                            Some(existing) if existing <= path_mtu => {
+                                // Keep the tighter learned value; never loosen
+                                // the clamp. A reactive MtuExceeded or
+                                // PathMtuNotification tighten takes precedence
+                                // over a looser discovery estimate
+                                // (cross-carrier keep-tighter).
+                                debug!(
+                                    target = %self.peer_display_name(&target),
+                                    fips_addr = %fips_addr,
+                                    path_mtu = path_mtu,
+                                    existing = existing,
+                                    "LookupResponse: keeping tighter existing path_mtu_lookup value"
+                                );
+                            }
+                            other => {
+                                map.insert(fips_addr, path_mtu);
+                                debug!(
+                                    target = %self.peer_display_name(&target),
+                                    fips_addr = %fips_addr,
+                                    path_mtu = path_mtu,
+                                    prior = ?other,
+                                    map_len = map.len(),
+                                    "Wrote path_mtu_lookup from discovery LookupResponse"
+                                );
+                            }
+                        },
                         Err(e) => {
                             warn!(
                                 target = %self.peer_display_name(&target),
