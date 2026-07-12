@@ -173,7 +173,6 @@ impl Node {
                 self.coord_cache
                     .invalidate_via_node(our_identity.node_addr());
                 self.reset_discovery_backoff();
-                self.metrics().tree.parent_switched.inc();
                 self.metrics().tree.parent_switches.inc();
                 info!(
                     new_parent = %self.peer_display_name(&new_parent),
@@ -205,7 +204,6 @@ impl Node {
                 self.coord_cache
                     .invalidate_other_roots(our_identity.node_addr());
                 self.reset_discovery_backoff();
-                self.metrics().tree.parent_switched.inc();
                 self.metrics().tree.parent_switches.inc();
                 info!(
                     new_root = %self.tree_state.root(),
