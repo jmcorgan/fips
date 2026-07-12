@@ -1,5 +1,12 @@
 # FIPS Bloom Filters
 
+> **Status (2026-07-12):** This document still describes the **abandoned v1.5**
+> bloom design. The code on `next` is presently plain **v1** — the v1.5
+> implementation was removed during the sans-IO refactor and replaced with the
+> v1 filter. The target design is **v2** (per the settled v2 bloom protocol
+> specification), which is **pending implementation**. Until v2 lands, treat any
+> "Implemented" wording below as the retired v1.5 work, not the shipped code.
+
 This document describes the bloom filter data structures, parameters, and
 mathematical properties used by FIPS for reachability-based candidate
 selection. It is a supporting reference — for how bloom filters fit into
