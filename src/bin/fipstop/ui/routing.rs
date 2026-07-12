@@ -134,8 +134,8 @@ fn draw_routing_stats(
     let cols =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
-    // Shorthand for a nested counter value (e.g. discovery.req_received).
-    let disc = |key: &str| helpers::nested_u64(data, "discovery", key);
+    // Shorthand for a nested counter value (e.g. lookup.req_received).
+    let lookup = |key: &str| helpers::nested_u64(data, "lookup", key);
     let err = |key: &str| helpers::nested_u64(data, "error_signals", key);
     let cong = |key: &str| helpers::nested_u64(data, "congestion", key);
 
@@ -174,32 +174,32 @@ fn draw_routing_stats(
     ));
     left.push(Line::from(""));
     left.extend(section(
-        "Discovery Requests",
+        "Lookup Requests",
         &[
-            ("Received", disc("req_received")),
-            ("Forwarded", disc("req_forwarded")),
-            ("Initiated", disc("req_initiated")),
-            ("Deduplicated", disc("req_deduplicated")),
-            ("Target Is Us", disc("req_target_is_us")),
-            ("Duplicate", disc("req_duplicate")),
-            ("Bloom Miss", disc("req_bloom_miss")),
-            ("Backoff Suppressed", disc("req_backoff_suppressed")),
-            ("Fwd Rate Limited", disc("req_forward_rate_limited")),
-            ("TTL Exhausted", disc("req_ttl_exhausted")),
-            ("Decode Error", disc("req_decode_error")),
+            ("Received", lookup("req_received")),
+            ("Forwarded", lookup("req_forwarded")),
+            ("Initiated", lookup("req_initiated")),
+            ("Deduplicated", lookup("req_deduplicated")),
+            ("Target Is Us", lookup("req_target_is_us")),
+            ("Duplicate", lookup("req_duplicate")),
+            ("Bloom Miss", lookup("req_bloom_miss")),
+            ("Backoff Suppressed", lookup("req_backoff_suppressed")),
+            ("Fwd Rate Limited", lookup("req_forward_rate_limited")),
+            ("TTL Exhausted", lookup("req_ttl_exhausted")),
+            ("Decode Error", lookup("req_decode_error")),
         ],
     ));
     left.push(Line::from(""));
     left.extend(section(
-        "Discovery Responses",
+        "Lookup Responses",
         &[
-            ("Received", disc("resp_received")),
-            ("Accepted", disc("resp_accepted")),
-            ("Forwarded", disc("resp_forwarded")),
-            ("Timed Out", disc("resp_timed_out")),
-            ("Identity Miss", disc("resp_identity_miss")),
-            ("Proof Failed", disc("resp_proof_failed")),
-            ("Decode Error", disc("resp_decode_error")),
+            ("Received", lookup("resp_received")),
+            ("Accepted", lookup("resp_accepted")),
+            ("Forwarded", lookup("resp_forwarded")),
+            ("Timed Out", lookup("resp_timed_out")),
+            ("Identity Miss", lookup("resp_identity_miss")),
+            ("Proof Failed", lookup("resp_proof_failed")),
+            ("Decode Error", lookup("resp_decode_error")),
         ],
     ));
 
