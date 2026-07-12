@@ -1,7 +1,7 @@
 //! Sans-IO routing decision core.
 //!
 //! Pure, runtime-agnostic transit-forward decision for SessionDatagrams. The
-//! async I/O adapter in `node::handlers::forwarding` decodes the wire bytes,
+//! async I/O adapter in `node::dataplane::forwarding` decodes the wire bytes,
 //! pre-resolves the next hop, builds a [`RoutingView`] over live node state,
 //! calls [`Router::route`], and drives the returned [`RouteOutcome`] (the
 //! actual encrypted sends, metrics, and logging). No I/O, no clock, no

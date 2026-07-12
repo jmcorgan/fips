@@ -2780,12 +2780,12 @@ mod tests {
     /// Structural confirmation that the rx_loop no longer dispatches `show_*`:
     /// the rx_loop source carries no `queries::dispatch` call and no
     /// `starts_with("show_")` routing branch. Reads the committed source of
-    /// `src/node/handlers/rx_loop.rs` and asserts both markers are absent. This
+    /// `src/node/dataplane/rx_loop.rs` and asserts both markers are absent. This
     /// is the milestone's "remove `show_*` from the data-plane dispatch path"
     /// invariant, guarded against regression.
     #[test]
     fn rx_loop_has_no_show_dispatch() {
-        let src = include_str!("../node/handlers/rx_loop.rs");
+        let src = include_str!("../node/dataplane/rx_loop.rs");
         assert!(
             !src.contains("queries::dispatch"),
             "rx_loop must not call queries::dispatch (show_* served off-loop)"

@@ -4,10 +4,10 @@
 #   - fips::node::handlers::rekey       — FMP/FSP rekey state machine
 #   - fips::node::handlers::handshake   — Noise handshake (cross-init,
 #                                          dual-init, msg1/2/3 dispatch)
-#   - fips::node::handlers::forwarding  — transit datagram forwarding,
+#   - fips::node::dataplane::forwarding — transit datagram forwarding,
 #                                          route lookup, drops
 #   - fips::node::handlers::session     — FSP K-bit cutover, drain
-#   - fips::node::handlers::encrypted   — FMP K-bit flip detection
+#   - fips::node::dataplane::encrypted  — FMP K-bit flip detection
 #   - fips::node::handlers::mmp         — link liveness, SRTT, ETX
 #
 # Other modules stay at info to keep log volume manageable. The base
@@ -33,7 +33,7 @@
 # environment variable FIPS_MESH_LAB_TRACE=1 is set.
 
 x-trace-rust-log: &trace-rust-log
-  RUST_LOG: "info,fips::node::handlers::rekey=trace,fips::node::handlers::handshake=trace,fips::node::handlers::forwarding=trace,fips::node::handlers::session=trace,fips::node::handlers::encrypted=trace,fips::node::handlers::mmp=trace"
+  RUST_LOG: "info,fips::node::handlers::rekey=trace,fips::node::handlers::handshake=trace,fips::node::dataplane::forwarding=trace,fips::node::handlers::session=trace,fips::node::dataplane::encrypted=trace,fips::node::handlers::mmp=trace"
 
 services:
   # rekey profile

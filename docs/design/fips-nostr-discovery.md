@@ -477,7 +477,7 @@ The TXT record carries three keys (`src/discovery/lan/mod.rs:47-55`):
 
 Once per node tick, the node drains browser events and acts on them in
 `poll_lan_discovery()` (`src/node/lifecycle.rs:907`, called from
-`src/node/handlers/rx_loop.rs:266`). For each discovered peer it finds
+`src/node/dataplane/rx_loop.rs:266`). For each discovered peer it finds
 a UDP transport whose family matches the peer address, parses the
 `npub` into a `PeerIdentity`, skips peers it is already connected to or
 currently connecting to, and otherwise initiates a connection.

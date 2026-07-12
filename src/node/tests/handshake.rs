@@ -1241,7 +1241,7 @@ async fn test_should_admit_msg1_admits_rekey_when_udp_accept_off() {
 ///
 /// The carve-out predicate must also consult peer state by source
 /// address: `current_addr()` is updated from inbound encrypted-frame
-/// source addrs (`handlers/encrypted.rs`), so an established peer can
+/// source addrs (`dataplane/encrypted.rs`), so an established peer can
 /// be matched even when the addr_to_link key is hostname-form and the
 /// incoming addr is numeric.
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! Tests for the consecutive-decrypt-failure threshold force-removal path.
 //!
-//! Covers `Node::handle_decrypt_failure` (in `node/handlers/encrypted.rs`),
+//! Covers `Node::handle_decrypt_failure` (in `node/dataplane/encrypted.rs`),
 //! which increments `ActivePeer::increment_decrypt_failures` on each AEAD
 //! verification failure and force-removes the peer once
 //! `DECRYPT_FAILURE_THRESHOLD` consecutive failures are observed. The
@@ -18,7 +18,7 @@ use super::*;
 /// the full `peers_by_index` cleanup path (not just the bare `peers` table).
 #[test]
 fn test_decrypt_failure_threshold_removes_peer() {
-    // Threshold constant in node/handlers/encrypted.rs (kept in sync with
+    // Threshold constant in node/dataplane/encrypted.rs (kept in sync with
     // production code; see DECRYPT_FAILURE_THRESHOLD).
     const THRESHOLD: u32 = 20;
 

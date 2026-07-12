@@ -7,6 +7,7 @@
 pub(crate) mod acl;
 mod bloom;
 pub(crate) mod context;
+mod dataplane;
 #[cfg(unix)]
 pub(crate) mod decrypt_worker;
 #[cfg(unix)]

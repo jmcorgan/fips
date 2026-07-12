@@ -222,7 +222,7 @@ pub struct ActivePeer {
     // === Rekey msg3 retransmission (initiator liveness) ===
     /// Retained wire-format rekey msg3, resent until the responder is
     /// confirmed on the new epoch. Mirrors the FSP
-    /// `rekey_msg3_payload` mechanism (node/session.rs). Liveness only:
+    /// `rekey_msg3_payload` mechanism (node/session/mod.rs). Liveness only:
     /// overlapping-epoch decrypt covers cutover skew; retransmission
     /// guarantees the responder eventually derives the new session even
     /// if the first msg3 datagram is lost.
