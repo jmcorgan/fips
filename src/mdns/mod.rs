@@ -142,6 +142,11 @@ pub struct LanRendezvous {
 }
 
 impl LanRendezvous {
+    /// Whether the mDNS event-pump task has exited (runtime liveness).
+    pub fn is_finished(&self) -> bool {
+        self.event_pump.is_finished()
+    }
+
     /// Start the mDNS responder and browser.
     ///
     /// `advertised_port` is the UDP port the operational UDP transport

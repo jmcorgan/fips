@@ -176,6 +176,25 @@ pub struct NostrRendezvous {
 }
 
 impl NostrRendezvous {
+    /// Whether the primary Nostr connection task has exited (runtime liveness).
+    ///
+    /// "Nostr exited" is defined as the primary `connect_task` having finished.
+    /// It is `Some` for the engine's whole running life (installed in `start`);
+    /// `shutdown` takes it, leaving `None` — a taken handle means the engine has
+    /// been shut down, which counts as finished, so a `None` inner maps to
+    /// `true` (this lets the liveness poll monitor terminate after a stop rather
+    /// than spinning forever). `connect_task` is a `tokio::sync::Mutex`, so this
+    /// sync accessor uses the non-blocking `try_lock`: a momentarily-contended
+    /// lock (only start/stop hold it, briefly) reports "not finished", the safe
+    /// direction — the 2s liveness poll re-checks next tick and never spuriously
+    /// degrades a healthy node.
+    pub fn is_finished(&self) -> bool {
+        self.connect_task
+            .try_lock()
+            .map(|g| g.as_ref().is_none_or(|h| h.is_finished()))
+            .unwrap_or(false)
+    }
+
     pub async fn start(
         identity: &crate::Identity,
         config: NostrRendezvousConfig,

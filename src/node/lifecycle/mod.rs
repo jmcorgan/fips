@@ -1183,6 +1183,16 @@ impl Node {
         self.supervisor.packet_tx = Some(packet_tx.clone());
         self.packet_rx = Some(packet_rx);
 
+        // Runtime child-liveness channel (design doc §6). Created before any
+        // child is spawned so each directly-observable child (TUN threads, the
+        // DNS task, and the mDNS/Nostr liveness monitor) can clone the sender
+        // and self-report its `Child` on exit. The sender stored on `self` is
+        // the keep-alive; the rx_loop takes only the receiver, so the channel
+        // never closes spuriously while the node runs.
+        let (child_exit_tx, child_exit_rx) = tokio::sync::mpsc::channel(16);
+        self.child_exit_tx = Some(child_exit_tx);
+        self.child_exit_rx = Some(child_exit_rx);
+
         // Initialize transports first (before TUN, before Nostr discovery).
         // Creation allocates each transport's id; the supervisor FSM authors
         // the start order over those ids.
@@ -1455,9 +1465,16 @@ impl Node {
                             let (writer, tun_tx) =
                                 device.create_writer(max_mss, self.path_mtu_lookup.clone())?;
 
-                            // Spawn writer thread
+                            // Spawn writer thread. On exit it self-reports
+                            // `Child::Tun` (sync context → `blocking_send`); TUN
+                            // is one compound child, so both threads reporting is
+                            // fine (the FSM de-dups via `up.remove`).
+                            let writer_child_tx = self.child_exit_tx.clone();
                             let writer_handle = thread::spawn(move || {
                                 writer.run();
+                                if let Some(tx) = &writer_child_tx {
+                                    let _ = tx.blocking_send(Child::Tun);
+                                }
                             });
 
                             // Clone tun_tx for the reader
@@ -1468,9 +1485,13 @@ impl Node {
                             let (outbound_tx, outbound_rx) =
                                 tokio::sync::mpsc::channel(tun_channel_size);
 
-                            // Spawn reader thread
+                            // Spawn reader thread. Like the writer, it
+                            // self-reports `Child::Tun` on exit (sync context →
+                            // `blocking_send`). Exactly one cfg variant compiles,
+                            // so the single clone is moved into that closure.
                             let transport_mtu = self.transport_mtu();
                             let path_mtu_lookup = self.path_mtu_lookup.clone();
+                            let reader_child_tx = self.child_exit_tx.clone();
                             #[cfg(target_os = "macos")]
                             let reader_handle = thread::spawn(move || {
                                 run_tun_reader(
@@ -1483,6 +1504,9 @@ impl Node {
                                     path_mtu_lookup,
                                     shutdown_read_fd,
                                 );
+                                if let Some(tx) = &reader_child_tx {
+                                    let _ = tx.blocking_send(Child::Tun);
+                                }
                             });
                             #[cfg(not(target_os = "macos"))]
                             let reader_handle = thread::spawn(move || {
@@ -1495,6 +1519,9 @@ impl Node {
                                     transport_mtu,
                                     path_mtu_lookup,
                                 );
+                                if let Some(tx) = &reader_child_tx {
+                                    let _ = tx.blocking_send(Child::Tun);
+                                }
                             });
 
                             self.tun_state = TunState::Active;
@@ -1568,14 +1595,25 @@ impl Node {
                                         mesh_ifindex = ?mesh_ifindex,
                                         "DNS responder started for .fips domain (auto-reload enabled)"
                                     );
-                                    let handle =
-                                        tokio::spawn(crate::upper::dns::run_dns_responder(
+                                    // Self-report on exit so the supervisor FSM
+                                    // routes health when the DNS task dies at
+                                    // runtime. On a deliberate stop the task is
+                                    // `.abort()`ed before this send; even if it
+                                    // fired, the FSM ignores it outside `Running`.
+                                    let dns_child_tx = self.child_exit_tx.clone();
+                                    let handle = tokio::spawn(async move {
+                                        crate::upper::dns::run_dns_responder(
                                             socket,
                                             identity_tx,
                                             dns_ttl,
                                             reloader,
                                             mesh_ifindex,
-                                        ));
+                                        )
+                                        .await;
+                                        if let Some(tx) = dns_child_tx {
+                                            let _ = tx.send(Child::Dns).await;
+                                        }
+                                    });
                                     self.supervisor.dns_identity_rx = Some(identity_rx);
                                     self.supervisor.dns_task = Some(handle);
                                     Event::SubstrateUp { child }
@@ -1645,6 +1683,34 @@ impl Node {
                 );
             }
             _ => {}
+        }
+
+        // Runtime liveness monitor for the two poll-observable children (mDNS +
+        // Nostr). Unlike the TUN threads and DNS task, these expose no exit hook,
+        // so one task polls their `is_finished` accessors every 2s and reports
+        // `Child::Mdns` / `Child::Nostr` on exit. It self-terminates once both
+        // have been reported (or were never present), and is only armed when at
+        // least one of them is actually running.
+        let mon_lan = self.supervisor.lan_rendezvous.clone();
+        let mon_nostr = self.supervisor.nostr_rendezvous.engine_arc();
+        if let Some(mon_tx) = self.child_exit_tx.clone()
+            && (mon_lan.is_some() || mon_nostr.is_some())
+        {
+            tokio::spawn(async move {
+                let mut mdns_reported = mon_lan.is_none();
+                let mut nostr_reported = mon_nostr.is_none();
+                while !(mdns_reported && nostr_reported) {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if !mdns_reported && mon_lan.as_ref().is_some_and(|l| l.is_finished()) {
+                        let _ = mon_tx.send(Child::Mdns).await;
+                        mdns_reported = true;
+                    }
+                    if !nostr_reported && mon_nostr.as_ref().is_some_and(|n| n.is_finished()) {
+                        let _ = mon_tx.send(Child::Nostr).await;
+                        nostr_reported = true;
+                    }
+                }
+            });
         }
 
         info!("Node started:");

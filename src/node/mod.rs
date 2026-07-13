@@ -335,6 +335,18 @@ pub struct Node {
     /// Packet receiver (for event loop).
     packet_rx: Option<PacketRx>,
 
+    // === Child Exit Channel ===
+    /// Sender half of the runtime child-liveness channel. Cloned into each
+    /// directly-observable child (the TUN reader/writer threads, the DNS task,
+    /// and the mDNS/Nostr liveness monitor) so a child self-reports its
+    /// [`Child`](crate::node::lifecycle::supervisor::Child) when it exits. Held
+    /// on `self` for the rx_loop's lifetime as the keep-alive sender so the
+    /// receiver never observes a spuriously-closed channel.
+    child_exit_tx: Option<tokio::sync::mpsc::Sender<crate::node::lifecycle::supervisor::Child>>,
+    /// Receiver half of the runtime child-liveness channel, `take()`-en by the
+    /// rx_loop select arm that feeds `Event::ChildExited` to the supervisor FSM.
+    child_exit_rx: Option<tokio::sync::mpsc::Receiver<crate::node::lifecycle::supervisor::Child>>,
+
     // === Connections (Handshake Phase) ===
     /// Pending connections (handshake in progress).
     /// Indexed by LinkId since we don't know the peer's identity yet.
@@ -603,6 +615,8 @@ impl Node {
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
             packet_rx: None,
+            child_exit_tx: None,
+            child_exit_rx: None,
             connections: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
@@ -748,6 +762,8 @@ impl Node {
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
             packet_rx: None,
+            child_exit_tx: None,
+            child_exit_rx: None,
             connections: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
