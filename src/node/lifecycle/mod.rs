@@ -2242,7 +2242,7 @@ impl Node {
                 .or_insert_with(|| peer_identity.short_npub());
             self.register_identity(node_addr, peer_identity.pubkey_full());
 
-            let mut state = super::retry::RetryState::new(PeerConfig {
+            let mut state = super::peering::retry::RetryState::new(PeerConfig {
                 npub: npub.clone(),
                 alias: None,
                 addresses,

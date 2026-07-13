@@ -4,10 +4,10 @@
 //! automatically retry with exponential backoff. Retry state lives on Node
 //! (not PeerConnection) because each retry creates a fresh connection.
 
-use super::{Node, NodeError};
 use crate::PeerIdentity;
 use crate::config::PeerConfig;
 use crate::identity::NodeAddr;
+use crate::node::{Node, NodeError};
 use crate::proto::fmp::backoff_ms;
 use tracing::{debug, info, warn};
 
@@ -55,7 +55,7 @@ impl Node {
     /// have not been exhausted (unless `reconnect` is true, which retries
     /// indefinitely). Does nothing if the peer is already connected or has
     /// a connection in progress.
-    pub(super) fn schedule_retry(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    pub(in crate::node) fn schedule_retry(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let retry_cfg = &self.config().node.retry;
         let max_retries = retry_cfg.max_retries;
         if max_retries == 0 {
@@ -131,7 +131,7 @@ impl Node {
     /// preserved and incremented rather than reset to zero. This ensures
     /// exponential backoff accumulates across repeated link-dead events instead
     /// of resetting to the base interval on every peer removal.
-    pub(super) fn schedule_reconnect(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    pub(in crate::node) fn schedule_reconnect(&mut self, node_addr: NodeAddr, now_ms: u64) {
         // Find peer in auto-connect config
         let peer_config = self
             .config()
@@ -196,7 +196,7 @@ impl Node {
     /// entry stays in `retry_pending` until the connection succeeds (cleared
     /// in `promote_connection`) or max retries are exhausted (cleared in
     /// `schedule_retry`).
-    pub(super) async fn process_pending_retries(&mut self, now_ms: u64) {
+    pub(in crate::node) async fn process_pending_retries(&mut self, now_ms: u64) {
         if self.retry_pending.is_empty() {
             return;
         }

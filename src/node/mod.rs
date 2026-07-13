@@ -15,10 +15,10 @@ pub(crate) mod encrypt_worker;
 mod handlers;
 mod lifecycle;
 pub(crate) mod metrics;
+mod peering;
 mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
-mod retry;
 pub(crate) mod session;
 pub(crate) mod stats;
 pub(crate) mod stats_history;
@@ -450,7 +450,7 @@ pub struct Node {
     /// Keyed by NodeAddr. Entries are created when a handshake times out
     /// or fails, and removed on successful promotion or when max retries
     /// are exhausted.
-    retry_pending: HashMap<NodeAddr, retry::RetryState>,
+    retry_pending: HashMap<NodeAddr, peering::retry::RetryState>,
 
     // === Periodic Parent Re-evaluation ===
     /// Timestamp of last periodic parent re-evaluation (for pacing).
@@ -2496,7 +2496,7 @@ impl Node {
     }
 
     /// Iterate over retry state for diagnostics.
-    pub fn retry_state_iter(&self) -> impl Iterator<Item = (&NodeAddr, &retry::RetryState)> {
+    pub fn retry_state_iter(&self) -> impl Iterator<Item = (&NodeAddr, &peering::retry::RetryState)> {
         self.retry_pending.iter()
     }
 

@@ -831,7 +831,7 @@ async fn test_process_pending_retries_is_budgeted_per_tick() {
         let node_addr = *peer_identity.node_addr();
         node.retry_pending.insert(
             node_addr,
-            crate::node::retry::RetryState {
+            crate::node::peering::retry::RetryState {
                 peer_config: crate::config::PeerConfig::new(npub, "udp", "10.0.0.2:2121"),
                 retry_count: 0,
                 retry_after_ms: 0,
@@ -1256,7 +1256,7 @@ async fn test_process_pending_retries_drops_expired_entries() {
     let peer_npub = peer_identity.npub();
     let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
 
-    let mut state = super::super::retry::RetryState::new(crate::config::PeerConfig::new(
+    let mut state = super::super::peering::retry::RetryState::new(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
         "127.0.0.1:9",
@@ -1409,7 +1409,7 @@ fn test_promote_clears_retry_pending() {
     // Simulate a retry entry existing for this peer
     node.retry_pending.insert(
         node_addr,
-        super::super::retry::RetryState::new(crate::config::PeerConfig::default()),
+        super::super::peering::retry::RetryState::new(crate::config::PeerConfig::default()),
     );
     assert_eq!(node.retry_pending.len(), 1);
 
@@ -1720,7 +1720,7 @@ async fn process_pending_retries_gated_at_capacity() {
     let peer_identity = Identity::generate();
     let peer_npub = peer_identity.npub();
     let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
-    let mut state = super::super::retry::RetryState::new(crate::config::PeerConfig::new(
+    let mut state = super::super::peering::retry::RetryState::new(crate::config::PeerConfig::new(
         peer_npub,
         "udp",
         "127.0.0.1:9",
