@@ -85,7 +85,13 @@ impl Node {
         let mut refresh_configs = Vec::new();
 
         for node_addr in &removed {
-            if self.retry_pending.remove(node_addr).is_some() {
+            if self
+                .peering
+                .reconciler
+                .retry_pending
+                .remove(node_addr)
+                .is_some()
+            {
                 debug!(
                     peer = %self.peer_display_name(node_addr),
                     "Dropping retry entry for peer removed from runtime peer list"
@@ -106,7 +112,7 @@ impl Node {
 
             if changed {
                 outcome.updated += 1;
-                if let Some(state) = self.retry_pending.get_mut(node_addr) {
+                if let Some(state) = self.peering.reconciler.retry_pending.get_mut(node_addr) {
                     state.peer_config = new_peer.clone();
                     state.retry_after_ms = Self::now_ms();
                 }
@@ -183,7 +189,9 @@ impl Node {
                     Ok(()) => {
                         let handshake_timeout_secs =
                             self.config().node.rate_limit.handshake_timeout_secs;
-                        if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+                        if let Some(state) =
+                            self.peering.reconciler.retry_pending.get_mut(&node_addr)
+                        {
                             state.peer_config = peer_config;
                             state.retry_after_ms =
                                 Self::now_ms().saturating_add(handshake_timeout_secs * 1000);
@@ -336,7 +344,7 @@ impl Node {
                 .unwrap_or(false)
                 && conn.transport_id() == Some(transport_id)
                 && conn.source_addr() == Some(remote_addr)
-        }) || self.pending_connects.iter().any(|pending| {
+        }) || self.peering.pending_connects.iter().any(|pending| {
             pending.peer_identity.node_addr() == peer_node_addr
                 && pending.transport_id == transport_id
                 && pending.remote_addr == *remote_addr
@@ -438,7 +446,7 @@ impl Node {
                             link_id = %link_id,
                             "Transport connect initiated (non-blocking)"
                         );
-                        self.pending_connects.push(super::PendingConnect {
+                        self.peering.pending_connects.push(super::PendingConnect {
                             link_id,
                             transport_id,
                             remote_addr,
@@ -857,7 +865,8 @@ impl Node {
 
                     self.schedule_retry(node_addr, now_ms);
                     if let Some(cooldown_until_ms) = decision.cooldown_until_ms
-                        && let Some(state) = self.retry_pending.get_mut(&node_addr)
+                        && let Some(state) =
+                            self.peering.reconciler.retry_pending.get_mut(&node_addr)
                     {
                         // Push the next retry past the cooldown so the
                         // open-discovery sweep doesn't re-enqueue and the
@@ -964,13 +973,13 @@ impl Node {
     /// marks the link as Connected and starts the Noise handshake.
     /// Failed connections are cleaned up and scheduled for retry.
     pub(super) async fn poll_pending_connects(&mut self) {
-        if self.pending_connects.is_empty() {
+        if self.peering.pending_connects.is_empty() {
             return;
         }
 
         let mut completed = Vec::new();
 
-        for (i, pending) in self.pending_connects.iter().enumerate() {
+        for (i, pending) in self.peering.pending_connects.iter().enumerate() {
             let state = if let Some(transport) = self.transports.get(&pending.transport_id) {
                 transport.connection_state(&pending.remote_addr)
             } else {
@@ -996,7 +1005,7 @@ impl Node {
 
         // Process completions in reverse order to preserve indices
         for (i, success, reason) in completed.into_iter().rev() {
-            let pending = self.pending_connects.remove(i);
+            let pending = self.peering.pending_connects.remove(i);
 
             if success {
                 // Mark link as Connected
@@ -2164,7 +2173,8 @@ impl Node {
                     let node_addr = *peer_identity.node_addr();
                     if !self.peers.contains_key(&node_addr)
                         && !self.is_connecting_to_peer(&node_addr)
-                        && let Some(state) = self.retry_pending.get_mut(&node_addr)
+                        && let Some(state) =
+                            self.peering.reconciler.retry_pending.get_mut(&node_addr)
                         && state.retry_after_ms > now_ms
                     {
                         state.retry_after_ms = now_ms;
@@ -2195,7 +2205,12 @@ impl Node {
                 skipped_connected = skipped_connected.saturating_add(1);
                 continue;
             }
-            if self.retry_pending.contains_key(&node_addr) {
+            if self
+                .peering
+                .reconciler
+                .retry_pending
+                .contains_key(&node_addr)
+            {
                 skipped_retry_pending = skipped_retry_pending.saturating_add(1);
                 continue;
             }
@@ -2253,7 +2268,10 @@ impl Node {
             state.reconnect = false;
             state.retry_after_ms = now_ms;
             state.expires_at_ms = Some(self.open_discovery_retry_expires_at_ms(now_ms));
-            self.retry_pending.insert(node_addr, state);
+            self.peering
+                .reconciler
+                .retry_pending
+                .insert(node_addr, state);
             info!(
                 caller = %caller,
                 peer = %peer_identity.short_npub(),
@@ -2349,7 +2367,7 @@ impl Node {
         let connection_used = self
             .connections
             .len()
-            .saturating_add(self.pending_connects.len());
+            .saturating_add(self.peering.pending_connects.len());
         let connection_slots = if self.max_connections() == 0 {
             usize::MAX
         } else {
@@ -2369,7 +2387,7 @@ impl Node {
         let used = self
             .connections
             .len()
-            .saturating_add(self.pending_connects.len());
+            .saturating_add(self.peering.pending_connects.len());
         if self.max_connections() == 0 {
             usize::MAX
         } else {
@@ -2403,7 +2421,8 @@ impl Node {
             })
             .count()
             .saturating_add(
-                self.pending_connects
+                self.peering
+                    .pending_connects
                     .iter()
                     .filter(|pending| pending.peer_identity.node_addr() == peer_node_addr)
                     .count(),
@@ -2422,6 +2441,8 @@ impl Node {
 
     fn open_discovery_enqueue_budget(&self, configured_npubs: &HashSet<String>) -> usize {
         let current_open_discovery_pending = self
+            .peering
+            .reconciler
             .retry_pending
             .values()
             .filter(|state| !configured_npubs.contains(&state.peer_config.npub))
@@ -2790,7 +2811,7 @@ impl Node {
         self.remove_active_peer(&node_addr);
 
         // Suppress any pending auto-reconnect
-        self.retry_pending.remove(&node_addr);
+        self.peering.reconciler.retry_pending.remove(&node_addr);
 
         info!(npub = %npub, "API disconnect completed");
 

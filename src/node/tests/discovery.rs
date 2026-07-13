@@ -1026,26 +1026,42 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
 
     // Eligible peer was queued.
     assert!(
-        node.retry_pending.contains_key(&eligible_node_addr),
+        node.peering
+            .reconciler
+            .retry_pending
+            .contains_key(&eligible_node_addr),
         "eligible advert should be queued for retry"
     );
-    let queued = node.retry_pending.get(&eligible_node_addr).unwrap();
+    let queued = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&eligible_node_addr)
+        .unwrap();
     assert_eq!(queued.peer_config.npub, eligible_npub);
 
     // Connected-peer skip filter held.
     assert!(
-        !node.retry_pending.contains_key(&connected_node_addr),
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&connected_node_addr),
         "advert for already-connected peer must not be queued"
     );
 
     // Self skip filter held.
     assert!(
-        !node.retry_pending.contains_key(&self_node_addr),
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&self_node_addr),
         "advert authored by own node must not be queued"
     );
 
     // Exactly one queued entry from the three injected adverts.
-    assert_eq!(node.retry_pending.len(), 1);
+    assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
 }
 
 // ============================================================================

@@ -163,7 +163,7 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
     );
     assert_eq!(node.peer_count(), 1, "old peer removed, new peer added");
     assert!(
-        node.retry_pending.is_empty(),
+        node.peering.reconciler.retry_pending.is_empty(),
         "schedule_reconnect is a no-op with no auto-connect config"
     );
 

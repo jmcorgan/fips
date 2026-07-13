@@ -71,7 +71,7 @@ impl Node {
         let max_backoff_ms = retry_cfg.max_backoff_secs * 1000;
         let peer_name = self.peer_display_name(&node_addr);
 
-        if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+        if let Some(state) = self.peering.reconciler.retry_pending.get_mut(&node_addr) {
             // Already tracking — increment
             state.retry_count += 1;
             if !state.reconnect && state.retry_count > max_retries {
@@ -80,7 +80,7 @@ impl Node {
                     attempts = state.retry_count,
                     "Max retries exhausted, giving up on peer"
                 );
-                self.retry_pending.remove(&node_addr);
+                self.peering.reconciler.retry_pending.remove(&node_addr);
                 return;
             }
             let delay = backoff_ms(state.retry_count, base_interval_ms, max_backoff_ms);
@@ -115,7 +115,10 @@ impl Node {
                     delay_secs = delay / 1000,
                     "First connection attempt failed, scheduling retry"
                 );
-                self.retry_pending.insert(node_addr, state);
+                self.peering
+                    .reconciler
+                    .retry_pending
+                    .insert(node_addr, state);
             }
             // If not found in auto_connect_peers, no retry (one-shot connection)
         }
@@ -162,7 +165,7 @@ impl Node {
         // If we already have accumulated backoff from previous failed attempts,
         // preserve and bump it rather than resetting to zero. This prevents the
         // exponential backoff from being discarded on each link-dead cycle.
-        if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+        if let Some(state) = self.peering.reconciler.retry_pending.get_mut(&node_addr) {
             state.reconnect = true;
             state.retry_count += 1;
             let delay = backoff_ms(state.retry_count, base_interval_ms, max_backoff_ms);
@@ -187,7 +190,10 @@ impl Node {
             "Scheduling auto-reconnect after link-dead removal"
         );
 
-        self.retry_pending.insert(node_addr, state);
+        self.peering
+            .reconciler
+            .retry_pending
+            .insert(node_addr, state);
     }
 
     /// Process pending retries whose time has arrived.
@@ -197,11 +203,13 @@ impl Node {
     /// in `promote_connection`) or max retries are exhausted (cleared in
     /// `schedule_retry`).
     pub(in crate::node) async fn process_pending_retries(&mut self, now_ms: u64) {
-        if self.retry_pending.is_empty() {
+        if self.peering.reconciler.retry_pending.is_empty() {
             return;
         }
 
         let expired: Vec<NodeAddr> = self
+            .peering
+            .reconciler
             .retry_pending
             .iter()
             .filter_map(|(addr, state)| {
@@ -212,13 +220,13 @@ impl Node {
             })
             .collect();
         for node_addr in expired {
-            self.retry_pending.remove(&node_addr);
+            self.peering.reconciler.retry_pending.remove(&node_addr);
             info!(
                 peer = %self.peer_display_name(&node_addr),
                 "Retry window expired, dropping pending retry state"
             );
         }
-        if self.retry_pending.is_empty() {
+        if self.peering.reconciler.retry_pending.is_empty() {
             return;
         }
 
@@ -226,7 +234,7 @@ impl Node {
             debug!(
                 peers = self.peers.len(),
                 max_peers = self.max_peers(),
-                retry_pending = self.retry_pending.len(),
+                retry_pending = self.peering.reconciler.retry_pending.len(),
                 "Suppressing auto-reconnect retries: at capacity"
             );
             return;
@@ -234,6 +242,8 @@ impl Node {
 
         // Collect retries that are due
         let due: Vec<NodeAddr> = self
+            .peering
+            .reconciler
             .retry_pending
             .iter()
             .filter(|(_, state)| now_ms >= state.retry_after_ms)
@@ -252,11 +262,11 @@ impl Node {
         for node_addr in due.into_iter().take(MAX_RETRY_CONNECTIONS_PER_TICK) {
             // Peer may have connected inbound while we waited
             if self.peers.contains_key(&node_addr) {
-                self.retry_pending.remove(&node_addr);
+                self.peering.reconciler.retry_pending.remove(&node_addr);
                 continue;
             }
 
-            let state = match self.retry_pending.get(&node_addr) {
+            let state = match self.peering.reconciler.retry_pending.get(&node_addr) {
                 Some(s) => s,
                 None => continue,
             };
@@ -296,7 +306,7 @@ impl Node {
                     // it times out, check_timeouts() calls schedule_retry()
                     // which bumps the counter and applies proper backoff.
                     let hs_timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
-                    if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+                    if let Some(state) = self.peering.reconciler.retry_pending.get_mut(&node_addr) {
                         state.retry_after_ms = now_ms + hs_timeout_ms;
                     }
                     debug!(

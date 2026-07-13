@@ -770,12 +770,17 @@ fn test_schedule_retry_creates_entry() {
 
     let mut node = Node::new(config).unwrap();
 
-    assert!(node.retry_pending.is_empty());
+    assert!(node.peering.reconciler.retry_pending.is_empty());
 
     node.schedule_retry(peer_node_addr, 1000);
 
-    assert_eq!(node.retry_pending.len(), 1);
-    let state = node.retry_pending.get(&peer_node_addr).unwrap();
+    assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
+    let state = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&peer_node_addr)
+        .unwrap();
     assert_eq!(state.retry_count, 1);
     assert!(
         state.reconnect,
@@ -805,13 +810,23 @@ fn test_schedule_retry_increments() {
     // First failure
     node.schedule_retry(peer_node_addr, 1000);
     assert_eq!(
-        node.retry_pending.get(&peer_node_addr).unwrap().retry_count,
+        node.peering
+            .reconciler
+            .retry_pending
+            .get(&peer_node_addr)
+            .unwrap()
+            .retry_count,
         1
     );
 
     // Second failure
     node.schedule_retry(peer_node_addr, 11_000);
-    let state = node.retry_pending.get(&peer_node_addr).unwrap();
+    let state = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&peer_node_addr)
+        .unwrap();
     assert_eq!(state.retry_count, 2);
     // backoff_ms(5000) with retry_count=2 = 5000 * 4 = 20000
     assert_eq!(state.retry_after_ms, 11_000 + 20_000);
@@ -829,7 +844,7 @@ async fn test_process_pending_retries_is_budgeted_per_tick() {
         let npub = identity.npub();
         let peer_identity = PeerIdentity::from_npub(&npub).unwrap();
         let node_addr = *peer_identity.node_addr();
-        node.retry_pending.insert(
+        node.peering.reconciler.retry_pending.insert(
             node_addr,
             crate::node::peering::retry::RetryState {
                 peer_config: crate::config::PeerConfig::new(npub, "udp", "10.0.0.2:2121"),
@@ -847,7 +862,9 @@ async fn test_process_pending_retries_is_budgeted_per_tick() {
     let processed = addrs
         .iter()
         .filter(|addr| {
-            node.retry_pending
+            node.peering
+                .reconciler
+                .retry_pending
                 .get(addr)
                 .is_some_and(|state| state.retry_count > 0)
         })
@@ -856,7 +873,7 @@ async fn test_process_pending_retries_is_budgeted_per_tick() {
 
     assert_eq!(processed, 16);
     assert_eq!(deferred, 4);
-    assert_eq!(node.retry_pending.len(), 20);
+    assert_eq!(node.peering.reconciler.retry_pending.len(), 20);
 }
 
 /// Test that auto-connect peers retry indefinitely (never exhaust).
@@ -878,19 +895,37 @@ fn test_schedule_retry_auto_connect_never_exhausts() {
 
     // All attempts should keep the entry alive despite max_retries=2
     node.schedule_retry(peer_node_addr, 1000);
-    assert!(node.retry_pending.contains_key(&peer_node_addr));
+    assert!(
+        node.peering
+            .reconciler
+            .retry_pending
+            .contains_key(&peer_node_addr)
+    );
 
     node.schedule_retry(peer_node_addr, 2000);
-    assert!(node.retry_pending.contains_key(&peer_node_addr));
+    assert!(
+        node.peering
+            .reconciler
+            .retry_pending
+            .contains_key(&peer_node_addr)
+    );
 
     // Attempt 3 would have exhausted before, but now retries indefinitely
     node.schedule_retry(peer_node_addr, 3000);
     assert!(
-        node.retry_pending.contains_key(&peer_node_addr),
+        node.peering
+            .reconciler
+            .retry_pending
+            .contains_key(&peer_node_addr),
         "Auto-connect peers should never exhaust retries"
     );
     assert_eq!(
-        node.retry_pending.get(&peer_node_addr).unwrap().retry_count,
+        node.peering
+            .reconciler
+            .retry_pending
+            .get(&peer_node_addr)
+            .unwrap()
+            .retry_count,
         3
     );
 }
@@ -914,7 +949,7 @@ fn test_schedule_retry_disabled() {
 
     node.schedule_retry(peer_node_addr, 1000);
     assert!(
-        node.retry_pending.is_empty(),
+        node.peering.reconciler.retry_pending.is_empty(),
         "No retry should be scheduled when max_retries=0"
     );
 }
@@ -930,7 +965,7 @@ fn test_schedule_retry_ignores_non_autoconnect() {
 
     node.schedule_retry(peer_node_addr, 1000);
     assert!(
-        node.retry_pending.is_empty(),
+        node.peering.reconciler.retry_pending.is_empty(),
         "No retry for unconfigured peer"
     );
 }
@@ -952,7 +987,7 @@ fn test_schedule_retry_skips_connected_peer() {
     // Scheduling a retry for an already-connected peer should be a no-op
     node.schedule_retry(node_addr, 3000);
     assert!(
-        node.retry_pending.is_empty(),
+        node.peering.reconciler.retry_pending.is_empty(),
         "No retry for already-connected peer"
     );
 }
@@ -1196,7 +1231,7 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
         "stale failures for connected peers must not affect traversal cooldown"
     );
     assert!(
-        node.retry_pending.is_empty(),
+        node.peering.reconciler.retry_pending.is_empty(),
         "stale failures for connected peers must not enqueue reconnect attempts"
     );
 }
@@ -1244,7 +1279,7 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
         "stale established handoff must not start a new handshake"
     );
     assert!(
-        node.retry_pending.is_empty(),
+        node.peering.reconciler.retry_pending.is_empty(),
         "stale established handoff must not enqueue a reconnect"
     );
 }
@@ -1264,12 +1299,19 @@ async fn test_process_pending_retries_drops_expired_entries() {
     state.retry_after_ms = 0;
     state.expires_at_ms = Some(1_000);
     state.reconnect = true;
-    node.retry_pending.insert(peer_node_addr, state);
+    node.peering
+        .reconciler
+        .retry_pending
+        .insert(peer_node_addr, state);
 
     node.process_pending_retries(1_000).await;
 
     assert!(
-        !node.retry_pending.contains_key(&peer_node_addr),
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&peer_node_addr),
         "expired retry entries should be dropped before retry processing"
     );
 }
@@ -1300,7 +1342,12 @@ fn test_schedule_reconnect_preserves_backoff() {
     node.schedule_retry(peer_node_addr, 1_000); // count=1, delay=10s
     node.schedule_retry(peer_node_addr, 11_000); // count=2, delay=20s
     {
-        let state = node.retry_pending.get(&peer_node_addr).unwrap();
+        let state = node
+            .peering
+            .reconciler
+            .retry_pending
+            .get(&peer_node_addr)
+            .unwrap();
         assert_eq!(state.retry_count, 2, "Two failures should yield count=2");
     }
 
@@ -1309,7 +1356,12 @@ fn test_schedule_reconnect_preserves_backoff() {
     // NOT reset to 0 as it was before the fix.
     node.schedule_reconnect(peer_node_addr, 31_000);
 
-    let state = node.retry_pending.get(&peer_node_addr).unwrap();
+    let state = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&peer_node_addr)
+        .unwrap();
     assert!(state.reconnect, "Entry should be marked as reconnect");
     assert_eq!(
         state.retry_count, 3,
@@ -1346,7 +1398,12 @@ fn test_schedule_reconnect_fresh_state() {
     // No prior retry entry — first reconnect should use base delay.
     node.schedule_reconnect(peer_node_addr, 1_000);
 
-    let state = node.retry_pending.get(&peer_node_addr).unwrap();
+    let state = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&peer_node_addr)
+        .unwrap();
     assert!(state.reconnect, "Entry should be marked as reconnect");
     assert_eq!(
         state.retry_count, 0,
@@ -1386,6 +1443,8 @@ fn test_disconnect_schedules_reconnect() {
     node.handle_disconnect(&peer_node_addr, &payload);
 
     let state = node
+        .peering
+        .reconciler
         .retry_pending
         .get(&peer_node_addr)
         .expect("handle_disconnect should schedule reconnect for auto-connect peer");
@@ -1407,17 +1466,21 @@ fn test_promote_clears_retry_pending() {
     let node_addr = *identity.node_addr();
 
     // Simulate a retry entry existing for this peer
-    node.retry_pending.insert(
+    node.peering.reconciler.retry_pending.insert(
         node_addr,
         super::super::peering::retry::RetryState::new(crate::config::PeerConfig::default()),
     );
-    assert_eq!(node.retry_pending.len(), 1);
+    assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
 
     node.add_connection(conn).unwrap();
     node.promote_connection(link_id, identity, 2000).unwrap();
 
     assert!(
-        !node.retry_pending.contains_key(&node_addr),
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&node_addr),
         "retry_pending should be cleared on successful promotion"
     );
 }
@@ -1443,12 +1506,15 @@ async fn test_initiate_peer_connections_schedules_retry_on_no_transport() {
     ));
 
     let mut node = Node::new(config).unwrap();
-    assert!(node.retry_pending.is_empty());
+    assert!(node.peering.reconciler.retry_pending.is_empty());
 
     node.initiate_peer_connections().await;
 
     assert!(
-        node.retry_pending.contains_key(&peer_node_addr),
+        node.peering
+            .reconciler
+            .retry_pending
+            .contains_key(&peer_node_addr),
         "startup peer-init failure must enqueue a retry so the peer can recover \
          without a daemon restart"
     );
@@ -1727,7 +1793,10 @@ async fn process_pending_retries_gated_at_capacity() {
     ));
     state.retry_after_ms = 0;
     state.reconnect = true;
-    node.retry_pending.insert(peer_node_addr, state);
+    node.peering
+        .reconciler
+        .retry_pending
+        .insert(peer_node_addr, state);
 
     let before_peers = node.peer_count();
     let before_connections = node.connection_count();
@@ -1741,6 +1810,8 @@ async fn process_pending_retries_gated_at_capacity() {
     // (which fails without a registered transport), and the failure
     // handler would call `schedule_retry`, bumping `retry_count` to 1.
     let state = node
+        .peering
+        .reconciler
         .retry_pending
         .get(&peer_node_addr)
         .expect("retry entry must be preserved when suppressed at capacity");

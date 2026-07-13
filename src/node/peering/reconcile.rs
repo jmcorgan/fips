@@ -279,7 +279,7 @@ pub(crate) struct PeeringReconciler {
     /// `retry_count` lives here, not per-connection, so escalating backoff
     /// survives a fresh connection per re-dial (design §6:704 / §7:1150). Keyed
     /// by [`NodeAddr`].
-    retry_pending: HashMap<NodeAddr, RetryState>,
+    pub(in crate::node) retry_pending: HashMap<NodeAddr, RetryState>,
 }
 
 impl PeeringReconciler {
