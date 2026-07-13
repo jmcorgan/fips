@@ -276,6 +276,12 @@ impl Node {
                             // failures remain at warn.
                             if matches!(e, NodeError::MaxPeersExceeded { .. }) {
                                 debug!(
+                                    // Emit under the handshake target (same as the
+                                    // "promoting inbound" line above) so this stays
+                                    // visible wherever inbound handshake events are
+                                    // logged at debug, independent of this module's
+                                    // own log level.
+                                    target: "fips::node::handlers::handshake",
                                     peer = %self.peer_display_name(ambient.verified_identity.node_addr()),
                                     max = self.max_peers(),
                                     "Rejecting inbound connection at max_peers cap (no promotion)"
