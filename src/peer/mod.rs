@@ -11,6 +11,7 @@ mod active;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod connected_udp;
 mod connection;
+pub(crate) mod machine;
 
 pub use active::{ActivePeer, ConnectivityState};
 pub use connection::{HandshakeState, PeerConnection};
