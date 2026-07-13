@@ -2496,7 +2496,9 @@ impl Node {
     }
 
     /// Iterate over retry state for diagnostics.
-    pub fn retry_state_iter(&self) -> impl Iterator<Item = (&NodeAddr, &peering::retry::RetryState)> {
+    pub fn retry_state_iter(
+        &self,
+    ) -> impl Iterator<Item = (&NodeAddr, &peering::retry::RetryState)> {
         self.retry_pending.iter()
     }
 
