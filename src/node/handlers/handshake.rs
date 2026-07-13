@@ -12,7 +12,7 @@ use crate::peer::machine::{
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
-    ConnAction, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundDecision,
+    EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundDecision,
     OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
@@ -1169,13 +1169,14 @@ impl Node {
         // cannot collide with an existing entry.
         self.peer_machines.insert(link_id, machine);
 
-        // Execute `[PromoteToActive]`. The executor calls `promote_connection`
-        // (identical to the pre-refactor `drive_promote_to_active`), feeds
-        // `PromotionResolved{Promoted}` back, and runs the inert
-        // `RegisterDecryptSession` (R2 — register stays in `promote_connection`).
-        // A promote failure (e.g. `MaxPeersExceeded` if peers filled between dial
-        // and msg2) runs the executor's Err cleanup and removes the machine,
-        // leaving it absent (not Established).
+        // Execute `[PromoteToActive]`. The executor calls `promote_connection`,
+        // feeds `PromotionResolved{Promoted}` back, registers the decrypt-worker
+        // session (R1 — C3-3b relocated the register into the executor's
+        // `PromoteToActive` Ok arm, gated on the result), and runs the now-inert
+        // `RegisterDecryptSession` follow-up. A promote failure (e.g.
+        // `MaxPeersExceeded` if peers filled between dial and msg2) runs the
+        // executor's Err cleanup and removes the machine, leaving it absent (not
+        // Established).
         let ambient = PeerActionCtx {
             verified_identity: peer_identity,
             transport_id: packet.transport_id,
@@ -1215,36 +1216,6 @@ impl Node {
             // Schedule filter announce (sent on next tick via debounce)
             self.bloom_state.mark_update_needed(peer_node_addr);
             self.reset_lookup_backoff();
-        }
-    }
-
-    /// Execute a [`ConnAction::PromoteToActive`] from the establish machine.
-    ///
-    /// The decision to promote is made by the establish handlers (and, from the
-    /// establish-core stage on, the pure decision in `proto::fmp`); this is the
-    /// executor half of the seam. It runs the promotion through
-    /// [`Self::promote_connection`], resolving the verified identity and
-    /// promotion timestamp from the ambient wire context, and returns the
-    /// [`PromotionResult`] so the caller can drive the site-specific
-    /// post-promotion tail (TreeAnnounce, bloom mark, discovery-backoff reset,
-    /// loser-link cleanup).
-    ///
-    // C3-3a cut the last live caller (the inline outbound `Promote` arm) over to
-    // the executor's `PromoteToActive` path, so this is now unused. Its caller
-    // census / retirement is C3-3b (blueprint § C3-3b); kept here (allowed) until
-    // then so the diff stays scoped to the outbound Promote cutover.
-    #[allow(dead_code)]
-    fn drive_promote_to_active(
-        &mut self,
-        action: ConnAction,
-        verified_identity: PeerIdentity,
-        current_time_ms: u64,
-    ) -> Result<PromotionResult, NodeError> {
-        match action {
-            ConnAction::PromoteToActive { link } => {
-                self.promote_connection(link, verified_identity, current_time_ms)
-            }
-            _ => unreachable!("drive_promote_to_active requires a PromoteToActive action"),
         }
     }
 
@@ -1396,11 +1367,12 @@ impl Node {
                     "Cross-connection resolved: this connection won"
                 );
 
-                // Hand the FMP recv cipher + replay window to the
-                // decrypt shard worker. (Same as normal-promotion tail
-                // below.)
-                #[cfg(unix)]
-                self.register_decrypt_worker_session(&peer_node_addr);
+                // R1 (C3-3b): the decrypt-worker registration is no longer done
+                // here — it relocated OUT of `promote_connection` into the single
+                // executor `PromoteToActive` Ok arm (`peer_actions.rs`), gated on
+                // the returned `PromotionResult` (`Promoted | CrossConnectionWon`).
+                // The executor runs it synchronously right after this call returns,
+                // before any await, so the live establish behaviour is unchanged.
 
                 Ok(PromotionResult::CrossConnectionWon {
                     loser_link_id,
@@ -1506,13 +1478,14 @@ impl Node {
                 "Connection promoted to active peer"
             );
 
-            // Hand the FMP recv cipher + replay window to the
-            // decrypt shard worker. From this point on the worker
-            // is the sole authority on FMP replay protection for
-            // this session. No-op when the worker pool isn't
-            // spawned (unit-test path or `FIPS_DECRYPT_WORKERS=0`).
-            #[cfg(unix)]
-            self.register_decrypt_worker_session(&peer_node_addr);
+            // R1 (C3-3b): the decrypt-worker registration relocated OUT of
+            // `promote_connection` into the single executor `PromoteToActive` Ok
+            // arm (`peer_actions.rs`), gated on the returned `PromotionResult`
+            // (`Promoted | CrossConnectionWon`, never `CrossConnectionLost`). The
+            // executor runs it synchronously right after this call returns, before
+            // any await — same point, same effect as the pre-refactor in-place call
+            // (no-op when the worker pool isn't spawned; unit-test path or
+            // `FIPS_DECRYPT_WORKERS=0`).
 
             Ok(PromotionResult::Promoted(peer_node_addr))
         }

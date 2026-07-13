@@ -22,6 +22,7 @@
 use crate::node::Node;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::peer::machine::{PeerAction, PeerEvent};
+use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
@@ -35,7 +36,7 @@ use tracing::warn;
 ///
 /// Unlike a machine event/action payload this is **executor-side**, so it may
 /// hold real values resolved from the wire context (cf. `handle_msg1`'s
-/// `wire`/`packet` locals and `drive_promote_to_active`'s ambient args). It is
+/// `wire`/`packet` locals and `promote_connection`'s ambient args). It is
 /// built fresh per driven step by the caller at cutover time (C3-2/C3-3).
 #[allow(dead_code)]
 pub(in crate::node) struct PeerActionCtx {
@@ -165,15 +166,40 @@ impl Node {
                 }
                 PeerAction::PromoteToActive { link: promote_link } => {
                     // GAP-1: ambient supplies the verified identity + promotion ts
-                    // that `promote_connection` needs (cf. `drive_promote_to_active`).
+                    // that `promote_connection` needs (resolved from the wire ctx).
                     match self.promote_connection(
                         promote_link,
                         ambient.verified_identity,
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
+                            // R1 (C3-3b): the decrypt-worker registration relocated
+                            // OUT of `promote_connection` into THIS single executor
+                            // arm — the one live caller of `promote_connection` (both
+                            // the inbound `handle_msg1` and outbound `handle_msg2`
+                            // net-new establish paths reach it here). Register iff the
+                            // promotion actually created or replaced a peer
+                            // (`Promoted | CrossConnectionWon`), NEVER on
+                            // `CrossConnectionLost`. Run synchronously right after
+                            // `promote_connection` returns, before feeding
+                            // `PromotionResolved` and before any await — the exact
+                            // synchronous point (and Promoted/Won gating) of the
+                            // pre-refactor in-`promote_connection` call. No-op when
+                            // the worker pool isn't spawned (`register_...` early-
+                            // returns), so the direct `promote_connection` test
+                            // callers (which bypass this executor) are unaffected.
+                            #[cfg(unix)]
+                            match result {
+                                PromotionResult::Promoted(node_addr)
+                                | PromotionResult::CrossConnectionWon { node_addr, .. } => {
+                                    self.register_decrypt_worker_session(&node_addr);
+                                }
+                                PromotionResult::CrossConnectionLost { .. } => {}
+                            }
+
                             // Feed the outcome back into the machine and fold the
-                            // follow-up actions (RegisterDecryptSession, cross-conn
+                            // follow-up actions (RegisterDecryptSession — now a
+                            // redundant no-op, see its arm — and the cross-conn index
                             // frees) into the worklist. Disjoint field borrow again.
                             let follow = match self.peer_machines.get_mut(&promote_link) {
                                 Some(machine) => machine.step(
@@ -184,6 +210,70 @@ impl Node {
                                 None => Vec::new(),
                             };
                             queue.extend(follow);
+
+                            // Defensive cross-connection loser-link surgery (C3-3b).
+                            // LINK-ONLY: close the losing transport connection, drop
+                            // its link, and re-point `addr_to_link`, reproducing the
+                            // pre-refactor inline `handle_msg2`/`handle_msg1` per-arm
+                            // order EXACTLY. The index-plane frees/unregisters are
+                            // owned by the machine's `PromotionResolved{Won/Lost}`
+                            // follow-up (queued just above), so NOTHING here touches
+                            // an index — no double-free.
+                            //
+                            // UNREACHABLE on every current driven path: the inbound
+                            // and outbound net-new establish arms only route to the
+                            // machine when no promoted peer exists for the node_addr
+                            // (and `RestartThenPromote` removes the old peer first),
+                            // so `promote_connection` always returns `Promoted`. The
+                            // `debug_assert!(false, ..)` catches any future path that
+                            // drives a cross-connection through the executor without
+                            // the matching send-state handling.
+                            match result {
+                                PromotionResult::CrossConnectionWon { loser_link_id, .. } => {
+                                    debug_assert!(
+                                        false,
+                                        "executor CrossConnectionWon is unreachable on \
+                                         driven net-new establish paths"
+                                    );
+                                    // Close the losing transport connection (no-op for
+                                    // connectionless) via the LOSER link's own
+                                    // transport/addr, then drop the losing link.
+                                    if let Some(loser_link) = self.links.get(&loser_link_id) {
+                                        let loser_tid = loser_link.transport_id();
+                                        let loser_addr = loser_link.remote_addr().clone();
+                                        if let Some(transport) = self.transports.get(&loser_tid) {
+                                            transport.close_connection(&loser_addr).await;
+                                        }
+                                    }
+                                    self.remove_link(&loser_link_id);
+                                    // Point `addr_to_link` at the winning (current)
+                                    // link.
+                                    self.addr_to_link.insert(
+                                        (ambient.transport_id, ambient.remote_addr.clone()),
+                                        promote_link,
+                                    );
+                                }
+                                PromotionResult::CrossConnectionLost { winner_link_id } => {
+                                    debug_assert!(
+                                        false,
+                                        "executor CrossConnectionLost is unreachable on \
+                                         driven net-new establish paths"
+                                    );
+                                    // Close this (losing) connection, drop its link,
+                                    // and restore `addr_to_link` to the winner.
+                                    if let Some(transport) =
+                                        self.transports.get(&ambient.transport_id)
+                                    {
+                                        transport.close_connection(&ambient.remote_addr).await;
+                                    }
+                                    self.remove_link(&promote_link);
+                                    self.addr_to_link.insert(
+                                        (ambient.transport_id, ambient.remote_addr.clone()),
+                                        winner_link_id,
+                                    );
+                                }
+                                PromotionResult::Promoted(_) => {}
+                            }
                         }
                         Err(e) => {
                             // GAP-4: promotion failed. `promote_connection` already
@@ -247,14 +337,15 @@ impl Node {
                 }
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;
-                    // C3-2 (HALT-reported): the decrypt-worker registration still
-                    // runs INSIDE `promote_connection` (`handshake.rs:1193/1305`),
-                    // which is the single source of truth for its ~40 direct
-                    // `promote_connection` callers (unit/integration tests) and the
-                    // two live handlers. Relocating it out (GAP-3) would perturb the
-                    // live promote path, so C3-1 keeps it there and drives this
-                    // action as a no-op; the relocation lands with the inbound
-                    // cutover in C3-2.
+                    // No-op by design. C3-3b (R1-a) relocated the decrypt-worker
+                    // registration into the `PromoteToActive` Ok arm above, gated on
+                    // the returned `PromotionResult`, so it runs once per live
+                    // promote (Promoted/Won) at the pre-refactor synchronous point.
+                    // This machine-emitted action is now redundant with that arm;
+                    // kept as an inert no-op (rather than removing the emission) so
+                    // the machine's action sequence and its unit tests stay
+                    // unchanged. The keyed-by-NodeAddr register does not need the
+                    // machine's `index` payload.
                 }
                 PeerAction::UnregisterDecryptSession { index } => {
                     // Executor supplies `transport_id` from ambient; keyed by

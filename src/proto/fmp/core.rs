@@ -312,21 +312,6 @@ pub(crate) enum ConnAction {
         bytes: Vec<u8>,
         next_resend_at_ms: u64,
     },
-    /// Promote the completed handshake connection on `link` to an active peer
-    /// (`promote_connection`): moves the Noise session out of the
-    /// `PeerConnection`, resolves cross-connection precedence via the
-    /// tie-breaker, and installs the `ActivePeer`. The shell executes the
-    /// promotion (resolving the verified identity and promotion timestamp from
-    /// the ambient wire context) and then runs the post-promotion tail
-    /// (TreeAnnounce, bloom mark, discovery-backoff reset, loser-link cleanup).
-    //
-    // C3-3a cut the inline outbound `Promote` arm — the last constructor of this
-    // variant — over to the machine's `PeerAction::PromoteToActive` seam. The only
-    // remaining reference is the (now dead-code-allowed) `drive_promote_to_active`
-    // matcher; both are retired together in C3-3b, so this variant is allowed
-    // until then to keep the C3-3a diff scoped to the outbound Promote cutover.
-    #[allow(dead_code)]
-    PromoteToActive { link: LinkId },
 }
 
 /// Read-only view of FMP connection/peer state the lifecycle core needs.
