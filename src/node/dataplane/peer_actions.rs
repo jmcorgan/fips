@@ -28,7 +28,7 @@ use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::VecDeque;
-use tracing::warn;
+use tracing::{debug, trace, warn};
 
 /// Ambient shell facts a [`PeerAction`] executor needs that the machine's
 /// runtime-agnostic action payloads deliberately omit (verified identity,
@@ -323,8 +323,73 @@ impl Node {
                     }
                 }
                 PeerAction::SwapSendState { .. } => {
-                    // C4: initiator cutover (`active.rs:1033`
-                    // `cutover_to_new_session`).
+                    // C4-0: initiator cutover. Reproduces the `ConnAction::Cutover`
+                    // body in `handlers/rekey.rs:53-88` EXACTLY. `addr` is resolved
+                    // from the ambient verified identity (as `InvalidateSendState`
+                    // does). The decrypt re-register folds HERE, gated on
+                    // `did_cutover` — the generic `RegisterDecryptSession` arm stays a
+                    // no-op so a promote never double-registers. Shadow-only until the
+                    // cadence fold routes here (C4-1).
+                    let node_addr = *ambient.verified_identity.node_addr();
+                    let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
+                        if let Some(_old_our_index) = peer.cutover_to_new_session() {
+                            // New index was pre-registered in peers_by_index
+                            // during msg2 handling (handshake.rs).
+                            debug_assert!(
+                                peer.transport_id().is_some()
+                                    && peer.our_index().is_some()
+                                    && self.peers_by_index.contains_key(&(
+                                        peer.transport_id().unwrap(),
+                                        peer.our_index().unwrap().as_u32()
+                                    )),
+                                "peers_by_index should contain pre-registered new index after cutover"
+                            );
+                            debug!(
+                                peer = %self.peer_display_name(&node_addr),
+                                "Rekey cutover complete (initiator), K-bit flipped"
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    // Re-register the new session with the decrypt worker — the
+                    // cache_key (transport_id, our_index) just changed, so the
+                    // old worker entry is stale and every packet on the new
+                    // session would miss the worker's HashMap lookup.
+                    #[cfg(unix)]
+                    if did_cutover {
+                        self.register_decrypt_worker_session(&node_addr);
+                    }
+                    #[cfg(not(unix))]
+                    let _ = did_cutover;
+                }
+                PeerAction::CompleteDrain { peer: node_addr } => {
+                    // C4-0: initiator drain completion. Reproduces the
+                    // `ConnAction::Drain` body in `handlers/rekey.rs:90-111` EXACTLY.
+                    // Extract the real previous index + transport_id under the peer
+                    // borrow, drop the borrow, then run the cache_key cleanup (which
+                    // takes &mut self for unregister_decrypt_worker_session).
+                    // Shadow-only until the cadence fold routes here (C4-1).
+                    let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
+                        peer.complete_drain().map(|idx| (idx, peer.transport_id()))
+                    });
+                    if let Some((old_our_index, transport_id)) = drained {
+                        if let Some(tid) = transport_id {
+                            let cache_key = (tid, old_our_index.as_u32());
+                            self.peers_by_index.remove(&cache_key);
+                            #[cfg(unix)]
+                            self.unregister_decrypt_worker_session(cache_key);
+                        }
+                        let _ = self.index_allocator.free(old_our_index);
+                        trace!(
+                            peer = %self.peer_display_name(&node_addr),
+                            old_index = %old_our_index,
+                            "Drain complete, previous session erased"
+                        );
+                    }
                 }
                 PeerAction::InvalidateSendState => {
                     // GAP-4 (biggest): the FULL teardown. `remove_active_peer`

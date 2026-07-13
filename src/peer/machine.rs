@@ -268,6 +268,11 @@ pub(crate) enum PeerAction {
     /// Initiator-side rekey cutover: swap the published send-state to the pending
     /// epoch.
     SwapSendState { epoch: [u8; 8] },
+    /// Complete an initiator-side rekey drain: retire the previous session slot
+    /// (drop its `peers_by_index`/decrypt-worker entry, free its index). The
+    /// executor reads the REAL previous index from `ActivePeer::complete_drain`
+    /// (not a machine-shadow index, which can drift).
+    CompleteDrain { peer: NodeAddr },
     /// Invalidate the published send-state (close/loss).
     InvalidateSendState,
     /// Register a decrypt-worker entry for `index`.
@@ -829,13 +834,12 @@ impl PeerMachine {
                 actions
             }
             ConnAction::Drain { peer } => {
+                // The executor reads the real previous_our_index from
+                // `ActivePeer::complete_drain` and does the peers_by_index /
+                // decrypt-worker / index-free cleanup, replacing the old
+                // shadow-index emission (which could drift from the real index).
                 self.state = PeerState::Active { addr: peer };
-                let mut actions = Vec::new();
-                if let Some(idx) = self.draining_index.take() {
-                    actions.push(PeerAction::UnregisterDecryptSession { index: idx });
-                    actions.push(PeerAction::FreeIndex { index: idx });
-                }
-                actions
+                vec![PeerAction::CompleteDrain { peer }]
             }
             ConnAction::InitiateRekey { peer } => {
                 // Fresh outbound rekey: allocate our new index, send msg1 (Noise
@@ -1264,6 +1268,23 @@ mod tests {
                 kind: MaintainKind::Rekey(RekeyPhase::Draining)
             }
         );
+
+        // A second cadence tick from the (expired) drain window completes the
+        // drain: the machine now emits the single `CompleteDrain` send-state
+        // write (executor reads the real previous index) instead of the old
+        // shadow-index `[UnregisterDecryptSession, FreeIndex]` pair.
+        let drain_actions = m.step(
+            PeerEvent::Timeout {
+                kind: TimerKind::RekeyCadence,
+            },
+            20_000,
+            &mut alloc,
+        );
+        assert_eq!(
+            drain_actions,
+            vec![PeerAction::CompleteDrain { peer: addr }]
+        );
+        assert_eq!(m.state(), PeerState::Active { addr });
     }
 
     // ---- Test 2: responder cutover (data-plane owned) ---------------------
