@@ -1020,9 +1020,14 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
         bootstrap.insert_advert_for_test(npub.clone(), advert).await;
     }
 
+    // The sweep now runs through the gate-checked reconciler overlay layer,
+    // which is inert unless the node is Running/Degraded. In production the
+    // sweep fires only from the rx_loop tick (which spins after `start()`
+    // returns Running), so drive the node into `Running` to reflect that.
+    node.supervisor.state = crate::node::NodeState::Running;
+
     // Run the sweep.
-    node.run_open_discovery_sweep(&bootstrap, Some(3_600), "test")
-        .await;
+    node.run_open_discovery_sweep(&bootstrap, Some(3_600)).await;
 
     // Eligible peer was queued.
     assert!(

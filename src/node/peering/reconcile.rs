@@ -339,6 +339,39 @@ impl PeeringReconciler {
         actions
     }
 
+    /// Per-layer wrapper: run **only** the overlay-enqueue layer (design §10).
+    ///
+    /// The monolithic [`reconcile`] runs the always-on retry-dial phase on every
+    /// call, so the driver must NOT call it at the overlay (nostr-poll) cadence
+    /// slot — that would re-fire the retry-dial there, dialing the due entries a
+    /// second time in the tick and applying the per-tick 16-cap more than once
+    /// (today the cap applies exactly once, at the retry slot). This wrapper is
+    /// gate-checked and then calls [`Self::layer_overlay_enqueue`] only.
+    ///
+    /// On `NotRunning` / `Suspended` it returns no actions. It does **not**
+    /// clear `retry_pending` on `Suspended` — that clear is owned by the drain
+    /// gate (`enter_drain`) and the retry-slot [`reconcile`], not the overlay
+    /// slot (design §10). The returned [`PeeringAction::ScheduleRetry`] items are
+    /// observability only; the durable mutation is the insert the layer performed
+    /// into `retry_pending`, dialed at the later retry slot (two-phase, §2.5).
+    pub(in crate::node) fn reconcile_overlay(
+        &mut self,
+        policy: &Policy,
+        observed: &Observed,
+        budget: &Budget,
+        pools: &DiscoveryPools,
+        now: u64,
+        gate: Gate,
+    ) -> Vec<PeeringAction> {
+        match gate {
+            Gate::NotRunning | Gate::Suspended => return Vec::new(),
+            Gate::Reconciling => {}
+        }
+        let mut actions = Vec::new();
+        self.layer_overlay_enqueue(policy, observed, budget, pools, now, &mut actions);
+        actions
+    }
+
     /// Layer 1a — config bring-up floor (subsumes `initiate_peer_connections`).
     ///
     /// Emits a `Connect` for every auto-connect peer not already connected or
