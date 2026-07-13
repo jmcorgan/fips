@@ -24,12 +24,51 @@
 # fips-mesh1) and are intentionally NOT bridged into br-lan: the FIPS
 # Ethernet transport binds each directly and runs discovery beacons over it.
 #
-# The shipped /etc/fips/fips.yaml already carries 'mesh0' and 'mesh1'
-# entries under 'transports.ethernet' bound to these names — each is inert
-# until its interface exists. After an interface is up, restart fips.
+# The shipped /etc/fips/fips.yaml carries 'mesh0' and 'mesh1' entries under
+# 'transports.ethernet' bound to these names, but commented out — a stock
+# install that never creates fips-mesh* then logs no bind warning. This
+# helper uncomments the matching entry when it creates an interface and
+# re-comments it on remove, so the daemon binds the transport without a
+# manual config edit. After an interface is up, restart fips.
 # See docs/how-to/set-up-80211s-mesh-backhaul.md for the full guide.
 
 DEFAULT_MESH_ID="fips-mesh"
+CONFIG="/etc/fips/fips.yaml"
+
+# Replace $CONFIG with the rewritten $CONFIG.tmp. Force mode 0600 first: the
+# package installs fips.yaml 0600 (it may hold an inline 'nsec' private key),
+# and a fresh tmp file would otherwise land world-readable after the move.
+mesh_config_write() {
+	chmod 600 "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
+}
+
+# Uncomment the 'mesh<idx>' transports.ethernet block in $CONFIG (created by
+# 'fips-mesh-setup'). Reversible with mesh_config_disable. Returns:
+#   0 enabled (or already active)   1 no config file   2 no such block
+mesh_config_enable() {
+	idx="$1"
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^    mesh$idx:" "$CONFIG" && return 0
+	grep -q "^    # mesh$idx:" "$CONFIG" || return 2
+	awk -v idx="$idx" '
+		$0 ~ ("^    # mesh" idx ":[ \t]*$") { blk = 1; sub(/^    # /, "    "); print; next }
+		blk && /^    #   / { sub(/^    # /, "    "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && mesh_config_write
+}
+
+# Re-comment the 'mesh<idx>' block so the daemon stops binding it (and stops
+# warning about the now-missing interface). Inverse of mesh_config_enable.
+mesh_config_disable() {
+	idx="$1"
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^    mesh$idx:" "$CONFIG" || return 0
+	awk -v idx="$idx" '
+		$0 ~ ("^    mesh" idx ":[ \t]*$") { blk = 1; sub(/^    /, "    # "); print; next }
+		blk && /^      / { sub(/^    /, "    # "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && mesh_config_write
+}
 
 usage() {
 	echo "Usage: fips-mesh-setup <radio> [mesh-id]" >&2
@@ -62,15 +101,18 @@ if [ "$1" = "remove" ]; then
 		ifname="$(uci -q get "wireless.$section.ifname")"
 		uci -q delete "wireless.$section"
 		uci -q delete "network.$section"
+		# Re-comment the matching mesh<N> transport in fips.yaml so the
+		# daemon stops warning about the interface we just removed.
+		idx="$(printf '%s' "$ifname" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
+		[ -n "$idx" ] && mesh_config_disable "$idx"
 		echo "Removed ${ifname:-$section}."
 	done
 	uci commit wireless
 	uci commit network
+	# 'wifi reload' re-applies the whole wireless config, so it briefly drops
+	# every client AP on all radios (a few seconds) — expected on remove.
 	wifi reload
 	echo "Restart fips: /etc/init.d/fips restart"
-	echo "(The 'mesh*' entries in /etc/fips/fips.yaml are harmless without"
-	echo "their interfaces, but you may comment them out to silence the"
-	echo "startup warnings.)"
 	exit 0
 fi
 
@@ -178,7 +220,21 @@ uci set "network.$SECTION.proto=none"
 
 uci commit wireless
 uci commit network
+# 'wifi reload' re-applies the whole wireless config, so it briefly drops
+# every client AP on all radios (a few seconds) — expected when adding a mesh.
 wifi reload
+
+# Enable the matching mesh<N> transport in the shipped fips.yaml (it ships
+# commented out). Tailor the restart hint to what we could do.
+mesh_config_enable "$IDX"
+case $? in
+	0) TRANSPORT_NOTE="The mesh$IDX transport in $CONFIG that binds '$MESH_IFNAME' is
+     now uncommented and enabled." ;;
+	1) TRANSPORT_NOTE="No $CONFIG found — add a transports.ethernet entry binding
+     interface '$MESH_IFNAME' by hand." ;;
+	*) TRANSPORT_NOTE="No 'mesh$IDX' entry in $CONFIG — add a transports.ethernet
+     entry binding interface '$MESH_IFNAME' by hand (copy the mesh0 block)." ;;
+esac
 
 cat <<EOF
 Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO \
@@ -189,10 +245,9 @@ ALL routers in this backhaul must share this mesh ID AND channel
 radio too — second band is a standby path (failover, not multipath).
 
 Next steps:
-  1. Restart the daemon (the shipped /etc/fips/fips.yaml already binds
-     mesh transports to fips-mesh0/fips-mesh1). Restart AFTER the
-     interface is up — a transport whose interface is missing at
-     startup is skipped, not retried:
+  1. $TRANSPORT_NOTE
+     Restart the daemon AFTER the interface is up — a transport whose
+     interface is missing at startup is skipped, not retried:
        /etc/init.d/fips restart
   2. Verify L2 peering with a second FIPS router in range:
        iw dev $MESH_IFNAME station dump

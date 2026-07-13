@@ -70,9 +70,16 @@ fips-mesh-setup radio1
 
 This creates an open 802.11s interface with mesh ID `fips-mesh` and
 HWMP forwarding off, attaches it to an unmanaged netifd interface (no
-IP configuration — none is needed), and reloads the radio. Interfaces
-are named by radio index: `radio0` → `fips-mesh0`, `radio1` →
-`fips-mesh1`. Pass a second argument to use a different mesh ID.
+IP configuration — none is needed), uncomments the matching `meshN`
+transport entry in `/etc/fips/fips.yaml` (see Step 2), and reloads the
+radio. Interfaces are named by radio index: `radio0` → `fips-mesh0`,
+`radio1` → `fips-mesh1`. Pass a second argument to use a different
+mesh ID.
+
+Note: the helper runs `wifi reload`, which re-applies the whole
+wireless config and so briefly drops every client AP on all radios for
+a few seconds. `fips-mesh-setup remove` reloads the same way. Expect
+the blip if clients are connected.
 
 On dual-band routers, meshing **both** bands is worth it: 2.4 GHz
 reaches further at lower rates, 5 GHz carries more over shorter
@@ -123,10 +130,13 @@ wifi reload
 
 ## Step 2 — check the FIPS transport binding
 
-The `fips.yaml` shipped in the OpenWrt package already carries one
-transport entry per radio, enabled by default — each is inert until
-its interface exists. If you maintain your own config, make sure they
-are present:
+The `fips.yaml` shipped in the OpenWrt package carries one transport
+entry per radio, but **commented out** — so a stock install that never
+runs this helper logs no per-boot "interface missing" warning.
+`fips-mesh-setup` uncommented the matching `meshN` entry in Step 1, so
+there is normally nothing to do here. If you maintain your own config
+(or ran the manual UCI above instead of the helper), make sure the
+entries are present and uncommented:
 
 ```yaml
 transports:
