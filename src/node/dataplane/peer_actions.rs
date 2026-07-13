@@ -27,6 +27,7 @@ use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::VecDeque;
+use tracing::warn;
 
 /// Ambient shell facts a [`PeerAction`] executor needs that the machine's
 /// runtime-agnostic action payloads deliberately omit (verified identity,
@@ -123,11 +124,15 @@ impl Node {
                         // `PromoteToActive` never runs.
                         let send_err = match self.transports.get(&ambient.transport_id) {
                             Some(transport) => {
-                                transport.send(&ambient.remote_addr, &frame).await.is_err()
+                                transport.send(&ambient.remote_addr, &frame).await.err()
                             }
-                            None => false,
+                            None => None,
                         };
-                        if send_err {
+                        if let Some(e) = send_err {
+                            // Restored pre-refactor msg2-send-failure warn!
+                            // (`handle_msg1` L665): the send error text is surfaced
+                            // at the executor point where the failure is now handled.
+                            warn!(link_id = %link, error = %e, "Failed to send msg2");
                             self.connections.remove(&link);
                             self.links.remove(&link);
                             self.addr_to_link
@@ -172,13 +177,17 @@ impl Node {
                             };
                             queue.extend(follow);
                         }
-                        Err(_e) => {
+                        Err(e) => {
                             // GAP-4: promotion failed. `promote_connection` already
                             // removed `connections[link]`; mirror the pre-refactor
                             // cleanup (`handle_msg1` L587-591): drop the link +
                             // reverse map, free our index, discard the machine, and
                             // record the reject. The queue is drained (PromoteToActive
                             // is the last establish action), so no explicit abort.
+                            //
+                            // Restored pre-refactor promote-failure warn!
+                            // (`handle_msg1` L757).
+                            warn!(link_id = %promote_link, error = %e, "Failed to promote inbound connection");
                             self.remove_link(&promote_link);
                             if let Some(idx) = ambient.our_index {
                                 let _ = self.index_allocator.free(idx);

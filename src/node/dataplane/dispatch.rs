@@ -187,6 +187,15 @@ impl Node {
 
         // Remove link and address mapping
         self.remove_link(&link_id);
+        // Bound `peer_machines` (C3-2b follow-up #2): drop this peer's machine
+        // entry, keyed by the `link_id` derived above BEFORE the `peers` removal.
+        // This cleans up the OLD peer's machine on an inbound restart and prevents
+        // unbounded growth on the establish success path. NEUTRAL: nothing on the
+        // live path reads `peer_machines` except the establish executor, which only
+        // ever touches the in-flight establish's (distinct) `link_id`; no reader
+        // depends on a stale entry, so removal changes no behavior — it only bounds
+        // the map.
+        self.peer_machines.remove(&link_id);
         if let Some(transport_id) = transport_id {
             self.cleanup_bootstrap_transport_if_unused(transport_id);
         }

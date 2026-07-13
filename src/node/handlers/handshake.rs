@@ -307,7 +307,6 @@ impl Node {
                 self.msg1_rate_limiter.complete_handshake();
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                return;
             }
             InboundDecision::Reject {
                 reason: reason @ (InboundReject::PendingSession | InboundReject::DualRekeyWon),
@@ -330,7 +329,6 @@ impl Node {
                 self.msg1_rate_limiter.complete_handshake();
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                return;
             }
             InboundDecision::ResendMsg2 { msg2 } => {
                 if let Some(msg2) = msg2.as_deref()
@@ -349,7 +347,6 @@ impl Node {
                     }
                 }
                 self.msg1_rate_limiter.complete_handshake();
-                return;
             }
             InboundDecision::RekeyRespond {
                 peer,
@@ -439,22 +436,201 @@ impl Node {
                 // as rekeys (not new connections). The temporary `conn`/`link_id`
                 // were never inserted into the registry, so no cleanup is needed.
                 self.msg1_rate_limiter.complete_handshake();
-                return;
             }
             InboundDecision::RestartThenPromote { peer } => {
-                // Epoch mismatch — peer restarted. Tear down the stale session
-                // and schedule a reconnect, then fall through to promote the
-                // fresh handshake as a new connection.
+                // === C3-2b: restart inbound establish, driven by the machine. ===
+                // Epoch mismatch — the peer restarted. The fresh leg is promoted
+                // exactly like a net-new inbound (realization A two-phase
+                // authorize); the OLD peer's teardown is the machine's Phase-1
+                // `[InvalidateSendState, ReportLost{peer}]`:
+                //   InvalidateSendState → remove_active_peer(old): frees the four
+                //     index slots + `peers_by_index` + decrypt unregister + FSP
+                //     `sessions` + `pending_tun_packets` (GAP-4). The fresh leg's
+                //     `our_index` is None, so the machine emits NO
+                //     UnregisterDecryptSession (N1).
+                //   ReportLost{peer} → note_link_dead(old): reconnect backoff.
+                // These execute BEFORE authorize/allocate, preserving the
+                // pre-refactor order exactly (remove_active_peer → note_link_dead →
+                // authorize → allocate → send msg2 → promote). `peer` here equals
+                // `peer_identity.node_addr()` (see `establish_inbound`), so the
+                // executor's `InvalidateSendState`
+                // (`ambient.verified_identity.node_addr()`) targets the same addr
+                // as the pre-refactor `remove_active_peer(&peer)`.
                 debug!(
                     peer = %self.peer_display_name(&peer),
                     "Peer restart detected (epoch mismatch), removing stale session"
                 );
-                self.remove_active_peer(&peer);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                self.note_link_dead(peer, now_ms);
+
+                // Keep the shell's own copies of the msg2 framing inputs before
+                // the machine event consumes `wire` (WireOutcome is not Clone).
+                let msg2_payload = wire.msg2_payload.clone();
+                let their_index = wire.their_index;
+
+                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+
+                // Phase 1: classify + emit the old-peer teardown. For a restart the
+                // fresh leg has `our_index == None`, so the emitted sequence is
+                // exactly [InvalidateSendState, ReportLost{peer}]; the machine then
+                // parks at Handshaking{ReceivedMsg1} (no allocation — realization A).
+                let phase1 = machine.step(
+                    PeerEvent::InboundMsg1 {
+                        link: link_id,
+                        wire,
+                        est,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                debug_assert!(matches!(
+                    machine.state(),
+                    PeerState::Handshaking {
+                        phase: HandshakePhase::ReceivedMsg1,
+                        ..
+                    }
+                ));
+
+                // Execute the Phase-1 teardown, in emitted order
+                // (InvalidateSendState before ReportLost, both before
+                // authorize/alloc). N2 CLOCK NOTE — INTENTIONAL DIVERGENCE: the
+                // pre-refactor arm timestamped `note_link_dead` with
+                // `SystemTime::now()` wall-clock; routing `ReportLost` through the
+                // executor uses `ambient.now_ms == packet.timestamp_ms`. This is an
+                // accepted sub-millisecond reconnect-backoff timing shift — NOT
+                // on-wire, NOT index/metrics — see design/step2-c3-2-blueprint.md
+                // N2. The machine is not yet in `peer_machines`, but these two
+                // actions do not touch the map, so executing them here is safe.
+                let teardown_ctx = PeerActionCtx {
+                    verified_identity: peer_identity,
+                    transport_id: packet.transport_id,
+                    remote_addr: packet.remote_addr.clone(),
+                    our_index: None,
+                    their_index: Some(their_index),
+                    now_ms: packet.timestamp_ms,
+                };
+                self.execute_peer_actions(link_id, &teardown_ctx, phase1)
+                    .await;
+
+                // Shell interposition: late-ACL authorize BEFORE any allocation.
+                if self
+                    .authorize_peer(
+                        &peer_identity,
+                        PeerAclContext::InboundHandshake,
+                        packet.transport_id,
+                        &packet.remote_addr,
+                    )
+                    .is_err()
+                {
+                    let _ = machine.step(
+                        PeerEvent::Rejected,
+                        packet.timestamp_ms,
+                        &mut self.index_allocator,
+                    );
+                    self.msg1_rate_limiter.complete_handshake();
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
+                }
+
+                // Phase 2: allocate our index + emit [SendHandshake, PromoteToActive].
+                let promote_actions = machine.step(
+                    PeerEvent::Authorized,
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                let our_index = match machine.our_index() {
+                    Some(idx) => idx,
+                    None => {
+                        // Allocation exhausted in Phase 2 (mirrors the pre-refactor
+                        // allocate-failure path): no msg2, no promote. The old peer
+                        // has already been torn down above — identical to the
+                        // pre-refactor arm, which also removed the stale peer before
+                        // hitting the shared allocate-failure return.
+                        warn!("Failed to allocate session index for inbound");
+                        self.msg1_rate_limiter.complete_handshake();
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        return;
+                    }
+                };
+
+                // Shell registry surgery (Option A1), in the pre-refactor order:
+                // set indices on the shell connection, insert link / reverse map /
+                // connection, then build + store the framed msg2. The old index was
+                // already freed by `remove_active_peer` above, BEFORE this fresh
+                // allocation — matching the pre-refactor allocation sequence.
+                conn.set_our_index(our_index);
+                conn.set_their_index(their_index);
+                let link = Link::connectionless(
+                    link_id,
+                    packet.transport_id,
+                    packet.remote_addr.clone(),
+                    LinkDirection::Inbound,
+                    Duration::from_millis(self.config().node.base_rtt_ms),
+                );
+                self.links.insert(link_id, link);
+                self.addr_to_link.insert(addr_key, link_id);
+                self.connections.insert(link_id, conn);
+                let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
+                if let Some(conn) = self.connections.get_mut(&link_id) {
+                    conn.set_handshake_msg2(wire_msg2.clone());
+                }
+
+                // Register the machine (Promote/Restart tail only).
+                self.peer_machines.insert(link_id, machine);
+
+                // Execute [SendHandshake, PromoteToActive]. Because the old peer was
+                // removed in Phase 1, `promote_connection`'s cross-connection branch
+                // (`peers.get(addr)`) cannot fire, so it always returns `Promoted`;
+                // the defensive `PromotionResolved{CrossConnectionWon/Lost}`
+                // follow-ups are unreachable here (see the post-tail note).
+                let ambient = PeerActionCtx {
+                    verified_identity: peer_identity,
+                    transport_id: packet.transport_id,
+                    remote_addr: packet.remote_addr.clone(),
+                    our_index: Some(our_index),
+                    their_index: Some(their_index),
+                    now_ms: packet.timestamp_ms,
+                };
+                self.execute_peer_actions(link_id, &ambient, promote_actions)
+                    .await;
+
+                // Post-`Promoted` shell tail (byte-identical to the pre-refactor
+                // Promoted arm), reached only when promotion succeeded (machine now
+                // Established); a send/promote failure removed the machine and
+                // already cleaned up.
+                //
+                // DEFENSIVE CROSS-CONNECTION (risk #5): the machine's
+                // `PromotionResolved{CrossConnectionWon/Lost}` follow-ups run the
+                // index-level cleanup generically in the executor, but the loser-
+                // link surgery (close_connection → remove_link → addr_to_link) is
+                // NOT reproduced here — it is UNREACHABLE on the driven restart
+                // path: Phase-1 `remove_active_peer` removed `peers[addr]`, so
+                // `promote_connection` returns `Promoted`. The full cross-connection
+                // link surgery lands in C3-3 (blueprint risk #5 / N3); the
+                // debug_assert below catches any regression that reaches a non-
+                // Established, non-absent state.
+                debug_assert!(matches!(
+                    self.peer_machines.get(&link_id).map(|m| m.state()),
+                    Some(PeerState::Established { .. }) | None
+                ));
+                if matches!(
+                    self.peer_machines.get(&link_id).map(|m| m.state()),
+                    Some(PeerState::Established { .. })
+                ) {
+                    // Store msg2 on peer for resend on duplicate msg1
+                    if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                        peer.set_handshake_msg2(wire_msg2.clone());
+                    }
+                    // Send initial tree announce to new peer
+                    if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
+                        debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
+                    }
+                    // Schedule filter announce (sent on next tick via debounce)
+                    self.bloom_state.mark_update_needed(peer_node_addr);
+                    self.reset_lookup_backoff();
+                }
+
+                self.msg1_rate_limiter.complete_handshake();
             }
             InboundDecision::Promote => {
                 // === C3-2a: net-new inbound establish, driven by the machine. ===
@@ -522,7 +698,10 @@ impl Node {
                     Some(idx) => idx,
                     None => {
                         // Allocation exhausted in Phase 2 (mirrors the pre-refactor
-                        // allocate-failure path): no msg2, no promote.
+                        // allocate-failure path): no msg2, no promote. The concrete
+                        // allocator error is consumed inside `on_authorized`, so the
+                        // restored warn! carries the pre-refactor message text only.
+                        warn!("Failed to allocate session index for inbound");
                         self.msg1_rate_limiter.complete_handshake();
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -594,181 +773,8 @@ impl Node {
                 }
 
                 self.msg1_rate_limiter.complete_handshake();
-                return;
             }
         }
-
-        if self
-            .authorize_peer(
-                &wire.peer_identity,
-                PeerAclContext::InboundHandshake,
-                packet.transport_id,
-                &packet.remote_addr,
-            )
-            .is_err()
-        {
-            self.msg1_rate_limiter.complete_handshake();
-            self.stats_mut()
-                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            return;
-        }
-
-        // Note: we don't early-return if peer is already in self.peers here.
-        // promote_connection handles cross-connection resolution via tie-breaker.
-
-        // Allocate our session index
-        let our_index = match self.index_allocator.allocate() {
-            Ok(idx) => idx,
-            Err(e) => {
-                self.msg1_rate_limiter.complete_handshake();
-                warn!(error = %e, "Failed to allocate session index for inbound");
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                return;
-            }
-        };
-
-        conn.set_our_index(our_index);
-        conn.set_their_index(wire.their_index);
-
-        // Create link
-        let link = Link::connectionless(
-            link_id,
-            packet.transport_id,
-            packet.remote_addr.clone(),
-            LinkDirection::Inbound,
-            Duration::from_millis(self.config().node.base_rtt_ms),
-        );
-
-        self.links.insert(link_id, link);
-        self.addr_to_link.insert(addr_key, link_id);
-        self.connections.insert(link_id, conn);
-
-        // Build and send msg2 response, storing for potential resend
-        let wire_msg2 = build_msg2(our_index, wire.their_index, &wire.msg2_payload);
-        if let Some(conn) = self.connections.get_mut(&link_id) {
-            conn.set_handshake_msg2(wire_msg2.clone());
-        }
-
-        if let Some(transport) = self.transports.get(&packet.transport_id) {
-            match transport.send(&packet.remote_addr, &wire_msg2).await {
-                Ok(bytes) => {
-                    debug!(
-                        link_id = %link_id,
-                        our_index = %our_index,
-                        their_index = %wire.their_index,
-                        bytes,
-                        "Sent msg2 response"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        link_id = %link_id,
-                        error = %e,
-                        "Failed to send msg2"
-                    );
-                    // Clean up on failure
-                    self.connections.remove(&link_id);
-                    self.links.remove(&link_id);
-                    self.addr_to_link
-                        .remove(&(packet.transport_id, packet.remote_addr));
-                    let _ = self.index_allocator.free(our_index);
-                    self.msg1_rate_limiter.complete_handshake();
-                    self.stats_mut()
-                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                    return;
-                }
-            }
-        }
-
-        // Responder handshake is complete after receive_handshake_init (Noise IK
-        // pattern: responder processes msg1 and generates msg2 in one step).
-        // Promote the connection to active peer now.
-        let promote = ConnAction::PromoteToActive { link: link_id };
-        match self.drive_promote_to_active(promote, wire.peer_identity, packet.timestamp_ms) {
-            Ok(result) => {
-                match result {
-                    PromotionResult::Promoted(node_addr) => {
-                        // Store msg2 on peer for resend on duplicate msg1
-                        if let Some(peer) = self.peers.get_mut(&node_addr) {
-                            peer.set_handshake_msg2(wire_msg2.clone());
-                        }
-                        // Promotion is logged once by `promote_connection`
-                        // ("Connection promoted to active peer"); no separate
-                        // inbound-path line.
-                        // Send initial tree announce to new peer
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionWon {
-                        loser_link_id,
-                        node_addr,
-                    } => {
-                        // Store msg2 on peer for resend on duplicate msg1
-                        if let Some(peer) = self.peers.get_mut(&node_addr) {
-                            peer.set_handshake_msg2(wire_msg2.clone());
-                        }
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(loser_link) = self.links.get(&loser_link_id) {
-                            let loser_tid = loser_link.transport_id();
-                            let loser_addr = loser_link.remote_addr().clone();
-                            if let Some(transport) = self.transports.get(&loser_tid) {
-                                transport.close_connection(&loser_addr).await;
-                            }
-                        }
-                        // Clean up the losing connection's link
-                        self.remove_link(&loser_link_id);
-                        debug!(
-                            peer = %self.peer_display_name(&node_addr),
-                            loser_link_id = %loser_link_id,
-                            "Inbound cross-connection won, loser link cleaned up"
-                        );
-                        // Send initial tree announce to peer (new or reconnected)
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionLost { winner_link_id } => {
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            transport.close_connection(&packet.remote_addr).await;
-                        }
-                        // This connection lost — clean up its link
-                        self.remove_link(&link_id);
-                        // Restore addr_to_link for the winner's link
-                        self.addr_to_link.insert(
-                            (packet.transport_id, packet.remote_addr.clone()),
-                            winner_link_id,
-                        );
-                        debug!(
-                            winner_link_id = %winner_link_id,
-                            "Inbound cross-connection lost, keeping existing"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    link_id = %link_id,
-                    error = %e,
-                    "Failed to promote inbound connection"
-                );
-                // Clean up on promotion failure
-                self.remove_link(&link_id);
-                let _ = self.index_allocator.free(our_index);
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            }
-        }
-
-        self.msg1_rate_limiter.complete_handshake();
     }
 
     /// Find stored msg2 bytes for a given link (pre- or post-promotion).
