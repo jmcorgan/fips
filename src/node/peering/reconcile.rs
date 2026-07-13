@@ -296,6 +296,40 @@ pub(crate) enum PeeringAction {
     },
 }
 
+/// Per-sweep observability tally for the overlay-enqueue layer.
+///
+/// Sans-IO: the core counts each enqueue/skip decision as it makes it and
+/// returns the tally as data; the driver performs the actual logging I/O. This
+/// restores the operator-facing `"open-discovery sweep complete"` summary (with
+/// its per-reason skip breakdown) that was dropped when the sweep moved into the
+/// core. `cached` and `skipped_self` are counted driver-side — self is filtered
+/// out of the overlay pool before the core ever sees it, and the raw cache size
+/// is the driver's to know.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OverlaySweepTally {
+    /// The enqueue budget was 0, so the layer returned before iterating any
+    /// candidate (the old sweep's "enqueue budget is 0, skipping" early return).
+    pub budget_zero: bool,
+    /// Candidates enqueued for a due-now retry dial.
+    pub enqueued: usize,
+    /// Skipped: advert older than the startup-sweep max age.
+    pub skipped_age: usize,
+    /// Skipped: a configured (statically-peered) npub (retry expedited, then skip).
+    pub skipped_configured: usize,
+    /// Skipped: already an active peer.
+    pub skipped_connected: usize,
+    /// Skipped: already has a pending retry entry.
+    pub skipped_retry_pending: usize,
+    /// Skipped: already connecting.
+    pub skipped_connecting: usize,
+    /// Skipped: no usable endpoints in the advert.
+    pub skipped_no_endpoints: usize,
+    /// Skipped: npub failed to parse.
+    pub skipped_invalid_npub: usize,
+    /// Skipped: npub is in overlay cooldown.
+    pub skipped_cooldown: usize,
+}
+
 /// The sans-IO decision core (mirror of `SupervisorFsm`). Holds the durable
 /// cross-attempt retry schedule; time and I/O enter only as inputs.
 #[derive(Default)]
@@ -338,8 +372,18 @@ impl PeeringReconciler {
         // same-call overlay insert never dials in its own call (two-phase, §2.5).
         self.layer_config_floor(policy, observed, &mut actions);
         self.layer_retry_dial(policy, observed, budget, now, &mut actions);
-        // Layer 2: overlay pool (ceiling-only enqueue).
-        self.layer_overlay_enqueue(policy, observed, budget, pools, now, &mut actions);
+        // Layer 2: overlay pool (ceiling-only enqueue). The tally is
+        // observability-only and unused on the monolithic path (the per-layer
+        // `reconcile_overlay` wrapper is what the open-discovery driver calls).
+        self.layer_overlay_enqueue(
+            policy,
+            observed,
+            budget,
+            pools,
+            now,
+            &mut actions,
+            &mut OverlaySweepTally::default(),
+        );
         // Layer 3: opportunistic growth.
         self.layer_opportunistic(observed, budget, pools, &mut actions);
         actions
@@ -368,14 +412,25 @@ impl PeeringReconciler {
         pools: &DiscoveryPools,
         now: u64,
         gate: Gate,
-    ) -> Vec<PeeringAction> {
+    ) -> (Vec<PeeringAction>, OverlaySweepTally) {
         match gate {
-            Gate::NotRunning | Gate::Suspended => return Vec::new(),
+            Gate::NotRunning | Gate::Suspended => {
+                return (Vec::new(), OverlaySweepTally::default());
+            }
             Gate::Reconciling => {}
         }
         let mut actions = Vec::new();
-        self.layer_overlay_enqueue(policy, observed, budget, pools, now, &mut actions);
-        actions
+        let mut tally = OverlaySweepTally::default();
+        self.layer_overlay_enqueue(
+            policy,
+            observed,
+            budget,
+            pools,
+            now,
+            &mut actions,
+            &mut tally,
+        );
+        (actions, tally)
     }
 
     /// Per-layer wrapper: run **only** the opportunistic-growth layer (design
@@ -519,6 +574,7 @@ impl PeeringReconciler {
     /// available outbound slots). No `>= N` set-point floor (design §9.2 option
     /// b). Enqueues due-now retry entries; the dial happens on a later
     /// retry-slot invocation (two-phase, §2.5).
+    #[allow(clippy::too_many_arguments)]
     fn layer_overlay_enqueue(
         &mut self,
         policy: &Policy,
@@ -527,6 +583,7 @@ impl PeeringReconciler {
         pools: &DiscoveryPools,
         now: u64,
         actions: &mut Vec<PeeringAction>,
+        tally: &mut OverlaySweepTally,
     ) {
         if !policy.open_discovery_enabled {
             return;
@@ -548,6 +605,7 @@ impl PeeringReconciler {
         let available_outbound = budget.handshake_slots.min(budget.peer_slots);
         let mut enqueue_budget = cap_remaining.min(available_outbound);
         if enqueue_budget == 0 {
+            tally.budget_zero = true;
             return;
         }
 
@@ -560,6 +618,7 @@ impl PeeringReconciler {
             if let Some(max_age) = pools.startup_sweep_max_age_secs
                 && now_secs.saturating_sub(*created_at_secs) > max_age
             {
+                tally.skipped_age = tally.skipped_age.saturating_add(1);
                 continue;
             }
 
@@ -576,25 +635,31 @@ impl PeeringReconciler {
                         state.retry_after_ms = now;
                     }
                 }
+                tally.skipped_configured = tally.skipped_configured.saturating_add(1);
                 continue;
             }
 
             let Ok(peer_identity) = PeerIdentity::from_npub(npub) else {
+                tally.skipped_invalid_npub = tally.skipped_invalid_npub.saturating_add(1);
                 continue; // skipped_invalid_npub (lifecycle:2182)
             };
             let addr = *peer_identity.node_addr();
             // Self is excluded by the driver when building the pool (the core has
-            // no self identity input).
+            // no self identity input); the driver tallies `skipped_self`.
             if observed.connected.contains(&addr) {
+                tally.skipped_connected = tally.skipped_connected.saturating_add(1);
                 continue; // skipped_connected (lifecycle:2194)
             }
             if self.retry_pending.contains_key(&addr) {
+                tally.skipped_retry_pending = tally.skipped_retry_pending.saturating_add(1);
                 continue; // skipped_retry_pending (lifecycle:2198)
             }
             if pools.overlay_cooldown.contains(npub) {
+                tally.skipped_cooldown = tally.skipped_cooldown.saturating_add(1);
                 continue; // skipped_cooldown (lifecycle:2202)
             }
             if observed.connecting.contains(&addr) {
+                tally.skipped_connecting = tally.skipped_connecting.saturating_add(1);
                 continue; // skipped_connecting (lifecycle:2206)
             }
 
@@ -616,6 +681,7 @@ impl PeeringReconciler {
                 priority = priority.saturating_add(1);
             }
             if addresses.is_empty() {
+                tally.skipped_no_endpoints = tally.skipped_no_endpoints.saturating_add(1);
                 continue; // skipped_no_endpoints (lifecycle:2235)
             }
 
@@ -637,6 +703,7 @@ impl PeeringReconciler {
                 backoff_ms: 0,
             });
             enqueue_budget = enqueue_budget.saturating_sub(1);
+            tally.enqueued = tally.enqueued.saturating_add(1);
         }
     }
 

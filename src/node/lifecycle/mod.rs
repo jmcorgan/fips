@@ -2333,7 +2333,22 @@ impl Node {
         // enqueue, the driver can pre-seed the alias + identity caches for
         // exactly that set (below) — reproducing the old sweep's per-enqueue
         // `peer_aliases` / `register_identity` side effects byte-for-byte.
+        let now_secs = now_ms / 1000;
         let candidates = bootstrap.cached_open_discovery_candidates(64).await;
+        // `cached` and the self buckets feed the operator sweep summary below: the
+        // raw cache size and the self-advert filter are the driver's to count,
+        // since the sans-IO core never sees self (it is excluded from the pool).
+        // The old sweep checked self at position 4 — *after* the age and
+        // configured filters, which `continue` first — so a stale (startup only)
+        // or self-configured own-advert was attributed to `skipped_age` /
+        // `skipped_configured`, not `skipped_self`. Reproduce that precedence here
+        // (the two predicates that preceded the old self check) so the restored
+        // summary buckets self exactly as before; only a self-advert that clears
+        // both counts as `skipped_self`.
+        let cached_count = candidates.len();
+        let mut skipped_self = 0usize;
+        let mut skipped_self_as_age = 0usize;
+        let mut skipped_self_as_configured = 0usize;
         let mut overlay = Vec::with_capacity(candidates.len());
         let mut overlay_cooldown = HashSet::new();
         let mut candidate_identities: HashMap<NodeAddr, PeerIdentity> = HashMap::new();
@@ -2341,6 +2356,15 @@ impl Node {
             if let Ok(identity) = PeerIdentity::from_npub(&npub) {
                 let node_addr = *identity.node_addr();
                 if node_addr == self_node_addr {
+                    if max_age_secs
+                        .is_some_and(|max_age| now_secs.saturating_sub(created_at_secs) > max_age)
+                    {
+                        skipped_self_as_age = skipped_self_as_age.saturating_add(1);
+                    } else if configured_npubs.contains(&npub) {
+                        skipped_self_as_configured = skipped_self_as_configured.saturating_add(1);
+                    } else {
+                        skipped_self = skipped_self.saturating_add(1);
+                    }
                     continue;
                 }
                 candidate_identities.insert(node_addr, identity);
@@ -2373,7 +2397,7 @@ impl Node {
         // candidates reached it. Consuming the core's own output here to drive
         // that I/O bookkeeping is legitimate sans-IO: the core decides WHICH to
         // enqueue, the driver performs the side effects for exactly that set.
-        let actions = self
+        let (actions, tally) = self
             .peering
             .reconciler
             .reconcile_overlay(&policy, &observed, &budget, &pools, now_ms, gate);
@@ -2389,6 +2413,59 @@ impl Node {
                 .entry(peer)
                 .or_insert_with(|| identity.short_npub());
             self.register_identity(peer, identity.pubkey_full());
+        }
+
+        // Operator-facing sweep summary. Restores the log dropped when the sweep
+        // moved into the sans-IO core: the core tallies each enqueue/skip
+        // decision, the driver adds the two values only it holds (`cached`, the
+        // raw cache size, and `skipped_self`), derives the caller label from the
+        // sweep kind (startup passes a max-age, per-tick passes `None`), and
+        // reproduces the old summarize gate (always on startup; per-tick only
+        // when something was enqueued). Only summarizes when the core actually
+        // reconciled — a not-running/suspended gate yields an empty default tally
+        // that must not read as "ran, enqueued nothing".
+        if matches!(gate, Gate::Reconciling) {
+            let caller = if max_age_secs.is_some() {
+                "startup"
+            } else {
+                "per-tick"
+            };
+            if tally.budget_zero {
+                debug!(
+                    caller = %caller,
+                    "open-discovery sweep: enqueue budget is 0, skipping"
+                );
+            } else if caller == "startup" || tally.enqueued > 0 {
+                // Fold the self-advert cases the old sweep attributed to the age
+                // and configured buckets back into those buckets.
+                let skipped_age = tally.skipped_age + skipped_self_as_age;
+                let skipped_configured = tally.skipped_configured + skipped_self_as_configured;
+                let skipped_total = skipped_self
+                    + skipped_age
+                    + skipped_configured
+                    + tally.skipped_connected
+                    + tally.skipped_retry_pending
+                    + tally.skipped_connecting
+                    + tally.skipped_no_endpoints
+                    + tally.skipped_invalid_npub
+                    + tally.skipped_cooldown;
+                info!(
+                    caller = %caller,
+                    cached = cached_count,
+                    queued = tally.enqueued,
+                    skipped_age = skipped_age,
+                    skipped_configured = skipped_configured,
+                    skipped_self = skipped_self,
+                    skipped_connected = tally.skipped_connected,
+                    skipped_retry_pending = tally.skipped_retry_pending,
+                    skipped_connecting = tally.skipped_connecting,
+                    skipped_no_endpoints = tally.skipped_no_endpoints,
+                    skipped_invalid_npub = tally.skipped_invalid_npub,
+                    skipped_cooldown = tally.skipped_cooldown,
+                    skipped_total = skipped_total,
+                    "open-discovery sweep complete"
+                );
+            }
         }
     }
 
