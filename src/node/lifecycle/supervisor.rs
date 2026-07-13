@@ -104,10 +104,9 @@ pub(crate) enum Child {
 /// An input to the supervisor. Results of executing [`Action`]s are fed back as
 /// `SubstrateUp` / `SubstrateFailed` / `ChildStopped`.
 ///
-/// `Tick` and `ChildExited` (design doc §6) are **deferred**: `ChildExited`
-/// belongs to the runtime child-liveness monitoring follow-up (this commit is
-/// start-time health only). The bounded-drain events (`Drain` /
-/// `DrainDeadlineElapsed`) and the start/up/failed/stop events are present here.
+/// `Tick` (design doc §6) is **deferred** (the per-tick reconciler backstop lands
+/// with the cadence work). `ChildExited` is present: it feeds runtime
+/// child-liveness monitoring, routing health the same way a start failure does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
     /// Begin bring-up. `transports` are the ids the driver has already created
@@ -163,6 +162,18 @@ pub(crate) enum Event {
     /// A child the driver was asked to stop has finished stopping.
     ChildStopped {
         /// The child that has been torn down.
+        child: Child,
+    },
+    /// A supervised child's task or thread exited on its own at runtime (design
+    /// doc §6) — not in response to a `StopChild`. Valid from `Running`; routes
+    /// health the same way a start failure does (the last transport out →
+    /// `Failed`, an optional child out → `Degraded`), but at runtime `Failed` is
+    /// a published health signal, not a teardown — the driver keeps serving. No
+    /// restart (the FSM has no restart action). Inert outside `Running`.
+    #[allow(dead_code)]
+    // constructed by the runtime exit-producer wiring in the following commit
+    ChildExited {
+        /// The child whose task/thread exited.
         child: Child,
     },
 }
@@ -388,6 +399,7 @@ impl SupervisorFsm {
             Event::Drain { deadline_ms } => self.on_drain(deadline_ms),
             Event::DrainDeadlineElapsed => self.on_drain_deadline_elapsed(),
             Event::ChildStopped { child } => self.on_child_stopped(child),
+            Event::ChildExited { child } => self.on_child_exited(child),
         }
     }
 
@@ -479,23 +491,28 @@ impl SupervisorFsm {
         }
     }
 
-    /// Resolve start-completion health (design doc §9.1) and set the resulting
-    /// state, returning the [`NodeState`] the driver should publish. Called once
-    /// when `Starting.pending` empties (or the degenerate no-children path):
+    /// Resolve start-completion health (design doc §9.1). Called once when
+    /// `Starting.pending` empties (or the degenerate no-children path); the
+    /// classification is shared with runtime child-exit via
+    /// [`Self::classify_health`].
+    fn resolve_start_health(&mut self) -> NodeState {
+        self.classify_health()
+    }
+
+    /// Classify health from the current `up` / `failed` sets and set the
+    /// resulting state, returning the [`NodeState`] the driver should publish.
+    /// Shared by start-completion ([`Self::resolve_start_health`]) and runtime
+    /// child-exit ([`Self::on_child_exited`]):
     ///
     /// - zero transports up → [`SupState::Failed`] / [`NodeState::Failed`];
-    /// - ≥1 transport up but some configured child failed → [`Health::Degraded`]
-    ///   / [`NodeState::Degraded`];
-    /// - everything configured came up → [`Health::Full`] / [`NodeState::Running`].
+    /// - ≥1 transport up but some child in `failed` → [`Health::Degraded`] /
+    ///   [`NodeState::Degraded`];
+    /// - everything up and nothing failed → [`Health::Full`] / [`NodeState::Running`].
     ///
     /// Worker-pool failures are captured in `failed` like any other optional
     /// child, so they contribute `Degraded` (never `Failed`) — the inline crypto
     /// fallback keeps the node correct without the pools (design doc §9.1).
-    ///
-    /// This is start-time health only. Runtime child-liveness monitoring (a
-    /// `ChildExited` event re-routing health when a task/thread dies at runtime)
-    /// is a deferred follow-up (design doc §7 / §9.1 is start-framed).
-    fn resolve_start_health(&mut self) -> NodeState {
+    fn classify_health(&mut self) -> NodeState {
         let transports_up = self
             .up
             .iter()
@@ -578,6 +595,32 @@ impl SupervisorFsm {
             }
         }
         Vec::new()
+    }
+
+    /// A supervised child exited on its own at runtime (design doc §6). Only
+    /// meaningful while `Running`: startup (`Starting`), drain (`Draining`), and
+    /// teardown (`Stopping`) own their own child bookkeeping through the
+    /// `pending` / `up` sets and the `SubstrateUp` / `SubstrateFailed` /
+    /// `ChildStopped` events, so a stray exit signal in those states is ignored.
+    ///
+    /// The exit is routed exactly like a start-time failure via
+    /// [`Self::classify_health`] — the last transport out → `Failed`, an optional
+    /// child out → `Degraded{+child}` — the runtime analogue of the §9.1
+    /// start-time policy. Two differences from start: `Failed` here is a
+    /// published health signal only (the driver keeps serving, per the resolved
+    /// runtime policy — no auto-teardown), and there is no restart (the FSM has
+    /// no restart action). If the exiting child is not currently up (a duplicate
+    /// signal, or one that never came up) the machine is unchanged and emits
+    /// nothing.
+    fn on_child_exited(&mut self, child: Child) -> Vec<Action> {
+        if !matches!(self.state, SupState::Running { .. }) {
+            return Vec::new();
+        }
+        if !self.up.remove(&child) {
+            return Vec::new();
+        }
+        self.failed.insert(child);
+        vec![Action::PublishState(self.classify_health())]
     }
 
     /// Teardown order over the up-set, mirroring today's `stop()`:
@@ -1170,5 +1213,154 @@ mod tests {
                 health: Health::Full
             }
         );
+    }
+
+    #[test]
+    fn child_exited_optional_is_degraded() {
+        // An optional child (Nostr) exits at runtime with a transport still up →
+        // Degraded, the exited child recorded in `reasons` and dropped from `up`.
+        let mut s = SupervisorFsm::running_with([
+            Child::Transport(tid(1)),
+            Child::Nostr,
+            Child::Tun,
+            Child::Dns,
+        ]);
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Nostr
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        let mut reasons = HashSet::new();
+        reasons.insert(Child::Nostr);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Degraded {
+                    reasons: reasons.clone()
+                }
+            }
+        );
+        assert_eq!(s.failed(), &reasons);
+    }
+
+    #[test]
+    fn child_exited_transport_beyond_first_is_degraded() {
+        // One of several transports exits → Degraded (≥1 transport remains up),
+        // not Failed.
+        let mut s =
+            SupervisorFsm::running_with([Child::Transport(tid(1)), Child::Transport(tid(2))]);
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        assert!(matches!(
+            s.state(),
+            SupState::Running {
+                health: Health::Degraded { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn child_exited_last_transport_is_failed() {
+        // The only transport exits → Failed (published), but no teardown action:
+        // per the runtime policy the driver keeps serving on the Failed health
+        // signal; the FSM emits only `PublishState(Failed)`.
+        let mut s = SupervisorFsm::running_with([Child::Transport(tid(1)), Child::Dns]);
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Failed)]
+        );
+        assert_eq!(
+            s.state(),
+            &SupState::Failed {
+                reason: FailReason::NoTransports
+            }
+        );
+    }
+
+    #[test]
+    fn child_exited_accumulates_reasons_then_fails_on_last_transport() {
+        // Runtime exits accumulate in `reasons` and stay Degraded while a
+        // transport survives; the last transport out flips to Failed.
+        let mut s = SupervisorFsm::running_with([
+            Child::Transport(tid(1)),
+            Child::Transport(tid(2)),
+            Child::Nostr,
+        ]);
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Nostr
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        // Still Degraded (tid(2) up); reasons carry both prior exits.
+        let mut reasons = HashSet::new();
+        reasons.insert(Child::Nostr);
+        reasons.insert(Child::Transport(tid(1)));
+        assert_eq!(s.failed(), &reasons);
+        // Last transport out → Failed.
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Transport(tid(2))
+            }),
+            vec![Action::PublishState(NodeState::Failed)]
+        );
+        assert!(matches!(s.state(), SupState::Failed { .. }));
+    }
+
+    #[test]
+    fn child_exited_is_inert_outside_running() {
+        // From `Created`: no producer should fire pre-Running, but a stray signal
+        // is ignored.
+        let mut created = SupervisorFsm::new();
+        assert_eq!(
+            created.step(Event::ChildExited {
+                child: Child::Nostr
+            }),
+            vec![]
+        );
+        assert_eq!(created.state(), &SupState::Created);
+
+        // From `Draining`: a child exiting during the drain window is the drain's
+        // own teardown, owned by the `ChildStopped` path — ignore it here.
+        let mut draining = SupervisorFsm::running_with([Child::Transport(tid(1)), Child::Dns]);
+        draining.step(Event::Drain { deadline_ms: 1_000 });
+        assert_eq!(
+            draining.step(Event::ChildExited { child: Child::Dns }),
+            vec![]
+        );
+        assert!(matches!(draining.state(), SupState::Draining { .. }));
+    }
+
+    #[test]
+    fn child_exited_unknown_child_is_noop() {
+        // A child not in the up-set (duplicate signal, or never up) leaves the
+        // machine unchanged and emits nothing.
+        let mut s = SupervisorFsm::running_with([Child::Transport(tid(1))]);
+        assert_eq!(
+            s.step(Event::ChildExited {
+                child: Child::Nostr
+            }),
+            vec![]
+        );
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
+        assert!(s.failed().is_empty());
     }
 }
