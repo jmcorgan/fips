@@ -12,4 +12,5 @@ pub(crate) mod connected_udp;
 mod dispatch;
 mod encrypted;
 mod forwarding;
+mod peer_actions;
 mod rx_loop;

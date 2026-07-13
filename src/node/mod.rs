@@ -50,6 +50,7 @@ use self::reloadable::Reloadable;
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
+use crate::peer::machine::PeerMachine;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::fmp::Fmp;
@@ -368,6 +369,17 @@ pub struct Node {
     /// Indexed by LinkId since we don't know the peer's identity yet.
     connections: HashMap<LinkId, PeerConnection>,
 
+    // === Per-Peer Control Machines (Step 2 / M2) ===
+    /// Per-peer lifecycle control FSMs, keyed by the stable `LinkId` that spans
+    /// the handshake→active lifetime. A NEW parallel structure introduced by the
+    /// node-runtime decomposition: `connections`/`peers` stay byte-unchanged (hot
+    /// path pristine) and are cut over to this machine home path-by-path. Unwired
+    /// in M2 — the executor (`dataplane/peer_actions.rs`) and advance helper exist
+    /// but no live handler path drives them yet and nothing inserts into this map;
+    /// the inbound establish cutover lands in a later step.
+    #[allow(dead_code)]
+    peer_machines: HashMap<LinkId, PeerMachine>,
+
     // === Peers (Active Phase) ===
     /// Authenticated peers.
     /// Indexed by NodeAddr (verified identity).
@@ -640,6 +652,7 @@ impl Node {
             child_exit_tx: None,
             child_exit_rx: None,
             connections: HashMap::new(),
+            peer_machines: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
@@ -789,6 +802,7 @@ impl Node {
             child_exit_tx: None,
             child_exit_rx: None,
             connections: HashMap::new(),
+            peer_machines: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
