@@ -5,7 +5,9 @@ pub(crate) mod supervisor;
 use super::{Node, NodeError, NodeState};
 use supervisor::{Action, Child, Event, PeeringDesired, SupervisorFsm};
 
-use super::peering::reconcile::{Budget, DiscoveryPools, Gate, Observed, PeeringAction, Policy};
+use super::peering::reconcile::{
+    Budget, Candidate, DiscoveryPools, Gate, Observed, PeeringAction, Policy,
+};
 use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
@@ -615,18 +617,26 @@ impl Node {
     /// drains their discovery buffers, and initiates connections to
     /// newly discovered peers (if auto_connect is enabled).
     pub(super) async fn poll_transport_discovery(&mut self) {
-        // Collect discoveries first to avoid borrow conflict with self
-        let mut to_connect = Vec::new();
-        let mut queued_per_peer: HashMap<NodeAddr, usize> = HashMap::new();
-        let mut connect_budget = self.discovery_connect_budget();
-        let mut skipped_budget = 0usize;
+        let self_node_addr = *self.identity().node_addr();
 
+        // Drain each auto-connect transport's discovery buffer (the I/O) and
+        // apply the driver-only prefilters that read live path-granular state the
+        // sans-IO core cannot observe (obligation O7): self-skip, the active-peer
+        // "fresh enough to skip" check, and the "already connecting on this exact
+        // path" check. The surviving beacons become the opportunistic pool, in
+        // transport-then-beacon iteration order; the core owns the connected /
+        // discovery-connect-budget / per-peer-cap decisions over them.
+        //
+        // Collect-then-dial (as before): the pool snapshot is frozen while the
+        // dataplane maps are unmutated, so the core's per-peer cap sees a stable
+        // in-flight count — the same guarantee the old collect-then-dial had.
+        let mut transport_neighbors: Vec<Candidate> = Vec::new();
         for (transport_id, transport) in &self.transports {
             if !transport.is_operational() {
                 continue;
             }
             if !transport.auto_connect() {
-                // Still drain the buffer so it doesn't grow unbounded
+                // Still drain the buffer so it doesn't grow unbounded.
                 let _ = transport.discover();
                 continue;
             }
@@ -635,27 +645,30 @@ impl Node {
                 Err(_) => continue,
             };
             for peer in discovered {
-                let pubkey = match peer.pubkey_hint {
-                    Some(pk) => pk,
-                    None => continue,
+                let Some(pubkey) = peer.pubkey_hint else {
+                    continue;
                 };
                 let identity = PeerIdentity::from_pubkey(pubkey);
                 let node_addr = *identity.node_addr();
 
-                // Skip self
-                if node_addr == *self.identity().node_addr() {
+                // Skip self.
+                if node_addr == self_node_addr {
                     continue;
                 }
 
                 let candidate_transport_id = *transport_id;
                 let remote_addr = peer.addr;
+                let connected = self.peers.contains_key(&node_addr);
 
-                if self.peers.contains_key(&node_addr) {
+                if connected {
+                    // Active peer: skip a candidate whose path is already the
+                    // current, still-fresh one (avoid churning a healthy link).
                     let transport_name = transport.transport_type().name;
-                    let candidate = PeerAddress::new(transport_name, remote_addr.to_string());
+                    let peer_addr_candidate =
+                        PeerAddress::new(transport_name, remote_addr.to_string());
                     if self.active_peer_candidate_is_fresh_enough_to_skip(
                         &node_addr,
-                        std::slice::from_ref(&candidate),
+                        std::slice::from_ref(&peer_addr_candidate),
                     ) {
                         continue;
                     }
@@ -666,64 +679,58 @@ impl Node {
                     ) {
                         continue;
                     }
-                    let queued_for_peer = queued_per_peer.get(&node_addr).copied().unwrap_or(0);
-                    if connect_budget == 0
-                        || self
-                            .path_candidate_attempt_budget(&node_addr)
-                            .saturating_sub(queued_for_peer)
-                            == 0
-                    {
-                        skipped_budget = skipped_budget.saturating_add(1);
-                        continue;
-                    }
-                    to_connect.push((candidate_transport_id, remote_addr, identity, true));
-                    *queued_per_peer.entry(node_addr).or_default() += 1;
-                    connect_budget = connect_budget.saturating_sub(1);
-                    continue;
-                }
-
-                if self.is_connecting_to_peer_on_path(
+                } else if self.is_connecting_to_peer_on_path(
                     &node_addr,
                     candidate_transport_id,
                     &remote_addr,
                 ) {
                     continue;
                 }
-                let queued_for_peer = queued_per_peer.get(&node_addr).copied().unwrap_or(0);
-                if connect_budget == 0
-                    || self
-                        .path_candidate_attempt_budget(&node_addr)
-                        .saturating_sub(queued_for_peer)
-                        == 0
-                {
-                    skipped_budget = skipped_budget.saturating_add(1);
-                    continue;
-                }
 
-                to_connect.push((candidate_transport_id, remote_addr, identity, false));
-                *queued_per_peer.entry(node_addr).or_default() += 1;
-                connect_budget = connect_budget.saturating_sub(1);
+                transport_neighbors.push(Candidate {
+                    transport_id: candidate_transport_id,
+                    remote_addr,
+                    identity: Some(identity),
+                    // Log-only flag; the core recomputes it from `connected`.
+                    active_refresh: connected,
+                });
             }
         }
 
-        if skipped_budget > 0 {
-            debug!(
-                skipped = skipped_budget,
-                queued = to_connect.len(),
-                "Transport discovery connect budget exhausted"
-            );
+        if transport_neighbors.is_empty() {
+            return;
         }
 
-        for (transport_id, remote_addr, identity, active_refresh) in to_connect {
+        let pools = DiscoveryPools {
+            transport_neighbors,
+            ..DiscoveryPools::default()
+        };
+        let policy = self.build_peering_policy(Vec::new());
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let now_ms = Self::now_ms();
+        let gate = Gate::from_state(self.supervisor.state);
+        let actions = self
+            .peering
+            .reconciler
+            .reconcile_opportunistic(&policy, &observed, &budget, &pools, now_ms, gate);
+
+        for action in actions {
+            let PeeringAction::Connect(candidate) = action else {
+                continue;
+            };
+            let Some(identity) = candidate.identity else {
+                continue;
+            };
             info!(
                 peer = %self.peer_display_name(identity.node_addr()),
-                transport_id = %transport_id,
-                remote_addr = %remote_addr,
-                active_refresh,
+                transport_id = %candidate.transport_id,
+                remote_addr = %candidate.remote_addr,
+                active_refresh = candidate.active_refresh,
                 "Auto-connecting to discovered peer"
             );
             if let Err(e) = self
-                .initiate_connection(transport_id, remote_addr, identity)
+                .initiate_connection(candidate.transport_id, candidate.remote_addr, identity)
                 .await
             {
                 warn!(error = %e, "Failed to auto-connect to discovered peer");
@@ -968,9 +975,28 @@ impl Node {
         if events.is_empty() {
             return;
         }
+
+        // Resolve each mDNS beacon to a dialable candidate (the driver I/O: pick a
+        // socket-family-compatible UDP transport, parse the npub). The
+        // connected / connecting skip is the core's decision — LAN growth has no
+        // discovery budget or per-peer cap, only the connected/connecting guard,
+        // applied in event order.
+        //
+        // First-wins per-peer dedup (obligation O7): mdns-sd emits one
+        // `Discovered` event per interface IP of a multi-homed responder, and the
+        // old inline-dial loop dialed the first compatible address then skipped
+        // the rest via `is_connecting_to_peer` (which turned true after that
+        // dial). The frozen-snapshot core cannot see that intra-tick feedback, so
+        // the driver reproduces it here: keep only the first surviving candidate
+        // per peer this tick. (In the ACL-reject case the old loop retried every
+        // address, but each attempt failed `authorize_peer` before touching any
+        // state, so no connection resulted either way — the dedup is neutral on
+        // the dataplane.)
+        let mut lan: Vec<Candidate> = Vec::new();
+        let mut seen: HashSet<NodeAddr> = HashSet::new();
         for event in events {
             let crate::mdns::LanEvent::Discovered(peer) = event;
-            let Some((transport_id, local_addr)) =
+            let Some((transport_id, _local_addr)) =
                 self.find_udp_transport_for_remote_addr(peer.addr)
             else {
                 debug!(
@@ -987,24 +1013,59 @@ impl Node {
                 }
             };
             let peer_node_addr = *identity.node_addr();
-            let remote_addr = crate::transport::TransportAddr::from_string(&peer.addr.to_string());
-            if self.peers.contains_key(&peer_node_addr)
-                || self.is_connecting_to_peer(&peer_node_addr)
-            {
+            if !seen.insert(peer_node_addr) {
                 continue;
             }
+            let remote_addr = crate::transport::TransportAddr::from_string(&peer.addr.to_string());
+            lan.push(Candidate {
+                transport_id,
+                remote_addr,
+                identity: Some(identity),
+                active_refresh: false,
+            });
+        }
+
+        if lan.is_empty() {
+            return;
+        }
+
+        let pools = DiscoveryPools {
+            lan,
+            ..DiscoveryPools::default()
+        };
+        let policy = self.build_peering_policy(Vec::new());
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let now_ms = Self::now_ms();
+        let gate = Gate::from_state(self.supervisor.state);
+        let actions = self
+            .peering
+            .reconciler
+            .reconcile_opportunistic(&policy, &observed, &budget, &pools, now_ms, gate);
+
+        for action in actions {
+            let PeeringAction::Connect(candidate) = action else {
+                continue;
+            };
+            let Some(identity) = candidate.identity else {
+                continue;
+            };
+            let local_addr = self
+                .transports
+                .get(&candidate.transport_id)
+                .and_then(|transport| transport.local_addr());
             info!(
                 npub = %identity.short_npub(),
-                addr = %peer.addr,
-                local_addr = %local_addr,
+                addr = %candidate.remote_addr,
+                local_addr = ?local_addr,
                 "lan: initiating handshake to discovered peer"
             );
             if let Err(err) = self
-                .initiate_connection(transport_id, remote_addr, identity)
+                .initiate_connection(candidate.transport_id, candidate.remote_addr, identity)
                 .await
             {
                 debug!(
-                    npub = %peer.npub,
+                    npub = %identity.short_npub(),
                     error = %err,
                     "lan: failed to initiate connection to discovered peer"
                 );
@@ -2353,9 +2414,12 @@ impl Node {
 
     /// Snapshot the live dataplane maps into the reconciler's [`Observed`] input.
     ///
-    /// For the mandatory-floor + retry-dial cutover (C3b) only the `connected`
-    /// and `connecting` sets are read by the core; the count/in-flight fields
-    /// are populated by the overlay/opportunistic cutovers that follow.
+    /// The `connected` / `connecting` sets gate the floor, retry-dial, overlay,
+    /// and LAN layers; `in_flight_by_peer` feeds the opportunistic layer's
+    /// per-peer parallel cap (obligation O7), computed exactly as the deleted
+    /// `path_candidate_attempt_budget` did: `connections(expected == addr) +
+    /// pending_connects(addr)`. The scalar counts stay unpopulated at the
+    /// ceiling-only posture (no layer reads them; see [`Observed`]).
     pub(in crate::node) fn observe_peering(&self) -> Observed {
         let connected: HashSet<NodeAddr> = self.peers.keys().copied().collect();
         let connecting: HashSet<NodeAddr> = self
@@ -2363,9 +2427,21 @@ impl Node {
             .values()
             .filter_map(|conn| conn.expected_identity().map(|id| *id.node_addr()))
             .collect();
+        let mut in_flight_by_peer: HashMap<NodeAddr, usize> = HashMap::new();
+        for conn in self.connections.values() {
+            if let Some(id) = conn.expected_identity() {
+                *in_flight_by_peer.entry(*id.node_addr()).or_default() += 1;
+            }
+        }
+        for pending in &self.peering.pending_connects {
+            *in_flight_by_peer
+                .entry(*pending.peer_identity.node_addr())
+                .or_default() += 1;
+        }
         Observed {
             connected,
             connecting,
+            in_flight_by_peer,
             ..Observed::default()
         }
     }
@@ -2438,12 +2514,6 @@ impl Node {
         self.outbound_handshake_slots()
             .min(self.outbound_link_slots())
             .min(MAX_PARALLEL_PATH_CANDIDATES_PER_PEER.saturating_sub(in_flight_for_peer))
-    }
-
-    fn discovery_connect_budget(&self) -> usize {
-        self.outbound_handshake_slots()
-            .min(self.outbound_link_slots())
-            .min(MAX_DISCOVERY_CONNECTS_PER_TICK)
     }
 
     /// Capture the advertisable-endpoint inputs of every operational

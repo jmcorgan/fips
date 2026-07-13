@@ -142,19 +142,26 @@ pub(crate) struct Budget {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Observed {
     /// `self.peers.len()`.
-    // The scalar counts are carried for the ceiling's future set-point use and
-    // driver observability; the C3b core reads admission via `Budget`, so they
-    // are not yet read by any layer.
-    #[allow(dead_code)] // populated for observability; read by later cutovers
+    // The scalar counts are carried for the ceiling's future set-point use
+    // (design §6:654). At Step 1b's ceiling-only posture the ceiling is enforced
+    // through `Budget` (admission arithmetic) and the per-peer cap through
+    // `in_flight_by_peer`, so no reconcile layer reads these scalars — they
+    // remain unread after all three driver cutovers, awaiting the Step 2
+    // set-point.
+    #[allow(dead_code)]
+    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
     pub peers: usize,
     /// `self.connections.len()`.
-    #[allow(dead_code)] // populated for observability; read by later cutovers
+    #[allow(dead_code)]
+    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
     pub connections: usize,
     /// `self.links.len()`.
-    #[allow(dead_code)] // populated for observability; read by later cutovers
+    #[allow(dead_code)]
+    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
     pub links: usize,
     /// `self.pending_connects.len()`.
-    #[allow(dead_code)] // populated for observability; read by later cutovers
+    #[allow(dead_code)]
+    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
     pub pending_connects: usize,
     /// The `peers` map keys (fully authenticated peers).
     pub connected: HashSet<NodeAddr>,
@@ -171,13 +178,12 @@ pub(crate) struct Observed {
 /// anonymous-capable.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
-    // transport_id / remote_addr are read by the opportunistic-growth driver
-    // cutover (C5); the mandatory-floor + retry cutover (C3b) dials by identity.
+    // transport_id / remote_addr carry the dial path for the opportunistic-growth
+    // driver (transport-neighbor beacons + LAN mDNS); the mandatory-floor + retry
+    // layers dial by identity and treat these as placeholders.
     /// The transport to dial over.
-    #[allow(dead_code)] // wired by the opportunistic cutover (C5)
     pub transport_id: TransportId,
     /// The remote address to dial.
-    #[allow(dead_code)] // wired by the opportunistic cutover (C5)
     pub remote_addr: TransportAddr,
     /// The peer identity; `None` is an anonymous first-contact leg (design §7).
     pub identity: Option<PeerIdentity>,
@@ -369,6 +375,43 @@ impl PeeringReconciler {
         }
         let mut actions = Vec::new();
         self.layer_overlay_enqueue(policy, observed, budget, pools, now, &mut actions);
+        actions
+    }
+
+    /// Per-layer wrapper: run **only** the opportunistic-growth layer (design
+    /// §10).
+    ///
+    /// The monolithic [`reconcile`] runs the always-on retry-dial phase on every
+    /// call, so the driver must NOT call it at the opportunistic (transport
+    /// discovery / LAN rendezvous) cadence slots — that would re-fire the
+    /// retry-dial there, dialing the due entries a second time in the tick and
+    /// applying the per-tick 16-cap more than once (today the cap applies exactly
+    /// once, at the retry slot). This wrapper is gate-checked and then calls
+    /// [`Self::layer_opportunistic`] only, emitting `Connect` directly for the
+    /// driver to dial.
+    ///
+    /// On `NotRunning` / `Suspended` it returns no actions. It does **not** clear
+    /// `retry_pending` on `Suspended` — that clear is owned by the drain gate
+    /// (`enter_drain`) and the retry-slot [`reconcile`], not the opportunistic
+    /// slot (design §10). `policy` and `now` are accepted for wrapper-family
+    /// uniformity with [`reconcile`] / [`reconcile_overlay`]; the ceiling-only
+    /// opportunistic layer reads neither (it grows only against the live
+    /// [`Budget`] / [`Observed`], with no time- or config-derived input).
+    pub(in crate::node) fn reconcile_opportunistic(
+        &mut self,
+        _policy: &Policy,
+        observed: &Observed,
+        budget: &Budget,
+        pools: &DiscoveryPools,
+        _now: u64,
+        gate: Gate,
+    ) -> Vec<PeeringAction> {
+        match gate {
+            Gate::NotRunning | Gate::Suspended => return Vec::new(),
+            Gate::Reconciling => {}
+        }
+        let mut actions = Vec::new();
+        self.layer_opportunistic(observed, budget, pools, &mut actions);
         actions
     }
 
