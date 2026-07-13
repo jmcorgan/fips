@@ -3,7 +3,10 @@
 pub(crate) mod supervisor;
 
 use super::{Node, NodeError, NodeState};
-use supervisor::{Action, Child, Event, SupervisorFsm};
+use supervisor::{Action, Child, Event, PeeringDesired, SupervisorFsm};
+
+use super::peering::reconcile::{Budget, DiscoveryPools, Gate, Observed, PeeringAction, Policy};
+use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::acl::PeerAclContext;
@@ -158,7 +161,7 @@ impl Node {
                     error = %err,
                     "Failed to initiate connection for newly added runtime peer"
                 );
-                self.schedule_retry(*identity.node_addr(), Self::now_ms());
+                self.note_handshake_timeout(*identity.node_addr(), Self::now_ms());
             }
         }
 
@@ -203,7 +206,7 @@ impl Node {
                             error = %err,
                             "Refreshed peer addresses did not initiate a direct connection"
                         );
-                        self.schedule_retry(node_addr, Self::now_ms());
+                        self.note_handshake_timeout(node_addr, Self::now_ms());
                     }
                 }
             }
@@ -242,20 +245,62 @@ impl Node {
             self.register_identity(*identity.node_addr(), identity.pubkey_full());
         }
 
-        // Collect peer configs to avoid borrow conflicts
-        let peer_configs: Vec<_> = self.config().auto_connect_peers().cloned().collect();
+        // Collect the auto-connect peer configs and build the mandatory-floor
+        // reconcile inputs. This is the startup-gate seam (design §3 D4): the
+        // substrate is up (transports created, before TUN) but the published
+        // NodeState is still `Starting`, so pass `Gate::Reconciling` EXPLICITLY
+        // rather than deriving it from the published state (which would map to
+        // `NotRunning` and dial nothing). This preserves today's startup dial
+        // position exactly.
+        let auto_connect_peers: Vec<PeerConfig> =
+            self.config().auto_connect_peers().cloned().collect();
 
-        if peer_configs.is_empty() {
+        if auto_connect_peers.is_empty() {
             debug!("No static peers configured");
             return;
         }
 
+        // Recover the full `PeerConfig` for each emitted floor `Connect` from its
+        // candidate identity (the core carries identity + a placeholder address;
+        // the driver dial needs the config to expand addresses).
+        let configs_by_addr: HashMap<NodeAddr, PeerConfig> = auto_connect_peers
+            .iter()
+            .filter_map(|pc| {
+                PeerIdentity::from_npub(&pc.npub)
+                    .ok()
+                    .map(|id| (*id.node_addr(), pc.clone()))
+            })
+            .collect();
+
         debug!(
-            count = peer_configs.len(),
+            count = configs_by_addr.len(),
             "Initiating static peer connections"
         );
 
-        for peer_config in peer_configs {
+        let policy = self.build_peering_policy(auto_connect_peers);
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let now_ms = Self::now_ms();
+        let actions = self.peering.reconciler.reconcile(
+            &policy,
+            &observed,
+            &budget,
+            &DiscoveryPools::default(),
+            now_ms,
+            Gate::Reconciling,
+        );
+
+        for action in actions {
+            let PeeringAction::Connect(candidate) = action else {
+                continue;
+            };
+            let Some(identity) = candidate.identity else {
+                continue;
+            };
+            let node_addr = *identity.node_addr();
+            let Some(peer_config) = configs_by_addr.get(&node_addr).cloned() else {
+                continue;
+            };
             if let Err(e) = self.initiate_peer_connection(&peer_config).await {
                 warn!(
                     npub = %peer_config.npub,
@@ -266,9 +311,7 @@ impl Node {
                 // Schedule a retry so transient address-resolution failures
                 // (e.g. cached endpoints stale, NAT rebinds, all addresses
                 // currently unreachable) recover without a daemon restart.
-                if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_config.npub) {
-                    self.schedule_retry(*peer_identity.node_addr(), Self::now_ms());
-                }
+                self.note_handshake_timeout(node_addr, now_ms);
                 // No-transport failures most often mean the cached overlay
                 // advert is pointing at a dead post-NAT-rebind address. The
                 // advert cache is read-only inside fetch_advert, so retries
@@ -774,7 +817,10 @@ impl Node {
                         Err(err) => {
                             warn!(peer_npub = %peer_npub, error = %err, "Failed to adopt NAT traversal");
                             if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_npub) {
-                                self.schedule_retry(*peer_identity.node_addr(), Self::now_ms());
+                                self.note_handshake_timeout(
+                                    *peer_identity.node_addr(),
+                                    Self::now_ms(),
+                                );
                             }
                         }
                     }
@@ -863,7 +909,7 @@ impl Node {
                         continue;
                     }
 
-                    self.schedule_retry(node_addr, now_ms);
+                    self.note_handshake_timeout(node_addr, now_ms);
                     if let Some(cooldown_until_ms) = decision.cooldown_until_ms
                         && let Some(state) =
                             self.peering.reconciler.retry_pending.get_mut(&node_addr)
@@ -1053,7 +1099,7 @@ impl Node {
                 // Clean up link and schedule retry
                 self.remove_link(&pending.link_id);
                 self.links.remove(&pending.link_id);
-                self.schedule_retry(*pending.peer_identity.node_addr(), Self::now_ms());
+                self.note_handshake_timeout(*pending.peer_identity.node_addr(), Self::now_ms());
             }
         }
     }
@@ -1857,11 +1903,18 @@ impl Node {
                     // The rx loop owns the bounded wait; the FSM's timer is
                     // carried for observability only. No-op here.
                 }
-                Action::SetPeeringDesired(_) | Action::SuspendReplenish => {
-                    // §8 reconciler drain-gate. Documented no-op in this commit:
-                    // the homeostatic reconciler that consumes these lands in
-                    // Step 1b. Without it there is nothing to reconnect the peers
-                    // the drain closes, so the gate is implicitly satisfied.
+                Action::SetPeeringDesired(PeeringDesired::Empty) => {
+                    // §8 reconciler drain-gate (obligation O4): clear the queued
+                    // retry schedule so the disconnects the drain itself causes
+                    // cannot leave reconnect entries behind.
+                    self.peering.reconciler.retry_pending.clear();
+                }
+                Action::SuspendReplenish => {
+                    // §8 reconciler drain-gate: no extra latch needed. The whole
+                    // drain window is `Gate::Suspended`
+                    // (`Gate::from_state(NodeState::Draining)`), so the per-tick
+                    // retry-dial reconcile and every peer-loss reflex read that
+                    // gate and self-suppress for the duration of the drain.
                 }
                 Action::SpawnChild(_) | Action::StopChild(_) | Action::PublishState(_) => {
                     // Drain entry never emits child or publish-state actions
@@ -2361,6 +2414,79 @@ impl Node {
         self.run_open_discovery_sweep(bootstrap, Some(max_age_secs), "startup")
             .await;
         self.supervisor.nostr_rendezvous.set_startup_sweep_done();
+    }
+
+    /// Build the reconciler [`Policy`] from config. `auto_connect_peers` is
+    /// filled by the caller: the startup floor and the reflex wrappers pass the
+    /// configured auto-connect set; the per-tick retry-dial slot passes an empty
+    /// set so the config floor stays silent (cadence contract, design §3 D4).
+    pub(in crate::node) fn build_peering_policy(
+        &self,
+        auto_connect_peers: Vec<PeerConfig>,
+    ) -> Policy {
+        let cfg = self.config();
+        let retry = &cfg.node.retry;
+        let nostr = &cfg.node.rendezvous.nostr;
+        Policy {
+            auto_connect_peers,
+            max_peers: self.max_peers(),
+            max_connections: self.max_connections(),
+            max_links: self.max_links(),
+            retry_base_interval_ms: retry.base_interval_secs.saturating_mul(1000),
+            retry_max_backoff_ms: retry.max_backoff_secs.saturating_mul(1000),
+            retry_max_retries: retry.max_retries,
+            handshake_timeout_ms: cfg
+                .node
+                .rate_limit
+                .handshake_timeout_secs
+                .saturating_mul(1000),
+            open_discovery_enabled: nostr.enabled
+                && nostr.policy == crate::config::NostrRendezvousPolicy::Open,
+            open_discovery_max_pending: nostr.open_discovery_max_pending,
+            open_discovery_expires_ms: nostr
+                .advert_ttl_secs
+                .saturating_mul(1000)
+                .saturating_mul(OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER),
+        }
+    }
+
+    /// Snapshot the live dataplane maps into the reconciler's [`Observed`] input.
+    ///
+    /// For the mandatory-floor + retry-dial cutover (C3b) only the `connected`
+    /// and `connecting` sets are read by the core; the count/in-flight fields
+    /// are populated by the overlay/opportunistic cutovers that follow.
+    pub(in crate::node) fn observe_peering(&self) -> Observed {
+        let connected: HashSet<NodeAddr> = self.peers.keys().copied().collect();
+        let connecting: HashSet<NodeAddr> = self
+            .connections
+            .values()
+            .filter_map(|conn| conn.expected_identity().map(|id| *id.node_addr()))
+            .collect();
+        Observed {
+            connected,
+            connecting,
+            ..Observed::default()
+        }
+    }
+
+    /// Build the admission [`Budget`] from the live maps. This is the surviving
+    /// home for the slot arithmetic; the shared helpers it wraps stay until the
+    /// overlay/opportunistic cutovers consume them (obligation O5).
+    pub(in crate::node) fn build_peering_budget(&self) -> Budget {
+        let peer_slots = if self.max_peers() == 0 {
+            usize::MAX
+        } else {
+            self.max_peers().saturating_sub(self.peers.len())
+        };
+        Budget {
+            handshake_slots: self.outbound_handshake_slots(),
+            link_slots: self.outbound_link_slots(),
+            peer_slots,
+            admission_ok: self.outbound_admission_check(),
+            discovery_per_tick: MAX_DISCOVERY_CONNECTS_PER_TICK,
+            retry_per_tick: MAX_RETRY_CONNECTIONS_PER_TICK,
+            per_peer_cap: MAX_PARALLEL_PATH_CANDIDATES_PER_PEER,
+        }
     }
 
     fn available_outbound_slots(&self) -> usize {

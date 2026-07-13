@@ -772,7 +772,7 @@ fn test_schedule_retry_creates_entry() {
 
     assert!(node.peering.reconciler.retry_pending.is_empty());
 
-    node.schedule_retry(peer_node_addr, 1000);
+    node.note_handshake_timeout(peer_node_addr, 1000);
 
     assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
     let state = node
@@ -808,7 +808,7 @@ fn test_schedule_retry_increments() {
     let mut node = Node::new(config).unwrap();
 
     // First failure
-    node.schedule_retry(peer_node_addr, 1000);
+    node.note_handshake_timeout(peer_node_addr, 1000);
     assert_eq!(
         node.peering
             .reconciler
@@ -820,7 +820,7 @@ fn test_schedule_retry_increments() {
     );
 
     // Second failure
-    node.schedule_retry(peer_node_addr, 11_000);
+    node.note_handshake_timeout(peer_node_addr, 11_000);
     let state = node
         .peering
         .reconciler
@@ -857,6 +857,10 @@ async fn test_process_pending_retries_is_budgeted_per_tick() {
         addrs.push(node_addr);
     }
 
+    // The retry-dial tick runs only under a `Reconciling` gate (it fires from the
+    // rx loop, which spins only after start() reaches Running). Put the node in
+    // Running so the retry-dial budget — the property under test — is exercised.
+    node.supervisor.state = crate::node::NodeState::Running;
     node.process_pending_retries(1).await;
 
     let processed = addrs
@@ -894,7 +898,7 @@ fn test_schedule_retry_auto_connect_never_exhausts() {
     let mut node = Node::new(config).unwrap();
 
     // All attempts should keep the entry alive despite max_retries=2
-    node.schedule_retry(peer_node_addr, 1000);
+    node.note_handshake_timeout(peer_node_addr, 1000);
     assert!(
         node.peering
             .reconciler
@@ -902,7 +906,7 @@ fn test_schedule_retry_auto_connect_never_exhausts() {
             .contains_key(&peer_node_addr)
     );
 
-    node.schedule_retry(peer_node_addr, 2000);
+    node.note_handshake_timeout(peer_node_addr, 2000);
     assert!(
         node.peering
             .reconciler
@@ -911,7 +915,7 @@ fn test_schedule_retry_auto_connect_never_exhausts() {
     );
 
     // Attempt 3 would have exhausted before, but now retries indefinitely
-    node.schedule_retry(peer_node_addr, 3000);
+    node.note_handshake_timeout(peer_node_addr, 3000);
     assert!(
         node.peering
             .reconciler
@@ -947,7 +951,7 @@ fn test_schedule_retry_disabled() {
 
     let mut node = Node::new(config).unwrap();
 
-    node.schedule_retry(peer_node_addr, 1000);
+    node.note_handshake_timeout(peer_node_addr, 1000);
     assert!(
         node.peering.reconciler.retry_pending.is_empty(),
         "No retry should be scheduled when max_retries=0"
@@ -963,7 +967,7 @@ fn test_schedule_retry_ignores_non_autoconnect() {
     // No peers configured at all
     let mut node = make_node();
 
-    node.schedule_retry(peer_node_addr, 1000);
+    node.note_handshake_timeout(peer_node_addr, 1000);
     assert!(
         node.peering.reconciler.retry_pending.is_empty(),
         "No retry for unconfigured peer"
@@ -985,7 +989,7 @@ fn test_schedule_retry_skips_connected_peer() {
     assert_eq!(node.peer_count(), 1);
 
     // Scheduling a retry for an already-connected peer should be a no-op
-    node.schedule_retry(node_addr, 3000);
+    node.note_handshake_timeout(node_addr, 3000);
     assert!(
         node.peering.reconciler.retry_pending.is_empty(),
         "No retry for already-connected peer"
@@ -1304,6 +1308,9 @@ async fn test_process_pending_retries_drops_expired_entries() {
         .retry_pending
         .insert(peer_node_addr, state);
 
+    // Retry-dial runs only under a `Reconciling` gate; put the node in Running so
+    // the expired-entry drop (the property under test) is reached.
+    node.supervisor.state = crate::node::NodeState::Running;
     node.process_pending_retries(1_000).await;
 
     assert!(
@@ -1339,8 +1346,8 @@ fn test_schedule_reconnect_preserves_backoff() {
     let mut node = Node::new(config).unwrap();
 
     // Simulate two stale handshake timeouts incrementing the retry count.
-    node.schedule_retry(peer_node_addr, 1_000); // count=1, delay=10s
-    node.schedule_retry(peer_node_addr, 11_000); // count=2, delay=20s
+    node.note_handshake_timeout(peer_node_addr, 1_000); // count=1, delay=10s
+    node.note_handshake_timeout(peer_node_addr, 11_000); // count=2, delay=20s
     {
         let state = node
             .peering
@@ -1354,7 +1361,7 @@ fn test_schedule_reconnect_preserves_backoff() {
     // Now simulate a link-dead removal triggering schedule_reconnect.
     // The existing retry entry (count=2) should be preserved and bumped to 3,
     // NOT reset to 0 as it was before the fix.
-    node.schedule_reconnect(peer_node_addr, 31_000);
+    node.note_link_dead(peer_node_addr, 31_000);
 
     let state = node
         .peering
@@ -1396,7 +1403,7 @@ fn test_schedule_reconnect_fresh_state() {
     let mut node = Node::new(config).unwrap();
 
     // No prior retry entry — first reconnect should use base delay.
-    node.schedule_reconnect(peer_node_addr, 1_000);
+    node.note_link_dead(peer_node_addr, 1_000);
 
     let state = node
         .peering
@@ -1801,6 +1808,9 @@ async fn process_pending_retries_gated_at_capacity() {
     let before_peers = node.peer_count();
     let before_connections = node.connection_count();
 
+    // Running gate so the admission short-circuit (not the startup gate) is what
+    // suppresses the dial — the fingerprint this test asserts on.
+    node.supervisor.state = crate::node::NodeState::Running;
     node.process_pending_retries(1_000).await;
 
     // At capacity: gate short-circuits before due-list collection. The

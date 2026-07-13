@@ -9,7 +9,6 @@
 //! connection is created per re-dial, so the escalating backoff count must
 //! persist in the reconciler, not per-connection.
 
-pub(in crate::node) mod retry;
-
-#[allow(dead_code)] // Wired by the driver cutover in the following commits; unused until then.
+pub(in crate::node) mod driver;
 pub(in crate::node) mod reconcile;
+pub(in crate::node) mod retry;

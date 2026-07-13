@@ -142,12 +142,19 @@ pub(crate) struct Budget {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Observed {
     /// `self.peers.len()`.
+    // The scalar counts are carried for the ceiling's future set-point use and
+    // driver observability; the C3b core reads admission via `Budget`, so they
+    // are not yet read by any layer.
+    #[allow(dead_code)] // populated for observability; read by later cutovers
     pub peers: usize,
     /// `self.connections.len()`.
+    #[allow(dead_code)] // populated for observability; read by later cutovers
     pub connections: usize,
     /// `self.links.len()`.
+    #[allow(dead_code)] // populated for observability; read by later cutovers
     pub links: usize,
     /// `self.pending_connects.len()`.
+    #[allow(dead_code)] // populated for observability; read by later cutovers
     pub pending_connects: usize,
     /// The `peers` map keys (fully authenticated peers).
     pub connected: HashSet<NodeAddr>,
@@ -164,9 +171,13 @@ pub(crate) struct Observed {
 /// anonymous-capable.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
+    // transport_id / remote_addr are read by the opportunistic-growth driver
+    // cutover (C5); the mandatory-floor + retry cutover (C3b) dials by identity.
     /// The transport to dial over.
+    #[allow(dead_code)] // wired by the opportunistic cutover (C5)
     pub transport_id: TransportId,
     /// The remote address to dial.
+    #[allow(dead_code)] // wired by the opportunistic cutover (C5)
     pub remote_addr: TransportAddr,
     /// The peer identity; `None` is an anonymous first-contact leg (design §7).
     pub identity: Option<PeerIdentity>,
@@ -225,11 +236,17 @@ pub(crate) struct DiscoveryPools {
 pub(crate) struct Policy {
     /// `config.peers()` filtered by `is_auto_connect()`.
     pub auto_connect_peers: Vec<PeerConfig>,
+    // The limit triple is enforced through `Budget` (the admission arithmetic the
+    // driver pre-computes), so the core does not read these directly; they are
+    // carried on the policy for completeness and future set-point use.
     /// `node.limits.max_peers`.
+    #[allow(dead_code)] // ceiling is enforced via Budget; carried for completeness
     pub max_peers: usize,
     /// `node.limits.max_connections`.
+    #[allow(dead_code)] // ceiling is enforced via Budget; carried for completeness
     pub max_connections: usize,
     /// `node.limits.max_links`.
+    #[allow(dead_code)] // ceiling is enforced via Budget; carried for completeness
     pub max_links: usize,
     /// `node.retry.base_interval_secs * 1000`.
     pub retry_base_interval_ms: u64,
@@ -265,8 +282,10 @@ pub(crate) enum PeeringAction {
     /// only; the durable mutation is on the reconciler's `retry_pending`.
     ScheduleRetry {
         /// The peer whose retry was scheduled.
+        #[allow(dead_code)] // observability payload; the durable mutation is internal
         peer: NodeAddr,
         /// The backoff delay applied.
+        #[allow(dead_code)] // observability payload; the durable mutation is internal
         backoff_ms: u64,
     },
 }
