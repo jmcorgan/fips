@@ -30,6 +30,25 @@ pub(super) fn make_node() -> Node {
     make_node_with(Config::new())
 }
 
+/// A test node that reaches `Full` health on `start()`.
+///
+/// A default [`make_node`] configures no transports, so its `start()` now
+/// resolves to `NodeState::Failed` (zero transports up, design doc §9.1) and
+/// returns `NoOperationalTransports`. Lifecycle-state tests that need a running
+/// node build one with a single loopback UDP transport (ephemeral port) as the
+/// sole configured child — DNS disabled — so bring-up has exactly one
+/// configured child and it comes up (`Full`). Mirrors the udp config in
+/// `test_node_start_does_not_wait_for_nostr_relay_startup`.
+pub(super) fn make_healthy_node() -> Node {
+    let mut config = Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    make_node_with(config)
+}
+
 /// Build a test node from an explicit `Config`. Immutable state lives solely in
 /// the shared `NodeContext`, built once at construction — there is no
 /// post-construction field to poke, so set limits/config on the `Config` here.

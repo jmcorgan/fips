@@ -151,13 +151,16 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
 
 #[tokio::test]
 async fn test_node_state_transitions() {
-    let mut node = make_node();
+    // A transport-less node now resolves to `Failed` on start (design doc
+    // §9.1), so exercise state transitions with a genuinely healthy node.
+    let mut node = make_healthy_node();
 
     assert!(!node.is_running());
     assert!(node.state().can_start());
 
     node.start().await.unwrap();
     assert!(node.is_running());
+    assert_eq!(node.state(), NodeState::Running);
     assert!(!node.state().can_start());
 
     node.stop().await.unwrap();
@@ -166,8 +169,25 @@ async fn test_node_state_transitions() {
 }
 
 #[tokio::test]
-async fn test_drain_publishes_draining_state() {
+async fn test_transportless_start_fails_and_publishes_failed() {
+    // The intended behavioral change (design doc §9.1): a node with zero
+    // transports up cannot serve, so `start()` returns `NoOperationalTransports`
+    // and leaves the published state at `Failed` (not operational, not
+    // restartable in-process).
     let mut node = make_node();
+    assert!(node.state().can_start());
+
+    let result = node.start().await;
+    assert!(matches!(result, Err(NodeError::NoOperationalTransports)));
+    assert_eq!(node.state(), NodeState::Failed);
+    assert!(!node.is_running());
+    assert!(!node.state().is_operational());
+    assert!(!node.state().can_start());
+}
+
+#[tokio::test]
+async fn test_drain_publishes_draining_state() {
+    let mut node = make_healthy_node();
     node.start().await.unwrap();
     assert_eq!(node.state(), NodeState::Running);
     assert!(node.state().is_operational());
@@ -189,7 +209,7 @@ async fn test_drain_publishes_draining_state() {
 
 #[tokio::test]
 async fn test_immediate_stop_never_publishes_draining() {
-    let mut node = make_node();
+    let mut node = make_healthy_node();
     node.start().await.unwrap();
     assert_eq!(node.state(), NodeState::Running);
 
@@ -231,7 +251,7 @@ async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
 
 #[tokio::test]
 async fn test_node_double_start() {
-    let mut node = make_node();
+    let mut node = make_healthy_node();
     node.start().await.unwrap();
 
     let result = node.start().await;
@@ -578,7 +598,7 @@ async fn test_node_rx_loop_requires_start() {
 
 #[tokio::test]
 async fn test_node_rx_loop_takes_channel() {
-    let mut node = make_node();
+    let mut node = make_healthy_node();
     node.start().await.unwrap();
 
     // packet_rx should be available after start

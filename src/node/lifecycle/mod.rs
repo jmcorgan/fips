@@ -1125,6 +1125,19 @@ impl Node {
             dns,
         });
 
+        // The FSM resolves start-completion health (Full/Degraded/Failed) when
+        // `Starting.pending` empties and emits it as a `PublishState` action
+        // (design doc §6/§9.1). Capture that outcome — from the degenerate
+        // no-children path (published on the `Event::Start` step itself) or from
+        // the final `SubstrateUp`/`SubstrateFailed` below — to drive the
+        // start-completion behavior after the spawn loop.
+        let mut start_outcome: Option<NodeState> = None;
+        for action in &actions {
+            if let Action::PublishState(ns) = action {
+                start_outcome = Some(*ns);
+            }
+        }
+
         // Execute each SpawnChild in order, reporting the outcome back so the
         // FSM's up-set tracks what actually came up. Optional failures are
         // warn/debug-and-continue (today's behavior); start still reaches
@@ -1465,7 +1478,12 @@ impl Node {
                 }
             };
 
-            self.supervisor.fsm.step(feedback);
+            let feedback_actions = self.supervisor.fsm.step(feedback);
+            for action in &feedback_actions {
+                if let Action::PublishState(ns) = action {
+                    start_outcome = Some(*ns);
+                }
+            }
         }
 
         // Seams that never triggered inside the loop: the "Transports
@@ -1479,7 +1497,40 @@ impl Node {
             self.initiate_peer_connections().await;
         }
 
-        self.supervisor.state = NodeState::Running;
+        // Publish the FSM-resolved start-completion state (design doc §6/§9.1)
+        // instead of the old unconditional `Running`.
+        let outcome = start_outcome
+            .expect("supervisor publishes a start-completion state when bring-up resolves");
+        self.supervisor.state = outcome;
+
+        match outcome {
+            NodeState::Failed => {
+                // Zero transports came up — fatal. Tear down cleanly any
+                // children that DID come up (a failed start must not leave the
+                // node half-up), then return an error. `broadcast_disconnect =
+                // false`: there is nothing to gracefully disconnect on a start
+                // that never reached service. The daemon exits on this error.
+                warn!(
+                    "Node start failed: no operational transports came up; tearing down partially-started children"
+                );
+                let up = self.reconstruct_supervised_up();
+                self.supervisor.fsm = SupervisorFsm::running_with(up);
+                let teardown = self.supervisor.fsm.step(Event::Stop);
+                self.execute_teardown(teardown, false).await;
+                return Err(NodeError::NoOperationalTransports);
+            }
+            NodeState::Degraded => {
+                // Operational but missing one or more configured optional
+                // children. Enumerate them for the operator, then proceed —
+                // a degraded node serves traffic.
+                warn!(
+                    degraded_children = ?self.supervisor.fsm.failed(),
+                    "Node started DEGRADED: one or more configured optional children failed to start"
+                );
+            }
+            _ => {}
+        }
+
         info!("Node started:");
         info!("       state: {}", self.supervisor.state);
         info!("  transports: {}", self.transports.len());
@@ -1803,8 +1854,10 @@ impl Node {
                     // Step 1b. Without it there is nothing to reconnect the peers
                     // the drain closes, so the gate is implicitly satisfied.
                 }
-                Action::SpawnChild(_) | Action::StopChild(_) => {
-                    // Drain entry never emits child actions; ignore defensively.
+                Action::SpawnChild(_) | Action::StopChild(_) | Action::PublishState(_) => {
+                    // Drain entry never emits child or publish-state actions
+                    // (the `Draining` state is a direct write above); ignore
+                    // defensively.
                 }
             }
         }

@@ -157,6 +157,9 @@ pub enum NodeError {
 
     #[error("bootstrap handoff failed: {0}")]
     BootstrapHandoff(String),
+
+    #[error("node start failed: no operational transports")]
+    NoOperationalTransports,
 }
 
 /// Node operational state.
@@ -166,14 +169,23 @@ pub enum NodeState {
     Created,
     /// Starting up (initializing transports).
     Starting,
-    /// Fully operational.
+    /// Fully operational — every configured child came up (design doc §9.1).
     Running,
+    /// Operational but degraded (design doc §9.1): ≥1 transport is up and the
+    /// node is serving, but one or more configured optional children (a
+    /// transport beyond the first, Nostr, mDNS, TUN, DNS, or a worker pool)
+    /// failed to start. Still operational — a degraded node serves traffic.
+    Degraded,
     /// Bounded graceful drain in progress (design doc §6): a shutdown
     /// `Disconnect` has been broadcast and the node is waiting for peers to
     /// clear (bounded by `node.drain_timeout_secs`) before teardown. Not
     /// operational; the daemon drain path advances to `Stopping` via the
     /// supervisor's `DrainDeadlineElapsed`, never through `stop()`.
     Draining,
+    /// Start failed fatally: zero transports came up (design doc §9.1). The
+    /// driver tears down any children that did come up and `start()` returns
+    /// an error. Not operational and not restartable in-process.
+    Failed,
     /// Shutting down.
     Stopping,
     /// Stopped.
@@ -181,19 +193,23 @@ pub enum NodeState {
 }
 
 impl NodeState {
-    /// Check if node is operational.
+    /// Check if node is operational. A `Degraded` node is operational — it is
+    /// serving, just missing an optional child (design doc §9.1).
     pub fn is_operational(&self) -> bool {
-        matches!(self, NodeState::Running)
+        matches!(self, NodeState::Running | NodeState::Degraded)
     }
 
-    /// Check if node can be started.
+    /// Check if node can be started. A `Failed` node is not restartable
+    /// in-process (design doc §9.1) — only a fresh `Created` or a cleanly
+    /// `Stopped` node can start.
     pub fn can_start(&self) -> bool {
         matches!(self, NodeState::Created | NodeState::Stopped)
     }
 
-    /// Check if node can be stopped.
+    /// Check if node can be stopped. Both `Running` and `Degraded` nodes are
+    /// operational and can be stopped or drained.
     pub fn can_stop(&self) -> bool {
-        matches!(self, NodeState::Running)
+        matches!(self, NodeState::Running | NodeState::Degraded)
     }
 }
 
@@ -203,7 +219,9 @@ impl fmt::Display for NodeState {
             NodeState::Created => "created",
             NodeState::Starting => "starting",
             NodeState::Running => "running",
+            NodeState::Degraded => "degraded",
             NodeState::Draining => "draining",
+            NodeState::Failed => "failed",
             NodeState::Stopping => "stopping",
             NodeState::Stopped => "stopped",
         };

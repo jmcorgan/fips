@@ -41,11 +41,32 @@
 //! path is untouched. `Draining` and `Stop` share a single teardown-plan author
 //! (`begin_stopping`), so the teardown ordering is defined once.
 //!
-//! What is deferred is only the FSM-owned `PublishState` *action* (published
-//! state authored by the machine rather than the driver): it lands with the
-//! `Running{Full|Degraded}` health split (design doc §6/§9.1), which needs it
-//! because a single direct `self.state` write cannot express the health fork.
-//! The `Draining` published state itself is **not** deferred — it is here.
+//! ## Scope: the `Running{Full|Degraded}` + `Failed` health split (this commit)
+//!
+//! This commit lands the operator-visible start-completion health policy
+//! (design doc §6/§9.1) and, with it, the FSM-owned [`Action::PublishState`]:
+//!
+//! - [`SupState::Running`] now carries a [`Health`] (`Full` or `Degraded`), and
+//!   [`SupState::Failed`] is the fatal path. When `Starting.pending` empties (or
+//!   the degenerate no-children path), the machine resolves health once
+//!   ([`SupervisorFsm::resolve_start_health`]): **zero transports up → `Failed`**
+//!   (fatal); **≥1 transport up but a configured optional child failed →
+//!   `Degraded`**; **everything configured came up → `Full`**. Not-configured
+//!   children never count (a node never asked to run DNS is not degraded for
+//!   lacking it); worker-pool failures are `Degraded` at most, never `Failed`.
+//! - the health outcome is a fork that a single direct `self.state` write cannot
+//!   express, so the machine emits [`Action::PublishState`] carrying the resolved
+//!   [`NodeState`]; the driver writes it. The non-forking transitions
+//!   (`Starting`/`Draining`/`Stopping`/`Stopped`) keep their direct `self.state`
+//!   writes — only the start-completion health outcome routes through
+//!   `PublishState`, to minimize churn.
+//! - the degenerate no-children path now resolves to `Failed` (zero transports),
+//!   **not** the old immediate-`Running`.
+//!
+//! Runtime child-liveness monitoring (a `ChildExited` event re-routing health
+//! when a task/thread dies at runtime) is **deferred** (design doc §7): §9.1's
+//! resolution is start-framed, and liveness monitoring is a substantial unbuilt
+//! mechanism. This commit is start-time health only.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -83,9 +104,10 @@ pub(crate) enum Child {
 /// An input to the supervisor. Results of executing [`Action`]s are fed back as
 /// `SubstrateUp` / `SubstrateFailed` / `ChildStopped`.
 ///
-/// `Tick` and `ChildExited` (design doc §6) arrive with the `Degraded`/health
-/// commit; the bounded-drain events (`Drain` / `DrainDeadlineElapsed`) are
-/// present here.
+/// `Tick` and `ChildExited` (design doc §6) are **deferred**: `ChildExited`
+/// belongs to the runtime child-liveness monitoring follow-up (this commit is
+/// start-time health only). The bounded-drain events (`Drain` /
+/// `DrainDeadlineElapsed`) and the start/up/failed/stop events are present here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
     /// Begin bring-up. `transports` are the ids the driver has already created
@@ -169,14 +191,25 @@ pub(crate) enum PeeringDesired {
 
 /// An effect the driver must perform. The core never performs I/O itself.
 ///
-/// `PublishState` (design doc §6) is intentionally absent until the
-/// `Running{Full|Degraded}` health commit: the driver keeps its verbatim
-/// `self.state` writes, so no published-state action is needed yet.
+/// `PublishState` (design doc §6) lands here, with the `Running{Full|Degraded}`
+/// health split: the start-completion health outcome is a fork
+/// (`Full`/`Degraded`/`Failed`) that a single direct `self.state` write cannot
+/// express, so the machine authors it as an action. The driver keeps its direct
+/// `self.state` writes for the non-forking transitions (`Starting`/`Draining`/
+/// `Stopping`/`Stopped`); only the start-completion health outcome routes through
+/// `PublishState`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     /// Bring up this child (the driver performs the spawn / start I/O and
     /// reports `SubstrateUp` or `SubstrateFailed`).
     SpawnChild(Child),
+    /// Publish the given operator-visible [`NodeState`]. Emitted at start
+    /// completion (when `Starting.pending` empties, or the degenerate
+    /// no-children path) to carry the resolved health outcome —
+    /// [`NodeState::Running`] (Full), [`NodeState::Degraded`], or
+    /// [`NodeState::Failed`] — to the driver, which writes it to the published
+    /// state (design doc §6/§9.1).
+    PublishState(NodeState),
     /// Tear down this child (the driver performs the stop / join I/O and
     /// reports `ChildStopped`).
     StopChild(Child),
@@ -197,10 +230,35 @@ pub(crate) enum Action {
     SuspendReplenish,
 }
 
+/// Start-completion health (design doc §9.1). Resolved once when
+/// `Starting.pending` empties: `Full` iff every configured child came up,
+/// `Degraded` iff ≥1 transport is up but some configured optional child failed.
+/// Zero transports up is not a health — it is the fatal [`SupState::Failed`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Health {
+    /// Every configured child came up.
+    Full,
+    /// ≥1 transport is up, but one or more configured optional children failed
+    /// to start (a transport beyond the first, Nostr, mDNS, TUN, DNS, or a
+    /// worker-pool spawn). The node is operational (serving) but degraded.
+    Degraded {
+        /// The configured children that failed to start.
+        reasons: HashSet<Child>,
+    },
+}
+
+/// Reason for the fatal [`SupState::Failed`] state (design doc §9.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailReason {
+    /// Zero transports came up at start completion. Without a transport the node
+    /// cannot serve, so this is fatal (the driver tears down and returns an
+    /// error), unlike the degraded-but-serving optional-child failures.
+    NoTransports,
+}
+
 /// Internal supervisor state (design doc §6). Richer than the published
 /// [`NodeState`](crate::node::NodeState): `Starting`/`Stopping` carry the set of
-/// children still resolving. `Draining{deadline}`, `Running{Full|Degraded}`, and
-/// `Failed{reason}` are added by the later flagged commits.
+/// children still resolving, and `Running` carries the resolved [`Health`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SupState {
     /// Constructed but not started.
@@ -210,8 +268,18 @@ pub(crate) enum SupState {
         /// Children asked to spawn that have not yet reported up-or-failed.
         pending: HashSet<Child>,
     },
-    /// All children resolved; node operational.
-    Running,
+    /// All children resolved and ≥1 transport up; node operational. Carries the
+    /// resolved [`Health`] (`Full` or `Degraded`).
+    Running {
+        /// Resolved start-completion health.
+        health: Health,
+    },
+    /// Start completed with zero transports up (design doc §9.1) — fatal. The
+    /// driver tears down any children that did come up and returns an error.
+    Failed {
+        /// Why the start failed.
+        reason: FailReason,
+    },
     /// Bounded graceful-drain window (design doc §6/§8). Broadcast Disconnect
     /// has gone out and the reconciler is gated off (desired peering set
     /// emptied, replenishment suspended); teardown begins when
@@ -241,6 +309,9 @@ pub(crate) struct SupervisorFsm {
     state: SupState,
     /// Children currently up (present). Drives the teardown plan.
     up: HashSet<Child>,
+    /// Configured children that failed to start during the current bring-up.
+    /// Feeds the `Degraded` health determination when `pending` empties.
+    failed: HashSet<Child>,
 }
 
 impl SupervisorFsm {
@@ -249,6 +320,7 @@ impl SupervisorFsm {
         Self {
             state: SupState::Created,
             up: HashSet::new(),
+            failed: HashSet::new(),
         }
     }
 
@@ -262,8 +334,11 @@ impl SupervisorFsm {
     /// plan over exactly the present children.
     pub(crate) fn running_with(up: impl IntoIterator<Item = Child>) -> Self {
         Self {
-            state: SupState::Running,
+            state: SupState::Running {
+                health: Health::Full,
+            },
             up: up.into_iter().collect(),
+            failed: HashSet::new(),
         }
     }
 
@@ -271,6 +346,13 @@ impl SupervisorFsm {
     #[cfg(test)]
     pub(crate) fn state(&self) -> &SupState {
         &self.state
+    }
+
+    /// The configured children that failed to start during bring-up. The driver
+    /// reads this on the `Degraded` start outcome to enumerate the degraded
+    /// children in an operator-visible `warn!`.
+    pub(in crate::node) fn failed(&self) -> &HashSet<Child> {
+        &self.failed
     }
 
     /// Whether the machine is in the bounded-drain window. The driver uses this
@@ -351,12 +433,13 @@ impl SupervisorFsm {
         }
 
         self.up.clear();
+        self.failed.clear();
 
-        // A node with no children at all still reaches `Running` (today: even
-        // zero started transports proceeds to `Running`).
+        // A node with no children at all resolves health immediately. Zero
+        // transports up → `Failed` (design doc §9.1; this is the behavioral
+        // change from the old immediate-`Running`).
         if order.is_empty() {
-            self.state = SupState::Running;
-            return Vec::new();
+            return vec![Action::PublishState(self.resolve_start_health())];
         }
 
         self.state = SupState::Starting {
@@ -366,39 +449,89 @@ impl SupervisorFsm {
     }
 
     fn on_substrate_up(&mut self, child: Child) -> Vec<Action> {
-        if let SupState::Starting { pending } = &mut self.state {
-            pending.remove(&child);
-            self.up.insert(child);
-            if pending.is_empty() {
-                self.state = SupState::Running;
-            }
+        let SupState::Starting { pending } = &mut self.state else {
+            return Vec::new();
+        };
+        pending.remove(&child);
+        let emptied = pending.is_empty();
+        self.up.insert(child);
+        if emptied {
+            vec![Action::PublishState(self.resolve_start_health())]
+        } else {
+            Vec::new()
         }
-        Vec::new()
     }
 
     fn on_substrate_failed(&mut self, child: Child) -> Vec<Action> {
-        // Behavior-neutral: warn/continue. The child drains from `pending` and
-        // does not join the up-set; start still reaches `Running`.
-        if let SupState::Starting { pending } = &mut self.state {
-            pending.remove(&child);
-            if pending.is_empty() {
-                self.state = SupState::Running;
-            }
+        // Record the failed child (design doc §9.1): a configured child that
+        // failed to start drives the `Degraded` determination when `pending`
+        // empties. It drains from `pending` and never joins the up-set.
+        let SupState::Starting { pending } = &mut self.state else {
+            return Vec::new();
+        };
+        pending.remove(&child);
+        let emptied = pending.is_empty();
+        self.failed.insert(child);
+        if emptied {
+            vec![Action::PublishState(self.resolve_start_health())]
+        } else {
+            Vec::new()
         }
-        Vec::new()
+    }
+
+    /// Resolve start-completion health (design doc §9.1) and set the resulting
+    /// state, returning the [`NodeState`] the driver should publish. Called once
+    /// when `Starting.pending` empties (or the degenerate no-children path):
+    ///
+    /// - zero transports up → [`SupState::Failed`] / [`NodeState::Failed`];
+    /// - ≥1 transport up but some configured child failed → [`Health::Degraded`]
+    ///   / [`NodeState::Degraded`];
+    /// - everything configured came up → [`Health::Full`] / [`NodeState::Running`].
+    ///
+    /// Worker-pool failures are captured in `failed` like any other optional
+    /// child, so they contribute `Degraded` (never `Failed`) — the inline crypto
+    /// fallback keeps the node correct without the pools (design doc §9.1).
+    ///
+    /// This is start-time health only. Runtime child-liveness monitoring (a
+    /// `ChildExited` event re-routing health when a task/thread dies at runtime)
+    /// is a deferred follow-up (design doc §7 / §9.1 is start-framed).
+    fn resolve_start_health(&mut self) -> NodeState {
+        let transports_up = self
+            .up
+            .iter()
+            .filter(|c| matches!(c, Child::Transport(_)))
+            .count();
+        if transports_up == 0 {
+            self.state = SupState::Failed {
+                reason: FailReason::NoTransports,
+            };
+            NodeState::Failed
+        } else if !self.failed.is_empty() {
+            self.state = SupState::Running {
+                health: Health::Degraded {
+                    reasons: self.failed.clone(),
+                },
+            };
+            NodeState::Degraded
+        } else {
+            self.state = SupState::Running {
+                health: Health::Full,
+            };
+            NodeState::Running
+        }
     }
 
     fn on_stop(&mut self) -> Vec<Action> {
-        if !matches!(self.state, SupState::Running) {
+        if !matches!(self.state, SupState::Running { .. }) {
             return Vec::new();
         }
         self.begin_stopping()
     }
 
     fn on_drain(&mut self, deadline_ms: u64) -> Vec<Action> {
-        // Only a graceful drain from a running node. Inert otherwise (matching
-        // `Stop`'s guard).
-        if !matches!(self.state, SupState::Running) {
+        // Only a graceful drain from a running node (either health). Inert
+        // otherwise (matching `Stop`'s guard).
+        if !matches!(self.state, SupState::Running { .. }) {
             return Vec::new();
         }
         self.state = SupState::Draining { deadline_ms };
@@ -614,23 +747,42 @@ mod tests {
     }
 
     #[test]
-    fn all_children_up_reaches_running() {
+    fn all_configured_up_reaches_full() {
+        // Everything configured came up (2 transports + all optional children)
+        // → Full; the pending-emptying step publishes `Running`.
         let mut s = SupervisorFsm::new();
         let spawns = s.step(start_full());
-        for a in spawns {
-            let child = match a {
+        let children: Vec<Child> = spawns
+            .into_iter()
+            .map(|a| match a {
                 Action::SpawnChild(c) => c,
                 _ => panic!("unexpected action"),
-            };
-            assert_eq!(s.step(Event::SubstrateUp { child }), vec![]);
+            })
+            .collect();
+        let last = children.len() - 1;
+        for (i, child) in children.into_iter().enumerate() {
+            let out = s.step(Event::SubstrateUp { child });
+            if i == last {
+                assert_eq!(out, vec![Action::PublishState(NodeState::Running)]);
+            } else {
+                assert_eq!(out, vec![]);
+            }
         }
-        assert_eq!(s.state(), &SupState::Running);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
+        assert!(s.failed().is_empty());
     }
 
     #[test]
-    fn failed_child_still_reaches_running_and_is_not_up() {
-        // Behavior-neutral: a failed optional child does not block Running and
-        // is excluded from teardown (never joined the up-set).
+    fn configured_optional_child_failure_is_degraded() {
+        // A configured optional child (mDNS) fails but ≥1 transport is up →
+        // Degraded, with the failed child in `reasons`. The node stays
+        // operational and tears down cleanly (the failed child never joined the
+        // up-set, so it is excluded from teardown; workers excluded by design).
         let mut s = SupervisorFsm::new();
         s.step(start_full());
         for child in [
@@ -640,13 +792,29 @@ mod tests {
             Child::DecryptWorkers,
             Child::Nostr,
         ] {
-            s.step(Event::SubstrateUp { child });
+            assert_eq!(s.step(Event::SubstrateUp { child }), vec![]);
         }
-        // mdns fails, tun+dns come up
-        s.step(Event::SubstrateFailed { child: Child::Mdns });
-        s.step(Event::SubstrateUp { child: Child::Tun });
-        s.step(Event::SubstrateUp { child: Child::Dns });
-        assert_eq!(s.state(), &SupState::Running);
+        // mdns fails, tun comes up, dns comes up last (empties pending).
+        assert_eq!(
+            s.step(Event::SubstrateFailed { child: Child::Mdns }),
+            vec![]
+        );
+        assert_eq!(s.step(Event::SubstrateUp { child: Child::Tun }), vec![]);
+        assert_eq!(
+            s.step(Event::SubstrateUp { child: Child::Dns }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        let mut expected_reasons = HashSet::new();
+        expected_reasons.insert(Child::Mdns);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Degraded {
+                    reasons: expected_reasons.clone()
+                }
+            }
+        );
+        assert_eq!(s.failed(), &expected_reasons);
 
         let stops = s.step(Event::Stop);
         // mdns must not appear in teardown; workers excluded by design.
@@ -663,7 +831,109 @@ mod tests {
     }
 
     #[test]
-    fn no_children_reaches_running_immediately() {
+    fn worker_pool_failure_is_degraded_not_failed() {
+        // A worker-pool spawn failure is Degraded at most, never Failed
+        // (inline crypto fallback keeps the node correct). One transport is up.
+        let mut s = SupervisorFsm::new();
+        s.step(Event::Start {
+            transports: vec![tid(1)],
+            encrypt_workers: true,
+            decrypt_workers: false,
+            nostr: false,
+            mdns: false,
+            tun: false,
+            dns: false,
+        });
+        assert_eq!(
+            s.step(Event::SubstrateUp {
+                child: Child::Transport(tid(1))
+            }),
+            vec![]
+        );
+        assert_eq!(
+            s.step(Event::SubstrateFailed {
+                child: Child::EncryptWorkers
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        let mut expected = HashSet::new();
+        expected.insert(Child::EncryptWorkers);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Degraded { reasons: expected }
+            }
+        );
+    }
+
+    #[test]
+    fn not_configured_child_does_not_cause_degraded() {
+        // A node that never asked to run mDNS/TUN/DNS/Nostr is not degraded for
+        // lacking them: only a configured-and-failed child counts. One transport
+        // configured and up, nothing else configured → Full.
+        let mut s = SupervisorFsm::new();
+        s.step(Event::Start {
+            transports: vec![tid(1)],
+            encrypt_workers: false,
+            decrypt_workers: false,
+            nostr: false,
+            mdns: false,
+            tun: false,
+            dns: false,
+        });
+        assert_eq!(
+            s.step(Event::SubstrateUp {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Running)]
+        );
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
+    }
+
+    #[test]
+    fn zero_transports_up_is_failed_via_child_failures() {
+        // Transports were configured but all failed → zero transports up →
+        // Failed (fatal), even though other children came up. Failed takes
+        // priority over Degraded.
+        let mut s = SupervisorFsm::new();
+        s.step(Event::Start {
+            transports: vec![tid(1)],
+            encrypt_workers: false,
+            decrypt_workers: false,
+            nostr: true,
+            mdns: false,
+            tun: false,
+            dns: false,
+        });
+        assert_eq!(
+            s.step(Event::SubstrateFailed {
+                child: Child::Transport(tid(1))
+            }),
+            vec![]
+        );
+        assert_eq!(
+            s.step(Event::SubstrateUp {
+                child: Child::Nostr
+            }),
+            vec![Action::PublishState(NodeState::Failed)]
+        );
+        assert_eq!(
+            s.state(),
+            &SupState::Failed {
+                reason: FailReason::NoTransports
+            }
+        );
+    }
+
+    #[test]
+    fn no_children_is_failed_immediately() {
+        // The degenerate empty-`Start` path: zero transports → Failed (the
+        // behavioral change from the old immediate-Running).
         let mut s = SupervisorFsm::new();
         let actions = s.step(Event::Start {
             transports: vec![],
@@ -674,8 +944,13 @@ mod tests {
             tun: false,
             dns: false,
         });
-        assert_eq!(actions, vec![]);
-        assert_eq!(s.state(), &SupState::Running);
+        assert_eq!(actions, vec![Action::PublishState(NodeState::Failed)]);
+        assert_eq!(
+            s.state(),
+            &SupState::Failed {
+                reason: FailReason::NoTransports
+            }
+        );
     }
 
     #[test]
@@ -714,9 +989,10 @@ mod tests {
     fn all_children_stopped_reaches_stopped() {
         let mut s = SupervisorFsm::new();
         s.step(start_full());
-        // Every spawned child reports an outcome: five come up, three fail
-        // (warn/continue). `pending` drains fully, so the node still reaches
-        // `Running` — as it does today.
+        // Every spawned child reports an outcome: five come up, three fail.
+        // `pending` drains fully; one transport (tid(1)) is up so the node
+        // reaches `Running`, but a configured transport (tid(2)) and two
+        // configured optional children failed → Degraded.
         for child in [
             Child::Transport(tid(1)),
             Child::EncryptWorkers,
@@ -729,7 +1005,12 @@ mod tests {
         for child in [Child::Transport(tid(2)), Child::DecryptWorkers, Child::Mdns] {
             s.step(Event::SubstrateFailed { child });
         }
-        assert_eq!(s.state(), &SupState::Running);
+        assert!(matches!(
+            s.state(),
+            SupState::Running {
+                health: Health::Degraded { .. }
+            }
+        ));
 
         // Only the children that came up are torn down; the failed ones never
         // joined the up-set.
@@ -768,7 +1049,12 @@ mod tests {
         s.step(Event::SubstrateUp {
             child: Child::Transport(tid(1)),
         });
-        assert_eq!(s.state(), &SupState::Running);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
         // A stray event in Running produces nothing and does not change state.
         assert_eq!(
             s.step(Event::SubstrateUp {
@@ -776,7 +1062,12 @@ mod tests {
             }),
             vec![]
         );
-        assert_eq!(s.state(), &SupState::Running);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
     }
 
     #[test]
@@ -873,6 +1164,11 @@ mod tests {
         // Inert from `Running` (no drain in progress).
         let mut s = SupervisorFsm::running_with([Child::Transport(tid(1))]);
         assert_eq!(s.step(Event::DrainDeadlineElapsed), vec![]);
-        assert_eq!(s.state(), &SupState::Running);
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
     }
 }
