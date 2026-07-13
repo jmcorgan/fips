@@ -6,14 +6,17 @@
 
 use crate::NodeAddr;
 use crate::node::Node;
+use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{MmpReject, RejectReason, TreeReject};
 use crate::node::tree::sign_declaration;
+use crate::peer::machine::PeerEvent;
 use crate::proto::link::LinkMessageType;
 use crate::proto::mmp::{
     LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, ReceiverReport, RrLog,
     SenderReport,
 };
 use crate::proto::stp::ParentEval;
+use crate::transport::{TransportAddr, TransportId};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -500,13 +503,15 @@ impl Node {
         for action in actions {
             match action {
                 MmpAction::ReapPeer { peer } => {
+                    // Log SHELL-SIDE before routing so the reap keeps the
+                    // `fips::node::handlers::mmp` tracing target (no relocation into
+                    // the executor, no target pin needed).
                     debug!(
                         peer = %self.peer_display_name(&peer),
                         timeout_secs = self.config().node.link_dead_timeout_secs,
                         "Removing peer: link dead timeout"
                     );
-                    self.remove_active_peer(&peer);
-                    self.note_link_dead(peer, now_ms);
+                    self.route_link_dead(peer, now_ms).await;
                 }
                 MmpAction::Heartbeat { peer } => {
                     if let Some(p) = self.peers.get_mut(&peer) {
@@ -524,6 +529,65 @@ impl Node {
                 | MmpAction::SendSessionReport { .. }
                 | MmpAction::LogSession { .. } => {}
             }
+        }
+    }
+
+    /// Route a link-dead liveness reap through the peer machine + executor.
+    /// The shell already decided (the tick sweep's `plan_heartbeats` batch
+    /// emitted this `ReapPeer` in phase order), so the machine only CONSUMES the
+    /// decision via [`PeerEvent::LinkDeadSuspected`]. The resulting executor arms
+    /// (`InvalidateSendState` → `remove_active_peer`, `ReportLost` →
+    /// `note_link_dead`) reproduce the pre-refactor inline reap body exactly, in
+    /// that order.
+    ///
+    /// Finding A: an established peer always has a `peer_machine`. If the peer
+    /// vanished between snapshot and effect, the old inline body was already a
+    /// no-op, so we return; if the machine is absent (impossible per Finding A)
+    /// we fall back to the byte-identical inline body under a `debug_assert`.
+    ///
+    /// `now_ms` is the sweep's hoisted wall-clock ms (the same value the old reap
+    /// fed `note_link_dead`); it flows to the executor `ReportLost` arm via
+    /// `ambient.now_ms`.
+    async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
+        let link = match self.peers.get(&node_addr) {
+            Some(peer) => peer.link_id(),
+            None => return,
+        };
+        if !self.peer_machines.contains_key(&link) {
+            debug_assert!(
+                false,
+                "peer machine present for every established peer (Finding A)"
+            );
+            self.remove_active_peer(&node_addr);
+            self.note_link_dead(node_addr, now_ms);
+            return;
+        }
+        let ambient = self.link_dead_ctx(&node_addr, now_ms);
+        self.advance_peer_machine(link, PeerEvent::LinkDeadSuspected, Self::now_ms(), &ambient)
+            .await;
+    }
+
+    /// Ambient shell facts for the routed liveness reap. The executor reads only
+    /// `verified_identity` (`InvalidateSendState` → `remove_active_peer` resolves
+    /// its `NodeAddr` from it, so it must equal `node_addr`) and `now_ms`
+    /// (`ReportLost` → `note_link_dead`, the wall-clock reconnect basis). The
+    /// transport/index/direction fields are unused by these two arms and are
+    /// populated best-effort for coherence. `now_ms` is threaded in (rather than
+    /// re-read) so the value fed to `note_link_dead` is byte-identical to the old
+    /// reap's hoisted wall-clock for every peer in the sweep.
+    fn link_dead_ctx(&self, node_addr: &NodeAddr, now_ms: u64) -> PeerActionCtx {
+        let peer = &self.peers[node_addr];
+        PeerActionCtx {
+            verified_identity: *peer.identity(),
+            transport_id: peer.transport_id().unwrap_or_else(|| TransportId::new(0)),
+            remote_addr: peer
+                .current_addr()
+                .cloned()
+                .unwrap_or_else(|| TransportAddr::new(Vec::new())),
+            our_index: peer.our_index(),
+            their_index: peer.their_index(),
+            now_ms,
+            is_outbound: false,
         }
     }
 }
