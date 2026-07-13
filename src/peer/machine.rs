@@ -224,6 +224,19 @@ pub(crate) enum PeerEvent {
     },
     /// Inbound rekey msg2 (completes our initiated rekey).
     RekeyMsg2 { their_index: SessionIndex },
+    /// A cadence-decided rekey `ConnAction` to CONSUME (C4-1). The shell ran the
+    /// batch `poll_rekey` across the whole peer set (phase-grouped, index-order
+    /// preserving — Finding B) and routes each decided action here; the machine
+    /// applies the control-tier transition + emits the send-state write
+    /// (`SwapSendState`/`CompleteDrain`) WITHOUT re-polling. Carries only
+    /// `Cutover`/`Drain` on the C4-1 path (`InitiateRekey` stays inline shell-side
+    /// with a [`RekeyInitiated`](PeerEvent::RekeyInitiated) observation).
+    RekeyConsume { action: ConnAction },
+    /// OBSERVATION: the shell initiated an outbound rekey inline (the Noise msg1
+    /// leaf + index allocation are shell-side). Advances the control state to
+    /// `Maintaining{Rekey(Msg1Sent)}` so the next tick's `Cutover`/`Drain` consume
+    /// transitions from a coherent phase. Emits no action.
+    RekeyInitiated,
     /// Data plane observed the responder K-bit flip inline (§3.7).
     PeerKbitFlip { epoch: [u8; 8] },
     /// A filter announce is due for this peer.
@@ -448,6 +461,8 @@ impl PeerMachine {
                 self.on_inbound_msg1(self.link, wire, est, now, index_allocator)
             }
             PeerEvent::RekeyMsg2 { their_index } => self.on_rekey_msg2(their_index),
+            PeerEvent::RekeyConsume { action } => self.map_rekey_action(action, now),
+            PeerEvent::RekeyInitiated => self.on_rekey_initiated(),
             PeerEvent::PeerKbitFlip { .. } => {
                 // Responder cutover is data-plane-owned (§3.7): the machine only
                 // schedules the drain-window unregister. NO slot mutation.
@@ -789,6 +804,31 @@ impl PeerMachine {
         Vec::new()
     }
 
+    /// OBS (C4-1): the shell ran `initiate_rekey` inline — the Noise msg1 leaf,
+    /// the index allocation, the wire send, and the `set_rekey_state` on the
+    /// `ActivePeer` all happened shell-side. This is a pure observation that
+    /// advances the machine's control state to `Maintaining{Rekey(Msg1Sent)}` so
+    /// the subsequent cadence `Cutover`/`Drain` consume transitions from a
+    /// coherent phase. Emits NO action (nothing left to do). No-op unless the peer
+    /// is in an established-like state (defensive; the shell only initiates on
+    /// healthy established peers).
+    fn on_rekey_initiated(&mut self) -> Vec<PeerAction> {
+        let addr = match self.addr() {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        if !self.is_established_context() {
+            return Vec::new();
+        }
+        self.rekey_in_progress = true;
+        self.rekey_resend_count = 0;
+        self.state = PeerState::Maintaining {
+            addr,
+            kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent),
+        };
+        Vec::new()
+    }
+
     /// Rekey cadence: run `poll_rekey` over this one peer's snapshot and map the
     /// phase-grouped `ConnAction`s.
     fn on_rekey_cadence(&mut self, now: u64) -> Vec<PeerAction> {
@@ -838,6 +878,14 @@ impl PeerMachine {
                 // `ActivePeer::complete_drain` and does the peers_by_index /
                 // decrypt-worker / index-free cleanup, replacing the old
                 // shadow-index emission (which could drift from the real index).
+                //
+                // Clear the shadow `draining_index` set by the Cutover arm: the
+                // real previous index is now retired by `CompleteDrain`, so a
+                // leftover `Some(stale)` would double-free if a later
+                // `CrossConnectionWon` consumed it in `on_promotion_resolved`
+                // (C4-0 latent item 1). Post-rekey cross-connection promotion is
+                // not a live path, but clearing here removes the hazard outright.
+                self.draining_index = None;
                 self.state = PeerState::Active { addr: peer };
                 vec![PeerAction::CompleteDrain { peer }]
             }
@@ -1834,5 +1882,94 @@ mod tests {
         // The exact action-sequence equality above is the "no ScheduleRetry"
         // guarantee: loss is reported only via ReportLost, and no retry-schedule
         // action exists in the PeerAction vocabulary at all (reconciler-owned).
+    }
+
+    // ---- Test 9: cadence CONSUME (C4-1) -----------------------------------
+    // The shell polls the batch `poll_rekey` and routes each decided ConnAction
+    // as `RekeyConsume` — the machine maps it WITHOUT re-polling, yielding the
+    // same action sequence + transition as the machine-driven cadence (Test 1),
+    // and the Drain consume clears the shadow `draining_index`.
+    #[test]
+    fn rekey_consume_cutover_then_drain() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        m.state = PeerState::Maintaining {
+            addr,
+            kind: MaintainKind::Rekey(RekeyPhase::PendingCutover),
+        };
+        m.rekey_our_index = Some(SessionIndex::new(0x2222));
+        m.our_index = Some(SessionIndex::new(0x1111));
+        m.remote_epoch = Some([9u8; 8]);
+
+        // Consume the shell-decided Cutover: identical sequence to Test 1.
+        let cut = m.step(
+            PeerEvent::RekeyConsume {
+                action: ConnAction::Cutover { peer: addr },
+            },
+            10_000,
+            &mut alloc,
+        );
+        assert_eq!(
+            cut,
+            vec![
+                PeerAction::SwapSendState { epoch: [9u8; 8] },
+                PeerAction::RegisterDecryptSession {
+                    index: SessionIndex::new(0x2222)
+                },
+                PeerAction::SetTimer {
+                    kind: TimerKind::DrainExpiry,
+                    at_ms: 10_000 + DRAIN_WINDOW_MS
+                },
+            ]
+        );
+        assert_eq!(
+            m.state(),
+            PeerState::Maintaining {
+                addr,
+                kind: MaintainKind::Rekey(RekeyPhase::Draining)
+            }
+        );
+        // Cutover stashed the old index in the drain shadow.
+        assert_eq!(m.draining_index, Some(SessionIndex::new(0x1111)));
+
+        // Consume the shell-decided Drain: single CompleteDrain, Active, and the
+        // shadow drain index is CLEARED (double-free guard, C4-0 latent item 1).
+        let drain = m.step(
+            PeerEvent::RekeyConsume {
+                action: ConnAction::Drain { peer: addr },
+            },
+            20_000,
+            &mut alloc,
+        );
+        assert_eq!(drain, vec![PeerAction::CompleteDrain { peer: addr }]);
+        assert_eq!(m.state(), PeerState::Active { addr });
+        assert_eq!(m.draining_index, None);
+    }
+
+    // ---- Test 10: RekeyInitiated observation (C4-1) -----------------------
+    // The shell ran `initiate_rekey` inline; the obs advances control state to
+    // Msg1Sent and emits nothing.
+    #[test]
+    fn rekey_initiated_observation() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        m.state = PeerState::Established { addr };
+
+        let acts = m.step(PeerEvent::RekeyInitiated, 5_000, &mut alloc);
+        assert!(acts.is_empty());
+        assert_eq!(
+            m.state(),
+            PeerState::Maintaining {
+                addr,
+                kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent)
+            }
+        );
+        assert!(m.rekey_in_progress);
+        // No index allocation happened in the machine (shell-side leaf).
+        assert_eq!(alloc.count(), 0);
     }
 }

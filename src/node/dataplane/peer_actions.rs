@@ -345,6 +345,12 @@ impl Node {
                                 "peers_by_index should contain pre-registered new index after cutover"
                             );
                             debug!(
+                                // Pin the target to the pre-refactor module: this
+                                // cutover log relocated from handlers/rekey.rs into
+                                // the executor, but operators (and the test harness)
+                                // filter it under fips::node::handlers::rekey. Keeping
+                                // the target preserves the observable log contract.
+                                target: "fips::node::handlers::rekey",
                                 peer = %self.peer_display_name(&node_addr),
                                 "Rekey cutover complete (initiator), K-bit flipped"
                             );
@@ -385,6 +391,10 @@ impl Node {
                         }
                         let _ = self.index_allocator.free(old_our_index);
                         trace!(
+                            // Pin to the pre-refactor module (see the cutover log
+                            // above) so the relocated drain log stays visible under
+                            // the operator's fips::node::handlers::rekey filter.
+                            target: "fips::node::handlers::rekey",
                             peer = %self.peer_display_name(&node_addr),
                             old_index = %old_our_index,
                             "Drain complete, previous session erased"
