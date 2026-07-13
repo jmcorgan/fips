@@ -2388,6 +2388,14 @@ impl Node {
     }
 
     /// Remove a peer.
+    ///
+    /// Raw `pub` accessor with ZERO callers in the crate (production or test) —
+    /// the production teardown path is [`remove_active_peer`](Self::remove_active_peer),
+    /// which drops the peer's `peer_machines` entry. This helper deliberately
+    /// does NOT touch `peer_machines`: it never runs against an established peer
+    /// in production, so it cannot orphan a machine (Finding A). If it is ever
+    /// wired to remove established peers, mirror the `remove_active_peer` cleanup
+    /// (`self.peer_machines.remove(&peer.link_id())`) here.
     pub fn remove_peer(&mut self, node_addr: &NodeAddr) -> Option<ActivePeer> {
         self.peers.remove(node_addr)
     }

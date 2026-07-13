@@ -9,6 +9,7 @@ use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
+use crate::peer::machine::PeerMachine;
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
@@ -1538,6 +1539,13 @@ impl Node {
                 };
                 let loser_link_id = old_peer.link_id();
 
+                // Finding A: the replaced (losing) peer was established and so
+                // carried a machine keyed by its OWN link_id (loser_link_id);
+                // drop it so no machine orphans when its ActivePeer is removed.
+                // The winning connection's machine is inserted below keyed by
+                // the winner link_id. NEUTRAL — nothing reads peer_machines yet.
+                self.peer_machines.remove(&loser_link_id);
+
                 // Clean up old peer's index from peers_by_index
                 if let (Some(old_tid), Some(old_idx)) =
                     (old_peer.transport_id(), old_peer.our_index())
@@ -1595,6 +1603,20 @@ impl Node {
                 );
 
                 self.peers.insert(peer_node_addr, new_peer);
+                // Finding A: populate the inert per-peer machine so every
+                // established peer has exactly one machine, keyed by its
+                // link_id (the winner link here). Nothing drives it yet.
+                self.peer_machines.insert(
+                    link_id,
+                    PeerMachine::established(
+                        link_id,
+                        verified_identity,
+                        our_index,
+                        is_outbound,
+                        remote_epoch,
+                        current_time_ms,
+                    ),
+                );
                 self.peers_by_index
                     .insert((transport_id, our_index.as_u32()), peer_node_addr);
                 self.peering
@@ -1712,6 +1734,20 @@ impl Node {
             }
 
             self.peers.insert(peer_node_addr, new_peer);
+            // Finding A: populate the inert per-peer machine so every
+            // established peer has exactly one machine, keyed by its link_id.
+            // Nothing drives it yet.
+            self.peer_machines.insert(
+                link_id,
+                PeerMachine::established(
+                    link_id,
+                    verified_identity,
+                    our_index,
+                    is_outbound,
+                    remote_epoch,
+                    current_time_ms,
+                ),
+            );
             self.peers_by_index
                 .insert((transport_id, our_index.as_u32()), peer_node_addr);
             self.peering

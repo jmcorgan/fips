@@ -448,6 +448,53 @@ impl PeerMachine {
         }
     }
 
+    /// New machine for an ALREADY-established peer: the post-handshake state a
+    /// promoted peer occupies before any rekey. M3 inserts one of these into
+    /// `Node.peer_machines` at each `promote_connection` establishment site so
+    /// every established peer has exactly one machine keyed by its `LinkId`
+    /// (Finding A). The machine is **inert** — nothing drives it yet — and is
+    /// parked at [`PeerState::Established`] so a later reap sees
+    /// [`is_established_context`](Self::is_established_context) true and a later
+    /// rekey step finds it. `our_index` is the peer's msg1-allocated session
+    /// index; `remote_epoch` is the crystallized peer's startup epoch.
+    pub(crate) fn established(
+        link: LinkId,
+        identity: PeerIdentity,
+        our_index: SessionIndex,
+        is_outbound: bool,
+        remote_epoch: Option<[u8; 8]>,
+        now: u64,
+    ) -> Self {
+        let addr = *identity.node_addr();
+        let mut conn = if is_outbound {
+            ConnectionState::outbound(link, identity, now)
+        } else {
+            ConnectionState::inbound(link, now)
+        };
+        conn.set_our_index(our_index);
+        conn.set_remote_epoch(remote_epoch);
+        Self {
+            state: PeerState::Established { addr },
+            link,
+            identity: Some(identity),
+            node_addr: Some(addr),
+            conn,
+            remote_epoch,
+            rekey_in_progress: false,
+            rekey_our_index: None,
+            rekey_msg1: None,
+            rekey_resend_count: 0,
+            last_peer_rekey_ms: 0,
+            rekey_msg3_pending: false,
+            session_established_at_ms: now,
+            authenticated_at_ms: now,
+            rekey_jitter_secs: 0,
+            last_heartbeat_sent_ms: 0,
+            our_index: Some(our_index),
+            draining_index: None,
+        }
+    }
+
     /// Current lifecycle state.
     pub(crate) fn state(&self) -> PeerState {
         self.state
@@ -1265,6 +1312,30 @@ mod tests {
             rekey_age_floor_secs: 60,
             our_node_addr: our,
         }
+    }
+
+    // ---- Test 0: established constructor (Finding A populate) --------------
+    #[test]
+    fn established_constructor_yields_established_context() {
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let idx = SessionIndex::new(0x4242);
+        let m = PeerMachine::established(
+            LinkId::new(7),
+            id,
+            idx,
+            /* is_outbound */ true,
+            None,
+            1_234,
+        );
+
+        // Parked at Established with the crystallized address + index visible,
+        // so a later reap's `is_established_context` and a later rekey both
+        // find it.
+        assert_eq!(m.state(), PeerState::Established { addr });
+        assert!(m.is_established_context());
+        assert_eq!(m.addr(), Some(addr));
+        assert_eq!(m.our_index(), Some(idx));
     }
 
     // ---- Test 1: rekey initiator cutover ----------------------------------
