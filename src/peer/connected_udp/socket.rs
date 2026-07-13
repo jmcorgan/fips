@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
-use std::os::unix::io::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
 /// A `connect()`-ed UDP socket for one established peer.
 ///
@@ -26,7 +26,7 @@ use std::os::unix::io::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 ///   needs to be redone on the data path.
 #[derive(Debug)]
 pub(crate) struct ConnectedPeerSocket {
-    fd: RawFd,
+    fd: OwnedFd,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
 }
@@ -34,10 +34,10 @@ pub(crate) struct ConnectedPeerSocket {
 impl ConnectedPeerSocket {
     /// Adopt an already-opened, bound, and `connect()`-ed fd (from
     /// `crate::transport::udp::open_connected_fd`) into an owning
-    /// handle. Takes ownership of the fd; it is closed on drop.
+    /// handle. Takes ownership of the fd; the `OwnedFd` closes it on drop.
     pub(crate) fn from_fd(fd: OwnedFd, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
         Self {
-            fd: fd.into_raw_fd(),
+            fd,
             peer_addr,
             local_addr,
         }
@@ -55,18 +55,7 @@ impl ConnectedPeerSocket {
 
 impl AsRawFd for ConnectedPeerSocket {
     fn as_raw_fd(&self) -> RawFd {
-        self.fd
-    }
-}
-
-impl Drop for ConnectedPeerSocket {
-    fn drop(&mut self) {
-        // Best-effort close. Ignore the result — if close fails the
-        // kernel has already done what it can; we don't want to panic
-        // in Drop.
-        unsafe {
-            libc::close(self.fd);
-        }
+        self.fd.as_raw_fd()
     }
 }
 
