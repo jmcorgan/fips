@@ -7,14 +7,17 @@
 
 use crate::NodeAddr;
 use crate::node::Node;
+use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::noise::HandshakeState;
+use crate::peer::machine::PeerEvent;
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{ConnAction, LifecycleView, PeerSnapshot, RekeyCfg, RekeyResendSnapshot};
 use crate::proto::fsp::{
     FspAction, RekeyMsg3ResendSnapshot, SessionSetup, SessionSnapshot, cutover_timer_elapsed,
 };
 use crate::proto::link::SessionDatagram;
+use crate::transport::{TransportAddr, TransportId};
 use tracing::{debug, info, trace, warn};
 
 /// Keep previous session alive for this long after cutover.
@@ -50,79 +53,187 @@ impl Node {
         let snapshots = self.rekey_peers();
         for action in self.fmp.poll_rekey(snapshots, &cfg) {
             match action {
-                // Execute cutover for initiator side.
+                // Initiator cutover: route the decided action through the peer
+                // machine + executor (C4-1). The executor's `SwapSendState` arm
+                // reproduces the pre-refactor cutover body EXACTLY.
                 ConnAction::Cutover { peer: node_addr } => {
-                    let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
-                        if let Some(_old_our_index) = peer.cutover_to_new_session() {
-                            // New index was pre-registered in peers_by_index
-                            // during msg2 handling (handshake.rs).
-                            debug_assert!(
-                                peer.transport_id().is_some()
-                                    && peer.our_index().is_some()
-                                    && self.peers_by_index.contains_key(&(
-                                        peer.transport_id().unwrap(),
-                                        peer.our_index().unwrap().as_u32()
-                                    )),
-                                "peers_by_index should contain pre-registered new index after cutover"
-                            );
-                            let our_index = peer.our_index();
-                            let their_index = peer.their_index();
-                            info!(
-                                peer = %self.peer_display_name(&node_addr),
-                                our_addr = %self.identity().node_addr(),
-                                their_addr = %node_addr,
-                                our_index = ?our_index,
-                                their_index = ?their_index,
-                                "Rekey cutover complete (initiator), K-bit flipped"
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    // Re-register the new session with the decrypt worker — the
-                    // cache_key (transport_id, our_index) just changed, so the
-                    // old worker entry is stale and every packet on the new
-                    // session would miss the worker's HashMap lookup.
-                    #[cfg(unix)]
-                    if did_cutover {
-                        self.register_decrypt_worker_session(&node_addr);
-                    }
-                    #[cfg(not(unix))]
-                    let _ = did_cutover;
+                    self.route_rekey_cadence(node_addr, ConnAction::Cutover { peer: node_addr })
+                        .await;
                 }
-                // Execute drain completion.
+                // Drain completion: route through the machine + executor. The
+                // executor's `CompleteDrain` arm reads the REAL previous index
+                // from `complete_drain()` and frees it at the same point the old
+                // inline body did (index-order preserving).
                 ConnAction::Drain { peer: node_addr } => {
-                    // Extract the old index and transport_id under the peer
-                    // borrow, then drop the borrow so the cache_key cleanup
-                    // below can take &mut self for unregister_decrypt_worker_session.
-                    let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
-                        peer.complete_drain().map(|idx| (idx, peer.transport_id()))
-                    });
-                    if let Some((old_our_index, transport_id)) = drained {
-                        if let Some(tid) = transport_id {
-                            let cache_key = (tid, old_our_index.as_u32());
-                            self.peers_by_index.remove(&cache_key);
-                            #[cfg(unix)]
-                            self.unregister_decrypt_worker_session(cache_key);
-                        }
-                        let _ = self.index_allocator.free(old_our_index);
-                        trace!(
-                            peer = %self.peer_display_name(&node_addr),
-                            old_index = %old_our_index,
-                            "Drain complete, previous session erased"
-                        );
-                    }
+                    self.route_rekey_cadence(node_addr, ConnAction::Drain { peer: node_addr })
+                        .await;
                 }
-                // Initiate a new rekey.
+                // Initiate a new rekey: STAYS INLINE (the Noise msg1 build +
+                // index allocation are a shell-side leaf, byte-unchanged). Feed
+                // the machine a `RekeyInitiated` observation afterward so its
+                // control state stays coherent for the next tick's Cutover/Drain.
                 ConnAction::InitiateRekey { peer: node_addr } => {
                     self.initiate_rekey(&node_addr).await;
+                    self.observe_rekey_initiated(&node_addr);
                 }
                 #[allow(unreachable_patterns)]
                 _ => {}
             }
+        }
+    }
+
+    /// Route a cadence-decided `Cutover`/`Drain` `ConnAction` through the peer
+    /// machine + executor (C4-1). The shell already decided (batch `poll_rekey`);
+    /// the machine consumes via [`PeerEvent::RekeyConsume`] WITHOUT re-polling,
+    /// preserving the phase order. The `SwapSendState`/`CompleteDrain` executor
+    /// arms reproduce the pre-refactor inline effect bodies exactly.
+    ///
+    /// Finding A: an established peer always has a `peer_machine`. If the peer
+    /// vanished between snapshot and effect, the old inline body was a no-op, so
+    /// we do nothing; if the machine is absent (impossible per Finding A) we fall
+    /// back to the byte-identical inline body under a `debug_assert`.
+    async fn route_rekey_cadence(&mut self, node_addr: NodeAddr, action: ConnAction) {
+        let link = match self.peers.get(&node_addr) {
+            Some(peer) => peer.link_id(),
+            None => return,
+        };
+        if !self.peer_machines.contains_key(&link) {
+            debug_assert!(
+                false,
+                "peer machine present for every established rekey peer (Finding A)"
+            );
+            match action {
+                ConnAction::Cutover { peer } => self.cutover_peer_inline(&peer),
+                ConnAction::Drain { peer } => self.drain_peer_inline(&peer),
+                _ => {}
+            }
+            return;
+        }
+        let ambient = self.rekey_cadence_ctx(&node_addr);
+        self.advance_peer_machine(
+            link,
+            PeerEvent::RekeyConsume { action },
+            Self::now_ms(),
+            &ambient,
+        )
+        .await;
+    }
+
+    /// Feed the machine the `RekeyInitiated` observation after the inline
+    /// `initiate_rekey` (C4-1). The obs emits no action, so there is no executor
+    /// pass — a bare `step` keeps the machine's control state coherent.
+    fn observe_rekey_initiated(&mut self, node_addr: &NodeAddr) {
+        let link = match self.peers.get(node_addr) {
+            Some(peer) => peer.link_id(),
+            None => return,
+        };
+        if let Some(machine) = self.peer_machines.get_mut(&link) {
+            let acts = machine.step(
+                PeerEvent::RekeyInitiated,
+                Self::now_ms(),
+                &mut self.index_allocator,
+            );
+            debug_assert!(acts.is_empty(), "RekeyInitiated is a pure observation");
+        } else {
+            debug_assert!(
+                false,
+                "peer machine present for every established rekey peer (Finding A)"
+            );
+        }
+    }
+
+    /// Ambient shell facts for the routed cadence Cutover/Drain step. Only
+    /// `verified_identity` is read by the `SwapSendState`/`CompleteDrain`
+    /// executor arms — `SwapSendState` resolves its `NodeAddr` from it (so it must
+    /// equal `node_addr`), and `CompleteDrain` carries its peer in the action
+    /// payload. The transport/index/direction fields are unused by these two arms
+    /// (they matter only to `PromoteToActive`, never emitted on this path) and are
+    /// populated best-effort for coherence.
+    fn rekey_cadence_ctx(&self, node_addr: &NodeAddr) -> PeerActionCtx {
+        let peer = &self.peers[node_addr];
+        PeerActionCtx {
+            verified_identity: *peer.identity(),
+            transport_id: peer.transport_id().unwrap_or_else(|| TransportId::new(0)),
+            remote_addr: peer
+                .current_addr()
+                .cloned()
+                .unwrap_or_else(|| TransportAddr::new(Vec::new())),
+            our_index: peer.our_index(),
+            their_index: peer.their_index(),
+            now_ms: Self::now_ms(),
+            is_outbound: false,
+        }
+    }
+
+    /// Pre-refactor initiator cutover body, retained as the release fallback for
+    /// the (Finding-A-impossible) missing-machine case. Byte-identical to the old
+    /// inline `ConnAction::Cutover` arm and to the executor's `SwapSendState` arm.
+    fn cutover_peer_inline(&mut self, node_addr: &NodeAddr) {
+        let did_cutover = if let Some(peer) = self.peers.get_mut(node_addr) {
+            if let Some(_old_our_index) = peer.cutover_to_new_session() {
+                // New index was pre-registered in peers_by_index during msg2
+                // handling (handshake.rs).
+                debug_assert!(
+                    peer.transport_id().is_some()
+                        && peer.our_index().is_some()
+                        && self.peers_by_index.contains_key(&(
+                            peer.transport_id().unwrap(),
+                            peer.our_index().unwrap().as_u32()
+                        )),
+                    "peers_by_index should contain pre-registered new index after cutover"
+                );
+                let our_index = peer.our_index();
+                let their_index = peer.their_index();
+                info!(
+                    peer = %self.peer_display_name(node_addr),
+                    our_addr = %self.identity().node_addr(),
+                    their_addr = %node_addr,
+                    our_index = ?our_index,
+                    their_index = ?their_index,
+                    "Rekey cutover complete (initiator), K-bit flipped"
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        // Re-register the new session with the decrypt worker — the cache_key
+        // (transport_id, our_index) just changed, so the old worker entry is
+        // stale and every packet on the new session would miss the lookup.
+        #[cfg(unix)]
+        if did_cutover {
+            self.register_decrypt_worker_session(node_addr);
+        }
+        #[cfg(not(unix))]
+        let _ = did_cutover;
+    }
+
+    /// Pre-refactor drain-completion body, retained as the release fallback for
+    /// the (Finding-A-impossible) missing-machine case. Byte-identical to the old
+    /// inline `ConnAction::Drain` arm and to the executor's `CompleteDrain` arm.
+    fn drain_peer_inline(&mut self, node_addr: &NodeAddr) {
+        // Extract the old index and transport_id under the peer borrow, then drop
+        // the borrow so the cache_key cleanup below can take &mut self for
+        // unregister_decrypt_worker_session.
+        let drained = self
+            .peers
+            .get_mut(node_addr)
+            .and_then(|peer| peer.complete_drain().map(|idx| (idx, peer.transport_id())));
+        if let Some((old_our_index, transport_id)) = drained {
+            if let Some(tid) = transport_id {
+                let cache_key = (tid, old_our_index.as_u32());
+                self.peers_by_index.remove(&cache_key);
+                #[cfg(unix)]
+                self.unregister_decrypt_worker_session(cache_key);
+            }
+            let _ = self.index_allocator.free(old_our_index);
+            trace!(
+                peer = %self.peer_display_name(node_addr),
+                old_index = %old_our_index,
+                "Drain complete, previous session erased"
+            );
         }
     }
 
