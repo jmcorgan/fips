@@ -1,0 +1,259 @@
+#!/bin/sh
+# fips-mesh-setup — configure open 802.11s mesh interfaces for FIPS backhaul.
+#
+# Usage:
+#   fips-mesh-setup <radio> [mesh-id]    e.g. fips-mesh-setup radio1
+#   fips-mesh-setup remove [radio]       no radio: remove all instances
+#
+# Creates a mesh-point interface on the given radio and leaves everything
+# above L2 to FIPS. Run once per radio: dual-band routers can mesh on both
+# bands at once (2.4 GHz reaches further, 5 GHz carries more). Note this is
+# failover, not multipath — FIPS keeps one active link per peer; the other
+# band stands by and reconnects the peer if the active link dies.
+#
+#   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
+#     handshake authenticates and encrypts every peer link, so SAE would
+#     only duplicate that (and on ath10k it forces the slower raw Tx/Rx
+#     firmware mode). A stranger can form an 802.11s peering but cannot
+#     pass the FIPS handshake.
+#   - mesh_fwding '0'    — disables 802.11s HWMP forwarding so each mesh
+#     link is a plain L2 neighbor link. FIPS is the routing layer; two
+#     routing layers would fight.
+#
+# Interfaces are named per radio index (radio0 -> fips-mesh0, radio1 ->
+# fips-mesh1) and are intentionally NOT bridged into br-lan: the FIPS
+# Ethernet transport binds each directly and runs discovery beacons over it.
+#
+# The shipped /etc/fips/fips.yaml carries 'mesh0' and 'mesh1' entries under
+# 'transports.ethernet' bound to these names, but commented out — a stock
+# install that never creates fips-mesh* then logs no bind warning. This
+# helper uncomments the matching entry when it creates an interface and
+# re-comments it on remove, so the daemon binds the transport without a
+# manual config edit. After an interface is up, restart fips.
+# See docs/how-to/set-up-80211s-mesh-backhaul.md for the full guide.
+
+DEFAULT_MESH_ID="fips-mesh"
+CONFIG="/etc/fips/fips.yaml"
+
+# Replace $CONFIG with the rewritten $CONFIG.tmp. Force mode 0600 first: the
+# package installs fips.yaml 0600 (it may hold an inline 'nsec' private key),
+# and a fresh tmp file would otherwise land world-readable after the move.
+mesh_config_write() {
+	chmod 600 "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
+}
+
+# Uncomment the 'mesh<idx>' transports.ethernet block in $CONFIG (created by
+# 'fips-mesh-setup'). Reversible with mesh_config_disable. Returns:
+#   0 enabled (or already active)   1 no config file   2 no such block
+mesh_config_enable() {
+	idx="$1"
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^    mesh$idx:" "$CONFIG" && return 0
+	grep -q "^    # mesh$idx:" "$CONFIG" || return 2
+	awk -v idx="$idx" '
+		$0 ~ ("^    # mesh" idx ":[ \t]*$") { blk = 1; sub(/^    # /, "    "); print; next }
+		blk && /^    #   / { sub(/^    # /, "    "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && mesh_config_write
+}
+
+# Re-comment the 'mesh<idx>' block so the daemon stops binding it (and stops
+# warning about the now-missing interface). Inverse of mesh_config_enable.
+mesh_config_disable() {
+	idx="$1"
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^    mesh$idx:" "$CONFIG" || return 0
+	awk -v idx="$idx" '
+		$0 ~ ("^    mesh" idx ":[ \t]*$") { blk = 1; sub(/^    /, "    # "); print; next }
+		blk && /^      / { sub(/^    /, "    # "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && mesh_config_write
+}
+
+usage() {
+	echo "Usage: fips-mesh-setup <radio> [mesh-id]" >&2
+	echo "       fips-mesh-setup remove [radio]" >&2
+	echo "Radios on this device:" >&2
+	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/  \1/p" >&2
+	exit 1
+}
+
+# List the UCI section names of fips-managed mesh wifi-ifaces.
+mesh_sections() {
+	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\(fips_mesh[^.=]*\)=wifi-iface$/\1/p"
+}
+
+# ---------------------------------------------------------------------------
+# remove [radio] — delete the wireless and network sections created below
+# ---------------------------------------------------------------------------
+
+if [ "$1" = "remove" ]; then
+	if [ -n "$2" ]; then
+		SECTIONS="fips_mesh_$(printf '%s' "$2" | tr -c 'a-zA-Z0-9_' '_')"
+	else
+		SECTIONS="$(mesh_sections)"
+	fi
+	[ -n "$SECTIONS" ] || {
+		echo "No fips mesh instances configured."
+		exit 0
+	}
+	for section in $SECTIONS; do
+		ifname="$(uci -q get "wireless.$section.ifname")"
+		uci -q delete "wireless.$section"
+		uci -q delete "network.$section"
+		# Re-comment the matching mesh<N> transport in fips.yaml so the
+		# daemon stops warning about the interface we just removed.
+		idx="$(printf '%s' "$ifname" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
+		[ -n "$idx" ] && mesh_config_disable "$idx"
+		echo "Removed ${ifname:-$section}."
+	done
+	uci commit wireless
+	uci commit network
+	# 'wifi reload' re-applies the whole wireless config, so it briefly drops
+	# every client AP on all radios (a few seconds) — expected on remove.
+	wifi reload
+	echo "Restart fips: /etc/init.d/fips restart"
+	exit 0
+fi
+
+RADIO="$1"
+MESH_ID="${2:-$DEFAULT_MESH_ID}"
+
+[ -n "$RADIO" ] || usage
+
+if [ "$(uci -q get "wireless.$RADIO")" != "wifi-device" ]; then
+	echo "Error: '$RADIO' is not a wifi-device in /etc/config/wireless." >&2
+	usage
+fi
+
+# One instance per radio: section fips_mesh_<radio>, netdev fips-mesh<N>
+# where N is the radio's trailing index (radio0 -> fips-mesh0). For radios
+# named without a trailing number, fall back to the first free index.
+SECTION="fips_mesh_$(printf '%s' "$RADIO" | tr -c 'a-zA-Z0-9_' '_')"
+IDX="$(printf '%s' "$RADIO" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
+[ -n "$IDX" ] || IDX="$(printf '%s' "$RADIO" | sed -n 's/^\([0-9]\{1,\}\)$/\1/p')"
+if [ -z "$IDX" ]; then
+	IDX=0
+	while uci show wireless 2>/dev/null | grep -q "\.ifname='fips-mesh$IDX'"; do
+		IDX=$((IDX + 1))
+	done
+fi
+MESH_IFNAME="fips-mesh$IDX"
+
+# Refuse a name collision from another radio's instance (e.g. two radios
+# whose names end in the same digit) rather than silently hijacking it.
+OWNER="$(uci show wireless 2>/dev/null \
+	| sed -n "s/^wireless\.\(fips_mesh[^.=]*\)\.ifname='$MESH_IFNAME'$/\1/p")"
+if [ -n "$OWNER" ] && [ "$OWNER" != "$SECTION" ]; then
+	echo "Error: $MESH_IFNAME is already used by section '$OWNER'." >&2
+	echo "Remove it first: fips-mesh-setup remove" >&2
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Driver capability check (advisory — config below is harmless either way)
+# ---------------------------------------------------------------------------
+
+if command -v iw >/dev/null 2>&1; then
+	if ! iw list 2>/dev/null | grep -q "\* mesh point"; then
+		echo "Warning: no radio on this device advertises 'mesh point' support" >&2
+		echo "(iw list | grep 'mesh point'). The interface may fail to come up." >&2
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Wireless: open 802.11s mesh point, HWMP forwarding off
+# ---------------------------------------------------------------------------
+
+uci -q delete "wireless.$SECTION"
+uci set "wireless.$SECTION=wifi-iface"
+uci set "wireless.$SECTION.device=$RADIO"
+uci set "wireless.$SECTION.mode=mesh"
+uci set "wireless.$SECTION.mesh_id=$MESH_ID"
+uci set "wireless.$SECTION.encryption=none"
+uci set "wireless.$SECTION.mesh_fwding=0"
+uci set "wireless.$SECTION.ifname=$MESH_IFNAME"
+uci set "wireless.$SECTION.network=$SECTION"
+
+# Radios ship disabled on fresh OpenWrt installs; a disabled radio would
+# leave the mesh interface down with no error anywhere visible.
+if [ "$(uci -q get "wireless.$RADIO.disabled")" = "1" ]; then
+	echo "Note: enabling $RADIO (was disabled)."
+	uci -q delete "wireless.$RADIO.disabled"
+fi
+
+# The mesh inherits the radio's channel, and mesh points only peer on the
+# same channel. 'auto' lets each router pick its own — the classic silent
+# non-peering cause — so surface the setting loudly.
+CHANNEL="$(uci -q get "wireless.$RADIO.channel")"
+BAND="$(uci -q get "wireless.$RADIO.band")"
+if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "auto" ]; then
+	echo "Warning: $RADIO channel is '${CHANNEL:-unset}' — each router may" >&2
+	echo "auto-select a different channel and mesh points only peer on the" >&2
+	echo "same one. Pin the same channel on every backhaul router, e.g.:" >&2
+	echo "  uci set wireless.$RADIO.channel='36' && uci commit wireless && wifi reload" >&2
+fi
+
+# A client (sta) interface on the same radio follows its upstream AP's
+# channel and drags every other interface with it — a mesh pinned to a
+# different channel silently never joins, and does not recover when the
+# STA disconnects.
+for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.mode='sta'$/\1/p"); do
+	if [ "$(uci -q get "wireless.$s.device")" = "$RADIO" ]; then
+		echo "Warning: $RADIO also carries client interface '$s' (mode 'sta')." >&2
+		echo "The whole radio follows that STA's upstream channel — a mesh" >&2
+		echo "pinned to a different channel stays down silently. Align the" >&2
+		echo "mesh channel with the upstream AP, or put the mesh on a radio" >&2
+		echo "without a STA (a roaming uplink is incompatible with a" >&2
+		echo "fixed-channel mesh on the same radio)." >&2
+	fi
+done
+
+# ---------------------------------------------------------------------------
+# Network: unmanaged interface so netifd brings the netdev up. No IP config —
+# the FIPS Ethernet transport speaks raw frames on it.
+# ---------------------------------------------------------------------------
+
+uci -q delete "network.$SECTION"
+uci set "network.$SECTION=interface"
+uci set "network.$SECTION.proto=none"
+
+uci commit wireless
+uci commit network
+# 'wifi reload' re-applies the whole wireless config, so it briefly drops
+# every client AP on all radios (a few seconds) — expected when adding a mesh.
+wifi reload
+
+# Enable the matching mesh<N> transport in the shipped fips.yaml (it ships
+# commented out). Tailor the restart hint to what we could do.
+mesh_config_enable "$IDX"
+case $? in
+	0) TRANSPORT_NOTE="The mesh$IDX transport in $CONFIG that binds '$MESH_IFNAME' is
+     now uncommented and enabled." ;;
+	1) TRANSPORT_NOTE="No $CONFIG found — add a transports.ethernet entry binding
+     interface '$MESH_IFNAME' by hand." ;;
+	*) TRANSPORT_NOTE="No 'mesh$IDX' entry in $CONFIG — add a transports.ethernet
+     entry binding interface '$MESH_IFNAME' by hand (copy the mesh0 block)." ;;
+esac
+
+cat <<EOF
+Created open 802.11s mesh '$MESH_ID' as $MESH_IFNAME on $RADIO \
+(band ${BAND:-?}, channel ${CHANNEL:-auto}).
+
+ALL routers in this backhaul must share this mesh ID AND channel
+(per band). On a dual-band router, run fips-mesh-setup for the other
+radio too — second band is a standby path (failover, not multipath).
+
+Next steps:
+  1. $TRANSPORT_NOTE
+     Restart the daemon AFTER the interface is up — a transport whose
+     interface is missing at startup is skipped, not retried:
+       /etc/init.d/fips restart
+  2. Verify L2 peering with a second FIPS router in range:
+       iw dev $MESH_IFNAME station dump
+     and the FIPS link on top of it:
+       fipsctl show peers
+
+Run 'fips-mesh-setup remove' to undo all instances, or
+'fips-mesh-setup remove $RADIO' for just this one.
+EOF

@@ -770,6 +770,73 @@ node:
         assert!(config.has_identity());
     }
 
+    /// The fips.yaml shipped in the OpenWrt package must keep parsing as the
+    /// config schema evolves. The 802.11s mesh backhaul entries (one per
+    /// radio, so dual-band routers can mesh on both bands) ship commented
+    /// out — a stock install that never creates fips-mesh* logs no per-boot
+    /// bind warning; `fips-mesh-setup` uncomments the matching block when it
+    /// creates the interface (docs/how-to/set-up-80211s-mesh-backhaul.md).
+    /// Verify both states parse: as shipped (mesh inactive), and after the
+    /// uncomment `fips-mesh-setup` performs.
+    #[test]
+    fn shipped_openwrt_config_parses() {
+        let yaml = include_str!("../../packaging/openwrt-ipk/files/etc/fips/fips.yaml");
+
+        // As shipped: parses, and the mesh entries are commented out (a
+        // running daemon binds no fips-mesh* transport, so no bind warning).
+        let config: Config = serde_yaml::from_str(yaml).expect("shipped OpenWrt fips.yaml");
+        for name in ["mesh0", "mesh1"] {
+            assert!(
+                !config
+                    .transports
+                    .ethernet
+                    .iter()
+                    .any(|(n, _)| n == Some(name)),
+                "{name} must ship commented out, not active, in fips.yaml"
+            );
+        }
+
+        // What `fips-mesh-setup` produces: uncomment each mesh block, which
+        // must still parse into a transport entry bound to the right netdev.
+        let config: Config = serde_yaml::from_str(&uncomment_mesh_blocks(yaml))
+            .expect("fips.yaml with mesh transports uncommented");
+        for (name, interface) in [("mesh0", "fips-mesh0"), ("mesh1", "fips-mesh1")] {
+            assert!(
+                config
+                    .transports
+                    .ethernet
+                    .iter()
+                    .any(|(n, eth)| n == Some(name) && eth.interface == interface),
+                "{name} backhaul entry missing after uncommenting shipped fips.yaml"
+            );
+        }
+    }
+
+    /// Mirror `fips-mesh-setup`'s block uncomment: strip the `    # ` prefix
+    /// from each `# mesh<N>:` header and its `    #   ` continuation lines,
+    /// leaving every other comment untouched.
+    fn uncomment_mesh_blocks(yaml: &str) -> String {
+        let mut out = String::new();
+        let mut in_block = false;
+        for line in yaml.lines() {
+            let is_header = line
+                .strip_prefix("    # mesh")
+                .and_then(|r| r.strip_suffix(':'))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if is_header {
+                in_block = true;
+                out.push_str(&line.replacen("    # ", "    ", 1));
+            } else if in_block && line.starts_with("    #   ") {
+                out.push_str(&line.replacen("    # ", "    ", 1));
+            } else {
+                in_block = false;
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn test_parse_yaml_with_hex() {
         let yaml = r#"
