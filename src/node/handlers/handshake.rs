@@ -10,7 +10,7 @@ use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{PeerEvent, PeerMachine};
+use crate::peer::machine::{PeerAction, PeerEvent, PeerMachine};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
@@ -782,91 +782,37 @@ impl Node {
             return;
         }
 
-        // Normal path: promote to active peer
-        debug!(
-            peer = %self.peer_display_name(&peer_node_addr),
-            link_id = %link_id,
-            "handle_msg2: promoting outbound, peers_has_key={}",
-            self.peers.contains_key(&peer_node_addr),
+        // Net-new outbound promote, driven by the per-peer machine. The peer-map
+        // membership test above was false (the cross-connection block returns on
+        // an existing peer), so this is the net-new path: promote_connection hits
+        // its normal-promotion branch and returns Promoted.
+        //
+        // The transient machine is NOT inserted into peer_machines — the
+        // persistent Established machine is created inside promote_connection.
+        // With no outbound decision core to run, the machine emits PromoteToActive
+        // unconditionally. The promote tail (info log, tree/bloom/backoff, and the
+        // pending_outbound removal) lives in the executor's PromoteToActive arm.
+        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
+        let actions = machine.step(
+            PeerEvent::OutboundMsg2 {
+                their_index: header.sender_idx,
+            },
+            packet.timestamp_ms,
+            &mut self.index_allocator,
         );
-        match self.promote_connection(link_id, peer_identity, packet.timestamp_ms) {
-            Ok(result) => {
-                // Clean up pending_outbound
-                self.pending_outbound.remove(&key);
+        debug_assert_eq!(actions, vec![PeerAction::PromoteToActive { link: link_id }]);
 
-                match result {
-                    PromotionResult::Promoted(node_addr) => {
-                        info!(
-                            peer = %self.peer_display_name(&node_addr),
-                            "Peer promoted to active"
-                        );
-                        // Send initial tree announce to new peer
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionWon {
-                        loser_link_id,
-                        node_addr,
-                    } => {
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(loser_link) = self.links.get(&loser_link_id) {
-                            let loser_tid = loser_link.transport_id();
-                            let loser_addr = loser_link.remote_addr().clone();
-                            if let Some(transport) = self.transports.get(&loser_tid) {
-                                transport.close_connection(&loser_addr).await;
-                            }
-                        }
-                        // Clean up the losing connection's link
-                        self.remove_link(&loser_link_id);
-                        // Ensure addr_to_link points to the winning link
-                        self.addr_to_link
-                            .insert((packet.transport_id, packet.remote_addr.clone()), link_id);
-                        debug!(
-                            peer = %self.peer_display_name(&node_addr),
-                            loser_link_id = %loser_link_id,
-                            "Outbound cross-connection won, loser link cleaned up"
-                        );
-                        // Send initial tree announce to peer (new or reconnected)
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionLost { winner_link_id } => {
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            transport.close_connection(&packet.remote_addr).await;
-                        }
-                        // This connection lost — clean up its link
-                        self.remove_link(&link_id);
-                        // Ensure addr_to_link points to the winner's link
-                        self.addr_to_link.insert(
-                            (packet.transport_id, packet.remote_addr.clone()),
-                            winner_link_id,
-                        );
-                        debug!(
-                            winner_link_id = %winner_link_id,
-                            "Outbound cross-connection lost, keeping existing"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    link_id = %link_id,
-                    error = %e,
-                    "Failed to promote connection"
-                );
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            }
-        }
+        let ambient = PeerActionCtx {
+            verified_identity: peer_identity,
+            transport_id: packet.transport_id,
+            remote_addr: packet.remote_addr.clone(),
+            our_index: Some(our_index),
+            their_index: Some(header.sender_idx),
+            now_ms: packet.timestamp_ms,
+            is_outbound: true,
+            pending_outbound_key: Some(key),
+        };
+        self.execute_peer_actions(link_id, &ambient, actions).await;
     }
 
     /// Handle handshake message 3 (phase 0x3).
@@ -1343,6 +1289,7 @@ impl Node {
                     their_index: Some(header.sender_idx),
                     now_ms: packet.timestamp_ms,
                     is_outbound: false,
+                    pending_outbound_key: None,
                 };
                 self.execute_peer_actions(link_id, &ambient, actions).await;
             }

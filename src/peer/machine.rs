@@ -233,6 +233,13 @@ pub(crate) enum PeerEvent {
         wire: WireOutcome,
         est: EstablishSnapshot,
     },
+    /// Outbound handshake msg2 completed (Noise finalized, identity crystallized
+    /// shell-side from the connection's expected identity, ACL already gated,
+    /// msg3 sent). The net-new-vs-cross-connection decision is the shell's
+    /// peer-map membership test; this event is emitted only on the net-new path,
+    /// so it maps directly to a promote. `their_index` carries the peer's session
+    /// index for shape parity with the inbound path.
+    OutboundMsg2 { their_index: SessionIndex },
     /// `promote_connection` resolved the [`PromoteToActive`](PeerAction::PromoteToActive)
     /// action shell-side; the machine consumes the outcome (it does not
     /// re-decide the tie-break).
@@ -540,6 +547,7 @@ impl PeerMachine {
             PeerEvent::InboundMsg3 { wire, est } => {
                 self.on_inbound_msg3(wire, est, now, index_allocator)
             }
+            PeerEvent::OutboundMsg2 { their_index } => self.on_outbound_msg2(their_index, now),
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::RekeyMsg2 { their_index } => self.on_rekey_msg2(their_index),
             PeerEvent::RekeyConsume { action } => self.map_rekey_action(action, now),
@@ -742,6 +750,23 @@ impl PeerMachine {
                 vec![PeerAction::PromoteToActive { link: self.link }]
             }
         }
+    }
+
+    /// Net-new outbound promote after msg2 completes the initiator handshake.
+    ///
+    /// The net-new-vs-cross-connection decision is made shell-side (via the peer
+    /// map), so this handler is reached only on the net-new path and maps
+    /// directly to an unconditional promote — there is no sub-decision to run
+    /// here. The persistent `Established` machine is created inside
+    /// `promote_connection`; this machine is a transient decision vehicle that is
+    /// discarded after the step, so the `set_their_index` and state write below
+    /// are behaviorally inert (kept to make the transient's intent explicit and
+    /// to match the established lifecycle shape).
+    fn on_outbound_msg2(&mut self, their_index: SessionIndex, _now: u64) -> Vec<PeerAction> {
+        self.conn.set_their_index(their_index);
+        let addr = self.addr().unwrap_or_else(zero_addr);
+        self.state = PeerState::Established { addr };
+        vec![PeerAction::PromoteToActive { link: self.link }]
     }
 
     /// XX inbound cross-connection at msg3. The Noise session swap and the
@@ -1336,6 +1361,22 @@ mod tests {
         assert!(m.is_established_context());
         assert_eq!(m.addr(), Some(addr));
         assert_eq!(m.our_index(), Some(idx));
+    }
+
+    // ---- Test: net-new outbound promote at msg2 ---------------------------
+    #[test]
+    fn outbound_msg2_promotes_net_new() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let link = LinkId::new(3);
+        let mut m = PeerMachine::new_outbound(link, id, 0);
+        let their_index = SessionIndex::new(0x77);
+
+        let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
+
+        assert_eq!(actions, vec![PeerAction::PromoteToActive { link }]);
+        assert_eq!(m.state(), PeerState::Established { addr });
     }
 
     // ---- Test 1: rekey initiator cutover ----------------------------------

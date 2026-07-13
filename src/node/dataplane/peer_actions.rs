@@ -80,11 +80,16 @@ pub(in crate::node) struct PeerActionCtx {
     /// The wire timestamp driving this step (promotion ts / loss-report clock).
     pub(in crate::node) now_ms: u64,
     /// Establish direction for this exchange. `false` = inbound, `true` =
-    /// outbound. The live `PromoteToActive` body drives the inbound establish
-    /// promote only (msg3 is always responder side), so it does not read this
-    /// yet; retained for the future outbound promote path, whose promote-Err
-    /// cleanup differs from the inbound one.
+    /// outbound. `PromoteToActive` reads this to pick the direction-specific
+    /// promote tail: the outbound branch logs a `Peer promoted to active` line
+    /// and clears `pending_outbound`, and its promote-Err cleanup is warn-only
+    /// (no link/index teardown), unlike the inbound branch.
     pub(in crate::node) is_outbound: bool,
+    /// The `pending_outbound` key for an outbound promote, cleared on success.
+    /// `Some` only on the outbound driven step (the map entry keyed by the wire
+    /// `receiver_idx`); `None` on the inbound and maintenance paths, which have
+    /// no `pending_outbound` entry to clear.
+    pub(in crate::node) pending_outbound_key: Option<(TransportId, u32)>,
 }
 
 impl Node {
@@ -162,38 +167,68 @@ impl Node {
                     // state that the rekey/reap folds read.
 
                     // Capture msg2 BEFORE `promote_connection` removes the pending
-                    // connection, so a duplicate msg1 can be answered with it.
-                    let wire_msg2 = self
-                        .connections
-                        .get(&promote_link)
-                        .and_then(|c| c.handshake_msg2().map(|m| m.to_vec()));
+                    // connection, so a duplicate msg1 can be answered with it. Only
+                    // the inbound promote answers a duplicate inbound msg1; the
+                    // outbound side has no stored msg2 to resend.
+                    let wire_msg2 = if ambient.is_outbound {
+                        None
+                    } else {
+                        self.connections
+                            .get(&promote_link)
+                            .and_then(|c| c.handshake_msg2().map(|m| m.to_vec()))
+                    };
 
-                    debug!(
-                        // Relocated from `handlers/handshake.rs` (M6): pin the target
-                        // so it stays visible under the harness's
-                        // `fips::node::handlers::handshake=debug` filter.
-                        target: "fips::node::handlers::handshake",
-                        peer = %self.peer_display_name(ambient.verified_identity.node_addr()),
-                        link_id = %promote_link,
-                        our_index = ?ambient.our_index,
-                        "handle_msg3: promoting inbound, peers_has_key={}",
-                        self.peers.contains_key(ambient.verified_identity.node_addr()),
-                    );
+                    if ambient.is_outbound {
+                        debug!(
+                            // Relocated from `handlers/handshake.rs`: pin the target
+                            // so it stays visible under the harness's
+                            // `fips::node::handlers::handshake=debug` filter.
+                            target: "fips::node::handlers::handshake",
+                            peer = %self.peer_display_name(ambient.verified_identity.node_addr()),
+                            link_id = %promote_link,
+                            "handle_msg2: promoting outbound, peers_has_key={}",
+                            self.peers.contains_key(ambient.verified_identity.node_addr()),
+                        );
+                    } else {
+                        debug!(
+                            // Relocated from `handlers/handshake.rs`: pin the target
+                            // so it stays visible under the harness's
+                            // `fips::node::handlers::handshake=debug` filter.
+                            target: "fips::node::handlers::handshake",
+                            peer = %self.peer_display_name(ambient.verified_identity.node_addr()),
+                            link_id = %promote_link,
+                            our_index = ?ambient.our_index,
+                            "handle_msg3: promoting inbound, peers_has_key={}",
+                            self.peers.contains_key(ambient.verified_identity.node_addr()),
+                        );
+                    }
                     match self.promote_connection(
                         promote_link,
                         ambient.verified_identity,
                         ambient.now_ms,
                     ) {
                         Ok(PromotionResult::Promoted(node_addr)) => {
-                            // Store msg2 on peer for resend on duplicate msg1
-                            if let (Some(peer), Some(msg2)) =
-                                (self.peers.get_mut(&node_addr), wire_msg2)
-                            {
-                                peer.set_handshake_msg2(msg2);
+                            if ambient.is_outbound {
+                                // The outbound promote logs a second line here in
+                                // addition to `promote_connection`'s "Connection
+                                // promoted to active peer". Pin the target so the
+                                // relocated line keeps the module it filtered under.
+                                info!(
+                                    target: "fips::node::handlers::handshake",
+                                    peer = %self.peer_display_name(&node_addr),
+                                    "Peer promoted to active"
+                                );
+                            } else {
+                                // Store msg2 on peer for resend on duplicate msg1
+                                if let (Some(peer), Some(msg2)) =
+                                    (self.peers.get_mut(&node_addr), wire_msg2)
+                                {
+                                    peer.set_handshake_msg2(msg2);
+                                }
+                                // Promotion is logged once by `promote_connection`
+                                // ("Connection promoted to active peer"); no separate
+                                // inbound-path line.
                             }
-                            // Promotion is logged once by `promote_connection`
-                            // ("Connection promoted to active peer"); no separate
-                            // inbound-path line.
                             // Send initial tree announce to new peer
                             if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                                 debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
@@ -201,6 +236,12 @@ impl Node {
                             // Schedule filter announce (sent on next tick via debounce)
                             self.bloom_state.mark_update_needed(node_addr);
                             self.reset_lookup_backoff();
+                            // Clear the pending outbound entry on promote success
+                            // only; a failed promote leaves it for the stale-
+                            // connection reaper.
+                            if let Some(k) = ambient.pending_outbound_key {
+                                self.pending_outbound.remove(&k);
+                            }
                         }
                         Ok(PromotionResult::CrossConnectionWon {
                             loser_link_id,
@@ -268,6 +309,19 @@ impl Node {
                                 winner_link_id = %winner_link_id,
                                 "Inbound cross-connection lost, keeping existing"
                             );
+                        }
+                        Err(e) if ambient.is_outbound => {
+                            // The outbound promote-failure path is warn-only: it
+                            // records the reject but performs no link/index teardown
+                            // and leaves the `pending_outbound` entry for the stale-
+                            // connection reaper.
+                            warn!(
+                                link_id = %promote_link,
+                                error = %e,
+                                "Failed to promote connection"
+                            );
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                         Err(e) => {
                             // A max_peers rejection is expected policy, not a fault —

@@ -588,6 +588,7 @@ impl Node {
             their_index: peer.their_index(),
             now_ms,
             is_outbound: false,
+            pending_outbound_key: None,
         }
     }
 }
