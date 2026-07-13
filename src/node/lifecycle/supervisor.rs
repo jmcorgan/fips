@@ -170,8 +170,6 @@ pub(crate) enum Event {
     /// `Failed`, an optional child out → `Degraded`), but at runtime `Failed` is
     /// a published health signal, not a teardown — the driver keeps serving. No
     /// restart (the FSM has no restart action). Inert outside `Running`.
-    #[allow(dead_code)]
-    // constructed by the runtime exit-producer wiring in the following commit
     ChildExited {
         /// The child whose task/thread exited.
         child: Child,

@@ -97,6 +97,18 @@ impl Node {
             }
         };
 
+        // Take the runtime child-liveness receiver, or a dummy channel (when the
+        // node was seeded straight into Running without a start()). Holding the
+        // dummy sender in the guard keeps the channel open. Same pattern as TUN
+        // outbound / DNS identity.
+        let (mut child_exit_rx, _child_exit_guard) = match self.child_exit_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
         let mut tick =
             tokio::time::interval(Duration::from_secs(self.config().node.tick_interval_secs));
 
@@ -249,6 +261,27 @@ impl Node {
                                     fb_drained += 1;
                                 }
                                 Err(_) => break,
+                            }
+                        }
+                    }
+                }
+                // Runtime child-liveness. Placed AFTER `packet_rx` so the hot
+                // inbound path keeps its `biased` priority. A directly-observable
+                // child (TUN threads, DNS/mDNS/Nostr) exited on its own; feed the
+                // FSM, which republishes health (Degraded here — a Running node
+                // always has ≥1 transport up). `on_child_exited` only ever emits
+                // `PublishState`; other variants are ignored defensively.
+                maybe_child = child_exit_rx.recv() => {
+                    if let Some(child) = maybe_child {
+                        let actions = self
+                            .supervisor
+                            .fsm
+                            .step(crate::node::lifecycle::supervisor::Event::ChildExited { child });
+                        for action in actions {
+                            if let crate::node::lifecycle::supervisor::Action::PublishState(ns) =
+                                action
+                            {
+                                self.supervisor.state = ns;
                             }
                         }
                     }
