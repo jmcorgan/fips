@@ -69,6 +69,125 @@ impl fmt::Display for ConnectivityState {
     }
 }
 
+/// Published active-send-state for a peer (the two-tier boundary).
+///
+/// This is the send-critical subset of an `ActivePeer` that the data plane
+/// reads (and, on roam/responder-cutover, writes) directly by plain borrow
+/// with no FSM dispatch: the three epoch slots (current / previous-draining /
+/// pending), the K-bit + session-relative time base, the transport target,
+/// the connected-UDP handles, and the hot per-packet counters. Grouping these
+/// draws the control/published-send-state boundary inside the peer entry.
+///
+/// Co-located, not behind `Arc`/`ArcSwap` — the data plane is not sharded, so
+/// the hot path reads this by plain borrow. Publishing behind `Arc`/`ArcSwap`
+/// is later-increment plumbing for a sharded data plane.
+///
+/// Like `ActivePeer`, this does not implement `Clone` because it contains
+/// `NoiseSession`, which cannot be safely cloned (cloning would risk nonce
+/// reuse, a catastrophic security failure).
+#[derive(Debug)]
+struct PeerSendState {
+    // === Current epoch slot ===
+    /// Noise session for encryption/decryption (None if legacy peer).
+    noise_session: Option<NoiseSession>,
+    /// Our session index (they include this when sending TO us).
+    our_index: Option<SessionIndex>,
+    /// Their session index (we include this when sending TO them).
+    their_index: Option<SessionIndex>,
+
+    // === Previous / draining epoch slot ===
+    /// Previous session kept alive during drain window after cutover.
+    previous_session: Option<NoiseSession>,
+    /// Previous session's our_index (for peers_by_index cleanup on drain expiry).
+    previous_our_index: Option<SessionIndex>,
+    /// When the drain window started (None = no drain in progress).
+    drain_started: Option<Instant>,
+
+    // === Pending epoch slot ===
+    /// Pending new session from completed rekey (before K-bit cutover).
+    pending_new_session: Option<NoiseSession>,
+    /// Pending new session's our_index.
+    pending_our_index: Option<SessionIndex>,
+    /// Pending new session's their_index.
+    pending_their_index: Option<SessionIndex>,
+
+    // === Epoch bit + session-relative time base ===
+    /// Current K-bit epoch value (alternates each rekey).
+    current_k_bit: bool,
+    /// Session start time for computing session-relative timestamps.
+    /// Used as the epoch for the 4-byte inner header timestamp field.
+    session_start: Instant,
+
+    // === Transport target ===
+    /// Transport ID for this peer's link.
+    transport_id: Option<TransportId>,
+    /// Current transport address (for roaming support).
+    current_addr: Option<TransportAddr>,
+    /// Link used to reach this peer.
+    link_id: LinkId,
+
+    // === Connected-UDP handles ===
+    /// Unix UDP fast-path: per-peer `connect()`-ed socket (paired with
+    /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
+    /// the connected 5-tuple, so inbound packets land here; the
+    /// encrypt-worker send path sends with `msg_name = NULL`, skipping
+    /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
+    /// in-flight worker jobs survive rekey/address-change rotations.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    connected_udp: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
+
+    /// Per-peer recv drain thread. Always paired with `connected_udp`:
+    /// the kernel routes inbound packets from this peer to the
+    /// connected socket, so it *must* be drained or the kernel recv
+    /// buffer fills. Drop signals shutdown via self-pipe.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    peer_recv_drain: Option<crate::peer::connected_udp::PeerRecvDrain>,
+
+    // === Hot counters ===
+    /// Link statistics.
+    link_stats: LinkStats,
+    /// When this peer was last seen (any activity, Unix milliseconds).
+    last_seen: u64,
+    /// Number of replay detections suppressed since last session reset.
+    replay_suppressed_count: u32,
+    /// Consecutive decryption failures (reset on any successful decrypt).
+    consecutive_decrypt_failures: u32,
+    /// Per-peer MMP state (None for legacy peers without Noise sessions).
+    mmp: Option<MmpPeerState>,
+}
+
+impl PeerSendState {
+    /// Empty send-state for a peer with no Noise session yet. Mirrors the
+    /// send-critical portion of `ActivePeer::new`.
+    fn new(link_id: LinkId, session_start: Instant, last_seen: u64) -> Self {
+        Self {
+            noise_session: None,
+            our_index: None,
+            their_index: None,
+            previous_session: None,
+            previous_our_index: None,
+            drain_started: None,
+            pending_new_session: None,
+            pending_our_index: None,
+            pending_their_index: None,
+            current_k_bit: false,
+            session_start,
+            transport_id: None,
+            current_addr: None,
+            link_id,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            connected_udp: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            peer_recv_drain: None,
+            link_stats: LinkStats::new(),
+            last_seen,
+            replay_suppressed_count: 0,
+            consecutive_decrypt_failures: 0,
+            mmp: None,
+        }
+    }
+}
+
 /// A fully authenticated remote FIPS node.
 ///
 /// Created only after successful Noise KK handshake. The identity is
@@ -84,22 +203,8 @@ pub struct ActivePeer {
     identity: PeerIdentity,
 
     // === Connection ===
-    /// Link used to reach this peer.
-    link_id: LinkId,
     /// Current connectivity state.
     connectivity: ConnectivityState,
-
-    // === Session (Wire Protocol) ===
-    /// Noise session for encryption/decryption (None if legacy peer).
-    noise_session: Option<NoiseSession>,
-    /// Our session index (they include this when sending TO us).
-    our_index: Option<SessionIndex>,
-    /// Their session index (we include this when sending TO them).
-    their_index: Option<SessionIndex>,
-    /// Transport ID for this peer's link.
-    transport_id: Option<TransportId>,
-    /// Current transport address (for roaming support).
-    current_addr: Option<TransportAddr>,
 
     // === Spanning Tree ===
     /// Their latest parent declaration.
@@ -125,26 +230,13 @@ pub struct ActivePeer {
     /// Whether we owe them a filter update.
     pending_filter_update: bool,
 
-    // === Timing ===
-    /// Session start time for computing session-relative timestamps.
-    /// Used as the epoch for the 4-byte inner header timestamp field.
-    session_start: Instant,
-
     // === Statistics ===
-    /// Link statistics.
-    link_stats: LinkStats,
     /// When this peer was authenticated (Unix milliseconds).
     authenticated_at: u64,
-    /// When this peer was last seen (any activity, Unix milliseconds).
-    last_seen: u64,
 
     // === Epoch (Restart Detection) ===
     /// Remote peer's startup epoch (from handshake). Used to detect restarts.
     remote_epoch: Option<[u8; 8]>,
-
-    // === MMP ===
-    /// Per-peer MMP state (None for legacy peers without Noise sessions).
-    mmp: Option<MmpPeerState>,
 
     // === Heartbeat ===
     /// When we last sent a heartbeat to this peer.
@@ -155,12 +247,6 @@ pub struct ActivePeer {
     /// Cleared after the handshake timeout window.
     handshake_msg2: Option<Vec<u8>>,
 
-    // === Replay Detection Suppression ===
-    /// Number of replay detections suppressed since last session reset.
-    replay_suppressed_count: u32,
-    /// Consecutive decryption failures (reset on any successful decrypt).
-    consecutive_decrypt_failures: u32,
-
     // === Rekey (Key Rotation) ===
     /// When the current Noise session was established (for rekey timer).
     session_established_at: Instant,
@@ -170,20 +256,6 @@ pub struct ActivePeer {
     /// dual-initiation in symmetric-start meshes; mean interval is
     /// preserved.
     rekey_jitter_secs: i64,
-    /// Current K-bit epoch value (alternates each rekey).
-    current_k_bit: bool,
-    /// Previous session kept alive during drain window after cutover.
-    previous_session: Option<NoiseSession>,
-    /// Previous session's our_index (for peers_by_index cleanup on drain expiry).
-    previous_our_index: Option<SessionIndex>,
-    /// When the drain window started (None = no drain in progress).
-    drain_started: Option<Instant>,
-    /// Pending new session from completed rekey (before K-bit cutover).
-    pending_new_session: Option<NoiseSession>,
-    /// Pending new session's our_index.
-    pending_our_index: Option<SessionIndex>,
-    /// Pending new session's their_index.
-    pending_their_index: Option<SessionIndex>,
     /// Whether a rekey is currently in progress (handshake sent, not yet complete).
     rekey_in_progress: bool,
     /// When we last received a rekey msg1 from this peer (dampening).
@@ -199,21 +271,10 @@ pub struct ActivePeer {
     /// In-progress rekey: number of msg1 retransmissions performed so far.
     rekey_msg1_resend_count: u32,
 
-    /// Unix UDP fast-path: per-peer `connect()`-ed socket (paired with
-    /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
-    /// the connected 5-tuple, so inbound packets land here; the
-    /// encrypt-worker send path sends with `msg_name = NULL`, skipping
-    /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
-    /// in-flight worker jobs survive rekey/address-change rotations.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    connected_udp: Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>>,
-
-    /// Per-peer recv drain thread. Always paired with `connected_udp`:
-    /// the kernel routes inbound packets from this peer to the
-    /// connected socket, so it *must* be drained or the kernel recv
-    /// buffer fills. Drop signals shutdown via self-pipe.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    peer_recv_drain: Option<crate::peer::connected_udp::PeerRecvDrain>,
+    // === Published active-send-state (two-tier boundary) ===
+    /// The send-critical subset read (and, on roam/responder-cutover, written)
+    /// directly by the data plane. See `PeerSendState`.
+    send: PeerSendState,
 }
 
 impl ActivePeer {
@@ -225,13 +286,7 @@ impl ActivePeer {
         let now = Instant::now();
         Self {
             identity,
-            link_id,
             connectivity: ConnectivityState::Connected,
-            noise_session: None,
-            our_index: None,
-            their_index: None,
-            transport_id: None,
-            current_addr: None,
             declaration: None,
             ancestry: None,
             tree_announce_min_interval_ms: 500,
@@ -241,25 +296,12 @@ impl ActivePeer {
             filter_sequence: 0,
             filter_received_at: 0,
             pending_filter_update: true, // Send filter on new connection
-            session_start: now,
-            link_stats: LinkStats::new(),
             authenticated_at,
-            last_seen: authenticated_at,
             remote_epoch: None,
-            mmp: None,
             last_heartbeat_sent: None,
             handshake_msg2: None,
-            replay_suppressed_count: 0,
-            consecutive_decrypt_failures: 0,
             session_established_at: now,
             rekey_jitter_secs: draw_rekey_jitter(),
-            current_k_bit: false,
-            previous_session: None,
-            previous_our_index: None,
-            drain_started: None,
-            pending_new_session: None,
-            pending_our_index: None,
-            pending_their_index: None,
             rekey_in_progress: false,
             last_peer_rekey: None,
             rekey_handshake: None,
@@ -267,10 +309,7 @@ impl ActivePeer {
             rekey_msg1: None,
             rekey_msg1_next_resend: 0,
             rekey_msg1_resend_count: 0,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            connected_udp: None,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            peer_recv_drain: None,
+            send: PeerSendState::new(link_id, now, authenticated_at),
         }
     }
 
@@ -285,7 +324,7 @@ impl ActivePeer {
         link_stats: LinkStats,
     ) -> Self {
         let mut peer = Self::new(identity, link_id, authenticated_at);
-        peer.link_stats = link_stats;
+        peer.send.link_stats = link_stats;
         peer
     }
 
@@ -309,15 +348,22 @@ impl ActivePeer {
         remote_epoch: Option<[u8; 8]>,
     ) -> Self {
         let now = Instant::now();
+        let mut send = PeerSendState::new(link_id, now, authenticated_at);
+        send.noise_session = Some(noise_session);
+        send.our_index = Some(our_index);
+        send.their_index = Some(their_index);
+        send.transport_id = Some(transport_id);
+        send.current_addr = Some(current_addr);
+        send.link_stats = link_stats;
+        send.mmp = Some(MmpPeerState::new(
+            mmp_config.mode,
+            mmp_config.log_interval_secs,
+            mmp_config.owd_window_size,
+            is_initiator,
+        ));
         Self {
             identity,
-            link_id,
             connectivity: ConnectivityState::Connected,
-            noise_session: Some(noise_session),
-            our_index: Some(our_index),
-            their_index: Some(their_index),
-            transport_id: Some(transport_id),
-            current_addr: Some(current_addr),
             declaration: None,
             ancestry: None,
             tree_announce_min_interval_ms: 500,
@@ -327,30 +373,12 @@ impl ActivePeer {
             filter_sequence: 0,
             filter_received_at: 0,
             pending_filter_update: true,
-            session_start: now,
-            link_stats,
             authenticated_at,
-            last_seen: authenticated_at,
             remote_epoch,
-            mmp: Some(MmpPeerState::new(
-                mmp_config.mode,
-                mmp_config.log_interval_secs,
-                mmp_config.owd_window_size,
-                is_initiator,
-            )),
             last_heartbeat_sent: None,
             handshake_msg2: None,
-            replay_suppressed_count: 0,
-            consecutive_decrypt_failures: 0,
             session_established_at: now,
             rekey_jitter_secs: draw_rekey_jitter(),
-            current_k_bit: false,
-            previous_session: None,
-            previous_our_index: None,
-            drain_started: None,
-            pending_new_session: None,
-            pending_our_index: None,
-            pending_their_index: None,
             rekey_in_progress: false,
             last_peer_rekey: None,
             rekey_handshake: None,
@@ -358,10 +386,7 @@ impl ActivePeer {
             rekey_msg1: None,
             rekey_msg1_next_resend: 0,
             rekey_msg1_resend_count: 0,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            connected_udp: None,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            peer_recv_drain: None,
+            send,
         }
     }
 
@@ -374,7 +399,7 @@ impl ActivePeer {
     pub(crate) fn connected_udp(
         &self,
     ) -> Option<std::sync::Arc<crate::peer::connected_udp::ConnectedPeerSocket>> {
-        self.connected_udp.clone()
+        self.send.connected_udp.clone()
     }
 
     /// Install a per-peer `connect()`-ed UDP socket with its paired
@@ -388,10 +413,10 @@ impl ActivePeer {
     ) {
         // Drop the old drain BEFORE the old socket so its last fd
         // reference is released cleanly.
-        self.peer_recv_drain = None;
-        self.connected_udp = None;
-        self.connected_udp = Some(socket);
-        self.peer_recv_drain = Some(drain);
+        self.send.peer_recv_drain = None;
+        self.send.connected_udp = None;
+        self.send.connected_udp = Some(socket);
+        self.send.peer_recv_drain = Some(drain);
     }
 
     /// Clear the per-peer connected UDP socket + drain. The drain
@@ -401,8 +426,8 @@ impl ActivePeer {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[allow(dead_code)] // called from session-deregister + rekey follow-up
     pub(crate) fn clear_connected_udp(&mut self) {
-        self.peer_recv_drain = None;
-        self.connected_udp = None;
+        self.send.peer_recv_drain = None;
+        self.send.connected_udp = None;
     }
 
     // === Identity Accessors ===
@@ -436,7 +461,7 @@ impl ActivePeer {
 
     /// Get the link ID.
     pub fn link_id(&self) -> LinkId {
-        self.link_id
+        self.send.link_id
     }
 
     /// Get the connectivity state.
@@ -463,34 +488,34 @@ impl ActivePeer {
 
     /// Check if this peer has a Noise session.
     pub fn has_session(&self) -> bool {
-        self.noise_session.is_some()
+        self.send.noise_session.is_some()
     }
 
     /// Get the Noise session, if present.
     pub fn noise_session(&self) -> Option<&NoiseSession> {
-        self.noise_session.as_ref()
+        self.send.noise_session.as_ref()
     }
 
     /// Get mutable access to the Noise session.
     pub fn noise_session_mut(&mut self) -> Option<&mut NoiseSession> {
-        self.noise_session.as_mut()
+        self.send.noise_session.as_mut()
     }
 
     /// Get our session index (they use this to send TO us).
     pub fn our_index(&self) -> Option<SessionIndex> {
-        self.our_index
+        self.send.our_index
     }
 
     /// Get their session index (we use this to send TO them).
     pub fn their_index(&self) -> Option<SessionIndex> {
-        self.their_index
+        self.send.their_index
     }
 
     /// Update their session index (used during cross-connection resolution
     /// when the losing node keeps its inbound session but needs the peer's
     /// outbound index).
     pub fn set_their_index(&mut self, index: SessionIndex) {
-        self.their_index = Some(index);
+        self.send.their_index = Some(index);
     }
 
     /// Replace the Noise session and indices during cross-connection resolution.
@@ -509,21 +534,21 @@ impl ActivePeer {
         new_their_index: SessionIndex,
     ) -> Option<SessionIndex> {
         self.reset_replay_suppressed();
-        let old_our_index = self.our_index;
-        self.noise_session = Some(new_session);
-        self.our_index = Some(new_our_index);
-        self.their_index = Some(new_their_index);
+        let old_our_index = self.send.our_index;
+        self.send.noise_session = Some(new_session);
+        self.send.our_index = Some(new_our_index);
+        self.send.their_index = Some(new_their_index);
         old_our_index
     }
 
     /// Get the transport ID for this peer.
     pub fn transport_id(&self) -> Option<TransportId> {
-        self.transport_id
+        self.send.transport_id
     }
 
     /// Get the current transport address.
     pub fn current_addr(&self) -> Option<&TransportAddr> {
-        self.current_addr.as_ref()
+        self.send.current_addr.as_ref()
     }
 
     /// Update the current address (for roaming support).
@@ -533,10 +558,10 @@ impl ActivePeer {
     /// use this to invalidate per-peer `connect(2)`-ed UDP sockets whose
     /// 5-tuple just went stale.
     pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
-        let changed =
-            self.transport_id != Some(transport_id) || self.current_addr.as_ref() != Some(&addr);
-        self.transport_id = Some(transport_id);
-        self.current_addr = Some(addr);
+        let changed = self.send.transport_id != Some(transport_id)
+            || self.send.current_addr.as_ref() != Some(&addr);
+        self.send.transport_id = Some(transport_id);
+        self.send.current_addr = Some(addr);
         changed
     }
 
@@ -561,38 +586,38 @@ impl ActivePeer {
 
     /// Increment replay suppression counter. Returns the new count.
     pub fn increment_replay_suppressed(&mut self) -> u32 {
-        self.replay_suppressed_count += 1;
-        self.replay_suppressed_count
+        self.send.replay_suppressed_count += 1;
+        self.send.replay_suppressed_count
     }
 
     /// Reset replay suppression counter, returning previous count.
     pub fn reset_replay_suppressed(&mut self) -> u32 {
-        let count = self.replay_suppressed_count;
-        self.replay_suppressed_count = 0;
+        let count = self.send.replay_suppressed_count;
+        self.send.replay_suppressed_count = 0;
         count
     }
 
     /// Current replay suppression count.
     pub fn replay_suppressed_count(&self) -> u32 {
-        self.replay_suppressed_count
+        self.send.replay_suppressed_count
     }
 
     // === Decryption Failure Tracking ===
 
     /// Increment consecutive decryption failure counter, returning new count.
     pub fn increment_decrypt_failures(&mut self) -> u32 {
-        self.consecutive_decrypt_failures += 1;
-        self.consecutive_decrypt_failures
+        self.send.consecutive_decrypt_failures += 1;
+        self.send.consecutive_decrypt_failures
     }
 
     /// Reset consecutive decryption failure counter.
     pub fn reset_decrypt_failures(&mut self) {
-        self.consecutive_decrypt_failures = 0;
+        self.send.consecutive_decrypt_failures = 0;
     }
 
     /// Current consecutive decryption failure count.
     pub fn consecutive_decrypt_failures(&self) -> u32 {
-        self.consecutive_decrypt_failures
+        self.send.consecutive_decrypt_failures
     }
 
     // === Epoch Accessors ===
@@ -663,24 +688,24 @@ impl ActivePeer {
 
     /// Get link statistics.
     pub fn link_stats(&self) -> &LinkStats {
-        &self.link_stats
+        &self.send.link_stats
     }
 
     /// Get mutable link statistics.
     pub fn link_stats_mut(&mut self) -> &mut LinkStats {
-        &mut self.link_stats
+        &mut self.send.link_stats
     }
 
     // === MMP Accessors ===
 
     /// Get MMP state (None for legacy peers without sessions).
     pub fn mmp(&self) -> Option<&MmpPeerState> {
-        self.mmp.as_ref()
+        self.send.mmp.as_ref()
     }
 
     /// Get mutable MMP state.
     pub fn mmp_mut(&mut self) -> Option<&mut MmpPeerState> {
-        self.mmp.as_mut()
+        self.send.mmp.as_mut()
     }
 
     /// Link cost for routing decisions.
@@ -716,12 +741,12 @@ impl ActivePeer {
 
     /// When this peer was last seen.
     pub fn last_seen(&self) -> u64 {
-        self.last_seen
+        self.send.last_seen
     }
 
     /// Time since last activity.
     pub fn idle_time(&self, current_time_ms: u64) -> u64 {
-        current_time_ms.saturating_sub(self.last_seen)
+        current_time_ms.saturating_sub(self.send.last_seen)
     }
 
     /// Connection duration since authentication.
@@ -734,12 +759,12 @@ impl ActivePeer {
     /// Returns milliseconds since session establishment, truncated to u32.
     /// Wraps at ~49.7 days which is acceptable for session-relative timing.
     pub fn session_elapsed_ms(&self) -> u32 {
-        self.session_start.elapsed().as_millis() as u32
+        self.send.session_start.elapsed().as_millis() as u32
     }
 
     /// When this peer's session started (for link-dead fallback timing).
     pub fn session_start(&self) -> Instant {
-        self.session_start
+        self.send.session_start
     }
 
     // === Heartbeat ===
@@ -758,7 +783,7 @@ impl ActivePeer {
 
     /// Update last seen timestamp.
     pub fn touch(&mut self, current_time_ms: u64) {
-        self.last_seen = current_time_ms;
+        self.send.last_seen = current_time_ms;
         // If we were stale, receiving traffic makes us connected again
         if self.connectivity == ConnectivityState::Stale {
             self.connectivity = ConnectivityState::Connected;
@@ -785,12 +810,12 @@ impl ActivePeer {
     /// Mark peer as connected (e.g., after successful reconnect).
     pub fn mark_connected(&mut self, current_time_ms: u64) {
         self.connectivity = ConnectivityState::Connected;
-        self.last_seen = current_time_ms;
+        self.send.last_seen = current_time_ms;
     }
 
     /// Update the link ID (e.g., on reconnect).
     pub fn set_link_id(&mut self, link_id: LinkId) {
-        self.link_id = link_id;
+        self.send.link_id = link_id;
     }
 
     // === Tree Updates ===
@@ -804,7 +829,7 @@ impl ActivePeer {
     ) {
         self.declaration = Some(declaration);
         self.ancestry = Some(ancestry);
-        self.last_seen = current_time_ms;
+        self.send.last_seen = current_time_ms;
     }
 
     /// Clear peer's tree position.
@@ -858,7 +883,7 @@ impl ActivePeer {
         self.inbound_filter = Some(filter);
         self.filter_sequence = sequence;
         self.filter_received_at = current_time_ms;
-        self.last_seen = current_time_ms;
+        self.send.last_seen = current_time_ms;
     }
 
     /// Clear peer's inbound filter.
@@ -908,7 +933,7 @@ impl ActivePeer {
             mode,
             ..MmpConfig::default()
         };
-        self.mmp = Some(MmpPeerState::new(
+        self.send.mmp = Some(MmpPeerState::new(
             config.mode,
             config.log_interval_secs,
             config.owd_window_size,
@@ -923,7 +948,8 @@ impl ActivePeer {
     /// is compiled out of release builds.
     #[cfg(test)]
     pub(crate) fn test_backdate_session_start(&mut self, age: std::time::Duration) {
-        self.session_start = self
+        self.send.session_start = self
+            .send
             .session_start
             .checked_sub(age)
             .unwrap_or_else(Instant::now);
@@ -941,7 +967,7 @@ impl ActivePeer {
 
     /// Current K-bit epoch value.
     pub fn current_k_bit(&self) -> bool {
-        self.current_k_bit
+        self.send.current_k_bit
     }
 
     /// Whether a rekey is currently in progress.
@@ -969,38 +995,38 @@ impl ActivePeer {
 
     /// Get the pending new session's our_index.
     pub fn pending_our_index(&self) -> Option<SessionIndex> {
-        self.pending_our_index
+        self.send.pending_our_index
     }
 
     /// Get the pending new session's their_index.
     pub fn pending_their_index(&self) -> Option<SessionIndex> {
-        self.pending_their_index
+        self.send.pending_their_index
     }
 
     /// Get the previous session's our_index (during drain).
     pub fn previous_our_index(&self) -> Option<SessionIndex> {
-        self.previous_our_index
+        self.send.previous_our_index
     }
 
     /// Get the previous session for decryption fallback.
     pub fn previous_session(&self) -> Option<&NoiseSession> {
-        self.previous_session.as_ref()
+        self.send.previous_session.as_ref()
     }
 
     /// Get mutable access to the previous session for decryption.
     pub fn previous_session_mut(&mut self) -> Option<&mut NoiseSession> {
-        self.previous_session.as_mut()
+        self.send.previous_session.as_mut()
     }
 
     /// Get the pending new session (completed rekey, not yet cut over).
     pub fn pending_new_session(&self) -> Option<&NoiseSession> {
-        self.pending_new_session.as_ref()
+        self.send.pending_new_session.as_ref()
     }
 
     /// Mutable access to the pending new session, for trial-decrypt of an
     /// inbound frame before promoting it on a peer K-bit flip.
     pub fn pending_new_session_mut(&mut self) -> Option<&mut NoiseSession> {
-        self.pending_new_session.as_mut()
+        self.send.pending_new_session.as_mut()
     }
 
     /// Store a completed rekey session and its indices.
@@ -1013,9 +1039,9 @@ impl ActivePeer {
         our_index: SessionIndex,
         their_index: SessionIndex,
     ) {
-        self.pending_new_session = Some(session);
-        self.pending_our_index = Some(our_index);
-        self.pending_their_index = Some(their_index);
+        self.send.pending_new_session = Some(session);
+        self.send.pending_our_index = Some(our_index);
+        self.send.pending_their_index = Some(their_index);
         self.rekey_in_progress = false;
         // Clear initiator handshake state (index now lives in pending_our_index)
         self.rekey_our_index = None;
@@ -1031,24 +1057,24 @@ impl ActivePeer {
     /// flips the K-bit. Returns the old our_index that should remain in peers_by_index
     /// during the drain window.
     pub fn cutover_to_new_session(&mut self) -> Option<SessionIndex> {
-        let new_session = self.pending_new_session.take()?;
-        let new_our_index = self.pending_our_index.take();
-        let new_their_index = self.pending_their_index.take();
+        let new_session = self.send.pending_new_session.take()?;
+        let new_our_index = self.send.pending_our_index.take();
+        let new_their_index = self.send.pending_their_index.take();
 
         // Demote current to previous
-        self.previous_session = self.noise_session.take();
-        self.previous_our_index = self.our_index;
-        self.drain_started = Some(Instant::now());
+        self.send.previous_session = self.send.noise_session.take();
+        self.send.previous_our_index = self.send.our_index;
+        self.send.drain_started = Some(Instant::now());
 
         // Promote pending to current
-        self.noise_session = Some(new_session);
-        self.our_index = new_our_index;
-        self.their_index = new_their_index;
+        self.send.noise_session = Some(new_session);
+        self.send.our_index = new_our_index;
+        self.send.their_index = new_their_index;
 
         // Flip K-bit and reset timing
-        self.current_k_bit = !self.current_k_bit;
+        self.send.current_k_bit = !self.send.current_k_bit;
         self.session_established_at = Instant::now();
-        self.session_start = Instant::now();
+        self.send.session_start = Instant::now();
         self.rekey_in_progress = false;
         self.rekey_msg1_resend_count = 0;
         self.rekey_jitter_secs = draw_rekey_jitter();
@@ -1056,11 +1082,11 @@ impl ActivePeer {
 
         // Reset MMP counters to avoid metric discontinuity
         let now_ms = crate::time::mono_ms();
-        if let Some(mmp) = &mut self.mmp {
+        if let Some(mmp) = &mut self.send.mmp {
             mmp.reset_for_rekey(now_ms);
         }
 
-        self.previous_our_index
+        self.send.previous_our_index
     }
 
     /// Handle receiving a K-bit flip from the peer (responder side).
@@ -1068,24 +1094,24 @@ impl ActivePeer {
     /// Promotes pending_new_session to current, demotes current to previous.
     /// Returns the old our_index for drain tracking.
     pub fn handle_peer_kbit_flip(&mut self) -> Option<SessionIndex> {
-        let new_session = self.pending_new_session.take()?;
-        let new_our_index = self.pending_our_index.take();
-        let new_their_index = self.pending_their_index.take();
+        let new_session = self.send.pending_new_session.take()?;
+        let new_our_index = self.send.pending_our_index.take();
+        let new_their_index = self.send.pending_their_index.take();
 
         // Demote current to previous
-        self.previous_session = self.noise_session.take();
-        self.previous_our_index = self.our_index;
-        self.drain_started = Some(Instant::now());
+        self.send.previous_session = self.send.noise_session.take();
+        self.send.previous_our_index = self.send.our_index;
+        self.send.drain_started = Some(Instant::now());
 
         // Promote pending to current
-        self.noise_session = Some(new_session);
-        self.our_index = new_our_index;
-        self.their_index = new_their_index;
+        self.send.noise_session = Some(new_session);
+        self.send.our_index = new_our_index;
+        self.send.their_index = new_their_index;
 
         // Match peer's K-bit
-        self.current_k_bit = !self.current_k_bit;
+        self.send.current_k_bit = !self.send.current_k_bit;
         self.session_established_at = Instant::now();
-        self.session_start = Instant::now();
+        self.send.session_start = Instant::now();
         self.rekey_in_progress = false;
         self.rekey_msg1_resend_count = 0;
         self.rekey_jitter_secs = draw_rekey_jitter();
@@ -1093,16 +1119,16 @@ impl ActivePeer {
 
         // Reset MMP counters to avoid metric discontinuity
         let now_ms = crate::time::mono_ms();
-        if let Some(mmp) = &mut self.mmp {
+        if let Some(mmp) = &mut self.send.mmp {
             mmp.reset_for_rekey(now_ms);
         }
 
-        self.previous_our_index
+        self.send.previous_our_index
     }
 
     /// Check if the drain window has expired.
     pub fn drain_expired(&self, drain_secs: u64) -> bool {
-        match self.drain_started {
+        match self.send.drain_started {
             Some(t) => t.elapsed().as_secs() >= drain_secs,
             None => false,
         }
@@ -1110,7 +1136,7 @@ impl ActivePeer {
 
     /// Whether a drain is in progress.
     pub fn is_draining(&self) -> bool {
-        self.drain_started.is_some()
+        self.send.drain_started.is_some()
     }
 
     /// Complete the drain: drop previous session and free its index.
@@ -1118,9 +1144,9 @@ impl ActivePeer {
     /// Returns the previous our_index so the caller can remove it from
     /// peers_by_index and free it from the IndexAllocator.
     pub fn complete_drain(&mut self) -> Option<SessionIndex> {
-        self.previous_session = None;
-        self.drain_started = None;
-        self.previous_our_index.take()
+        self.send.previous_session = None;
+        self.send.drain_started = None;
+        self.send.previous_our_index.take()
     }
 
     /// Abandon an in-progress rekey.
@@ -1136,9 +1162,9 @@ impl ActivePeer {
         self.rekey_in_progress = false;
         // Return whichever index needs freeing
         self.rekey_our_index.take().or_else(|| {
-            self.pending_new_session = None;
-            self.pending_their_index = None;
-            self.pending_our_index.take()
+            self.send.pending_new_session = None;
+            self.send.pending_their_index = None;
+            self.send.pending_our_index.take()
         })
     }
 
