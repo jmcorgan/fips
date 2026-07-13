@@ -3,7 +3,12 @@
 pub(crate) mod supervisor;
 
 use super::{Node, NodeError, NodeState};
-use supervisor::{Action, Child, Event, SupervisorFsm};
+use supervisor::{Action, Child, Event, PeeringDesired, SupervisorFsm};
+
+use super::peering::reconcile::{
+    Budget, Candidate, DiscoveryPools, Gate, Observed, PeeringAction, Policy,
+};
+use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::acl::PeerAclContext;
@@ -85,7 +90,13 @@ impl Node {
         let mut refresh_configs = Vec::new();
 
         for node_addr in &removed {
-            if self.retry_pending.remove(node_addr).is_some() {
+            if self
+                .peering
+                .reconciler
+                .retry_pending
+                .remove(node_addr)
+                .is_some()
+            {
                 debug!(
                     peer = %self.peer_display_name(node_addr),
                     "Dropping retry entry for peer removed from runtime peer list"
@@ -106,7 +117,7 @@ impl Node {
 
             if changed {
                 outcome.updated += 1;
-                if let Some(state) = self.retry_pending.get_mut(node_addr) {
+                if let Some(state) = self.peering.reconciler.retry_pending.get_mut(node_addr) {
                     state.peer_config = new_peer.clone();
                     state.retry_after_ms = Self::now_ms();
                 }
@@ -152,7 +163,7 @@ impl Node {
                     error = %err,
                     "Failed to initiate connection for newly added runtime peer"
                 );
-                self.schedule_retry(*identity.node_addr(), Self::now_ms());
+                self.note_handshake_timeout(*identity.node_addr(), Self::now_ms());
             }
         }
 
@@ -183,7 +194,9 @@ impl Node {
                     Ok(()) => {
                         let handshake_timeout_secs =
                             self.config().node.rate_limit.handshake_timeout_secs;
-                        if let Some(state) = self.retry_pending.get_mut(&node_addr) {
+                        if let Some(state) =
+                            self.peering.reconciler.retry_pending.get_mut(&node_addr)
+                        {
                             state.peer_config = peer_config;
                             state.retry_after_ms =
                                 Self::now_ms().saturating_add(handshake_timeout_secs * 1000);
@@ -195,7 +208,7 @@ impl Node {
                             error = %err,
                             "Refreshed peer addresses did not initiate a direct connection"
                         );
-                        self.schedule_retry(node_addr, Self::now_ms());
+                        self.note_handshake_timeout(node_addr, Self::now_ms());
                     }
                 }
             }
@@ -234,20 +247,62 @@ impl Node {
             self.register_identity(*identity.node_addr(), identity.pubkey_full());
         }
 
-        // Collect peer configs to avoid borrow conflicts
-        let peer_configs: Vec<_> = self.config().auto_connect_peers().cloned().collect();
+        // Collect the auto-connect peer configs and build the mandatory-floor
+        // reconcile inputs. This is the startup-gate seam (design §3 D4): the
+        // substrate is up (transports created, before TUN) but the published
+        // NodeState is still `Starting`, so pass `Gate::Reconciling` EXPLICITLY
+        // rather than deriving it from the published state (which would map to
+        // `NotRunning` and dial nothing). This preserves today's startup dial
+        // position exactly.
+        let auto_connect_peers: Vec<PeerConfig> =
+            self.config().auto_connect_peers().cloned().collect();
 
-        if peer_configs.is_empty() {
+        if auto_connect_peers.is_empty() {
             debug!("No static peers configured");
             return;
         }
 
+        // Recover the full `PeerConfig` for each emitted floor `Connect` from its
+        // candidate identity (the core carries identity + a placeholder address;
+        // the driver dial needs the config to expand addresses).
+        let configs_by_addr: HashMap<NodeAddr, PeerConfig> = auto_connect_peers
+            .iter()
+            .filter_map(|pc| {
+                PeerIdentity::from_npub(&pc.npub)
+                    .ok()
+                    .map(|id| (*id.node_addr(), pc.clone()))
+            })
+            .collect();
+
         debug!(
-            count = peer_configs.len(),
+            count = configs_by_addr.len(),
             "Initiating static peer connections"
         );
 
-        for peer_config in peer_configs {
+        let policy = self.build_peering_policy(auto_connect_peers);
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let now_ms = Self::now_ms();
+        let actions = self.peering.reconciler.reconcile(
+            &policy,
+            &observed,
+            &budget,
+            &DiscoveryPools::default(),
+            now_ms,
+            Gate::Reconciling,
+        );
+
+        for action in actions {
+            let PeeringAction::Connect(candidate) = action else {
+                continue;
+            };
+            let Some(identity) = candidate.identity else {
+                continue;
+            };
+            let node_addr = *identity.node_addr();
+            let Some(peer_config) = configs_by_addr.get(&node_addr).cloned() else {
+                continue;
+            };
             if let Err(e) = self.initiate_peer_connection(&peer_config).await {
                 warn!(
                     npub = %peer_config.npub,
@@ -258,9 +313,7 @@ impl Node {
                 // Schedule a retry so transient address-resolution failures
                 // (e.g. cached endpoints stale, NAT rebinds, all addresses
                 // currently unreachable) recover without a daemon restart.
-                if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_config.npub) {
-                    self.schedule_retry(*peer_identity.node_addr(), Self::now_ms());
-                }
+                self.note_handshake_timeout(node_addr, now_ms);
                 // No-transport failures most often mean the cached overlay
                 // advert is pointing at a dead post-NAT-rebind address. The
                 // advert cache is read-only inside fetch_advert, so retries
@@ -336,7 +389,7 @@ impl Node {
                 .unwrap_or(false)
                 && conn.transport_id() == Some(transport_id)
                 && conn.source_addr() == Some(remote_addr)
-        }) || self.pending_connects.iter().any(|pending| {
+        }) || self.peering.pending_connects.iter().any(|pending| {
             pending
                 .peer_identity
                 .as_ref()
@@ -450,7 +503,7 @@ impl Node {
                                 "Transport connect initiated (anonymous discovery)"
                             );
                         }
-                        self.pending_connects.push(super::PendingConnect {
+                        self.peering.pending_connects.push(super::PendingConnect {
                             link_id,
                             transport_id,
                             remote_addr,
@@ -589,22 +642,33 @@ impl Node {
     /// drains their discovery buffers, and initiates connections to
     /// newly discovered peers (if auto_connect is enabled).
     pub(super) async fn poll_transport_discovery(&mut self) {
-        // Collect discoveries first to avoid borrow conflict with self
-        // Anonymous (None-identity) entries carry `active_refresh = false`:
-        // they are first-contact links learned from an unauthenticated beacon,
-        // never an active-peer path refresh.
-        let mut to_connect: Vec<(TransportId, TransportAddr, Option<PeerIdentity>, bool)> =
-            Vec::new();
-        let mut queued_per_peer: HashMap<NodeAddr, usize> = HashMap::new();
-        let mut connect_budget = self.discovery_connect_budget();
-        let mut skipped_budget = 0usize;
+        let self_node_addr = *self.identity().node_addr();
 
+        // Drain each auto-connect transport's discovery buffer (the I/O) and
+        // apply the driver-only prefilters that read live path-granular state the
+        // sans-IO core cannot observe (obligation O7): self-skip, the active-peer
+        // "fresh enough to skip" check, and the "already connecting on this exact
+        // path" check. The surviving beacons become the opportunistic pool, in
+        // transport-then-beacon iteration order; the core owns the connected /
+        // discovery-connect-budget / per-peer-cap decisions over them.
+        //
+        // Collect-then-dial (as before): the pool snapshot is frozen while the
+        // dataplane maps are unmutated, so the core's per-peer cap sees a stable
+        // in-flight count — the same guarantee the old collect-then-dial had.
+        //
+        // Anonymous (None-identity) beacons are first-contact links learned from
+        // an unauthenticated shared-media beacon; their identity is only learned
+        // from XX msg2. They carry `active_refresh = false`, have no NodeAddr to
+        // key the per-peer cap, and — matching next's poll_transport_discovery —
+        // bypass the discovery connect budget in the core. The driver-only
+        // `addr_to_link` dedup below is their sole gate.
+        let mut transport_neighbors: Vec<Candidate> = Vec::new();
         for (transport_id, transport) in &self.transports {
             if !transport.is_operational() {
                 continue;
             }
             if !transport.auto_connect() {
-                // Still drain the buffer so it doesn't grow unbounded
+                // Still drain the buffer so it doesn't grow unbounded.
                 let _ = transport.discover();
                 continue;
             }
@@ -613,60 +677,48 @@ impl Node {
                 Err(_) => continue,
             };
             for peer in discovered {
-                if let Some(pubkey) = peer.pubkey_hint {
-                    // Identity known from discovery (e.g., config-based auto-connect)
-                    let identity = PeerIdentity::from_pubkey(pubkey);
-                    let node_addr = *identity.node_addr();
-
-                    // Skip self
-                    if node_addr == *self.identity().node_addr() {
+                let Some(pubkey) = peer.pubkey_hint else {
+                    // Anonymous discovery (shared-media beacon without identity).
+                    // Identity will be learned from XX handshake msg2. Dedup by
+                    // transport address — skip if a link already exists.
+                    if self
+                        .addr_to_link
+                        .contains_key(&(*transport_id, peer.addr.clone()))
+                    {
                         continue;
                     }
+                    transport_neighbors.push(Candidate {
+                        transport_id: *transport_id,
+                        remote_addr: peer.addr,
+                        identity: None,
+                        active_refresh: false,
+                    });
+                    continue;
+                };
+                let identity = PeerIdentity::from_pubkey(pubkey);
+                let node_addr = *identity.node_addr();
 
-                    let candidate_transport_id = *transport_id;
-                    let remote_addr = peer.addr;
+                // Skip self.
+                if node_addr == self_node_addr {
+                    continue;
+                }
 
-                    if self.peers.contains_key(&node_addr) {
-                        // Already an active peer: this is a path-refresh
-                        // candidate, subject to freshness and per-tick budgets.
-                        let transport_name = transport.transport_type().name;
-                        let candidate = PeerAddress::new(transport_name, remote_addr.to_string());
-                        if self.active_peer_candidate_is_fresh_enough_to_skip(
-                            &node_addr,
-                            std::slice::from_ref(&candidate),
-                        ) {
-                            continue;
-                        }
-                        if self.is_connecting_to_peer_on_path(
-                            &node_addr,
-                            candidate_transport_id,
-                            &remote_addr,
-                        ) {
-                            continue;
-                        }
-                        let queued_for_peer = queued_per_peer.get(&node_addr).copied().unwrap_or(0);
-                        if connect_budget == 0
-                            || self
-                                .path_candidate_attempt_budget(&node_addr)
-                                .saturating_sub(queued_for_peer)
-                                == 0
-                        {
-                            skipped_budget = skipped_budget.saturating_add(1);
-                            continue;
-                        }
-                        to_connect.push((
-                            candidate_transport_id,
-                            remote_addr,
-                            Some(identity),
-                            true,
-                        ));
-                        *queued_per_peer.entry(node_addr).or_default() += 1;
-                        connect_budget = connect_budget.saturating_sub(1);
+                let candidate_transport_id = *transport_id;
+                let remote_addr = peer.addr;
+                let connected = self.peers.contains_key(&node_addr);
+
+                if connected {
+                    // Active peer: skip a candidate whose path is already the
+                    // current, still-fresh one (avoid churning a healthy link).
+                    let transport_name = transport.transport_type().name;
+                    let peer_addr_candidate =
+                        PeerAddress::new(transport_name, remote_addr.to_string());
+                    if self.active_peer_candidate_is_fresh_enough_to_skip(
+                        &node_addr,
+                        std::slice::from_ref(&peer_addr_candidate),
+                    ) {
                         continue;
                     }
-
-                    // New peer: skip if a connection is already in progress on
-                    // this path, then budget the first-contact attempt.
                     if self.is_connecting_to_peer_on_path(
                         &node_addr,
                         candidate_transport_id,
@@ -674,62 +726,67 @@ impl Node {
                     ) {
                         continue;
                     }
-                    let queued_for_peer = queued_per_peer.get(&node_addr).copied().unwrap_or(0);
-                    if connect_budget == 0
-                        || self
-                            .path_candidate_attempt_budget(&node_addr)
-                            .saturating_sub(queued_for_peer)
-                            == 0
-                    {
-                        skipped_budget = skipped_budget.saturating_add(1);
-                        continue;
-                    }
-
-                    to_connect.push((candidate_transport_id, remote_addr, Some(identity), false));
-                    *queued_per_peer.entry(node_addr).or_default() += 1;
-                    connect_budget = connect_budget.saturating_sub(1);
-                } else {
-                    // Anonymous discovery (shared-media beacon without identity).
-                    // Identity will be learned from XX handshake msg2.
-                    // Dedup by transport address — skip if link already exists.
-                    if self
-                        .addr_to_link
-                        .contains_key(&(*transport_id, peer.addr.clone()))
-                    {
-                        continue;
-                    }
-
-                    to_connect.push((*transport_id, peer.addr, None, false));
+                } else if self.is_connecting_to_peer_on_path(
+                    &node_addr,
+                    candidate_transport_id,
+                    &remote_addr,
+                ) {
+                    continue;
                 }
+
+                transport_neighbors.push(Candidate {
+                    transport_id: candidate_transport_id,
+                    remote_addr,
+                    identity: Some(identity),
+                    // Log-only flag; the core recomputes it from `connected`.
+                    active_refresh: connected,
+                });
             }
         }
 
-        if skipped_budget > 0 {
-            debug!(
-                skipped = skipped_budget,
-                queued = to_connect.len(),
-                "Transport discovery connect budget exhausted"
-            );
+        if transport_neighbors.is_empty() {
+            return;
         }
 
-        for (transport_id, remote_addr, identity, active_refresh) in to_connect {
-            if let Some(ref id) = identity {
+        let pools = DiscoveryPools {
+            transport_neighbors,
+            ..DiscoveryPools::default()
+        };
+        let policy = self.build_peering_policy(Vec::new());
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let now_ms = Self::now_ms();
+        let gate = Gate::from_state(self.supervisor.state);
+        let actions = self
+            .peering
+            .reconciler
+            .reconcile_opportunistic(&policy, &observed, &budget, &pools, now_ms, gate);
+
+        for action in actions {
+            let PeeringAction::Connect(candidate) = action else {
+                continue;
+            };
+            if let Some(ref id) = candidate.identity {
                 info!(
                     peer = %self.peer_display_name(id.node_addr()),
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    active_refresh,
+                    transport_id = %candidate.transport_id,
+                    remote_addr = %candidate.remote_addr,
+                    active_refresh = candidate.active_refresh,
                     "Auto-connecting to discovered peer"
                 );
             } else {
                 info!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
+                    transport_id = %candidate.transport_id,
+                    remote_addr = %candidate.remote_addr,
                     "Auto-connecting to anonymous discovered peer"
                 );
             }
             if let Err(e) = self
-                .initiate_connection(transport_id, remote_addr, identity)
+                .initiate_connection(
+                    candidate.transport_id,
+                    candidate.remote_addr,
+                    candidate.identity,
+                )
                 .await
             {
                 warn!(error = %e, "Failed to auto-connect to discovered peer");
@@ -823,7 +880,10 @@ impl Node {
                         Err(err) => {
                             warn!(peer_npub = %peer_npub, error = %err, "Failed to adopt NAT traversal");
                             if let Ok(peer_identity) = PeerIdentity::from_npub(&peer_npub) {
-                                self.schedule_retry(*peer_identity.node_addr(), Self::now_ms());
+                                self.note_handshake_timeout(
+                                    *peer_identity.node_addr(),
+                                    Self::now_ms(),
+                                );
                             }
                         }
                     }
@@ -912,9 +972,10 @@ impl Node {
                         continue;
                     }
 
-                    self.schedule_retry(node_addr, now_ms);
+                    self.note_handshake_timeout(node_addr, now_ms);
                     if let Some(cooldown_until_ms) = decision.cooldown_until_ms
-                        && let Some(state) = self.retry_pending.get_mut(&node_addr)
+                        && let Some(state) =
+                            self.peering.reconciler.retry_pending.get_mut(&node_addr)
                     {
                         // Push the next retry past the cooldown so the
                         // open-discovery sweep doesn't re-enqueue and the
@@ -970,9 +1031,28 @@ impl Node {
         if events.is_empty() {
             return;
         }
+
+        // Resolve each mDNS beacon to a dialable candidate (the driver I/O: pick a
+        // socket-family-compatible UDP transport, parse the npub). The
+        // connected / connecting skip is the core's decision — LAN growth has no
+        // discovery budget or per-peer cap, only the connected/connecting guard,
+        // applied in event order.
+        //
+        // First-wins per-peer dedup (obligation O7): mdns-sd emits one
+        // `Discovered` event per interface IP of a multi-homed responder, and the
+        // old inline-dial loop dialed the first compatible address then skipped
+        // the rest via `is_connecting_to_peer` (which turned true after that
+        // dial). The frozen-snapshot core cannot see that intra-tick feedback, so
+        // the driver reproduces it here: keep only the first surviving candidate
+        // per peer this tick. (In the ACL-reject case the old loop retried every
+        // address, but each attempt failed `authorize_peer` before touching any
+        // state, so no connection resulted either way — the dedup is neutral on
+        // the dataplane.)
+        let mut lan: Vec<Candidate> = Vec::new();
+        let mut seen: HashSet<NodeAddr> = HashSet::new();
         for event in events {
             let crate::mdns::LanEvent::Discovered(peer) = event;
-            let Some((transport_id, local_addr)) =
+            let Some((transport_id, _local_addr)) =
                 self.find_udp_transport_for_remote_addr(peer.addr)
             else {
                 debug!(
@@ -989,24 +1069,63 @@ impl Node {
                 }
             };
             let peer_node_addr = *identity.node_addr();
-            let remote_addr = crate::transport::TransportAddr::from_string(&peer.addr.to_string());
-            if self.peers.contains_key(&peer_node_addr)
-                || self.is_connecting_to_peer(&peer_node_addr)
-            {
+            if !seen.insert(peer_node_addr) {
                 continue;
             }
+            let remote_addr = crate::transport::TransportAddr::from_string(&peer.addr.to_string());
+            lan.push(Candidate {
+                transport_id,
+                remote_addr,
+                identity: Some(identity),
+                active_refresh: false,
+            });
+        }
+
+        if lan.is_empty() {
+            return;
+        }
+
+        let pools = DiscoveryPools {
+            lan,
+            ..DiscoveryPools::default()
+        };
+        let policy = self.build_peering_policy(Vec::new());
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let now_ms = Self::now_ms();
+        let gate = Gate::from_state(self.supervisor.state);
+        let actions = self
+            .peering
+            .reconciler
+            .reconcile_opportunistic(&policy, &observed, &budget, &pools, now_ms, gate);
+
+        for action in actions {
+            let PeeringAction::Connect(candidate) = action else {
+                continue;
+            };
+            let Some(identity) = candidate.identity else {
+                continue;
+            };
+            let local_addr = self
+                .transports
+                .get(&candidate.transport_id)
+                .and_then(|transport| transport.local_addr());
             info!(
                 npub = %identity.short_npub(),
-                addr = %peer.addr,
-                local_addr = %local_addr,
+                addr = %candidate.remote_addr,
+                local_addr = ?local_addr,
                 "lan: initiating handshake to discovered peer"
             );
             if let Err(err) = self
-                .initiate_connection(transport_id, remote_addr, Some(identity))
+                .initiate_connection(
+                    candidate.transport_id,
+                    candidate.remote_addr,
+                    Some(identity),
+                )
                 .await
             {
                 debug!(
-                    npub = %peer.npub,
+                    npub = %identity.short_npub(),
                     error = %err,
                     "lan: failed to initiate connection to discovered peer"
                 );
@@ -1021,13 +1140,13 @@ impl Node {
     /// marks the link as Connected and starts the Noise handshake.
     /// Failed connections are cleaned up and scheduled for retry.
     pub(super) async fn poll_pending_connects(&mut self) {
-        if self.pending_connects.is_empty() {
+        if self.peering.pending_connects.is_empty() {
             return;
         }
 
         let mut completed = Vec::new();
 
-        for (i, pending) in self.pending_connects.iter().enumerate() {
+        for (i, pending) in self.peering.pending_connects.iter().enumerate() {
             let state = if let Some(transport) = self.transports.get(&pending.transport_id) {
                 transport.connection_state(&pending.remote_addr)
             } else {
@@ -1053,7 +1172,7 @@ impl Node {
 
         // Process completions in reverse order to preserve indices
         for (i, success, reason) in completed.into_iter().rev() {
-            let pending = self.pending_connects.remove(i);
+            let pending = self.peering.pending_connects.remove(i);
 
             if success {
                 // Mark link as Connected
@@ -1101,8 +1220,8 @@ impl Node {
                 // they'll be rediscovered via the shared-medium beacon.
                 self.remove_link(&pending.link_id);
                 self.links.remove(&pending.link_id);
-                if let Some(ref id) = pending.peer_identity {
-                    self.schedule_retry(*id.node_addr(), Self::now_ms());
+                if let Some(id) = &pending.peer_identity {
+                    self.note_handshake_timeout(*id.node_addr(), Self::now_ms());
                 }
             }
         }
@@ -1907,11 +2026,18 @@ impl Node {
                     // The rx loop owns the bounded wait; the FSM's timer is
                     // carried for observability only. No-op here.
                 }
-                Action::SetPeeringDesired(_) | Action::SuspendReplenish => {
-                    // §8 reconciler drain-gate. Documented no-op in this commit:
-                    // the homeostatic reconciler that consumes these lands in
-                    // Step 1b. Without it there is nothing to reconnect the peers
-                    // the drain closes, so the gate is implicitly satisfied.
+                Action::SetPeeringDesired(PeeringDesired::Empty) => {
+                    // §8 reconciler drain-gate (obligation O4): clear the queued
+                    // retry schedule so the disconnects the drain itself causes
+                    // cannot leave reconnect entries behind.
+                    self.peering.reconciler.retry_pending.clear();
+                }
+                Action::SuspendReplenish => {
+                    // §8 reconciler drain-gate: no extra latch needed. The whole
+                    // drain window is `Gate::Suspended`
+                    // (`Gate::from_state(NodeState::Draining)`), so the per-tick
+                    // retry-dial reconcile and every peer-loss reflex read that
+                    // gate and self-suppress for the duration of the drain.
                 }
                 Action::SpawnChild(_) | Action::StopChild(_) | Action::PublishState(_) => {
                     // Drain entry never emits child or publish-state actions
@@ -2149,25 +2275,36 @@ impl Node {
     }
 
     async fn queue_open_discovery_retries(&mut self, bootstrap: &std::sync::Arc<NostrRendezvous>) {
-        self.run_open_discovery_sweep(bootstrap, None, "per-tick")
-            .await;
+        self.run_open_discovery_sweep(bootstrap, None).await;
     }
 
-    /// Open-discovery cache sweep. Iterates the cached overlay adverts and
-    /// queues retries for non-configured, not-yet-connected peers.
+    /// Open-discovery cache sweep — drains the cached overlay adverts and
+    /// enqueues retries for eligible peers via the sans-IO reconciler's overlay
+    /// layer.
     ///
-    /// `max_age_secs`, if set, filters out adverts whose `created_at` is
-    /// older than `now - max_age_secs`. The per-tick sweep passes `None`
-    /// (relies on the cache's own `valid_until_ms` filter); the one-shot
-    /// startup sweep passes `Some(startup_sweep_max_age_secs)`.
+    /// The driver builds the [`DiscoveryPools`] overlay input from
+    /// `bootstrap.cached_open_discovery_candidates(64)` (the I/O), excluding the
+    /// node's own advert (obligation O6 — the sans-IO core has no self-identity
+    /// input), and supplies the configured-npub set, the per-npub cooldown set,
+    /// and the startup-sweep max-age. `max_age_secs` is `None` for the per-tick
+    /// sweep and `Some(startup_sweep_max_age_secs)` for the one-shot startup
+    /// sweep.
     ///
-    /// `caller` is a short label included in log lines so per-tick and
-    /// startup sweeps are distinguishable in operator-facing logs.
+    /// The core reproduces the old sweep's full skip order, configured-advert
+    /// expedite, and enqueue budget internally: it inserts due-now entries into
+    /// the relocated `retry_pending`, and the retry-slot `process_pending_retries`
+    /// dials them later in the same tick (two-phase, design §2.5). Per design §10
+    /// this calls the reconciler's `reconcile_overlay` (the overlay layer only) —
+    /// NOT the monolithic `reconcile()` — so the always-on retry-dial phase does
+    /// not re-fire at this slot (which would double-dial the due entries and
+    /// apply the per-tick 16-cap twice). The returned `ScheduleRetry` actions
+    /// name exactly the newly enqueued peers; the driver consumes them to
+    /// pre-seed the alias + identity caches for that set (the old sweep's
+    /// per-enqueue `peer_aliases` / `register_identity` side effects).
     pub(in crate::node) async fn run_open_discovery_sweep(
         &mut self,
         bootstrap: &std::sync::Arc<NostrRendezvous>,
         max_age_secs: Option<u64>,
-        caller: &'static str,
     ) {
         if !self.config().node.rendezvous.nostr.enabled
             || self.config().node.rendezvous.nostr.policy
@@ -2176,183 +2313,82 @@ impl Node {
             return;
         }
 
+        let now_ms = Self::now_ms();
+        let self_node_addr = *self.identity().node_addr();
+
         let configured_npubs = self
             .config()
             .peers()
             .iter()
             .map(|peer| peer.npub.clone())
             .collect::<HashSet<_>>();
-        let now_ms = Self::now_ms();
-        let now_secs = now_ms / 1000;
-        let mut enqueue_budget = self.open_discovery_enqueue_budget(&configured_npubs);
-        if enqueue_budget == 0 {
-            debug!(
-                caller = %caller,
-                "open-discovery sweep: enqueue budget is 0, skipping"
-            );
-            return;
-        }
 
+        // Drain the cached overlay adverts (the I/O). Exclude our own advert
+        // (O6): the sans-IO core has no self-identity input, so the driver
+        // filters self here, reproducing the old sweep's self-skip. The cooldown
+        // set mirrors the old per-candidate `bootstrap.cooldown_until` skip.
+        //
+        // `candidate_identities` keeps each forwarded candidate's `PeerIdentity`
+        // keyed by NodeAddr so that, once the core decides which candidates to
+        // enqueue, the driver can pre-seed the alias + identity caches for
+        // exactly that set (below) — reproducing the old sweep's per-enqueue
+        // `peer_aliases` / `register_identity` side effects byte-for-byte.
         let candidates = bootstrap.cached_open_discovery_candidates(64).await;
-        let cached_count = candidates.len();
-        let mut enqueued = 0usize;
-        let mut skipped_age = 0usize;
-        let mut skipped_configured = 0usize;
-        let mut skipped_self = 0usize;
-        let mut skipped_connected = 0usize;
-        let mut skipped_retry_pending = 0usize;
-        let mut skipped_connecting = 0usize;
-        let mut skipped_no_endpoints = 0usize;
-        let mut skipped_invalid_npub = 0usize;
-        let mut skipped_cooldown = 0usize;
-
+        let mut overlay = Vec::with_capacity(candidates.len());
+        let mut overlay_cooldown = HashSet::new();
+        let mut candidate_identities: HashMap<NodeAddr, PeerIdentity> = HashMap::new();
         for (npub, endpoints, created_at_secs) in candidates {
-            if enqueue_budget == 0 {
-                break;
-            }
-
-            if let Some(max_age) = max_age_secs
-                && now_secs.saturating_sub(created_at_secs) > max_age
-            {
-                skipped_age = skipped_age.saturating_add(1);
-                continue;
-            }
-
-            if configured_npubs.contains(&npub) {
-                if let Ok(peer_identity) = PeerIdentity::from_npub(&npub) {
-                    let node_addr = *peer_identity.node_addr();
-                    if !self.peers.contains_key(&node_addr)
-                        && !self.is_connecting_to_peer(&node_addr)
-                        && let Some(state) = self.retry_pending.get_mut(&node_addr)
-                        && state.retry_after_ms > now_ms
-                    {
-                        state.retry_after_ms = now_ms;
-                        debug!(
-                            peer = %peer_identity.short_npub(),
-                            caller = %caller,
-                            "open-discovery sweep: fresh configured-peer advert expedited retry"
-                        );
-                    }
-                }
-                skipped_configured = skipped_configured.saturating_add(1);
-                continue;
-            }
-
-            let peer_identity = match PeerIdentity::from_npub(&npub) {
-                Ok(identity) => identity,
-                Err(_) => {
-                    skipped_invalid_npub = skipped_invalid_npub.saturating_add(1);
+            if let Ok(identity) = PeerIdentity::from_npub(&npub) {
+                let node_addr = *identity.node_addr();
+                if node_addr == self_node_addr {
                     continue;
                 }
-            };
-            let node_addr = *peer_identity.node_addr();
-            if node_addr == *self.identity().node_addr() {
-                skipped_self = skipped_self.saturating_add(1);
-                continue;
-            }
-            if self.peers.contains_key(&node_addr) {
-                skipped_connected = skipped_connected.saturating_add(1);
-                continue;
-            }
-            if self.retry_pending.contains_key(&node_addr) {
-                skipped_retry_pending = skipped_retry_pending.saturating_add(1);
-                continue;
+                candidate_identities.insert(node_addr, identity);
             }
             if bootstrap.cooldown_until(&npub, now_ms).is_some() {
-                skipped_cooldown = skipped_cooldown.saturating_add(1);
-                continue;
+                overlay_cooldown.insert(npub.clone());
             }
-            let connecting = self.connections.values().any(|conn| {
-                conn.expected_identity()
-                    .map(|id| id.node_addr() == &node_addr)
-                    .unwrap_or(false)
-            });
-            if connecting {
-                skipped_connecting = skipped_connecting.saturating_add(1);
-                continue;
-            }
-
-            let mut addresses = Vec::new();
-            let mut priority = 120u8;
-            let seen_at_ms = Self::now_ms();
-            for endpoint in endpoints {
-                let Some(candidate) =
-                    crate::nostr::RendezvousDriver::overlay_endpoint_to_peer_address(
-                        &endpoint, priority, seen_at_ms,
-                    )
-                else {
-                    continue;
-                };
-                if addresses.iter().any(|existing: &PeerAddress| {
-                    existing.transport == candidate.transport && existing.addr == candidate.addr
-                }) {
-                    continue;
-                }
-                addresses.push(candidate);
-                priority = priority.saturating_add(1);
-            }
-            if addresses.is_empty() {
-                skipped_no_endpoints = skipped_no_endpoints.saturating_add(1);
-                continue;
-            }
-
-            self.peer_aliases
-                .entry(node_addr)
-                .or_insert_with(|| peer_identity.short_npub());
-            self.register_identity(node_addr, peer_identity.pubkey_full());
-
-            let mut state = super::retry::RetryState::new(PeerConfig {
-                npub: npub.clone(),
-                alias: None,
-                addresses,
-                connect_policy: ConnectPolicy::AutoConnect,
-                auto_reconnect: true,
-                via_nostr: false,
-            });
-            state.reconnect = false;
-            state.retry_after_ms = now_ms;
-            state.expires_at_ms = Some(self.open_discovery_retry_expires_at_ms(now_ms));
-            self.retry_pending.insert(node_addr, state);
-            info!(
-                caller = %caller,
-                peer = %peer_identity.short_npub(),
-                advert_age_secs = now_secs.saturating_sub(created_at_secs),
-                "open-discovery sweep: queued retry for cached advert"
-            );
-            enqueue_budget = enqueue_budget.saturating_sub(1);
-            enqueued = enqueued.saturating_add(1);
+            overlay.push((npub, endpoints, created_at_secs));
         }
 
-        // Always log a one-line summary on the startup sweep so operators
-        // can verify it ran. Per-tick sweeps are noisier; only summarize
-        // when something happened.
-        let total_skipped = skipped_age
-            + skipped_configured
-            + skipped_self
-            + skipped_connected
-            + skipped_retry_pending
-            + skipped_connecting
-            + skipped_no_endpoints
-            + skipped_invalid_npub
-            + skipped_cooldown;
-        let should_summarize = caller == "startup" || enqueued > 0;
-        if should_summarize {
-            info!(
-                caller = %caller,
-                cached = cached_count,
-                queued = enqueued,
-                skipped_age = skipped_age,
-                skipped_configured = skipped_configured,
-                skipped_self = skipped_self,
-                skipped_connected = skipped_connected,
-                skipped_retry_pending = skipped_retry_pending,
-                skipped_connecting = skipped_connecting,
-                skipped_no_endpoints = skipped_no_endpoints,
-                skipped_invalid_npub = skipped_invalid_npub,
-                skipped_cooldown = skipped_cooldown,
-                skipped_total = total_skipped,
-                "open-discovery sweep complete"
-            );
+        let pools = DiscoveryPools {
+            overlay,
+            configured_npubs,
+            overlay_cooldown,
+            startup_sweep_max_age_secs: max_age_secs,
+            ..DiscoveryPools::default()
+        };
+
+        let policy = self.build_peering_policy(Vec::new());
+        let observed = self.observe_peering();
+        let budget = self.build_peering_budget();
+        let gate = Gate::from_state(self.supervisor.state);
+
+        // Two-phase enqueue (design §2.5): reconcile_overlay inserts due-now
+        // entries into retry_pending; the retry slot dials them. The core emits
+        // a `ScheduleRetry` for exactly the NEW enqueues (the configured-advert
+        // expedite bumps `retry_after_ms` without emitting), which is precisely
+        // the set the old sweep pre-seeded — its `register_identity` /
+        // `peer_aliases` sat after every skip `continue`, so only enqueued
+        // candidates reached it. Consuming the core's own output here to drive
+        // that I/O bookkeeping is legitimate sans-IO: the core decides WHICH to
+        // enqueue, the driver performs the side effects for exactly that set.
+        let actions = self
+            .peering
+            .reconciler
+            .reconcile_overlay(&policy, &observed, &budget, &pools, now_ms, gate);
+
+        for action in actions {
+            let PeeringAction::ScheduleRetry { peer, .. } = action else {
+                continue;
+            };
+            let Some(identity) = candidate_identities.get(&peer).copied() else {
+                continue;
+            };
+            self.peer_aliases
+                .entry(peer)
+                .or_insert_with(|| identity.short_npub());
+            self.register_identity(peer, identity.pubkey_full());
         }
     }
 
@@ -2399,36 +2435,107 @@ impl Node {
             .rendezvous
             .nostr
             .startup_sweep_max_age_secs;
-        self.run_open_discovery_sweep(bootstrap, Some(max_age_secs), "startup")
+        self.run_open_discovery_sweep(bootstrap, Some(max_age_secs))
             .await;
         self.supervisor.nostr_rendezvous.set_startup_sweep_done();
     }
 
-    fn available_outbound_slots(&self) -> usize {
-        let connection_used = self
-            .connections
-            .len()
-            .saturating_add(self.pending_connects.len());
-        let connection_slots = if self.max_connections() == 0 {
-            usize::MAX
-        } else {
-            self.max_connections().saturating_sub(connection_used)
-        };
+    /// Build the reconciler [`Policy`] from config. `auto_connect_peers` is
+    /// filled by the caller: the startup floor and the reflex wrappers pass the
+    /// configured auto-connect set; the per-tick retry-dial slot passes an empty
+    /// set so the config floor stays silent (cadence contract, design §3 D4).
+    pub(in crate::node) fn build_peering_policy(
+        &self,
+        auto_connect_peers: Vec<PeerConfig>,
+    ) -> Policy {
+        let cfg = self.config();
+        let retry = &cfg.node.retry;
+        let nostr = &cfg.node.rendezvous.nostr;
+        Policy {
+            auto_connect_peers,
+            max_peers: self.max_peers(),
+            max_connections: self.max_connections(),
+            max_links: self.max_links(),
+            retry_base_interval_ms: retry.base_interval_secs.saturating_mul(1000),
+            retry_max_backoff_ms: retry.max_backoff_secs.saturating_mul(1000),
+            retry_max_retries: retry.max_retries,
+            handshake_timeout_ms: cfg
+                .node
+                .rate_limit
+                .handshake_timeout_secs
+                .saturating_mul(1000),
+            open_discovery_enabled: nostr.enabled
+                && nostr.policy == crate::config::NostrRendezvousPolicy::Open,
+            open_discovery_max_pending: nostr.open_discovery_max_pending,
+            open_discovery_expires_ms: nostr
+                .advert_ttl_secs
+                .saturating_mul(1000)
+                .saturating_mul(OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER),
+        }
+    }
 
+    /// Snapshot the live dataplane maps into the reconciler's [`Observed`] input.
+    ///
+    /// The `connected` / `connecting` sets gate the floor, retry-dial, overlay,
+    /// and LAN layers; `in_flight_by_peer` feeds the opportunistic layer's
+    /// per-peer parallel cap (obligation O7), computed exactly as the deleted
+    /// `path_candidate_attempt_budget` did: `connections(expected == addr) +
+    /// pending_connects(addr)`. The scalar counts stay unpopulated at the
+    /// ceiling-only posture (no layer reads them; see [`Observed`]).
+    pub(in crate::node) fn observe_peering(&self) -> Observed {
+        let connected: HashSet<NodeAddr> = self.peers.keys().copied().collect();
+        let connecting: HashSet<NodeAddr> = self
+            .connections
+            .values()
+            .filter_map(|conn| conn.expected_identity().map(|id| *id.node_addr()))
+            .collect();
+        let mut in_flight_by_peer: HashMap<NodeAddr, usize> = HashMap::new();
+        for conn in self.connections.values() {
+            if let Some(id) = conn.expected_identity() {
+                *in_flight_by_peer.entry(*id.node_addr()).or_default() += 1;
+            }
+        }
+        for pending in &self.peering.pending_connects {
+            // Anonymous first-contact legs have no NodeAddr and are correctly
+            // excluded from the per-peer in-flight count (they never retry and
+            // cannot key the per-peer cap).
+            if let Some(id) = &pending.peer_identity {
+                *in_flight_by_peer.entry(*id.node_addr()).or_default() += 1;
+            }
+        }
+        Observed {
+            connected,
+            connecting,
+            in_flight_by_peer,
+            ..Observed::default()
+        }
+    }
+
+    /// Build the admission [`Budget`] from the live maps. This is the surviving
+    /// home for the slot arithmetic; the shared helpers it wraps stay until the
+    /// overlay/opportunistic cutovers consume them (obligation O5).
+    pub(in crate::node) fn build_peering_budget(&self) -> Budget {
         let peer_slots = if self.max_peers() == 0 {
             usize::MAX
         } else {
             self.max_peers().saturating_sub(self.peers.len())
         };
-
-        connection_slots.min(peer_slots)
+        Budget {
+            handshake_slots: self.outbound_handshake_slots(),
+            link_slots: self.outbound_link_slots(),
+            peer_slots,
+            admission_ok: self.outbound_admission_check(),
+            discovery_per_tick: MAX_DISCOVERY_CONNECTS_PER_TICK,
+            retry_per_tick: MAX_RETRY_CONNECTIONS_PER_TICK,
+            per_peer_cap: MAX_PARALLEL_PATH_CANDIDATES_PER_PEER,
+        }
     }
 
     fn outbound_handshake_slots(&self) -> usize {
         let used = self
             .connections
             .len()
-            .saturating_add(self.pending_connects.len());
+            .saturating_add(self.peering.pending_connects.len());
         if self.max_connections() == 0 {
             usize::MAX
         } else {
@@ -2462,7 +2569,8 @@ impl Node {
             })
             .count()
             .saturating_add(
-                self.pending_connects
+                self.peering
+                    .pending_connects
                     .iter()
                     .filter(|pending| {
                         pending
@@ -2476,42 +2584,6 @@ impl Node {
         self.outbound_handshake_slots()
             .min(self.outbound_link_slots())
             .min(MAX_PARALLEL_PATH_CANDIDATES_PER_PEER.saturating_sub(in_flight_for_peer))
-    }
-
-    fn discovery_connect_budget(&self) -> usize {
-        self.outbound_handshake_slots()
-            .min(self.outbound_link_slots())
-            .min(MAX_DISCOVERY_CONNECTS_PER_TICK)
-    }
-
-    fn open_discovery_enqueue_budget(&self, configured_npubs: &HashSet<String>) -> usize {
-        let current_open_discovery_pending = self
-            .retry_pending
-            .values()
-            .filter(|state| !configured_npubs.contains(&state.peer_config.npub))
-            .count();
-
-        let cap_remaining = self
-            .config()
-            .node
-            .rendezvous
-            .nostr
-            .open_discovery_max_pending
-            .saturating_sub(current_open_discovery_pending);
-
-        cap_remaining.min(self.available_outbound_slots())
-    }
-
-    fn open_discovery_retry_expires_at_ms(&self, now_ms: u64) -> u64 {
-        now_ms.saturating_add(
-            self.config()
-                .node
-                .rendezvous
-                .nostr
-                .advert_ttl_secs
-                .saturating_mul(1000)
-                .saturating_mul(OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER),
-        )
     }
 
     /// Capture the advertisable-endpoint inputs of every operational
@@ -2854,7 +2926,7 @@ impl Node {
         self.remove_active_peer(&node_addr);
 
         // Suppress any pending auto-reconnect
-        self.retry_pending.remove(&node_addr);
+        self.peering.reconciler.retry_pending.remove(&node_addr);
 
         info!(npub = %npub, "API disconnect completed");
 

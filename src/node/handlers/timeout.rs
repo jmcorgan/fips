@@ -85,7 +85,7 @@ impl Node {
         let stale = self.stale_connections(now_ms, timeout_ms);
         for action in self.fmp.poll_timeouts(stale) {
             match action {
-                ConnAction::ScheduleRetry { peer } => self.schedule_retry(peer, now_ms),
+                ConnAction::ScheduleRetry { peer } => self.note_handshake_timeout(peer, now_ms),
                 ConnAction::Teardown { link } => {
                     // Log before cleanup (needs live connection state).
                     if let Some(conn) = self.connections.get(&link) {

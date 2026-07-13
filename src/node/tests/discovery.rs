@@ -1142,32 +1142,53 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
         bootstrap.insert_advert_for_test(npub.clone(), advert).await;
     }
 
+    // The sweep now runs through the gate-checked reconciler overlay layer,
+    // which is inert unless the node is Running/Degraded. In production the
+    // sweep fires only from the rx_loop tick (which spins after `start()`
+    // returns Running), so drive the node into `Running` to reflect that.
+    node.supervisor.state = crate::node::NodeState::Running;
+
     // Run the sweep.
-    node.run_open_discovery_sweep(&bootstrap, Some(3_600), "test")
-        .await;
+    node.run_open_discovery_sweep(&bootstrap, Some(3_600)).await;
 
     // Eligible peer was queued.
     assert!(
-        node.retry_pending.contains_key(&eligible_node_addr),
+        node.peering
+            .reconciler
+            .retry_pending
+            .contains_key(&eligible_node_addr),
         "eligible advert should be queued for retry"
     );
-    let queued = node.retry_pending.get(&eligible_node_addr).unwrap();
+    let queued = node
+        .peering
+        .reconciler
+        .retry_pending
+        .get(&eligible_node_addr)
+        .unwrap();
     assert_eq!(queued.peer_config.npub, eligible_npub);
 
     // Connected-peer skip filter held.
     assert!(
-        !node.retry_pending.contains_key(&connected_node_addr),
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&connected_node_addr),
         "advert for already-connected peer must not be queued"
     );
 
     // Self skip filter held.
     assert!(
-        !node.retry_pending.contains_key(&self_node_addr),
+        !node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&self_node_addr),
         "advert authored by own node must not be queued"
     );
 
     // Exactly one queued entry from the three injected adverts.
-    assert_eq!(node.retry_pending.len(), 1);
+    assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
 }
 
 // ============================================================================

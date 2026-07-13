@@ -506,7 +506,7 @@ impl Node {
                         "Removing peer: link dead timeout"
                     );
                     self.remove_active_peer(&peer);
-                    self.schedule_reconnect(peer, now_ms);
+                    self.note_link_dead(peer, now_ms);
                 }
                 MmpAction::Heartbeat { peer } => {
                     if let Some(p) = self.peers.get_mut(&peer) {

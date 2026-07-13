@@ -1309,7 +1309,7 @@ impl Node {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                self.schedule_reconnect(peer, now_ms);
+                self.note_link_dead(peer, now_ms);
                 // Fall through to process as new connection.
             }
             InboundDecision::Promote => {
@@ -1597,7 +1597,10 @@ impl Node {
                 self.peers.insert(peer_node_addr, new_peer);
                 self.peers_by_index
                     .insert((transport_id, our_index.as_u32()), peer_node_addr);
-                self.retry_pending.remove(&peer_node_addr);
+                self.peering
+                    .reconciler
+                    .retry_pending
+                    .remove(&peer_node_addr);
                 self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
                 // Non-routing peers don't send filters; include them as
@@ -1711,7 +1714,10 @@ impl Node {
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index
                 .insert((transport_id, our_index.as_u32()), peer_node_addr);
-            self.retry_pending.remove(&peer_node_addr);
+            self.peering
+                .reconciler
+                .retry_pending
+                .remove(&peer_node_addr);
             self.register_identity(peer_node_addr, verified_identity.pubkey_full());
 
             // Non-routing peers don't send filters; include them as

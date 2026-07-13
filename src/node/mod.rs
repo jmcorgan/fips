@@ -15,10 +15,10 @@ pub(crate) mod encrypt_worker;
 mod handlers;
 mod lifecycle;
 pub(crate) mod metrics;
+mod peering;
 mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
-mod retry;
 pub(crate) mod session;
 pub(crate) mod stats;
 pub(crate) mod stats_history;
@@ -458,19 +458,18 @@ pub struct Node {
     /// Rate limiter for source-side CoordsRequired/PathBroken responses.
     coords_response_rate_limiter: RoutingErrorRateLimiter,
 
-    // === Pending Transport Connects ===
-    /// Links waiting for transport-level connection establishment before
-    /// sending handshake msg1. For connection-oriented transports (TCP, Tor),
-    /// the transport connect runs in the background; the tick handler polls
-    /// connection_state() and initiates the handshake when connected.
-    pending_connects: Vec<PendingConnect>,
-
-    // === Connection Retry ===
-    /// Retry state for peers whose outbound connections have failed.
-    /// Keyed by NodeAddr. Entries are created when a handshake times out
-    /// or fails, and removed on successful promotion or when max retries
-    /// are exhausted.
-    retry_pending: HashMap<NodeAddr, retry::RetryState>,
+    // === Peering Homeostasis ===
+    /// Owner of the peering-reconciler state relocated off `Node`: the sans-IO
+    /// retry-schedule core (`peering.reconciler.retry_pending`) and the pending
+    /// transport connects (`peering.pending_connects`) awaiting transport-level
+    /// connection establishment before handshake msg1 (for connection-oriented
+    /// transports the transport connect runs in the background; the tick handler
+    /// polls connection_state() and initiates the handshake when connected). The
+    /// retry entries are created when a handshake times out or fails, and removed
+    /// on successful promotion or when max retries are exhausted. Still driven by
+    /// the imperative methods; the reconciler core is unwired until the driver
+    /// cutover.
+    peering: peering::reconcile::Peering,
 
     // === Periodic Parent Re-evaluation ===
     /// Timestamp of last periodic parent re-evaluation (for pacing).
@@ -664,8 +663,7 @@ impl Node {
                 LookupBackoff::with_params(backoff_base_secs, backoff_max_secs),
                 LookupForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
             ),
-            pending_connects: Vec::new(),
-            retry_pending: HashMap::new(),
+            peering: peering::reconcile::Peering::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
             estimated_mesh_size: None,
@@ -809,8 +807,7 @@ impl Node {
                 coords_response_interval_ms,
             ),
             lookup: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
-            pending_connects: Vec::new(),
-            retry_pending: HashMap::new(),
+            peering: peering::reconcile::Peering::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
             estimated_mesh_size: None,
@@ -2282,6 +2279,7 @@ impl Node {
                 .values()
                 .any(|peer| peer.transport_id() == Some(transport_id))
             || self
+                .peering
                 .pending_connects
                 .iter()
                 .any(|pending| pending.transport_id == transport_id);
@@ -2535,8 +2533,10 @@ impl Node {
     }
 
     /// Iterate over retry state for diagnostics.
-    pub fn retry_state_iter(&self) -> impl Iterator<Item = (&NodeAddr, &retry::RetryState)> {
-        self.retry_pending.iter()
+    pub fn retry_state_iter(
+        &self,
+    ) -> impl Iterator<Item = (&NodeAddr, &peering::retry::RetryState)> {
+        self.peering.reconciler.retry_pending.iter()
     }
 
     // === Routing ===

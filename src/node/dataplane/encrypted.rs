@@ -543,7 +543,7 @@ impl Node {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                self.schedule_reconnect(addr, now_ms);
+                self.note_link_dead(addr, now_ms);
             }
         }
     }
