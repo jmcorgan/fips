@@ -661,11 +661,18 @@ DOCKERFILE
     # Write a minimal fips.yaml that exercises the new defaults.
     # tun.enabled: true so the daemon creates fips0 itself; identity
     # persistent so /etc/fips/fips.pub gives us a stable npub to query.
+    # A UDP transport is configured so at least one transport comes up:
+    # a node with zero operational transports is Failed and refuses to
+    # start. This test exercises the .fips DNS responder, not mesh
+    # connectivity, so any bound transport suffices.
     docker exec "$name" bash -c 'cat > /etc/fips/fips.yaml <<EOF
 node:
   identity:
     persistent: true
   log_level: debug
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
 tun:
   enabled: true
   name: fips0

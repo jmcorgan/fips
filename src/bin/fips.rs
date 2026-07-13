@@ -8,7 +8,7 @@ use fips::config::{IdentitySource, resolve_identity};
 use fips::version;
 use fips::{Config, Node};
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
 /// FIPS mesh network daemon
@@ -157,26 +157,23 @@ async fn run_daemon(
 
     info!("FIPS running");
 
-    // Run the RX event loop until shutdown signal.
-    // stop() drops the packet channel, causing run_rx_loop to exit.
-    tokio::select! {
-        result = node.run_rx_loop() => {
-            match result {
-                Ok(()) => info!("RX loop exited"),
-                Err(e) => error!("RX loop error: {}", e),
-            }
-        }
-        _ = shutdown_signal => {
-            info!("Shutdown signal received");
-        }
+    // Serve until the shutdown signal, then drain in place before returning.
+    // The rx loop observes the signal directly, so its channels are never
+    // destructively cancelled — they live in the loop's locals across serve and
+    // drain, and are dropped only on clean exit (after which teardown does not
+    // need them). On the signal the loop broadcasts a shutdown Disconnect and
+    // waits (bounded by node.drain_timeout_secs) for peers to clear.
+    match node.run_rx_loop_with_shutdown(shutdown_signal).await {
+        Ok(()) => info!("RX loop exited"),
+        Err(e) => error!("RX loop error: {}", e),
     }
 
     info!("FIPS shutting down");
 
-    // Stop the node (shuts down transports, TUN, I/O threads)
-    if let Err(e) = node.stop().await {
-        warn!("Error during shutdown: {}", e);
-    }
+    // Close the drain window (if the loop drained) and tear down. A drained
+    // loop tears down without re-broadcasting; a loop that exited some other
+    // way falls back to the immediate stop().
+    node.finish_shutdown().await;
 
     info!("FIPS shutdown complete");
 }

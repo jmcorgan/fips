@@ -654,7 +654,7 @@ async fn test_session_100_nodes() {
     let mut tun_receivers: Vec<mpsc::Receiver<Vec<u8>>> = Vec::with_capacity(NUM_NODES);
     for tn in nodes.iter_mut() {
         let (tx, rx) = mpsc::channel();
-        tn.node.tun_tx = Some(tx);
+        tn.node.supervisor.tun_tx = Some(tx);
         tun_receivers.push(rx);
     }
 
@@ -1070,7 +1070,7 @@ async fn test_tun_outbound_established_session() {
 
     // Install TUN receiver on Node 1
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[1].node.tun_tx = Some(tun_tx);
+    nodes[1].node.supervisor.tun_tx = Some(tun_tx);
 
     // Build and inject an IPv6 packet
     let test_payload = b"data-plane-test-12345";
@@ -1114,7 +1114,7 @@ async fn test_tun_outbound_triggers_session_initiation() {
 
     // Install TUN receiver on Node 1
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[1].node.tun_tx = Some(tun_tx);
+    nodes[1].node.supervisor.tun_tx = Some(tun_tx);
 
     // Build and inject an IPv6 packet (identity cache populated at peer promotion)
     let test_payload = b"trigger-session-test";
@@ -1167,7 +1167,7 @@ async fn test_tun_outbound_unknown_destination() {
 
     // Install TUN receiver on Node 0 (for ICMPv6 response)
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[0].node.tun_tx = Some(tun_tx);
+    nodes[0].node.supervisor.tun_tx = Some(tun_tx);
 
     let src_fips = crate::FipsAddress::from_node_addr(nodes[0].node.node_addr());
 
@@ -1219,7 +1219,7 @@ async fn test_tun_outbound_3node_forwarded() {
 
     // Install TUN receiver on Node 2
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[2].node.tun_tx = Some(tun_tx);
+    nodes[2].node.supervisor.tun_tx = Some(tun_tx);
 
     // Build and inject an IPv6 packet (triggers session initiation to Node 2)
     let test_payload = b"forwarded-data-plane";
@@ -1264,7 +1264,7 @@ async fn test_tun_outbound_pending_queue_flush() {
 
     // Install TUN receiver on Node 1
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[1].node.tun_tx = Some(tun_tx);
+    nodes[1].node.supervisor.tun_tx = Some(tun_tx);
 
     // Send 5 packets before any session exists
     let mut packets = Vec::new();
@@ -1915,7 +1915,7 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
 
     // Install TUN receiver on source node to capture ICMPv6 PTB
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[0].node.tun_tx = Some(tun_tx);
+    nodes[0].node.supervisor.tun_tx = Some(tun_tx);
 
     // Build an IPv6 packet that fits local MTU but exceeds path MTU
     let reduced_ipv6_mtu = crate::upper::icmp::effective_ipv6_mtu(reduced_mtu) as usize;
@@ -1972,7 +1972,7 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
 
     // Verify a packet that fits within path MTU passes through (no PTB)
     let (tun_tx2, tun_rx2) = std::sync::mpsc::channel();
-    nodes[0].node.tun_tx = Some(tun_tx2);
+    nodes[0].node.supervisor.tun_tx = Some(tun_tx2);
     let fitting_payload = vec![0u8; reduced_ipv6_mtu - 41]; // fits within path MTU
     let fitting_packet = build_ipv6_packet(&src_fips, &dst_fips, &fitting_payload);
     assert!(fitting_packet.len() <= reduced_ipv6_mtu);
@@ -2111,7 +2111,7 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     // should check PathMtuState and generate ICMPv6 PTB on TUN instead
     // of forwarding.
     let (tun_tx2, tun_rx2) = std::sync::mpsc::channel();
-    nodes[0].node.tun_tx = Some(tun_tx2);
+    nodes[0].node.supervisor.tun_tx = Some(tun_tx2);
 
     nodes[0].node.handle_tun_outbound(ipv6_packet.clone()).await;
 
@@ -2155,7 +2155,7 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
 
     // Verify a fitting packet still passes through without PTB
     let (tun_tx3, tun_rx3) = std::sync::mpsc::channel();
-    nodes[0].node.tun_tx = Some(tun_tx3);
+    nodes[0].node.supervisor.tun_tx = Some(tun_tx3);
 
     let fitting_payload = vec![0xCDu8; 600 - 40]; // 600-byte IPv6 packet, well within 694
     let fitting_packet = build_ipv6_packet(&src_fips, &dst_fips, &fitting_payload);

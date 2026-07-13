@@ -310,8 +310,8 @@ async fn test_run_rx_loop_handshake() {
     node_b.packet_rx = Some(packet_rx_b);
 
     // Set node state to Running (transports need to be operational)
-    node_a.state = NodeState::Running;
-    node_b.state = NodeState::Running;
+    node_a.supervisor.state = NodeState::Running;
+    node_b.supervisor.state = NodeState::Running;
 
     // === Phase 1: Node A initiates handshake to Node B ===
 

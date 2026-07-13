@@ -56,7 +56,7 @@ async fn test_nat_bootstrap_failure_falls_back_to_direct_udp_address() {
     let peer_identity = Identity::generate();
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx.clone());
+    node.supervisor.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
 
     let transport_id = TransportId::new(1);
@@ -102,7 +102,7 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
     let peer_identity = Identity::generate();
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx.clone());
+    node.supervisor.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
 
     let transport_id = TransportId::new(1);
@@ -151,18 +151,73 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
 
 #[tokio::test]
 async fn test_node_state_transitions() {
-    let mut node = make_node();
+    // A transport-less node now resolves to `Failed` on start (design doc
+    // §9.1), so exercise state transitions with a genuinely healthy node.
+    let mut node = make_healthy_node();
 
     assert!(!node.is_running());
     assert!(node.state().can_start());
 
     node.start().await.unwrap();
     assert!(node.is_running());
+    assert_eq!(node.state(), NodeState::Running);
     assert!(!node.state().can_start());
 
     node.stop().await.unwrap();
     assert!(!node.is_running());
     assert_eq!(node.state(), NodeState::Stopped);
+}
+
+#[tokio::test]
+async fn test_transportless_start_fails_and_publishes_failed() {
+    // The intended behavioral change (design doc §9.1): a node with zero
+    // transports up cannot serve, so `start()` returns `NoOperationalTransports`
+    // and leaves the published state at `Failed` (not operational, not
+    // restartable in-process).
+    let mut node = make_node();
+    assert!(node.state().can_start());
+
+    let result = node.start().await;
+    assert!(matches!(result, Err(NodeError::NoOperationalTransports)));
+    assert_eq!(node.state(), NodeState::Failed);
+    assert!(!node.is_running());
+    assert!(!node.state().is_operational());
+    assert!(!node.state().can_start());
+}
+
+#[tokio::test]
+async fn test_drain_publishes_draining_state() {
+    let mut node = make_healthy_node();
+    node.start().await.unwrap();
+    assert_eq!(node.state(), NodeState::Running);
+    assert!(node.state().is_operational());
+
+    // Enter the bounded drain in place: publishes the operator-visible
+    // `Draining` state (not operational) without tearing down.
+    node.enter_drain().await;
+    assert_eq!(node.state(), NodeState::Draining);
+    assert!(!node.state().is_operational());
+    // `Draining` is neither startable nor externally stoppable; the daemon
+    // drain finishes via the supervisor's `DrainDeadlineElapsed`, not `stop()`.
+    assert!(!node.state().can_start());
+    assert!(!node.state().can_stop());
+
+    // Finishing shutdown from `Draining` tears down to `Stopped`.
+    node.finish_shutdown().await;
+    assert_eq!(node.state(), NodeState::Stopped);
+}
+
+#[tokio::test]
+async fn test_immediate_stop_never_publishes_draining() {
+    let mut node = make_healthy_node();
+    node.start().await.unwrap();
+    assert_eq!(node.state(), NodeState::Running);
+
+    // The immediate stop() path (used by tests and the stop-now path)
+    // transitions Running → Stopping → Stopped and never enters `Draining`.
+    node.stop().await.unwrap();
+    assert_eq!(node.state(), NodeState::Stopped);
+    assert_ne!(node.state(), NodeState::Draining);
 }
 
 #[tokio::test]
@@ -196,7 +251,7 @@ async fn test_node_start_does_not_wait_for_nostr_relay_startup() {
 
 #[tokio::test]
 async fn test_node_double_start() {
-    let mut node = make_node();
+    let mut node = make_healthy_node();
     node.start().await.unwrap();
 
     let result = node.start().await;
@@ -543,7 +598,7 @@ async fn test_node_rx_loop_requires_start() {
 
 #[tokio::test]
 async fn test_node_rx_loop_takes_channel() {
-    let mut node = make_node();
+    let mut node = make_healthy_node();
     node.start().await.unwrap();
 
     // packet_rx should be available after start
@@ -1053,7 +1108,7 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     config.peers = vec![old_peer.clone()];
     let mut node = make_node_with(config);
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx.clone());
+    node.supervisor.packet_tx = Some(packet_tx.clone());
     node.packet_rx = Some(packet_rx);
 
     let transport_id = TransportId::new(1);
@@ -1133,7 +1188,9 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
         peer_config: crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9"),
         reason: "stale traversal failure".to_string(),
     });
-    node.nostr_rendezvous.set_engine(bootstrap.clone());
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
 
@@ -1173,7 +1230,9 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
             socket,
         ),
     });
-    node.nostr_rendezvous.set_engine(bootstrap.clone());
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(bootstrap.clone());
 
     node.poll_nostr_rendezvous().await;
 
@@ -1427,7 +1486,7 @@ async fn test_transport_mtu_returns_min_across_operational() {
     // iteration order. This is the core ISSUE-2026-0011 regression test.
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp1 = make_udp_transport_with_mtu(1, 1497).await;
@@ -1464,7 +1523,7 @@ async fn test_transport_mtu_min_with_single_operational() {
     // operational.
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
@@ -1487,7 +1546,7 @@ async fn test_transport_mtu_min_with_single_operational() {
 async fn test_seed_path_mtu_inserts_when_empty() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
@@ -1520,7 +1579,7 @@ async fn test_seed_path_mtu_inserts_when_empty() {
 async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
@@ -1560,7 +1619,7 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
 async fn test_seed_path_mtu_tightens_looser_existing_value() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
 
     let udp = make_udp_transport_with_mtu(1, 1280).await;
@@ -1730,7 +1789,9 @@ async fn poll_nostr_rendezvous_established_gated_at_capacity() {
             socket,
         ),
     });
-    node.nostr_rendezvous.set_engine(bootstrap.clone());
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(bootstrap.clone());
 
     let before_peers = node.peer_count();
     let before_links = node.link_count();

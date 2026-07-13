@@ -365,7 +365,7 @@ impl Node {
                                     mark_ipv6_ecn_ce(&mut packet);
                                     self.metrics().congestion.ce_received.inc();
                                 }
-                                if let Some(tun_tx) = &self.tun_tx {
+                                if let Some(tun_tx) = &self.supervisor.tun_tx {
                                     if let Err(e) = tun_tx.send(packet) {
                                         debug!(error = %e, "Failed to deliver decompressed IPv6 packet to TUN");
                                     }
@@ -1916,7 +1916,7 @@ impl Node {
         send: PipelinedSend<'_>,
     ) -> Result<bool, NodeError> {
         let dest_addr = send.dest_addr;
-        let Some(workers) = self.encrypt_workers.as_ref().cloned() else {
+        let Some(workers) = self.supervisor.encrypt_workers.as_ref().cloned() else {
             return Ok(false);
         };
 
@@ -2528,7 +2528,7 @@ impl Node {
         let our_ipv6 = FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
         if let Some(response) =
             build_dest_unreachable(original_packet, DestUnreachableCode::NoRoute, our_ipv6)
-            && let Some(tun_tx) = &self.tun_tx
+            && let Some(tun_tx) = &self.supervisor.tun_tx
         {
             let _ = tun_tx.send(response);
         }
@@ -2565,7 +2565,7 @@ impl Node {
         // SAFETY: slice is exactly 16 bytes; length validated above (>= 40)
         let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[24..40]).unwrap());
         if let Some(response) = build_packet_too_big(original_packet, mtu, dest_addr)
-            && let Some(tun_tx) = &self.tun_tx
+            && let Some(tun_tx) = &self.supervisor.tun_tx
         {
             debug!(
                 original_src = %src_addr,

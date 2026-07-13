@@ -24,17 +24,17 @@ async fn test_adopted_udp_traversal_completes_handshake() {
     let (packet_tx_a, packet_rx_a) = packet_channel(64);
     let (packet_tx_b, packet_rx_b) = packet_channel(64);
 
-    node_a.packet_tx = Some(packet_tx_a.clone());
+    node_a.supervisor.packet_tx = Some(packet_tx_a.clone());
     node_a.packet_rx = Some(packet_rx_a);
-    node_a.state = NodeState::Running;
+    node_a.supervisor.state = NodeState::Running;
 
     let mut transport_b = UdpTransport::new(transport_id_b, None, udp_config, packet_tx_b.clone());
     transport_b.start_async().await.unwrap();
 
     let addr_b = transport_b.local_addr().unwrap();
-    node_b.packet_tx = Some(packet_tx_b.clone());
+    node_b.supervisor.packet_tx = Some(packet_tx_b.clone());
     node_b.packet_rx = Some(packet_rx_b);
-    node_b.state = NodeState::Running;
+    node_b.supervisor.state = NodeState::Running;
     node_b
         .transports
         .insert(transport_id_b, TransportHandle::Udp(transport_b));
@@ -107,9 +107,9 @@ async fn test_adopted_udp_traversal_completes_handshake() {
 async fn test_failed_adopted_traversal_cleans_up_transport() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
-    node.state = NodeState::Running;
+    node.supervisor.state = NodeState::Running;
     node.index_allocator = IndexAllocator::with_max_attempts(0);
 
     let peer = make_node();
@@ -137,9 +137,9 @@ async fn test_failed_adopted_traversal_cleans_up_transport() {
 async fn test_adopted_traversal_skips_already_connected_peer() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
-    node.state = NodeState::Running;
+    node.supervisor.state = NodeState::Running;
 
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
@@ -196,17 +196,17 @@ async fn test_third_peer_can_handshake_via_adopted_transport_socket() {
     let (packet_tx_b, packet_rx_b) = packet_channel(64);
     let (packet_tx_c, packet_rx_c) = packet_channel(64);
 
-    node_a.packet_tx = Some(packet_tx_a.clone());
+    node_a.supervisor.packet_tx = Some(packet_tx_a.clone());
     node_a.packet_rx = Some(packet_rx_a);
-    node_a.state = NodeState::Running;
+    node_a.supervisor.state = NodeState::Running;
 
-    node_b.packet_tx = Some(packet_tx_b.clone());
+    node_b.supervisor.packet_tx = Some(packet_tx_b.clone());
     node_b.packet_rx = Some(packet_rx_b);
-    node_b.state = NodeState::Running;
+    node_b.supervisor.state = NodeState::Running;
 
-    node_c.packet_tx = Some(packet_tx_c.clone());
+    node_c.supervisor.packet_tx = Some(packet_tx_c.clone());
     node_c.packet_rx = Some(packet_rx_c);
-    node_c.state = NodeState::Running;
+    node_c.supervisor.state = NodeState::Running;
 
     let mut transport_a = UdpTransport::new(transport_id_a, None, udp_config.clone(), packet_tx_a);
     transport_a.start_async().await.unwrap();
@@ -341,9 +341,9 @@ async fn test_adopted_udp_inherits_mtu_from_single_primary_config() {
     let mut node = make_node_with(config);
 
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
-    node.state = NodeState::Running;
+    node.supervisor.state = NodeState::Running;
 
     let peer = make_node();
     let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -391,9 +391,9 @@ async fn test_adopted_udp_inherits_mtu_from_named_primary_config() {
     let mut node = make_node_with(config);
 
     let (packet_tx, packet_rx) = packet_channel(64);
-    node.packet_tx = Some(packet_tx);
+    node.supervisor.packet_tx = Some(packet_tx);
     node.packet_rx = Some(packet_rx);
-    node.state = NodeState::Running;
+    node.supervisor.state = NodeState::Running;
 
     let peer = make_node();
     let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

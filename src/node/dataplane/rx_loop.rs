@@ -44,12 +44,42 @@ impl Node {
     /// This method takes ownership of the packet_rx channel and runs
     /// until the channel is closed (typically when stop() is called).
     pub async fn run_rx_loop(&mut self) -> Result<(), NodeError> {
+        // No shutdown observer → today's infinite loop, byte-identical. All
+        // existing callers/tests use this; `pending()` never fires, so the
+        // shutdown/deadline arms below stay permanently disabled.
+        self.run_rx_loop_with_shutdown(std::future::pending()).await
+    }
+
+    /// The rx event loop, which serves until `shutdown` fires and then drains
+    /// **in place** before returning.
+    ///
+    /// The channel receivers are moved into this frame's locals and live across
+    /// both serve and drain, so — unlike a `select!`-cancelled loop — they are
+    /// never destructively dropped mid-flight; they are released only on clean
+    /// exit, after which teardown does not need them.
+    ///
+    /// - While serving (`drain_deadline == None`) the loop is behaviorally
+    ///   identical to before: the shutdown arm, the deadline arm, and the
+    ///   peers-empty early-exit are all guarded off, so the hot per-packet path
+    ///   and the `biased` order of the real arms are unchanged.
+    /// - When `shutdown` fires, the loop calls [`Node::enter_drain`] once
+    ///   (broadcast Disconnect, gate the reconciler off) and arms the bounded
+    ///   deadline, then keeps servicing inbound/tick/peer-removal until all
+    ///   peers clear or the deadline elapses, then returns. The caller
+    ///   ([`Node::finish_shutdown`]) closes the window and tears down.
+    pub async fn run_rx_loop_with_shutdown(
+        &mut self,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Result<(), NodeError> {
+        tokio::pin!(shutdown);
+        // `None` = serving; `Some(deadline)` = draining (bounded window).
+        let mut drain_deadline: Option<tokio::time::Instant> = None;
         let mut packet_rx = self.packet_rx.take().ok_or(NodeError::NotStarted)?;
 
         // Take the TUN outbound receiver, or create a dummy channel that never
         // produces messages (when TUN is disabled). Holding the sender prevents
         // the channel from closing.
-        let (mut tun_outbound_rx, _tun_guard) = match self.tun_outbound_rx.take() {
+        let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.tun_outbound_rx.take() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -59,7 +89,7 @@ impl Node {
 
         // Take the DNS identity receiver, or create a dummy channel (when DNS
         // is disabled). Same pattern as TUN outbound.
-        let (mut dns_identity_rx, _dns_guard) = match self.dns_identity_rx.take() {
+        let (mut dns_identity_rx, _dns_guard) = match self.supervisor.dns_identity_rx.take() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -124,6 +154,13 @@ impl Node {
         crate::perf_profile::maybe_spawn_reporter();
 
         loop {
+            // Bounded drain mode: break as soon as all peers have cleared. In
+            // normal mode (`None`) this short-circuits before touching
+            // `self.peers`, so the loop is byte-identical.
+            if drain_deadline.is_some() && self.peers.is_empty() {
+                info!("Drain complete: all peers cleared, ending drain loop");
+                break;
+            }
             tokio::select! {
                 biased;
                 // Decrypt-worker fallback drains FIRST. Under sustained
@@ -288,6 +325,27 @@ impl Node {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.activate_connected_udp_sessions().await;
                 }
+                // Shutdown signal → enter the bounded drain in place, ONCE.
+                // Gated on `is_none()` so it only fires while serving; after
+                // entering drain the arm is disabled (the completed signal is
+                // never polled again) and the deadline arm below bounds the
+                // window. Placed after the real arms so their `biased` priority
+                // is unchanged, and inert while serving with `pending()`.
+                _ = &mut shutdown, if drain_deadline.is_none() => {
+                    self.enter_drain().await;
+                    drain_deadline =
+                        Some(tokio::time::Instant::now() + self.config().node.drain_timeout());
+                }
+                // Bounded drain deadline (drain mode only). Placed LAST so the
+                // `biased` priority of the normal arms is unchanged, and gated
+                // on `is_some()` so in normal mode the branch is disabled — the
+                // future is created but never polled and never fires.
+                _ = tokio::time::sleep_until(
+                    drain_deadline.unwrap_or_else(tokio::time::Instant::now)
+                ), if drain_deadline.is_some() => {
+                    info!("Drain deadline elapsed, ending drain loop");
+                    break;
+                }
             }
         }
 
@@ -323,9 +381,11 @@ impl Node {
             // discovery-layer cooldown to the long protocol-mismatch
             // window and emit a single WARN per fresh observation.
             if self
+                .supervisor
                 .nostr_rendezvous
                 .is_bootstrap_transport(&packet.transport_id)
                 && let Some(npub) = self
+                    .supervisor
                     .nostr_rendezvous
                     .bootstrap_transport_npub(&packet.transport_id)
                     .cloned()
