@@ -996,14 +996,26 @@ impl PeerMachine {
     }
 
     fn on_link_dead(&mut self, now: u64) -> Vec<PeerAction> {
-        if !self.is_active_like() {
+        // Guard the full established set (Established | Active | Maintaining), not
+        // just `is_active_like()`: a peer that never rekeyed stays parked in
+        // `Established` (the machine reaches `Active` only via a rekey `Drain`),
+        // yet the pre-refactor liveness reap tore down EVERY dead established peer.
+        // A too-narrow `is_active_like()` guard here would silently skip the common
+        // (never-rekeyed) reap target. Mirrors `on_disconnect`'s guard.
+        if !self.is_established_context() {
             return Vec::new();
         }
-        let mut actions = vec![PeerAction::InvalidateSendState];
-        if let Some(idx) = self.our_index.take() {
-            actions.push(PeerAction::UnregisterDecryptSession { index: idx });
-        }
-        actions.push(PeerAction::TeardownConnectedUdp);
+        // `InvalidateSendState` maps to the executor's `remove_active_peer`, which
+        // unregisters the decrypt worker by the REAL current index. The machine's
+        // shadow `our_index` is deliberately NOT used to unregister here (C5-0): it
+        // can drift to a reused index and wrongly unregister ANOTHER peer's worker
+        // session. `TeardownConnectedUdp` is inert (C6 — the old reap had no
+        // connected-UDP teardown, so inert is neutral); `ReportLost` drives the
+        // loss reflex (`note_link_dead`).
+        let mut actions = vec![
+            PeerAction::InvalidateSendState,
+            PeerAction::TeardownConnectedUdp,
+        ];
         if let Some(peer) = self.addr() {
             actions.push(PeerAction::ReportLost { peer });
         }
@@ -1871,9 +1883,6 @@ mod tests {
             dead,
             vec![
                 PeerAction::InvalidateSendState,
-                PeerAction::UnregisterDecryptSession {
-                    index: SessionIndex::new(0x4242)
-                },
                 PeerAction::TeardownConnectedUdp,
                 PeerAction::ReportLost { peer: addr },
             ]
