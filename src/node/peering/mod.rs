@@ -10,3 +10,6 @@
 //! persist in the reconciler, not per-connection.
 
 pub(in crate::node) mod retry;
+
+#[allow(dead_code)] // Wired by the driver cutover in the following commits; unused until then.
+pub(in crate::node) mod reconcile;
