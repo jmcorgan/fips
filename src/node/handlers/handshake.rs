@@ -6,7 +6,9 @@ use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{FailReason, HandshakePhase, PeerEvent, PeerMachine, PeerState};
+use crate::peer::machine::{
+    FailReason, HandshakePhase, PeerAction, PeerEvent, PeerMachine, PeerState,
+};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
@@ -506,6 +508,7 @@ impl Node {
                     our_index: None,
                     their_index: Some(their_index),
                     now_ms: packet.timestamp_ms,
+                    is_outbound: false,
                 };
                 self.execute_peer_actions(link_id, &teardown_ctx, phase1)
                     .await;
@@ -590,6 +593,7 @@ impl Node {
                     our_index: Some(our_index),
                     their_index: Some(their_index),
                     now_ms: packet.timestamp_ms,
+                    is_outbound: false,
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
                     .await;
@@ -747,6 +751,7 @@ impl Node {
                     our_index: Some(our_index),
                     their_index: Some(their_index),
                     now_ms: packet.timestamp_ms,
+                    is_outbound: false,
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
                     .await;
@@ -1114,85 +1119,102 @@ impl Node {
             return;
         }
 
-        // Normal path: promote to active peer
-        let promote = ConnAction::PromoteToActive { link: link_id };
-        match self.drive_promote_to_active(promote, peer_identity, packet.timestamp_ms) {
-            Ok(result) => {
-                // Clean up pending_outbound
-                self.pending_outbound.remove(&key);
+        // === C3-3a: net-new outbound establish, driven by the machine. ===
+        // ONLY the `establish_outbound == Promote` arm is cut over here. The
+        // Swap/Keep cross-connection arms and the rekey-msg2 completion branch
+        // above STAY INLINE (§0): they mutate an existing already-promoted peer
+        // via `replace_session` with no PeerAction, so the machine's C1 Swap/Keep
+        // arms cannot be neutral until `PeerSendState` expresses `replace_session`.
+        //
+        // This arm is `has_existing_peer == false` only, so `promote_connection`
+        // always hits its else branch and returns `Promoted`; the defensive
+        // `CrossConnectionWon/Lost` follow-ups are UNREACHABLE here (their
+        // loser-link surgery lands in C3-3b). Direct analog of the C3-2a inbound
+        // net-new arm — no ordering constraint, lowest risk.
+        //
+        // Model A: build a TRANSIENT outbound machine, step `Msg2 →
+        // [PromoteToActive]`, execute it (→ `promote_connection` →
+        // `PromotionResolved{Promoted}` → inert `RegisterDecryptSession`, R2), and
+        // insert into `peer_machines` only on the Promoted (Established) tail. The
+        // outbound `our_index` was allocated at DIAL (unchanged), the outbound
+        // promote sends nothing on the wire, and `promote_connection` frees
+        // nothing new — so the index sequence, `peers`/`peers_by_index`/
+        // `addr_to_link` state, and metrics are byte-identical to the pre-refactor
+        // Promoted arm. `pending_outbound` lifecycle stays shell-side (removed on
+        // the Established tail, exactly where the pre-refactor Ok arm removed it);
+        // the machine never touches it.
+        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
 
-                match result {
-                    PromotionResult::Promoted(node_addr) => {
-                        info!(
-                            peer = %self.peer_display_name(&node_addr),
-                            "Peer promoted to active"
-                        );
-                        // Send initial tree announce to new peer
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionWon {
-                        loser_link_id,
-                        node_addr,
-                    } => {
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(loser_link) = self.links.get(&loser_link_id) {
-                            let loser_tid = loser_link.transport_id();
-                            let loser_addr = loser_link.remote_addr().clone();
-                            if let Some(transport) = self.transports.get(&loser_tid) {
-                                transport.close_connection(&loser_addr).await;
-                            }
-                        }
-                        // Clean up the losing connection's link
-                        self.remove_link(&loser_link_id);
-                        // Ensure addr_to_link points to the winning link
-                        self.addr_to_link
-                            .insert((packet.transport_id, packet.remote_addr.clone()), link_id);
-                        debug!(
-                            peer = %self.peer_display_name(&node_addr),
-                            loser_link_id = %loser_link_id,
-                            "Outbound cross-connection won, loser link cleaned up"
-                        );
-                        // Send initial tree announce to peer (new or reconnected)
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionLost { winner_link_id } => {
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            transport.close_connection(&packet.remote_addr).await;
-                        }
-                        // This connection lost — clean up its link
-                        self.remove_link(&link_id);
-                        // Ensure addr_to_link points to the winner's link
-                        self.addr_to_link.insert(
-                            (packet.transport_id, packet.remote_addr.clone()),
-                            winner_link_id,
-                        );
-                        debug!(
-                            winner_link_id = %winner_link_id,
-                            "Outbound cross-connection lost, keeping existing"
-                        );
-                    }
-                }
+        // Step `Msg2 → [PromoteToActive]`. The machine re-runs the pure
+        // `establish_outbound` on the snapshot (a harmless second pure call, as in
+        // C3-2a); `has_existing_peer == false` reproduces the `Promote` decision.
+        let promote_actions = machine.step(
+            PeerEvent::Msg2 {
+                their_index: header.sender_idx,
+                out: out_snap,
+            },
+            packet.timestamp_ms,
+            &mut self.index_allocator,
+        );
+        debug_assert_eq!(
+            promote_actions,
+            vec![PeerAction::PromoteToActive { link: link_id }]
+        );
+
+        // Register the machine (Promote tail only — the Swap/Keep/rekey arms above
+        // all returned without inserting). Inserted BEFORE execute so the
+        // executor's `PromoteToActive` arm can feed `PromotionResolved` back into
+        // it via the `peer_machines` lookup. The outbound `link_id` was allocated
+        // at dial and the dial path never inserts a machine (Model A), so this
+        // cannot collide with an existing entry.
+        self.peer_machines.insert(link_id, machine);
+
+        // Execute `[PromoteToActive]`. The executor calls `promote_connection`
+        // (identical to the pre-refactor `drive_promote_to_active`), feeds
+        // `PromotionResolved{Promoted}` back, and runs the inert
+        // `RegisterDecryptSession` (R2 — register stays in `promote_connection`).
+        // A promote failure (e.g. `MaxPeersExceeded` if peers filled between dial
+        // and msg2) runs the executor's Err cleanup and removes the machine,
+        // leaving it absent (not Established).
+        let ambient = PeerActionCtx {
+            verified_identity: peer_identity,
+            transport_id: packet.transport_id,
+            remote_addr: packet.remote_addr.clone(),
+            our_index,
+            their_index: Some(header.sender_idx),
+            now_ms: packet.timestamp_ms,
+            is_outbound: true,
+        };
+        self.execute_peer_actions(link_id, &ambient, promote_actions)
+            .await;
+
+        // Post-`Promoted` shell tail (byte-identical to the pre-refactor Promoted
+        // arm), reached only when promotion succeeded (machine now Established).
+        // `pending_outbound.remove` runs here — exactly where the pre-refactor Ok
+        // arm removed it, before the TreeAnnounce/bloom/backoff tail. A promote
+        // failure removed the machine and skips the whole tail (the pre-refactor
+        // Err arm likewise left `pending_outbound` in place and only recorded the
+        // reject, which the executor's Err arm already did).
+        debug_assert!(matches!(
+            self.peer_machines.get(&link_id).map(|m| m.state()),
+            Some(PeerState::Established { .. }) | None
+        ));
+        if matches!(
+            self.peer_machines.get(&link_id).map(|m| m.state()),
+            Some(PeerState::Established { .. })
+        ) {
+            self.pending_outbound.remove(&key);
+            info!(
+                peer = %self.peer_display_name(&peer_node_addr),
+                "Peer promoted to active"
+            );
+            // Send initial tree announce to new peer
+            if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
+                debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
             }
-            Err(e) => {
-                warn!(
-                    link_id = %link_id,
-                    error = %e,
-                    "Failed to promote connection"
-                );
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            }
+            // Schedule filter announce (sent on next tick via debounce)
+            self.bloom_state.mark_update_needed(peer_node_addr);
+            self.reset_lookup_backoff();
         }
     }
 
@@ -1206,6 +1228,12 @@ impl Node {
     /// [`PromotionResult`] so the caller can drive the site-specific
     /// post-promotion tail (TreeAnnounce, bloom mark, discovery-backoff reset,
     /// loser-link cleanup).
+    ///
+    // C3-3a cut the last live caller (the inline outbound `Promote` arm) over to
+    // the executor's `PromoteToActive` path, so this is now unused. Its caller
+    // census / retirement is C3-3b (blueprint § C3-3b); kept here (allowed) until
+    // then so the diff stays scoped to the outbound Promote cutover.
+    #[allow(dead_code)]
     fn drive_promote_to_active(
         &mut self,
         action: ConnAction,

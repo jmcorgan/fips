@@ -54,6 +54,14 @@ pub(in crate::node) struct PeerActionCtx {
     pub(in crate::node) their_index: Option<SessionIndex>,
     /// The wire timestamp driving this step (promotion ts / loss-report clock).
     pub(in crate::node) now_ms: u64,
+    /// Establish direction for this exchange. Discriminates the
+    /// `PromoteToActive` failure cleanup: the pre-refactor inbound
+    /// (`handle_msg1`) and outbound (`handle_msg2`) promote-Err arms were NOT
+    /// byte-identical, so the executor must reproduce each. `false` = inbound
+    /// (drop link + reverse map + free index), `true` = outbound (record the
+    /// reject only; leave the dead link/`addr_to_link` for the stale-connection
+    /// reaper, matching old `handle_msg2`).
+    pub(in crate::node) is_outbound: bool,
 }
 
 impl Node {
@@ -179,22 +187,48 @@ impl Node {
                         }
                         Err(e) => {
                             // GAP-4: promotion failed. `promote_connection` already
-                            // removed `connections[link]`; mirror the pre-refactor
-                            // cleanup (`handle_msg1` L587-591): drop the link +
-                            // reverse map, free our index, discard the machine, and
-                            // record the reject. The queue is drained (PromoteToActive
-                            // is the last establish action), so no explicit abort.
-                            //
-                            // Restored pre-refactor promote-failure warn!
-                            // (`handle_msg1` L757).
-                            warn!(link_id = %promote_link, error = %e, "Failed to promote inbound connection");
-                            self.remove_link(&promote_link);
-                            if let Some(idx) = ambient.our_index {
-                                let _ = self.index_allocator.free(idx);
+                            // removed `connections[link]` and (on error) handled its
+                            // own index internally. The pre-refactor inbound and
+                            // outbound promote-Err arms were NOT byte-identical, so
+                            // discriminate on `ambient.is_outbound`. The queue is
+                            // drained (PromoteToActive is the last establish action),
+                            // so no explicit abort.
+                            if ambient.is_outbound {
+                                // OLD outbound (`handle_msg2` promote-Err): warn +
+                                // record_reject ONLY. NO `remove_link`, NO
+                                // `index_allocator.free`, NO `addr_to_link` removal —
+                                // the dead link/addr_to_link/pending_outbound were
+                                // left for the 30s stale-connection reaper
+                                // (`promote_connection` already handled
+                                // `connections[link]`/its index on error). Restored
+                                // pre-refactor outbound warn! ("Failed to promote
+                                // connection").
+                                //
+                                // The transient outbound machine was inserted BEFORE
+                                // execute (Model A); it is additive C3-1 state that
+                                // did not exist pre-refactor, so removing the just-
+                                // inserted machine on failure is neutral vs old and
+                                // prevents a leak.
+                                warn!(link_id = %promote_link, error = %e, "Failed to promote connection");
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
+                                self.peer_machines.remove(&promote_link);
+                            } else {
+                                // OLD inbound (`handle_msg1` L587-591): drop the link
+                                // + reverse map, free our index, discard the machine,
+                                // and record the reject. Restored pre-refactor inbound
+                                // promote-failure warn! (`handle_msg1` L757).
+                                warn!(link_id = %promote_link, error = %e, "Failed to promote inbound connection");
+                                self.remove_link(&promote_link);
+                                if let Some(idx) = ambient.our_index {
+                                    let _ = self.index_allocator.free(idx);
+                                }
+                                self.peer_machines.remove(&promote_link);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
                             }
-                            self.peer_machines.remove(&promote_link);
-                            self.stats_mut()
-                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                     }
                 }
