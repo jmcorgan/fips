@@ -3,8 +3,10 @@
 use crate::NodeAddr;
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
+use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
+use crate::peer::machine::{FailReason, HandshakePhase, PeerEvent, PeerMachine, PeerState};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
@@ -272,13 +274,47 @@ impl Node {
         // shared authorize → allocate → send-msg2 → promote tail; the other
         // variants complete the rate-limiter and return here.
         match self.fmp.establish_inbound(&est, &wire) {
-            InboundDecision::Reject { reason } => {
+            InboundDecision::Reject {
+                reason: InboundReject::AtMaxPeers,
+            } => {
+                // C3-2a net-new arm: drive the reject through the machine to
+                // prove realization A — a net-new msg1 at the max-peers cap
+                // reaches `Failed{Rejected}` with the index allocator untouched
+                // (no allocate before the reject). The transient machine is
+                // discarded (never inserted into `peer_machines`); `conn`/
+                // `link_id` were never inserted into the registry either.
+                debug!(
+                    peer = %self.peer_display_name(&peer_node_addr),
+                    max = self.max_peers(),
+                    "Silent-dropping Msg1 at max_peers cap (early gate; no Msg2 sent)"
+                );
+                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+                let _ = machine.step(
+                    PeerEvent::InboundMsg1 {
+                        link: link_id,
+                        wire,
+                        est,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                debug_assert!(matches!(
+                    machine.state(),
+                    PeerState::Failed {
+                        reason: FailReason::Rejected
+                    }
+                ));
+                self.msg1_rate_limiter.complete_handshake();
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                return;
+            }
+            InboundDecision::Reject {
+                reason: reason @ (InboundReject::PendingSession | InboundReject::DualRekeyWon),
+            } => {
+                // Existing-peer rekey rejects — still inline (C4). Byte-unchanged
+                // from the pre-refactor shared reject tail.
                 match reason {
-                    InboundReject::AtMaxPeers => debug!(
-                        peer = %self.peer_display_name(&peer_node_addr),
-                        max = self.max_peers(),
-                        "Silent-dropping Msg1 at max_peers cap (early gate; no Msg2 sent)"
-                    ),
                     InboundReject::PendingSession => debug!(
                         peer = %self.peer_display_name(&peer_node_addr),
                         "Rekey msg1 received but already have pending session, dropping"
@@ -287,6 +323,7 @@ impl Node {
                         peer = %self.peer_display_name(&peer_node_addr),
                         "Dual rekey initiation: we win (smaller addr), dropping their msg1"
                     ),
+                    InboundReject::AtMaxPeers => unreachable!(),
                 }
                 // `conn`/`link_id` were never inserted into the registry, so the
                 // local drop suffices — no cleanup needed.
@@ -419,7 +456,146 @@ impl Node {
                     .unwrap_or(0);
                 self.note_link_dead(peer, now_ms);
             }
-            InboundDecision::Promote => {}
+            InboundDecision::Promote => {
+                // === C3-2a: net-new inbound establish, driven by the machine. ===
+                // Realization A (two-phase authorize): Phase 1 classifies with no
+                // allocation; the shell interposes the late-ACL gate here; Phase 2
+                // allocates the single index and emits [SendHandshake,
+                // PromoteToActive]. A rejected/unauthorized msg1 therefore
+                // allocates NO index — matching the pre-refactor
+                // authorize-before-allocate ordering exactly.
+
+                // Keep the shell's own copies of the msg2 framing inputs before
+                // the machine event consumes `wire` (WireOutcome is not Clone).
+                let msg2_payload = wire.msg2_payload.clone();
+                let their_index = wire.their_index;
+
+                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+
+                // Phase 1: classify (no allocation, no actions for a net-new leg).
+                let phase1 = machine.step(
+                    PeerEvent::InboundMsg1 {
+                        link: link_id,
+                        wire,
+                        est,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                debug_assert!(phase1.is_empty());
+                debug_assert!(matches!(
+                    machine.state(),
+                    PeerState::Handshaking {
+                        phase: HandshakePhase::ReceivedMsg1,
+                        ..
+                    }
+                ));
+
+                // Shell interposition: late-ACL authorize BEFORE any allocation.
+                if self
+                    .authorize_peer(
+                        &peer_identity,
+                        PeerAclContext::InboundHandshake,
+                        packet.transport_id,
+                        &packet.remote_addr,
+                    )
+                    .is_err()
+                {
+                    let _ = machine.step(
+                        PeerEvent::Rejected,
+                        packet.timestamp_ms,
+                        &mut self.index_allocator,
+                    );
+                    self.msg1_rate_limiter.complete_handshake();
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
+                }
+
+                // Phase 2: allocate our index + emit [SendHandshake, PromoteToActive].
+                let promote_actions = machine.step(
+                    PeerEvent::Authorized,
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                let our_index = match machine.our_index() {
+                    Some(idx) => idx,
+                    None => {
+                        // Allocation exhausted in Phase 2 (mirrors the pre-refactor
+                        // allocate-failure path): no msg2, no promote.
+                        self.msg1_rate_limiter.complete_handshake();
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        return;
+                    }
+                };
+
+                // Shell registry surgery (Option A1), in the pre-refactor order:
+                // set indices on the shell connection, insert link / reverse map /
+                // connection, then build + store the framed msg2.
+                conn.set_our_index(our_index);
+                conn.set_their_index(their_index);
+                let link = Link::connectionless(
+                    link_id,
+                    packet.transport_id,
+                    packet.remote_addr.clone(),
+                    LinkDirection::Inbound,
+                    Duration::from_millis(self.config().node.base_rtt_ms),
+                );
+                self.links.insert(link_id, link);
+                self.addr_to_link.insert(addr_key, link_id);
+                self.connections.insert(link_id, conn);
+                let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
+                if let Some(conn) = self.connections.get_mut(&link_id) {
+                    conn.set_handshake_msg2(wire_msg2.clone());
+                }
+
+                // Register the machine (Promote tail only — discarded on every
+                // reject/resend/rekey arm per the insertion discipline).
+                self.peer_machines.insert(link_id, machine);
+
+                // Execute [SendHandshake, PromoteToActive]. The executor frames +
+                // sends msg2 (bytes identical to `wire_msg2`), promotes via
+                // `promote_connection`, feeds PromotionResolved back, and runs the
+                // inert RegisterDecryptSession (R2 — register stays in
+                // `promote_connection`). Its send-failure / promote-failure arms
+                // run the pre-refactor cleanup and remove the machine, leaving it
+                // absent (not Established).
+                let ambient = PeerActionCtx {
+                    verified_identity: peer_identity,
+                    transport_id: packet.transport_id,
+                    remote_addr: packet.remote_addr.clone(),
+                    our_index: Some(our_index),
+                    their_index: Some(their_index),
+                    now_ms: packet.timestamp_ms,
+                };
+                self.execute_peer_actions(link_id, &ambient, promote_actions)
+                    .await;
+
+                // Post-`Promoted` shell tail (byte-identical to the pre-refactor
+                // Promoted arm), reached only when promotion succeeded (the machine
+                // is now Established); a send/promote failure removed the machine
+                // and already cleaned up.
+                if matches!(
+                    self.peer_machines.get(&link_id).map(|m| m.state()),
+                    Some(PeerState::Established { .. })
+                ) {
+                    // Store msg2 on peer for resend on duplicate msg1
+                    if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
+                        peer.set_handshake_msg2(wire_msg2.clone());
+                    }
+                    // Send initial tree announce to new peer
+                    if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
+                        debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
+                    }
+                    // Schedule filter announce (sent on next tick via debounce)
+                    self.bloom_state.mark_update_needed(peer_node_addr);
+                    self.reset_lookup_backoff();
+                }
+
+                self.msg1_rate_limiter.complete_handshake();
+                return;
+            }
         }
 
         if self

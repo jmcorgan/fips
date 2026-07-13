@@ -14,3 +14,5 @@ mod encrypted;
 mod forwarding;
 mod peer_actions;
 mod rx_loop;
+
+pub(in crate::node) use peer_actions::PeerActionCtx;

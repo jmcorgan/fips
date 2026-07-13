@@ -20,6 +20,7 @@
 //! `RegisterDecryptSession` is a deliberate no-op — see its arm for the C3-2 note.
 
 use crate::node::Node;
+use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::peer::machine::{PeerAction, PeerEvent};
 use crate::proto::fmp::wire::build_msg2;
 use crate::transport::{LinkId, TransportAddr, TransportId};
@@ -96,7 +97,6 @@ impl Node {
         ambient: &PeerActionCtx,
         actions: Vec<PeerAction>,
     ) {
-        let _ = link;
         let mut queue: VecDeque<PeerAction> = actions.into();
         while let Some(action) = queue.pop_front() {
             match action {
@@ -115,8 +115,30 @@ impl Node {
                         (ambient.our_index, ambient.their_index)
                     {
                         let frame = build_msg2(sender_idx, receiver_idx, &bytes);
-                        if let Some(transport) = self.transports.get(&ambient.transport_id) {
-                            let _ = transport.send(&ambient.remote_addr, &frame).await;
+                        // GAP-5: surface the send Result. A missing transport skips
+                        // the send and continues (mirrors `handle_msg1`'s
+                        // `if let Some(transport)` guard); a send *error* runs the
+                        // pre-refactor msg2-send-failure cleanup (`handle_msg1`
+                        // L494-503) and ABORTS the remaining queue so the queued
+                        // `PromoteToActive` never runs.
+                        let send_err = match self.transports.get(&ambient.transport_id) {
+                            Some(transport) => {
+                                transport.send(&ambient.remote_addr, &frame).await.is_err()
+                            }
+                            None => false,
+                        };
+                        if send_err {
+                            self.connections.remove(&link);
+                            self.links.remove(&link);
+                            self.addr_to_link
+                                .remove(&(ambient.transport_id, ambient.remote_addr.clone()));
+                            if let Some(idx) = ambient.our_index {
+                                let _ = self.index_allocator.free(idx);
+                            }
+                            self.peer_machines.remove(&link);
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                            return;
                         }
                     }
                 }
@@ -151,8 +173,19 @@ impl Node {
                             queue.extend(follow);
                         }
                         Err(_e) => {
-                            // C3-2 realizes the promotion-failure cleanup tail
-                            // (`handle_msg1:587` / `handle_msg2:1005`).
+                            // GAP-4: promotion failed. `promote_connection` already
+                            // removed `connections[link]`; mirror the pre-refactor
+                            // cleanup (`handle_msg1` L587-591): drop the link +
+                            // reverse map, free our index, discard the machine, and
+                            // record the reject. The queue is drained (PromoteToActive
+                            // is the last establish action), so no explicit abort.
+                            self.remove_link(&promote_link);
+                            if let Some(idx) = ambient.our_index {
+                                let _ = self.index_allocator.free(idx);
+                            }
+                            self.peer_machines.remove(&promote_link);
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                     }
                 }

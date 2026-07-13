@@ -305,6 +305,10 @@ pub(crate) struct PeerMachine {
     conn: ConnectionState,
     /// Remote startup epoch (establish-path-only; NOT in send-state).
     remote_epoch: Option<[u8; 8]>,
+    /// Inbound two-phase authorize (realization A): the opaque Noise msg2
+    /// payload stashed in Phase 1 (`InboundMsg1`) and emitted in Phase 2
+    /// (`on_authorized`), so a rejected/unauthorized msg1 allocates no index.
+    pending_msg2_payload: Option<Vec<u8>>,
 
     // --- rekey negotiation sub-state (control tier; NOT the pending send slot) ---
     rekey_in_progress: bool,
@@ -343,6 +347,7 @@ impl PeerMachine {
             identity: Some(identity),
             conn: ConnectionState::outbound(link, identity, now),
             remote_epoch: None,
+            pending_msg2_payload: None,
             rekey_in_progress: false,
             rekey_our_index: None,
             rekey_msg1: None,
@@ -368,6 +373,7 @@ impl PeerMachine {
             identity: None,
             conn: ConnectionState::inbound(link, now),
             remote_epoch: None,
+            pending_msg2_payload: None,
             rekey_in_progress: false,
             rekey_our_index: None,
             rekey_msg1: None,
@@ -385,6 +391,14 @@ impl PeerMachine {
     /// Current lifecycle state.
     pub(crate) fn state(&self) -> PeerState {
         self.state
+    }
+
+    /// The index we allocated for this peer's inbound session, once Phase 2
+    /// (`on_authorized`) has run. `None` before allocation (and after a
+    /// rejected/unauthorized msg1). The inbound cutover reads this to perform
+    /// the shell registry surgery with the machine-owned index (Option A1).
+    pub(crate) fn our_index(&self) -> Option<SessionIndex> {
+        self.our_index
     }
 
     /// The crystallized node address, if identity is known.
@@ -421,7 +435,7 @@ impl PeerMachine {
             PeerEvent::Msg2 { their_index, out } => {
                 self.on_msg2(their_index, out, now, index_allocator)
             }
-            PeerEvent::Authorized => Vec::new(),
+            PeerEvent::Authorized => self.on_authorized(now, index_allocator),
             PeerEvent::Rejected => self.fail(FailReason::AclRejected),
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::RekeyMsg1 { wire, est } => {
@@ -608,40 +622,67 @@ impl PeerMachine {
                     actions.push(PeerAction::UnregisterDecryptSession { index: idx });
                 }
                 actions.push(PeerAction::ReportLost { peer });
-                actions.extend(self.inbound_promote(link, &wire, now, alloc));
+                actions.extend(self.inbound_classify(link, &wire));
                 actions
             }
-            InboundDecision::Promote => self.inbound_promote(link, &wire, now, alloc),
+            InboundDecision::Promote => self.inbound_classify(link, &wire),
         }
     }
 
-    /// The inbound Promote tail: allocate our index, record indices/epoch/msg2,
-    /// emit msg2 + drive promotion. `RegisterDecryptSession` follows on the
-    /// `PromotionResolved{Promoted}` feedback (§3.2 "then on PromotionResult").
-    fn inbound_promote(
-        &mut self,
-        link: LinkId,
-        wire: &WireOutcome,
-        _now: u64,
-        alloc: &mut IndexAllocator,
-    ) -> Vec<PeerAction> {
+    /// Inbound **Phase 1** (realization A): classify the fresh leg *without*
+    /// allocating an index. Records identity/epoch/their-index and stashes the
+    /// opaque msg2 payload, parking at `Handshaking{ReceivedMsg1}` — the
+    /// "awaiting Authorized" marker. The index allocation and the msg2/promote
+    /// emission happen in Phase 2 ([`Self::on_authorized`]) only after the
+    /// shell's late-ACL gate passes, so a rejected/unauthorized msg1 allocates
+    /// nothing (preserving the pre-refactor global index-allocation sequence).
+    fn inbound_classify(&mut self, link: LinkId, wire: &WireOutcome) -> Vec<PeerAction> {
         self.identity = Some(wire.peer_identity);
         self.remote_epoch = wire.remote_epoch;
         self.conn.set_their_index(wire.their_index);
-        let our_index = alloc.allocate().ok();
-        if let Some(idx) = our_index {
-            self.conn.set_our_index(idx);
-            self.our_index = Some(idx);
-        }
-        self.conn.set_handshake_msg2(wire.msg2_payload.clone());
+        self.pending_msg2_payload = Some(wire.msg2_payload.clone());
         self.state = PeerState::Handshaking {
             link,
             phase: HandshakePhase::ReceivedMsg1,
         };
+        Vec::new()
+    }
+
+    /// Inbound **Phase 2** (realization A): the late-ACL gate passed shell-side.
+    /// Allocate our index NOW — the single inbound allocation point — record it
+    /// on `conn`, and emit the msg2 send + promotion. `RegisterDecryptSession`
+    /// follows on the `PromotionResolved{Promoted}` feedback (§3.2). Guarded to
+    /// the inbound `ReceivedMsg1` phase so the benign outbound `Authorized`
+    /// confirmation stays a no-op (state `Handshaking{SentMsg1}` and every other
+    /// state fall through to `Vec::new()`).
+    fn on_authorized(&mut self, _now: u64, alloc: &mut IndexAllocator) -> Vec<PeerAction> {
+        if !matches!(
+            self.state,
+            PeerState::Handshaking {
+                phase: HandshakePhase::ReceivedMsg1,
+                ..
+            }
+        ) {
+            return Vec::new();
+        }
+        let our_index = match alloc.allocate() {
+            Ok(idx) => idx,
+            Err(_) => {
+                // Allocation exhausted: no index, no msg2, no promote. The shell
+                // records the reject + completes the rate-limiter bracket
+                // (mirrors the pre-refactor `handle_msg1` allocate-failure path).
+                self.state = PeerState::Failed {
+                    reason: FailReason::Rejected,
+                };
+                return Vec::new();
+            }
+        };
+        self.conn.set_our_index(our_index);
+        self.our_index = Some(our_index);
+        let bytes = self.pending_msg2_payload.take().unwrap_or_default();
+        let link = self.link;
         vec![
-            PeerAction::SendHandshake {
-                bytes: wire.msg2_payload.clone(),
-            },
+            PeerAction::SendHandshake { bytes },
             PeerAction::PromoteToActive { link },
         ]
     }
@@ -1352,22 +1393,37 @@ mod tests {
             &mut alloc,
         );
 
-        // Restart tail: invalidate, unregister old, report lost, then Promote.
-        assert_eq!(actions[0], PeerAction::InvalidateSendState);
+        // Phase 1: restart tail only (invalidate, unregister old, report lost),
+        // then park at ReceivedMsg1 — no index allocated yet (realization A).
         assert_eq!(
-            actions[1],
-            PeerAction::UnregisterDecryptSession {
-                index: SessionIndex::new(0xDEAD)
-            }
+            actions,
+            vec![
+                PeerAction::InvalidateSendState,
+                PeerAction::UnregisterDecryptSession {
+                    index: SessionIndex::new(0xDEAD)
+                },
+                PeerAction::ReportLost { peer: peer_addr },
+            ]
         );
-        assert_eq!(actions[2], PeerAction::ReportLost { peer: peer_addr });
+        assert!(matches!(
+            m.state(),
+            PeerState::Handshaking {
+                phase: HandshakePhase::ReceivedMsg1,
+                ..
+            }
+        ));
+        assert_eq!(m.our_index(), None);
+        assert_eq!(alloc.count(), 0);
+
+        // Phase 2: late-ACL gate passed -> allocate + Promote tail.
+        let promote = m.step(PeerEvent::Authorized, 1_000, &mut alloc);
         assert!(
-            actions
+            promote
                 .iter()
                 .any(|a| matches!(a, PeerAction::SendHandshake { .. }))
         );
         assert!(
-            actions
+            promote
                 .iter()
                 .any(|a| matches!(a, PeerAction::PromoteToActive { .. }))
         );
@@ -1400,7 +1456,7 @@ mod tests {
         let our = *peer_identity().node_addr();
         let est_w = est_new_peer(our);
         let wire_w = wire_outcome(peer, Some([3u8; 8]), 0x77);
-        let wa = winner.step(
+        let wp1 = winner.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(1),
                 wire: wire_w,
@@ -1409,6 +1465,8 @@ mod tests {
             100,
             &mut alloc,
         );
+        assert!(wp1.is_empty()); // Phase 1 classifies without emitting.
+        let wa = winner.step(PeerEvent::Authorized, 100, &mut alloc);
         assert!(
             wa.iter().any(
                 |a| matches!(a, PeerAction::PromoteToActive { link } if *link == LinkId::new(1))
@@ -1432,7 +1490,7 @@ mod tests {
         let mut loser = PeerMachine::new_inbound(LinkId::new(2), 0);
         let est_l = est_new_peer(our);
         let wire_l = wire_outcome(peer, Some([3u8; 8]), 0x88);
-        let la = loser.step(
+        let lp1 = loser.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(2),
                 wire: wire_l,
@@ -1441,6 +1499,8 @@ mod tests {
             100,
             &mut alloc,
         );
+        assert!(lp1.is_empty()); // Phase 1 classifies without emitting.
+        let la = loser.step(PeerEvent::Authorized, 100, &mut alloc);
         assert!(
             la.iter()
                 .any(|a| matches!(a, PeerAction::PromoteToActive { .. }))
@@ -1490,7 +1550,9 @@ mod tests {
         let est = est_new_peer(our);
         let wire = wire_outcome(peer, Some([4u8; 8]), 0x77);
 
-        let mut actions = m.step(
+        // Phase 1 (InboundMsg1): classify only — no actions, no allocation,
+        // parked at ReceivedMsg1 (realization A).
+        let phase1 = m.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(1),
                 wire,
@@ -1499,27 +1561,109 @@ mod tests {
             200,
             &mut alloc,
         );
-        actions.extend(m.step(
+        assert!(phase1.is_empty());
+        assert_eq!(
+            m.state(),
+            PeerState::Handshaking {
+                link: LinkId::new(1),
+                phase: HandshakePhase::ReceivedMsg1
+            }
+        );
+        assert_eq!(m.our_index(), None);
+        assert_eq!(alloc.count(), 0); // allocator untouched pre-authorize
+
+        // Phase 2 (Authorized): allocate + [SendHandshake, PromoteToActive].
+        let phase2 = m.step(PeerEvent::Authorized, 200, &mut alloc);
+        assert!(matches!(phase2[0], PeerAction::SendHandshake { .. }));
+        assert_eq!(
+            phase2[1],
+            PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }
+        );
+        assert!(m.our_index().is_some());
+        assert_eq!(alloc.count(), 1); // exactly one index allocated
+
+        // Phase 3 (PromotionResolved{Promoted}): register + Established.
+        let phase3 = m.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::Promoted(peer_addr),
             },
             200,
             &mut alloc,
-        ));
-
-        // Combined promote sequence (§3.2 "then on PromotionResult ...").
-        assert!(matches!(actions[0], PeerAction::SendHandshake { .. }));
-        assert_eq!(
-            actions[1],
-            PeerAction::PromoteToActive {
-                link: LinkId::new(1)
-            }
         );
         assert!(matches!(
-            actions[2],
+            phase3[0],
             PeerAction::RegisterDecryptSession { .. }
         ));
         assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
+    }
+
+    // ---- Test 6b: inbound late-ACL rejected -> no allocation --------------
+    #[test]
+    fn inbound_authorize_rejected_no_alloc() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+        let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let our = *peer_identity().node_addr();
+        let est = est_new_peer(our);
+        let wire = wire_outcome(peer, Some([4u8; 8]), 0x77);
+
+        // Phase 1 classifies (no alloc).
+        let phase1 = m.step(
+            PeerEvent::InboundMsg1 {
+                link: LinkId::new(1),
+                wire,
+                est,
+            },
+            200,
+            &mut alloc,
+        );
+        assert!(phase1.is_empty());
+        assert_eq!(alloc.count(), 0);
+
+        // Late-ACL rejects -> Failed{AclRejected}, still no allocation.
+        let rej = m.step(PeerEvent::Rejected, 200, &mut alloc);
+        assert!(rej.is_empty());
+        assert_eq!(
+            m.state(),
+            PeerState::Failed {
+                reason: FailReason::AclRejected
+            }
+        );
+        assert_eq!(alloc.count(), 0);
+        assert_eq!(m.our_index(), None);
+    }
+
+    // ---- Test 6c: inbound reject at max_peers -> no allocation ------------
+    #[test]
+    fn inbound_at_max_peers_reject_no_alloc() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+        let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let our = *peer_identity().node_addr();
+        let mut est = est_new_peer(our);
+        est.at_max_peers = true;
+        let wire = wire_outcome(peer, Some([4u8; 8]), 0x77);
+
+        let actions = m.step(
+            PeerEvent::InboundMsg1 {
+                link: LinkId::new(1),
+                wire,
+                est,
+            },
+            200,
+            &mut alloc,
+        );
+        assert!(actions.is_empty());
+        assert_eq!(
+            m.state(),
+            PeerState::Failed {
+                reason: FailReason::Rejected
+            }
+        );
+        assert_eq!(alloc.count(), 0);
+        assert_eq!(m.our_index(), None);
     }
 
     // ---- Test 7: outbound establish (+ cross-connection) ------------------
