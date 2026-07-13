@@ -7,9 +7,10 @@
 
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
+use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::PeerMachine;
+use crate::peer::machine::{PeerEvent, PeerMachine};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
@@ -874,6 +875,14 @@ impl Node {
     /// learn the initiator's identity and epoch, then performs identity-based
     /// checks (restart detection, rekey detection, cross-connection resolution)
     /// and promotes the connection to active peer.
+    //
+    // The four terminal `establish_inbound` arms (Reject/ResendMsg2/CrossConnect/
+    // RekeyRespond) keep the pre-refactor trailing `return;`, preserved byte-for-
+    // byte from before the promote block moved into the executor. With that block
+    // gone the `match` is now the function tail, so those returns read as
+    // `needless_return`; the allow keeps the arms untouched rather than editing
+    // preserved shell bodies to satisfy the lint.
+    #[allow(clippy::needless_return)]
     pub(in crate::node) async fn handle_msg3(&mut self, packet: ReceivedPacket) {
         // Parse header
         let header = match Msg3Header::parse(&packet.data) {
@@ -1298,138 +1307,44 @@ impl Node {
                 );
                 return;
             }
-            InboundDecision::RestartThenPromote { peer } => {
-                // Epoch mismatch — peer restarted. Tear down stale session, then
-                // fall through to promote the fresh connection in its place.
-                debug!(
-                    peer = %self.peer_display_name(&peer),
-                    "Peer restart detected (epoch mismatch), removing stale session"
-                );
-                self.remove_active_peer(&peer);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                self.note_link_dead(peer, now_ms);
-                // Fall through to process as new connection.
-            }
-            InboundDecision::Promote => {
-                // Net-new inbound (or the post-restart re-promote): fall through
-                // to promote_connection, whose late max-peers cap and
-                // cross-connection won/lost handling stay shell-side.
-            }
-        }
-
-        // Promote the connection to active peer.
-        let wire_msg2 = self
-            .connections
-            .get(&link_id)
-            .and_then(|c| c.handshake_msg2().map(|m| m.to_vec()));
-
-        debug!(
-            peer = %self.peer_display_name(&peer_node_addr),
-            link_id = %link_id,
-            our_index = %our_index,
-            "handle_msg3: promoting inbound, peers_has_key={}",
-            self.peers.contains_key(&peer_node_addr),
-        );
-        match self.promote_connection(link_id, peer_identity, packet.timestamp_ms) {
-            Ok(result) => {
-                match result {
-                    PromotionResult::Promoted(node_addr) => {
-                        // Store msg2 on peer for resend on duplicate msg1
-                        if let (Some(peer), Some(msg2)) =
-                            (self.peers.get_mut(&node_addr), wire_msg2)
-                        {
-                            peer.set_handshake_msg2(msg2);
-                        }
-                        // Promotion is logged once by `promote_connection`
-                        // ("Connection promoted to active peer"); no separate
-                        // inbound-path line.
-                        // Send initial tree announce to new peer
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        // Schedule filter announce (sent on next tick via debounce)
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionWon {
-                        loser_link_id,
-                        node_addr,
-                    } => {
-                        // Store msg2 on peer for resend on duplicate msg1
-                        if let (Some(peer), Some(msg2)) =
-                            (self.peers.get_mut(&node_addr), wire_msg2)
-                        {
-                            peer.set_handshake_msg2(msg2);
-                        }
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(loser_link) = self.links.get(&loser_link_id) {
-                            let loser_tid = loser_link.transport_id();
-                            let loser_addr = loser_link.remote_addr().clone();
-                            if let Some(transport) = self.transports.get(&loser_tid) {
-                                transport.close_connection(&loser_addr).await;
-                            }
-                        }
-                        // Clean up the losing connection's link
-                        self.remove_link(&loser_link_id);
-                        debug!(
-                            peer = %self.peer_display_name(&node_addr),
-                            loser_link_id = %loser_link_id,
-                            "Inbound cross-connection won, loser link cleaned up"
-                        );
-                        if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
-                            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                        }
-                        self.bloom_state.mark_update_needed(node_addr);
-                        self.reset_lookup_backoff();
-                    }
-                    PromotionResult::CrossConnectionLost { winner_link_id } => {
-                        // Close the losing TCP connection (no-op for connectionless)
-                        if let Some(transport) = self.transports.get(&packet.transport_id) {
-                            transport.close_connection(&packet.remote_addr).await;
-                        }
-                        // This connection lost — clean up its link
-                        self.remove_link(&link_id);
-                        // Restore addr_to_link for the winner's link
-                        self.addr_to_link.insert(
-                            (packet.transport_id, packet.remote_addr.clone()),
-                            winner_link_id,
-                        );
-                        debug!(
-                            winner_link_id = %winner_link_id,
-                            "Inbound cross-connection lost, keeping existing"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                // A max_peers rejection is expected policy, not a fault —
-                // log it at debug to avoid WARN spam when a cap'd node is
-                // under sustained inbound pressure. Other promotion failures
-                // remain at warn.
-                if matches!(e, NodeError::MaxPeersExceeded { .. }) {
+            decision @ (InboundDecision::RestartThenPromote { .. } | InboundDecision::Promote) => {
+                // Preserve next's epoch-mismatch restart breadcrumb — fires before
+                // the machine's teardown actions run, matching next's inline order
+                // (breadcrumb → remove_active_peer → note_link_dead → promote).
+                if let InboundDecision::RestartThenPromote { peer } = &decision {
                     debug!(
-                        peer = %self.peer_display_name(&peer_node_addr),
-                        max = self.max_peers(),
-                        "Rejecting inbound connection at max_peers cap (no promotion)"
-                    );
-                } else {
-                    warn!(
-                        link_id = %link_id,
-                        error = %e,
-                        "Failed to promote inbound connection"
+                        peer = %self.peer_display_name(peer),
+                        "Peer restart detected (epoch mismatch), removing stale session"
                     );
                 }
-                // Clean up on promotion failure. promote_connection already
-                // freed our_index in its MaxPeersExceeded path; freeing again
-                // here is benign (IndexAllocator::free is a HashSet::remove,
-                // the second call returns Err(NotFound) and is ignored).
-                self.remove_link(&link_id);
-                let _ = self.index_allocator.free(our_index);
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                // Machine-driven establish promote. A TRANSIENT inbound machine
+                // re-derives the decision and emits the action stream:
+                // `[PromoteToActive]` for `Promote`, or `[InvalidateSendState,
+                // ReportLost, PromoteToActive]` for `RestartThenPromote` (whose two
+                // teardown actions map to `remove_active_peer` / `note_link_dead`,
+                // in that order — the same order next ran them inline). The transient
+                // is never inserted into `peer_machines`; the persistent
+                // `established()` machine is created inside `promote_connection`
+                // (M3), so there is no double-insert. The relocated promote body,
+                // and the `RestartThenPromote` teardown ordering equivalence, live in
+                // the executor's `PromoteToActive` / `InvalidateSendState` /
+                // `ReportLost` arms.
+                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+                let actions = machine.step(
+                    PeerEvent::InboundMsg3 { wire, est: snap },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                let ambient = PeerActionCtx {
+                    verified_identity: peer_identity,
+                    transport_id: packet.transport_id,
+                    remote_addr: packet.remote_addr.clone(),
+                    our_index: Some(our_index),
+                    their_index: Some(header.sender_idx),
+                    now_ms: packet.timestamp_ms,
+                    is_outbound: false,
+                };
+                self.execute_peer_actions(link_id, &ambient, actions).await;
             }
         }
     }
