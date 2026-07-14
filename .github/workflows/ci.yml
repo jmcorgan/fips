@@ -88,6 +88,46 @@ jobs:
             ${{ runner.os }}-cargo-
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # Android cross-check
+  #
+  # FIPS runs on Android as an embedded library — the host app owns the TUN
+  # (an Android VpnService), so there are no daemon binaries to package, unlike
+  # the desktop targets. This job only cross-compiles the library for the
+  # android target to guard the android-only cfg paths (and the `not(android)`
+  # exclusions) from silently bit-rotting; nothing else in CI compiles them.
+  # cargo-ndk wires the NDK toolchain, which is required even for a check
+  # because `ring` compiles C at build time.
+  # ───────────────────────────────────────────────────────────────────────────
+  android-check:
+    name: Android cross-check (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain (+ Android target)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: aarch64-linux-android
+          components: clippy
+          cache: false
+          rustflags: ''
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@cargo-ndk
+      - name: Clippy the library for Android
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          cargo ndk -t arm64-v8a clippy --lib -- -D warnings
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
