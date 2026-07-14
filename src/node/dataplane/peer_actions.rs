@@ -1,4 +1,4 @@
-//! Executor for the per-peer control machine's [`PeerAction`]s (Step 2 / M2).
+//! Executor for the per-peer control machine's [`PeerAction`]s.
 //!
 //! The per-peer FSM in [`crate::peer::machine`] is a sans-IO reducer: it decides
 //! *what* must happen and returns a `Vec<PeerAction>`; this module is the *doing*
@@ -6,14 +6,14 @@
 //! stands for (`build_msg2` + `transport.send`, `promote_connection`,
 //! `remove_active_peer`, `index_allocator.free`, `note_link_dead`, …).
 //!
-//! ## M2 skeleton (SHADOW-ONLY)
+//! ## Shadow-only skeleton
 //!
-//! This is the **M2** increment: the machine home (`Node.peer_machines`), the
+//! The machine home (`Node.peer_machines`), the
 //! executor, and the disjoint-borrow advance helper. It is **unwired** — no live
 //! handler path drives the machine and nothing inserts into `peer_machines`, so
 //! every method here is `#[allow(dead_code)]` and behaviorally inert.
 //!
-//! The arm bodies that a later reap/rekey/timer step will drive for real are
+//! The arm bodies that a later reap/rekey/timer commit will drive for real are
 //! ported 1:1 from the IK-lineage executor and adapted to next's Node API — they
 //! reproduce next's inline shell bodies exactly:
 //!
@@ -30,8 +30,8 @@
 //!   for the establish promote it stays INSIDE `promote_connection` (unlike the
 //!   IK lineage), so `PromoteToActive` does NOT re-register.
 //!
-//! Actions not yet exercised are inert stubs carrying the step that realizes
-//! them: the establish send-path (`SendHandshake` framing) lands when the inbound
+//! Actions not yet exercised are inert stubs: the establish send-path
+//! (`SendHandshake` framing) lands when the inbound
 //! establish send is wired; `SendRekey`/`SendLinkMessage`, the timers
 //! (`SetTimer`/`CancelTimer`), the outbound dial (`OpenTransport`), and the
 //! connected-UDP plane are inert here.
@@ -62,7 +62,7 @@ use tracing::{debug, info, trace, warn};
 /// Unlike a machine event/action payload this is **executor-side**, so it may
 /// hold real values resolved from the wire context (cf. `handle_msg3`'s
 /// `wire`/`packet` locals and `promote_connection`'s ambient args). It is built
-/// fresh per driven step by the caller at cutover time (a later establish step).
+/// fresh per driven step by the caller at cutover time.
 #[allow(dead_code)]
 pub(in crate::node) struct PeerActionCtx {
     /// The authenticated peer identity (`PromoteToActive` / `InvalidateSendState`
@@ -119,7 +119,7 @@ impl Node {
         self.execute_peer_actions(link, ambient, actions).await;
     }
 
-    /// Map each [`PeerAction`] onto its shell call (the executor table).
+    /// Map each [`PeerAction`] onto its shell call.
     ///
     /// The worklist is a `VecDeque` rather than self-recursion so the async
     /// executor stays a single flat future (no boxing) and the emitted order is
@@ -138,22 +138,22 @@ impl Node {
             match action {
                 PeerAction::OpenTransport { .. } => {
                     // Outbound dial (`initiate_connection`). Outbound establish is
-                    // not cut over yet; inert in the M2 skeleton.
+                    // not cut over yet; inert in the shadow-only skeleton.
                 }
                 PeerAction::SendHandshake { .. } => {
                     // Inbound establish send-path: frame the unframed Noise msg2
                     // payload with our/their index (`build_msg2(our_index,
                     // their_index, &payload)`) and send, with the msg2-send-failure
                     // cleanup + queue abort. Lands with `PromoteToActive` when the
-                    // inbound establish path is wired; inert in the M2 skeleton.
+                    // inbound establish path is wired; inert in the shadow-only skeleton.
                 }
                 PeerAction::SendRekey { .. } => {
                     // Rekey msg framing (`build_msg2(our_new_index, …)`) + send.
-                    // Rekey fold is out of M2 scope.
+                    // Rekey fold is out of scope here.
                 }
                 PeerAction::SendLinkMessage { .. } => {
                     // Encrypt + send a link-control frame (heartbeat / filter /
-                    // tree / disconnect). Data-plane-owned; out of M2 scope.
+                    // tree / disconnect). Data-plane-owned; out of scope here.
                 }
                 PeerAction::PromoteToActive { link: promote_link } => {
                     // Establish promote, driven through the machine. Transcribes
@@ -505,12 +505,12 @@ impl Node {
                     let _ = self.index_allocator.free(index);
                 }
                 PeerAction::ActivateConnectedUdp | PeerAction::TeardownConnectedUdp => {
-                    // Connected-UDP plane ownership (`connected_udp.rs`). Out of M2
-                    // scope.
+                    // Connected-UDP plane ownership (`connected_udp.rs`). Out of
+                    // scope for now.
                 }
                 PeerAction::SetTimer { .. } | PeerAction::CancelTimer { .. } => {
-                    // Timers become actions on the existing quantized tick. INERT in
-                    // M2 — the legacy tick timers still run, so driving these would
+                    // Timers become actions on the existing quantized tick. INERT:
+                    // the legacy tick timers still run, so driving these would
                     // double-schedule.
                 }
                 PeerAction::ReportLost { peer } => {
@@ -522,8 +522,8 @@ impl Node {
     }
 
     /// `ReportLost` → `note_link_dead` (kept as a named seam so the ambient clock
-    /// source is explicit and a later step can thread the reconciler-computed
-    /// backoff).
+    /// source is explicit and the reconciler-computed backoff can be threaded
+    /// later).
     #[allow(dead_code)]
     fn report_peer_lost(&mut self, peer: NodeAddr, now_ms: u64) {
         self.note_link_dead(peer, now_ms);

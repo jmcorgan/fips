@@ -21,10 +21,10 @@ impl Node {
     /// Reflex: an outbound handshake timed out (replaces the old
     /// `Node::schedule_retry` call sites).
     ///
-    /// Replicates `schedule_retry`'s connected-guard (obligation O2) — the pure
-    /// core cannot observe the peers map, so the driver drops the event when the
-    /// peer is already connected — then feeds the gate-guarded reconciler reflex
-    /// with the gate derived from the live published state (obligation O4).
+    /// Replicates `schedule_retry`'s connected-guard — the pure core cannot
+    /// observe the peers map, so the driver drops the event when the peer is
+    /// already connected — then feeds the gate-guarded reconciler reflex with
+    /// the gate derived from the live published state.
     pub(in crate::node) fn note_handshake_timeout(&mut self, node_addr: NodeAddr, now_ms: u64) {
         if self.peers.contains_key(&node_addr) {
             return;
@@ -44,7 +44,7 @@ impl Node {
     /// No connected-guard — the peer is already gone by the time a link-dead /
     /// disconnect event fires (`schedule_reconnect` had none). The gate is
     /// derived from the live published state so a drain self-suppresses the
-    /// reconnect (obligation O4, design §8 correctness trap).
+    /// reconnect.
     pub(in crate::node) fn note_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let policy =
             self.build_peering_policy(self.config().auto_connect_peers().cloned().collect());
@@ -63,16 +63,16 @@ impl Node {
     /// (bumping their `retry_after_ms` past the handshake window). This driver
     /// performs the advert-refetch + dial I/O each emitted `Connect` names, and
     /// on an immediate dial error feeds the `on_handshake_timeout` reflex so the
-    /// optimistic re-fire suppression is overwritten by proper backoff
-    /// (obligation O3). During a drain the gate is `Suspended`, so the reconcile
-    /// clears the schedule and emits nothing (the design §8 gate).
+    /// optimistic re-fire suppression is overwritten by proper backoff. During a
+    /// drain the gate is `Suspended`, so the reconcile clears the schedule and
+    /// emits nothing.
     pub(in crate::node) async fn process_pending_retries(&mut self, now_ms: u64) {
         if self.peering.reconciler.retry_pending.is_empty() {
             return;
         }
 
-        // Retry-dial cadence slot: empty config floor (design §3 D4) and empty
-        // discovery pools, so only the retry-dial phase acts.
+        // Retry-dial cadence slot: empty config floor and empty discovery
+        // pools, so only the retry-dial phase acts.
         let policy = self.build_peering_policy(Vec::new());
         let observed = self.observe_peering();
         let budget = self.build_peering_budget();
@@ -139,7 +139,7 @@ impl Node {
                         });
                     }
                     // Immediate failure counts as an attempt: overwrite the
-                    // optimistic re-fire suppression with backoff (obligation O3).
+                    // optimistic re-fire suppression with backoff.
                     self.note_handshake_timeout(node_addr, now_ms);
                 }
             }

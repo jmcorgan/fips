@@ -187,10 +187,10 @@ impl Node {
 
         // Remove link and address mapping
         self.remove_link(&link_id);
-        // Finding A: drop this peer's inert machine, keyed by the link_id
+        // Drop this peer's inert machine, keyed by the link_id
         // derived above (a peer's link_id is immutable, so the key never
         // moved). Keeps peers <-> peer_machines in exact correspondence on
-        // teardown. NEUTRAL — nothing reads peer_machines yet.
+        // teardown. NEUTRAL: nothing reads peer_machines yet.
         self.peer_machines.remove(&link_id);
         if let Some(transport_id) = transport_id {
             self.cleanup_bootstrap_transport_if_unused(transport_id);

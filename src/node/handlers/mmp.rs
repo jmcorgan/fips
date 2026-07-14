@@ -540,9 +540,9 @@ impl Node {
     /// `note_link_dead`) reproduce the pre-refactor inline reap body exactly, in
     /// that order.
     ///
-    /// Finding A: an established peer always has a `peer_machine`. If the peer
-    /// vanished between snapshot and effect, the old inline body was already a
-    /// no-op, so we return; if the machine is absent (impossible per Finding A)
+    /// An established peer always has a `peer_machine`. If the peer vanished
+    /// between snapshot and effect, the old inline body was already a
+    /// no-op, so we return; if the machine is absent (which should be impossible)
     /// we fall back to the byte-identical inline body under a `debug_assert`.
     ///
     /// `now_ms` is the sweep's hoisted wall-clock ms (the same value the old reap
@@ -554,10 +554,7 @@ impl Node {
             None => return,
         };
         if !self.peer_machines.contains_key(&link) {
-            debug_assert!(
-                false,
-                "peer machine present for every established peer (Finding A)"
-            );
+            debug_assert!(false, "peer machine present for every established peer");
             self.remove_active_peer(&node_addr);
             self.note_link_dead(node_addr, now_ms);
             return;

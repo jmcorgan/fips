@@ -1270,8 +1270,8 @@ impl Node {
                 // teardown actions map to `remove_active_peer` / `note_link_dead`,
                 // in that order — the same order next ran them inline). The transient
                 // is never inserted into `peer_machines`; the persistent
-                // `established()` machine is created inside `promote_connection`
-                // (M3), so there is no double-insert. The relocated promote body,
+                // `established()` machine is created inside `promote_connection`,
+                // so there is no double-insert. The relocated promote body,
                 // and the `RestartThenPromote` teardown ordering equivalence, live in
                 // the executor's `PromoteToActive` / `InvalidateSendState` /
                 // `ReportLost` arms.
@@ -1401,11 +1401,11 @@ impl Node {
                 };
                 let loser_link_id = old_peer.link_id();
 
-                // Finding A: the replaced (losing) peer was established and so
+                // The replaced (losing) peer was established and so
                 // carried a machine keyed by its OWN link_id (loser_link_id);
                 // drop it so no machine orphans when its ActivePeer is removed.
                 // The winning connection's machine is inserted below keyed by
-                // the winner link_id. NEUTRAL — nothing reads peer_machines yet.
+                // the winner link_id. NEUTRAL: nothing reads peer_machines yet.
                 self.peer_machines.remove(&loser_link_id);
 
                 // Clean up old peer's index from peers_by_index
@@ -1465,7 +1465,7 @@ impl Node {
                 );
 
                 self.peers.insert(peer_node_addr, new_peer);
-                // Finding A: populate the inert per-peer machine so every
+                // Populate the inert per-peer machine so every
                 // established peer has exactly one machine, keyed by its
                 // link_id (the winner link here). Nothing drives it yet.
                 self.peer_machines.insert(
@@ -1596,7 +1596,7 @@ impl Node {
             }
 
             self.peers.insert(peer_node_addr, new_peer);
-            // Finding A: populate the inert per-peer machine so every
+            // Populate the inert per-peer machine so every
             // established peer has exactly one machine, keyed by its link_id.
             // Nothing drives it yet.
             self.peer_machines.insert(

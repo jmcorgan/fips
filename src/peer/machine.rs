@@ -1,10 +1,10 @@
 //! Per-peer FMP control FSM (sans-IO reducer) — XX re-derivation.
 //!
 //! The unified per-peer lifecycle state machine, ported onto next's XX cores
-//! from the IK-lineage template. This is the **M1** increment: the FSM types,
+//! from the IK-lineage template. It provides the FSM types,
 //! the machine struct (control-tier state only), and the pure `step` reducer,
 //! plus its unit tests. It is **unwired** — nothing in the codebase calls it
-//! yet; the action executor and the msg3/rekey/reap wiring land in later steps.
+//! yet; the action executor and the msg3/rekey/reap wiring land in later commits.
 //!
 //! ## Shape
 //!
@@ -46,7 +46,7 @@
 //! [`RekeyRespondTrigger`](PeerAction::RekeyRespondTrigger)) carrying indices +
 //! the tie-break flag, and the executor performs the session/registry surgery
 //! shell-side, matching next's inline `handle_msg3` verbatim. These trigger
-//! variants are **provisional** (the wiring step may refine them) and unwired.
+//! variants are **provisional** (the wiring may refine them) and unwired.
 //!
 //! Likewise the outbound completion is NOT routed through the machine: next has
 //! no `establish_outbound` core — `handle_msg2` learns the identity from
@@ -55,19 +55,20 @@
 //! and the resend/timeout timers; the shell drives promote and feeds the outcome
 //! back via [`PromotionResolved`](PeerEvent::PromotionResolved).
 //!
-//! ## M1 realizability notes
+//! ## Realizability notes
 //!
 //! - `SendHandshake`/`SendRekey`/`SendLinkMessage` carry **opaque bytes**
 //!   (`Vec<u8>`); the driver applies outer wire framing / encryption. A fresh
 //!   outbound msg1 and a fresh inbound msg2 have no bytes the control machine can
 //!   build (the Noise step / `build_msg2` are shell-side), so they are emitted
-//!   with an empty payload and threaded at wiring time. Not exercised by the M1
+//!   with an empty payload and threaded at wiring time. Not exercised by the
 //!   tests (which assert on action *kinds* / index-plane facts).
 //! - `PeerSnapshot::rekey_msg3_pending` is sourced from a control field defaulting
 //!   `false`; the real wiring to `peer.rekey_msg3_payload().is_some()` and the
-//!   [`RekeyMsg3Resend`](TimerKind::RekeyMsg3Resend) driver land at the rekey step.
+//!   [`RekeyMsg3Resend`](TimerKind::RekeyMsg3Resend) driver land when the rekey
+//!   path is wired.
 //! - `PeerSnapshot::counter` (the Noise send counter) is a send-state fact the
-//!   control machine cannot see; passed as `0`. Irrelevant to every M1 test.
+//!   control machine cannot see; passed as `0`. Irrelevant to every test.
 
 #![allow(dead_code)]
 
@@ -83,10 +84,10 @@ use crate::{NodeAddr, PeerIdentity};
 // ============================================================================
 // Timing placeholders
 //
-// M1 is unwired; the real intervals come from `NodeConfig` when the driver is
-// wired. The `poll_*` cores already take the interval/backoff as arguments, so
-// these are only used to compute `SetTimer{at_ms}` deadlines and the
-// `Closed{backoff_deadline_ms}` park time. The unit tests assert on timer
+// This module is unwired; the real intervals come from `NodeConfig` when the
+// driver is wired. The `poll_*` cores already take the interval/backoff as
+// arguments, so these are only used to compute `SetTimer{at_ms}` deadlines and
+// the `Closed{backoff_deadline_ms}` park time. The unit tests assert on timer
 // *kinds*, not exact deadlines.
 // ============================================================================
 
@@ -456,13 +457,13 @@ impl PeerMachine {
     }
 
     /// New machine for an ALREADY-established peer: the post-handshake state a
-    /// promoted peer occupies before any rekey. M3 inserts one of these into
-    /// `Node.peer_machines` at each `promote_connection` establishment site so
-    /// every established peer has exactly one machine keyed by its `LinkId`
-    /// (Finding A). The machine is **inert** — nothing drives it yet — and is
+    /// promoted peer occupies before any rekey. The driver inserts one of these
+    /// into `Node.peer_machines` at each `promote_connection` establishment site
+    /// so every established peer has exactly one machine keyed by its `LinkId`.
+    /// The machine is **inert** — nothing drives it yet — and is
     /// parked at [`PeerState::Established`] so a later reap sees
     /// [`is_established_context`](Self::is_established_context) true and a later
-    /// rekey step finds it. `our_index` is the peer's msg1-allocated session
+    /// rekey finds it. `our_index` is the peer's msg1-allocated session
     /// index; `remote_epoch` is the crystallized peer's startup epoch.
     pub(crate) fn established(
         link: LinkId,
@@ -593,7 +594,7 @@ impl PeerMachine {
         }
         self.conn.set_transport_id(transport_id);
         // Connection-oriented transports open the transport first; connectionless
-        // ones send msg1 immediately. M1 models the connection-oriented arm.
+        // ones send msg1 immediately. This models the connection-oriented arm.
         self.state = PeerState::Connecting { link: self.link };
         vec![PeerAction::OpenTransport {
             transport_id,
@@ -624,8 +625,8 @@ impl PeerMachine {
 
     /// Emit msg1 and arm the retransmit/timeout timers. The Noise msg1
     /// construction and its index allocation are shell-side effects performed by
-    /// the driver when it executes this action; M1 emits an empty payload (see
-    /// module note). This path is not exercised by the M1 tests.
+    /// the driver when it executes this action; an empty payload is emitted (see
+    /// module note). This path is not exercised by the tests.
     fn start_outbound_handshake(&mut self, now: u64) -> Vec<PeerAction> {
         let bytes = Vec::new();
         self.state = PeerState::Handshaking {
@@ -951,7 +952,7 @@ impl PeerMachine {
             }
             ConnAction::InitiateRekey { peer } => {
                 // Fresh outbound rekey: the Noise leaf + index allocation are
-                // shell-side (empty payload in M1), arm the resend timer.
+                // shell-side (empty payload here), arm the resend timer.
                 self.rekey_in_progress = true;
                 self.rekey_resend_count = 0;
                 self.rekey_msg1 = Some(Vec::new());
@@ -1187,7 +1188,7 @@ impl PeerMachine {
 
     fn on_tick(&mut self, now: u64) -> Vec<PeerAction> {
         // The driver evaluates due machine timers on the quantized tick and
-        // re-enters the Timeout{kind} handlers. M1 is unwired; the deadline
+        // re-enters the Timeout{kind} handlers. This module is unwired; the deadline
         // bookkeeping is threaded from the driver at wiring time, so Tick is a
         // no-op here.
         let _ = now;
@@ -1242,8 +1243,8 @@ impl PeerMachine {
 
     /// Build this peer's rekey snapshot from control-tier state. `counter` is a
     /// send-state fact; passed as 0 here (see module note). `rekey_msg3_pending`
-    /// is sourced from the control field (default `false`; real wiring at the
-    /// rekey step).
+    /// is sourced from the control field (default `false`; real wiring when the
+    /// rekey path is wired).
     fn peer_snapshot(&self, addr: NodeAddr, now: u64) -> PeerSnapshot {
         let phase = match self.state {
             PeerState::Maintaining {
@@ -1339,7 +1340,7 @@ mod tests {
         }
     }
 
-    // ---- Test 0: established constructor (Finding A populate) --------------
+    // ---- Test 0: established constructor --------------
     #[test]
     fn established_constructor_yields_established_context() {
         let id = peer_identity();

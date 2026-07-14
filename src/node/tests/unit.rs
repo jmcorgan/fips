@@ -151,8 +151,8 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
 
 #[tokio::test]
 async fn test_node_state_transitions() {
-    // A transport-less node now resolves to `Failed` on start (design doc
-    // §9.1), so exercise state transitions with a genuinely healthy node.
+    // A transport-less node now resolves to `Failed` on start, so exercise
+    // state transitions with a genuinely healthy node.
     let mut node = make_healthy_node();
 
     assert!(!node.is_running());
@@ -170,7 +170,7 @@ async fn test_node_state_transitions() {
 
 #[tokio::test]
 async fn test_transportless_start_fails_and_publishes_failed() {
-    // The intended behavioral change (design doc §9.1): a node with zero
+    // The intended behavioral change: a node with zero
     // transports up cannot serve, so `start()` returns `NoOperationalTransports`
     // and leaves the published state at `Failed` (not operational, not
     // restartable in-process).

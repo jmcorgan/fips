@@ -11,7 +11,7 @@
 
 use crate::config::PeerConfig;
 
-/// Per-tick cap on retry-dial connection attempts (design §6 ceiling).
+/// Per-tick cap on retry-dial connection attempts (ceiling).
 pub(in crate::node) const MAX_RETRY_CONNECTIONS_PER_TICK: usize = 16;
 
 /// Tracks retry state for a peer across connection attempts.

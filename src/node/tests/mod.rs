@@ -32,7 +32,7 @@ pub(super) fn make_node() -> Node {
 /// A test node that reaches `Full` health on `start()`.
 ///
 /// A default [`make_node`] configures no transports, so its `start()` now
-/// resolves to `NodeState::Failed` (zero transports up, design doc §9.1) and
+/// resolves to `NodeState::Failed` (zero transports up) and
 /// returns `NoOperationalTransports`. Lifecycle-state tests that need a running
 /// node build one with a single loopback UDP transport (ephemeral port) as the
 /// sole configured child — DNS disabled — so bring-up has exactly one

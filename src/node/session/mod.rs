@@ -1268,7 +1268,7 @@ mod overlapping_epoch_tests {
     // ========================================================================
     // Rekey-policy characterization (pins `check_session_rekey`'s decision
     // boundaries before the `Fsp::poll_rekey` hoist — these thresholds have no
-    // other test module; see plan §10).
+    // other test module).
     // ========================================================================
 
     /// The initiator liveness-cutover delay used by `check_session_rekey`
