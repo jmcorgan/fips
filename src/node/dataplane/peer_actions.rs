@@ -316,6 +316,7 @@ impl Node {
                             // and leaves the `pending_outbound` entry for the stale-
                             // connection reaper.
                             warn!(
+                                target: "fips::node::handlers::handshake",
                                 link_id = %promote_link,
                                 error = %e,
                                 "Failed to promote connection"
@@ -342,6 +343,7 @@ impl Node {
                                 );
                             } else {
                                 warn!(
+                                    target: "fips::node::handlers::handshake",
                                     link_id = %promote_link,
                                     error = %e,
                                     "Failed to promote inbound connection"
