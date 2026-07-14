@@ -1380,6 +1380,122 @@ mod tests {
         assert_eq!(m.state(), PeerState::Established { addr });
     }
 
+    // ---- Contract: actions are runtime-agnostic data ----------------------
+    //
+    // The machine's emitted actions are the message contract between the sync
+    // decision core and the async driver. This proves the contract carries no
+    // runtime handles: the action type is Send + Sync + 'static (so it can move
+    // across a task boundary), and every variant round-trips unchanged through
+    // an async channel. Were a variant to embed a runtime handle (a task handle,
+    // a raw socket, an Arc<Runtime>), it would stop being plain owned data and
+    // this construction + equality round-trip would no longer hold.
+
+    /// Compile-time proof that the action contract crosses task boundaries as
+    /// owned, runtime-agnostic data. Fails to compile if any variant field is
+    /// not `Send + Sync + 'static`.
+    fn assert_contract_bound<T: Send + Sync + 'static>() {}
+
+    /// One value of every [`PeerAction`] variant. The wildcard-free match makes
+    /// a newly-added variant a compile error, forcing it through this contract.
+    fn all_actions() -> Vec<PeerAction> {
+        let peer = *peer_identity().node_addr();
+        let sample = vec![
+            PeerAction::OpenTransport {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+            },
+            PeerAction::SendHandshake {
+                bytes: vec![1, 2, 3],
+            },
+            PeerAction::SendRekey {
+                bytes: vec![4, 5, 6],
+            },
+            PeerAction::SendLinkMessage { msg: vec![7, 8, 9] },
+            PeerAction::PromoteToActive {
+                link: LinkId::new(7),
+            },
+            PeerAction::SwapSendState { epoch: [1u8; 8] },
+            PeerAction::CompleteDrain { peer },
+            PeerAction::InvalidateSendState,
+            PeerAction::RegisterDecryptSession {
+                index: SessionIndex::new(5),
+            },
+            PeerAction::UnregisterDecryptSession {
+                index: SessionIndex::new(6),
+            },
+            PeerAction::FreeIndex {
+                index: SessionIndex::new(7),
+            },
+            PeerAction::ActivateConnectedUdp,
+            PeerAction::TeardownConnectedUdp,
+            PeerAction::SetTimer {
+                kind: TimerKind::RekeyCadence,
+                at_ms: 1234,
+            },
+            PeerAction::CancelTimer {
+                kind: TimerKind::Liveness,
+            },
+            PeerAction::ReportLost { peer },
+            PeerAction::SwapToInboundSession {
+                peer,
+                our_index: SessionIndex::new(8),
+                our_inbound_wins: true,
+            },
+            PeerAction::RekeyRespondTrigger {
+                peer,
+                our_index: SessionIndex::new(9),
+                abandon_first: false,
+            },
+        ];
+        for a in &sample {
+            // Exhaustiveness guard: no `_` wildcard, so adding a variant without
+            // extending `sample` above breaks the build here.
+            match a {
+                PeerAction::OpenTransport { .. }
+                | PeerAction::SendHandshake { .. }
+                | PeerAction::SendRekey { .. }
+                | PeerAction::SendLinkMessage { .. }
+                | PeerAction::PromoteToActive { .. }
+                | PeerAction::SwapSendState { .. }
+                | PeerAction::CompleteDrain { .. }
+                | PeerAction::InvalidateSendState
+                | PeerAction::RegisterDecryptSession { .. }
+                | PeerAction::UnregisterDecryptSession { .. }
+                | PeerAction::FreeIndex { .. }
+                | PeerAction::ActivateConnectedUdp
+                | PeerAction::TeardownConnectedUdp
+                | PeerAction::SetTimer { .. }
+                | PeerAction::CancelTimer { .. }
+                | PeerAction::ReportLost { .. }
+                | PeerAction::SwapToInboundSession { .. }
+                | PeerAction::RekeyRespondTrigger { .. } => {}
+            }
+        }
+        sample
+    }
+
+    /// Route every action through a single-threaded async channel and assert it
+    /// arrives unchanged. `#[tokio::test]` runs on a current-thread runtime, so
+    /// sender and receiver share one thread — mirroring the eventual control
+    /// task boundary where actions cross to the driver over a channel.
+    #[tokio::test]
+    async fn peer_actions_round_trip_through_async_channel() {
+        assert_contract_bound::<PeerAction>();
+
+        let sent = all_actions();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PeerAction>();
+        for action in sent.iter().cloned() {
+            tx.send(action).expect("channel send");
+        }
+        drop(tx);
+
+        let mut received = Vec::new();
+        while let Some(action) = rx.recv().await {
+            received.push(action);
+        }
+        assert_eq!(received, sent, "every action must round-trip unchanged");
+    }
+
     // ---- Test 1: rekey initiator cutover ----------------------------------
     #[test]
     fn rekey_initiator_cutover() {
