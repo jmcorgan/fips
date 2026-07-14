@@ -49,8 +49,8 @@ impl Node {
         // The shell snapshots each healthy peer's rekey ages/flags (every clock
         // read resolved here); the core decides cutover/drain/trigger with no
         // clock, phase-grouped to preserve the pre-refactor execution order.
-        // The batch `poll_rekey` + snapshots STAY SHELL-SIDE and BYTE-UNCHANGED
-        // (Finding B): the cross-peer phase-grouping (all Cutover → all Drain →
+        // The batch `poll_rekey` + snapshots STAY SHELL-SIDE and BYTE-UNCHANGED:
+        // the cross-peer phase-grouping (all Cutover → all Drain →
         // all InitiateRekey) governs the shared `index_allocator` free-then-alloc
         // SEQUENCE that appears on the wire. The machine must NOT re-poll; it
         // CONSUMES each decided `ConnAction` in the same order the batch returned.
@@ -58,7 +58,7 @@ impl Node {
         for action in self.fmp.poll_rekey(snapshots, &cfg) {
             match action {
                 // Initiator cutover: route the decided action through the peer
-                // machine + executor (C4-1). The executor's `SwapSendState` arm
+                // machine + executor. The executor's `SwapSendState` arm
                 // reproduces the pre-refactor cutover body EXACTLY.
                 ConnAction::Cutover { peer: node_addr } => {
                     self.route_rekey_cadence(node_addr, ConnAction::Cutover { peer: node_addr })
@@ -87,14 +87,14 @@ impl Node {
     }
 
     /// Route a cadence-decided `Cutover`/`Drain` `ConnAction` through the peer
-    /// machine + executor (C4-1). The shell already decided (batch `poll_rekey`);
+    /// machine + executor. The shell already decided (batch `poll_rekey`);
     /// the machine consumes via [`PeerEvent::RekeyConsume`] WITHOUT re-polling,
     /// preserving the phase order. The `SwapSendState`/`CompleteDrain` executor
     /// arms reproduce the pre-refactor inline effect bodies exactly.
     ///
-    /// Finding A: an established peer always has a `peer_machine`. If the peer
-    /// vanished between snapshot and effect, the old inline body was a no-op, so
-    /// we do nothing; if the machine is absent (impossible per Finding A) we fall
+    /// An established peer always has a `peer_machine`. If the peer vanished
+    /// between snapshot and effect, the old inline body was a no-op, so we do
+    /// nothing; if the machine is absent (which should be impossible) we fall
     /// back to the byte-identical inline body under a `debug_assert`.
     async fn route_rekey_cadence(&mut self, node_addr: NodeAddr, action: ConnAction) {
         let link = match self.peers.get(&node_addr) {
@@ -104,7 +104,7 @@ impl Node {
         if !self.peer_machines.contains_key(&link) {
             debug_assert!(
                 false,
-                "peer machine present for every established rekey peer (Finding A)"
+                "peer machine present for every established rekey peer"
             );
             match action {
                 ConnAction::Cutover { peer } => self.cutover_peer_inline(&peer),
@@ -124,7 +124,7 @@ impl Node {
     }
 
     /// Feed the machine the `RekeyInitiated` observation after the inline
-    /// `initiate_rekey` (C4-1). The obs emits no action, so there is no executor
+    /// `initiate_rekey`. The obs emits no action, so there is no executor
     /// pass — a bare `step` keeps the machine's control state coherent.
     fn observe_rekey_initiated(&mut self, node_addr: &NodeAddr) {
         let link = match self.peers.get(node_addr) {
@@ -141,7 +141,7 @@ impl Node {
         } else {
             debug_assert!(
                 false,
-                "peer machine present for every established rekey peer (Finding A)"
+                "peer machine present for every established rekey peer"
             );
         }
     }
@@ -170,7 +170,7 @@ impl Node {
     }
 
     /// Pre-refactor initiator cutover body, retained as the release fallback for
-    /// the (Finding-A-impossible) missing-machine case. Byte-identical to the old
+    /// the (should-be-impossible) missing-machine case. Byte-identical to the old
     /// inline `ConnAction::Cutover` arm and to the executor's `SwapSendState` arm.
     fn cutover_peer_inline(&mut self, node_addr: &NodeAddr) {
         let did_cutover = if let Some(peer) = self.peers.get_mut(node_addr) {
@@ -209,7 +209,7 @@ impl Node {
     }
 
     /// Pre-refactor drain-completion body, retained as the release fallback for
-    /// the (Finding-A-impossible) missing-machine case. Byte-identical to the old
+    /// the (should-be-impossible) missing-machine case. Byte-identical to the old
     /// inline `ConnAction::Drain` arm and to the executor's `CompleteDrain` arm.
     fn drain_peer_inline(&mut self, node_addr: &NodeAddr) {
         // Extract the old index and transport_id under the peer borrow, then drop

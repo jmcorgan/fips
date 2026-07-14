@@ -1,4 +1,4 @@
-//! Node lifecycle supervisor — sans-IO core (Milestone-1 Step 1a).
+//! Node lifecycle supervisor — sans-IO core.
 //!
 //! A synchronous `step(event) -> Vec<Action>` finite-state machine over the
 //! fixed set of substrate children. It owns the *decision* of what to bring up
@@ -8,11 +8,11 @@
 //! holds no runtime handles — time enters only as inputs (a future `Tick`/
 //! `DrainDeadlineElapsed`, added with the `Draining` phase) — so it is
 //! unit-testable with synthetic sequences and survives a later thread-boundary
-//! move (design doc §6 Core 1, §8 "cores are sans-IO").
+//! move (cores are sans-IO).
 //!
 //! ## Scope: the behavior-neutral rewrite
 //!
-//! This is the first of the three Step-1a commits and is strictly
+//! This module is strictly
 //! behavior-preserving. The machine mirrors today's `start()`/`stop()` exactly:
 //!
 //! - every configured child is spawned in the current order, and optional
@@ -37,14 +37,14 @@
 //! [`Action::SetPeeringDesired`], [`Action::SuspendReplenish`]), and the new
 //! published [`NodeState::Draining`](crate::node::NodeState::Draining) —
 //! written directly by the driver at drain entry, exactly like the other
-//! `self.state` transitions this milestone uses. The existing immediate `Stop`
+//! `self.state` transitions this module uses. The existing immediate `Stop`
 //! path is untouched. `Draining` and `Stop` share a single teardown-plan author
 //! (`begin_stopping`), so the teardown ordering is defined once.
 //!
 //! ## Scope: the `Running{Full|Degraded}` + `Failed` health split (this commit)
 //!
-//! This commit lands the operator-visible start-completion health policy
-//! (design doc §6/§9.1) and, with it, the FSM-owned [`Action::PublishState`]:
+//! This module implements the operator-visible start-completion health policy
+//! and, with it, the FSM-owned [`Action::PublishState`]:
 //!
 //! - [`SupState::Running`] now carries a [`Health`] (`Full` or `Degraded`), and
 //!   [`SupState::Failed`] is the fatal path. When `Starting.pending` empties (or
@@ -64,7 +64,7 @@
 //!   **not** the old immediate-`Running`.
 //!
 //! Runtime child-liveness monitoring (a `ChildExited` event re-routing health
-//! when a task/thread dies at runtime) is **deferred** (design doc §7): §9.1's
+//! when a task/thread dies at runtime) is **deferred**: start-completion health
 //! resolution is start-framed, and liveness monitoring is a substantial unbuilt
 //! mechanism. This commit is start-time health only.
 
@@ -76,7 +76,7 @@ use crate::node::NodeState;
 use crate::transport::{PacketTx, TransportId};
 use crate::upper::tun::{TunOutboundRx, TunTx};
 
-/// A supervised substrate child (design doc §6 Core 1).
+/// A supervised substrate child.
 ///
 /// Each transport is an individual child keyed by its id so the later
 /// required-vs-optional health policy can reason about partial N-of-M bring-up.
@@ -104,7 +104,7 @@ pub(crate) enum Child {
 /// An input to the supervisor. Results of executing [`Action`]s are fed back as
 /// `SubstrateUp` / `SubstrateFailed` / `ChildStopped`.
 ///
-/// `Tick` (design doc §6) is **deferred** (the per-tick reconciler backstop lands
+/// `Tick` is **deferred** (the per-tick reconciler backstop lands
 /// with the cadence work). `ChildExited` is present: it feeds runtime
 /// child-liveness monitoring, routing health the same way a start failure does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,8 +164,8 @@ pub(crate) enum Event {
         /// The child that has been torn down.
         child: Child,
     },
-    /// A supervised child's task or thread exited on its own at runtime (design
-    /// doc §6) — not in response to a `StopChild`. Valid from `Running`; routes
+    /// A supervised child's task or thread exited on its own at runtime — not
+    /// in response to a `StopChild`. Valid from `Running`; routes
     /// health the same way a start failure does (the last transport out →
     /// `Failed`, an optional child out → `Degraded`), but at runtime `Failed` is
     /// a published health signal, not a teardown — the driver keeps serving. No
@@ -176,9 +176,9 @@ pub(crate) enum Event {
     },
 }
 
-/// A driver-scheduled timer the supervisor can arm (design doc §6). Only the
-/// drain deadline exists for now; the handshake/rekey/liveness timers named in
-/// §8 arrive with later cores.
+/// A driver-scheduled timer the supervisor can arm. Only the
+/// drain deadline exists for now; the handshake/rekey/liveness timers
+/// arrive with later cores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Timer {
     /// Fires when the bounded drain window closes. The driver feeds
@@ -187,20 +187,20 @@ pub(crate) enum Timer {
     DrainDeadline,
 }
 
-/// The reconciler's desired peering set (design doc §8 drain gate). Only
-/// `Empty` is needed in this commit; the populated variants that the Step-1b
+/// The reconciler's desired peering set (drain gate). Only
+/// `Empty` is needed for now; the populated variants that the
 /// homeostatic reconciler converges toward land with that core.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PeeringDesired {
     /// No peers desired. Entering `Draining` sets this so the reconciler stops
-    /// reconnecting the peers the drain just closed (§8: "Draining switches the
+    /// reconnecting the peers the drain just closed ("Draining switches the
     /// homeostat off").
     Empty,
 }
 
 /// An effect the driver must perform. The core never performs I/O itself.
 ///
-/// `PublishState` (design doc §6) lands here, with the `Running{Full|Degraded}`
+/// `PublishState` lands here, with the `Running{Full|Degraded}`
 /// health split: the start-completion health outcome is a fork
 /// (`Full`/`Degraded`/`Failed`) that a single direct `self.state` write cannot
 /// express, so the machine authors it as an action. The driver keeps its direct
@@ -217,7 +217,7 @@ pub(crate) enum Action {
     /// no-children path) to carry the resolved health outcome —
     /// [`NodeState::Running`] (Full), [`NodeState::Degraded`], or
     /// [`NodeState::Failed`] — to the driver, which writes it to the published
-    /// state (design doc §6/§9.1).
+    /// state.
     PublishState(NodeState),
     /// Tear down this child (the driver performs the stop / join I/O and
     /// reports `ChildStopped`).
@@ -230,16 +230,16 @@ pub(crate) enum Action {
     /// and owns the bounded drain wait, so this is a documented no-op beyond
     /// bookkeeping.
     SetTimer(Timer, u64),
-    /// Set the reconciler's desired peering set (§8 drain gate). Documented
-    /// **no-op in this commit** — the reconciler that consumes it lands in
-    /// Step 1b; the driver logs/ignores it for now.
+    /// Set the reconciler's desired peering set (drain gate). Documented
+    /// **no-op for now** — the reconciler that consumes it is not yet
+    /// built; the driver logs/ignores it for now.
     SetPeeringDesired(PeeringDesired),
-    /// Suspend peer replenishment (§8 drain gate). Documented **no-op in this
-    /// commit** for the same reason as `SetPeeringDesired`.
+    /// Suspend peer replenishment (drain gate). Documented **no-op for
+    /// now** for the same reason as `SetPeeringDesired`.
     SuspendReplenish,
 }
 
-/// Start-completion health (design doc §9.1). Resolved once when
+/// Start-completion health. Resolved once when
 /// `Starting.pending` empties: `Full` iff every configured child came up,
 /// `Degraded` iff ≥1 transport is up but some configured optional child failed.
 /// Zero transports up is not a health — it is the fatal [`SupState::Failed`].
@@ -256,7 +256,7 @@ pub(crate) enum Health {
     },
 }
 
-/// Reason for the fatal [`SupState::Failed`] state (design doc §9.1).
+/// Reason for the fatal [`SupState::Failed`] state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailReason {
     /// Zero transports came up at start completion. Without a transport the node
@@ -265,7 +265,7 @@ pub(crate) enum FailReason {
     NoTransports,
 }
 
-/// Internal supervisor state (design doc §6). Richer than the published
+/// Internal supervisor state. Richer than the published
 /// [`NodeState`](crate::node::NodeState): `Starting`/`Stopping` carry the set of
 /// children still resolving, and `Running` carries the resolved [`Health`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,13 +283,13 @@ pub(crate) enum SupState {
         /// Resolved start-completion health.
         health: Health,
     },
-    /// Start completed with zero transports up (design doc §9.1) — fatal. The
+    /// Start completed with zero transports up — fatal. The
     /// driver tears down any children that did come up and returns an error.
     Failed {
         /// Why the start failed.
         reason: FailReason,
     },
-    /// Bounded graceful-drain window (design doc §6/§8). Broadcast Disconnect
+    /// Bounded graceful-drain window. Broadcast Disconnect
     /// has gone out and the reconciler is gated off (desired peering set
     /// emptied, replenishment suspended); teardown begins when
     /// `DrainDeadlineElapsed` arrives. Logically sits between `Running` and
@@ -446,7 +446,7 @@ impl SupervisorFsm {
         self.failed.clear();
 
         // A node with no children at all resolves health immediately. Zero
-        // transports up → `Failed` (design doc §9.1; this is the behavioral
+        // transports up → `Failed` (this is the behavioral
         // change from the old immediate-`Running`).
         if order.is_empty() {
             return vec![Action::PublishState(self.resolve_start_health())];
@@ -473,7 +473,7 @@ impl SupervisorFsm {
     }
 
     fn on_substrate_failed(&mut self, child: Child) -> Vec<Action> {
-        // Record the failed child (design doc §9.1): a configured child that
+        // Record the failed child: a configured child that
         // failed to start drives the `Degraded` determination when `pending`
         // empties. It drains from `pending` and never joins the up-set.
         let SupState::Starting { pending } = &mut self.state else {
@@ -489,7 +489,7 @@ impl SupervisorFsm {
         }
     }
 
-    /// Resolve start-completion health (design doc §9.1). Called once when
+    /// Resolve start-completion health. Called once when
     /// `Starting.pending` empties (or the degenerate no-children path); the
     /// classification is shared with runtime child-exit via
     /// [`Self::classify_health`].
@@ -509,7 +509,7 @@ impl SupervisorFsm {
     ///
     /// Worker-pool failures are captured in `failed` like any other optional
     /// child, so they contribute `Degraded` (never `Failed`) — the inline crypto
-    /// fallback keeps the node correct without the pools (design doc §9.1).
+    /// fallback keeps the node correct without the pools.
     fn classify_health(&mut self) -> NodeState {
         let transports_up = self
             .up
@@ -552,8 +552,8 @@ impl SupervisorFsm {
         self.state = SupState::Draining { deadline_ms };
         // Drain entry, in order: broadcast the shutdown Disconnect, arm the
         // deadline timer, then gate the reconciler off (desired = ∅, suspend
-        // replenishment) so it cannot reconnect the peers the drain just closed
-        // (§8). The up-set is left intact for the eventual teardown plan.
+        // replenishment) so it cannot reconnect the peers the drain just
+        // closed. The up-set is left intact for the eventual teardown plan.
         vec![
             Action::BroadcastDisconnect,
             Action::SetTimer(Timer::DrainDeadline, deadline_ms),
@@ -595,7 +595,7 @@ impl SupervisorFsm {
         Vec::new()
     }
 
-    /// A supervised child exited on its own at runtime (design doc §6). Only
+    /// A supervised child exited on its own at runtime. Only
     /// meaningful while `Running`: startup (`Starting`), drain (`Draining`), and
     /// teardown (`Stopping`) own their own child bookkeeping through the
     /// `pending` / `up` sets and the `SubstrateUp` / `SubstrateFailed` /
@@ -603,7 +603,7 @@ impl SupervisorFsm {
     ///
     /// The exit is routed exactly like a start-time failure via
     /// [`Self::classify_health`] — the last transport out → `Failed`, an optional
-    /// child out → `Degraded{+child}` — the runtime analogue of the §9.1
+    /// child out → `Degraded{+child}` — the runtime analogue of the
     /// start-time policy. Two differences from start: `Failed` here is a
     /// published health signal only (the driver keeps serving, per the resolved
     /// runtime policy — no auto-teardown), and there is no restart (the FSM has

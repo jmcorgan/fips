@@ -248,7 +248,7 @@ impl Node {
         }
 
         // Collect the auto-connect peer configs and build the mandatory-floor
-        // reconcile inputs. This is the startup-gate seam (design §3 D4): the
+        // reconcile inputs. This is the startup-gate seam: the
         // substrate is up (transports created, before TUN) but the published
         // NodeState is still `Starting`, so pass `Gate::Reconciling` EXPLICITLY
         // rather than deriving it from the published state (which would map to
@@ -621,7 +621,7 @@ impl Node {
 
         // Drain each auto-connect transport's discovery buffer (the I/O) and
         // apply the driver-only prefilters that read live path-granular state the
-        // sans-IO core cannot observe (obligation O7): self-skip, the active-peer
+        // sans-IO core cannot observe: self-skip, the active-peer
         // "fresh enough to skip" check, and the "already connecting on this exact
         // path" check. The surviving beacons become the opportunistic pool, in
         // transport-then-beacon iteration order; the core owns the connected /
@@ -982,7 +982,7 @@ impl Node {
         // discovery budget or per-peer cap, only the connected/connecting guard,
         // applied in event order.
         //
-        // First-wins per-peer dedup (obligation O7): mdns-sd emits one
+        // First-wins per-peer dedup: mdns-sd emits one
         // `Discovered` event per interface IP of a multi-homed responder, and the
         // old inline-dial loop dialed the first compatible address then skipped
         // the rest via `is_connecting_to_peer` (which turned true after that
@@ -1183,7 +1183,7 @@ impl Node {
         self.supervisor.packet_tx = Some(packet_tx.clone());
         self.packet_rx = Some(packet_rx);
 
-        // Runtime child-liveness channel (design doc §6). Created before any
+        // Runtime child-liveness channel. Created before any
         // child is spawned so each directly-observable child (TUN threads, the
         // DNS task, and the mDNS/Nostr liveness monitor) can clone the sender
         // and self-report its `Child` on exit. The sender stored on `self` is
@@ -1252,8 +1252,8 @@ impl Node {
         });
 
         // The FSM resolves start-completion health (Full/Degraded/Failed) when
-        // `Starting.pending` empties and emits it as a `PublishState` action
-        // (design doc §6/§9.1). Capture that outcome — from the degenerate
+        // `Starting.pending` empties and emits it as a `PublishState`
+        // action. Capture that outcome — from the degenerate
         // no-children path (published on the `Event::Start` step itself) or from
         // the final `SubstrateUp`/`SubstrateFailed` below — to drive the
         // start-completion behavior after the spawn loop.
@@ -1651,7 +1651,7 @@ impl Node {
             self.initiate_peer_connections().await;
         }
 
-        // Publish the FSM-resolved start-completion state (design doc §6/§9.1)
+        // Publish the FSM-resolved start-completion state
         // instead of the old unconditional `Running`.
         let outcome = start_outcome
             .expect("supervisor publishes a start-completion state when bring-up resolves");
@@ -1994,9 +1994,9 @@ impl Node {
     ///
     /// Seeds the FSM at `Running` from observed presence (same pattern as
     /// [`Self::stop`]), steps it into `Draining`, and executes the entry
-    /// actions: broadcast a single shutdown `Disconnect`, and no-op the §8
-    /// reconciler-gate actions (the reconciler that consumes them lands in
-    /// Step 1b; the `SetTimer` is likewise a no-op — the bounded wait is the rx
+    /// actions: broadcast a single shutdown `Disconnect`, and no-op the
+    /// reconciler-gate actions (the reconciler that consumes them is not yet
+    /// built; the `SetTimer` is likewise a no-op — the bounded wait is the rx
     /// loop's deadline arm). Teardown is deferred to [`Self::finish_shutdown`].
     ///
     /// Called from an rx-loop `select!` arm body: the channel receivers are
@@ -2013,7 +2013,7 @@ impl Node {
         let actions = self.supervisor.fsm.step(Event::Drain { deadline_ms });
 
         // Publish the operator-visible `Draining` state (a direct write, like
-        // the other `self.state` transitions this milestone uses). The
+        // the other `self.state` transitions this module uses). The
         // FSM-owned `PublishState` *action* is not needed for this single
         // transition; it arrives with the Full/Degraded health split (c), which
         // a direct write cannot express.
@@ -2031,13 +2031,13 @@ impl Node {
                     // carried for observability only. No-op here.
                 }
                 Action::SetPeeringDesired(PeeringDesired::Empty) => {
-                    // §8 reconciler drain-gate (obligation O4): clear the queued
+                    // reconciler drain-gate: clear the queued
                     // retry schedule so the disconnects the drain itself causes
                     // cannot leave reconnect entries behind.
                     self.peering.reconciler.retry_pending.clear();
                 }
                 Action::SuspendReplenish => {
-                    // §8 reconciler drain-gate: no extra latch needed. The whole
+                    // reconciler drain-gate: no extra latch needed. The whole
                     // drain window is `Gate::Suspended`
                     // (`Gate::from_state(NodeState::Draining)`), so the per-tick
                     // retry-dial reconcile and every peer-loss reflex read that
@@ -2288,7 +2288,7 @@ impl Node {
     ///
     /// The driver builds the [`DiscoveryPools`] overlay input from
     /// `bootstrap.cached_open_discovery_candidates(64)` (the I/O), excluding the
-    /// node's own advert (obligation O6 — the sans-IO core has no self-identity
+    /// node's own advert (the sans-IO core has no self-identity
     /// input), and supplies the configured-npub set, the per-npub cooldown set,
     /// and the startup-sweep max-age. `max_age_secs` is `None` for the per-tick
     /// sweep and `Some(startup_sweep_max_age_secs)` for the one-shot startup
@@ -2297,8 +2297,8 @@ impl Node {
     /// The core reproduces the old sweep's full skip order, configured-advert
     /// expedite, and enqueue budget internally: it inserts due-now entries into
     /// the relocated `retry_pending`, and the retry-slot `process_pending_retries`
-    /// dials them later in the same tick (two-phase, design §2.5). Per design §10
-    /// this calls the reconciler's `reconcile_overlay` (the overlay layer only) —
+    /// dials them later in the same tick (two-phase). This
+    /// calls the reconciler's `reconcile_overlay` (the overlay layer only) —
     /// NOT the monolithic `reconcile()` — so the always-on retry-dial phase does
     /// not re-fire at this slot (which would double-dial the due entries and
     /// apply the per-tick 16-cap twice). The returned `ScheduleRetry` actions
@@ -2392,7 +2392,7 @@ impl Node {
         let budget = self.build_peering_budget();
         let gate = Gate::from_state(self.supervisor.state);
 
-        // Two-phase enqueue (design §2.5): reconcile_overlay inserts due-now
+        // Two-phase enqueue: reconcile_overlay inserts due-now
         // entries into retry_pending; the retry slot dials them. The core emits
         // a `ScheduleRetry` for exactly the NEW enqueues (the configured-advert
         // expedite bumps `retry_after_ms` without emitting), which is precisely
@@ -2524,7 +2524,7 @@ impl Node {
     /// Build the reconciler [`Policy`] from config. `auto_connect_peers` is
     /// filled by the caller: the startup floor and the reflex wrappers pass the
     /// configured auto-connect set; the per-tick retry-dial slot passes an empty
-    /// set so the config floor stays silent (cadence contract, design §3 D4).
+    /// set so the config floor stays silent (cadence contract).
     pub(in crate::node) fn build_peering_policy(
         &self,
         auto_connect_peers: Vec<PeerConfig>,
@@ -2559,7 +2559,7 @@ impl Node {
     ///
     /// The `connected` / `connecting` sets gate the floor, retry-dial, overlay,
     /// and LAN layers; `in_flight_by_peer` feeds the opportunistic layer's
-    /// per-peer parallel cap (obligation O7), computed exactly as the deleted
+    /// per-peer parallel cap, computed exactly as the deleted
     /// `path_candidate_attempt_budget` did: `connections(expected == addr) +
     /// pending_connects(addr)`. The scalar counts stay unpopulated at the
     /// ceiling-only posture (no layer reads them; see [`Observed`]).
@@ -2591,7 +2591,7 @@ impl Node {
 
     /// Build the admission [`Budget`] from the live maps. This is the surviving
     /// home for the slot arithmetic; the shared helpers it wraps stay until the
-    /// overlay/opportunistic cutovers consume them (obligation O5).
+    /// overlay/opportunistic cutovers consume them.
     pub(in crate::node) fn build_peering_budget(&self) -> Budget {
         let peer_slots = if self.max_peers() == 0 {
             usize::MAX

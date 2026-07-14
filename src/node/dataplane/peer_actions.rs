@@ -1,4 +1,4 @@
-//! Executor for the per-peer control machine's [`PeerAction`]s (Step 2 / C3).
+//! Executor for the per-peer control machine's [`PeerAction`]s.
 //!
 //! The per-peer FSM in [`crate::peer::machine`] is a sans-IO reducer: it decides
 //! *what* must happen and returns a `Vec<PeerAction>`; this module is the *doing*
@@ -6,18 +6,18 @@
 //! stands for (`build_msg2` + `transport.send`, `promote_connection`,
 //! `remove_active_peer`, `index_allocator.free`, `note_link_dead`, …).
 //!
-//! ## C3-1 skeleton (SHADOW-ONLY)
+//! ## Shadow-only skeleton
 //!
-//! This is the **C3-1** increment: the machine home (`Node.peer_machines`), the
+//! The machine home (`Node.peer_machines`), the
 //! executor, and the disjoint-borrow advance helper. It is **unwired** — the live
 //! `handle_msg1`/`handle_msg2` path does not drive it yet, so every method here is
 //! `#[allow(dead_code)]`. The inbound cutover (`handle_msg1` → `step(InboundMsg1)`)
-//! lands in **C3-2**, the outbound cutover (`handle_msg2` / dial) in **C3-3**.
+//! and the outbound cutover (`handle_msg2` / dial) are wired later.
 //!
-//! Arms the C3 ladder does not yet exercise are inert stubs carrying the sub-commit
-//! that realizes them (`OpenTransport`→C3-3, `SendRekey`/`SwapSendState`→C4,
-//! `SendLinkMessage`→C4/C5, `SetTimer`/`CancelTimer`→C5 inert, connected-UDP→C6).
-//! `RegisterDecryptSession` is a deliberate no-op — see its arm for the C3-2 note.
+//! Arms not yet exercised are inert stubs (outbound dial, rekey/crypto installs,
+//! link-control frames, timers, and the connected-UDP plane are inert stubs
+//! realized as those planes are wired).
+//! `RegisterDecryptSession` is a deliberate no-op — see its arm for the note.
 
 use crate::node::Node;
 use crate::node::reject::{HandshakeReject, RejectReason};
@@ -37,20 +37,20 @@ use tracing::{debug, trace, warn};
 /// Unlike a machine event/action payload this is **executor-side**, so it may
 /// hold real values resolved from the wire context (cf. `handle_msg1`'s
 /// `wire`/`packet` locals and `promote_connection`'s ambient args). It is
-/// built fresh per driven step by the caller at cutover time (C3-2/C3-3).
+/// built fresh per driven step by the caller at cutover time.
 #[allow(dead_code)]
 pub(in crate::node) struct PeerActionCtx {
-    /// The authenticated peer identity (GAP-1: `PromoteToActive` /
-    /// `InvalidateSendState` resolve their `NodeAddr` from this).
+    /// The authenticated peer identity: `PromoteToActive` /
+    /// `InvalidateSendState` resolve their `NodeAddr` from this.
     pub(in crate::node) verified_identity: PeerIdentity,
     /// The transport the exchange is happening over (msg2 send target, decrypt
     /// cache-key transport half).
     pub(in crate::node) transport_id: TransportId,
     /// The peer's wire address (msg2 send target).
     pub(in crate::node) remote_addr: TransportAddr,
-    /// Our session index for this exchange (GAP-2: msg2 framing sender_idx).
+    /// Our session index for this exchange (msg2 framing sender_idx).
     pub(in crate::node) our_index: Option<SessionIndex>,
-    /// The peer's session index for this exchange (GAP-2: msg2 framing
+    /// The peer's session index for this exchange (msg2 framing
     /// receiver_idx).
     pub(in crate::node) their_index: Option<SessionIndex>,
     /// The wire timestamp driving this step (promotion ts / loss-report clock).
@@ -69,7 +69,7 @@ impl Node {
     /// Advance the machine for `link` by one event and execute the resulting
     /// actions.
     ///
-    /// The borrow structure the whole seam turns on (spec risk #8): the machine
+    /// The borrow structure the whole seam turns on: the machine
     /// needs `&mut IndexAllocator` as a synchronous capability *while it is
     /// itself borrowed mutably out of `peer_machines`*. `peer_machines` and
     /// `index_allocator` are **distinct `Node` fields**, so the collect below is
@@ -92,10 +92,10 @@ impl Node {
         self.execute_peer_actions(link, ambient, actions).await;
     }
 
-    /// Map each [`PeerAction`] onto its shell call (spec's executor table).
+    /// Map each [`PeerAction`] onto its shell call.
     ///
     /// `PromoteToActive` feeds its [`PromotionResult`](crate::proto::fmp::PromotionResult)
-    /// back into the machine (GAP-1) and appends the follow-up actions to the same
+    /// back into the machine and appends the follow-up actions to the same
     /// worklist — a queue rather than self-recursion so the async executor stays a
     /// single flat future (no boxing) and the emitted order is preserved (the
     /// establish sequences always end in `PromoteToActive`, so its follow-ups run
@@ -111,21 +111,21 @@ impl Node {
         while let Some(action) = queue.pop_front() {
             match action {
                 PeerAction::OpenTransport { .. } => {
-                    // C3-3: outbound dial (`initiate_connection`,
+                    // Outbound dial (`initiate_connection`,
                     // `lifecycle/mod.rs:470`). Outbound establish is not cut over
-                    // until C3-3; inert in the C3-1 skeleton.
+                    // yet; inert in the shadow-only skeleton.
                 }
                 PeerAction::SendHandshake { bytes } => {
-                    // GAP-2: the machine payload is the UNFRAMED Noise msg2 payload;
+                    // The machine payload is the UNFRAMED Noise msg2 payload;
                     // frame it with our/their index (mirrors `handshake.rs:472`'s
                     // `build_msg2(our_index, their_index, &payload)`) before the
                     // wire send. A fresh-outbound msg1 (empty payload → build msg1
-                    // from indices) is framed differently and lands in C3-3.
+                    // from indices) is framed differently and is wired later.
                     if let (Some(sender_idx), Some(receiver_idx)) =
                         (ambient.our_index, ambient.their_index)
                     {
                         let frame = build_msg2(sender_idx, receiver_idx, &bytes);
-                        // GAP-5: surface the send Result. A missing transport skips
+                        // Surface the send Result. A missing transport skips
                         // the send and continues (mirrors `handle_msg1`'s
                         // `if let Some(transport)` guard); a send *error* runs the
                         // pre-refactor msg2-send-failure cleanup (`handle_msg1`
@@ -157,15 +157,15 @@ impl Node {
                     }
                 }
                 PeerAction::SendRekey { .. } => {
-                    // C4: rekey msg2 framing (`build_msg2(our_new_index, …)`,
-                    // `handshake.rs:365`) + send. Rekey fold is out of C3 scope.
+                    // Rekey msg2 framing (`build_msg2(our_new_index, …)`,
+                    // `handshake.rs:365`) + send. Rekey fold is not yet wired.
                 }
                 PeerAction::SendLinkMessage { .. } => {
-                    // C4/C5: encrypt + send a link-control frame (heartbeat / filter
-                    // / tree / disconnect). Data-plane-owned; out of C3 scope.
+                    // Encrypt + send a link-control frame (heartbeat / filter
+                    // / tree / disconnect). Data-plane-owned; not yet wired.
                 }
                 PeerAction::PromoteToActive { link: promote_link } => {
-                    // GAP-1: ambient supplies the verified identity + promotion ts
+                    // Ambient supplies the verified identity + promotion ts
                     // that `promote_connection` needs (resolved from the wire ctx).
                     match self.promote_connection(
                         promote_link,
@@ -173,7 +173,7 @@ impl Node {
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
-                            // R1 (C3-3b): the decrypt-worker registration relocated
+                            // The decrypt-worker registration relocated
                             // OUT of `promote_connection` into THIS single executor
                             // arm — the one live caller of `promote_connection` (both
                             // the inbound `handle_msg1` and outbound `handle_msg2`
@@ -211,7 +211,7 @@ impl Node {
                             };
                             queue.extend(follow);
 
-                            // Defensive cross-connection loser-link surgery (C3-3b).
+                            // Defensive cross-connection loser-link surgery.
                             // LINK-ONLY: close the losing transport connection, drop
                             // its link, and re-point `addr_to_link`, reproducing the
                             // pre-refactor inline `handle_msg2`/`handle_msg1` per-arm
@@ -276,7 +276,7 @@ impl Node {
                             }
                         }
                         Err(e) => {
-                            // GAP-4: promotion failed. `promote_connection` already
+                            // Promotion failed. `promote_connection` already
                             // removed `connections[link]` and (on error) handled its
                             // own index internally. The pre-refactor inbound and
                             // outbound promote-Err arms were NOT byte-identical, so
@@ -295,7 +295,7 @@ impl Node {
                                 // connection").
                                 //
                                 // The transient outbound machine was inserted BEFORE
-                                // execute (Model A); it is additive C3-1 state that
+                                // execute; it is additive state that
                                 // did not exist pre-refactor, so removing the just-
                                 // inserted machine on failure is neutral vs old and
                                 // prevents a leak.
@@ -323,13 +323,13 @@ impl Node {
                     }
                 }
                 PeerAction::SwapSendState { .. } => {
-                    // C4-0: initiator cutover. Reproduces the `ConnAction::Cutover`
+                    // Initiator cutover. Reproduces the `ConnAction::Cutover`
                     // body in `handlers/rekey.rs:53-88` EXACTLY. `addr` is resolved
                     // from the ambient verified identity (as `InvalidateSendState`
                     // does). The decrypt re-register folds HERE, gated on
                     // `did_cutover` — the generic `RegisterDecryptSession` arm stays a
                     // no-op so a promote never double-registers. Shadow-only until the
-                    // cadence fold routes here (C4-1).
+                    // cadence fold routes here.
                     let node_addr = *ambient.verified_identity.node_addr();
                     let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
                         if let Some(_old_our_index) = peer.cutover_to_new_session() {
@@ -373,12 +373,12 @@ impl Node {
                     let _ = did_cutover;
                 }
                 PeerAction::CompleteDrain { peer: node_addr } => {
-                    // C4-0: initiator drain completion. Reproduces the
+                    // Initiator drain completion. Reproduces the
                     // `ConnAction::Drain` body in `handlers/rekey.rs:90-111` EXACTLY.
                     // Extract the real previous index + transport_id under the peer
                     // borrow, drop the borrow, then run the cache_key cleanup (which
                     // takes &mut self for unregister_decrypt_worker_session).
-                    // Shadow-only until the cadence fold routes here (C4-1).
+                    // Shadow-only until the cadence fold routes here.
                     let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
                         peer.complete_drain().map(|idx| (idx, peer.transport_id()))
                     });
@@ -402,7 +402,7 @@ impl Node {
                     }
                 }
                 PeerAction::InvalidateSendState => {
-                    // GAP-4 (biggest): the FULL teardown. `remove_active_peer`
+                    // The FULL teardown. `remove_active_peer`
                     // (`dispatch.rs:107`) frees the four index slots
                     // (current/rekey/pending/previous), drops `peers_by_index`,
                     // unregisters the decrypt worker, removes the FSP `sessions`
@@ -412,8 +412,8 @@ impl Node {
                 }
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;
-                    // No-op by design. C3-3b (R1-a) relocated the decrypt-worker
-                    // registration into the `PromoteToActive` Ok arm above, gated on
+                    // No-op by design. The decrypt-worker
+                    // registration relocated into the `PromoteToActive` Ok arm above, gated on
                     // the returned `PromotionResult`, so it runs once per live
                     // promote (Promoted/Won) at the pre-refactor synchronous point.
                     // This machine-emitted action is now redundant with that arm;
@@ -434,12 +434,12 @@ impl Node {
                     let _ = self.index_allocator.free(index);
                 }
                 PeerAction::ActivateConnectedUdp | PeerAction::TeardownConnectedUdp => {
-                    // C6: connected-UDP plane ownership (`connected_udp.rs`).
+                    // Connected-UDP plane ownership (`connected_udp.rs`).
                 }
                 PeerAction::SetTimer { .. } | PeerAction::CancelTimer { .. } => {
-                    // C5: timers become actions on the existing quantized tick.
-                    // INERT in C3 — the legacy tick timers still run, so driving
-                    // these would double-schedule (spec risk #7).
+                    // Timers become actions on the existing quantized tick.
+                    // INERT — the legacy tick timers still run, so driving
+                    // these would double-schedule.
                 }
                 PeerAction::ReportLost { peer } => {
                     // The single loss token → the reconciler reflex (`driver.rs:48`).
@@ -450,7 +450,7 @@ impl Node {
     }
 
     /// `ReportLost` → `note_link_dead` (kept as a named seam so the ambient clock
-    /// source is explicit and C5 can thread the reconciler-computed backoff).
+    /// source is explicit and the reconciler-computed backoff can be threaded later).
     #[allow(dead_code)]
     fn report_peer_lost(&mut self, peer: NodeAddr, now_ms: u64) {
         self.note_link_dead(peer, now_ms);

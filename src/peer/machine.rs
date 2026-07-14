@@ -1,11 +1,11 @@
 //! Per-peer FMP control FSM (sans-IO reducer).
 //!
-//! The unified per-peer lifecycle state machine that Step 2 of the node-runtime
-//! decomposition folds the scattered `connections`/`peers`/rekey state carriers
-//! into. This module is the **C1** increment: the FSM types, the machine struct
-//! (control-tier state only), and the pure `step` reducer, plus its unit tests.
-//! It is **unwired** — nothing in the codebase calls it yet; the driver wiring
-//! (C3b) and the send-state boundary (C2) land in later commits.
+//! The unified per-peer lifecycle state machine that folds the scattered
+//! `connections`/`peers`/rekey state carriers into one place. It provides the
+//! FSM types, the machine struct (control-tier state only), and the pure `step`
+//! reducer, plus its unit tests. It is **unwired** — nothing in the codebase
+//! calls it yet; the driver wiring and the send-state boundary land in later
+//! commits.
 //!
 //! ## Shape
 //!
@@ -14,7 +14,7 @@
 //! [`crate::proto::fmp`] ([`Fmp::establish_inbound`]/[`establish_outbound`],
 //! [`Fmp::poll_timeouts`]/[`poll_resends`]/[`poll_rekey`]/[`poll_rekey_resends`],
 //! and `cross_connection_winner`) — this module writes **no new decision
-//! core** (R4). The machine only (a) builds the plain-data snapshots those cores
+//! core**. The machine only (a) builds the plain-data snapshots those cores
 //! consume from its control-tier state, (b) maps the returned
 //! [`ConnAction`]/[`InboundDecision`]/[`OutboundDecision`]/[`PromotionResult`]
 //! into the [`PeerAction`] vocabulary the driver executes, and (c) advances its
@@ -22,16 +22,16 @@
 //! registry surgery, late ACL `authorize_peer`, decrypt-worker register/unregister)
 //! are **emitted as actions**, never performed here.
 //!
-//! ## Control / send-state split (§6 Core 3)
+//! ## Control / send-state split
 //!
 //! The machine holds **control-tier** state only. The hot send-critical state
 //! (the three epoch slots, transport target, connected-UDP handle, hot counters)
-//! becomes `PeerSendState` in **C2** and is *not* built here; the machine emits
+//! becomes `PeerSendState` and is *not* built here; the machine emits
 //! actions (`PromoteToActive`, `SwapSendState`, `RegisterDecryptSession`, …) that
 //! the driver applies to the published send-state. `remote_epoch` is
 //! establish-path-only, hence control-tier, and lives here.
 //!
-//! ## C1 realizability notes (see `design/step2-machine-spec.md` caveats)
+//! ## Realizability notes
 //!
 //! - `SendHandshake`/`SendRekey`/`SendLinkMessage` carry **opaque bytes**
 //!   (`Vec<u8>`) — the driver applies outer wire framing / encryption. On the
@@ -39,16 +39,16 @@
 //!   rekey msg2 they are the Noise payload the shell already produced
 //!   ([`WireOutcome::msg2_payload`]). A fresh outbound msg1 has no bytes the
 //!   control machine can build (the Noise step is shell-side), so it is emitted
-//!   with an empty payload and a `C3b` note — that path is not exercised by the
-//!   C1 tests.
+//!   with an empty payload and a note that the driver fills it in — that path is
+//!   not exercised by the tests.
 //! - `SendLinkMessage { msg }` is opaque plaintext (there is **no** unifying
 //!   `LinkMessage` type in the tree today — heartbeat is a bare `[0x51]` byte,
 //!   while filter/tree/disconnect are distinct concrete types). The machine
 //!   builds the real heartbeat and disconnect frames; filter/tree announce
-//!   payloads are data-plane-owned and threaded in at C3b (empty here).
+//!   payloads are data-plane-owned and threaded in by the driver (empty here).
 //! - `PeerSnapshot::counter` (the Noise send counter) is a send-state fact the
 //!   control machine cannot see; it is passed as `0` (the message-count rekey
-//!   trigger is threaded from `PeerSendState` at C4). Irrelevant to every C1
+//!   trigger is threaded from `PeerSendState`). Irrelevant to every
 //!   test (cutover/drain ignore it).
 
 #![allow(dead_code)]
@@ -66,8 +66,8 @@ use crate::{NodeAddr, PeerIdentity};
 // ============================================================================
 // Timing placeholders
 //
-// C1 is unwired; the real intervals come from `NodeConfig` when the driver is
-// wired (C3b/C5). The `poll_*` cores already take the interval/backoff as
+// This module is unwired; the real intervals come from `NodeConfig` when the
+// driver is wired. The `poll_*` cores already take the interval/backoff as
 // arguments, so these are only used to compute `SetTimer{at_ms}` deadlines and
 // the `Closed{backoff_deadline_ms}` park time. The unit tests assert on timer
 // *kinds*, not exact deadlines.
@@ -88,7 +88,7 @@ const REKEY_DAMPEN_MS: u64 = 30_000;
 const CLOSED_BACKOFF_MS: u64 = 5_000;
 
 // ============================================================================
-// FSM types (spec §1)
+// FSM types
 // ============================================================================
 
 /// The unified per-peer lifecycle state (subsumes today's `HandshakeState`,
@@ -224,12 +224,12 @@ pub(crate) enum PeerEvent {
     },
     /// Inbound rekey msg2 (completes our initiated rekey).
     RekeyMsg2 { their_index: SessionIndex },
-    /// A cadence-decided rekey `ConnAction` to CONSUME (C4-1). The shell ran the
+    /// A cadence-decided rekey `ConnAction` to CONSUME. The shell ran the
     /// batch `poll_rekey` across the whole peer set (phase-grouped, index-order
-    /// preserving — Finding B) and routes each decided action here; the machine
+    /// preserving) and routes each decided action here; the machine
     /// applies the control-tier transition + emits the send-state write
     /// (`SwapSendState`/`CompleteDrain`) WITHOUT re-polling. Carries only
-    /// `Cutover`/`Drain` on the C4-1 path (`InitiateRekey` stays inline shell-side
+    /// `Cutover`/`Drain` (`InitiateRekey` stays inline shell-side
     /// with a [`RekeyInitiated`](PeerEvent::RekeyInitiated) observation).
     RekeyConsume { action: ConnAction },
     /// OBSERVATION: the shell initiated an outbound rekey inline (the Noise msg1
@@ -237,7 +237,7 @@ pub(crate) enum PeerEvent {
     /// `Maintaining{Rekey(Msg1Sent)}` so the next tick's `Cutover`/`Drain` consume
     /// transitions from a coherent phase. Emits no action.
     RekeyInitiated,
-    /// Data plane observed the responder K-bit flip inline (§3.7).
+    /// Data plane observed the responder K-bit flip inline.
     PeerKbitFlip { epoch: [u8; 8] },
     /// A filter announce is due for this peer.
     FilterAnnounce,
@@ -271,7 +271,7 @@ pub(crate) enum PeerAction {
     /// Transmit rekey handshake bytes.
     SendRekey { bytes: Vec<u8> },
     /// Transmit an (encrypted) plaintext link-control frame. Opaque `Vec<u8>`
-    /// pending a unifying `LinkMessage` type — C3b: type against
+    /// pending a unifying `LinkMessage` type; a future revision could type against
     /// `proto::bloom::FilterAnnounce` / `proto::stp::TreeAnnounce` /
     /// `proto::fmp::Disconnect` / a heartbeat marker.
     SendLinkMessage { msg: Vec<u8> },
@@ -308,11 +308,11 @@ pub(crate) enum PeerAction {
 }
 
 // ============================================================================
-// The machine (control tier — spec §2)
+// The machine (control tier)
 // ============================================================================
 
 /// Per-peer control FSM. Holds control-tier lifecycle state only; the
-/// send-critical state is published as `PeerSendState` (C2) and mutated via the
+/// send-critical state is published as `PeerSendState` and mutated via the
 /// emitted [`PeerAction`]s.
 pub(crate) struct PeerMachine {
     state: PeerState,
@@ -323,7 +323,7 @@ pub(crate) struct PeerMachine {
     conn: ConnectionState,
     /// Remote startup epoch (establish-path-only; NOT in send-state).
     remote_epoch: Option<[u8; 8]>,
-    /// Inbound two-phase authorize (realization A): the opaque Noise msg2
+    /// Inbound two-phase authorize: the opaque Noise msg2
     /// payload stashed in Phase 1 (`InboundMsg1`) and emitted in Phase 2
     /// (`on_authorized`), so a rejected/unauthorized msg1 allocates no index.
     pending_msg2_payload: Option<Vec<u8>>,
@@ -348,7 +348,7 @@ pub(crate) struct PeerMachine {
     // The machine owns decrypt-worker register/unregister via actions, so it
     // tracks which index it registered (to later unregister/free). This is
     // control knowledge of the registration lifecycle, distinct from the hot
-    // send-state slots (C2).
+    // send-state slots.
     /// The currently-registered decrypt index (post-establish).
     our_index: Option<SessionIndex>,
     /// The previous index held open during a post-cutover drain window.
@@ -414,7 +414,7 @@ impl PeerMachine {
     /// The index we allocated for this peer's inbound session, once Phase 2
     /// (`on_authorized`) has run. `None` before allocation (and after a
     /// rejected/unauthorized msg1). The inbound cutover reads this to perform
-    /// the shell registry surgery with the machine-owned index (Option A1).
+    /// the shell registry surgery with the machine-owned index.
     pub(crate) fn our_index(&self) -> Option<SessionIndex> {
         self.our_index
     }
@@ -464,7 +464,7 @@ impl PeerMachine {
             PeerEvent::RekeyConsume { action } => self.map_rekey_action(action, now),
             PeerEvent::RekeyInitiated => self.on_rekey_initiated(),
             PeerEvent::PeerKbitFlip { .. } => {
-                // Responder cutover is data-plane-owned (§3.7): the machine only
+                // Responder cutover is data-plane-owned: the machine only
                 // schedules the drain-window unregister. NO slot mutation.
                 vec![PeerAction::SetTimer {
                     kind: TimerKind::DrainExpiry,
@@ -472,12 +472,12 @@ impl PeerMachine {
                 }]
             }
             PeerEvent::FilterAnnounce => vec![PeerAction::SendLinkMessage {
-                // C3b: filter-announce payload is data-plane-owned; threaded in
+                // Filter-announce payload is data-plane-owned; threaded in
                 // at wiring time.
                 msg: Vec::new(),
             }],
             PeerEvent::TreeAnnounceDue => vec![PeerAction::SendLinkMessage {
-                // C3b: tree-announce payload is data-plane-owned.
+                // Tree-announce payload is data-plane-owned.
                 msg: Vec::new(),
             }],
             PeerEvent::PeerHeard => self.on_peer_heard(now),
@@ -490,7 +490,7 @@ impl PeerMachine {
     }
 
     // ------------------------------------------------------------------
-    // Outbound establish (§3.1)
+    // Outbound establish
     // ------------------------------------------------------------------
 
     fn on_dial(
@@ -504,7 +504,7 @@ impl PeerMachine {
         }
         self.conn.set_transport_id(transport_id);
         // Connection-oriented transports open the transport first; connectionless
-        // ones send msg1 immediately. C1 models the connection-oriented arm
+        // ones send msg1 immediately. This models the connection-oriented arm
         // (OpenTransport) — the reconciler's candidate carries the transport
         // kind at wiring time; connectionless dial reuses `start_handshake`.
         self.state = PeerState::Connecting { link: self.link };
@@ -537,8 +537,8 @@ impl PeerMachine {
 
     /// Emit msg1 and arm the retransmit/timeout timers. The Noise msg1
     /// construction and its index allocation are shell-side effects performed by
-    /// the driver when it executes this action; C1 emits an empty payload (see
-    /// module note). This path is not exercised by the C1 tests.
+    /// the driver when it executes this action; an empty payload is emitted (see
+    /// module note). This path is not exercised by the tests.
     fn start_outbound_handshake(&mut self, now: u64) -> Vec<PeerAction> {
         let bytes = Vec::new();
         self.state = PeerState::Handshaking {
@@ -606,7 +606,7 @@ impl PeerMachine {
     }
 
     // ------------------------------------------------------------------
-    // Inbound establish (§3.2)
+    // Inbound establish
     // ------------------------------------------------------------------
 
     fn on_inbound_msg1(
@@ -649,7 +649,7 @@ impl PeerMachine {
         }
     }
 
-    /// Inbound **Phase 1** (realization A): classify the fresh leg *without*
+    /// Inbound **Phase 1**: classify the fresh leg *without*
     /// allocating an index. Records identity/epoch/their-index and stashes the
     /// opaque msg2 payload, parking at `Handshaking{ReceivedMsg1}` — the
     /// "awaiting Authorized" marker. The index allocation and the msg2/promote
@@ -668,10 +668,10 @@ impl PeerMachine {
         Vec::new()
     }
 
-    /// Inbound **Phase 2** (realization A): the late-ACL gate passed shell-side.
+    /// Inbound **Phase 2**: the late-ACL gate passed shell-side.
     /// Allocate our index NOW — the single inbound allocation point — record it
     /// on `conn`, and emit the msg2 send + promotion. `RegisterDecryptSession`
-    /// follows on the `PromotionResolved{Promoted}` feedback (§3.2). Guarded to
+    /// follows on the `PromotionResolved{Promoted}` feedback. Guarded to
     /// the inbound `ReceivedMsg1` phase so the benign outbound `Authorized`
     /// confirmation stays a no-op (state `Handshaking{SentMsg1}` and every other
     /// state fall through to `Vec::new()`).
@@ -744,7 +744,7 @@ impl PeerMachine {
     }
 
     // ------------------------------------------------------------------
-    // Promotion feedback (§3.3)
+    // Promotion feedback
     // ------------------------------------------------------------------
 
     fn on_promotion_resolved(&mut self, result: PromotionResult, now: u64) -> Vec<PeerAction> {
@@ -787,7 +787,7 @@ impl PeerMachine {
     }
 
     // ------------------------------------------------------------------
-    // Rekey (initiator) + cutover (§3.4)
+    // Rekey (initiator) + cutover
     // ------------------------------------------------------------------
 
     fn on_rekey_msg2(&mut self, their_index: SessionIndex) -> Vec<PeerAction> {
@@ -804,7 +804,7 @@ impl PeerMachine {
         Vec::new()
     }
 
-    /// OBS (C4-1): the shell ran `initiate_rekey` inline — the Noise msg1 leaf,
+    /// Observation: the shell ran `initiate_rekey` inline — the Noise msg1 leaf,
     /// the index allocation, the wire send, and the `set_rekey_state` on the
     /// `ActivePeer` all happened shell-side. This is a pure observation that
     /// advances the machine's control state to `Maintaining{Rekey(Msg1Sent)}` so
@@ -882,8 +882,8 @@ impl PeerMachine {
                 // Clear the shadow `draining_index` set by the Cutover arm: the
                 // real previous index is now retired by `CompleteDrain`, so a
                 // leftover `Some(stale)` would double-free if a later
-                // `CrossConnectionWon` consumed it in `on_promotion_resolved`
-                // (C4-0 latent item 1). Post-rekey cross-connection promotion is
+                // `CrossConnectionWon` consumed it in `on_promotion_resolved`.
+                // Post-rekey cross-connection promotion is
                 // not a live path, but clearing here removes the hazard outright.
                 self.draining_index = None;
                 self.state = PeerState::Active { addr: peer };
@@ -891,7 +891,7 @@ impl PeerMachine {
             }
             ConnAction::InitiateRekey { peer } => {
                 // Fresh outbound rekey: allocate our new index, send msg1 (Noise
-                // leaf is shell-side → empty payload in C1), arm the resend timer.
+                // leaf is shell-side → empty payload here), arm the resend timer.
                 self.rekey_in_progress = true;
                 self.rekey_resend_count = 0;
                 self.rekey_msg1 = Some(Vec::new());
@@ -961,7 +961,7 @@ impl PeerMachine {
     }
 
     // ------------------------------------------------------------------
-    // Liveness (§3.5)
+    // Liveness
     // ------------------------------------------------------------------
 
     fn on_heartbeat_due(&mut self, now: u64) -> Vec<PeerAction> {
@@ -1007,9 +1007,9 @@ impl PeerMachine {
         }
         // `InvalidateSendState` maps to the executor's `remove_active_peer`, which
         // unregisters the decrypt worker by the REAL current index. The machine's
-        // shadow `our_index` is deliberately NOT used to unregister here (C5-0): it
+        // shadow `our_index` is deliberately NOT used to unregister here: it
         // can drift to a reused index and wrongly unregister ANOTHER peer's worker
-        // session. `TeardownConnectedUdp` is inert (C6 — the old reap had no
+        // session. `TeardownConnectedUdp` is inert (the old reap had no
         // connected-UDP teardown, so inert is neutral); `ReportLost` drives the
         // loss reflex (`note_link_dead`).
         let mut actions = vec![
@@ -1026,7 +1026,7 @@ impl PeerMachine {
     }
 
     // ------------------------------------------------------------------
-    // Timeout / teardown / close (§3.6)
+    // Timeout / teardown / close
     // ------------------------------------------------------------------
 
     fn on_timeout(&mut self, kind: TimerKind, now: u64) -> Vec<PeerAction> {
@@ -1082,7 +1082,7 @@ impl PeerMachine {
         let snap = self.conn_snapshot();
         // poll_timeouts emits [ScheduleRetry?, Teardown]; the machine REMAPS
         // ScheduleRetry -> ReportLost (single loss token) and Teardown ->
-        // FreeIndex{our_index}, emitting FreeIndex before ReportLost (§3.6).
+        // FreeIndex{our_index}, emitting FreeIndex before ReportLost.
         let mut free = Vec::new();
         let mut lost = Vec::new();
         for act in Fmp::new().poll_timeouts(vec![snap]) {
@@ -1131,8 +1131,8 @@ impl PeerMachine {
 
     fn on_tick(&mut self, now: u64) -> Vec<PeerAction> {
         // The driver evaluates due machine timers on the quantized tick and
-        // re-enters the Timeout{kind} handlers. C1 is unwired; the deadline
-        // bookkeeping is threaded from the driver at C5, so Tick is a no-op here.
+        // re-enters the Timeout{kind} handlers. This module is unwired; the
+        // deadline bookkeeping is threaded from the driver, so Tick is a no-op here.
         let _ = now;
         Vec::new()
     }
@@ -1189,7 +1189,7 @@ impl PeerMachine {
     }
 
     /// Build this peer's rekey snapshot from control-tier state. `counter` is a
-    /// send-state fact (C4); passed as 0 here (see module note).
+    /// send-state fact; passed as 0 here (see module note).
     fn peer_snapshot(&self, addr: NodeAddr, now: u64) -> PeerSnapshot {
         let phase = match self.state {
             PeerState::Maintaining {
@@ -1229,8 +1229,8 @@ fn disconnect_frame(reason: CloseReason) -> Vec<u8> {
 }
 
 // ============================================================================
-// Unit tests (spec §5) — assert on ACTION SEQUENCES + STATE transitions using
-// hand-built synthetic snapshots (caveat #4: no real crypto sessions).
+// Unit tests — assert on ACTION SEQUENCES + STATE transitions using
+// hand-built synthetic snapshots (no real crypto sessions).
 // ============================================================================
 
 #[cfg(test)]
@@ -1475,7 +1475,7 @@ mod tests {
         );
 
         // Phase 1: restart tail only (invalidate, unregister old, report lost),
-        // then park at ReceivedMsg1 — no index allocated yet (realization A).
+        // then park at ReceivedMsg1 — no index allocated yet.
         assert_eq!(
             actions,
             vec![
@@ -1632,7 +1632,7 @@ mod tests {
         let wire = wire_outcome(peer, Some([4u8; 8]), 0x77);
 
         // Phase 1 (InboundMsg1): classify only — no actions, no allocation,
-        // parked at ReceivedMsg1 (realization A).
+        // parked at ReceivedMsg1.
         let phase1 = m.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(1),
@@ -1893,7 +1893,7 @@ mod tests {
         // action exists in the PeerAction vocabulary at all (reconciler-owned).
     }
 
-    // ---- Test 9: cadence CONSUME (C4-1) -----------------------------------
+    // ---- Test 9: cadence CONSUME ------------------------------------------
     // The shell polls the batch `poll_rekey` and routes each decided ConnAction
     // as `RekeyConsume` — the machine maps it WITHOUT re-polling, yielding the
     // same action sequence + transition as the machine-driven cadence (Test 1),
@@ -1944,7 +1944,7 @@ mod tests {
         assert_eq!(m.draining_index, Some(SessionIndex::new(0x1111)));
 
         // Consume the shell-decided Drain: single CompleteDrain, Active, and the
-        // shadow drain index is CLEARED (double-free guard, C4-0 latent item 1).
+        // shadow drain index is CLEARED (double-free guard).
         let drain = m.step(
             PeerEvent::RekeyConsume {
                 action: ConnAction::Drain { peer: addr },
@@ -1957,7 +1957,7 @@ mod tests {
         assert_eq!(m.draining_index, None);
     }
 
-    // ---- Test 10: RekeyInitiated observation (C4-1) -----------------------
+    // ---- Test 10: RekeyInitiated observation ------------------------------
     // The shell ran `initiate_rekey` inline; the obs advances control state to
     // Msg1Sent and emits nothing.
     #[test]

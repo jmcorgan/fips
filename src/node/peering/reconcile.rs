@@ -1,4 +1,4 @@
-//! Peering homeostatic reconciler — sans-IO core (Milestone-1 Step 1b).
+//! Peering homeostatic reconciler — sans-IO core.
 //!
 //! A synchronous `reconcile(inputs) -> Vec<PeeringAction>` decision core over
 //! the node's peer set. It owns the *decision* of which peers to dial and how
@@ -10,10 +10,10 @@
 //! I/O, and holds no runtime handles — time enters only as the `now` input, and
 //! the live dataplane maps enter only as an immutable [`Observed`] snapshot — so
 //! it is unit-testable with synthetic inputs and survives a later
-//! thread-boundary move (design doc §6 Core 2, §8 "cores are sans-IO"). It
-//! mirrors the [`crate::node::lifecycle::supervisor`] template.
+//! thread-boundary move. It mirrors the
+//! [`crate::node::lifecycle::supervisor`] template.
 //!
-//! ## Scope: the four reconcile layers (behavior-neutral rewrite)
+//! ## The four reconcile layers
 //!
 //! [`PeeringReconciler::reconcile`] runs four layers in priority order, each
 //! subsuming today's imperative `Node` methods verbatim:
@@ -24,7 +24,7 @@
 //!    the retry-dial phase is gated only by [`Budget::admission_ok`], matching
 //!    today.
 //! 2. **Overlay pool** — Nostr open-discovery, **ceiling-only** enqueue with no
-//!    set-point floor (design doc §9.2 option b; subsumes
+//!    set-point floor (option b; subsumes
 //!    `run_open_discovery_sweep`). Enqueues into the durable retry schedule; the
 //!    dial happens on a later retry-slot invocation (the two-phase timing,
 //!    below).
@@ -33,10 +33,10 @@
 //!    (subsumes `poll_lan_rendezvous`, connected/connecting skip only).
 //! 4. **Ceiling** — not a separate pass; the `node.limits` triple plus the
 //!    per-tick and per-peer caps are enforced inline in every layer through the
-//!    [`Budget`] the driver builds. "Any limb binds → stop growing" (design
-//!    §6:673). Ceiling-only posture: never emits [`PeeringAction::Disconnect`].
+//!    [`Budget`] the driver builds. "Any limb binds → stop growing".
+//!    Ceiling-only posture: never emits [`PeeringAction::Disconnect`].
 //!
-//! ### Two-phase overlay timing (design §2.5)
+//! ### Two-phase overlay timing
 //!
 //! The durable `retry_pending` schedule survives between the reconcile
 //! invocations at the two relevant cadence slots. The overlay layer at the
@@ -49,24 +49,21 @@
 //! ### Cadence contract (driver responsibility)
 //!
 //! Behavior-neutrality across the tick depends on the driver populating only the
-//! input relevant to each cadence slot (design §2 intro): the config-peer floor
+//! input relevant to each cadence slot: the config-peer floor
 //! runs only when `policy.auto_connect_peers` is non-empty (the startup
-//! peer-connect seam, design §3 D4); the overlay/opportunistic layers run only
+//! peer-connect seam); the overlay/opportunistic layers run only
 //! when their pools are populated. The driver also excludes the node's own
 //! identity and the driver-only "candidate fresh enough to skip" /
 //! "already connecting on this exact path" predicates when building the pools —
 //! those read the live freshness cache / connection table at path granularity,
-//! which the pure core does not observe (see the deviation notes in the C2
-//! disposition).
+//! which the pure core does not observe.
 //!
-//! ## Scope: the drain gate (consumed by the C3 cutover)
+//! ## The drain gate
 //!
 //! The `Gate` derived from the published `NodeState` gates the whole core: a
 //! `Suspended` (draining) gate clears the retry schedule and returns no actions,
 //! and the reflexes self-suppress, so the drain does not reconnect the peers it
-//! just closed (design §8 correctness trap). `NotRunning` is the inert startup
-//! gate. This core is **unwired** in this commit — nothing calls it on the hot
-//! path yet; the driver cutover lands in the following commits.
+//! just closed. `NotRunning` is the inert startup gate.
 
 use std::collections::{HashMap, HashSet};
 
@@ -80,8 +77,8 @@ use crate::transport::{TransportAddr, TransportId};
 
 use super::retry::RetryState;
 
-/// Drain/run gate derived from the supervisor's published [`NodeState`]
-/// (design §6). Not a bare bool: it must also express "not yet running" (the
+/// Drain/run gate derived from the supervisor's published [`NodeState`].
+/// Not a bare bool: it must also express "not yet running" (the
 /// startup gate) distinctly from "draining" (the suspend gate).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Gate {
@@ -95,7 +92,7 @@ pub(crate) enum Gate {
 }
 
 impl Gate {
-    /// Map the published [`NodeState`] to the gate (design §6:636):
+    /// Map the published [`NodeState`] to the gate:
     /// `Running`/`Degraded` → `Reconciling`; `Draining` → `Suspended`;
     /// everything else (`Created`/`Starting`/`Stopping`/`Stopped`/`Failed`) →
     /// `NotRunning`.
@@ -112,7 +109,7 @@ impl Gate {
     }
 }
 
-/// Admission observations the ceiling needs (design §6:654), built by the driver
+/// Admission observations the ceiling needs, built by the driver
 /// from the live maps at each cadence point. This is the only place the deleted
 /// `available_outbound_slots` / `outbound_handshake_slots` / `outbound_link_slots`
 /// arithmetic survives.
@@ -137,31 +134,30 @@ pub(crate) struct Budget {
 }
 
 /// What the reconciler observes of today's dataplane maps (it never owns them).
-/// Peer/leg identity is anonymous-capable so re-applying over
-/// refactor-node-next's XX first-contact path stays neutral (design §7:1181).
+/// Peer/leg identity is anonymous-capable so the XX first-contact path stays
+/// neutral.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Observed {
     /// `self.peers.len()`.
-    // The scalar counts are carried for the ceiling's future set-point use
-    // (design §6:654). At Step 1b's ceiling-only posture the ceiling is enforced
-    // through `Budget` (admission arithmetic) and the per-peer cap through
-    // `in_flight_by_peer`, so no reconcile layer reads these scalars — they
-    // remain unread after all three driver cutovers, awaiting the Step 2
-    // set-point.
+    // The scalar counts are carried for the ceiling's future set-point use.
+    // At the ceiling-only posture the ceiling is enforced through `Budget`
+    // (admission arithmetic) and the per-peer cap through `in_flight_by_peer`,
+    // so no reconcile layer reads these scalars — they remain unread for now,
+    // awaiting a future set-point.
     #[allow(dead_code)]
-    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
+    // ceiling-only posture: no layer reads the scalar counts (future set-point)
     pub peers: usize,
     /// `self.connections.len()`.
     #[allow(dead_code)]
-    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
+    // ceiling-only posture: no layer reads the scalar counts (future set-point)
     pub connections: usize,
     /// `self.links.len()`.
     #[allow(dead_code)]
-    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
+    // ceiling-only posture: no layer reads the scalar counts (future set-point)
     pub links: usize,
     /// `self.pending_connects.len()`.
     #[allow(dead_code)]
-    // ceiling-only posture: no layer reads the scalar counts (Step 2 set-point)
+    // ceiling-only posture: no layer reads the scalar counts (future set-point)
     pub pending_connects: usize,
     /// The `peers` map keys (fully authenticated peers).
     pub connected: HashSet<NodeAddr>,
@@ -173,7 +169,7 @@ pub(crate) struct Observed {
     pub in_flight_by_peer: HashMap<NodeAddr, usize>,
 }
 
-/// A dialable candidate. Mirrors next's discovery tuple exactly
+/// A dialable candidate. Mirrors the discovery tuple exactly
 /// (`(TransportId, TransportAddr, Option<PeerIdentity>, bool)`), identity
 /// anonymous-capable.
 #[derive(Clone, Debug)]
@@ -185,9 +181,9 @@ pub(crate) struct Candidate {
     pub transport_id: TransportId,
     /// The remote address to dial.
     pub remote_addr: TransportAddr,
-    /// The peer identity; `None` is an anonymous first-contact leg (design §7).
+    /// The peer identity; `None` is an anonymous first-contact leg.
     pub identity: Option<PeerIdentity>,
-    /// The trailing bool in next's tuple: whether this is an active-refresh dial
+    /// The trailing bool in the tuple: whether this is an active-refresh dial
     /// against an already-connected peer.
     pub active_refresh: bool,
 }
@@ -217,7 +213,7 @@ impl Candidate {
     }
 }
 
-/// Read-only candidate pools the driver drained this tick (design §6:650). Plain
+/// Read-only candidate pools the driver drained this tick. Plain
 /// data, no runtime handles.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DiscoveryPools {
@@ -236,7 +232,7 @@ pub(crate) struct DiscoveryPools {
     pub startup_sweep_max_age_secs: Option<u64>,
 }
 
-/// The desired-state policy (design §5 knobs). Built once per invocation from
+/// The desired-state policy knobs. Built once per invocation from
 /// config.
 #[derive(Clone, Debug)]
 pub(crate) struct Policy {
@@ -268,11 +264,11 @@ pub(crate) struct Policy {
     pub open_discovery_max_pending: usize,
     /// `advert_ttl_secs * 1000 * OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER`.
     // NOTE: there is deliberately NO set-point N knob. The overlay pool is
-    // CEILING-ONLY (design §9.2 option b).
+    // CEILING-ONLY.
     pub open_discovery_expires_ms: u64,
 }
 
-/// The action vocabulary (design §6:643). `Connect` carries the
+/// The action vocabulary. `Connect` carries the
 /// anonymous-capable [`Candidate`]; `ScheduleRetry` reports the retry-schedule
 /// delta the reconciler owns (for driver observability; the durable mutation is
 /// internal).
@@ -280,9 +276,9 @@ pub(crate) struct Policy {
 pub(crate) enum PeeringAction {
     /// Dial this candidate (driver performs the connect / handshake I/O).
     Connect(Candidate),
-    /// Shed this peer. Reserved and unused at the ceiling-only posture of Step
-    /// 1b (design §9.3 refuse-to-grow, no shed).
-    #[allow(dead_code)] // Step 2: shedding/eviction emits this
+    /// Shed this peer. Reserved and unused at the ceiling-only posture
+    /// (refuse-to-grow, no shed).
+    #[allow(dead_code)] // shedding/eviction will emit this
     Disconnect(NodeAddr),
     /// A retry was (re)scheduled for `peer` at `backoff_ms` delay. Observability
     /// only; the durable mutation is on the reconciler's `retry_pending`.
@@ -336,7 +332,7 @@ pub(crate) struct OverlaySweepTally {
 pub(crate) struct PeeringReconciler {
     /// Cross-attempt retry schedule (moved off `Node.retry_pending`). The
     /// `retry_count` lives here, not per-connection, so escalating backoff
-    /// survives a fresh connection per re-dial (design §6:704 / §7:1150). Keyed
+    /// survives a fresh connection per re-dial. Keyed
     /// by [`NodeAddr`].
     pub(in crate::node) retry_pending: HashMap<NodeAddr, RetryState>,
 }
@@ -354,11 +350,11 @@ impl PeeringReconciler {
         now: u64,
         gate: Gate,
     ) -> Vec<PeeringAction> {
-        // Gate prologue (design §2.0).
+        // Gate prologue.
         match gate {
-            // Startup gate: inert before the substrate is ready (design §2.3).
+            // Startup gate: inert before the substrate is ready.
             Gate::NotRunning => return Vec::new(),
-            // Drain gate: clear the schedule and desire nothing (design §2.3).
+            // Drain gate: clear the schedule and desire nothing.
             Gate::Suspended => {
                 self.retry_pending.clear();
                 return Vec::new();
@@ -369,7 +365,7 @@ impl PeeringReconciler {
         let mut actions = Vec::new();
         // Layer 1: mandatory floor. The config floor precedes the retry-dial
         // phase; the retry-dial phase precedes the overlay enqueue so a
-        // same-call overlay insert never dials in its own call (two-phase, §2.5).
+        // same-call overlay insert never dials in its own call (two-phase).
         self.layer_config_floor(policy, observed, &mut actions);
         self.layer_retry_dial(policy, observed, budget, now, &mut actions);
         // Layer 2: overlay pool (ceiling-only enqueue). The tally is
@@ -389,7 +385,7 @@ impl PeeringReconciler {
         actions
     }
 
-    /// Per-layer wrapper: run **only** the overlay-enqueue layer (design §10).
+    /// Per-layer wrapper: run **only** the overlay-enqueue layer.
     ///
     /// The monolithic [`reconcile`] runs the always-on retry-dial phase on every
     /// call, so the driver must NOT call it at the overlay (nostr-poll) cadence
@@ -401,9 +397,9 @@ impl PeeringReconciler {
     /// On `NotRunning` / `Suspended` it returns no actions. It does **not**
     /// clear `retry_pending` on `Suspended` — that clear is owned by the drain
     /// gate (`enter_drain`) and the retry-slot [`reconcile`], not the overlay
-    /// slot (design §10). The returned [`PeeringAction::ScheduleRetry`] items are
+    /// slot. The returned [`PeeringAction::ScheduleRetry`] items are
     /// observability only; the durable mutation is the insert the layer performed
-    /// into `retry_pending`, dialed at the later retry slot (two-phase, §2.5).
+    /// into `retry_pending`, dialed at the later retry slot (two-phase).
     pub(in crate::node) fn reconcile_overlay(
         &mut self,
         policy: &Policy,
@@ -433,8 +429,7 @@ impl PeeringReconciler {
         (actions, tally)
     }
 
-    /// Per-layer wrapper: run **only** the opportunistic-growth layer (design
-    /// §10).
+    /// Per-layer wrapper: run **only** the opportunistic-growth layer.
     ///
     /// The monolithic [`reconcile`] runs the always-on retry-dial phase on every
     /// call, so the driver must NOT call it at the opportunistic (transport
@@ -448,7 +443,7 @@ impl PeeringReconciler {
     /// On `NotRunning` / `Suspended` it returns no actions. It does **not** clear
     /// `retry_pending` on `Suspended` — that clear is owned by the drain gate
     /// (`enter_drain`) and the retry-slot [`reconcile`], not the opportunistic
-    /// slot (design §10). `policy` and `now` are accepted for wrapper-family
+    /// slot. `policy` and `now` are accepted for wrapper-family
     /// uniformity with [`reconcile`] / [`reconcile_overlay`]; the ceiling-only
     /// opportunistic layer reads neither (it grows only against the live
     /// [`Budget`] / [`Observed`], with no time- or config-derived input).
@@ -475,7 +470,7 @@ impl PeeringReconciler {
     /// Emits a `Connect` for every auto-connect peer not already connected or
     /// connecting. Not budget-gated (the startup floor is mandatory); the driver
     /// populates `policy.auto_connect_peers` only at the startup peer-connect
-    /// seam so this does not re-fire every tick (design §3 D4).
+    /// seam so this does not re-fire every tick.
     fn layer_config_floor(
         &self,
         policy: &Policy,
@@ -571,9 +566,9 @@ impl PeeringReconciler {
     /// Layer 2 — overlay pool enqueue (subsumes `run_open_discovery_sweep`).
     ///
     /// Ceiling-only: the sole bound is the enqueue budget (pending cap ∧
-    /// available outbound slots). No `>= N` set-point floor (design §9.2 option
-    /// b). Enqueues due-now retry entries; the dial happens on a later
-    /// retry-slot invocation (two-phase, §2.5).
+    /// available outbound slots). No `>= N` set-point floor. Enqueues due-now
+    /// retry entries; the dial happens on a later
+    /// retry-slot invocation (two-phase).
     #[allow(clippy::too_many_arguments)]
     fn layer_overlay_enqueue(
         &mut self,
@@ -593,7 +588,7 @@ impl PeeringReconciler {
         // open_discovery_enqueue_budget: cap_remaining ∧ available_outbound_slots
         // (== handshake_slots ∧ peer_slots). Note this is min(cap, handshake,
         // peer) — the real helper uses available_outbound_slots, NOT peer_slots
-        // alone (see deviation note).
+        // alone.
         let current_open_discovery_pending = self
             .retry_pending
             .values()
@@ -783,11 +778,11 @@ impl PeeringReconciler {
 
     /// Reflex: an outbound handshake timed out (== `Node::schedule_retry`,
     /// retry.rs:58). Byte-identical retry_count/backoff math. No-op when the gate
-    /// is `Suspended` (drain trap, §2.3, review decision D1).
+    /// is `Suspended` (drain trap).
     ///
     /// NOTE: today's `schedule_retry` also returns early if the peer is already
     /// connected (`self.peers.contains_key`). The reflex takes no [`Observed`]
-    /// (D1 keeps the signature `(addr, now, policy, gate)`), so that
+    /// (the reflex signature is `(addr, now, policy, gate)`), so that
     /// connected-guard is the driver's responsibility at the call site.
     pub(crate) fn on_handshake_timeout(
         &mut self,
@@ -848,7 +843,7 @@ impl PeeringReconciler {
     /// Reflex: a link went dead (== `Node::schedule_reconnect`, retry.rs:134).
     /// Byte-identical retry_count/backoff math, including preserving accumulated
     /// backoff across repeated link-dead events. No-op when the gate is
-    /// `Suspended` (drain trap, §2.3, review decision D1).
+    /// `Suspended` (drain trap).
     pub(crate) fn on_link_dead(
         &mut self,
         addr: NodeAddr,
@@ -1051,7 +1046,7 @@ mod tests {
         let _ = overlay_addr;
 
         // auto_connect_peers stays empty: these reconcile calls model non-startup
-        // cadence slots, where the config floor does not run (design §3 D4).
+        // cadence slots, where the config floor does not run.
         let mut policy = base_policy();
         policy.open_discovery_enabled = true;
 
@@ -1178,7 +1173,7 @@ mod tests {
         assert_eq!(st.retry_after_ms, 1_000 + backoff_ms(0, BASE_MS, CAP_MS));
 
         // A later retry-slot reconcile (now past retry_after) dials once. The
-        // retry-slot policy has an empty config floor (cadence contract, §3 D4),
+        // retry-slot policy has an empty config floor (cadence contract),
         // so the single Connect comes only from the retry-dial phase.
         let now = 1_000 + backoff_ms(0, BASE_MS, CAP_MS);
         let tick_policy = base_policy();

@@ -279,12 +279,12 @@ impl Node {
             InboundDecision::Reject {
                 reason: InboundReject::AtMaxPeers,
             } => {
-                // C3-2a net-new arm: drive the reject through the machine to
-                // prove realization A — a net-new msg1 at the max-peers cap
-                // reaches `Failed{Rejected}` with the index allocator untouched
-                // (no allocate before the reject). The transient machine is
-                // discarded (never inserted into `peer_machines`); `conn`/
-                // `link_id` were never inserted into the registry either.
+                // Net-new arm: drive the reject through the machine so a
+                // net-new msg1 at the max-peers cap reaches `Failed{Rejected}`
+                // with the index allocator untouched (no allocate before the
+                // reject). The transient machine is discarded (never inserted
+                // into `peer_machines`); `conn`/`link_id` were never inserted
+                // into the registry either.
                 debug!(
                     peer = %self.peer_display_name(&peer_node_addr),
                     max = self.max_peers(),
@@ -313,7 +313,7 @@ impl Node {
             InboundDecision::Reject {
                 reason: reason @ (InboundReject::PendingSession | InboundReject::DualRekeyWon),
             } => {
-                // Existing-peer rekey rejects — still inline (C4). Byte-unchanged
+                // Existing-peer rekey rejects — still inline. Byte-unchanged
                 // from the pre-refactor shared reject tail.
                 match reason {
                     InboundReject::PendingSession => debug!(
@@ -440,16 +440,16 @@ impl Node {
                 self.msg1_rate_limiter.complete_handshake();
             }
             InboundDecision::RestartThenPromote { peer } => {
-                // === C3-2b: restart inbound establish, driven by the machine. ===
+                // === Restart inbound establish, driven by the machine. ===
                 // Epoch mismatch — the peer restarted. The fresh leg is promoted
-                // exactly like a net-new inbound (realization A two-phase
-                // authorize); the OLD peer's teardown is the machine's Phase-1
+                // exactly like a net-new inbound (two-phase authorize); the OLD
+                // peer's teardown is the machine's Phase-1
                 // `[InvalidateSendState, ReportLost{peer}]`:
                 //   InvalidateSendState → remove_active_peer(old): frees the four
                 //     index slots + `peers_by_index` + decrypt unregister + FSP
-                //     `sessions` + `pending_tun_packets` (GAP-4). The fresh leg's
+                //     `sessions` + `pending_tun_packets`. The fresh leg's
                 //     `our_index` is None, so the machine emits NO
-                //     UnregisterDecryptSession (N1).
+                //     UnregisterDecryptSession.
                 //   ReportLost{peer} → note_link_dead(old): reconnect backoff.
                 // These execute BEFORE authorize/allocate, preserving the
                 // pre-refactor order exactly (remove_active_peer → note_link_dead →
@@ -473,7 +473,7 @@ impl Node {
                 // Phase 1: classify + emit the old-peer teardown. For a restart the
                 // fresh leg has `our_index == None`, so the emitted sequence is
                 // exactly [InvalidateSendState, ReportLost{peer}]; the machine then
-                // parks at Handshaking{ReceivedMsg1} (no allocation — realization A).
+                // parks at Handshaking{ReceivedMsg1} (no allocation).
                 let phase1 = machine.step(
                     PeerEvent::InboundMsg1 {
                         link: link_id,
@@ -493,13 +493,13 @@ impl Node {
 
                 // Execute the Phase-1 teardown, in emitted order
                 // (InvalidateSendState before ReportLost, both before
-                // authorize/alloc). N2 CLOCK NOTE — INTENTIONAL DIVERGENCE: the
+                // authorize/alloc). CLOCK NOTE — INTENTIONAL DIVERGENCE: the
                 // pre-refactor arm timestamped `note_link_dead` with
                 // `SystemTime::now()` wall-clock; routing `ReportLost` through the
                 // executor uses `ambient.now_ms == packet.timestamp_ms`. This is an
                 // accepted sub-millisecond reconnect-backoff timing shift — NOT
-                // on-wire, NOT index/metrics — see design/step2-c3-2-blueprint.md
-                // N2. The machine is not yet in `peer_machines`, but these two
+                // on-wire, NOT index/metrics. The machine is not yet in
+                // `peer_machines`, but these two
                 // actions do not touch the map, so executing them here is safe.
                 let teardown_ctx = PeerActionCtx {
                     verified_identity: peer_identity,
@@ -556,7 +556,7 @@ impl Node {
                     }
                 };
 
-                // Shell registry surgery (Option A1), in the pre-refactor order:
+                // Shell registry surgery, in the pre-refactor order:
                 // set indices on the shell connection, insert link / reverse map /
                 // connection, then build + store the framed msg2. The old index was
                 // already freed by `remove_active_peer` above, BEFORE this fresh
@@ -603,14 +603,14 @@ impl Node {
                 // Established); a send/promote failure removed the machine and
                 // already cleaned up.
                 //
-                // DEFENSIVE CROSS-CONNECTION (risk #5): the machine's
+                // DEFENSIVE CROSS-CONNECTION: the machine's
                 // `PromotionResolved{CrossConnectionWon/Lost}` follow-ups run the
                 // index-level cleanup generically in the executor, but the loser-
                 // link surgery (close_connection → remove_link → addr_to_link) is
                 // NOT reproduced here — it is UNREACHABLE on the driven restart
                 // path: Phase-1 `remove_active_peer` removed `peers[addr]`, so
                 // `promote_connection` returns `Promoted`. The full cross-connection
-                // link surgery lands in C3-3 (blueprint risk #5 / N3); the
+                // link surgery is wired later; the
                 // debug_assert below catches any regression that reaches a non-
                 // Established, non-absent state.
                 debug_assert!(matches!(
@@ -637,13 +637,13 @@ impl Node {
                 self.msg1_rate_limiter.complete_handshake();
             }
             InboundDecision::Promote => {
-                // === C3-2a: net-new inbound establish, driven by the machine. ===
-                // Realization A (two-phase authorize): Phase 1 classifies with no
-                // allocation; the shell interposes the late-ACL gate here; Phase 2
-                // allocates the single index and emits [SendHandshake,
-                // PromoteToActive]. A rejected/unauthorized msg1 therefore
-                // allocates NO index — matching the pre-refactor
-                // authorize-before-allocate ordering exactly.
+                // === Net-new inbound establish, driven by the machine. ===
+                // Two-phase authorize: Phase 1 classifies with no allocation; the
+                // shell interposes the late-ACL gate here; Phase 2 allocates the
+                // single index and emits [SendHandshake, PromoteToActive]. A
+                // rejected/unauthorized msg1 therefore allocates NO index —
+                // matching the pre-refactor authorize-before-allocate ordering
+                // exactly.
 
                 // Keep the shell's own copies of the msg2 framing inputs before
                 // the machine event consumes `wire` (WireOutcome is not Clone).
@@ -713,7 +713,7 @@ impl Node {
                     }
                 };
 
-                // Shell registry surgery (Option A1), in the pre-refactor order:
+                // Shell registry surgery, in the pre-refactor order:
                 // set indices on the shell connection, insert link / reverse map /
                 // connection, then build + store the framed msg2.
                 conn.set_our_index(our_index);
@@ -740,7 +740,7 @@ impl Node {
                 // Execute [SendHandshake, PromoteToActive]. The executor frames +
                 // sends msg2 (bytes identical to `wire_msg2`), promotes via
                 // `promote_connection`, feeds PromotionResolved back, and runs the
-                // inert RegisterDecryptSession (R2 — register stays in
+                // inert RegisterDecryptSession (register stays in
                 // `promote_connection`). Its send-failure / promote-failure arms
                 // run the pre-refactor cleanup and remove the machine, leaving it
                 // absent (not Established).
@@ -1119,22 +1119,22 @@ impl Node {
             return;
         }
 
-        // === C3-3a: net-new outbound establish, driven by the machine. ===
+        // === Net-new outbound establish, driven by the machine. ===
         // ONLY the `establish_outbound == Promote` arm is cut over here. The
         // Swap/Keep cross-connection arms and the rekey-msg2 completion branch
-        // above STAY INLINE (§0): they mutate an existing already-promoted peer
-        // via `replace_session` with no PeerAction, so the machine's C1 Swap/Keep
+        // above STAY INLINE: they mutate an existing already-promoted peer
+        // via `replace_session` with no PeerAction, so the machine's Swap/Keep
         // arms cannot be neutral until `PeerSendState` expresses `replace_session`.
         //
         // This arm is `has_existing_peer == false` only, so `promote_connection`
         // always hits its else branch and returns `Promoted`; the defensive
         // `CrossConnectionWon/Lost` follow-ups are UNREACHABLE here (their
-        // loser-link surgery lands in C3-3b). Direct analog of the C3-2a inbound
+        // loser-link surgery is wired later). Direct analog of the inbound
         // net-new arm — no ordering constraint, lowest risk.
         //
-        // Model A: build a TRANSIENT outbound machine, step `Msg2 →
+        // Build a TRANSIENT outbound machine, step `Msg2 →
         // [PromoteToActive]`, execute it (→ `promote_connection` →
-        // `PromotionResolved{Promoted}` → inert `RegisterDecryptSession`, R2), and
+        // `PromotionResolved{Promoted}` → inert `RegisterDecryptSession`), and
         // insert into `peer_machines` only on the Promoted (Established) tail. The
         // outbound `our_index` was allocated at DIAL (unchanged), the outbound
         // promote sends nothing on the wire, and `promote_connection` frees
@@ -1146,8 +1146,8 @@ impl Node {
         let mut machine = PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
 
         // Step `Msg2 → [PromoteToActive]`. The machine re-runs the pure
-        // `establish_outbound` on the snapshot (a harmless second pure call, as in
-        // C3-2a); `has_existing_peer == false` reproduces the `Promote` decision.
+        // `establish_outbound` on the snapshot (a harmless second pure call);
+        // `has_existing_peer == false` reproduces the `Promote` decision.
         let promote_actions = machine.step(
             PeerEvent::Msg2 {
                 their_index: header.sender_idx,
@@ -1165,13 +1165,13 @@ impl Node {
         // all returned without inserting). Inserted BEFORE execute so the
         // executor's `PromoteToActive` arm can feed `PromotionResolved` back into
         // it via the `peer_machines` lookup. The outbound `link_id` was allocated
-        // at dial and the dial path never inserts a machine (Model A), so this
+        // at dial and the dial path never inserts a machine, so this
         // cannot collide with an existing entry.
         self.peer_machines.insert(link_id, machine);
 
         // Execute `[PromoteToActive]`. The executor calls `promote_connection`,
         // feeds `PromotionResolved{Promoted}` back, registers the decrypt-worker
-        // session (R1 — C3-3b relocated the register into the executor's
+        // session (the register was relocated into the executor's
         // `PromoteToActive` Ok arm, gated on the result), and runs the now-inert
         // `RegisterDecryptSession` follow-up. A promote failure (e.g.
         // `MaxPeersExceeded` if peers filled between dial and msg2) runs the
@@ -1367,7 +1367,7 @@ impl Node {
                     "Cross-connection resolved: this connection won"
                 );
 
-                // R1 (C3-3b): the decrypt-worker registration is no longer done
+                // The decrypt-worker registration is no longer done
                 // here — it relocated OUT of `promote_connection` into the single
                 // executor `PromoteToActive` Ok arm (`peer_actions.rs`), gated on
                 // the returned `PromotionResult` (`Promoted | CrossConnectionWon`).
@@ -1478,7 +1478,7 @@ impl Node {
                 "Connection promoted to active peer"
             );
 
-            // R1 (C3-3b): the decrypt-worker registration relocated OUT of
+            // The decrypt-worker registration relocated OUT of
             // `promote_connection` into the single executor `PromoteToActive` Ok
             // arm (`peer_actions.rs`), gated on the returned `PromotionResult`
             // (`Promoted | CrossConnectionWon`, never `CrossConnectionLost`). The

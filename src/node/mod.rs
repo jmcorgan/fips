@@ -170,20 +170,20 @@ pub enum NodeState {
     Created,
     /// Starting up (initializing transports).
     Starting,
-    /// Fully operational — every configured child came up (design doc §9.1).
+    /// Fully operational — every configured child came up.
     Running,
-    /// Operational but degraded (design doc §9.1): ≥1 transport is up and the
+    /// Operational but degraded: ≥1 transport is up and the
     /// node is serving, but one or more configured optional children (a
     /// transport beyond the first, Nostr, mDNS, TUN, DNS, or a worker pool)
     /// failed to start. Still operational — a degraded node serves traffic.
     Degraded,
-    /// Bounded graceful drain in progress (design doc §6): a shutdown
+    /// Bounded graceful drain in progress: a shutdown
     /// `Disconnect` has been broadcast and the node is waiting for peers to
     /// clear (bounded by `node.drain_timeout_secs`) before teardown. Not
     /// operational; the daemon drain path advances to `Stopping` via the
     /// supervisor's `DrainDeadlineElapsed`, never through `stop()`.
     Draining,
-    /// Start failed fatally: zero transports came up (design doc §9.1). The
+    /// Start failed fatally: zero transports came up. The
     /// driver tears down any children that did come up and `start()` returns
     /// an error. Not operational and not restartable in-process.
     Failed,
@@ -195,13 +195,13 @@ pub enum NodeState {
 
 impl NodeState {
     /// Check if node is operational. A `Degraded` node is operational — it is
-    /// serving, just missing an optional child (design doc §9.1).
+    /// serving, just missing an optional child.
     pub fn is_operational(&self) -> bool {
         matches!(self, NodeState::Running | NodeState::Degraded)
     }
 
     /// Check if node can be started. A `Failed` node is not restartable
-    /// in-process (design doc §9.1) — only a fresh `Created` or a cleanly
+    /// in-process — only a fresh `Created` or a cleanly
     /// `Stopped` node can start.
     pub fn can_start(&self) -> bool {
         matches!(self, NodeState::Created | NodeState::Stopped)
@@ -353,14 +353,14 @@ pub struct Node {
     /// Indexed by LinkId since we don't know the peer's identity yet.
     connections: HashMap<LinkId, PeerConnection>,
 
-    // === Per-Peer Control Machines (Step 2 / C3) ===
+    // === Per-Peer Control Machines ===
     /// Per-peer lifecycle control FSMs, keyed by the stable `LinkId` that spans
     /// the handshake→active lifetime. A NEW parallel structure introduced by the
     /// node-runtime decomposition: `connections`/`peers` stay byte-unchanged (hot
     /// path pristine) and are cut over to this machine home path-by-path. Unwired
-    /// in C3-1 — the executor (`dataplane/peer_actions.rs`) and advance helper
+    /// initially — the executor (`dataplane/peer_actions.rs`) and advance helper
     /// exist but the live `handle_msg1`/`handle_msg2` path does not drive them yet;
-    /// the inbound cutover lands in C3-2.
+    /// the inbound cutover is wired later.
     #[allow(dead_code)]
     peer_machines: HashMap<LinkId, PeerMachine>,
 

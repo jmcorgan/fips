@@ -187,7 +187,7 @@ impl Node {
 
         // Remove link and address mapping
         self.remove_link(&link_id);
-        // Bound `peer_machines` (C3-2b follow-up #2): drop this peer's machine
+        // Bound `peer_machines`: drop this peer's machine
         // entry, keyed by the `link_id` derived above BEFORE the `peers` removal.
         // This cleans up the OLD peer's machine on an inbound restart and prevents
         // unbounded growth on the establish success path. NEUTRAL: nothing on the
