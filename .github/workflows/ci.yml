@@ -122,7 +122,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install cargo-ndk
-        uses: taiki-e/install-action@cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
       - name: Clippy the library for Android
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
