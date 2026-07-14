@@ -31,7 +31,7 @@ use tracing::error;
 use tracing::{debug, trace};
 #[cfg(windows)]
 use tracing::{error, warn};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use tun::Layer;
 
 /// Read-only handle to the per-destination path MTU map. Populated by
@@ -234,7 +234,10 @@ impl TunDevice {
             }
         }
 
-        // Create the TUN device
+        // Create the TUN device. `mut` is only exercised on linux/macos, where
+        // the name/layer/mtu are set below; other unix targets (android) pass
+        // the default config through unchanged.
+        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(unused_mut))]
         let mut tun_config = tun::Configuration::default();
 
         // On macOS, utun devices get kernel-assigned names (utun0, utun1, ...),
