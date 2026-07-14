@@ -299,7 +299,12 @@ impl Node {
                                 // did not exist pre-refactor, so removing the just-
                                 // inserted machine on failure is neutral vs old and
                                 // prevents a leak.
-                                warn!(link_id = %promote_link, error = %e, "Failed to promote connection");
+                                warn!(
+                                    target: "fips::node::handlers::handshake",
+                                    link_id = %promote_link,
+                                    error = %e,
+                                    "Failed to promote connection"
+                                );
                                 self.stats_mut().record_reject(RejectReason::Handshake(
                                     HandshakeReject::BadState,
                                 ));
@@ -309,7 +314,12 @@ impl Node {
                                 // + reverse map, free our index, discard the machine,
                                 // and record the reject. Restored pre-refactor inbound
                                 // promote-failure warn! (`handle_msg1` L757).
-                                warn!(link_id = %promote_link, error = %e, "Failed to promote inbound connection");
+                                warn!(
+                                    target: "fips::node::handlers::handshake",
+                                    link_id = %promote_link,
+                                    error = %e,
+                                    "Failed to promote inbound connection"
+                                );
                                 self.remove_link(&promote_link);
                                 if let Some(idx) = ambient.our_index {
                                     let _ = self.index_allocator.free(idx);
