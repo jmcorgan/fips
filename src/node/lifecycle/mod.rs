@@ -588,7 +588,7 @@ impl Node {
                 self.links.remove(&link_id);
                 self.addr_to_link
                     .remove(&(transport_id, remote_addr.clone()));
-                self.peer_machines.remove(&link_id);
+                self.remove_peer_machine(link_id);
                 return Err(NodeError::IndexAllocationFailed(e.to_string()));
             }
         };
@@ -604,7 +604,7 @@ impl Node {
                     self.links.remove(&link_id);
                     self.addr_to_link
                         .remove(&(transport_id, remote_addr.clone()));
-                    self.peer_machines.remove(&link_id);
+                    self.remove_peer_machine(link_id);
                     return Err(NodeError::HandshakeFailed(e.to_string()));
                 }
             };
@@ -1225,7 +1225,7 @@ impl Node {
                     );
                     // Clean up link and dial-time machine on handshake failure
                     self.remove_link(&pending.link_id);
-                    self.peer_machines.remove(&pending.link_id);
+                    self.remove_peer_machine(pending.link_id);
                 } else {
                     // Drive the dial-persisted machine: `Connecting` →
                     // `on_transport_connected` → `start_outbound_handshake`,
@@ -1264,7 +1264,7 @@ impl Node {
                 // Clean up link and dial-time machine, then schedule retry
                 self.remove_link(&pending.link_id);
                 self.links.remove(&pending.link_id);
-                self.peer_machines.remove(&pending.link_id);
+                self.remove_peer_machine(pending.link_id);
                 self.note_handshake_timeout(*pending.peer_identity.node_addr(), Self::now_ms());
             }
         }

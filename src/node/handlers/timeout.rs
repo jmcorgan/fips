@@ -119,7 +119,7 @@ impl Node {
         // `link_id` and lifetime; drop it here so a reaped handshake leg leaves
         // no dangling machine. A no-op for promoted peers — `promote_connection`
         // already removed their connection, so this reaper never runs for them.
-        self.peer_machines.remove(&link_id);
+        self.remove_peer_machine(link_id);
         let transport_id = conn.transport_id();
 
         // Free session index and pending_outbound if allocated

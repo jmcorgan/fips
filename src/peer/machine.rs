@@ -172,7 +172,14 @@ pub(crate) enum FailReason {
 }
 
 /// A timer the machine schedules on the driver's quantized tick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `Hash` lets it key the driver's per-peer timer store; `Ord` lets the driver
+/// collect due kinds deterministically. Note the driver must fire
+/// `HandshakeTimeout` before `HandshakeRetransmit` on a same-tick coincidence
+/// (a reaped leg must not be resent), which is the reverse of this declaration
+/// order — the driver orders explicitly rather than relying on the derived
+/// ascending `Ord`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TimerKind {
     HandshakeRetransmit,
     HandshakeTimeout,
@@ -607,7 +614,20 @@ impl PeerMachine {
                 // Net-new: our outbound index (allocated at dial) is the one we
                 // register once promotion resolves.
                 self.our_index = self.conn.our_index();
-                vec![PeerAction::PromoteToActive { link: self.link }]
+                // The machine survives promotion (it becomes the active peer's
+                // control machine), so cancel the outbound handshake timers here
+                // or they would linger in the driver's store. A late fire would
+                // no-op against the non-`Handshaking` state, but leaving them
+                // armed is a timer leak.
+                vec![
+                    PeerAction::CancelTimer {
+                        kind: TimerKind::HandshakeRetransmit,
+                    },
+                    PeerAction::CancelTimer {
+                        kind: TimerKind::HandshakeTimeout,
+                    },
+                    PeerAction::PromoteToActive { link: self.link },
+                ]
             }
             OutboundDecision::CrossConnectionSwap => {
                 // Our outbound wins: swap the peer to the outbound session,
@@ -1935,9 +1955,17 @@ mod tests {
         );
         assert_eq!(
             actions,
-            vec![PeerAction::PromoteToActive {
-                link: LinkId::new(1)
-            }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive {
+                    link: LinkId::new(1)
+                }
+            ]
         );
         actions = m.step(
             PeerEvent::PromotionResolved {
@@ -2051,9 +2079,17 @@ mod tests {
         );
         assert_eq!(
             promote,
-            vec![PeerAction::PromoteToActive {
-                link: LinkId::new(1)
-            }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive {
+                    link: LinkId::new(1)
+                }
+            ]
         );
         assert_eq!(
             m.our_index(),
@@ -2161,9 +2197,17 @@ mod tests {
         );
         assert_eq!(
             promote,
-            vec![PeerAction::PromoteToActive {
-                link: LinkId::new(1)
-            }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive {
+                    link: LinkId::new(1)
+                }
+            ]
         );
         assert_eq!(m.our_index(), None);
     }

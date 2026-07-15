@@ -195,7 +195,7 @@ impl Node {
         // ever touches the in-flight establish's (distinct) `link_id`; no reader
         // depends on a stale entry, so removal changes no behavior — it only bounds
         // the map.
-        self.peer_machines.remove(&link_id);
+        self.remove_peer_machine(link_id);
         if let Some(transport_id) = transport_id {
             self.cleanup_bootstrap_transport_if_unused(transport_id);
         }

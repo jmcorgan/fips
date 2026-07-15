@@ -37,7 +37,7 @@ use self::reloadable::Reloadable;
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;
-use crate::peer::machine::PeerMachine;
+use crate::peer::machine::{PeerMachine, TimerKind};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::fmp::Fmp;
@@ -364,6 +364,15 @@ pub struct Node {
     #[allow(dead_code)]
     peer_machines: HashMap<LinkId, PeerMachine>,
 
+    /// Per-peer timer store, keyed by `LinkId` then `TimerKind`, holding each
+    /// armed timer's absolute deadline (ms). The sans-IO time-as-input backing
+    /// for `PeerEvent::Timeout`: populated/cleared by the machine's
+    /// `SetTimer`/`CancelTimer` actions (`dataplane/peer_actions.rs`) and dropped
+    /// alongside the machine through the `remove_peer_machine` choke-point. At
+    /// this rung it is a SHADOW of the legacy tick timers — written but not yet
+    /// read by any driver (the handshake-kind fold wires the reader).
+    peer_timers: HashMap<LinkId, HashMap<TimerKind, u64>>,
+
     // === Peers (Active Phase) ===
     /// Authenticated peers.
     /// Indexed by NodeAddr (verified identity).
@@ -631,6 +640,7 @@ impl Node {
             child_exit_rx: None,
             connections: HashMap::new(),
             peer_machines: HashMap::new(),
+            peer_timers: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
@@ -779,6 +789,7 @@ impl Node {
             child_exit_rx: None,
             connections: HashMap::new(),
             peer_machines: HashMap::new(),
+            peer_timers: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
@@ -2246,6 +2257,15 @@ impl Node {
         } else {
             None
         }
+    }
+
+    /// Single choke-point for dropping a per-peer control machine. Also drops the
+    /// machine's timer store so no armed `SetTimer` outlives it (the store and the
+    /// machine share the `LinkId` lifetime). Every teardown path routes machine
+    /// removal here rather than calling `peer_machines.remove` directly.
+    pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
+        self.peer_machines.remove(&link);
+        self.peer_timers.remove(&link);
     }
 
     pub(crate) fn cleanup_bootstrap_transport_if_unused(&mut self, transport_id: TransportId) {

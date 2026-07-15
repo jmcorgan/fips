@@ -7,7 +7,7 @@ use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
 use crate::peer::machine::{
-    FailReason, HandshakePhase, PeerAction, PeerEvent, PeerMachine, PeerState,
+    FailReason, HandshakePhase, PeerAction, PeerEvent, PeerMachine, PeerState, TimerKind,
 };
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
@@ -974,7 +974,7 @@ impl Node {
             }
             self.connections.remove(&link_id);
             // Drop the machine persisted at dial — this leg never promotes.
-            self.peer_machines.remove(&link_id);
+            self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
             if let Some(idx) = our_index {
                 let _ = self.index_allocator.free(idx);
@@ -1014,7 +1014,7 @@ impl Node {
             // directly, with no machine). Drop it on entry so none of this block's
             // exits leave a dangling machine — matching the pre-persistence path,
             // which created no machine for a cross-connection.
-            self.peer_machines.remove(&link_id);
+            self.remove_peer_machine(link_id);
             // Extract the outbound connection
             let mut conn = match self.connections.remove(&link_id) {
                 Some(c) => c,
@@ -1186,9 +1186,22 @@ impl Node {
                 actions
             }
         };
+        // The outbound Msg2 Promote step cancels the two dial-armed handshake
+        // timers (the machine survives promotion, so they would otherwise linger
+        // in the driver's shadow store) and then promotes. The cancels are
+        // behavior-neutral at this rung — `peer_timers` is written but not yet
+        // driven — and `PromoteToActive` is still what performs the promotion.
         debug_assert_eq!(
             promote_actions,
-            vec![PeerAction::PromoteToActive { link: link_id }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive { link: link_id },
+            ]
         );
 
         // Execute `[PromoteToActive]`. The executor calls `promote_connection`,
