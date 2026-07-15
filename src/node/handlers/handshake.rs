@@ -1079,6 +1079,9 @@ impl Node {
                     pending_new_session = snap.pending_new_session,
                     "rekey-msg3 tie-break: we win (smaller addr), drop their msg3"
                 );
+                // We keep our in-progress rekey and drop their msg3; return the
+                // msg1-allocated inbound index rather than orphaning it.
+                let _ = self.index_allocator.free(our_index);
                 self.connections.remove(&link_id);
                 self.links.remove(&link_id);
                 self.stats_mut()
@@ -1103,6 +1106,9 @@ impl Node {
                         ),
                     }
                 }
+                // Duplicate handshake: the active peer is untouched, so return the
+                // msg1-allocated inbound index rather than orphaning it.
+                let _ = self.index_allocator.free(our_index);
                 self.connections.remove(&link_id);
                 self.links.remove(&link_id);
                 return;

@@ -1302,3 +1302,268 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
         "fresh msg1 from unknown source must still be rejected"
     );
 }
+
+// ===========================================================================
+// Regression: `handle_msg3` must return the msg1-allocated session index to
+// the allocator on the two inbound-establish arms that abandon the pending
+// inbound leg without promoting it — the `Reject{DualRekeyWon}` tie-break
+// (dual-init rekey we win) and the `ResendMsg2` duplicate-handshake arm. Both
+// tear the pending connection/link down; neither must orphan the index.
+// ===========================================================================
+
+/// A node bundled with its UDP transport, receive channel, and bound address,
+/// used to drive real msg1/msg2/msg3 exchanges below.
+struct HsNode {
+    node: Node,
+    transport_id: TransportId,
+    packet_rx: crate::transport::PacketRx,
+    addr: TransportAddr,
+}
+
+/// Build an `HsNode` on an ephemeral localhost UDP port from an explicit config.
+async fn make_hs_node(config: Config) -> HsNode {
+    use crate::config::UdpConfig;
+    use crate::transport::udp::UdpTransport;
+
+    let mut node = make_node_with(config);
+    let transport_id = TransportId::new(1);
+    let udp_config = UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        mtu: Some(1280),
+        ..Default::default()
+    };
+    let (packet_tx, packet_rx) = packet_channel(64);
+    let mut transport = UdpTransport::new(transport_id, None, udp_config, packet_tx);
+    transport.start_async().await.unwrap();
+    let addr = TransportAddr::from_string(&transport.local_addr().unwrap().to_string());
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(transport));
+
+    HsNode {
+        node,
+        transport_id,
+        packet_rx,
+        addr,
+    }
+}
+
+async fn stop_hs(n: &mut HsNode) {
+    for (_, t) in n.node.transports.iter_mut() {
+        t.stop().await.ok();
+    }
+}
+
+/// Receive the next packet whose handshake phase matches `phase` (the low
+/// nibble of the wire type byte: 1=msg1, 2=msg2, 3=msg3), skipping unrelated
+/// traffic. Post-promotion tree/filter announces (phase 0, encrypted data)
+/// share these channels, so a phase filter keeps the hand-driven exchange in
+/// step.
+async fn recv_phase(rx: &mut crate::transport::PacketRx, phase: u8, what: &str) -> ReceivedPacket {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    loop {
+        let pkt = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timeout waiting for {}", what))
+            .expect("channel closed");
+        if pkt.data.first().is_some_and(|b| b & 0x0f == phase) {
+            return pkt;
+        }
+    }
+}
+
+/// Drive one initiator -> responder XX exchange (msg1 then msg2) and return the
+/// responder's inbound msg3 packet, left unhandled for the caller. The msg3 is
+/// produced by the initiator's real `handle_msg2`, so it carries a valid Noise
+/// payload.
+async fn drive_to_msg3(
+    initiator: &mut HsNode,
+    responder: &mut HsNode,
+    now_ms: u64,
+) -> ReceivedPacket {
+    use crate::proto::fmp::wire::build_msg1;
+    use std::time::Duration;
+
+    let peer_identity = PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full());
+
+    let link_id = initiator.node.allocate_link_id();
+    let mut conn = PeerConnection::outbound(link_id, peer_identity, now_ms);
+    let our_index = initiator.node.index_allocator.allocate().unwrap();
+    let our_keypair = initiator.node.identity().keypair();
+    let noise_msg1 = conn
+        .start_handshake(our_keypair, initiator.node.startup_epoch(), now_ms)
+        .unwrap();
+    conn.set_our_index(our_index);
+    conn.set_transport_id(initiator.transport_id);
+    conn.set_source_addr(responder.addr.clone());
+
+    let wire_msg1 = build_msg1(our_index, &noise_msg1);
+    let link = Link::connectionless(
+        link_id,
+        initiator.transport_id,
+        responder.addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    initiator.node.links.insert(link_id, link);
+    initiator
+        .node
+        .addr_to_link
+        .insert((initiator.transport_id, responder.addr.clone()), link_id);
+    initiator.node.connections.insert(link_id, conn);
+    initiator
+        .node
+        .pending_outbound
+        .insert((initiator.transport_id, our_index.as_u32()), link_id);
+
+    initiator
+        .node
+        .transports
+        .get(&initiator.transport_id)
+        .unwrap()
+        .send(&responder.addr, &wire_msg1)
+        .await
+        .expect("send msg1");
+
+    // Responder processes msg1 and emits msg2 back to the initiator.
+    let msg1_pkt = recv_phase(&mut responder.packet_rx, 1, "msg1").await;
+    responder.node.handle_msg1(msg1_pkt).await;
+
+    // Initiator processes msg2 and emits msg3 to the responder.
+    let msg2_pkt = recv_phase(&mut initiator.packet_rx, 2, "msg2").await;
+    initiator.node.handle_msg2(msg2_pkt).await;
+
+    // Capture the responder's inbound msg3, left unhandled for the caller.
+    recv_phase(&mut responder.packet_rx, 3, "msg3").await
+}
+
+#[tokio::test]
+async fn test_msg3_dual_rekey_won_frees_index() {
+    // Rekey enabled with a tiny interval so the rekey age floor collapses to
+    // its 5s minimum; the peer session is then backdated past it.
+    let make_config = || {
+        let mut c = Config::new();
+        c.node.rekey.enabled = true;
+        c.node.rekey.after_secs = 1;
+        c
+    };
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    // The DualRekeyWon tie-break is won by the numerically smaller node addr,
+    // so the responder (whose handle_msg3 we exercise) must be the smaller.
+    let mut responder = loop {
+        let cand = make_hs_node(make_config()).await;
+        if cand.node.node_addr() < initiator.node.node_addr() {
+            break cand;
+        }
+    };
+
+    // First handshake: the responder promotes the initiator to a healthy active
+    // peer holding exactly one allocated session index.
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+    let baseline = responder.node.index_allocator.count();
+    assert_eq!(baseline, 1, "responder holds exactly the peer's index");
+
+    // Age the session past the rekey floor and mark a rekey in progress so a
+    // fresh inbound msg3 classifies as the dual-init rekey we win.
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    {
+        let peer = responder.node.get_peer_mut(&peer_addr).unwrap();
+        peer.test_backdate_session_established(std::time::Duration::from_secs(6));
+        peer.set_rekey_in_progress();
+    }
+
+    // Second handshake: the new inbound msg1 allocates a fresh index, then the
+    // msg3 lands on the DualRekeyWon reject arm.
+    let msg3b = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        baseline + 1,
+        "second msg1 allocated a fresh index"
+    );
+    responder.node.handle_msg3(msg3b).await;
+
+    // The rejected msg3 must return its index and leave the active peer intact.
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        baseline,
+        "DualRekeyWon must free the msg1-allocated index"
+    );
+    assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
+    assert!(
+        responder
+            .node
+            .get_peer(&peer_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_none(),
+        "reject arm must not store rekey-responder state"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+#[tokio::test]
+async fn test_msg3_resend_msg2_frees_index() {
+    // Rekey disabled so an aged-session inbound msg3 classifies as a duplicate
+    // handshake (ResendMsg2), not a rekey; the tiny interval keeps the
+    // cross-connection age bound (the rekey floor) at its 5s minimum so the
+    // aged session skips the cross-connection arm too.
+    let mut config = Config::new();
+    config.node.rekey.enabled = false;
+    config.node.rekey.after_secs = 1;
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(config).await;
+
+    // First handshake establishes the active peer.
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+    let baseline = responder.node.index_allocator.count();
+    assert_eq!(baseline, 1, "responder holds exactly the peer's index");
+
+    // Age the session past the cross-connection bound so the duplicate inbound
+    // msg3 resolves to ResendMsg2 rather than CrossConnect.
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    responder
+        .node
+        .get_peer_mut(&peer_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(6));
+
+    // Second (duplicate) handshake: fresh index allocated at msg1, then freed
+    // on the ResendMsg2 arm.
+    let msg3b = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        baseline + 1,
+        "second msg1 allocated a fresh index"
+    );
+    responder.node.handle_msg3(msg3b).await;
+
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        baseline,
+        "ResendMsg2 must free the msg1-allocated index"
+    );
+    assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
+    assert!(
+        responder
+            .node
+            .get_peer(&peer_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_none(),
+        "duplicate-handshake arm must not store rekey-responder state"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
