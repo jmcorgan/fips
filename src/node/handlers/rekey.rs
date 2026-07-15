@@ -113,7 +113,7 @@ impl Node {
         self.advance_peer_machine(
             link,
             PeerEvent::RekeyConsume { action },
-            Self::now_ms(),
+            ambient.now_ms,
             &ambient,
         )
         .await;

@@ -102,7 +102,6 @@ impl Node {
     /// `index_allocator` are **distinct `Node` fields**, so the collect below is a
     /// disjoint two-field borrow the checker accepts; once the actions are
     /// collected both borrows drop and the executor runs against `&mut self`.
-    #[allow(dead_code)]
     pub(in crate::node) async fn advance_peer_machine(
         &mut self,
         link: LinkId,
@@ -125,7 +124,6 @@ impl Node {
     /// executor stays a single flat future (no boxing) and the emitted order is
     /// preserved. `PromoteToActive` (deferred) will feed its resolution back into
     /// the machine and fold follow-up actions onto this same queue.
-    #[allow(dead_code)]
     pub(in crate::node) async fn execute_peer_actions(
         &mut self,
         link: LinkId,
