@@ -123,6 +123,11 @@ impl Node {
             Some(c) => c,
             None => return,
         };
+        // A dial-persisted outbound control machine shares the connection's
+        // `link_id` and lifetime; drop it here so a reaped handshake leg leaves
+        // no dangling machine. A no-op for promoted peers — `promote_connection`
+        // already removed their connection, so this reaper never runs for them.
+        self.peer_machines.remove(&link_id);
         let transport_id = conn.transport_id();
 
         // Free session index and pending_outbound/pending_inbound if allocated

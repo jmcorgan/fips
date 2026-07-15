@@ -6,52 +6,33 @@
 //! stands for (`build_msg2` + `transport.send`, `promote_connection`,
 //! `remove_active_peer`, `index_allocator.free`, `note_link_dead`, …).
 //!
-//! ## Shadow-only skeleton
+//! ## Progressive cutover
 //!
-//! The machine home (`Node.peer_machines`), the
-//! executor, and the disjoint-borrow advance helper. It is **unwired** — no live
-//! handler path drives the machine and nothing inserts into `peer_machines`, so
-//! every method here is `#[allow(dead_code)]` and behaviorally inert.
+//! The executor is wired incrementally. Live today: the outbound msg2 promote
+//! (`handle_msg2` looks up the dial-persisted machine), the connectionless
+//! outbound msg1 send (`SendHandshake` with `their_index == None` →
+//! `send_stored_msg1`, driven from `initiate_connection`), and the
+//! connection-oriented dial (`OpenTransport` performs the non-blocking
+//! `transport.connect`; `TransportConnected` drives the connect-resolution msg1
+//! send from `poll_pending_connects`).
 //!
-//! The arm bodies that a later reap/rekey/timer commit will drive for real are
-//! ported 1:1 from the IK-lineage executor and adapted to next's Node API — they
-//! reproduce next's inline shell bodies exactly:
+//! Inbound establish is not machine-driven here: `handle_msg1` builds and sends
+//! msg2 inline, so `PeerEvent::InboundMsg1` is never dispatched and the
+//! `SendHandshake` `their_index == Some` (msg2) branch stays dormant.
 //!
-//! - `SwapSendState` / `CompleteDrain` mirror `handlers/rekey.rs`'s `check_rekey`
-//!   `Cutover` / `Drain` bodies (`peer.cutover_to_new_session()` +
-//!   `register_decrypt_worker_session` gated on `did_cutover`;
-//!   `peer.complete_drain()` → `peers_by_index.remove` +
-//!   `unregister_decrypt_worker_session` + `index_allocator.free`).
-//! - `InvalidateSendState` → `remove_active_peer` (the full teardown).
-//! - `ReportLost` → `note_link_dead` (the reconciler loss reflex).
-//! - `UnregisterDecryptSession` / `FreeIndex` index-plane cleanups.
-//! - `RegisterDecryptSession` is a deliberate no-op — the decrypt-worker register
-//!   for the rekey cutover relocates into the driven `SwapSendState` site here;
-//!   for the establish promote it stays INSIDE `promote_connection` (unlike the
-//!   IK lineage), so `PromoteToActive` does NOT re-register.
-//!
-//! Actions not yet exercised are inert stubs: the establish send-path
-//! (`SendHandshake` framing) lands when the inbound
-//! establish send is wired; `SendRekey`/`SendLinkMessage`, the timers
-//! (`SetTimer`/`CancelTimer`), the outbound dial (`OpenTransport`), and the
-//! connected-UDP plane are inert here.
-//!
-//! `PromoteToActive` is LIVE: it drives the inbound establish promote
-//! (`promote_connection` + the msg2/tree-announce/bloom follow-ups), transcribing
-//! `handle_msg3`'s shared promote block. Two XX-semantic arms remain explicit
-//! **deferred stubs** whose real bodies land when the inbound cross-connection /
-//! rekey-responder paths are wired: `SwapToInboundSession` and
-//! `RekeyRespondTrigger`. Each carries a `debug_assert!(false, …)` guard + a
-//! benign no-op — they are unreachable now (those decisions stay inline in
-//! `handle_msg3`).
+//! Not yet driven, so their arms stay inert stubs: rekey/crypto installs,
+//! link-control frames, the timers (`SetTimer`/`CancelTimer` — the legacy tick
+//! still runs them), and the connected-UDP plane. `RegisterDecryptSession` is a
+//! deliberate no-op — see its arm for the note.
 
+use crate::PeerIdentity;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{PeerAction, PeerEvent};
+use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
 use crate::proto::fmp::PromotionResult;
+use crate::proto::fmp::wire::build_msg2;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
-use crate::{NodeAddr, PeerIdentity};
 use std::collections::VecDeque;
 use tracing::{debug, info, trace, warn};
 
@@ -134,16 +115,99 @@ impl Node {
         let mut queue: VecDeque<PeerAction> = actions.into();
         while let Some(action) = queue.pop_front() {
             match action {
-                PeerAction::OpenTransport { .. } => {
-                    // Outbound dial (`initiate_connection`). Outbound establish is
-                    // not cut over yet; inert in the shadow-only skeleton.
+                PeerAction::OpenTransport {
+                    transport_id,
+                    remote_addr,
+                } => {
+                    // Outbound connection-oriented dial. `initiate_connection`'s
+                    // oriented branch drove the machine to `Connecting`, which
+                    // emitted this action. Perform the non-blocking
+                    // `transport.connect` and, on success, push the
+                    // `PendingConnect` for `poll_pending_connects` to resolve. On
+                    // connect error, tear down the dial-window state (link,
+                    // reverse map, control machine) and abort the queue — the
+                    // executor-local mirror of the old inline
+                    // `initiate_connection` connect+push.
+                    if let Some(transport) = self.transports.get(&transport_id) {
+                        match transport.connect(&remote_addr).await {
+                            Ok(()) => {
+                                debug!(
+                                    transport_id = %transport_id,
+                                    remote_addr = %remote_addr,
+                                    link_id = %link,
+                                    "Transport connect initiated (non-blocking)"
+                                );
+                                self.peering
+                                    .pending_connects
+                                    .push(crate::node::PendingConnect {
+                                        link_id: link,
+                                        transport_id,
+                                        remote_addr,
+                                        peer_identity: Some(ambient.verified_identity),
+                                    });
+                            }
+                            Err(_e) => {
+                                self.links.remove(&link);
+                                self.addr_to_link.remove(&(transport_id, remote_addr));
+                                self.peer_machines.remove(&link);
+                                return;
+                            }
+                        }
+                    }
                 }
-                PeerAction::SendHandshake { .. } => {
-                    // Inbound establish send-path: frame the unframed Noise msg2
-                    // payload with our/their index (`build_msg2(our_index,
-                    // their_index, &payload)`) and send, with the msg2-send-failure
-                    // cleanup + queue abort. Lands with `PromoteToActive` when the
-                    // inbound establish path is wired; inert in the shadow-only skeleton.
+                PeerAction::SendHandshake { bytes } => {
+                    // Two outbound directions share this action, discriminated by
+                    // `their_index`:
+                    //   msg2 (`their_index == Some`): the machine payload is the
+                    //   UNFRAMED Noise msg2; frame it with our/their index
+                    //   (`build_msg2`) and send.
+                    //   msg1 (`their_index == None`): a fresh outbound handshake;
+                    //   the machine's empty payload is ignored — the shell already
+                    //   allocated the index, ran the Noise leaf, and armed the
+                    //   wire at dial (`prepare_outbound_msg1`); this just sends the
+                    //   stored wire (see `send_stored_msg1`).
+                    if let (Some(sender_idx), Some(receiver_idx)) =
+                        (ambient.our_index, ambient.their_index)
+                    {
+                        let frame = build_msg2(sender_idx, receiver_idx, &bytes);
+                        // Surface the send Result. A missing transport skips
+                        // the send and continues (mirrors `handle_msg1`'s
+                        // `if let Some(transport)` guard); a send *error* runs the
+                        // pre-refactor msg2-send-failure cleanup (`handle_msg1`
+                        // L494-503) and ABORTS the remaining queue so the queued
+                        // `PromoteToActive` never runs.
+                        let send_err = match self.transports.get(&ambient.transport_id) {
+                            Some(transport) => {
+                                transport.send(&ambient.remote_addr, &frame).await.err()
+                            }
+                            None => None,
+                        };
+                        if let Some(e) = send_err {
+                            // Restored pre-refactor msg2-send-failure warn!
+                            // (`handle_msg1` L665): the send error text is surfaced
+                            // at the executor point where the failure is now handled.
+                            warn!(link_id = %link, error = %e, "Failed to send msg2");
+                            self.connections.remove(&link);
+                            self.links.remove(&link);
+                            self.addr_to_link
+                                .remove(&(ambient.transport_id, ambient.remote_addr.clone()));
+                            if let Some(idx) = ambient.our_index {
+                                let _ = self.index_allocator.free(idx);
+                            }
+                            self.peer_machines.remove(&link);
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                            return;
+                        }
+                    } else {
+                        // msg1: the shell already allocated the index, ran the
+                        // Noise leaf, and armed the wire on the connection at dial
+                        // (`prepare_outbound_msg1`); send the stored wire. The
+                        // machine's empty payload is ignored.
+                        let _ = bytes;
+                        self.send_stored_msg1(link, ambient.transport_id, &ambient.remote_addr)
+                            .await;
+                    }
                 }
                 PeerAction::SendRekey { .. } => {
                     // Rekey msg framing (`build_msg2(our_new_index, …)`) + send.
@@ -513,19 +577,22 @@ impl Node {
                     // the legacy tick timers still run, so driving these would
                     // double-schedule.
                 }
-                PeerAction::ReportLost { peer } => {
-                    // The single loss token → the reconciler reflex.
-                    self.report_peer_lost(peer, ambient.now_ms);
+                PeerAction::ReportLost { peer, kind } => {
+                    // The single loss token, routed to the reconciler reflex the
+                    // `kind` names: an un-promoted handshake attempt takes the
+                    // connected-guarded `note_handshake_timeout` (`driver.rs:28`),
+                    // an established peer's link-death takes the unconditional
+                    // `note_link_dead` (`driver.rs:48`).
+                    match kind {
+                        LostKind::HandshakeTimeout => {
+                            self.note_handshake_timeout(peer, ambient.now_ms);
+                        }
+                        LostKind::LinkDead => {
+                            self.note_link_dead(peer, ambient.now_ms);
+                        }
+                    }
                 }
             }
         }
-    }
-
-    /// `ReportLost` → `note_link_dead` (kept as a named seam so the ambient clock
-    /// source is explicit and the reconciler-computed backoff can be threaded
-    /// later).
-    #[allow(dead_code)]
-    fn report_peer_lost(&mut self, peer: NodeAddr, now_ms: u64) {
-        self.note_link_dead(peer, now_ms);
     }
 }

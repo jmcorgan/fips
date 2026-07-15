@@ -213,11 +213,15 @@ pub(crate) enum TimerKind {
 ///
 /// Not `Debug`/`PartialEq`: the reused core snapshot payloads derive neither.
 pub(crate) enum PeerEvent {
-    /// Reconciler dial intent.
+    /// Reconciler dial intent. `connection_oriented` selects the outbound
+    /// path: connection-oriented transports open the transport first
+    /// (`OpenTransport` → `Connecting`); connectionless ones send msg1
+    /// immediately (`start_outbound_handshake` → `Handshaking`).
     Dial {
         transport_id: TransportId,
         remote_addr: TransportAddr,
         peer_identity: PeerIdentity,
+        connection_oriented: bool,
     },
     /// Connection-oriented transport connected.
     TransportConnected,
@@ -278,6 +282,21 @@ pub(crate) enum PeerEvent {
     Disconnect { reason: CloseReason },
     /// The periodic quantized tick.
     Tick,
+}
+
+/// Why a peer was reported lost. Selects the reconciler reflex the executor
+/// routes the `ReportLost` token to: an un-promoted handshake attempt that
+/// failed (`HandshakeTimeout`, connected-guarded like the old `schedule_retry`)
+/// versus an established peer whose link died (`LinkDead`, unconditional like
+/// the old `schedule_reconnect`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LostKind {
+    /// An outbound handshake attempt timed out or its dial failed before the
+    /// peer promoted — routes to the connected-guarded reflex.
+    HandshakeTimeout,
+    /// An established peer's link went dead or is being replaced — routes to
+    /// the unconditional reconnect reflex.
+    LinkDead,
 }
 
 /// An effect the driver executes on the machine's behalf. Runtime-agnostic
@@ -351,8 +370,9 @@ pub(crate) enum PeerAction {
     /// Cancel a scheduled timer.
     CancelTimer { kind: TimerKind },
     /// Report the peer lost to the reconciler (the single loss token — there is
-    /// deliberately no `ScheduleRetry` machine action).
-    ReportLost { peer: NodeAddr },
+    /// deliberately no `ScheduleRetry` machine action). `kind` selects the
+    /// reflex (handshake-timeout vs link-dead) the executor routes to.
+    ReportLost { peer: NodeAddr, kind: LostKind },
 }
 
 // ============================================================================
@@ -540,8 +560,9 @@ impl PeerMachine {
             PeerEvent::Dial {
                 transport_id,
                 remote_addr,
+                connection_oriented,
                 ..
-            } => self.on_dial(transport_id, remote_addr, now),
+            } => self.on_dial(transport_id, remote_addr, connection_oriented, now),
             PeerEvent::TransportConnected => self.on_transport_connected(now),
             PeerEvent::TransportFailed => self.on_transport_failed(now),
             PeerEvent::InboundMsg1 { link } => self.on_inbound_msg1(link, now, index_allocator),
@@ -587,19 +608,28 @@ impl PeerMachine {
         &mut self,
         transport_id: TransportId,
         remote_addr: TransportAddr,
-        _now: u64,
+        connection_oriented: bool,
+        now: u64,
     ) -> Vec<PeerAction> {
         if !matches!(self.state, PeerState::Discovered) {
             return Vec::new();
         }
         self.conn.set_transport_id(transport_id);
-        // Connection-oriented transports open the transport first; connectionless
-        // ones send msg1 immediately. This models the connection-oriented arm.
-        self.state = PeerState::Connecting { link: self.link };
-        vec![PeerAction::OpenTransport {
-            transport_id,
-            remote_addr,
-        }]
+        if connection_oriented {
+            // Connection-oriented transports open the transport first; the
+            // executor's `OpenTransport` arm connects, then feeds
+            // `TransportConnected` → `start_outbound_handshake`.
+            self.state = PeerState::Connecting { link: self.link };
+            vec![PeerAction::OpenTransport {
+                transport_id,
+                remote_addr,
+            }]
+        } else {
+            // Connectionless transports have no connect step — send msg1
+            // immediately (the executor's `SendHandshake` msg1 branch performs
+            // the Noise leaf, framing, index alloc, and send).
+            self.start_outbound_handshake(now)
+        }
     }
 
     fn on_transport_connected(&mut self, now: u64) -> Vec<PeerAction> {
@@ -615,7 +645,13 @@ impl PeerMachine {
         }
         let mut actions = Vec::new();
         if let Some(peer) = self.addr() {
-            actions.push(PeerAction::ReportLost { peer });
+            // Dial failure on an un-promoted leg routes like a handshake timeout
+            // (the connected-guarded reflex). Dormant today — no `TransportFailed`
+            // event is dispatched until the connection-oriented cutover (C5).
+            actions.push(PeerAction::ReportLost {
+                peer,
+                kind: LostKind::HandshakeTimeout,
+            });
         }
         self.state = PeerState::Closed {
             backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
@@ -740,7 +776,10 @@ impl PeerMachine {
                 // connection in the stale peer's place.
                 vec![
                     PeerAction::InvalidateSendState,
-                    PeerAction::ReportLost { peer },
+                    PeerAction::ReportLost {
+                        peer,
+                        kind: LostKind::LinkDead,
+                    },
                     PeerAction::PromoteToActive { link: self.link },
                 ]
             }
@@ -1071,7 +1110,12 @@ impl PeerMachine {
             PeerAction::TeardownConnectedUdp,
         ];
         if let Some(peer) = self.addr() {
-            actions.push(PeerAction::ReportLost { peer });
+            // An established peer whose link died — the unconditional reconnect
+            // reflex (the live liveness-reap producer).
+            actions.push(PeerAction::ReportLost {
+                peer,
+                kind: LostKind::LinkDead,
+            });
         }
         self.state = PeerState::Closed {
             backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
@@ -1145,7 +1189,13 @@ impl PeerMachine {
         for act in Fmp::new().poll_timeouts(vec![snap]) {
             match act {
                 ConnAction::ScheduleRetry { peer } => {
-                    lost.push(PeerAction::ReportLost { peer });
+                    // Handshake timeout on an un-promoted leg — the connected-
+                    // guarded reflex. Dormant today (no `Timeout` event is
+                    // dispatched until the timeout fold in C5).
+                    lost.push(PeerAction::ReportLost {
+                        peer,
+                        kind: LostKind::HandshakeTimeout,
+                    });
                 }
                 ConnAction::Teardown { .. } => {
                     if let Some(idx) = self.conn.our_index() {
@@ -1435,7 +1485,10 @@ mod tests {
             PeerAction::CancelTimer {
                 kind: TimerKind::Liveness,
             },
-            PeerAction::ReportLost { peer },
+            PeerAction::ReportLost {
+                peer,
+                kind: LostKind::LinkDead,
+            },
             PeerAction::SwapToInboundSession {
                 peer,
                 our_index: SessionIndex::new(8),
@@ -1708,7 +1761,10 @@ mod tests {
             actions,
             vec![
                 PeerAction::InvalidateSendState,
-                PeerAction::ReportLost { peer: peer_addr },
+                PeerAction::ReportLost {
+                    peer: peer_addr,
+                    kind: LostKind::LinkDead,
+                },
                 PeerAction::PromoteToActive {
                     link: LinkId::new(1)
                 },
@@ -1957,6 +2013,207 @@ mod tests {
         );
     }
 
+    // ---- Test 7b: dial-persisted outbound promote leaves our_index unset ---
+    // An outbound machine persisted at DIAL (`new_outbound`, `Discovered`, with
+    // `conn.our_index` UNSET — the shell owns the index on its own
+    // `PeerConnection`, never on the machine) must, on promote via msg2, end with
+    // `our_index == None`, exactly as the pre-persistence transient did. The
+    // guard: a subsequent inbound restart then emits NO
+    // `UnregisterDecryptSession` (contrast `restart_override`, whose machine has
+    // `our_index == Some`). A leaked `Some(dial_index)` here would wrongly
+    // unregister — on index reuse, ANOTHER peer's — worker session; keeping the
+    // field `None` is the Model-B dial-persistence neutrality property.
+    #[test]
+    fn dial_persisted_outbound_promote_no_restart_unregister() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+        let peer_addr = *peer.node_addr();
+        let our = *peer_identity().node_addr();
+
+        // Persisted at dial: Discovered, conn.our_index deliberately NOT set.
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        assert_eq!(m.our_index(), None);
+
+        // Promote via msg2 from Discovered (the production path — the former
+        // transient was likewise stepped from `new_outbound` without a state set).
+        let promote = m.step(
+            PeerEvent::OutboundMsg2 {
+                their_index: SessionIndex::new(0x77),
+            },
+            300,
+            &mut alloc,
+        );
+        assert_eq!(
+            promote,
+            vec![PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }]
+        );
+        assert_eq!(
+            m.our_index(),
+            None,
+            "outbound promote must leave our_index unset"
+        );
+
+        // Drive promotion to Established (from Discovered, as in production).
+        let _ = m.step(
+            PeerEvent::PromotionResolved {
+                result: PromotionResult::Promoted(peer_addr),
+            },
+            300,
+            &mut alloc,
+        );
+        assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
+        assert_eq!(m.our_index(), None);
+
+        // A subsequent inbound restart (peer restart, new epoch) must NOT emit
+        // UnregisterDecryptSession, because our_index is None.
+        let mut est = est_new_peer(our);
+        est.has_existing_peer = true;
+        est.existing_peer_epoch = Some([1u8; 8]);
+        let wire = wire_outcome(peer_addr, Some([2u8; 8]));
+        let restart = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
+        assert!(
+            !restart
+                .iter()
+                .any(|a| matches!(a, PeerAction::UnregisterDecryptSession { .. })),
+            "no UnregisterDecryptSession when the promoted outbound machine's our_index is None"
+        );
+        assert!(
+            restart.iter().any(|a| matches!(
+                a,
+                PeerAction::ReportLost {
+                    kind: LostKind::LinkDead,
+                    ..
+                }
+            )),
+            "restart still reports the loss via the link-dead reconnect reflex"
+        );
+    }
+
+    // ---- Test 7c: connectionless dial reaches Handshaking, Msg2 neutral ----
+    // The connectionless cutover drives the outbound machine
+    // Discovered -> (Dial, connection_oriented=false) -> Handshaking{SentMsg1}
+    // BEFORE msg2, whereas the pre-cutover path stepped Msg2 while still in
+    // Discovered. `on_msg2` is state-independent, so both must yield the
+    // identical `[PromoteToActive]` and leave `our_index == None`.
+    #[test]
+    fn connectionless_dial_then_msg2_promotes_from_handshaking() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        // Connectionless dial: no OpenTransport, straight to Handshaking{SentMsg1}.
+        let dial = m.step(
+            PeerEvent::Dial {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+                peer_identity: peer,
+                connection_oriented: false,
+            },
+            100,
+            &mut alloc,
+        );
+        assert!(matches!(
+            m.state(),
+            PeerState::Handshaking {
+                phase: HandshakePhase::SentMsg1,
+                ..
+            }
+        ));
+        assert!(
+            dial.iter()
+                .any(|a| matches!(a, PeerAction::SendHandshake { .. }))
+        );
+        assert!(
+            !dial
+                .iter()
+                .any(|a| matches!(a, PeerAction::OpenTransport { .. })),
+            "connectionless dial emits no OpenTransport"
+        );
+
+        // Step Msg2 from Handshaking — identical promote to the Discovered path.
+        let promote = m.step(
+            PeerEvent::OutboundMsg2 {
+                their_index: SessionIndex::new(0x77),
+            },
+            200,
+            &mut alloc,
+        );
+        assert_eq!(
+            promote,
+            vec![PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }]
+        );
+        assert_eq!(m.our_index(), None);
+    }
+
+    // ---- Test 7d: connection-oriented dial opens transport first ----------
+    // The connection-oriented cutover drives the outbound machine
+    // Discovered -> (Dial, connection_oriented=true) -> Connecting
+    // (emitting ONLY OpenTransport, no msg1 yet), then TransportConnected ->
+    // Handshaking{SentMsg1} with the same SendHandshake + two SetTimer that
+    // `start_outbound_handshake` emits. Covers the oriented reach into
+    // `start_outbound_handshake` via `on_transport_connected` (the connectionless
+    // reach via `on_dial` is already covered by the test above).
+    #[test]
+    fn connection_oriented_dial_opens_transport_then_connected_handshakes() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        // Connection-oriented dial: open the transport first, no msg1 yet.
+        let dial = m.step(
+            PeerEvent::Dial {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+                peer_identity: peer,
+                connection_oriented: true,
+            },
+            100,
+            &mut alloc,
+        );
+        assert_eq!(
+            m.state(),
+            PeerState::Connecting {
+                link: LinkId::new(1)
+            }
+        );
+        assert_eq!(
+            dial,
+            vec![PeerAction::OpenTransport {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+            }],
+            "connection-oriented dial emits exactly one OpenTransport and no msg1"
+        );
+
+        // Transport connected: now send msg1 and arm the handshake timers.
+        let connected = m.step(PeerEvent::TransportConnected, 200, &mut alloc);
+        assert!(matches!(
+            m.state(),
+            PeerState::Handshaking {
+                phase: HandshakePhase::SentMsg1,
+                ..
+            }
+        ));
+        assert_eq!(
+            connected,
+            vec![
+                PeerAction::SendHandshake { bytes: Vec::new() },
+                PeerAction::SetTimer {
+                    kind: TimerKind::HandshakeRetransmit,
+                    at_ms: 200 + HANDSHAKE_RETRANSMIT_INTERVAL_MS,
+                },
+                PeerAction::SetTimer {
+                    kind: TimerKind::HandshakeTimeout,
+                    at_ms: 200 + HANDSHAKE_TIMEOUT_MS,
+                },
+            ]
+        );
+    }
+
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------
     #[test]
     fn liveness_to_link_dead() {
@@ -1987,7 +2244,10 @@ mod tests {
             vec![
                 PeerAction::InvalidateSendState,
                 PeerAction::TeardownConnectedUdp,
-                PeerAction::ReportLost { peer: addr },
+                PeerAction::ReportLost {
+                    peer: addr,
+                    kind: LostKind::LinkDead,
+                },
             ]
         );
         assert!(matches!(m.state(), PeerState::Closed { .. }));

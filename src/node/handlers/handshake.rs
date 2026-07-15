@@ -597,6 +597,8 @@ impl Node {
         {
             self.pending_outbound.remove(&key);
             self.connections.remove(&link_id);
+            // Drop the machine persisted at dial — this leg never promotes.
+            self.peer_machines.remove(&link_id);
             self.remove_link(&link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -660,6 +662,12 @@ impl Node {
         // This ensures both nodes use the same Noise handshake (the winner's
         // outbound = the loser's inbound).
         if self.peers.contains_key(&peer_node_addr) {
+            // The dial-persisted outbound machine is not consumed by the inline
+            // Swap/Keep resolution below (which mutates the existing promoted peer
+            // directly, with no machine). Drop it on entry so none of this block's
+            // exits leave a dangling machine — matching the pre-persistence path,
+            // which created no machine for a cross-connection.
+            self.peer_machines.remove(&link_id);
             let our_outbound_wins = cross_connection_winner(
                 self.identity().node_addr(),
                 &peer_node_addr,
@@ -787,20 +795,42 @@ impl Node {
         // an existing peer), so this is the net-new path: promote_connection hits
         // its normal-promotion branch and returns Promoted.
         //
-        // The transient machine is NOT inserted into peer_machines — the
-        // persistent Established machine is created inside promote_connection.
-        // With no outbound decision core to run, the machine emits PromoteToActive
-        // unconditionally. The promote tail (info log, tree/bloom/backoff, and the
-        // pending_outbound removal) lives in the executor's PromoteToActive arm.
-        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
-        let actions = machine.step(
-            PeerEvent::OutboundMsg2 {
-                their_index: header.sender_idx,
-            },
-            packet.timestamp_ms,
-            &mut self.index_allocator,
+        // Net-new outbound promote via the per-peer machine. Look up the machine
+        // persisted at DIAL for an identified leg and step `OutboundMsg2 →
+        // [PromoteToActive]` in place; an anonymous-discovery leg never persisted
+        // a machine at dial and falls to the transient in the `None` arm. The
+        // transient is NOT inserted into `peer_machines` — the persistent
+        // Established machine is created inside `promote_connection` (next's
+        // invariant: `promote_connection` owns the Established machine). With no
+        // outbound decision core to run, the machine emits `PromoteToActive`
+        // unconditionally (the net-new-vs-cross-connection decision was the
+        // `peers.contains_key` test above, which returns on an existing peer). The
+        // promote tail (info log, tree/bloom/backoff, `pending_outbound` removal)
+        // lives in the executor's `PromoteToActive` arm.
+        let promote_actions = match self.peer_machines.get_mut(&link_id) {
+            Some(machine) => machine.step(
+                PeerEvent::OutboundMsg2 {
+                    their_index: header.sender_idx,
+                },
+                packet.timestamp_ms,
+                &mut self.index_allocator,
+            ),
+            None => {
+                let mut machine =
+                    PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
+                machine.step(
+                    PeerEvent::OutboundMsg2 {
+                        their_index: header.sender_idx,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                )
+            }
+        };
+        debug_assert_eq!(
+            promote_actions,
+            vec![PeerAction::PromoteToActive { link: link_id }]
         );
-        debug_assert_eq!(actions, vec![PeerAction::PromoteToActive { link: link_id }]);
 
         let ambient = PeerActionCtx {
             verified_identity: peer_identity,
@@ -812,7 +842,8 @@ impl Node {
             is_outbound: true,
             pending_outbound_key: Some(key),
         };
-        self.execute_peer_actions(link_id, &ambient, actions).await;
+        self.execute_peer_actions(link_id, &ambient, promote_actions)
+            .await;
     }
 
     /// Handle handshake message 3 (phase 0x3).
