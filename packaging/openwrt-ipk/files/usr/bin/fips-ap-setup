@@ -16,7 +16,12 @@
 #     the security type must be uniform across ALL routers anyway: clients
 #     key a saved network on SSID + security type, so one router with a PSK
 #     splits the ESS into a different saved network. A stranger can
-#     associate but cannot pass the FIPS handshake.
+#     associate AND form a FIPS peer link — that is the point of open
+#     access. The Noise handshake authenticates each link (no
+#     impersonation of another identity, no MITM); it does NOT gate who
+#     may peer. Admission is open up to the daemon's max-peers cap; the
+#     firewall zone below is what confines every client to the FIPS
+#     overlay (no path to br-lan or the WAN).
 #   - NO DHCP            — odhcpd announces a ULA prefix in router
 #     advertisements (stateless SLAAC, no lease state). FIPS itself only
 #     needs link-local + mDNS, but Android's provisioning check requires an
@@ -174,9 +179,10 @@ fi
 
 # ---------------------------------------------------------------------------
 # Wireless: open AP with client isolation. Clients of the same AP cannot
-# exchange L2 frames — two FIPS phones on one router still reach each other
-# through the router at the overlay layer, while a stranger cannot reach
-# other clients at all.
+# exchange L2 frames directly — two FIPS phones on one router still reach
+# each other through the router at the overlay layer. Isolation is an L2
+# control only: a stranger who peers is an overlay peer like any other, so
+# the FIPS overlay (not L2) is the trust boundary between clients.
 # ---------------------------------------------------------------------------
 
 uci -q delete "wireless.$SECTION"

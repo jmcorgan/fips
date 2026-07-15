@@ -30,10 +30,16 @@ Three deliberate choices distinguish this from a stock guest network:
   only security type that needs zero provisioning, and OWE is left out
   for now for exactly this uniformity reason (OWE-transition mode is
   inconsistent across client vendors). Every FIPS peer link is already
-  authenticated and encrypted by the Noise IK handshake — a stranger
-  can associate, but their traffic dies at the FIPS handshake. What
-  you concede: L2 metadata is visible in the air and a hostile radio
-  can burn airtime — both true of any radio link.
+  authenticated and encrypted by the Noise IK handshake. A stranger
+  can associate *and* form a FIPS peer link — that is the point of open
+  access; the handshake authenticates each link (no impersonation, no
+  MITM) but does not gate who may peer, and admission is open up to the
+  daemon's max-peers cap. What confines a hostile peer is the isolated
+  `fips_ap` zone (no path to br-lan or the WAN — see below), not the
+  handshake. What you concede: any nearby device can reach the FIPS
+  overlay surface (handshake, discovery, lookup, routing) and peer with
+  the router; L2 metadata is visible in the air; a hostile radio can
+  burn airtime — all inherent to an open radio link.
 - **No DHCP — IPv6 router advertisements only.** odhcpd announces a
   ULA prefix (`fd..`-range) for stateless SLAAC: no DHCPv4, no DHCPv6,
   no lease state. FIPS itself only needs link-local + mDNS, but
@@ -214,10 +220,13 @@ stays associated — that is the designed steady state, not an error.
 - **Airtime is shared per radio.** An access AP and a mesh backhaul
   on the same radio share one channel. On dual/tri-band hardware,
   dedicate a band to the backhaul and serve clients on the others.
-- **Strangers can associate — by design.** They reach only the FIPS
-  handshake surface, which drops them. Do not add forwardings to the
-  `fips_ap` zone: that would turn the open SSID into a hotspot and
-  hand the isolation away.
+- **Strangers can associate and peer — by design.** Open access means
+  any nearby device can complete the Noise handshake and become a FIPS
+  peer (up to the max-peers cap); the handshake authenticates each link,
+  it does not restrict who joins. They reach only the FIPS overlay
+  surface — the isolated zone gives no path to br-lan or the WAN. Do not
+  add forwardings to the `fips_ap` zone: that would turn the open SSID
+  into a hotspot and hand the isolation away.
 - **Roaming is client-driven.** Clients decide when to hop BSSIDs
   (standard ESS behavior) and renumber on each router; FIPS sessions
   ride through because the overlay identity is the anchor. Expect a

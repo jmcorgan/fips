@@ -21,12 +21,14 @@ Two deliberate choices distinguish this from a stock 802.11s setup:
   handshake, so SAE at L2 would duplicate that work, add a shared
   credential to provision across routers, and (on ath10k) force the
   firmware into its slower raw Tx/Rx mode. A stranger can form an
-  802.11s peering with your router, but their frames die at the FIPS
-  handshake — the same security model as mDNS and BLE discovery, where
-  the advert is only a hint and the handshake is the authentication.
-  What you concede: L2 metadata (MAC addresses, frame sizes) is
-  visible in the air, and a hostile radio can burn airtime — both true
-  of any radio link regardless of L2 encryption.
+  802.11s peering with your router *and* a FIPS peer link on top of it —
+  the same open model as mDNS and BLE discovery, where the advert is
+  only a hint and the handshake authenticates each link (no
+  impersonation, no MITM) rather than gating who may peer. Admission is
+  open up to the daemon's max-peers cap. What you concede: any nearby
+  radio can peer and reach the FIPS overlay surface; L2 metadata (MAC
+  addresses, frame sizes) is visible in the air; a hostile radio can
+  burn airtime — all inherent to an open radio link.
 - **`mesh_fwding 0`** — disables 802.11s's own HWMP routing so each
   mesh link is a plain neighbor link. FIPS is the routing layer; two
   routing layers would fight, and broadcast discovery beacons would
