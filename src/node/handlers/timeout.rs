@@ -11,9 +11,21 @@ use tracing::{debug, info};
 
 impl LifecycleView for Node {
     fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
+        // `is_failed()` legs are always reaped here (~1s), as before. The
+        // idle-timeout is reaped here ONLY for legs whose timeout is not already
+        // driven by a machine `HandshakeTimeout` timer — i.e. inbound legs (IK
+        // inbound arms none) and machine-less test connections. Outbound legs with
+        // an armed timer are reaped by `drive_handshake_timeouts`, so excluding
+        // them here avoids a double reap.
         self.connections
             .iter()
-            .filter(|(_, conn)| conn.is_timed_out(now_ms, timeout_ms) || conn.is_failed())
+            .filter(|(link_id, conn)| {
+                conn.is_failed()
+                    || (conn.is_timed_out(now_ms, timeout_ms)
+                        && !self.peer_timers.get(*link_id).is_some_and(|timers| {
+                            timers.contains_key(&TimerKind::HandshakeTimeout)
+                        }))
+            })
             .map(|(link_id, conn)| ConnSnapshot {
                 link: *link_id,
                 is_outbound: conn.is_outbound(),
@@ -115,29 +127,87 @@ impl Node {
         }
     }
 
-    /// Drive the per-peer machine timers that have come due on this tick.
+    /// Act on the per-peer machine timers this tick.
     ///
     /// The sans-IO machine arms `SetTimer`/`CancelTimer` actions into
-    /// [`peer_timers`](Node::peer_timers); this is the shell driver that fires
-    /// the due ones. At this rung only the msg1-retransmit timer is driven (the
-    /// handshake-timeout timer stays on the legacy [`check_timeouts`](Self::check_timeouts)
-    /// path until the next fold); the rekey/liveness kinds keep their own shell
-    /// drivers, so this deliberately kind-filters to `HandshakeRetransmit`.
-    ///
-    /// Retransmit is the pre-fold `resend_pending_handshakes` logic, re-homed:
-    /// the *due* signal is now the machine-armed timer (not the connection's
-    /// `next_resend_at_ms`), and the resend counter lives on the machine (the
-    /// operator-visible count reads from there). The wire bytes and transport
-    /// target still come from the shell connection, the pure core computes the
-    /// backoff schedule, and — matching the old shell exactly — the count and
-    /// reschedule advance only on a successful send; a failed send neither
-    /// advances the count nor marks the connection failed, it just retries next
-    /// tick.
+    /// [`peer_timers`](Node::peer_timers); this is the shell driver that acts on
+    /// them: timeout reaps idle-timed-out outbound legs, retransmit resends the
+    /// due msg1s. Handshake-TIMEOUT is driven before handshake-RETRANSMIT so a
+    /// timed-out leg is reaped rather than resent on the same tick. The
+    /// rekey/liveness kinds keep their own shell drivers, so only the two
+    /// handshake kinds are driven here.
     pub(in crate::node) async fn drive_peer_timers(&mut self, now_ms: u64) {
         if self.peer_timers.is_empty() {
             return;
         }
+        self.drive_handshake_timeouts(now_ms);
+        self.drive_handshake_retransmits(now_ms).await;
+    }
 
+    /// Reap the outbound legs whose machine `HandshakeTimeout` timer marks them
+    /// as machine-timeout-owned and which have idle-timed-out this tick.
+    ///
+    /// The timer's PRESENCE selects the leg (only OUTBOUND legs arm one — IK
+    /// inbound arms none); the reap THRESHOLD is the shell `is_timed_out(now,
+    /// config)` predicate, NOT the timer's stored deadline. This matters because
+    /// the machine arms the timer from a hardcoded constant at dial, which is not
+    /// authoritative for an operator-tuned `handshake_timeout_secs` — reading the
+    /// threshold from config each tick keeps the reap neutral for any config, and
+    /// off the `last_activity` clock exactly as the old `check_timeouts` did. A
+    /// timed-out leg is reaped by the old Teardown path: the outbound retry
+    /// reflex, then `cleanup_stale_connection` (which drops the machine + timers).
+    ///
+    /// `check_timeouts` keeps reaping everything else — `is_failed()` legs and the
+    /// idle-timeout of legs without a machine timer (inbound / machine-less).
+    fn drive_handshake_timeouts(&mut self, now_ms: u64) {
+        let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
+        let timer_links: Vec<LinkId> = self
+            .peer_timers
+            .iter()
+            .filter(|(_, timers)| timers.contains_key(&TimerKind::HandshakeTimeout))
+            .map(|(link, _)| *link)
+            .collect();
+        for link in timer_links {
+            let (reap, retry_peer) = match self.connections.get(&link) {
+                Some(conn) if conn.is_timed_out(now_ms, timeout_ms) => {
+                    let retry_peer = if conn.is_outbound() {
+                        conn.expected_identity().map(|id| *id.node_addr())
+                    } else {
+                        None
+                    };
+                    (true, retry_peer)
+                }
+                // Not yet idle-timed-out: leave the timer for a later tick.
+                Some(_) => (false, None),
+                None => {
+                    // Orphan timer (connection already reaped elsewhere) — drop it.
+                    if let Some(timers) = self.peer_timers.get_mut(&link) {
+                        timers.remove(&TimerKind::HandshakeTimeout);
+                    }
+                    (false, None)
+                }
+            };
+            if reap {
+                if let Some(peer) = retry_peer {
+                    self.note_handshake_timeout(peer, now_ms);
+                }
+                debug!(link_id = %link, "Handshake connection timed out");
+                self.cleanup_stale_connection(link, now_ms);
+            }
+        }
+    }
+
+    /// Fire due handshake-retransmit timers: resend the stored msg1.
+    ///
+    /// The pre-fold `resend_pending_handshakes` logic, re-homed: the *due* signal
+    /// is the machine-armed timer (not the connection's `next_resend_at_ms`), and
+    /// the resend counter lives on the machine (the operator-visible count reads
+    /// from there). The wire bytes and transport target still come from the shell
+    /// connection, the pure core computes the backoff schedule, and — matching the
+    /// old shell exactly — the count and reschedule advance only on a successful
+    /// send; a failed send neither advances the count nor marks the connection
+    /// failed, it just retries next tick.
+    async fn drive_handshake_retransmits(&mut self, now_ms: u64) {
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
         let backoff = self.config().node.rate_limit.handshake_resend_backoff;

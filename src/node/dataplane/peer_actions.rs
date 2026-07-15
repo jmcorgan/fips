@@ -22,10 +22,10 @@
 //! a deliberate no-op — see its arm for the note.
 //!
 //! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
-//! store (`peer_timers`). The `HandshakeRetransmit` deadline is read and fired
-//! by `drive_peer_timers` (the msg1-resend home). The `HandshakeTimeout` and
-//! rekey/liveness kinds are still SHADOW — driven by the legacy `check_timeouts`
-//! / rekey shell drivers — so populating them stays behavior-neutral.
+//! store (`peer_timers`). The `HandshakeRetransmit` and `HandshakeTimeout`
+//! deadlines are read and fired by `drive_peer_timers` (the handshake resend +
+//! reap home). The rekey/liveness kinds are still SHADOW — driven by their own
+//! shell drivers — so populating them stays behavior-neutral.
 
 use crate::PeerIdentity;
 use crate::node::Node;
@@ -501,11 +501,10 @@ impl Node {
                 }
                 PeerAction::SetTimer { kind, at_ms } => {
                     // Populate the per-peer timer store (overwrite = reschedule).
-                    // The `HandshakeRetransmit` deadline is now read + fired by
-                    // `drive_peer_timers` (the msg1-resend home). Other kinds are
-                    // still SHADOW here — `HandshakeTimeout` is driven by the
-                    // legacy `check_timeouts`, and rekey/liveness keep their own
-                    // shell drivers — so populating them stays behavior-neutral.
+                    // The `HandshakeRetransmit` and `HandshakeTimeout` deadlines
+                    // are read + fired by `drive_peer_timers`. Rekey/liveness kinds
+                    // are still SHADOW here — they keep their own shell drivers —
+                    // so populating them stays behavior-neutral.
                     self.peer_timers
                         .entry(link)
                         .or_default()

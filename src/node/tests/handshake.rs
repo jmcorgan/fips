@@ -903,6 +903,83 @@ async fn test_resend_scheduling() {
     );
 }
 
+/// Test that the timer driver reaps an outbound leg whose machine
+/// `HandshakeTimeout` timer has come due (the timeout fold). The reap re-checks
+/// the shell `is_timed_out` predicate, then tears the connection down exactly as
+/// the old `check_timeouts` Teardown path did.
+#[tokio::test]
+async fn test_handshake_timeout_drive() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let peer_identity = make_peer_identity();
+    let remote_addr = TransportAddr::from_string("10.0.0.2:2121");
+
+    let dial_ms = 1000u64;
+    let link_id = node.allocate_link_id();
+    let mut conn = PeerConnection::outbound(link_id, peer_identity, dial_ms);
+    let our_index = node.index_allocator.allocate().unwrap();
+    let our_keypair = node.identity().keypair();
+    let _ = conn
+        .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
+        .unwrap();
+    conn.set_our_index(our_index);
+    conn.set_transport_id(transport_id);
+    conn.set_source_addr(remote_addr.clone());
+
+    let link = Link::connectionless(
+        link_id,
+        transport_id,
+        remote_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    node.links.insert(link_id, link);
+    node.addr_to_link
+        .insert((transport_id, remote_addr.clone()), link_id);
+    node.connections.insert(link_id, conn);
+    node.pending_outbound
+        .insert((transport_id, our_index.as_u32()), link_id);
+
+    // Machine in SentMsg1 with a HandshakeTimeout timer armed at dial + 30s.
+    let mut machine =
+        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, dial_ms);
+    let _ = machine.step(
+        crate::peer::machine::PeerEvent::Dial {
+            transport_id,
+            remote_addr: remote_addr.clone(),
+            peer_identity,
+            connection_oriented: false,
+        },
+        dial_ms,
+        &mut node.index_allocator,
+    );
+    node.peer_machines.insert(link_id, machine);
+    node.peer_timers.entry(link_id).or_default().insert(
+        crate::peer::machine::TimerKind::HandshakeTimeout,
+        dial_ms + 30_000,
+    );
+
+    assert_eq!(node.connection_count(), 1);
+
+    // Well past dial + 30s: the timer is due and the leg is idle-timed-out.
+    node.drive_peer_timers(dial_ms + 100_000).await;
+
+    assert_eq!(
+        node.connection_count(),
+        0,
+        "Timed-out leg reaped by the timer drive"
+    );
+    assert_eq!(node.index_allocator.count(), 0, "Session index freed");
+    assert!(
+        !node.peer_machines.contains_key(&link_id),
+        "Control machine dropped with the reaped connection"
+    );
+    assert!(
+        !node.peer_timers.contains_key(&link_id),
+        "Timer store dropped with the reaped connection"
+    );
+}
+
 /// Test that msg2 is stored on PeerConnection for responder resend.
 #[test]
 fn test_msg2_stored_on_connection() {
