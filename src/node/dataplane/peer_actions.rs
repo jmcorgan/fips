@@ -6,18 +6,19 @@
 //! stands for (`build_msg2` + `transport.send`, `promote_connection`,
 //! `remove_active_peer`, `index_allocator.free`, `note_link_dead`, …).
 //!
-//! ## Shadow-only skeleton
+//! ## Progressive cutover
 //!
-//! The machine home (`Node.peer_machines`), the
-//! executor, and the disjoint-borrow advance helper. It is **unwired** — the live
-//! `handle_msg1`/`handle_msg2` path does not drive it yet, so every method here is
-//! `#[allow(dead_code)]`. The inbound cutover (`handle_msg1` → `step(InboundMsg1)`)
-//! and the outbound cutover (`handle_msg2` / dial) are wired later.
+//! The executor is wired incrementally. Live today: the inbound establish
+//! (`handle_msg1` → `step(InboundMsg1)`), the outbound msg2 promote
+//! (`handle_msg2` looks up the dial-persisted machine), and the connectionless
+//! outbound msg1 send (`SendHandshake` with `their_index == None` →
+//! `send_stored_msg1`, driven from `initiate_connection`).
 //!
-//! Arms not yet exercised are inert stubs (outbound dial, rekey/crypto installs,
-//! link-control frames, timers, and the connected-UDP plane are inert stubs
-//! realized as those planes are wired).
-//! `RegisterDecryptSession` is a deliberate no-op — see its arm for the note.
+//! Not yet driven, so their arms stay inert stubs: `OpenTransport` (the
+//! connection-oriented dial), rekey/crypto installs, link-control frames, the
+//! timers (`SetTimer`/`CancelTimer` — the legacy tick still runs them), and the
+//! connected-UDP plane. `RegisterDecryptSession` is a deliberate no-op — see its
+//! arm for the note.
 
 use crate::PeerIdentity;
 use crate::node::Node;
@@ -114,11 +115,16 @@ impl Node {
                     // yet; inert in the shadow-only skeleton.
                 }
                 PeerAction::SendHandshake { bytes } => {
-                    // The machine payload is the UNFRAMED Noise msg2 payload;
-                    // frame it with our/their index (mirrors `handshake.rs:472`'s
-                    // `build_msg2(our_index, their_index, &payload)`) before the
-                    // wire send. A fresh-outbound msg1 (empty payload → build msg1
-                    // from indices) is framed differently and is wired later.
+                    // Two outbound directions share this action, discriminated by
+                    // `their_index`:
+                    //   msg2 (`their_index == Some`): the machine payload is the
+                    //   UNFRAMED Noise msg2; frame it with our/their index
+                    //   (`build_msg2`) and send.
+                    //   msg1 (`their_index == None`): a fresh outbound handshake;
+                    //   the machine's empty payload is ignored — the shell already
+                    //   allocated the index, ran the Noise leaf, and armed the
+                    //   wire at dial (`prepare_outbound_msg1`); this just sends the
+                    //   stored wire (see `send_stored_msg1`).
                     if let (Some(sender_idx), Some(receiver_idx)) =
                         (ambient.our_index, ambient.their_index)
                     {
@@ -152,6 +158,14 @@ impl Node {
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
                         }
+                    } else {
+                        // msg1: the shell already allocated the index, ran the
+                        // Noise leaf, and armed the wire on the connection at dial
+                        // (`prepare_outbound_msg1`); send the stored wire. The
+                        // machine's empty payload is ignored.
+                        let _ = bytes;
+                        self.send_stored_msg1(link, ambient.transport_id, &ambient.remote_addr)
+                            .await;
                     }
                 }
                 PeerAction::SendRekey { .. } => {

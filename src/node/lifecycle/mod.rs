@@ -12,10 +12,11 @@ use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
 use crate::node::acl::PeerAclContext;
+use crate::node::dataplane::PeerActionCtx;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::PeerConnection;
-use crate::peer::machine::PeerMachine;
+use crate::peer::machine::{PeerEvent, PeerMachine};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
@@ -509,21 +510,70 @@ impl Node {
             }
             Ok(())
         } else {
-            // Connectionless: proceed with immediate handshake
-            self.start_handshake(link_id, transport_id, remote_addr, peer_identity)
-                .await
+            // Connectionless: no connect step. Prepare msg1 in the shell — the
+            // index alloc, Noise leaf, and framing can fail and the error must
+            // propagate to the caller (matching the pre-cutover path) — then drive
+            // the machine to send it. The machine goes straight to
+            // `start_outbound_handshake`; the executor's `SendHandshake` msg1
+            // branch sends the wire `prepare_outbound_msg1` armed on the
+            // connection.
+            self.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)?;
+            let now = Self::now_ms();
+            let ambient = PeerActionCtx {
+                verified_identity: peer_identity,
+                transport_id,
+                remote_addr: remote_addr.clone(),
+                our_index: None,
+                their_index: None,
+                now_ms: now,
+                is_outbound: true,
+            };
+            self.advance_peer_machine(
+                link_id,
+                PeerEvent::Dial {
+                    transport_id,
+                    remote_addr,
+                    peer_identity,
+                    connection_oriented: false,
+                },
+                now,
+                &ambient,
+            )
+            .await;
+            Ok(())
         }
     }
 
     /// Start the Noise handshake on a link and send msg1.
     ///
-    /// Called immediately for connectionless transports, or after the
-    /// transport connection is established for connection-oriented transports.
+    /// Called after a connection-oriented transport connects. (Connectionless
+    /// dials `prepare_outbound_msg1` + drive the machine to send in
+    /// `initiate_connection`.)
     pub(super) async fn start_handshake(
         &mut self,
         link_id: LinkId,
         transport_id: TransportId,
         remote_addr: TransportAddr,
+        peer_identity: PeerIdentity,
+    ) -> Result<(), NodeError> {
+        self.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)?;
+        self.send_stored_msg1(link_id, transport_id, &remote_addr)
+            .await;
+        Ok(())
+    }
+
+    /// Prepare an outbound Noise msg1 at dial: allocate the session index, run
+    /// the Noise leaf, frame the wire, arm the shell-side resend, track
+    /// `pending_outbound`, and persist the connection + control machine (parked
+    /// in `Discovered`). Returns `Err` on index-allocation or Noise failure
+    /// (cleaning the partial leg), leaving the armed wire on the connection for
+    /// `send_stored_msg1` to transmit. Does NOT send — so the fallible setup can
+    /// propagate its error synchronously before any machine drive.
+    pub(in crate::node) fn prepare_outbound_msg1(
+        &mut self,
+        link_id: LinkId,
+        transport_id: TransportId,
+        remote_addr: &TransportAddr,
         peer_identity: PeerIdentity,
     ) -> Result<(), NodeError> {
         let peer_node_addr = *peer_identity.node_addr();
@@ -538,7 +588,8 @@ impl Node {
             Err(e) => {
                 // Clean up the link we just created
                 self.links.remove(&link_id);
-                self.addr_to_link.remove(&(transport_id, remote_addr));
+                self.addr_to_link
+                    .remove(&(transport_id, remote_addr.clone()));
                 return Err(NodeError::IndexAllocationFailed(e.to_string()));
             }
         };
@@ -552,7 +603,8 @@ impl Node {
                     // Clean up the index and link
                     let _ = self.index_allocator.free(our_index);
                     self.links.remove(&link_id);
-                    self.addr_to_link.remove(&(transport_id, remote_addr));
+                    self.addr_to_link
+                        .remove(&(transport_id, remote_addr.clone()));
                     return Err(NodeError::HandshakeFailed(e.to_string()));
                 }
             };
@@ -576,7 +628,7 @@ impl Node {
 
         // Store msg1 for resend and schedule first resend
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
+        connection.set_handshake_msg1(wire_msg1, current_time_ms + resend_interval);
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
@@ -586,7 +638,8 @@ impl Node {
         // Persist the outbound control machine at dial, keyed by the same
         // `link_id` as the connection. It parks in `Discovered` (inert to reap
         // and rekey — it is absent from `peers`, never established) until
-        // `handle_msg2` looks it up to drive the promote. Its `our_index` is
+        // `handle_msg2` looks it up to drive the promote, or a connectionless
+        // dial drives it to `Handshaking` to send. Its `our_index` is
         // deliberately left unset so a later inbound restart does not emit a
         // spurious `UnregisterDecryptSession`. It is removed wherever the
         // connection is torn down without promoting (the stale reaper and the
@@ -595,16 +648,42 @@ impl Node {
         let machine = PeerMachine::new_outbound(link_id, peer_identity, current_time_ms);
         self.peer_machines.insert(link_id, machine);
 
+        Ok(())
+    }
+
+    /// Send the msg1 wire that `prepare_outbound_msg1` armed on the connection.
+    /// On send error, marks the connection failed and RETAINS it (the legacy
+    /// resend tick retries); a missing wire or transport is a no-op. This is the
+    /// body of the executor's `SendHandshake` msg1 action and the send tail of
+    /// the connection-oriented `start_handshake`.
+    pub(in crate::node) async fn send_stored_msg1(
+        &mut self,
+        link_id: LinkId,
+        transport_id: TransportId,
+        remote_addr: &TransportAddr,
+    ) {
+        let wire_msg1 = match self
+            .connections
+            .get(&link_id)
+            .and_then(|c| c.handshake_msg1())
+        {
+            Some(w) => w.to_vec(),
+            None => return,
+        };
+        let our_index = self.connections.get(&link_id).and_then(|c| c.our_index());
+
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
-            match transport.send(&remote_addr, &wire_msg1).await {
+            match transport.send(remote_addr, &wire_msg1).await {
                 Ok(bytes) => {
-                    debug!(
-                        link_id = %link_id,
-                        our_index = %our_index,
-                        bytes,
-                        "Sent Noise handshake message 1 (wire format)"
-                    );
+                    if let Some(idx) = our_index {
+                        debug!(
+                            link_id = %link_id,
+                            our_index = %idx,
+                            bytes,
+                            "Sent Noise handshake message 1 (wire format)"
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!(
@@ -620,8 +699,6 @@ impl Node {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Poll all transports for discovered peers and auto-connect.

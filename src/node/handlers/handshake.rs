@@ -1140,10 +1140,12 @@ impl Node {
         // loser-link surgery is wired later). Direct analog of the inbound
         // net-new arm — no ordering constraint, lowest risk.
         //
-        // Look up the outbound machine persisted at DIAL (`start_handshake`),
-        // parked in `Discovered`, and step `Msg2 → [PromoteToActive]` in place.
-        // `on_msg2` is state-independent — it decides from the outbound snapshot,
-        // not the machine's state — and reads the machine's unset `conn.our_index`
+        // Look up the outbound machine persisted at DIAL, and step `Msg2 →
+        // [PromoteToActive]` in place. It is in `Discovered` (connection-oriented
+        // dial, not yet cut over) or `Handshaking{SentMsg1}` (connectionless dial,
+        // which drives the machine to send msg1) — either way `on_msg2` is
+        // state-independent: it decides from the outbound snapshot, not the
+        // machine's state, and reads the machine's unset `conn.our_index`
         // as `None`, so stepping the persisted (vs the former transient) machine
         // is byte-identical: same `Promote` decision (`has_existing_peer == false`),
         // same `our_index == None`. The machine is already in `peer_machines`
