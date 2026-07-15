@@ -439,8 +439,6 @@ impl Node {
         remote_addr: TransportAddr,
         peer_identity: PeerIdentity,
     ) -> Result<(), NodeError> {
-        let peer_node_addr = *peer_identity.node_addr();
-
         self.authorize_peer(
             &peer_identity,
             PeerAclContext::OutboundConnect,
@@ -494,33 +492,35 @@ impl Node {
         self.peer_machines.insert(link_id, machine);
 
         if is_connection_oriented {
-            // Connection-oriented: start non-blocking connect, defer handshake
-            if let Some(transport) = self.transports.get(&transport_id) {
-                match transport.connect(&remote_addr).await {
-                    Ok(()) => {
-                        debug!(
-                            peer = %self.peer_display_name(&peer_node_addr),
-                            transport_id = %transport_id,
-                            remote_addr = %remote_addr,
-                            link_id = %link_id,
-                            "Transport connect initiated (non-blocking)"
-                        );
-                        self.peering.pending_connects.push(super::PendingConnect {
-                            link_id,
-                            transport_id,
-                            remote_addr,
-                            peer_identity,
-                        });
-                    }
-                    Err(e) => {
-                        // Clean up link and the dial-time control machine
-                        self.links.remove(&link_id);
-                        self.addr_to_link.remove(&(transport_id, remote_addr));
-                        self.peer_machines.remove(&link_id);
-                        return Err(NodeError::TransportError(e.to_string()));
-                    }
-                }
-            }
+            // Connection-oriented: drive the machine to open the transport. The
+            // machine parks in `Connecting` and emits one `OpenTransport`; the
+            // executor performs the non-blocking `transport.connect` and pushes
+            // the `PendingConnect`. No index alloc or wire-arm happens here —
+            // that is deferred to `prepare_outbound_msg1` at connect-resolution
+            // time (`poll_pending_connects`), so `our_index` stays `None` on both
+            // the (not-yet-built) connection and the machine.
+            let now = Self::now_ms();
+            let ambient = PeerActionCtx {
+                verified_identity: peer_identity,
+                transport_id,
+                remote_addr: remote_addr.clone(),
+                our_index: None,
+                their_index: None,
+                now_ms: now,
+                is_outbound: true,
+            };
+            self.advance_peer_machine(
+                link_id,
+                PeerEvent::Dial {
+                    transport_id,
+                    remote_addr,
+                    peer_identity,
+                    connection_oriented: true,
+                },
+                now,
+                &ambient,
+            )
+            .await;
             Ok(())
         } else {
             // Connectionless: no connect step. Prepare msg1 in the shell — the
@@ -555,24 +555,6 @@ impl Node {
             .await;
             Ok(())
         }
-    }
-
-    /// Start the Noise handshake on a link and send msg1.
-    ///
-    /// Called after a connection-oriented transport connects. (Connectionless
-    /// dials `prepare_outbound_msg1` + drive the machine to send in
-    /// `initiate_connection`.)
-    pub(super) async fn start_handshake(
-        &mut self,
-        link_id: LinkId,
-        transport_id: TransportId,
-        remote_addr: TransportAddr,
-        peer_identity: PeerIdentity,
-    ) -> Result<(), NodeError> {
-        self.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)?;
-        self.send_stored_msg1(link_id, transport_id, &remote_addr)
-            .await;
-        Ok(())
     }
 
     /// Prepare an outbound Noise msg1 at dial: allocate the session index, run
@@ -659,8 +641,9 @@ impl Node {
     /// Send the msg1 wire that `prepare_outbound_msg1` armed on the connection.
     /// On send error, marks the connection failed and RETAINS it (the legacy
     /// resend tick retries); a missing wire or transport is a no-op. This is the
-    /// body of the executor's `SendHandshake` msg1 action and the send tail of
-    /// the connection-oriented `start_handshake`.
+    /// body of the executor's `SendHandshake` msg1 action — reached on both the
+    /// connectionless dial and the connection-oriented connect-resolution path,
+    /// after `prepare_outbound_msg1` has armed the wire.
     pub(in crate::node) async fn send_stored_msg1(
         &mut self,
         link_id: LinkId,
@@ -1223,16 +1206,18 @@ impl Node {
                     "Transport connected, starting handshake"
                 );
 
-                // Start the handshake now that the transport is connected
-                if let Err(e) = self
-                    .start_handshake(
-                        pending.link_id,
-                        pending.transport_id,
-                        pending.remote_addr.clone(),
-                        pending.peer_identity,
-                    )
-                    .await
-                {
+                // Prepare msg1 now that the transport is connected, then drive
+                // the machine to send it. The prepare (index alloc, Noise leaf,
+                // wire arm) MUST run BEFORE the `TransportConnected` drive: the
+                // executor's `SendHandshake` msg1 branch only transmits the wire
+                // this armed on the connection — a drive-only path would find no
+                // armed wire and silently send nothing.
+                if let Err(e) = self.prepare_outbound_msg1(
+                    pending.link_id,
+                    pending.transport_id,
+                    &pending.remote_addr,
+                    pending.peer_identity,
+                ) {
                     warn!(
                         link_id = %pending.link_id,
                         error = %e,
@@ -1241,6 +1226,29 @@ impl Node {
                     // Clean up link and dial-time machine on handshake failure
                     self.remove_link(&pending.link_id);
                     self.peer_machines.remove(&pending.link_id);
+                } else {
+                    // Drive the dial-persisted machine: `Connecting` →
+                    // `on_transport_connected` → `start_outbound_handshake`,
+                    // emitting `SendHandshake` (msg1) whose executor arm sends the
+                    // wire just armed. `our_index`/`their_index` stay `None` so the
+                    // executor takes the `their_index == None` msg1 branch.
+                    let now = Self::now_ms();
+                    let ambient = PeerActionCtx {
+                        verified_identity: pending.peer_identity,
+                        transport_id: pending.transport_id,
+                        remote_addr: pending.remote_addr.clone(),
+                        our_index: None,
+                        their_index: None,
+                        now_ms: now,
+                        is_outbound: true,
+                    };
+                    self.advance_peer_machine(
+                        pending.link_id,
+                        PeerEvent::TransportConnected,
+                        now,
+                        &ambient,
+                    )
+                    .await;
                 }
             } else {
                 let reason = reason.unwrap_or_default();

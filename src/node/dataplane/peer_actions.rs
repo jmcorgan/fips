@@ -10,15 +10,17 @@
 //!
 //! The executor is wired incrementally. Live today: the inbound establish
 //! (`handle_msg1` → `step(InboundMsg1)`), the outbound msg2 promote
-//! (`handle_msg2` looks up the dial-persisted machine), and the connectionless
+//! (`handle_msg2` looks up the dial-persisted machine), the connectionless
 //! outbound msg1 send (`SendHandshake` with `their_index == None` →
-//! `send_stored_msg1`, driven from `initiate_connection`).
+//! `send_stored_msg1`, driven from `initiate_connection`), and the
+//! connection-oriented dial (`OpenTransport` performs the non-blocking
+//! `transport.connect`; `TransportConnected` drives the connect-resolution msg1
+//! send from `poll_pending_connects`).
 //!
-//! Not yet driven, so their arms stay inert stubs: `OpenTransport` (the
-//! connection-oriented dial), rekey/crypto installs, link-control frames, the
-//! timers (`SetTimer`/`CancelTimer` — the legacy tick still runs them), and the
-//! connected-UDP plane. `RegisterDecryptSession` is a deliberate no-op — see its
-//! arm for the note.
+//! Not yet driven, so their arms stay inert stubs: rekey/crypto installs,
+//! link-control frames, the timers (`SetTimer`/`CancelTimer` — the legacy tick
+//! still runs them), and the connected-UDP plane. `RegisterDecryptSession` is a
+//! deliberate no-op — see its arm for the note.
 
 use crate::PeerIdentity;
 use crate::node::Node;
@@ -109,10 +111,45 @@ impl Node {
         let mut queue: VecDeque<PeerAction> = actions.into();
         while let Some(action) = queue.pop_front() {
             match action {
-                PeerAction::OpenTransport { .. } => {
-                    // Outbound dial (`initiate_connection`,
-                    // `lifecycle/mod.rs:470`). Outbound establish is not cut over
-                    // yet; inert in the shadow-only skeleton.
+                PeerAction::OpenTransport {
+                    transport_id,
+                    remote_addr,
+                } => {
+                    // Outbound connection-oriented dial. `initiate_connection`'s
+                    // oriented branch drove the machine to `Connecting`, which
+                    // emitted this action. Perform the non-blocking
+                    // `transport.connect` and, on success, push the
+                    // `PendingConnect` for `poll_pending_connects` to resolve. On
+                    // connect error, tear down the dial-window state (link,
+                    // reverse map, control machine) and abort the queue — the
+                    // executor-local mirror of the old inline
+                    // `initiate_connection` connect+push.
+                    if let Some(transport) = self.transports.get(&transport_id) {
+                        match transport.connect(&remote_addr).await {
+                            Ok(()) => {
+                                debug!(
+                                    transport_id = %transport_id,
+                                    remote_addr = %remote_addr,
+                                    link_id = %link,
+                                    "Transport connect initiated (non-blocking)"
+                                );
+                                self.peering
+                                    .pending_connects
+                                    .push(crate::node::PendingConnect {
+                                        link_id: link,
+                                        transport_id,
+                                        remote_addr,
+                                        peer_identity: ambient.verified_identity,
+                                    });
+                            }
+                            Err(_e) => {
+                                self.links.remove(&link);
+                                self.addr_to_link.remove(&(transport_id, remote_addr));
+                                self.peer_machines.remove(&link);
+                                return;
+                            }
+                        }
+                    }
                 }
                 PeerAction::SendHandshake { bytes } => {
                     // Two outbound directions share this action, discriminated by
