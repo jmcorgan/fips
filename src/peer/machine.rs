@@ -2002,6 +2002,97 @@ mod tests {
         );
     }
 
+    // ---- Test 7b: dial-persisted outbound promote leaves our_index unset ---
+    // An outbound machine persisted at DIAL (`new_outbound`, `Discovered`, with
+    // `conn.our_index` UNSET — the shell owns the index on its own
+    // `PeerConnection`, never on the machine) must, on promote via msg2, end with
+    // `our_index == None`, exactly as the pre-persistence transient did. The
+    // guard: a subsequent inbound restart then emits NO
+    // `UnregisterDecryptSession` (contrast `restart_override`, whose machine has
+    // `our_index == Some`). A leaked `Some(dial_index)` here would wrongly
+    // unregister — on index reuse, ANOTHER peer's — worker session; keeping the
+    // field `None` is the Model-B dial-persistence neutrality property.
+    #[test]
+    fn dial_persisted_outbound_promote_no_restart_unregister() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+        let peer_addr = *peer.node_addr();
+        let our = *peer_identity().node_addr();
+
+        // Persisted at dial: Discovered, conn.our_index deliberately NOT set.
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        assert_eq!(m.our_index(), None);
+
+        // Promote via msg2 from Discovered (the production path — the former
+        // transient was likewise stepped from `new_outbound` without a state set).
+        let out = OutboundSnapshot {
+            has_existing_peer: false,
+            our_outbound_wins: false,
+        };
+        let promote = m.step(
+            PeerEvent::Msg2 {
+                their_index: SessionIndex::new(0x77),
+                out,
+            },
+            300,
+            &mut alloc,
+        );
+        assert_eq!(
+            promote,
+            vec![PeerAction::PromoteToActive {
+                link: LinkId::new(1)
+            }]
+        );
+        assert_eq!(
+            m.our_index(),
+            None,
+            "outbound promote must leave our_index unset"
+        );
+
+        // Drive promotion to Established (from Discovered, as in production).
+        let _ = m.step(
+            PeerEvent::PromotionResolved {
+                result: PromotionResult::Promoted(peer_addr),
+            },
+            300,
+            &mut alloc,
+        );
+        assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
+        assert_eq!(m.our_index(), None);
+
+        // A subsequent inbound restart (peer restart, new epoch) must NOT emit
+        // UnregisterDecryptSession, because our_index is None.
+        let mut est = est_new_peer(our);
+        est.has_existing_peer = true;
+        est.existing_peer_epoch = Some([1u8; 8]);
+        let wire = wire_outcome(peer, Some([2u8; 8]), 0x88);
+        let restart = m.step(
+            PeerEvent::InboundMsg1 {
+                link: LinkId::new(1),
+                wire,
+                est,
+            },
+            1_000,
+            &mut alloc,
+        );
+        assert!(
+            !restart
+                .iter()
+                .any(|a| matches!(a, PeerAction::UnregisterDecryptSession { .. })),
+            "no UnregisterDecryptSession when the promoted outbound machine's our_index is None"
+        );
+        assert!(
+            restart.iter().any(|a| matches!(
+                a,
+                PeerAction::ReportLost {
+                    kind: LostKind::LinkDead,
+                    ..
+                }
+            )),
+            "restart still reports the loss via the link-dead reconnect reflex"
+        );
+    }
+
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------
     #[test]
     fn liveness_to_link_dead() {

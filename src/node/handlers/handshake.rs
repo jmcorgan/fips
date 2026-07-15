@@ -973,6 +973,8 @@ impl Node {
                 }
             }
             self.connections.remove(&link_id);
+            // Drop the machine persisted at dial — this leg never promotes.
+            self.peer_machines.remove(&link_id);
             self.remove_link(&link_id);
             if let Some(idx) = our_index {
                 let _ = self.index_allocator.free(idx);
@@ -1007,6 +1009,12 @@ impl Node {
         let out_snap = self.outbound_snapshot(&peer_node_addr);
         let out_decision = self.fmp.establish_outbound(&out_snap);
         if out_decision != OutboundDecision::Promote {
+            // The dial-persisted outbound machine is not consumed by the inline
+            // Swap/Keep resolution below (which mutates the existing promoted peer
+            // directly, with no machine). Drop it on entry so none of this block's
+            // exits leave a dangling machine — matching the pre-persistence path,
+            // which created no machine for a cross-connection.
+            self.peer_machines.remove(&link_id);
             // Extract the outbound connection
             let mut conn = match self.connections.remove(&link_id) {
                 Some(c) => c,
@@ -1132,42 +1140,54 @@ impl Node {
         // loser-link surgery is wired later). Direct analog of the inbound
         // net-new arm — no ordering constraint, lowest risk.
         //
-        // Build a TRANSIENT outbound machine, step `Msg2 →
-        // [PromoteToActive]`, execute it (→ `promote_connection` →
-        // `PromotionResolved{Promoted}` → inert `RegisterDecryptSession`), and
-        // insert into `peer_machines` only on the Promoted (Established) tail. The
-        // outbound `our_index` was allocated at DIAL (unchanged), the outbound
-        // promote sends nothing on the wire, and `promote_connection` frees
-        // nothing new — so the index sequence, `peers`/`peers_by_index`/
-        // `addr_to_link` state, and metrics are byte-identical to the pre-refactor
-        // Promoted arm. `pending_outbound` lifecycle stays shell-side (removed on
-        // the Established tail, exactly where the pre-refactor Ok arm removed it);
-        // the machine never touches it.
-        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
-
-        // Step `Msg2 → [PromoteToActive]`. The machine re-runs the pure
-        // `establish_outbound` on the snapshot (a harmless second pure call);
-        // `has_existing_peer == false` reproduces the `Promote` decision.
-        let promote_actions = machine.step(
-            PeerEvent::Msg2 {
-                their_index: header.sender_idx,
-                out: out_snap,
-            },
-            packet.timestamp_ms,
-            &mut self.index_allocator,
-        );
+        // Look up the outbound machine persisted at DIAL (`start_handshake`),
+        // parked in `Discovered`, and step `Msg2 → [PromoteToActive]` in place.
+        // `on_msg2` is state-independent — it decides from the outbound snapshot,
+        // not the machine's state — and reads the machine's unset `conn.our_index`
+        // as `None`, so stepping the persisted (vs the former transient) machine
+        // is byte-identical: same `Promote` decision (`has_existing_peer == false`),
+        // same `our_index == None`. The machine is already in `peer_machines`
+        // (inserted at dial), so the executor's `PromoteToActive` arm can feed
+        // `PromotionResolved` back via the same lookup. A defensive transient
+        // reproduces the pre-persistence path if the machine is somehow absent — a
+        // state-machine inconsistency, since every dialed leg persists one. The
+        // outbound `our_index` was allocated at DIAL (unchanged), the promote
+        // sends nothing on the wire, and `promote_connection` frees nothing new,
+        // so index sequence, `peers`/`peers_by_index`/`addr_to_link` state, and
+        // metrics are byte-identical. `pending_outbound` lifecycle stays shell-side
+        // (removed on the Established tail); the machine never touches it.
+        let promote_actions = match self.peer_machines.get_mut(&link_id) {
+            Some(machine) => machine.step(
+                PeerEvent::Msg2 {
+                    their_index: header.sender_idx,
+                    out: out_snap,
+                },
+                packet.timestamp_ms,
+                &mut self.index_allocator,
+            ),
+            None => {
+                // No machine persisted at dial (e.g. a test that seeds
+                // `connections`/`pending_outbound` directly, or any path that
+                // reaches msg2 without `start_handshake`): reproduce the
+                // pre-persistence transient exactly.
+                let mut machine =
+                    PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
+                let actions = machine.step(
+                    PeerEvent::Msg2 {
+                        their_index: header.sender_idx,
+                        out: out_snap,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                self.peer_machines.insert(link_id, machine);
+                actions
+            }
+        };
         debug_assert_eq!(
             promote_actions,
             vec![PeerAction::PromoteToActive { link: link_id }]
         );
-
-        // Register the machine (Promote tail only — the Swap/Keep/rekey arms above
-        // all returned without inserting). Inserted BEFORE execute so the
-        // executor's `PromoteToActive` arm can feed `PromotionResolved` back into
-        // it via the `peer_machines` lookup. The outbound `link_id` was allocated
-        // at dial and the dial path never inserts a machine, so this
-        // cannot collide with an existing entry.
-        self.peer_machines.insert(link_id, machine);
 
         // Execute `[PromoteToActive]`. The executor calls `promote_connection`,
         // feeds `PromotionResolved{Promoted}` back, registers the decrypt-worker

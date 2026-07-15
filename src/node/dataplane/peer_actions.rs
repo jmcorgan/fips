@@ -292,10 +292,9 @@ impl Node {
                                 // pre-refactor outbound warn! ("Failed to promote
                                 // connection").
                                 //
-                                // The transient outbound machine was inserted BEFORE
-                                // execute; it is additive state that
-                                // did not exist pre-refactor, so removing the just-
-                                // inserted machine on failure is neutral vs old and
+                                // The outbound machine was persisted at dial; it is
+                                // additive state that did not exist pre-refactor, so
+                                // removing it on promote failure is neutral vs old and
                                 // prevents a leak.
                                 warn!(
                                     target: "fips::node::handlers::handshake",

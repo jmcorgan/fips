@@ -15,6 +15,7 @@ use crate::node::acl::PeerAclContext;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
 use crate::peer::PeerConnection;
+use crate::peer::machine::PeerMachine;
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
@@ -581,6 +582,18 @@ impl Node {
         self.pending_outbound
             .insert((transport_id, our_index.as_u32()), link_id);
         self.connections.insert(link_id, connection);
+
+        // Persist the outbound control machine at dial, keyed by the same
+        // `link_id` as the connection. It parks in `Discovered` (inert to reap
+        // and rekey — it is absent from `peers`, never established) until
+        // `handle_msg2` looks it up to drive the promote. Its `our_index` is
+        // deliberately left unset so a later inbound restart does not emit a
+        // spurious `UnregisterDecryptSession`. It is removed wherever the
+        // connection is torn down without promoting (the stale reaper and the
+        // msg2 ACL-fail / cross-connection arms), mirroring the connection's
+        // own lifetime.
+        let machine = PeerMachine::new_outbound(link_id, peer_identity, current_time_ms);
+        self.peer_machines.insert(link_id, machine);
 
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
