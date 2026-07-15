@@ -481,6 +481,18 @@ impl Node {
         self.addr_to_link
             .insert((transport_id, remote_addr.clone()), link_id);
 
+        // Persist the outbound control machine at dial, keyed by the same
+        // `link_id` as the (soon-to-be-built) connection. It parks in
+        // `Discovered` (inert to reap and rekey — absent from `peers`, never
+        // established) until `handle_msg2` looks it up to drive the promote, or
+        // a connectionless dial drives it to `Handshaking` to send. Its
+        // `our_index` is deliberately left unset so a later inbound restart does
+        // not emit a spurious `UnregisterDecryptSession`. It is removed on every
+        // failure path in the dial window (below and in `prepare_outbound_msg1`
+        // / `poll_pending_connects`), mirroring the connection's own lifetime.
+        let machine = PeerMachine::new_outbound(link_id, peer_identity, Self::now_ms());
+        self.peer_machines.insert(link_id, machine);
+
         if is_connection_oriented {
             // Connection-oriented: start non-blocking connect, defer handshake
             if let Some(transport) = self.transports.get(&transport_id) {
@@ -501,9 +513,10 @@ impl Node {
                         });
                     }
                     Err(e) => {
-                        // Clean up link
+                        // Clean up link and the dial-time control machine
                         self.links.remove(&link_id);
                         self.addr_to_link.remove(&(transport_id, remote_addr));
+                        self.peer_machines.remove(&link_id);
                         return Err(NodeError::TransportError(e.to_string()));
                     }
                 }
@@ -564,11 +577,14 @@ impl Node {
 
     /// Prepare an outbound Noise msg1 at dial: allocate the session index, run
     /// the Noise leaf, frame the wire, arm the shell-side resend, track
-    /// `pending_outbound`, and persist the connection + control machine (parked
-    /// in `Discovered`). Returns `Err` on index-allocation or Noise failure
-    /// (cleaning the partial leg), leaving the armed wire on the connection for
-    /// `send_stored_msg1` to transmit. Does NOT send — so the fallible setup can
-    /// propagate its error synchronously before any machine drive.
+    /// `pending_outbound`, and persist the connection. Returns `Err` on
+    /// index-allocation or Noise failure (cleaning the partial leg, including
+    /// the dial-time control machine), leaving the armed wire on the connection
+    /// for `send_stored_msg1` to transmit. Does NOT send — so the fallible setup
+    /// can propagate its error synchronously before any machine drive. The
+    /// control machine itself is persisted at dial in `initiate_connection`;
+    /// this function no longer touches `peer_machines` except to clean it up on
+    /// the failure paths.
     pub(in crate::node) fn prepare_outbound_msg1(
         &mut self,
         link_id: LinkId,
@@ -586,10 +602,11 @@ impl Node {
         let our_index = match self.index_allocator.allocate() {
             Ok(idx) => idx,
             Err(e) => {
-                // Clean up the link we just created
+                // Clean up the link and dial-time machine we just created
                 self.links.remove(&link_id);
                 self.addr_to_link
                     .remove(&(transport_id, remote_addr.clone()));
+                self.peer_machines.remove(&link_id);
                 return Err(NodeError::IndexAllocationFailed(e.to_string()));
             }
         };
@@ -600,11 +617,12 @@ impl Node {
             match connection.start_handshake(our_keypair, self.startup_epoch(), current_time_ms) {
                 Ok(msg) => msg,
                 Err(e) => {
-                    // Clean up the index and link
+                    // Clean up the index, link, and dial-time machine
                     let _ = self.index_allocator.free(our_index);
                     self.links.remove(&link_id);
                     self.addr_to_link
                         .remove(&(transport_id, remote_addr.clone()));
+                    self.peer_machines.remove(&link_id);
                     return Err(NodeError::HandshakeFailed(e.to_string()));
                 }
             };
@@ -634,19 +652,6 @@ impl Node {
         self.pending_outbound
             .insert((transport_id, our_index.as_u32()), link_id);
         self.connections.insert(link_id, connection);
-
-        // Persist the outbound control machine at dial, keyed by the same
-        // `link_id` as the connection. It parks in `Discovered` (inert to reap
-        // and rekey — it is absent from `peers`, never established) until
-        // `handle_msg2` looks it up to drive the promote, or a connectionless
-        // dial drives it to `Handshaking` to send. Its `our_index` is
-        // deliberately left unset so a later inbound restart does not emit a
-        // spurious `UnregisterDecryptSession`. It is removed wherever the
-        // connection is torn down without promoting (the stale reaper and the
-        // msg2 ACL-fail / cross-connection arms), mirroring the connection's
-        // own lifetime.
-        let machine = PeerMachine::new_outbound(link_id, peer_identity, current_time_ms);
-        self.peer_machines.insert(link_id, machine);
 
         Ok(())
     }
@@ -1233,8 +1238,9 @@ impl Node {
                         error = %e,
                         "Failed to start handshake after transport connect"
                     );
-                    // Clean up link on handshake failure
+                    // Clean up link and dial-time machine on handshake failure
                     self.remove_link(&pending.link_id);
+                    self.peer_machines.remove(&pending.link_id);
                 }
             } else {
                 let reason = reason.unwrap_or_default();
@@ -1247,9 +1253,10 @@ impl Node {
                     "Transport connect failed"
                 );
 
-                // Clean up link and schedule retry
+                // Clean up link and dial-time machine, then schedule retry
                 self.remove_link(&pending.link_id);
                 self.links.remove(&pending.link_id);
+                self.peer_machines.remove(&pending.link_id);
                 self.note_handshake_timeout(*pending.peer_identity.node_addr(), Self::now_ms());
             }
         }
