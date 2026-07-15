@@ -336,7 +336,7 @@ impl Node {
                     self.poll_pending_connects().await;
                     self.poll_nostr_rendezvous().await;
                     self.poll_lan_rendezvous().await;
-                    self.resend_pending_handshakes(now_ms).await;
+                    self.drive_peer_timers(now_ms).await;
                     self.resend_pending_rekeys(now_ms).await;
                     self.resend_pending_fmp_rekey_msg3(now_ms).await;
                     self.resend_pending_session_handshakes(now_ms).await;

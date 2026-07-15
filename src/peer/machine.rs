@@ -194,7 +194,14 @@ pub(crate) enum FailReason {
 }
 
 /// A timer the machine schedules on the driver's quantized tick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `Hash` lets it key the driver's per-peer timer store; `Ord` lets the driver
+/// collect due kinds deterministically. Note the driver must fire
+/// `HandshakeTimeout` before `HandshakeRetransmit` on a same-tick coincidence
+/// (a reaped leg must not be resent), which is the reverse of this declaration
+/// order — the driver orders explicitly rather than relying on the derived
+/// ascending `Ord`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TimerKind {
     HandshakeRetransmit,
     HandshakeTimeout,
@@ -536,7 +543,37 @@ impl PeerMachine {
         self.our_index
     }
 
-    /// The crystallized node address, if known.
+    /// The msg1 resend count for this outbound handshake leg. The per-peer
+    /// machine is the home for this counter — the timer driver advances it via
+    /// [`record_resend`](Self::record_resend) on each successful resend, and the
+    /// control-socket connection snapshot reads it here so the operator-visible
+    /// count follows the machine rather than the (now inert) shell connection.
+    pub(crate) fn resend_count(&self) -> u32 {
+        self.conn.resend_count()
+    }
+
+    /// Record a successful msg1 resend: advance the count and store the next
+    /// backoff deadline. The driver calls this only after the resend actually
+    /// went out (record-on-success — a failed send neither advances the count
+    /// nor reschedules), matching the pre-fold shell semantics.
+    pub(crate) fn record_resend(&mut self, next_resend_at_ms: u64) {
+        self.conn.record_resend(next_resend_at_ms);
+    }
+
+    /// Whether this is an outbound leg parked at `SentMsg1` — the only state in
+    /// which a msg1 resend is due. Mirrors `on_handshake_retransmit`'s guard so
+    /// the shell timer driver can gate without reaching into machine state.
+    pub(crate) fn is_handshaking_sent_msg1(&self) -> bool {
+        matches!(
+            self.state,
+            PeerState::Handshaking {
+                phase: HandshakePhase::SentMsg1,
+                ..
+            }
+        )
+    }
+
+    /// The crystallized node address, if identity is known.
     fn addr(&self) -> Option<NodeAddr> {
         self.node_addr
     }
@@ -806,7 +843,19 @@ impl PeerMachine {
         self.conn.set_their_index(their_index);
         let addr = self.addr().unwrap_or_else(zero_addr);
         self.state = PeerState::Established { addr };
-        vec![PeerAction::PromoteToActive { link: self.link }]
+        // The machine survives promotion (it becomes the active peer's control
+        // machine), so cancel the outbound handshake timers here or they would
+        // linger in the driver's store. A late fire would no-op against the
+        // non-`Handshaking` state, but leaving them armed is a timer leak.
+        vec![
+            PeerAction::CancelTimer {
+                kind: TimerKind::HandshakeRetransmit,
+            },
+            PeerAction::CancelTimer {
+                kind: TimerKind::HandshakeTimeout,
+            },
+            PeerAction::PromoteToActive { link: self.link },
+        ]
     }
 
     /// XX inbound cross-connection at msg3. The Noise session swap and the
@@ -1426,8 +1475,48 @@ mod tests {
 
         let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
 
-        assert_eq!(actions, vec![PeerAction::PromoteToActive { link }]);
+        assert_eq!(
+            actions,
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive { link },
+            ]
+        );
         assert_eq!(m.state(), PeerState::Established { addr });
+    }
+
+    // ---- Test: outbound promote at msg2 cancels handshake timers -----------
+    // The promoted machine survives as the active peer's control machine, so
+    // its outbound handshake retransmit + timeout timers must be cancelled at
+    // promotion or they linger in the driver's store. The promote must emit the
+    // two CancelTimer actions ahead of PromoteToActive, in that exact order.
+    #[test]
+    fn outbound_msg2_promote_cancels_handshake_timers() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let link = LinkId::new(4);
+        let mut m = PeerMachine::new_outbound(link, id, 0);
+        let their_index = SessionIndex::new(0x88);
+
+        let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
+
+        assert_eq!(
+            actions,
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive { link },
+            ]
+        );
     }
 
     // ---- Contract: actions are runtime-agnostic data ----------------------
@@ -2045,9 +2134,17 @@ mod tests {
         );
         assert_eq!(
             promote,
-            vec![PeerAction::PromoteToActive {
-                link: LinkId::new(1)
-            }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive {
+                    link: LinkId::new(1)
+                }
+            ]
         );
         assert_eq!(
             m.our_index(),
@@ -2142,9 +2239,17 @@ mod tests {
         );
         assert_eq!(
             promote,
-            vec![PeerAction::PromoteToActive {
-                link: LinkId::new(1)
-            }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive {
+                    link: LinkId::new(1)
+                }
+            ]
         );
         assert_eq!(m.our_index(), None);
     }

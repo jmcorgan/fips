@@ -10,7 +10,7 @@ use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{PeerAction, PeerEvent, PeerMachine};
+use crate::peer::machine::{PeerAction, PeerEvent, PeerMachine, TimerKind};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
@@ -598,7 +598,7 @@ impl Node {
             self.pending_outbound.remove(&key);
             self.connections.remove(&link_id);
             // Drop the machine persisted at dial — this leg never promotes.
-            self.peer_machines.remove(&link_id);
+            self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -667,7 +667,7 @@ impl Node {
             // directly, with no machine). Drop it on entry so none of this block's
             // exits leave a dangling machine — matching the pre-persistence path,
             // which created no machine for a cross-connection.
-            self.peer_machines.remove(&link_id);
+            self.remove_peer_machine(link_id);
             let our_outbound_wins = cross_connection_winner(
                 self.identity().node_addr(),
                 &peer_node_addr,
@@ -827,9 +827,22 @@ impl Node {
                 )
             }
         };
+        // The outbound Msg2 Promote step cancels the two dial-armed handshake
+        // timers (the machine survives promotion, so they would otherwise linger
+        // in the driver's shadow store) and then promotes. The cancels are
+        // behavior-neutral at this rung — `peer_timers` is written but not yet
+        // driven — and `PromoteToActive` is still what performs the promotion.
         debug_assert_eq!(
             promote_actions,
-            vec![PeerAction::PromoteToActive { link: link_id }]
+            vec![
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeRetransmit
+                },
+                PeerAction::CancelTimer {
+                    kind: TimerKind::HandshakeTimeout
+                },
+                PeerAction::PromoteToActive { link: link_id },
+            ]
         );
 
         let ambient = PeerActionCtx {
@@ -1443,7 +1456,7 @@ impl Node {
                 // drop it so no machine orphans when its ActivePeer is removed.
                 // The winning connection's machine is inserted below keyed by
                 // the winner link_id. NEUTRAL: nothing reads peer_machines yet.
-                self.peer_machines.remove(&loser_link_id);
+                self.remove_peer_machine(loser_link_id);
 
                 // Clean up old peer's index from peers_by_index
                 if let (Some(old_tid), Some(old_idx)) =

@@ -899,28 +899,125 @@ async fn test_resend_scheduling() {
     );
     node.links.insert(link_id, link);
     node.addr_to_link
-        .insert((transport_id, remote_addr), link_id);
+        .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
     node.connections.insert(link_id, conn);
 
-    // Before resend time: nothing should happen (no transport = can't send,
-    // but the filter should exclude it because now < next_resend_at)
-    node.resend_pending_handshakes(now_ms + 500).await;
-    let conn = node.connections.get(&link_id).unwrap();
-    assert_eq!(conn.resend_count(), 0, "No resend before scheduled time");
+    // The msg1-resend counter and its due timer live on the per-peer machine.
+    // Dial it to `SentMsg1` (connectionless: no connect step) and arm its
+    // retransmit timer at now + 1000ms, mirroring what a real dial arms.
+    let mut machine =
+        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms);
+    let _ = machine.step(
+        crate::peer::machine::PeerEvent::Dial {
+            transport_id,
+            remote_addr: remote_addr.clone(),
+            peer_identity,
+            connection_oriented: false,
+        },
+        now_ms,
+        &mut node.index_allocator,
+    );
+    node.peer_machines.insert(link_id, machine);
+    node.peer_timers.entry(link_id).or_default().insert(
+        crate::peer::machine::TimerKind::HandshakeRetransmit,
+        now_ms + 1000,
+    );
 
-    // At resend time: would resend if transport existed. Without transport,
-    // the send fails silently and resend_count stays at 0.
-    // This tests the filtering logic — the connection IS a candidate.
-    node.resend_pending_handshakes(now_ms + 1000).await;
-    // No transport registered, so send fails — count stays 0.
-    // That's the expected behavior (transport absence is a transient condition).
-    let conn = node.connections.get(&link_id).unwrap();
+    // Before the scheduled time the timer isn't due, so nothing fires.
+    node.drive_peer_timers(now_ms + 500).await;
     assert_eq!(
-        conn.resend_count(),
+        node.connection_resend_count(link_id),
         0,
-        "No transport means no resend recorded"
+        "No resend before scheduled time"
+    );
+
+    // At the scheduled time the timer is due, but no transport is registered so
+    // the send fails. Record-on-success: the count does NOT advance (and the
+    // connection is not marked failed) — a failed resend just retries next tick.
+    node.drive_peer_timers(now_ms + 1000).await;
+    assert_eq!(
+        node.connection_resend_count(link_id),
+        0,
+        "Failed send records no resend"
+    );
+}
+
+/// Test that the timer driver reaps an outbound leg whose machine
+/// `HandshakeTimeout` timer has come due (the timeout fold). The reap re-checks
+/// the shell `is_timed_out` predicate, then tears the connection down exactly as
+/// the old `check_timeouts` Teardown path did.
+#[tokio::test]
+async fn test_handshake_timeout_drive() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let peer_identity = make_peer_identity();
+    let remote_addr = TransportAddr::from_string("10.0.0.2:2121");
+
+    let dial_ms = 1000u64;
+    let link_id = node.allocate_link_id();
+    let mut conn = PeerConnection::outbound(link_id, peer_identity, dial_ms);
+    let our_index = node.index_allocator.allocate().unwrap();
+    let our_keypair = node.identity().keypair();
+    let _ = conn
+        .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
+        .unwrap();
+    conn.set_our_index(our_index);
+    conn.set_transport_id(transport_id);
+    conn.set_source_addr(remote_addr.clone());
+
+    let link = Link::connectionless(
+        link_id,
+        transport_id,
+        remote_addr.clone(),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    );
+    node.links.insert(link_id, link);
+    node.addr_to_link
+        .insert((transport_id, remote_addr.clone()), link_id);
+    node.connections.insert(link_id, conn);
+    node.pending_outbound
+        .insert((transport_id, our_index.as_u32()), link_id);
+
+    // Machine in SentMsg1 with a HandshakeTimeout timer armed at dial + 30s.
+    let mut machine =
+        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, dial_ms);
+    let _ = machine.step(
+        crate::peer::machine::PeerEvent::Dial {
+            transport_id,
+            remote_addr: remote_addr.clone(),
+            peer_identity,
+            connection_oriented: false,
+        },
+        dial_ms,
+        &mut node.index_allocator,
+    );
+    node.peer_machines.insert(link_id, machine);
+    node.peer_timers.entry(link_id).or_default().insert(
+        crate::peer::machine::TimerKind::HandshakeTimeout,
+        dial_ms + 30_000,
+    );
+
+    assert_eq!(node.connection_count(), 1);
+
+    // Well past dial + 30s: the timer is due and the leg is idle-timed-out.
+    node.drive_peer_timers(dial_ms + 100_000).await;
+
+    assert_eq!(
+        node.connection_count(),
+        0,
+        "Timed-out leg reaped by the timer drive"
+    );
+    assert_eq!(node.index_allocator.count(), 0, "Session index freed");
+    assert!(
+        !node.peer_machines.contains_key(&link_id),
+        "Control machine dropped with the reaped connection"
+    );
+    assert!(
+        !node.peer_timers.contains_key(&link_id),
+        "Timer store dropped with the reaped connection"
     );
 }
 

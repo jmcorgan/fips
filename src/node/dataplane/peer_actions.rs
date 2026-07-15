@@ -21,9 +21,14 @@
 //! `SendHandshake` `their_index == Some` (msg2) branch stays dormant.
 //!
 //! Not yet driven, so their arms stay inert stubs: rekey/crypto installs,
-//! link-control frames, the timers (`SetTimer`/`CancelTimer` — the legacy tick
-//! still runs them), and the connected-UDP plane. `RegisterDecryptSession` is a
-//! deliberate no-op — see its arm for the note.
+//! link-control frames, and the connected-UDP plane. `RegisterDecryptSession` is
+//! a deliberate no-op — see its arm for the note.
+//!
+//! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
+//! store (`peer_timers`). The `HandshakeRetransmit` and `HandshakeTimeout`
+//! deadlines are read and fired by `drive_peer_timers` (the handshake resend +
+//! reap home). The rekey/liveness kinds are still SHADOW — driven by their own
+//! shell drivers — so populating them stays behavior-neutral.
 
 use crate::PeerIdentity;
 use crate::node::reject::{HandshakeReject, RejectReason};
@@ -149,7 +154,7 @@ impl Node {
                             Err(_e) => {
                                 self.links.remove(&link);
                                 self.addr_to_link.remove(&(transport_id, remote_addr));
-                                self.peer_machines.remove(&link);
+                                self.remove_peer_machine(link);
                                 return;
                             }
                         }
@@ -194,7 +199,7 @@ impl Node {
                             if let Some(idx) = ambient.our_index {
                                 let _ = self.index_allocator.free(idx);
                             }
-                            self.peer_machines.remove(&link);
+                            self.remove_peer_machine(link);
                             self.stats_mut()
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
@@ -572,10 +577,21 @@ impl Node {
                     // Connected-UDP plane ownership (`connected_udp.rs`). Out of
                     // scope for now.
                 }
-                PeerAction::SetTimer { .. } | PeerAction::CancelTimer { .. } => {
-                    // Timers become actions on the existing quantized tick. INERT:
-                    // the legacy tick timers still run, so driving these would
-                    // double-schedule.
+                PeerAction::SetTimer { kind, at_ms } => {
+                    // Populate the per-peer timer store (overwrite = reschedule).
+                    // The `HandshakeRetransmit` and `HandshakeTimeout` deadlines
+                    // are read + fired by `drive_peer_timers`. Rekey/liveness kinds
+                    // are still SHADOW here — they keep their own shell drivers —
+                    // so populating them stays behavior-neutral.
+                    self.peer_timers
+                        .entry(link)
+                        .or_default()
+                        .insert(kind, at_ms);
+                }
+                PeerAction::CancelTimer { kind } => {
+                    if let Some(timers) = self.peer_timers.get_mut(&link) {
+                        timers.remove(&kind);
+                    }
                 }
                 PeerAction::ReportLost { peer, kind } => {
                     // The single loss token, routed to the reconciler reflex the

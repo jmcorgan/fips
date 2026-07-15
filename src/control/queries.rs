@@ -1323,7 +1323,7 @@ pub fn show_connections(node: &Node) -> Value {
                 "handshake_state": format!("{}", conn.handshake_state()),
                 "started_at_ms": conn.started_at(),
                 "idle_ms": now.saturating_sub(conn.last_activity()),
-                "resend_count": conn.resend_count(),
+                "resend_count": node.connection_resend_count(conn.link_id()),
             });
 
             if let Some(identity) = conn.expected_identity() {
