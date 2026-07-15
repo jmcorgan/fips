@@ -257,6 +257,21 @@ pub(crate) enum PeerEvent {
     Tick,
 }
 
+/// Why a peer was reported lost. Selects the reconciler reflex the executor
+/// routes the `ReportLost` token to: an un-promoted handshake attempt that
+/// failed (`HandshakeTimeout`, connected-guarded like the old `schedule_retry`)
+/// versus an established peer whose link died (`LinkDead`, unconditional like
+/// the old `schedule_reconnect`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LostKind {
+    /// An outbound handshake attempt timed out or its dial failed before the
+    /// peer promoted — routes to the connected-guarded reflex.
+    HandshakeTimeout,
+    /// An established peer's link went dead or is being replaced — routes to
+    /// the unconditional reconnect reflex.
+    LinkDead,
+}
+
 /// An effect the driver executes on the machine's behalf. Runtime-agnostic
 /// plain data — no tokio handles, time only as `at_ms` fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,8 +318,9 @@ pub(crate) enum PeerAction {
     /// Cancel a scheduled timer.
     CancelTimer { kind: TimerKind },
     /// Report the peer lost to the reconciler (the single loss token — there is
-    /// deliberately no `ScheduleRetry` machine action).
-    ReportLost { peer: NodeAddr },
+    /// deliberately no `ScheduleRetry` machine action). `kind` selects the
+    /// reflex (handshake-timeout vs link-dead) the executor routes to.
+    ReportLost { peer: NodeAddr, kind: LostKind },
 }
 
 // ============================================================================
@@ -527,7 +543,13 @@ impl PeerMachine {
         }
         let mut actions = Vec::new();
         if let Some(peer) = self.addr() {
-            actions.push(PeerAction::ReportLost { peer });
+            // Dial failure on an un-promoted leg routes like a handshake timeout
+            // (the connected-guarded reflex). Dormant today — no `TransportFailed`
+            // event is dispatched until the connection-oriented cutover (C5).
+            actions.push(PeerAction::ReportLost {
+                peer,
+                kind: LostKind::HandshakeTimeout,
+            });
         }
         self.state = PeerState::Closed {
             backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
@@ -641,7 +663,12 @@ impl PeerMachine {
                 if let Some(idx) = self.our_index.take() {
                     actions.push(PeerAction::UnregisterDecryptSession { index: idx });
                 }
-                actions.push(PeerAction::ReportLost { peer });
+                // An established peer being replaced by a fresh inbound leg — the
+                // unconditional reconnect reflex (a live, cut-over producer).
+                actions.push(PeerAction::ReportLost {
+                    peer,
+                    kind: LostKind::LinkDead,
+                });
                 actions.extend(self.inbound_classify(link, &wire));
                 actions
             }
@@ -1017,7 +1044,12 @@ impl PeerMachine {
             PeerAction::TeardownConnectedUdp,
         ];
         if let Some(peer) = self.addr() {
-            actions.push(PeerAction::ReportLost { peer });
+            // An established peer whose link died — the unconditional reconnect
+            // reflex (the live liveness-reap producer).
+            actions.push(PeerAction::ReportLost {
+                peer,
+                kind: LostKind::LinkDead,
+            });
         }
         self.state = PeerState::Closed {
             backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
@@ -1088,7 +1120,13 @@ impl PeerMachine {
         for act in Fmp::new().poll_timeouts(vec![snap]) {
             match act {
                 ConnAction::ScheduleRetry { peer } => {
-                    lost.push(PeerAction::ReportLost { peer });
+                    // Handshake timeout on an un-promoted leg — the connected-
+                    // guarded reflex. Dormant today (no `Timeout` event is
+                    // dispatched until the timeout fold in C5).
+                    lost.push(PeerAction::ReportLost {
+                        peer,
+                        kind: LostKind::HandshakeTimeout,
+                    });
                 }
                 ConnAction::Teardown { .. } => {
                     if let Some(idx) = self.conn.our_index() {
@@ -1338,7 +1376,10 @@ mod tests {
             PeerAction::CancelTimer {
                 kind: TimerKind::Liveness,
             },
-            PeerAction::ReportLost { peer },
+            PeerAction::ReportLost {
+                peer,
+                kind: LostKind::LinkDead,
+            },
         ];
         for a in &sample {
             // Exhaustiveness guard: no `_` wildcard, so adding a variant without
@@ -1587,7 +1628,10 @@ mod tests {
                 PeerAction::UnregisterDecryptSession {
                     index: SessionIndex::new(0xDEAD)
                 },
-                PeerAction::ReportLost { peer: peer_addr },
+                PeerAction::ReportLost {
+                    peer: peer_addr,
+                    kind: LostKind::LinkDead,
+                },
             ]
         );
         assert!(matches!(
@@ -1988,7 +2032,10 @@ mod tests {
             vec![
                 PeerAction::InvalidateSendState,
                 PeerAction::TeardownConnectedUdp,
-                PeerAction::ReportLost { peer: addr },
+                PeerAction::ReportLost {
+                    peer: addr,
+                    kind: LostKind::LinkDead,
+                },
             ]
         );
         assert!(matches!(m.state(), PeerState::Closed { .. }));

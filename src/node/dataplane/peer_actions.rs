@@ -19,14 +19,14 @@
 //! realized as those planes are wired).
 //! `RegisterDecryptSession` is a deliberate no-op — see its arm for the note.
 
+use crate::PeerIdentity;
 use crate::node::Node;
 use crate::node::reject::{HandshakeReject, RejectReason};
-use crate::peer::machine::{PeerAction, PeerEvent};
+use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
 use crate::proto::fmp::PromotionResult;
 use crate::proto::fmp::wire::build_msg2;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
-use crate::{NodeAddr, PeerIdentity};
 use std::collections::VecDeque;
 use tracing::{debug, trace, warn};
 
@@ -449,18 +449,22 @@ impl Node {
                     // INERT — the legacy tick timers still run, so driving
                     // these would double-schedule.
                 }
-                PeerAction::ReportLost { peer } => {
-                    // The single loss token → the reconciler reflex (`driver.rs:48`).
-                    self.report_peer_lost(peer, ambient.now_ms);
+                PeerAction::ReportLost { peer, kind } => {
+                    // The single loss token, routed to the reconciler reflex the
+                    // `kind` names: an un-promoted handshake attempt takes the
+                    // connected-guarded `note_handshake_timeout` (`driver.rs:28`),
+                    // an established peer's link-death takes the unconditional
+                    // `note_link_dead` (`driver.rs:48`).
+                    match kind {
+                        LostKind::HandshakeTimeout => {
+                            self.note_handshake_timeout(peer, ambient.now_ms);
+                        }
+                        LostKind::LinkDead => {
+                            self.note_link_dead(peer, ambient.now_ms);
+                        }
+                    }
                 }
             }
         }
-    }
-
-    /// `ReportLost` → `note_link_dead` (kept as a named seam so the ambient clock
-    /// source is explicit and the reconciler-computed backoff can be threaded later).
-    #[allow(dead_code)]
-    fn report_peer_lost(&mut self, peer: NodeAddr, now_ms: u64) {
-        self.note_link_dead(peer, now_ms);
     }
 }
