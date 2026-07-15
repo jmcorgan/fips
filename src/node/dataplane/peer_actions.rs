@@ -116,7 +116,6 @@ impl Node {
         ambient: &PeerActionCtx,
         actions: Vec<PeerAction>,
     ) {
-        let _ = link;
         let mut queue: VecDeque<PeerAction> = actions.into();
         while let Some(action) = queue.pop_front() {
             match action {
@@ -525,30 +524,161 @@ impl Node {
                     // double-free.
                     self.remove_active_peer(ambient.verified_identity.node_addr());
                 }
-                PeerAction::SwapToInboundSession { .. } => {
-                    // DEFERRED: XX inbound cross-connection resolved at msg3. The
-                    // session swap (`take_session`/`replace_session`,
-                    // `peers_by_index` surgery, free the peer's OLD index — or free
-                    // `our_index` on the losing side) is written, wired, and
-                    // ci-local-validated when the inbound establish path is wired.
-                    // Unreachable now (nothing drives the machine).
-                    debug_assert!(
-                        false,
-                        "SwapToInboundSession executor body lands when inbound establish is wired"
-                    );
+                PeerAction::SwapToInboundSession {
+                    peer,
+                    our_index,
+                    our_inbound_wins,
+                } => {
+                    // Simultaneous-init cross-connection resolved at msg3 (msg2-then-
+                    // msg3 ordering): apply the same tie-breaker the inverse ordering
+                    // uses so both sides converge on a single Noise session pair.
+                    let their_index = ambient
+                        .their_index
+                        .expect("cross-connection swap carries the peer session index");
+                    if our_inbound_wins {
+                        // Larger node side: swap to the inbound session so it pairs
+                        // with the peer's kept outbound session.
+                        let inbound_session = match self
+                            .connections
+                            .get_mut(&link)
+                            .and_then(|c| c.take_session())
+                        {
+                            Some(s) => s,
+                            None => {
+                                self.connections.remove(&link);
+                                self.remove_link(&link);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
+                                return;
+                            }
+                        };
+                        if let Some(peer_ref) = self.peers.get_mut(&peer) {
+                            let old_our_index =
+                                peer_ref.replace_session(inbound_session, our_index, their_index);
+                            let Some(transport_id) = peer_ref.transport_id() else {
+                                self.connections.remove(&link);
+                                self.remove_link(&link);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
+                                return;
+                            };
+                            if let Some(old_idx) = old_our_index {
+                                self.peers_by_index
+                                    .remove(&(transport_id, old_idx.as_u32()));
+                                let _ = self.index_allocator.free(old_idx);
+                            }
+                            self.peers_by_index
+                                .insert((transport_id, our_index.as_u32()), peer);
+
+                            debug!(
+                                peer = %self.peer_display_name(&peer),
+                                new_our_index = %our_index,
+                                new_their_index = %their_index,
+                                "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
+                            );
+                        }
+                    } else {
+                        // Smaller node side: keep the existing outbound session, drop
+                        // the inbound leg's allocated index.
+                        let _ = self.index_allocator.free(our_index);
+                        debug!(
+                            peer = %self.peer_display_name(&peer),
+                            "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
+                        );
+                    }
+
+                    // Both branches tear down the temporary inbound link fully
+                    // (including its `addr_to_link` mapping) via `remove_link`.
+                    self.connections.remove(&link);
+                    self.remove_link(&link);
+                    return;
                 }
-                PeerAction::RekeyRespondTrigger { .. } => {
-                    // DEFERRED: XX rekey-responder resolved at msg3. The session
-                    // move (`abandon_rekey` + index/`peers_by_index`/
-                    // `pending_outbound` cleanup, then `take_session` +
-                    // `set_pending_session` + `record_peer_rekey` +
-                    // `peers_by_index.insert`) is written, wired, and
-                    // ci-local-validated when the inbound establish path is wired.
-                    // Unreachable now (nothing drives the machine).
-                    debug_assert!(
-                        false,
-                        "RekeyRespondTrigger executor body lands when inbound establish is wired"
+                PeerAction::RekeyRespondTrigger {
+                    peer,
+                    our_index,
+                    abandon_first,
+                } => {
+                    // Rekey-responder resolved at msg3: store the new session as
+                    // pending on the existing peer, awaiting the K-bit cutover.
+                    let their_index = ambient
+                        .their_index
+                        .expect("rekey-responder trigger carries the peer session index");
+                    if abandon_first {
+                        // We lose the dual-rekey tie-break (larger addr): abandon our
+                        // own rekey/pending and fall through as responder.
+                        // `abandon_rekey` clears both the in-progress flag and any
+                        // pending session state, returning whichever index needs
+                        // freeing.
+                        info!(
+                            peer = %self.peer_display_name(&peer),
+                            our_addr = %self.identity().node_addr(),
+                            their_addr = %peer,
+                            "rekey-msg3 tie-break: we lose (larger addr), abandon ours"
+                        );
+                        if let Some(peer_ref) = self.peers.get_mut(&peer)
+                            && let Some(idx) = peer_ref.abandon_rekey()
+                        {
+                            if let Some(tid) = peer_ref.transport_id() {
+                                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                self.pending_outbound.remove(&(tid, idx.as_u32()));
+                            }
+                            let _ = self.index_allocator.free(idx);
+                        }
+                    }
+
+                    // Rekey: process as responder, store new session as pending.
+                    let noise_session = {
+                        let Some(conn) = self.connections.get_mut(&link) else {
+                            warn!(link_id = %link, "Connection removed during rekey msg3 processing");
+                            self.links.remove(&link);
+                            self.stats_mut().record_reject(RejectReason::Handshake(
+                                HandshakeReject::UnknownConnection,
+                            ));
+                            return;
+                        };
+                        conn.take_session()
+                    };
+                    let our_new_index = our_index;
+
+                    let noise_session = match noise_session {
+                        Some(s) => s,
+                        None => {
+                            warn!("Rekey msg3: no session from handshake");
+                            self.connections.remove(&link);
+                            self.links.remove(&link);
+                            self.stats_mut()
+                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                            return;
+                        }
+                    };
+
+                    // Store pending session on the existing peer
+                    if let Some(peer_ref) = self.peers.get_mut(&peer) {
+                        peer_ref.set_pending_session(noise_session, our_new_index, their_index);
+                        peer_ref.record_peer_rekey();
+                    }
+
+                    // Register new index in peers_by_index
+                    self.peers_by_index
+                        .insert((ambient.transport_id, our_new_index.as_u32()), peer);
+
+                    // Clean up: remove the temporary connection/link. Do NOT remove
+                    // addr_to_link — the entry must remain pointing to the original
+                    // link so the established peer stays routable, so this uses the
+                    // bare `links.remove` rather than the full `remove_link`.
+                    self.connections.remove(&link);
+                    self.links.remove(&link);
+
+                    debug!(
+                        peer = %self.peer_display_name(&peer),
+                        our_addr = %self.identity().node_addr(),
+                        new_our_index = %our_new_index,
+                        new_their_index = %their_index,
+                        "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
                     );
+                    return;
                 }
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;

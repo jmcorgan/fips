@@ -241,9 +241,14 @@ pub(crate) enum PeerEvent {
     /// Inbound handshake msg3 completed (Noise finalized, identity crystallized
     /// shell-side, ACL already gated). Drives the establish classification. Used
     /// for both a fresh inbound establish and a rekey msg3 on an established peer.
+    /// `our_index` is the index allocated for this leg at msg1; it is carried on
+    /// the event so a fresh classification machine can be seeded with it before
+    /// dispatch (the cross-connection and rekey-responder decisions read it back
+    /// to build their session-swap trigger, and would otherwise emit nothing).
     InboundMsg3 {
         wire: WireOutcome,
         est: EstablishSnapshot,
+        our_index: SessionIndex,
     },
     /// Outbound handshake msg2 completed (Noise finalized, identity crystallized
     /// shell-side from the connection's expected identity, ACL already gated,
@@ -347,7 +352,7 @@ pub(crate) enum PeerAction {
     /// NodeAddr) swaps to the inbound session (`take_session`/`replace_session`,
     /// `peers_by_index` surgery, free the peer's OLD index); otherwise it frees
     /// `our_index` (the msg1-allocated leg index) and keeps the outbound session.
-    /// Either way the temporary inbound link is torn down. Provisional / unwired.
+    /// Either way the temporary inbound link is torn down.
     SwapToInboundSession {
         peer: NodeAddr,
         our_index: SessionIndex,
@@ -362,7 +367,6 @@ pub(crate) enum PeerAction {
     /// `record_peer_rekey` + `peers_by_index.insert`. `our_index` is the
     /// msg1-allocated leg index that becomes the pending session's index. On XX
     /// there is NO responder-side msg2 send here (it went out at msg1).
-    /// Provisional / unwired.
     RekeyRespondTrigger {
         peer: NodeAddr,
         our_index: SessionIndex,
@@ -603,9 +607,11 @@ impl PeerMachine {
             PeerEvent::TransportConnected => self.on_transport_connected(now),
             PeerEvent::TransportFailed => self.on_transport_failed(now),
             PeerEvent::InboundMsg1 { link } => self.on_inbound_msg1(link, now, index_allocator),
-            PeerEvent::InboundMsg3 { wire, est } => {
-                self.on_inbound_msg3(wire, est, now, index_allocator)
-            }
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index,
+            } => self.on_inbound_msg3(wire, est, our_index, now, index_allocator),
             PeerEvent::OutboundMsg2 { their_index } => self.on_outbound_msg2(their_index, now),
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::RekeyMsg2 { their_index } => self.on_rekey_msg2(their_index),
@@ -769,6 +775,7 @@ impl PeerMachine {
         &mut self,
         wire: WireOutcome,
         est: EstablishSnapshot,
+        our_index: SessionIndex,
         now: u64,
         _alloc: &mut IndexAllocator,
     ) -> Vec<PeerAction> {
@@ -776,6 +783,14 @@ impl PeerMachine {
         // address + epoch; the full static key stays shell-side).
         self.node_addr = Some(wire.peer_node_addr);
         self.remote_epoch = wire.remote_epoch;
+        // Seed the leg's index from the event. On a fresh classification machine
+        // the index was allocated at msg1 shell-side and is not otherwise known
+        // here; the cross-connection and rekey-responder decisions read it back to
+        // build their session-swap trigger, and the tie-break/duplicate arms use
+        // it to return the index. Without this seed those arms would emit nothing
+        // and leak the index.
+        self.conn.set_our_index(our_index);
+        self.our_index = Some(our_index);
 
         match Fmp::new().establish_inbound(&est, &wire) {
             InboundDecision::Reject {
@@ -784,19 +799,24 @@ impl PeerMachine {
                 // Dual-init rekey tie-break: we win (smaller NodeAddr), drop the
                 // peer's msg3 and keep driving our own rekey. The existing peer
                 // (a separate machine/registry entry) is untouched; this temporary
-                // leg is discarded. NOTE: next's `handle_msg3` Reject arm removes
-                // conn+link but does NOT free the msg1-allocated index — so no
-                // FreeIndex is emitted here, matching ground truth.
-                self.fail(FailReason::Rejected)
+                // leg is discarded, returning the msg1-allocated index rather than
+                // orphaning it, then terminating this leg.
+                let actions = vec![PeerAction::FreeIndex { index: our_index }];
+                let _ = self.fail(FailReason::Rejected);
+                actions
             }
             InboundDecision::ResendMsg2 { msg2 } => {
-                // Same-epoch duplicate: resend the existing peer's stored msg2,
-                // leaving the active peer untouched. NOTE: next's `handle_msg3`
-                // ResendMsg2 arm likewise does NOT free the msg1-allocated index.
-                match msg2 {
-                    Some(bytes) => vec![PeerAction::SendHandshake { bytes }],
-                    None => Vec::new(),
+                // Same-epoch duplicate: resend the existing peer's stored msg2 (if
+                // any), leaving the active peer untouched, return the msg1-allocated
+                // index, then terminate this leg so a later timeout on a persistent
+                // machine cannot fire against the healthy established peer.
+                let mut actions = Vec::new();
+                if let Some(bytes) = msg2 {
+                    actions.push(PeerAction::SendHandshake { bytes });
                 }
+                actions.push(PeerAction::FreeIndex { index: our_index });
+                let _ = self.fail(FailReason::Rejected);
+                actions
             }
             InboundDecision::CrossConnect {
                 peer,
@@ -1759,9 +1779,23 @@ mod tests {
             est.rekey_in_progress = true;
             let wire = wire_outcome(peer_addr, Some([1u8; 8]));
 
-            let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
-            // We win the tie-break: drop the peer's msg3, no response, no free.
-            assert!(actions.is_empty());
+            let actions = m.step(
+                PeerEvent::InboundMsg3 {
+                    wire,
+                    est,
+                    our_index: SessionIndex::new(0x55),
+                },
+                1_000,
+                &mut alloc,
+            );
+            // We win the tie-break: drop the peer's msg3 and return the
+            // msg1-allocated index, then terminate this leg.
+            assert_eq!(
+                actions,
+                vec![PeerAction::FreeIndex {
+                    index: SessionIndex::new(0x55)
+                }]
+            );
             assert_eq!(
                 m.state(),
                 PeerState::Failed {
@@ -1793,7 +1827,15 @@ mod tests {
             est.rekey_in_progress = true;
             let wire = wire_outcome(peer_addr, Some([1u8; 8]));
 
-            let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
+            let actions = m.step(
+                PeerEvent::InboundMsg3 {
+                    wire,
+                    est,
+                    our_index: SessionIndex::new(0x55),
+                },
+                1_000,
+                &mut alloc,
+            );
             // We lose: emit the rekey-respond trigger with abandon_first=true and
             // the msg1-allocated index. The session/registry surgery is the
             // executor's; the machine emits ONLY the plain-data trigger (no
@@ -1845,7 +1887,16 @@ mod tests {
         est.existing_peer_epoch = Some([1u8; 8]); // old
         let wire = wire_outcome(peer_addr, Some([2u8; 8])); // new epoch
 
-        let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
+        let our_index = m.our_index().unwrap();
+        let actions = m.step(
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index,
+            },
+            1_000,
+            &mut alloc,
+        );
         assert_eq!(
             actions,
             vec![
@@ -1893,10 +1944,12 @@ mod tests {
             100,
             &mut alloc,
         );
+        let winner_index = winner.our_index().unwrap();
         let wp = winner.step(
             PeerEvent::InboundMsg3 {
                 wire: wire_outcome(peer_addr, Some([3u8; 8])),
                 est: est_new_peer(our),
+                our_index: winner_index,
             },
             100,
             &mut alloc,
@@ -1930,10 +1983,12 @@ mod tests {
             100,
             &mut alloc,
         );
+        let loser_index_seed = loser.our_index().unwrap();
         let lp = loser.step(
             PeerEvent::InboundMsg3 {
                 wire: wire_outcome(peer_addr, Some([3u8; 8])),
                 est: est_new_peer(our),
+                our_index: loser_index_seed,
             },
             100,
             &mut alloc,
@@ -2004,10 +2059,12 @@ mod tests {
 
         // msg3: net-new promote.
         let our = *peer_identity().node_addr();
+        let our_index = m.our_index().unwrap();
         let msg3 = m.step(
             PeerEvent::InboundMsg3 {
                 wire: wire_outcome(peer_addr, Some([4u8; 8])),
                 est: est_new_peer(our),
+                our_index,
             },
             200,
             &mut alloc,
@@ -2091,7 +2148,15 @@ mod tests {
         est.existing_session_age_secs = 10; // < floor(60) -> cross-connection
         let wire = wire_outcome(peer_addr, Some([5u8; 8]));
 
-        let actions = m.step(PeerEvent::InboundMsg3 { wire, est }, 200, &mut alloc);
+        let actions = m.step(
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index,
+            },
+            200,
+            &mut alloc,
+        );
         assert_eq!(
             actions,
             vec![PeerAction::SwapToInboundSession {
@@ -2099,6 +2164,147 @@ mod tests {
                 our_index,
                 our_inbound_wins: true,
             }]
+        );
+    }
+
+    // ---- Test 7a: cross-connection index seeded ONLY from the event -------
+    // A fresh classification machine (no msg1 step, so `conn.our_index()` is
+    // None) must still emit a NON-EMPTY `SwapToInboundSession` carrying the index
+    // carried on the event. Without the event-seed the cross-connection arm reads
+    // a None index and emits nothing — a silent session-swap no-op that leaks the
+    // index. This guards that the seed closes that hole.
+    #[test]
+    fn cross_connect_index_seeded_from_event() {
+        let (smaller, larger) = ordered_identities();
+        let our = *larger.node_addr();
+        let peer_addr = *smaller.node_addr();
+
+        let mut alloc = IndexAllocator::new();
+        // Fresh machine, deliberately NOT stepped through msg1 — the only index
+        // provenance is the event field.
+        let mut m = PeerMachine::new_inbound(LinkId::new(3), 0);
+        assert_eq!(m.our_index(), None);
+        let seed = SessionIndex::new(0xAB);
+
+        let mut est = est_new_peer(our);
+        est.has_existing_peer = true;
+        est.existing_peer_epoch = Some([5u8; 8]);
+        est.has_session = true;
+        est.is_healthy = true;
+        est.different_link = true;
+        est.existing_session_age_secs = 10; // < floor(60) -> cross-connection
+        let wire = wire_outcome(peer_addr, Some([5u8; 8]));
+
+        let actions = m.step(
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index: seed,
+            },
+            200,
+            &mut alloc,
+        );
+        assert_eq!(
+            actions,
+            vec![PeerAction::SwapToInboundSession {
+                peer: peer_addr,
+                our_index: seed,
+                our_inbound_wins: true,
+            }]
+        );
+    }
+
+    // ---- Test 7d: rekey-responder index seeded ONLY from the event -------
+    // The rekey-responder counterpart of Test 7a: a fresh machine seeded only via
+    // the event emits a NON-EMPTY `RekeyRespondTrigger` carrying that index (the
+    // pending session's index), rather than the empty no-op an unseeded index
+    // would produce.
+    #[test]
+    fn rekey_respond_index_seeded_from_event() {
+        let peer = peer_identity();
+        let peer_addr = *peer.node_addr();
+        let our = *peer_identity().node_addr();
+
+        let mut alloc = IndexAllocator::new();
+        let mut m = PeerMachine::new_inbound(LinkId::new(4), 0);
+        assert_eq!(m.our_index(), None);
+        let seed = SessionIndex::new(0xCD);
+
+        // Aged, healthy session, same epoch, same link, no rekey in progress ->
+        // plain rekey responder (abandon_first: false).
+        let mut est = est_new_peer(our);
+        est.has_existing_peer = true;
+        est.existing_peer_epoch = Some([7u8; 8]);
+        est.has_session = true;
+        est.is_healthy = true;
+        est.existing_session_age_secs = 120; // >= floor -> rekey path
+        let wire = wire_outcome(peer_addr, Some([7u8; 8]));
+
+        let actions = m.step(
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index: seed,
+            },
+            200,
+            &mut alloc,
+        );
+        assert_eq!(
+            actions,
+            vec![PeerAction::RekeyRespondTrigger {
+                peer: peer_addr,
+                our_index: seed,
+                abandon_first: false,
+            }]
+        );
+    }
+
+    // ---- Test 7e: same-epoch duplicate frees the index and terminates -----
+    // A same-epoch duplicate handshake (no cross-connection, no rekey) resends the
+    // stored msg2, returns the msg1-allocated index, and terminates the leg. The
+    // terminal transition matters: a persistent machine parked here would keep its
+    // handshake-timeout armed and later free the index + report loss against the
+    // healthy established peer.
+    #[test]
+    fn resend_msg2_frees_index_and_terminates() {
+        let peer = peer_identity();
+        let peer_addr = *peer.node_addr();
+        let our = *peer_identity().node_addr();
+
+        let mut alloc = IndexAllocator::new();
+        let mut m = PeerMachine::new_inbound(LinkId::new(5), 0);
+        let seed = SessionIndex::new(0xEF);
+        let stored_msg2 = vec![1u8, 2, 3, 4];
+
+        // Same epoch, same link, rekey disabled -> duplicate handshake.
+        let mut est = est_new_peer(our);
+        est.has_existing_peer = true;
+        est.existing_peer_epoch = Some([9u8; 8]);
+        est.rekey_enabled = false;
+        est.existing_msg2 = Some(stored_msg2.clone());
+        let wire = wire_outcome(peer_addr, Some([9u8; 8]));
+
+        let actions = m.step(
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index: seed,
+            },
+            200,
+            &mut alloc,
+        );
+        assert_eq!(
+            actions,
+            vec![
+                PeerAction::SendHandshake { bytes: stored_msg2 },
+                PeerAction::FreeIndex { index: seed },
+            ]
+        );
+        assert_eq!(
+            m.state(),
+            PeerState::Failed {
+                reason: FailReason::Rejected
+            }
         );
     }
 
@@ -2163,13 +2369,22 @@ mod tests {
         assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
         assert_eq!(m.our_index(), None);
 
-        // A subsequent inbound restart (peer restart, new epoch) must NOT emit
-        // UnregisterDecryptSession, because our_index is None.
+        // A subsequent inbound restart (peer restart, new epoch) must NOT emit a
+        // separate UnregisterDecryptSession: the restart teardown is the full
+        // InvalidateSendState (remove_active_peer), which owns the index cleanup.
         let mut est = est_new_peer(our);
         est.has_existing_peer = true;
         est.existing_peer_epoch = Some([1u8; 8]);
         let wire = wire_outcome(peer_addr, Some([2u8; 8]));
-        let restart = m.step(PeerEvent::InboundMsg3 { wire, est }, 1_000, &mut alloc);
+        let restart = m.step(
+            PeerEvent::InboundMsg3 {
+                wire,
+                est,
+                our_index: SessionIndex::new(0x99),
+            },
+            1_000,
+            &mut alloc,
+        );
         assert!(
             !restart
                 .iter()

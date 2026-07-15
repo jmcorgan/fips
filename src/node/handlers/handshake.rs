@@ -1157,177 +1157,41 @@ impl Node {
                 self.links.remove(&link_id);
                 return;
             }
-            InboundDecision::CrossConnect {
-                peer,
-                our_inbound_wins,
-            } => {
-                debug_assert_eq!(peer, peer_node_addr);
-                // Simultaneous-init cross-connection (msg2-then-msg3 ordering):
-                // apply the same tie-breaker handle_msg2 uses for the inverse
-                // ordering so both sides converge on a single Noise session pair.
-                if our_inbound_wins {
-                    // Larger node side: swap to the inbound session so it pairs
-                    // with the peer's kept outbound session.
-                    let inbound_session = match self
-                        .connections
-                        .get_mut(&link_id)
-                        .and_then(|c| c.take_session())
-                    {
-                        Some(s) => s,
-                        None => {
-                            self.connections.remove(&link_id);
-                            self.remove_link(&link_id);
-                            self.stats_mut()
-                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                            return;
-                        }
-                    };
-                    if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                        let old_our_index =
-                            peer.replace_session(inbound_session, our_index, header.sender_idx);
-                        let Some(transport_id) = peer.transport_id() else {
-                            self.connections.remove(&link_id);
-                            self.remove_link(&link_id);
-                            self.stats_mut()
-                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                            return;
-                        };
-                        if let Some(old_idx) = old_our_index {
-                            self.peers_by_index
-                                .remove(&(transport_id, old_idx.as_u32()));
-                            let _ = self.index_allocator.free(old_idx);
-                        }
-                        self.peers_by_index
-                            .insert((transport_id, our_index.as_u32()), peer_node_addr);
-
-                        debug!(
-                            peer = %self.peer_display_name(&peer_node_addr),
-                            new_our_index = %our_index,
-                            new_their_index = %header.sender_idx,
-                            "Simultaneous-init (msg3): swapped to inbound session (our inbound wins)"
-                        );
-                    }
-                } else {
-                    // Smaller node side: keep the existing outbound session, drop
-                    // the inbound's allocated index.
-                    let _ = self.index_allocator.free(our_index);
-                    debug!(
-                        peer = %self.peer_display_name(&peer_node_addr),
-                        "Simultaneous-init (msg3): keeping outbound session (our outbound wins)"
-                    );
-                }
-
-                self.connections.remove(&link_id);
-                self.remove_link(&link_id);
-                return;
-            }
-            InboundDecision::RekeyRespond {
-                peer,
-                abandon_first,
-            } => {
-                debug_assert_eq!(peer, peer_node_addr);
-                if abandon_first {
-                    // We lose — abandon our rekey/pending, fall through as
-                    // responder. abandon_rekey clears both rekey_in_progress and
-                    // any pending session state, returning whichever index needs
-                    // freeing.
-                    info!(
-                        peer = %self.peer_display_name(&peer_node_addr),
-                        our_addr = %our_node_addr,
-                        their_addr = %peer_node_addr,
-                        rekey_in_progress = snap.rekey_in_progress,
-                        pending_new_session = snap.pending_new_session,
-                        "rekey-msg3 tie-break: we lose (larger addr), abandon ours"
-                    );
-                    if let Some(peer) = self.peers.get_mut(&peer_node_addr)
-                        && let Some(idx) = peer.abandon_rekey()
-                    {
-                        if let Some(tid) = peer.transport_id() {
-                            self.peers_by_index.remove(&(tid, idx.as_u32()));
-                            self.pending_outbound.remove(&(tid, idx.as_u32()));
-                        }
-                        let _ = self.index_allocator.free(idx);
-                    }
-                }
-
-                // Rekey: process as responder, store new session as pending.
-                let noise_session = {
-                    let Some(conn) = self.connections.get_mut(&link_id) else {
-                        warn!(link_id = %link_id, "Connection removed during rekey msg3 processing");
-                        self.links.remove(&link_id);
-                        self.stats_mut().record_reject(RejectReason::Handshake(
-                            HandshakeReject::UnknownConnection,
-                        ));
-                        return;
-                    };
-                    conn.take_session()
-                };
-                let our_new_index = our_index;
-
-                let noise_session = match noise_session {
-                    Some(s) => s,
-                    None => {
-                        warn!("Rekey msg3: no session from handshake");
-                        self.connections.remove(&link_id);
-                        self.links.remove(&link_id);
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                        return;
-                    }
-                };
-
-                // Store pending session on the existing peer
-                if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                    peer.set_pending_session(noise_session, our_new_index, header.sender_idx);
-                    peer.record_peer_rekey();
-                }
-
-                // Register new index in peers_by_index
-                self.peers_by_index.insert(
-                    (packet.transport_id, our_new_index.as_u32()),
-                    peer_node_addr,
-                );
-
-                // Clean up: remove the temporary connection/link.
-                // Do NOT remove addr_to_link — the entry must remain pointing
-                // to the original link.
-                self.connections.remove(&link_id);
-                self.links.remove(&link_id);
-
-                debug!(
-                    peer = %self.peer_display_name(&peer_node_addr),
-                    our_addr = %self.identity().node_addr(),
-                    new_our_index = %our_new_index,
-                    new_their_index = %header.sender_idx,
-                    "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
-                );
-                return;
-            }
-            decision @ (InboundDecision::RestartThenPromote { .. } | InboundDecision::Promote) => {
-                // Preserve next's epoch-mismatch restart breadcrumb — fires before
-                // the machine's teardown actions run, matching next's inline order
-                // (breadcrumb → remove_active_peer → note_link_dead → promote).
+            decision @ (InboundDecision::RestartThenPromote { .. }
+            | InboundDecision::Promote
+            | InboundDecision::CrossConnect { .. }
+            | InboundDecision::RekeyRespond { .. }) => {
+                // Preserve the epoch-mismatch restart breadcrumb — it fires before
+                // the machine's teardown actions run, matching the pre-refactor
+                // order (breadcrumb → remove_active_peer → note_link_dead → promote).
                 if let InboundDecision::RestartThenPromote { peer } = &decision {
                     debug!(
                         peer = %self.peer_display_name(peer),
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
                 }
-                // Machine-driven establish promote. A TRANSIENT inbound machine
-                // re-derives the decision and emits the action stream:
-                // `[PromoteToActive]` for `Promote`, or `[InvalidateSendState,
-                // ReportLost, PromoteToActive]` for `RestartThenPromote` (whose two
-                // teardown actions map to `remove_active_peer` / `note_link_dead`,
-                // in that order — the same order next ran them inline). The transient
-                // is never inserted into `peer_machines`; the persistent
-                // `established()` machine is created inside `promote_connection`,
-                // so there is no double-insert. The relocated promote body,
-                // and the `RestartThenPromote` teardown ordering equivalence, live in
-                // the executor's `PromoteToActive` / `InvalidateSendState` /
-                // `ReportLost` arms.
+                // Machine-driven inbound establish/rekey resolution. A TRANSIENT
+                // inbound machine, seeded with the msg1-allocated index, re-derives
+                // the decision from the same snapshot and emits the action stream:
+                //   `[PromoteToActive]` for `Promote`;
+                //   `[InvalidateSendState, ReportLost, PromoteToActive]` for
+                //     `RestartThenPromote` (the two teardown actions map to
+                //     `remove_active_peer` / `note_link_dead`, in that order);
+                //   `[SwapToInboundSession]` for a simultaneous-init cross-connection;
+                //   `[RekeyRespondTrigger]` for a rekey-responder tie-break.
+                // The transient is never inserted into `peer_machines`; the
+                // persistent `established()` machine is created inside
+                // `promote_connection`, so there is no double-insert. The relocated
+                // session-swap / promote / teardown bodies live in the executor's
+                // `SwapToInboundSession` / `RekeyRespondTrigger` / `PromoteToActive`
+                // / `InvalidateSendState` / `ReportLost` arms.
                 let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
                 let actions = machine.step(
-                    PeerEvent::InboundMsg3 { wire, est: snap },
+                    PeerEvent::InboundMsg3 {
+                        wire,
+                        est: snap,
+                        our_index,
+                    },
                     packet.timestamp_ms,
                     &mut self.index_allocator,
                 );
