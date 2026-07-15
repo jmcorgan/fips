@@ -446,6 +446,36 @@ impl PeerMachine {
         self.our_index
     }
 
+    /// The msg1 resend count for this outbound handshake leg. The per-peer
+    /// machine is the home for this counter — the timer driver advances it via
+    /// [`record_resend`](Self::record_resend) on each successful resend, and the
+    /// control-socket connection snapshot reads it here so the operator-visible
+    /// count follows the machine rather than the (now inert) shell connection.
+    pub(crate) fn resend_count(&self) -> u32 {
+        self.conn.resend_count()
+    }
+
+    /// Record a successful msg1 resend: advance the count and store the next
+    /// backoff deadline. The driver calls this only after the resend actually
+    /// went out (record-on-success — a failed send neither advances the count
+    /// nor reschedules), matching the pre-fold shell semantics.
+    pub(crate) fn record_resend(&mut self, next_resend_at_ms: u64) {
+        self.conn.record_resend(next_resend_at_ms);
+    }
+
+    /// Whether this is an outbound leg parked at `SentMsg1` — the only state in
+    /// which a msg1 resend is due. Mirrors `on_handshake_retransmit`'s guard so
+    /// the shell timer driver can gate without reaching into machine state.
+    pub(crate) fn is_handshaking_sent_msg1(&self) -> bool {
+        matches!(
+            self.state,
+            PeerState::Handshaking {
+                phase: HandshakePhase::SentMsg1,
+                ..
+            }
+        )
+    }
+
     /// The crystallized node address, if identity is known.
     fn addr(&self) -> Option<NodeAddr> {
         self.identity.map(|id| *id.node_addr())

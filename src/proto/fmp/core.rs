@@ -328,13 +328,6 @@ pub(crate) trait LifecycleView {
     /// timeout/failed predicate; the core decides retry-then-teardown.
     fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot>;
 
-    /// Snapshot every outbound connection whose stored msg1 is due for a
-    /// resend as of `now_ms` and still under `max_resends`. The shell resolves
-    /// the "outbound, in `SentMsg1`, has stored msg1, under budget, past the
-    /// scheduled time" predicate and copies the opaque msg1 bytes; the core
-    /// computes the backoff schedule.
-    fn resend_candidates(&self, now_ms: u64, max_resends: u32) -> Vec<ConnSnapshot>;
-
     /// Snapshot every active peer with a session that is healthy, pre-computing
     /// its rekey-relevant ages and timer predicates (see [`PeerSnapshot`]). The
     /// shell resolves every clock read here; the core applies the thresholds.

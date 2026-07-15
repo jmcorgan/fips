@@ -858,28 +858,48 @@ async fn test_resend_scheduling() {
     );
     node.links.insert(link_id, link);
     node.addr_to_link
-        .insert((transport_id, remote_addr), link_id);
+        .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
     node.connections.insert(link_id, conn);
 
-    // Before resend time: nothing should happen (no transport = can't send,
-    // but the filter should exclude it because now < next_resend_at)
-    node.resend_pending_handshakes(now_ms + 500).await;
-    let conn = node.connections.get(&link_id).unwrap();
-    assert_eq!(conn.resend_count(), 0, "No resend before scheduled time");
+    // The msg1-resend counter and its due timer live on the per-peer machine.
+    // Dial it to `SentMsg1` (connectionless: no connect step) and arm its
+    // retransmit timer at now + 1000ms, mirroring what a real dial arms.
+    let mut machine =
+        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms);
+    let _ = machine.step(
+        crate::peer::machine::PeerEvent::Dial {
+            transport_id,
+            remote_addr: remote_addr.clone(),
+            peer_identity,
+            connection_oriented: false,
+        },
+        now_ms,
+        &mut node.index_allocator,
+    );
+    node.peer_machines.insert(link_id, machine);
+    node.peer_timers.entry(link_id).or_default().insert(
+        crate::peer::machine::TimerKind::HandshakeRetransmit,
+        now_ms + 1000,
+    );
 
-    // At resend time: would resend if transport existed. Without transport,
-    // the send fails silently and resend_count stays at 0.
-    // This tests the filtering logic — the connection IS a candidate.
-    node.resend_pending_handshakes(now_ms + 1000).await;
-    // No transport registered, so send fails — count stays 0.
-    // That's the expected behavior (transport absence is a transient condition).
-    let conn = node.connections.get(&link_id).unwrap();
+    // Before the scheduled time the timer isn't due, so nothing fires.
+    node.drive_peer_timers(now_ms + 500).await;
     assert_eq!(
-        conn.resend_count(),
+        node.connection_resend_count(link_id),
         0,
-        "No transport means no resend recorded"
+        "No resend before scheduled time"
+    );
+
+    // At the scheduled time the timer is due, but no transport is registered so
+    // the send fails. Record-on-success: the count does NOT advance (and the
+    // connection is not marked failed) — a failed resend just retries next tick.
+    node.drive_peer_timers(now_ms + 1000).await;
+    assert_eq!(
+        node.connection_resend_count(link_id),
+        0,
+        "Failed send records no resend"
     );
 }
 

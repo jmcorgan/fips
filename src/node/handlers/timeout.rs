@@ -2,7 +2,7 @@
 //! and handshake message resend scheduling.
 
 use crate::node::Node;
-use crate::peer::HandshakeState;
+use crate::peer::machine::TimerKind;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
 };
@@ -20,28 +20,6 @@ impl LifecycleView for Node {
                 retry_addr: conn.expected_identity().map(|id| *id.node_addr()),
                 resend_count: 0,
                 msg1: Vec::new(),
-            })
-            .collect()
-    }
-
-    fn resend_candidates(&self, now_ms: u64, max_resends: u32) -> Vec<ConnSnapshot> {
-        self.connections
-            .iter()
-            .filter(|(_, conn)| {
-                conn.is_outbound()
-                    && conn.handshake_state() == HandshakeState::SentMsg1
-                    && conn.resend_count() < max_resends
-                    && conn.next_resend_at_ms() > 0
-                    && now_ms >= conn.next_resend_at_ms()
-            })
-            .filter_map(|(link_id, conn)| {
-                conn.handshake_msg1().map(|msg1| ConnSnapshot {
-                    link: *link_id,
-                    is_outbound: true,
-                    retry_addr: None,
-                    resend_count: conn.resend_count(),
-                    msg1: msg1.to_vec(),
-                })
             })
             .collect()
     }
@@ -137,12 +115,26 @@ impl Node {
         }
     }
 
-    /// Resend handshake messages for pending connections.
+    /// Drive the per-peer machine timers that have come due on this tick.
     ///
-    /// For outbound connections in SentMsg1 state, resends the stored msg1
-    /// with exponential backoff. Called periodically from the RX event loop.
-    pub(in crate::node) async fn resend_pending_handshakes(&mut self, now_ms: u64) {
-        if self.connections.is_empty() {
+    /// The sans-IO machine arms `SetTimer`/`CancelTimer` actions into
+    /// [`peer_timers`](Node::peer_timers); this is the shell driver that fires
+    /// the due ones. At this rung only the msg1-retransmit timer is driven (the
+    /// handshake-timeout timer stays on the legacy [`check_timeouts`](Self::check_timeouts)
+    /// path until the next fold); the rekey/liveness kinds keep their own shell
+    /// drivers, so this deliberately kind-filters to `HandshakeRetransmit`.
+    ///
+    /// Retransmit is the pre-fold `resend_pending_handshakes` logic, re-homed:
+    /// the *due* signal is now the machine-armed timer (not the connection's
+    /// `next_resend_at_ms`), and the resend counter lives on the machine (the
+    /// operator-visible count reads from there). The wire bytes and transport
+    /// target still come from the shell connection, the pure core computes the
+    /// backoff schedule, and — matching the old shell exactly — the count and
+    /// reschedule advance only on a successful send; a failed send neither
+    /// advances the count nor marks the connection failed, it just retries next
+    /// tick.
+    pub(in crate::node) async fn drive_peer_timers(&mut self, now_ms: u64) {
+        if self.peer_timers.is_empty() {
             return;
         }
 
@@ -150,9 +142,64 @@ impl Node {
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
         let backoff = self.config().node.rate_limit.handshake_resend_backoff;
 
-        // The shell resolves the resend-candidate predicate and copies the
-        // opaque msg1 bytes; the core computes the backoff schedule.
-        let candidates = self.resend_candidates(now_ms, max_resends);
+        // Collect due retransmit timers (kind-filtered).
+        let due: Vec<LinkId> = self
+            .peer_timers
+            .iter()
+            .filter(|(_, timers)| {
+                timers
+                    .get(&TimerKind::HandshakeRetransmit)
+                    .is_some_and(|&at_ms| now_ms >= at_ms)
+            })
+            .map(|(link, _)| *link)
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+
+        // Classify each due link against the machine + connection. A timer whose
+        // machine has left `SentMsg1` (promoted/gone) or has hit the resend cap
+        // is dropped — no more resends, exactly as the old shell stopped
+        // selecting a capped/settled connection; the handshake-timeout reaper
+        // takes it from there.
+        let mut candidates: Vec<ConnSnapshot> = Vec::new();
+        let mut drop_timers: Vec<LinkId> = Vec::new();
+        for link in due {
+            let armed = match self.peer_machines.get(&link) {
+                Some(machine)
+                    if machine.is_handshaking_sent_msg1()
+                        && machine.resend_count() < max_resends =>
+                {
+                    machine.resend_count()
+                }
+                Some(_) => {
+                    drop_timers.push(link);
+                    continue;
+                }
+                None => {
+                    drop_timers.push(link);
+                    continue;
+                }
+            };
+            match self.connections.get(&link).and_then(|c| c.handshake_msg1()) {
+                // Armed but the stored wire isn't there yet — leave the timer and
+                // retry next tick (matches the old candidate filter skipping it).
+                None => continue,
+                Some(msg1) => candidates.push(ConnSnapshot {
+                    link,
+                    is_outbound: true,
+                    retry_addr: None,
+                    resend_count: armed,
+                    msg1: msg1.to_vec(),
+                }),
+            }
+        }
+        for link in drop_timers {
+            if let Some(timers) = self.peer_timers.get_mut(&link) {
+                timers.remove(&TimerKind::HandshakeRetransmit);
+            }
+        }
+
         for action in self
             .fmp
             .poll_resends(candidates, now_ms, interval_ms, backoff)
@@ -166,7 +213,6 @@ impl Node {
                 continue;
             };
 
-            // Get transport and address info from the connection
             let (transport_id, remote_addr) = match self.connections.get(&link) {
                 Some(conn) => match (conn.transport_id(), conn.source_addr()) {
                     (Some(tid), Some(addr)) => (tid, addr.clone()),
@@ -175,7 +221,6 @@ impl Node {
                 None => continue,
             };
 
-            // Send the stored msg1
             let sent = if let Some(transport) = self.transports.get(&transport_id) {
                 match transport.send(&remote_addr, &bytes).await {
                     Ok(_) => true,
@@ -192,13 +237,26 @@ impl Node {
                 false
             };
 
-            if sent && let Some(conn) = self.connections.get_mut(&link) {
-                conn.record_resend(next_resend_at_ms);
-                debug!(
-                    link_id = %link,
-                    resend = conn.resend_count(),
-                    "Resent handshake msg1"
-                );
+            if sent {
+                if let Some(machine) = self.peer_machines.get_mut(&link) {
+                    machine.record_resend(next_resend_at_ms);
+                    debug!(
+                        link_id = %link,
+                        resend = machine.resend_count(),
+                        "Resent handshake msg1"
+                    );
+                }
+                self.peer_timers
+                    .entry(link)
+                    .or_default()
+                    .insert(TimerKind::HandshakeRetransmit, next_resend_at_ms);
+            } else {
+                // Failed send: keep retrying at the tick cadence (the old shell
+                // left next_resend_at_ms unchanged so the connection stayed due).
+                self.peer_timers
+                    .entry(link)
+                    .or_default()
+                    .insert(TimerKind::HandshakeRetransmit, now_ms);
             }
         }
     }

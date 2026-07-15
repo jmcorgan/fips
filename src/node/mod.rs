@@ -1984,7 +1984,7 @@ impl Node {
                 handshake_state: format!("{}", conn.handshake_state()),
                 started_at_ms: conn.started_at(),
                 last_activity_ms: conn.last_activity(),
-                resend_count: conn.resend_count(),
+                resend_count: self.connection_resend_count(conn.link_id()),
                 expected_peer: conn.expected_identity().map(|id| id.npub()),
             })
             .collect();
@@ -2266,6 +2266,17 @@ impl Node {
     pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
         self.peer_machines.remove(&link);
         self.peer_timers.remove(&link);
+    }
+
+    /// Operator-visible msg1 resend count for a pending handshake `link`, read
+    /// from the per-peer machine (the counter's home once the resend drive moved
+    /// off the shell connection). Machine-less connections (inbound legs that
+    /// never resend, and test-created connections) report 0, matching what the
+    /// shell connection reported before the counter moved.
+    pub(crate) fn connection_resend_count(&self, link: LinkId) -> u32 {
+        self.peer_machines
+            .get(&link)
+            .map_or(0, |machine| machine.resend_count())
     }
 
     pub(crate) fn cleanup_bootstrap_transport_if_unused(&mut self, transport_id: TransportId) {

@@ -21,11 +21,11 @@
 //! link-control frames, and the connected-UDP plane. `RegisterDecryptSession` is
 //! a deliberate no-op — see its arm for the note.
 //!
-//! The timer arms (`SetTimer`/`CancelTimer`) are wired to populate/clear the
-//! per-peer timer store (`peer_timers`), but that store is a SHADOW: the legacy
-//! tick (`check_timeouts`/`resend_pending_handshakes`) still does all real timer
-//! work and no `PeerEvent::Timeout` is fed, so the arms are behavior-neutral
-//! until the handshake-kind driver fold cuts the legacy paths over.
+//! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
+//! store (`peer_timers`). The `HandshakeRetransmit` deadline is read and fired
+//! by `drive_peer_timers` (the msg1-resend home). The `HandshakeTimeout` and
+//! rekey/liveness kinds are still SHADOW — driven by the legacy `check_timeouts`
+//! / rekey shell drivers — so populating them stays behavior-neutral.
 
 use crate::PeerIdentity;
 use crate::node::Node;
@@ -500,13 +500,12 @@ impl Node {
                     // Connected-UDP plane ownership (`connected_udp.rs`).
                 }
                 PeerAction::SetTimer { kind, at_ms } => {
-                    // Populate the driver's per-peer timer store (overwrite =
-                    // reschedule). SHADOW ONLY at this rung: the legacy tick
-                    // (`check_timeouts`/`resend_pending_handshakes`) still does
-                    // all real work, and no `PeerEvent::Timeout` is fed yet, so
-                    // this is behavior-neutral. The handshake-kind fold (C5-2b/c)
-                    // adds the driver that reads this store and deletes the
-                    // overlapping legacy paths.
+                    // Populate the per-peer timer store (overwrite = reschedule).
+                    // The `HandshakeRetransmit` deadline is now read + fired by
+                    // `drive_peer_timers` (the msg1-resend home). Other kinds are
+                    // still SHADOW here — `HandshakeTimeout` is driven by the
+                    // legacy `check_timeouts`, and rekey/liveness keep their own
+                    // shell drivers — so populating them stays behavior-neutral.
                     self.peer_timers
                         .entry(link)
                         .or_default()
