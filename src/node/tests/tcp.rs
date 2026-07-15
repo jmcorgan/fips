@@ -286,3 +286,113 @@ async fn test_tcp_reconnection_after_link_death() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// Connection-oriented outbound connect succeeds on loopback and reaches the
+/// handshake.
+///
+/// `initiate_connection` opens a real non-blocking TCP connect to a live
+/// listener (node 1's `TcpTransport`) and queues a `PendingConnect`;
+/// `poll_pending_connects` promotes the resolved connection to `Connected` and
+/// runs `start_handshake`. The observable is `pending_outbound`: `start_handshake`
+/// → `prepare_outbound_msg1` tracks the dispatched msg1 there (keyed by the
+/// allocated session index), which is empty until the connect resolves.
+#[tokio::test]
+async fn test_tcp_oriented_connect_success_reaches_handshake() {
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+
+    // Target: node 1's live TCP listener + its verified identity.
+    let target_addr = nodes[1].addr.clone();
+    let target_identity = PeerIdentity::from_pubkey_full(nodes[1].node.identity().pubkey_full());
+    let transport_id = nodes[0].transport_id;
+
+    // Kick off the non-blocking oriented connect.
+    nodes[0]
+        .node
+        .initiate_connection(transport_id, target_addr, target_identity)
+        .await
+        .expect("initiate_connection should queue a pending connect");
+
+    // One pending connect queued, no msg1 dispatched yet.
+    assert_eq!(nodes[0].node.peering.pending_connects.len(), 1);
+    assert!(nodes[0].node.pending_outbound.is_empty());
+
+    // Drive the tick-side poll until the background connect resolves.
+    for _ in 0..100 {
+        nodes[0].node.poll_pending_connects().await;
+        if nodes[0].node.peering.pending_connects.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        nodes[0].node.peering.pending_connects.is_empty(),
+        "connect should have resolved"
+    );
+    // Reaching start_handshake -> prepare_outbound_msg1 tracks the outbound msg1
+    // in pending_outbound: proof the connect-success path dispatched the handshake.
+    assert_eq!(
+        nodes[0].node.pending_outbound.len(),
+        1,
+        "connect-success path should have reached start_handshake and dispatched msg1"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Connection-oriented outbound connect to a closed port fails and tears down
+/// the link.
+///
+/// The dial targets a guaranteed-closed loopback port (bind then drop the
+/// listener). `initiate_connection` is non-blocking, so it still queues a
+/// `PendingConnect` and a `Connecting` link; `poll_pending_connects` observes the
+/// background task's `Failed` result and routes through the failure arm
+/// (`remove_link` + `note_handshake_timeout`). The observable is the removed link
+/// and the absent `pending_outbound` entry — the failure path never reaches
+/// `start_handshake`.
+#[tokio::test]
+async fn test_tcp_oriented_connect_failure_tears_down_link() {
+    let mut nodes = vec![make_test_node_tcp().await];
+
+    // A guaranteed-closed loopback port: bind to grab a port, then drop it.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_addr = closed.local_addr().unwrap();
+    drop(closed);
+    let target_addr = TransportAddr::from_string(&closed_addr.to_string());
+    let target_identity = make_peer_identity();
+    let transport_id = nodes[0].transport_id;
+
+    nodes[0]
+        .node
+        .initiate_connection(transport_id, target_addr, target_identity)
+        .await
+        .expect("initiate_connection is non-blocking; it queues a pending connect");
+
+    // One pending connect + the in-flight dial's link.
+    assert_eq!(nodes[0].node.peering.pending_connects.len(), 1);
+    assert_eq!(nodes[0].node.links.len(), 1);
+
+    for _ in 0..100 {
+        nodes[0].node.poll_pending_connects().await;
+        if nodes[0].node.peering.pending_connects.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        nodes[0].node.peering.pending_connects.is_empty(),
+        "failed connect should have been drained"
+    );
+    // Failure path removes the link and never reaches start_handshake.
+    assert!(
+        nodes[0].node.links.is_empty(),
+        "connect-failure path should have torn down the link"
+    );
+    assert!(
+        nodes[0].node.pending_outbound.is_empty(),
+        "connect-failure path must not dispatch msg1"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}

@@ -2168,6 +2168,71 @@ mod tests {
         assert_eq!(m.our_index(), None);
     }
 
+    // ---- Test 7d: connection-oriented dial opens transport first ----------
+    // The connection-oriented cutover drives the outbound machine
+    // Discovered -> (Dial, connection_oriented=true) -> Connecting
+    // (emitting ONLY OpenTransport, no msg1 yet), then TransportConnected ->
+    // Handshaking{SentMsg1} with the same SendHandshake + two SetTimer that
+    // `start_outbound_handshake` emits. Covers the oriented reach into
+    // `start_outbound_handshake` via `on_transport_connected` (the connectionless
+    // reach via `on_dial` is already covered by the test above).
+    #[test]
+    fn connection_oriented_dial_opens_transport_then_connected_handshakes() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        // Connection-oriented dial: open the transport first, no msg1 yet.
+        let dial = m.step(
+            PeerEvent::Dial {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+                peer_identity: peer,
+                connection_oriented: true,
+            },
+            100,
+            &mut alloc,
+        );
+        assert_eq!(
+            m.state(),
+            PeerState::Connecting {
+                link: LinkId::new(1)
+            }
+        );
+        assert_eq!(
+            dial,
+            vec![PeerAction::OpenTransport {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+            }],
+            "connection-oriented dial emits exactly one OpenTransport and no msg1"
+        );
+
+        // Transport connected: now send msg1 and arm the handshake timers.
+        let connected = m.step(PeerEvent::TransportConnected, 200, &mut alloc);
+        assert!(matches!(
+            m.state(),
+            PeerState::Handshaking {
+                phase: HandshakePhase::SentMsg1,
+                ..
+            }
+        ));
+        assert_eq!(
+            connected,
+            vec![
+                PeerAction::SendHandshake { bytes: Vec::new() },
+                PeerAction::SetTimer {
+                    kind: TimerKind::HandshakeRetransmit,
+                    at_ms: 200 + HANDSHAKE_RETRANSMIT_INTERVAL_MS,
+                },
+                PeerAction::SetTimer {
+                    kind: TimerKind::HandshakeTimeout,
+                    at_ms: 200 + HANDSHAKE_TIMEOUT_MS,
+                },
+            ]
+        );
+    }
+
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------
     #[test]
     fn liveness_to_link_dead() {
