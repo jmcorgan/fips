@@ -14,6 +14,7 @@ For ad-hoc deployment without the build system, see
 | `/usr/bin/fipsctl` | CLI control tool (`fipsctl show peers`, `fipsctl show links`, …) |
 | `/usr/bin/fipstop` | Live TUI dashboard |
 | `/usr/bin/fips-gateway` | Outbound LAN gateway service (not started by default) |
+| `/usr/bin/fips-mesh-setup` | Opt-in helper — creates an open 802.11s mesh interface for router↔router backhaul |
 | `/etc/init.d/fips` | procd service for the daemon (auto-start, crash respawn) |
 | `/etc/init.d/fips-gateway` | procd service for the gateway (disabled by default) |
 | `/etc/fips/fips.yaml` | Node configuration (edit before first start) |
