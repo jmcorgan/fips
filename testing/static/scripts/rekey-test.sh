@@ -416,16 +416,20 @@ phase_result "Post-first-rekey (all 20 pairs)"
 echo ""
 
 # ── Phase 4: Wait for second rekey cycle ──────────────────────────────
-# Poll for the next FMP rekey cutover instead of blind-sleeping: capture
-# the cutover count reached so far, then wait until at least one more
-# cutover lands — that increment is the second rekey cycle firing.
+# Poll for the FMP rekey cutovers instead of blind-sleeping: capture the
+# cutover count reached so far, then wait until two more land. The second
+# rekey cycle produces two initiator cutovers, which is exactly the total
+# the Phase 6 assertion (>= 4) requires. Waiting for only one guaranteed a
+# count of three and left the fourth cutover to land in the gap before the
+# Phase 6 snapshot, so host load could push it past the window and fail the
+# run even though every cutover completed correctly.
 # Bounded by SECOND_REKEY_WAIT so a stalled rekey still falls through to
 # the strict Phase 5/6 assertions rather than hanging.
-echo "Phase 4: Second rekey cycle (waiting up to ${SECOND_REKEY_WAIT}s for the next cutover)"
+echo "Phase 4: Second rekey cycle (waiting up to ${SECOND_REKEY_WAIT}s for the second-cycle cutovers)"
 fmp_cutovers_before=$(count_log_pattern "Rekey cutover complete (initiator), K-bit flipped")
 wait_for_log_pattern_count \
     "Rekey cutover complete (initiator), K-bit flipped" \
-    "$((fmp_cutovers_before + 1))" "$SECOND_REKEY_WAIT" || true
+    "$((fmp_cutovers_before + 2))" "$SECOND_REKEY_WAIT" || true
 
 # Verify connectivity after second rekey (back-to-back). This is the
 # site of the recurring post-second-rekey straggler-pair flake: wait for
