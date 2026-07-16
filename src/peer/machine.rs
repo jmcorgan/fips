@@ -214,6 +214,20 @@ pub(crate) enum TimerKind {
     Liveness,
 }
 
+/// Outcome of an outbound cross-connection resolution, observed by the control
+/// machine after the shell has already applied the effect inline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CrossConnOutcome {
+    /// The outbound session replaced the existing inbound one: the control
+    /// shadow adopts the new local and remote session indices.
+    Swap {
+        our_index: SessionIndex,
+        their_index: SessionIndex,
+    },
+    /// The existing inbound session was kept: the control shadow is unchanged.
+    Keep,
+}
+
 /// An input to the machine. Cross-registry facts ride in the payload as
 /// plain-data snapshots ([`WireOutcome`]/[`EstablishSnapshot`]) built shell-side;
 /// `now` is the `step` parameter, never duplicated here.
@@ -276,6 +290,11 @@ pub(crate) enum PeerEvent {
     /// `Maintaining{Rekey(Msg1Sent)}` so the next tick's `Cutover`/`Drain` consume
     /// transitions from a coherent phase. Emits no action.
     RekeyInitiated,
+    /// OBSERVATION: the shell resolved an outbound cross-connection inline (a
+    /// session swap or keep, with the registry and index surgery already
+    /// applied). Reconciles the control shadow's session indices with reality
+    /// on a swap; leaves them untouched on a keep. Emits no action.
+    CrossConnResolved { outcome: CrossConnOutcome },
     /// Data plane observed the responder K-bit flip inline.
     PeerKbitFlip { epoch: [u8; 8] },
     /// A filter announce is due for this peer.
@@ -617,6 +636,7 @@ impl PeerMachine {
             PeerEvent::RekeyMsg2 { their_index } => self.on_rekey_msg2(their_index),
             PeerEvent::RekeyConsume { action } => self.map_rekey_action(action, now),
             PeerEvent::RekeyInitiated => self.on_rekey_initiated(),
+            PeerEvent::CrossConnResolved { outcome } => self.on_cross_conn_resolved(outcome),
             PeerEvent::PeerKbitFlip { .. } => {
                 // Responder cutover is data-plane-owned: the machine only
                 // schedules the drain-window unregister. NO slot mutation.
@@ -1003,6 +1023,23 @@ impl PeerMachine {
             addr,
             kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent),
         };
+        Vec::new()
+    }
+
+    /// Observation: the shell resolved an outbound cross-connection inline. On a
+    /// session swap it adopts the new local and remote session indices into the
+    /// control shadow, mirroring the shell's in-place session replacement; on a
+    /// keep it leaves the shadow untouched. Emits NO action — the crypto effect
+    /// already ran shell-side.
+    fn on_cross_conn_resolved(&mut self, outcome: CrossConnOutcome) -> Vec<PeerAction> {
+        if let CrossConnOutcome::Swap {
+            our_index,
+            their_index,
+        } = outcome
+        {
+            self.conn.set_our_index(our_index);
+            self.conn.set_their_index(their_index);
+        }
         Vec::new()
     }
 
@@ -2657,6 +2694,97 @@ mod tests {
         );
         assert!(m.rekey_in_progress);
         // No index allocation happened in the machine (shell-side leaf).
+        assert_eq!(alloc.count(), 0);
+    }
+
+    // ---- Test 11: RekeyMsg2 observation -----------------------------------
+    // The shell completed the initiated rekey inline; the obs records the peer's
+    // new index, clears the in-progress flag, advances to PendingCutover, and
+    // emits nothing.
+    #[test]
+    fn rekey_msg2_observation() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        m.state = PeerState::Maintaining {
+            addr,
+            kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent),
+        };
+        m.rekey_in_progress = true;
+
+        let their = SessionIndex::new(0x4444);
+        let acts = m.step(
+            PeerEvent::RekeyMsg2 { their_index: their },
+            6_000,
+            &mut alloc,
+        );
+        assert!(acts.is_empty());
+        assert_eq!(m.conn.their_index(), Some(their));
+        assert!(!m.rekey_in_progress);
+        assert_eq!(
+            m.state(),
+            PeerState::Maintaining {
+                addr,
+                kind: MaintainKind::Rekey(RekeyPhase::PendingCutover)
+            }
+        );
+        assert_eq!(alloc.count(), 0);
+    }
+
+    // ---- Test 12: CrossConnResolved observation ---------------------------
+    // A swap adopts the new local and remote indices into the control shadow and
+    // emits nothing; a keep leaves the shadow untouched and emits nothing.
+    #[test]
+    fn cross_conn_resolved_swap_updates_shadow() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        m.state = PeerState::Active { addr };
+        m.conn.set_our_index(SessionIndex::new(0x1111));
+        m.conn.set_their_index(SessionIndex::new(0x2222));
+
+        let our = SessionIndex::new(0xAAAA);
+        let their = SessionIndex::new(0xBBBB);
+        let acts = m.step(
+            PeerEvent::CrossConnResolved {
+                outcome: CrossConnOutcome::Swap {
+                    our_index: our,
+                    their_index: their,
+                },
+            },
+            7_000,
+            &mut alloc,
+        );
+        assert!(acts.is_empty());
+        assert_eq!(m.conn.our_index(), Some(our));
+        assert_eq!(m.conn.their_index(), Some(their));
+        assert_eq!(m.state(), PeerState::Active { addr });
+        assert_eq!(alloc.count(), 0);
+    }
+
+    #[test]
+    fn cross_conn_resolved_keep_is_noop() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        m.state = PeerState::Active { addr };
+        m.conn.set_our_index(SessionIndex::new(0x1111));
+        m.conn.set_their_index(SessionIndex::new(0x2222));
+
+        let acts = m.step(
+            PeerEvent::CrossConnResolved {
+                outcome: CrossConnOutcome::Keep,
+            },
+            7_000,
+            &mut alloc,
+        );
+        assert!(acts.is_empty());
+        assert_eq!(m.conn.our_index(), Some(SessionIndex::new(0x1111)));
+        assert_eq!(m.conn.their_index(), Some(SessionIndex::new(0x2222)));
+        assert_eq!(m.state(), PeerState::Active { addr });
         assert_eq!(alloc.count(), 0);
     }
 }

@@ -5,12 +5,13 @@
 //! - msg2 (responder → initiator): responder identity + epoch + negotiation
 //! - msg3 (initiator → responder): initiator identity + epoch + negotiation
 
+use crate::NodeAddr;
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{PeerAction, PeerEvent, PeerMachine, TimerKind};
+use crate::peer::machine::{CrossConnOutcome, PeerAction, PeerEvent, PeerMachine, TimerKind};
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
@@ -19,10 +20,63 @@ use crate::proto::fmp::{
     decide_fmp_negotiation,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
+use crate::utils::index::SessionIndex;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl Node {
+    /// Feed the peer's control machine the completed-rekey observation after the
+    /// inline `complete_rekey_msg2`. The obs records the peer's new session index
+    /// and advances the rekey phase; it emits no action, so a bare `step` keeps
+    /// the machine coherent without an executor pass.
+    fn observe_rekey_msg2(&mut self, node_addr: &NodeAddr, their_index: SessionIndex) {
+        let link = match self.peers.get(node_addr) {
+            Some(peer) => peer.link_id(),
+            None => return,
+        };
+        if let Some(machine) = self.peer_machines.get_mut(&link) {
+            let acts = machine.step(
+                PeerEvent::RekeyMsg2 { their_index },
+                Self::now_ms(),
+                &mut self.index_allocator,
+            );
+            debug_assert!(acts.is_empty(), "completed-rekey is a pure observation");
+        } else {
+            debug_assert!(
+                false,
+                "peer machine present for every established rekey peer"
+            );
+        }
+    }
+
+    /// Feed the promoted peer's control machine the cross-connection resolution
+    /// after the inline session surgery. The obs reconciles the machine's shadow
+    /// session indices (updated on a swap, unchanged on a keep); it emits no
+    /// action, so a bare `step` keeps the machine coherent without an executor
+    /// pass.
+    fn observe_cross_conn_resolved(&mut self, node_addr: &NodeAddr, outcome: CrossConnOutcome) {
+        let link = match self.peers.get(node_addr) {
+            Some(peer) => peer.link_id(),
+            None => return,
+        };
+        if let Some(machine) = self.peer_machines.get_mut(&link) {
+            let acts = machine.step(
+                PeerEvent::CrossConnResolved { outcome },
+                Self::now_ms(),
+                &mut self.index_allocator,
+            );
+            debug_assert!(
+                acts.is_empty(),
+                "cross-connection resolution is a pure observation"
+            );
+        } else {
+            debug_assert!(
+                false,
+                "peer machine present for the promoted cross-connection peer"
+            );
+        }
+    }
+
     /// Returns true if an inbound msg1 should be admitted past the
     /// `accept_connections` gate.
     ///
@@ -379,6 +433,7 @@ impl Node {
                     self.config().node.rate_limit.handshake_resend_interval_ms;
                 let msg3_now_ms = Self::now_ms();
 
+                let mut rekey_completed = false;
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
                         Ok((msg3_bytes, session, remote_epoch)) => {
@@ -469,6 +524,8 @@ impl Node {
                                     new_their_index = %header.sender_idx,
                                     "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
                                 );
+
+                                rekey_completed = true;
                             } else {
                                 // msg3 send failed — abandon rekey
                                 if let Some(idx) = peer.abandon_rekey() {
@@ -498,6 +555,15 @@ impl Node {
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
                     }
+                }
+
+                // Feed the control machine the completed-rekey observation so its
+                // shadow index and rekey phase stay coherent. Only on success —
+                // the failure path above reverts the rekey and leaves the machine
+                // untouched. The crypto effect already ran inline; this emits no
+                // action.
+                if rekey_completed {
+                    self.observe_rekey_msg2(&peer_node_addr, header.sender_idx);
                 }
 
                 self.pending_outbound.remove(&key);
@@ -685,6 +751,7 @@ impl Node {
                 }
             };
 
+            let mut cross_conn_outcome: Option<CrossConnOutcome> = None;
             if our_outbound_wins {
                 // We're the smaller node. Swap to outbound session + indices.
                 // The peer will keep their inbound session (complement of ours).
@@ -741,6 +808,11 @@ impl Node {
                         new_their_index = %header.sender_idx,
                         "Cross-connection: swapped to outbound session (our outbound wins)"
                     );
+
+                    cross_conn_outcome = Some(CrossConnOutcome::Swap {
+                        our_index: outbound_our_index,
+                        their_index: header.sender_idx,
+                    });
                 }
             } else {
                 // We're the larger node. Keep our inbound session (it pairs
@@ -766,6 +838,18 @@ impl Node {
                 if let Some(idx) = outbound_our_index {
                     let _ = self.index_allocator.free(idx);
                 }
+
+                cross_conn_outcome = Some(CrossConnOutcome::Keep);
+            }
+
+            // Feed the promoted peer's control machine the cross-connection
+            // resolution so its shadow session indices track the inline session
+            // surgery above (updated on a swap, unchanged on a keep). The
+            // outbound leg's machine was removed on entry, so this targets the
+            // still-live promoted peer's machine. The crypto effect already ran
+            // inline; this emits no action.
+            if let Some(outcome) = cross_conn_outcome {
+                self.observe_cross_conn_resolved(&peer_node_addr, outcome);
             }
 
             // Clean up outbound connection state
