@@ -78,7 +78,7 @@ async fn test_two_node_handshake_udp() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.connections.insert(link_id_a, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
@@ -315,7 +315,7 @@ async fn test_run_rx_loop_handshake() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.connections.insert(link_id_a, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
@@ -506,7 +506,7 @@ async fn test_cross_connection_both_initiate() {
     node_a
         .addr_to_link
         .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
-    node_a.connections.insert(link_id_a_out, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
@@ -536,7 +536,7 @@ async fn test_cross_connection_both_initiate() {
     node_b
         .addr_to_link
         .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
-    node_b.connections.insert(link_id_b_out, conn_b);
+    node_b.add_connection(conn_b).unwrap();
     node_b
         .pending_outbound
         .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
@@ -685,7 +685,7 @@ async fn test_stale_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
+    node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
@@ -763,7 +763,7 @@ async fn test_failed_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
+    node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
@@ -859,11 +859,11 @@ async fn test_resend_scheduling() {
         .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
-    node.connections.insert(link_id, conn);
 
-    // The msg1-resend counter and its due timer live on the per-peer machine.
-    // Dial it to `SentMsg1` (connectionless: no connect step) and arm its
-    // retransmit timer at now + 1000ms, mirroring what a real dial arms.
+    // The msg1-resend counter and its due timer live on the per-peer machine,
+    // which also carries the pending connection. Dial it to `SentMsg1`
+    // (connectionless: no connect step) and arm its retransmit timer at
+    // now + 1000ms, mirroring what a real dial arms.
     let mut machine =
         crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms);
     let _ = machine.step(
@@ -876,6 +876,7 @@ async fn test_resend_scheduling() {
         now_ms,
         &mut node.index_allocator,
     );
+    machine.set_leg(conn);
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
         crate::peer::machine::TimerKind::HandshakeRetransmit,
@@ -934,11 +935,11 @@ async fn test_handshake_timeout_drive() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
-    // Machine in SentMsg1 with a HandshakeTimeout timer armed at dial + 30s.
+    // Machine in SentMsg1, carrying the pending connection, with a
+    // HandshakeTimeout timer armed at dial + 30s.
     let mut machine =
         crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, dial_ms);
     let _ = machine.step(
@@ -951,6 +952,7 @@ async fn test_handshake_timeout_drive() {
         dial_ms,
         &mut node.index_allocator,
     );
+    machine.set_leg(conn);
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
         crate::peer::machine::TimerKind::HandshakeTimeout,

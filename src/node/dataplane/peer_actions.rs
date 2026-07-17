@@ -191,7 +191,6 @@ impl Node {
                             // (`handle_msg1` L665): the send error text is surfaced
                             // at the executor point where the failure is now handled.
                             warn!(link_id = %link, error = %e, "Failed to send msg2");
-                            self.connections.remove(&link);
                             self.links.remove(&link);
                             self.addr_to_link
                                 .remove(&(ambient.transport_id, ambient.remote_addr.clone()));

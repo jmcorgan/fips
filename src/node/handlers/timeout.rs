@@ -14,11 +14,12 @@ impl LifecycleView for Node {
         // `is_failed()` legs are always reaped here (~1s), as before. The
         // idle-timeout is reaped here ONLY for legs whose timeout is not already
         // driven by a machine `HandshakeTimeout` timer — i.e. inbound legs (IK
-        // inbound arms none) and machine-less test connections. Outbound legs with
-        // an armed timer are reaped by `drive_handshake_timeouts`, so excluding
-        // them here avoids a double reap.
-        self.connections
+        // inbound arms none). Outbound legs with an armed timer are reaped by
+        // `drive_handshake_timeouts`, so excluding them here avoids a double
+        // reap.
+        self.peer_machines
             .iter()
+            .filter_map(|(link_id, machine)| machine.leg().map(|conn| (link_id, conn)))
             .filter(|(link_id, conn)| {
                 conn.is_failed()
                     || (conn.is_timed_out(now_ms, timeout_ms)
@@ -57,7 +58,7 @@ impl Node {
     /// the retry-then-teardown choreography is the pure
     /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
     pub(in crate::node) fn check_timeouts(&mut self) {
-        if self.connections.is_empty() {
+        if self.connection_count() == 0 {
             return;
         }
 
@@ -70,7 +71,7 @@ impl Node {
                 ConnAction::ScheduleRetry { peer } => self.note_handshake_timeout(peer, now_ms),
                 ConnAction::Teardown { link } => {
                     // Log before cleanup (needs live connection state).
-                    if let Some(conn) = self.connections.get(&link) {
+                    if let Some(conn) = self.leg(&link) {
                         let direction = conn.direction();
                         if conn.is_failed() {
                             debug!(
@@ -101,14 +102,21 @@ impl Node {
     /// the link and address mapping. Does not log — callers provide context-appropriate
     /// log messages.
     pub(in crate::node) fn cleanup_stale_connection(&mut self, link_id: LinkId, _now_ms: u64) {
-        let conn = match self.connections.remove(&link_id) {
+        // Take the connection off its machine BEFORE disposing the machine
+        // (the machine owns it), keeping it readable for the index/link
+        // cleanup below. The machine shares the connection's `link_id` and
+        // lifetime; dropping it here means a reaped handshake leg leaves no
+        // dangling machine. A no-op for promoted peers — `promote_connection`
+        // already consumed their connection, so this reaper never runs for
+        // them.
+        let conn = match self
+            .peer_machines
+            .get_mut(&link_id)
+            .and_then(|machine| machine.take_leg())
+        {
             Some(c) => c,
             None => return,
         };
-        // A dial-persisted outbound control machine shares the connection's
-        // `link_id` and lifetime; drop it here so a reaped handshake leg leaves
-        // no dangling machine. A no-op for promoted peers — `promote_connection`
-        // already removed their connection, so this reaper never runs for them.
         self.remove_peer_machine(link_id);
         let transport_id = conn.transport_id();
 
@@ -158,7 +166,7 @@ impl Node {
     /// reflex, then `cleanup_stale_connection` (which drops the machine + timers).
     ///
     /// `check_timeouts` keeps reaping everything else — `is_failed()` legs and the
-    /// idle-timeout of legs without a machine timer (inbound / machine-less).
+    /// idle-timeout of legs without a machine timer (inbound legs).
     fn drive_handshake_timeouts(&mut self, now_ms: u64) {
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
         let timer_links: Vec<LinkId> = self
@@ -168,7 +176,7 @@ impl Node {
             .map(|(link, _)| *link)
             .collect();
         for link in timer_links {
-            let (reap, retry_peer) = match self.connections.get(&link) {
+            let (reap, retry_peer) = match self.leg(&link) {
                 Some(conn) if conn.is_timed_out(now_ms, timeout_ms) => {
                     let retry_peer = if conn.is_outbound() {
                         conn.expected_identity().map(|id| *id.node_addr())
@@ -251,7 +259,7 @@ impl Node {
                     continue;
                 }
             };
-            match self.connections.get(&link).and_then(|c| c.handshake_msg1()) {
+            match self.leg(&link).and_then(|c| c.handshake_msg1()) {
                 // Armed but the stored wire isn't there yet — leave the timer and
                 // retry next tick (matches the old candidate filter skipping it).
                 None => continue,
@@ -283,7 +291,7 @@ impl Node {
                 continue;
             };
 
-            let (transport_id, remote_addr) = match self.connections.get(&link) {
+            let (transport_id, remote_addr) = match self.leg(&link) {
                 Some(conn) => match (conn.transport_id(), conn.source_addr()) {
                     (Some(tid), Some(addr)) => (tid, addr.clone()),
                     _ => continue,

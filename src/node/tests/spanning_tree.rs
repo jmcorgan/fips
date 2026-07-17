@@ -141,7 +141,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
         .node
         .addr_to_link
         .insert((transport_id, responder_addr.clone()), link_id);
-    initiator.node.connections.insert(link_id, conn);
+    initiator.node.add_connection(conn).unwrap();
     initiator
         .node
         .pending_outbound

@@ -281,7 +281,8 @@ struct PendingConnect {
 /// ## Peer Lifecycle
 ///
 /// Peers go through two phases:
-/// 1. **Connection phase** (`connections`): Handshake in progress, indexed by LinkId
+/// 1. **Connection phase**: Handshake in progress; the pending connection is
+///    carried by its per-peer control machine (`peer_machines`), indexed by LinkId
 /// 2. **Active phase** (`peers`): Authenticated, indexed by NodeAddr
 ///
 /// The `addr_to_link` map enables dispatching incoming packets to the right
@@ -348,16 +349,12 @@ pub struct Node {
     /// rx_loop select arm that feeds `Event::ChildExited` to the supervisor FSM.
     child_exit_rx: Option<tokio::sync::mpsc::Receiver<crate::node::lifecycle::supervisor::Child>>,
 
-    // === Connections (Handshake Phase) ===
-    /// Pending connections (handshake in progress).
-    /// Indexed by LinkId since we don't know the peer's identity yet.
-    connections: HashMap<LinkId, PeerConnection>,
-
     // === Per-Peer Control Machines ===
     /// Per-peer lifecycle control FSMs, keyed by the stable `LinkId` that spans
-    /// the handshake→active lifetime. A parallel structure introduced by the
-    /// node-runtime decomposition: `connections`/`peers` stay byte-unchanged (hot
-    /// path pristine) and are cut over to this machine home path-by-path.
+    /// the handshake→active lifetime. Each machine owns its pending handshake
+    /// connection (the `PeerConnection` leg) while the handshake is in
+    /// progress — the single LinkId-keyed per-peer map on `Node`; `peers`
+    /// stays byte-unchanged (hot path pristine).
     /// Machines are inserted at dial and inbound msg1, and stepped in production
     /// by the handshake handlers, the rekey-cadence and liveness-reap routers,
     /// and the lifecycle paths, with the executor (`dataplane/peer_actions.rs`)
@@ -643,7 +640,6 @@ impl Node {
             packet_rx: None,
             child_exit_tx: None,
             child_exit_rx: None,
-            connections: HashMap::new(),
             peer_machines: HashMap::new(),
             peer_timers: HashMap::new(),
             peers: HashMap::new(),
@@ -792,7 +788,6 @@ impl Node {
             packet_rx: None,
             child_exit_tx: None,
             child_exit_rx: None,
-            connections: HashMap::new(),
             peer_machines: HashMap::new(),
             peer_timers: HashMap::new(),
             peers: HashMap::new(),
@@ -1520,7 +1515,7 @@ impl Node {
             tun_state: self.tun_state,
             tun_name: self.tun_name.clone(),
             effective_ipv6_mtu: self.effective_ipv6_mtu(),
-            connection_count: self.connections.len(),
+            connection_count: self.connection_count(),
             peer_count: self.peers.len(),
             link_count: self.links.len(),
             transport_count: self.transports.len(),
@@ -2152,7 +2147,10 @@ impl Node {
 
     /// Number of pending connections (handshake in progress).
     pub fn connection_count(&self) -> usize {
-        self.connections.len()
+        self.peer_machines
+            .values()
+            .filter(|machine| machine.leg().is_some())
+            .count()
     }
 
     /// Number of authenticated peers.
@@ -2273,30 +2271,19 @@ impl Node {
         self.peer_timers.remove(&link);
     }
 
-    /// Gates the leg→machine direction of `debug_assert_peer_maps_coherent`.
-    /// Asserting it requires the convention that every `connections` insert is
-    /// paired with a `peer_machines` insert before the next await point —
-    /// which holds here: inbound msg1 births a machine alongside the window
-    /// leg, and dials birth one before the leg exists. Where handshake-window
-    /// legs legitimately run machine-less, flip this to `false` rather than
-    /// weakening the machine→carrier direction.
-    #[cfg(debug_assertions)]
-    const CHECK_LEGS_HAVE_MACHINES: bool = true;
-
     /// Debug-build coherence sweep over the peer-lifecycle maps, run once per
     /// rx-loop tick and invoked directly by unit tests.
     ///
     /// Machine→carrier: every `peer_machines` entry must have a live carrier —
-    /// a pending connection on the same link, an active peer on it, or a
+    /// its own embedded pending connection, an active peer on its link, or a
     /// pending connect still resolving toward it. A machine with none of these
-    /// is unreachable by every teardown path and has leaked.
-    ///
-    /// Leg→machine: every pending connection carries a control machine (gated
-    /// by `CHECK_LEGS_HAVE_MACHINES` above).
+    /// is unreachable by every teardown path and has leaked. (The pending
+    /// connection lives inside the machine, so no separate connection→machine
+    /// direction exists to check.)
     #[cfg(debug_assertions)]
     pub(in crate::node) fn debug_assert_peer_maps_coherent(&self) {
-        for link in self.peer_machines.keys() {
-            let has_carrier = self.connections.contains_key(link)
+        for (link, machine) in &self.peer_machines {
+            let has_carrier = machine.leg().is_some()
                 || self.peers.values().any(|peer| peer.link_id() == *link)
                 || self
                     .peering
@@ -2309,22 +2296,13 @@ impl Node {
                  (no pending connection, active peer, or pending connect)"
             );
         }
-
-        if Self::CHECK_LEGS_HAVE_MACHINES {
-            for link in self.connections.keys() {
-                assert!(
-                    self.peer_machines.contains_key(link),
-                    "pending connection on link {link} has no control machine"
-                );
-            }
-        }
     }
 
     /// Operator-visible msg1 resend count for a pending handshake `link`, read
     /// from the per-peer machine (the counter's home once the resend drive moved
-    /// off the shell connection). Machine-less connections (inbound legs that
-    /// never resend, and test-created connections) report 0, matching what the
-    /// shell connection reported before the counter moved.
+    /// off the shell connection). A link with no machine reports 0, and inbound
+    /// machines never resend, matching what the shell connection reported
+    /// before the counter moved.
     pub(crate) fn connection_resend_count(&self, link: LinkId) -> u32 {
         self.peer_machines
             .get(&link)
@@ -2345,8 +2323,7 @@ impl Node {
             .values()
             .any(|link| link.transport_id() == transport_id)
             || self
-                .connections
-                .values()
+                .connections()
                 .any(|conn| conn.transport_id() == Some(transport_id))
             || self
                 .peers
@@ -2381,59 +2358,87 @@ impl Node {
 
     // === Connection Management (Handshake Phase) ===
 
+    /// The pending connection for `link_id`, read through the control machine
+    /// that carries it.
+    fn leg(&self, link_id: &LinkId) -> Option<&PeerConnection> {
+        self.peer_machines
+            .get(link_id)
+            .and_then(|machine| machine.leg())
+    }
+
+    /// Mutable access to the pending connection for `link_id`.
+    fn leg_mut(&mut self, link_id: &LinkId) -> Option<&mut PeerConnection> {
+        self.peer_machines
+            .get_mut(link_id)
+            .and_then(|machine| machine.leg_mut())
+    }
+
     /// Add a pending connection.
     ///
-    /// Also seeds a control machine for the leg when none exists yet, keeping
-    /// the leg→machine invariant (`debug_assert_peer_maps_coherent`) intact
-    /// for callers that insert a connection directly rather than through the
-    /// dial or inbound-msg1 paths, which pair the two inserts themselves.
+    /// Seeds a control machine for the leg when none exists yet and embeds the
+    /// connection on it, for callers that insert a connection directly rather
+    /// than through the dial or inbound-msg1 paths, which build the machine
+    /// themselves.
     pub fn add_connection(&mut self, connection: PeerConnection) -> Result<(), NodeError> {
         let link_id = connection.link_id();
 
-        if self.connections.contains_key(&link_id) {
+        if self
+            .peer_machines
+            .get(&link_id)
+            .is_some_and(|machine| machine.leg().is_some())
+        {
             return Err(NodeError::ConnectionAlreadyExists(link_id));
         }
 
-        if self.max_connections() > 0 && self.connections.len() >= self.max_connections() {
+        if self.max_connections() > 0 && self.connection_count() >= self.max_connections() {
             return Err(NodeError::MaxConnectionsExceeded {
                 max: self.max_connections(),
             });
         }
 
-        self.peer_machines.entry(link_id).or_insert_with(|| {
-            let now = connection.started_at();
-            match connection.expected_identity() {
-                Some(identity) if connection.is_outbound() => {
-                    PeerMachine::new_outbound(link_id, *identity, now)
+        self.peer_machines
+            .entry(link_id)
+            .or_insert_with(|| {
+                let now = connection.started_at();
+                match connection.expected_identity() {
+                    Some(identity) if connection.is_outbound() => {
+                        PeerMachine::new_outbound(link_id, *identity, now)
+                    }
+                    _ => PeerMachine::new_inbound(link_id, now),
                 }
-                _ => PeerMachine::new_inbound(link_id, now),
-            }
-        });
-
-        self.connections.insert(link_id, connection);
+            })
+            .set_leg(connection);
         Ok(())
     }
 
     /// Get a connection by LinkId.
     pub fn get_connection(&self, link_id: &LinkId) -> Option<&PeerConnection> {
-        self.connections.get(link_id)
+        self.leg(link_id)
     }
 
     /// Get a mutable connection by LinkId.
     pub fn get_connection_mut(&mut self, link_id: &LinkId) -> Option<&mut PeerConnection> {
-        self.connections.get_mut(link_id)
+        self.leg_mut(link_id)
     }
 
     /// Remove a connection, disposing its control machine alongside
-    /// (the disposal complement of `add_connection`'s machine seeding).
+    /// (the disposal complement of `add_connection`'s machine seeding). The
+    /// connection is taken off the machine BEFORE the machine is dropped, so
+    /// the caller still receives it.
     pub fn remove_connection(&mut self, link_id: &LinkId) -> Option<PeerConnection> {
+        let connection = self
+            .peer_machines
+            .get_mut(link_id)
+            .and_then(|machine| machine.take_leg());
         self.remove_peer_machine(*link_id);
-        self.connections.remove(link_id)
+        connection
     }
 
     /// Iterate over all connections.
     pub fn connections(&self) -> impl Iterator<Item = &PeerConnection> {
-        self.connections.values()
+        self.peer_machines
+            .values()
+            .filter_map(|machine| machine.leg())
     }
 
     // === Peer Management (Active Phase) ===

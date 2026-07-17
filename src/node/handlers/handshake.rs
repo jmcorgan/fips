@@ -39,7 +39,7 @@ impl EstablishView for Node {
             rekey_in_progress: existing.map(|p| p.rekey_in_progress()).unwrap_or(false),
             existing_msg2: existing.and_then(|p| p.handshake_msg2().map(|m| m.to_vec())),
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
-            has_pending_outbound_to_peer: self.connections.values().any(|conn| {
+            has_pending_outbound_to_peer: self.connections().any(|conn| {
                 conn.expected_identity()
                     .map(|id| id.node_addr() == peer_addr)
                     .unwrap_or(false)
@@ -626,13 +626,12 @@ impl Node {
                 );
                 self.links.insert(link_id, link);
                 self.addr_to_link.insert(addr_key, link_id);
-                self.connections.insert(link_id, conn);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
-                if let Some(conn) = self.connections.get_mut(&link_id) {
-                    conn.set_handshake_msg2(wire_msg2.clone());
-                }
+                conn.set_handshake_msg2(wire_msg2.clone());
 
-                // Register the machine (Promote/Restart tail only).
+                // Register the machine, carrying the connection
+                // (Promote/Restart tail only).
+                machine.set_leg(conn);
                 self.peer_machines.insert(link_id, machine);
 
                 // Execute [SendHandshake, PromoteToActive]. Because the old peer was
@@ -781,14 +780,13 @@ impl Node {
                 );
                 self.links.insert(link_id, link);
                 self.addr_to_link.insert(addr_key, link_id);
-                self.connections.insert(link_id, conn);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
-                if let Some(conn) = self.connections.get_mut(&link_id) {
-                    conn.set_handshake_msg2(wire_msg2.clone());
-                }
+                conn.set_handshake_msg2(wire_msg2.clone());
 
-                // Register the machine (Promote tail only — discarded on every
-                // reject/resend/rekey arm per the insertion discipline).
+                // Register the machine, carrying the connection (Promote tail
+                // only — discarded on every reject/resend/rekey arm per the
+                // insertion discipline).
+                machine.set_leg(conn);
                 self.peer_machines.insert(link_id, machine);
 
                 // Execute [SendHandshake, PromoteToActive]. The executor frames +
@@ -842,7 +840,7 @@ impl Node {
     /// (if already promoted).
     fn find_stored_msg2(&self, link_id: LinkId) -> Option<Vec<u8>> {
         // Check pending connection first
-        if let Some(conn) = self.connections.get(&link_id)
+        if let Some(conn) = self.leg(&link_id)
             && let Some(msg2) = conn.handshake_msg2()
         {
             return Some(msg2.to_vec());
@@ -889,9 +887,17 @@ impl Node {
         };
 
         // Check if this is a rekey msg2: the handshake state is on the
-        // ActivePeer (not a PeerConnection), so self.connections won't have it.
-        // Look for a peer with matching rekey_our_index.
-        if !self.connections.contains_key(&link_id) {
+        // ActivePeer (not a PeerConnection), so the link's machine — if one
+        // survives at all — carries no pending connection. A bare machine
+        // lookup would NOT discriminate here: an established peer's machine
+        // stays keyed by this link, so the pending connection's presence is
+        // what marks a fresh establish. Look for a peer with matching
+        // rekey_our_index.
+        if self
+            .peer_machines
+            .get(&link_id)
+            .is_none_or(|machine| machine.leg().is_none())
+        {
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
 
             // Find peer with rekey in progress for this index
@@ -989,7 +995,7 @@ impl Node {
         }
 
         let (peer_identity, our_index) = {
-            let conn = self.connections.get_mut(&link_id).unwrap();
+            let conn = self.leg_mut(&link_id).unwrap();
 
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
             if let Err(e) = conn.complete_handshake(noise_msg2, packet.timestamp_ms) {
@@ -1037,8 +1043,8 @@ impl Node {
                     transport.close_connection(&addr).await;
                 }
             }
-            self.connections.remove(&link_id);
-            // Drop the machine persisted at dial — this leg never promotes.
+            // Drop the machine persisted at dial — this leg never promotes,
+            // and its pending connection is dropped with it.
             self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
             if let Some(idx) = our_index {
@@ -1074,14 +1080,21 @@ impl Node {
         let out_snap = self.outbound_snapshot(&peer_node_addr);
         let out_decision = self.fmp.establish_outbound(&out_snap);
         if out_decision != OutboundDecision::Promote {
-            // The dial-persisted outbound machine is not consumed by the inline
-            // Swap/Keep resolution below (which mutates the existing promoted peer
-            // directly, with no machine). Drop it on entry so none of this block's
-            // exits leave a dangling machine — matching the pre-persistence path,
+            // Extract the outbound connection from its machine FIRST — the
+            // machine owns it, so disposing the machine before the take would
+            // destroy the connection. The dial-persisted outbound machine is
+            // not consumed by the inline Swap/Keep resolution below (which
+            // mutates the existing promoted peer directly, with no machine),
+            // so drop it right after the take — unconditionally, whether or
+            // not a connection was carried — so none of this block's exits
+            // leave a dangling machine. Matches the pre-persistence path,
             // which created no machine for a cross-connection.
+            let taken_conn = self
+                .peer_machines
+                .get_mut(&link_id)
+                .and_then(|machine| machine.take_leg());
             self.remove_peer_machine(link_id);
-            // Extract the outbound connection
-            let mut conn = match self.connections.remove(&link_id) {
+            let mut conn = match taken_conn {
                 Some(c) => c,
                 None => {
                     self.pending_outbound.remove(&key);
@@ -1272,7 +1285,7 @@ impl Node {
         // The outbound Msg2 Promote step cancels the two dial-armed handshake
         // timers (the machine survives promotion, so they would otherwise linger
         // in `peer_timers` until `drive_peer_timers` lazily discards them — the
-        // promoted leg's `connections` entry is gone and the machine has left
+        // promoted leg's pending connection is consumed and the machine has left
         // `SentMsg1`, so they can no longer fire) and then promotes.
         // `PromoteToActive` is still what performs the promotion.
         debug_assert_eq!(
@@ -1347,10 +1360,13 @@ impl Node {
         verified_identity: PeerIdentity,
         current_time_ms: u64,
     ) -> Result<PromotionResult, NodeError> {
-        // Remove the connection from pending
+        // Take the pending connection off its control machine. The machine
+        // survives the promotion (it becomes the active peer's control
+        // machine), left with no pending connection.
         let mut connection = self
-            .connections
-            .remove(&link_id)
+            .peer_machines
+            .get_mut(&link_id)
+            .and_then(|machine| machine.take_leg())
             .ok_or(NodeError::ConnectionNotFound(link_id))?;
 
         // Verify handshake is complete and extract session
@@ -1522,14 +1538,13 @@ impl Node {
             // peer. The outbound will be cleaned up in handle_msg2 or by
             // the 30s handshake timeout.
             let pending_to_same_peer: Vec<LinkId> = self
-                .connections
-                .iter()
-                .filter(|(_, conn)| {
+                .connections()
+                .filter(|conn| {
                     conn.expected_identity()
                         .map(|id| *id.node_addr() == peer_node_addr)
                         .unwrap_or(false)
                 })
-                .map(|(lid, _)| *lid)
+                .map(|conn| conn.link_id())
                 .collect();
 
             for pending_link_id in &pending_to_same_peer {

@@ -206,7 +206,7 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, peer_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
+    node.add_connection(conn).unwrap();
     assert_eq!(node.peer_count(), 0);
 
     let before_pending = node.msg1_rate_limiter.pending_count();
@@ -235,7 +235,7 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     );
     assert_eq!(node.peer_count(), 0, "duplicate msg1 promotes nothing");
     assert!(
-        node.connections.contains_key(&link_id),
+        node.get_connection(&link_id).is_some(),
         "pending connection is left intact"
     );
     assert_eq!(
@@ -341,7 +341,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     node.links.insert(out_link, out_l);
     node.addr_to_link
         .insert((transport_id, out_addr.clone()), out_link);
-    node.connections.insert(out_link, out_conn);
+    node.add_connection(out_conn).unwrap();
     node.pending_outbound
         .insert((transport_id, out_index.as_u32()), out_link);
     assert_eq!(node.peer_count(), 0);
@@ -362,7 +362,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     assert!(peer.has_session());
     assert_eq!(node.peer_count(), 1);
     assert!(
-        node.connections.contains_key(&out_link),
+        node.get_connection(&out_link).is_some(),
         "pending outbound to the same identity must be preserved (deferred cleanup)"
     );
     assert!(
@@ -406,7 +406,7 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
     out_conn.set_our_index(out_index);
     out_conn.set_transport_id(transport_id);
     out_conn.set_source_addr(out_addr.clone());
-    node.connections.insert(out_link, out_conn);
+    node.add_connection(out_conn).unwrap();
     node.pending_outbound
         .insert((transport_id, out_index.as_u32()), out_link);
 
@@ -516,7 +516,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     node_a
         .addr_to_link
         .insert((transport_id_a, remote_addr_b.clone()), link_a_out);
-    node_a.connections.insert(link_a_out, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, out_index_a.as_u32()), link_a_out);
@@ -545,7 +545,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     node_b
         .addr_to_link
         .insert((transport_id_b, remote_addr_a.clone()), link_b_out);
-    node_b.connections.insert(link_b_out, conn_b);
+    node_b.add_connection(conn_b).unwrap();
     node_b
         .pending_outbound
         .insert((transport_id_b, out_index_b.as_u32()), link_b_out);

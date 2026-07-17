@@ -137,8 +137,7 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
         .unwrap();
 
     let mut addrs = node
-        .connections
-        .values()
+        .connections()
         .filter_map(|conn| conn.source_addr().and_then(|addr| addr.as_str()))
         .collect::<Vec<_>>();
     addrs.sort();
@@ -733,7 +732,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     node.links.insert(pending_link_id, pending_link);
     node.addr_to_link
         .insert((transport_id, pending_addr.clone()), pending_link_id);
-    node.connections.insert(pending_link_id, pending_conn);
+    node.add_connection(pending_conn).unwrap();
     node.pending_outbound
         .insert((transport_id, pending_index.as_u32()), pending_link_id);
 
@@ -1252,8 +1251,7 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     assert_eq!(node.peer_count(), 1, "existing link must stay live");
     assert_eq!(node.connection_count(), 1);
     assert_eq!(
-        node.connections
-            .values()
+        node.connections()
             .next()
             .and_then(|conn| conn.source_addr()),
         Some(&new_addr)
