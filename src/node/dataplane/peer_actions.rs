@@ -387,6 +387,16 @@ impl Node {
                         }
                     }
                 }
+                PeerAction::ResolveCrossConnection { .. } => {
+                    // A decision token, not an effect: the outbound msg2
+                    // handler intercepts it and runs the inline swap/keep
+                    // resolution itself, so it must never reach the executor.
+                    debug_assert!(
+                        false,
+                        "ResolveCrossConnection is intercepted by the msg2 \
+                         handler and must never reach the executor"
+                    );
+                }
                 PeerAction::SwapSendState { .. } => {
                     // Initiator cutover: the live authoritative rekey-cadence
                     // path, routed here from `check_rekey` via

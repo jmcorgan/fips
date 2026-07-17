@@ -330,6 +330,11 @@ pub(crate) enum PeerAction {
     /// Crystallize identity, re-home the map key, publish send-state
     /// (`promote_connection`). Resolves to a [`PromotionResolved`](PeerEvent::PromotionResolved).
     PromoteToActive { link: LinkId },
+    /// A DECISION conveyed to the driver, not an effect: emitted by the
+    /// outbound-msg2 arm when the establish decision is a cross-connection
+    /// resolution. The shell intercepts it and runs the inline swap/keep
+    /// resolution; it must never reach the action executor.
+    ResolveCrossConnection { swap: bool },
     /// Initiator-side rekey cutover: swap the published send-state to the pending
     /// epoch.
     SwapSendState { epoch: [u8; 8] },
@@ -686,13 +691,17 @@ impl PeerMachine {
         ]
     }
 
-    /// Outbound completion: classify via `establish_outbound` and drive the
-    /// promote / cross-connection resolution.
+    /// Outbound completion: compute the establish decision from the snapshot
+    /// via `establish_outbound`. `Promote` drives promotion via actions; the
+    /// Swap/Keep outcomes are conveyed as a
+    /// [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection) decision
+    /// for the shell's inline resolution, which owns all effects (index
+    /// frees, session replacement) permanently.
     fn on_msg2(
         &mut self,
         their_index: SessionIndex,
         out: OutboundSnapshot,
-        now: u64,
+        _now: u64,
         _alloc: &mut IndexAllocator,
     ) -> Vec<PeerAction> {
         self.conn.set_their_index(their_index);
@@ -717,31 +726,16 @@ impl PeerMachine {
                 ]
             }
             OutboundDecision::CrossConnectionSwap => {
-                // Our outbound wins: swap the peer to the outbound session,
-                // freeing the old inbound index. Resolved in-step (peer exists).
-                let outbound_index = self.conn.our_index();
-                let old_inbound_index = self.our_index;
-                self.crystallize(now);
-                let mut actions = Vec::new();
-                if let Some(idx) = old_inbound_index {
-                    actions.push(PeerAction::FreeIndex { index: idx });
-                }
-                if let Some(idx) = outbound_index {
-                    self.our_index = Some(idx);
-                    actions.push(PeerAction::RegisterDecryptSession { index: idx });
-                }
-                actions
+                // Our outbound wins: convey the decision only. The shell's
+                // inline resolution swaps the peer to the outbound session and
+                // owns the index frees and session replacement.
+                vec![PeerAction::ResolveCrossConnection { swap: true }]
             }
             OutboundDecision::CrossConnectionKeep => {
-                // Our outbound loses: keep the existing inbound session, free the
-                // unused outbound index.
-                let outbound_index = self.conn.our_index();
-                self.crystallize(now);
-                let mut actions = Vec::new();
-                if let Some(idx) = outbound_index {
-                    actions.push(PeerAction::FreeIndex { index: idx });
-                }
-                actions
+                // Our outbound loses: convey the decision only. The shell's
+                // inline resolution keeps the existing inbound session and
+                // frees the unused outbound index.
+                vec![PeerAction::ResolveCrossConnection { swap: false }]
             }
         }
     }
@@ -1491,6 +1485,7 @@ mod tests {
             PeerAction::PromoteToActive {
                 link: LinkId::new(7),
             },
+            PeerAction::ResolveCrossConnection { swap: true },
             PeerAction::SwapSendState { epoch: [1u8; 8] },
             PeerAction::CompleteDrain { peer },
             PeerAction::InvalidateSendState,
@@ -1526,6 +1521,7 @@ mod tests {
                 | PeerAction::SendRekey { .. }
                 | PeerAction::SendLinkMessage { .. }
                 | PeerAction::PromoteToActive { .. }
+                | PeerAction::ResolveCrossConnection { .. }
                 | PeerAction::SwapSendState { .. }
                 | PeerAction::CompleteDrain { .. }
                 | PeerAction::InvalidateSendState
@@ -2086,7 +2082,9 @@ mod tests {
         );
         assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
 
-        // Cross-connection SWAP: our outbound wins -> free old inbound, register outbound.
+        // Cross-connection SWAP: our outbound wins -> decision only; the
+        // shell's inline resolution owns the index frees and session
+        // replacement.
         let mut m2 = PeerMachine::new_outbound(LinkId::new(2), peer, 0);
         m2.state = PeerState::Handshaking {
             link: LinkId::new(2),
@@ -2108,18 +2106,25 @@ mod tests {
         );
         assert_eq!(
             swap,
-            vec![
-                PeerAction::FreeIndex {
-                    index: SessionIndex::new(0x1111)
-                },
-                PeerAction::RegisterDecryptSession {
-                    index: SessionIndex::new(0x2222)
-                },
-            ]
+            vec![PeerAction::ResolveCrossConnection { swap: true }]
         );
-        assert_eq!(m2.state(), PeerState::Established { addr: peer_addr });
+        assert!(!swap.iter().any(|a| matches!(
+            a,
+            PeerAction::FreeIndex { .. } | PeerAction::RegisterDecryptSession { .. }
+        )));
+        // The decision arm leaves the machine untouched: still Handshaking,
+        // our_index unchanged.
+        assert_eq!(
+            m2.state(),
+            PeerState::Handshaking {
+                link: LinkId::new(2),
+                phase: HandshakePhase::SentMsg1,
+            }
+        );
+        assert_eq!(m2.our_index(), Some(SessionIndex::new(0x1111)));
 
-        // Cross-connection KEEP: our outbound loses -> free unused outbound index.
+        // Cross-connection KEEP: our outbound loses -> decision only; the
+        // shell's inline resolution frees the unused outbound index.
         let mut m3 = PeerMachine::new_outbound(LinkId::new(3), peer, 0);
         m3.state = PeerState::Handshaking {
             link: LinkId::new(3),
@@ -2140,10 +2145,20 @@ mod tests {
         );
         assert_eq!(
             keep,
-            vec![PeerAction::FreeIndex {
-                index: SessionIndex::new(0x3333)
-            }]
+            vec![PeerAction::ResolveCrossConnection { swap: false }]
         );
+        assert!(!keep.iter().any(|a| matches!(
+            a,
+            PeerAction::FreeIndex { .. } | PeerAction::RegisterDecryptSession { .. }
+        )));
+        assert_eq!(
+            m3.state(),
+            PeerState::Handshaking {
+                link: LinkId::new(3),
+                phase: HandshakePhase::SentMsg1,
+            }
+        );
+        assert_eq!(m3.our_index(), None);
     }
 
     // ---- Test 7b: dial-persisted outbound promote leaves our_index unset ---
