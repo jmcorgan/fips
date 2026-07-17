@@ -1025,14 +1025,6 @@ impl Node {
     /// learn the initiator's identity and epoch, then performs identity-based
     /// checks (restart detection, rekey detection, cross-connection resolution)
     /// and promotes the connection to active peer.
-    //
-    // The four terminal `establish_inbound` arms (Reject/ResendMsg2/CrossConnect/
-    // RekeyRespond) keep the pre-refactor trailing `return;`, preserved byte-for-
-    // byte from before the promote block moved into the executor. With that block
-    // gone the `match` is now the function tail, so those returns read as
-    // `needless_return`; the allow keeps the arms untouched rather than editing
-    // preserved shell bodies to satisfy the lint.
-    #[allow(clippy::needless_return)]
     pub(in crate::node) async fn handle_msg3(&mut self, packet: ReceivedPacket) {
         // Parse header
         let header = match Msg3Header::parse(&packet.data) {
@@ -1210,11 +1202,13 @@ impl Node {
         // Identity-based restart/rekey/cross-connection classification.
         //
         // Now that we know the initiator's identity from msg3, classify this
-        // inbound handshake against any existing active peer. The classification
-        // tree is the pure `Fmp::establish_inbound` decision; each effect it
-        // selects is driven shell-side below, preserving the pre-refactor per-
-        // branch ordering and cleanup exactly. The snapshot resolves the one
-        // clock read (session age) and the config-derived rekey floor up front.
+        // inbound handshake against any existing active peer. The leg's machine
+        // evaluates the pure `establish_inbound` decision once and returns it with
+        // the arm's action stream; the driver routes on the decision below,
+        // running the actions through the executor and owning only the residual
+        // shell bookkeeping (link/map removal, reject records, the duplicate-msg2
+        // resend). The snapshot resolves the one clock read (session age) and the
+        // config-derived rekey floor up front.
         //
         // The rekey age floor sits BELOW the minimum possible rekey interval, or
         // jittered rekeys are wrongly rejected. It bounds both the
@@ -1270,7 +1264,60 @@ impl Node {
             },
         };
 
-        match self.fmp.establish_inbound(&snap, &wire) {
+        // Capture the snapshot fields the tie-break breadcrumb reads before the
+        // snapshot moves into the single classification call below.
+        let rekey_in_progress = snap.rekey_in_progress;
+        let pending_new_session = snap.pending_new_session;
+
+        // Single inbound classification site. The leg's PERSISTENT machine — born
+        // at msg1, parked `SentMsg2` — evaluates `establish_inbound` once and
+        // returns both the decision (for the driver to route on) and the arm's
+        // action stream. The terminal tie-break/duplicate arms carry their
+        // `FreeIndex` (returning the msg1-allocated inbound index) as a machine
+        // action; the driver owns only the link/map removal and the reject
+        // bookkeeping, since the machine cannot remove itself from the map.
+        let (decision, actions) = match self.peer_machines.get_mut(&link_id) {
+            // Disjoint field borrow: `self.peer_machines` (the map entry) and
+            // `self.index_allocator` (the capability) are separate fields.
+            Some(machine) => machine.inbound_msg3(
+                wire,
+                snap,
+                our_index,
+                packet.timestamp_ms,
+                &mut self.index_allocator,
+            ),
+            None => {
+                // Every inbound leg's machine is born at msg1, so a miss here
+                // means a teardown path dropped the machine but left the leg
+                // behind. Recover with a fresh machine seeded the way msg1 would
+                // have left it, so the classification below behaves identically.
+                debug_assert!(false, "peer machine present for every pending inbound leg");
+                let mut machine =
+                    PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms);
+                let result = machine.inbound_msg3(
+                    wire,
+                    snap,
+                    our_index,
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                self.peer_machines.insert(link_id, machine);
+                result
+            }
+        };
+
+        let ambient = PeerActionCtx {
+            verified_identity: peer_identity,
+            transport_id: packet.transport_id,
+            remote_addr: packet.remote_addr.clone(),
+            our_index: Some(our_index),
+            their_index: Some(header.sender_idx),
+            now_ms: packet.timestamp_ms,
+            is_outbound: false,
+            pending_outbound_key: None,
+        };
+
+        match decision {
             InboundDecision::Reject {
                 reason: InboundReject::DualRekeyWon,
             } => {
@@ -1279,22 +1326,29 @@ impl Node {
                     peer = %self.peer_display_name(&peer_node_addr),
                     our_addr = %our_node_addr,
                     their_addr = %peer_node_addr,
-                    rekey_in_progress = snap.rekey_in_progress,
-                    pending_new_session = snap.pending_new_session,
+                    rekey_in_progress = rekey_in_progress,
+                    pending_new_session = pending_new_session,
                     "rekey-msg3 tie-break: we win (smaller addr), drop their msg3"
                 );
-                // We keep our in-progress rekey and drop their msg3; return the
-                // msg1-allocated inbound index rather than orphaning it.
-                let _ = self.index_allocator.free(our_index);
+                // We keep our in-progress rekey and drop their msg3. The machine's
+                // returned `FreeIndex` returns the msg1-allocated inbound index
+                // rather than orphaning it; the driver owns only the link/map
+                // removal and the reject record.
+                self.execute_peer_actions(link_id, &ambient, actions).await;
+                debug_assert!(
+                    !self.index_allocator.is_allocated(our_index),
+                    "inbound index freed exactly once via the machine action"
+                );
                 self.links.remove(&link_id);
                 self.remove_peer_machine(link_id);
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                return;
             }
             InboundDecision::ResendMsg2 { msg2 } => {
-                // Not a rekey — duplicate handshake from same epoch. Resend
-                // stored msg2, leaving the active peer untouched.
+                // Not a rekey — duplicate handshake from same epoch. Resend the
+                // stored msg2 bytes as-is (a driver mechanism: replaying the
+                // stored frame, not rebuilding it), leaving the active peer
+                // untouched.
                 if let Some(msg2) = msg2
                     && let Some(transport) = self.transports.get(&packet.transport_id)
                 {
@@ -1310,12 +1364,16 @@ impl Node {
                         ),
                     }
                 }
-                // Duplicate handshake: the active peer is untouched, so return the
-                // msg1-allocated inbound index rather than orphaning it.
-                let _ = self.index_allocator.free(our_index);
+                // The active peer is untouched. The machine's returned `FreeIndex`
+                // returns the msg1-allocated inbound index rather than orphaning
+                // it; the driver owns only the link/map removal.
+                self.execute_peer_actions(link_id, &ambient, actions).await;
+                debug_assert!(
+                    !self.index_allocator.is_allocated(our_index),
+                    "inbound index freed exactly once via the machine action"
+                );
                 self.links.remove(&link_id);
                 self.remove_peer_machine(link_id);
-                return;
             }
             decision @ (InboundDecision::RestartThenPromote { .. }
             | InboundDecision::Promote
@@ -1331,8 +1389,8 @@ impl Node {
                     );
                 }
                 // Machine-driven inbound establish/rekey resolution. The leg's
-                // PERSISTENT machine — born at msg1, parked `SentMsg2` — re-derives
-                // the decision from the same snapshot and emits the action stream:
+                // PERSISTENT machine emitted the action stream alongside the
+                // decision:
                 //   `[PromoteToActive]` for `Promote`;
                 //   `[InvalidateSendState, ReportLost, PromoteToActive]` for
                 //     `RestartThenPromote` (the two teardown actions map to
@@ -1345,51 +1403,6 @@ impl Node {
                 // session-swap / promote / teardown bodies live in the executor's
                 // `SwapToInboundSession` / `RekeyRespondTrigger` / `PromoteToActive`
                 // / `InvalidateSendState` / `ReportLost` arms.
-                let actions = match self.peer_machines.get_mut(&link_id) {
-                    // Disjoint field borrow: `self.peer_machines` (the map entry)
-                    // and `self.index_allocator` (the capability) are separate
-                    // fields.
-                    Some(machine) => machine.step(
-                        PeerEvent::InboundMsg3 {
-                            wire,
-                            est: snap,
-                            our_index,
-                        },
-                        packet.timestamp_ms,
-                        &mut self.index_allocator,
-                    ),
-                    None => {
-                        // Every inbound leg's machine is born at msg1, so a miss
-                        // here means a teardown path dropped the machine but left
-                        // the leg behind. Recover with a fresh machine seeded the
-                        // way msg1 would have left it, so the step below behaves
-                        // identically.
-                        debug_assert!(false, "peer machine present for every pending inbound leg");
-                        let mut machine =
-                            PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms);
-                        let actions = machine.step(
-                            PeerEvent::InboundMsg3 {
-                                wire,
-                                est: snap,
-                                our_index,
-                            },
-                            packet.timestamp_ms,
-                            &mut self.index_allocator,
-                        );
-                        self.peer_machines.insert(link_id, machine);
-                        actions
-                    }
-                };
-                let ambient = PeerActionCtx {
-                    verified_identity: peer_identity,
-                    transport_id: packet.transport_id,
-                    remote_addr: packet.remote_addr.clone(),
-                    our_index: Some(our_index),
-                    their_index: Some(header.sender_idx),
-                    now_ms: packet.timestamp_ms,
-                    is_outbound: false,
-                    pending_outbound_key: None,
-                };
                 self.execute_peer_actions(link_id, &ambient, actions).await;
             }
         }
