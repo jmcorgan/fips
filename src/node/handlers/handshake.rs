@@ -682,8 +682,16 @@ impl Node {
         }
 
         if peer_node_addr == *self.identity().node_addr() {
+            // Reachable by any outbound leg whose msg2 static key turns out to
+            // be our own — usually an anonymous shared-media beacon, but an
+            // identified dial misdirected at ourselves lands here too (the
+            // learned identity overwrites the dial-time expectation and is
+            // never compared against it). This leg never promotes; its machine
+            // goes with it. The index, link, and `pending_outbound` entry are
+            // deliberately NOT freed here (pre-existing shape).
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
             self.connections.remove(&link_id);
+            self.remove_peer_machine(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -889,31 +897,22 @@ impl Node {
         // an existing peer), so this is the net-new path: promote_connection hits
         // its normal-promotion branch and returns Promoted.
         //
-        // Net-new outbound promote via the per-peer machine. Look up the machine
-        // persisted at DIAL for an identified leg and step `OutboundMsg2 →
-        // [PromoteToActive]` in place; the machine survives the promotion and the
-        // executor crystallizes it via the `PromotionResolved` feedback. An
-        // anonymous-discovery leg never persisted a machine at dial and falls to
-        // the transient in the `None` arm; the transient is NOT inserted into
-        // `peer_machines`, so an anonymous promote leaves no machine behind (the
-        // anonymous leg's machine birth lands with the outbound-side convention
-        // work). With no outbound decision core to run, the machine emits
-        // `PromoteToActive` unconditionally (the net-new-vs-cross-connection
-        // decision was the `peers.contains_key` test above, which returns on an
-        // existing peer). The promote tail (info log, tree/bloom/backoff,
-        // `pending_outbound` removal) lives in the executor's `PromoteToActive`
-        // arm.
+        // Every outbound leg carries a persistent machine by now — identified
+        // dials persist one at dial, anonymous-discovery legs at leg birth in
+        // `start_handshake` — so the lookup is expected to hit. For an anonymous
+        // machine this is where its identity crystallizes: msg2 revealed who
+        // answered, and the learned identity lands on the machine before the
+        // step (a no-op for identified machines). The machine survives the
+        // promotion and the executor crystallizes its state via the
+        // `PromotionResolved` feedback. With no outbound decision core to run,
+        // the machine emits `PromoteToActive` unconditionally (the
+        // net-new-vs-cross-connection decision was the `peers.contains_key`
+        // test above, which returns on an existing peer). The promote tail
+        // (info log, tree/bloom/backoff, `pending_outbound` removal) lives in
+        // the executor's `PromoteToActive` arm.
         let promote_actions = match self.peer_machines.get_mut(&link_id) {
-            Some(machine) => machine.step(
-                PeerEvent::OutboundMsg2 {
-                    their_index: header.sender_idx,
-                },
-                packet.timestamp_ms,
-                &mut self.index_allocator,
-            ),
-            None => {
-                let mut machine =
-                    PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
+            Some(machine) => {
+                machine.crystallize_identity(peer_identity);
                 machine.step(
                     PeerEvent::OutboundMsg2 {
                         their_index: header.sender_idx,
@@ -921,6 +920,27 @@ impl Node {
                     packet.timestamp_ms,
                     &mut self.index_allocator,
                 )
+            }
+            None => {
+                // A miss is a state-machine inconsistency (e.g. a test seeding
+                // `connections`/`pending_outbound` directly): rebuild the
+                // machine defensively and persist it, so the promotion feedback
+                // below still finds it and the promoted peer keeps a machine.
+                debug_assert!(
+                    false,
+                    "outbound leg {link_id} reached msg2 without a control machine"
+                );
+                let mut machine =
+                    PeerMachine::new_outbound(link_id, Some(peer_identity), packet.timestamp_ms);
+                let actions = machine.step(
+                    PeerEvent::OutboundMsg2 {
+                        their_index: header.sender_idx,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                self.peer_machines.insert(link_id, machine);
+                actions
             }
         };
         // The outbound Msg2 Promote step cancels the two dial-armed handshake

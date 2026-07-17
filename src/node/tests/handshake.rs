@@ -85,6 +85,12 @@ async fn test_two_node_handshake_udp() {
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_a.peer_machines.insert(
+        link_id_a,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
+    );
 
     // Send msg1 from A to B over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -344,6 +350,12 @@ async fn test_run_rx_loop_handshake() {
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_a.peer_machines.insert(
+        link_id_a,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
+    );
 
     // Send msg1 from A to B over real UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -532,6 +544,12 @@ async fn test_cross_connection_both_initiate() {
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_a.peer_machines.insert(
+        link_id_a_out,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_a_out, Some(peer_b_identity), 1000),
+    );
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
@@ -562,6 +580,12 @@ async fn test_cross_connection_both_initiate() {
     node_b
         .pending_outbound
         .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_b.peer_machines.insert(
+        link_id_b_out,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_b_out, Some(peer_a_identity), 1000),
+    );
 
     // Both send msg1 over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -906,7 +930,7 @@ async fn test_resend_scheduling() {
     // Dial it to `SentMsg1` (connectionless: no connect step) and arm its
     // retransmit timer at now + 1000ms, mirroring what a real dial arms.
     let mut machine =
-        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms);
+        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), now_ms);
     let _ = machine.step(
         crate::peer::machine::PeerEvent::Dial {
             transport_id,
@@ -981,7 +1005,7 @@ async fn test_handshake_timeout_drive() {
 
     // Machine in SentMsg1 with a HandshakeTimeout timer armed at dial + 30s.
     let mut machine =
-        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, dial_ms);
+        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), dial_ms);
     let _ = machine.step(
         crate::peer::machine::PeerEvent::Dial {
             transport_id,
@@ -1487,7 +1511,7 @@ async fn drive_to_msg3(
     // crystallizes that same machine in place.
     initiator.node.peer_machines.insert(
         link_id,
-        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms),
+        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), now_ms),
     );
     initiator
         .node
@@ -1816,4 +1840,146 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
 
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;
+}
+
+// ===========================================================================
+// Anonymous-discovery outbound lifecycle: the leg's persistent machine is
+// born identity-less at leg birth inside `start_handshake`, learns its
+// identity from XX msg2 (crystallization), survives the promote, and is
+// disposed with the leg when the dial turns out to target ourselves.
+// ===========================================================================
+
+#[tokio::test]
+async fn test_anonymous_dial_births_identityless_machine_at_leg_birth() {
+    use crate::peer::machine::PeerState;
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let responder = make_hs_node(Config::new()).await;
+
+    // Anonymous dial (no peer identity): the connectionless path runs the
+    // inline handshake, which creates the leg and its machine together.
+    initiator
+        .node
+        .initiate_connection(initiator.transport_id, responder.addr.clone(), None)
+        .await
+        .expect("anonymous dial");
+
+    assert_eq!(initiator.node.connections.len(), 1);
+    let leg_link = *initiator.node.connections.keys().next().unwrap();
+    let machine = initiator
+        .node
+        .peer_machines
+        .get(&leg_link)
+        .expect("anonymous leg carries a machine from leg birth");
+    assert!(
+        machine.identity().is_none(),
+        "anonymous machine is born without an identity"
+    );
+    assert_eq!(
+        machine.state(),
+        PeerState::Discovered,
+        "no event is dispatched on the inline dial path"
+    );
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    let mut initiator = initiator;
+    let mut responder = responder;
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+#[tokio::test]
+async fn test_anonymous_msg2_crystallizes_identity_and_promotes() {
+    use crate::peer::machine::PeerState;
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+
+    initiator
+        .node
+        .initiate_connection(initiator.transport_id, responder.addr.clone(), None)
+        .await
+        .expect("anonymous dial");
+    let leg_link = *initiator.node.connections.keys().next().unwrap();
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    // Responder answers msg1 with msg2; the initiator's msg2 processing learns
+    // who answered, crystallizes the identity onto the leg-born machine, and
+    // promotes through it.
+    let msg1_pkt = recv_phase(&mut responder.packet_rx, 1, "msg1").await;
+    responder.node.handle_msg1(msg1_pkt).await;
+    let msg2_pkt = recv_phase(&mut initiator.packet_rx, 2, "msg2").await;
+    initiator.node.handle_msg2(msg2_pkt).await;
+
+    let responder_identity =
+        PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full());
+    let responder_addr = *responder_identity.node_addr();
+    assert_eq!(initiator.node.peer_count(), 1);
+    let peer = initiator.node.get_peer(&responder_addr).expect("promoted");
+    assert_eq!(peer.link_id(), leg_link, "promote keeps the leg's link");
+
+    // The SAME machine survived the promote, with the learned identity and
+    // the established state crystallized in place.
+    let machine = initiator
+        .node
+        .peer_machines
+        .get(&leg_link)
+        .expect("machine survives the anonymous promote");
+    assert_eq!(
+        machine.identity().map(|id| *id.node_addr()),
+        Some(responder_addr),
+        "msg2 crystallized the learned identity onto the machine"
+    );
+    assert_eq!(
+        machine.state(),
+        PeerState::Established {
+            addr: responder_addr
+        }
+    );
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    // Complete the exchange so the responder promotes too, and both sides
+    // stay coherent across the full anonymous establish path.
+    let msg3_pkt = recv_phase(&mut responder.packet_rx, 3, "msg3").await;
+    responder.node.handle_msg3(msg3_pkt).await;
+    assert_eq!(responder.node.peer_count(), 1);
+    responder.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+#[tokio::test]
+async fn test_anonymous_self_connect_drop_disposes_machine() {
+    let mut node = make_hs_node(Config::new()).await;
+    let self_addr = node.addr.clone();
+
+    // Anonymously dial our own bound address (a shared-media beacon can echo
+    // ourselves back at us).
+    node.node
+        .initiate_connection(node.transport_id, self_addr, None)
+        .await
+        .expect("anonymous self dial");
+    let leg_link = *node.node.connections.keys().next().unwrap();
+    assert_eq!(node.node.peer_machines.len(), 1);
+
+    // We answer our own msg1, then our msg2 processing discovers the learned
+    // identity is our own and drops the leg — machine included.
+    let msg1_pkt = recv_phase(&mut node.packet_rx, 1, "msg1").await;
+    node.node.handle_msg1(msg1_pkt).await;
+    let msg2_pkt = recv_phase(&mut node.packet_rx, 2, "msg2").await;
+    node.node.handle_msg2(msg2_pkt).await;
+
+    assert_eq!(node.node.peer_count(), 0, "no promotion");
+    assert!(
+        !node.node.connections.contains_key(&leg_link),
+        "self-connect drop removes the outbound leg"
+    );
+    assert!(
+        !node.node.peer_machines.contains_key(&leg_link),
+        "self-connect drop disposes the outbound leg's machine"
+    );
+    node.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut node).await;
 }

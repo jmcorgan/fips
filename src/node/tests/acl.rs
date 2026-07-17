@@ -80,6 +80,12 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     node_a
         .pending_outbound
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_a.peer_machines.insert(
+        link_id_a,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
+    );
 
     let mut conn_b = PeerConnection::inbound(LinkId::new(2), 1000);
     let responder_epoch = [0x11; 8];
@@ -200,6 +206,12 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_a.peer_machines.insert(
+        link_id_a,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
+    );
 
     let transport = node_a.transports.get(&transport_id_a).unwrap();
     transport

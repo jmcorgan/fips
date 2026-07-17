@@ -2317,13 +2317,13 @@ impl Node {
     /// Gates the leg→machine direction of `debug_assert_peer_maps_coherent`.
     /// Asserting it requires the convention that every `connections` insert is
     /// paired with a `peer_machines` insert before the next await point —
-    /// which does NOT hold here yet: the inbound msg1→msg3 window legs and the
-    /// anonymous-discovery outbound legs legitimately run machine-less (their
-    /// decision machines are msg3/msg2-time transients). Flip this to `true`
-    /// once every leg is born with a persistent machine; until then only the
-    /// machine→carrier leak-tripwire direction asserts.
+    /// which now holds everywhere: identified dials persist their machine
+    /// before the leg exists (`initiate_connection`), anonymous-discovery legs
+    /// are born with one inside `start_handshake` alongside the connection
+    /// insert, inbound legs get theirs in `handle_msg1` at the same point, and
+    /// the `add_connection` test seam seeds one for directly-inserted legs.
     #[cfg(debug_assertions)]
-    const CHECK_LEGS_HAVE_MACHINES: bool = false;
+    const CHECK_LEGS_HAVE_MACHINES: bool = true;
 
     /// Debug-build coherence sweep over the peer-lifecycle maps, run once per
     /// rx-loop tick and invoked directly by unit tests.
@@ -2444,11 +2444,10 @@ impl Node {
 
         self.peer_machines.entry(link_id).or_insert_with(|| {
             let now = connection.started_at();
-            match connection.expected_identity() {
-                Some(identity) if connection.is_outbound() => {
-                    PeerMachine::new_outbound(link_id, *identity, now)
-                }
-                _ => PeerMachine::new_inbound(link_id, now),
+            if connection.is_outbound() {
+                PeerMachine::new_outbound(link_id, connection.expected_identity().copied(), now)
+            } else {
+                PeerMachine::new_inbound(link_id, now)
             }
         });
 

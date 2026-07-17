@@ -496,7 +496,7 @@ impl Node {
                 // a spurious `UnregisterDecryptSession`. It is removed on every
                 // failure path in the dial window (`prepare_outbound_msg1` /
                 // `poll_pending_connects`), mirroring the connection's lifetime.
-                let machine = PeerMachine::new_outbound(link_id, identity, Self::now_ms());
+                let machine = PeerMachine::new_outbound(link_id, Some(identity), Self::now_ms());
                 self.peer_machines.insert(link_id, machine);
 
                 if !is_connection_oriented {
@@ -537,9 +537,14 @@ impl Node {
                 Ok(())
             }
             None => {
-                // Anonymous-discovery dial: next's inline path, no control machine
-                // (the transient is born at `handle_msg2` when the peer's identity
-                // crystallizes from `conn.expected_identity()`).
+                // Anonymous-discovery dial: the inline path. The leg's control
+                // machine is born inside `start_handshake` at leg creation
+                // (identity-less; `handle_msg2` crystallizes the identity the XX
+                // handshake learns). The connection-oriented connect window below
+                // deliberately has no leg and no machine yet — the Failed arm of
+                // `poll_pending_connects` only disposes machines for identified
+                // legs, and stays correct because anonymous machines don't exist
+                // until connect resolution reaches `start_handshake`.
                 if is_connection_oriented {
                     // Connection-oriented: start non-blocking connect, defer handshake.
                     if let Some(transport) = self.transports.get(&transport_id) {
@@ -584,8 +589,9 @@ impl Node {
     /// connection for `send_stored_msg1` to transmit. Does NOT send — so the
     /// fallible setup can propagate its error synchronously before any machine
     /// drive. Anonymous-discovery legs use the monolithic `start_handshake`
-    /// instead; only identified legs persist a machine, so this is the only
-    /// caller path that cleans up `peer_machines`.
+    /// instead, whose machine is born after its fallible setup — so this is
+    /// the only caller path whose Err arms clean up `peer_machines` (the
+    /// dial-time machine predates the failure).
     pub(in crate::node) fn prepare_outbound_msg1(
         &mut self,
         link_id: LinkId,
@@ -658,11 +664,12 @@ impl Node {
     }
 
     /// Start an outbound Noise handshake inline (allocate index, run the Noise
-    /// leaf, arm the resend, track `pending_outbound`, and send msg1). Used by
-    /// the anonymous-discovery dial paths (connectionless dial and the
-    /// connection-oriented connect-resolution), which drive no control machine.
-    /// Anonymous discovery (no `peer_identity`) leaves identity to be learned
-    /// from the XX msg2.
+    /// leaf, arm the resend, track `pending_outbound`, persist the leg's
+    /// control machine, and send msg1). Used by the anonymous-discovery dial
+    /// paths (connectionless dial and the connection-oriented
+    /// connect-resolution). Anonymous discovery (no `peer_identity`) leaves
+    /// identity to be learned from the XX msg2, which crystallizes it onto the
+    /// leg-born machine.
     pub(super) async fn start_handshake(
         &mut self,
         link_id: LinkId,
@@ -739,6 +746,22 @@ impl Node {
         self.pending_outbound
             .insert((transport_id, our_index.as_u32()), link_id);
         self.connections.insert(link_id, connection);
+        // The leg's persistent control machine is born alongside its pending
+        // connection, after all fallible setup (the index-alloc and Noise Err
+        // returns above predate it and need no disposal). Both production
+        // callers dial anonymously (identified dials persist their machine at
+        // dial and go through `prepare_outbound_msg1`), so the machine starts
+        // identity-less; `handle_msg2` crystallizes the identity the XX
+        // handshake learns. Inserted before the send below so no suspension
+        // point observes a leg without a machine. The send-failure arm retains
+        // the failed connection, and the machine stays with it — the stale-
+        // connection reaper disposes both together. No timers are armed and no
+        // event is dispatched: this path sends msg1 inline, so the machine
+        // parks at `Discovered` until msg2.
+        self.peer_machines.insert(
+            link_id,
+            PeerMachine::new_outbound(link_id, peer_identity, current_time_ms),
+        );
 
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
@@ -1422,8 +1445,10 @@ impl Node {
                         }
                     }
                     None => {
-                        // Anonymous-discovery leg: next's inline handshake, no
-                        // control machine.
+                        // Anonymous-discovery leg: the inline handshake persists
+                        // the leg's control machine at leg birth. Its Err returns
+                        // all precede that birth, so the cleanup below has no
+                        // machine to dispose.
                         if let Err(e) = self
                             .start_handshake(
                                 pending.link_id,

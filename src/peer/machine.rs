@@ -464,14 +464,21 @@ pub(crate) struct PeerMachine {
 
 impl PeerMachine {
     /// New outbound machine (we dial). Starts at `Discovered`; the reconciler's
-    /// `Dial` event drives the first transition.
-    pub(crate) fn new_outbound(link: LinkId, identity: PeerIdentity, now: u64) -> Self {
+    /// `Dial` event drives the first transition. `identity` is `None` for an
+    /// anonymous-discovery leg (a shared-media beacon carries no identity): the
+    /// machine is born identity-less and [`crystallize_identity`]
+    /// (Self::crystallize_identity) fills it in when the XX msg2 reveals who
+    /// answered.
+    pub(crate) fn new_outbound(link: LinkId, identity: Option<PeerIdentity>, now: u64) -> Self {
         Self {
             state: PeerState::Discovered,
             link,
-            identity: Some(identity),
-            node_addr: Some(*identity.node_addr()),
-            conn: ConnectionState::outbound(link, identity, now),
+            identity,
+            node_addr: identity.map(|id| *id.node_addr()),
+            conn: match identity {
+                Some(id) => ConnectionState::outbound(link, id, now),
+                None => ConnectionState::outbound_anonymous(link, now),
+            },
             remote_epoch: None,
             rekey_in_progress: false,
             rekey_our_index: None,
@@ -593,6 +600,29 @@ impl PeerMachine {
     /// machine-owned index.
     pub(crate) fn our_index(&self) -> Option<SessionIndex> {
         self.our_index
+    }
+
+    /// The peer identity this machine was born with (outbound identified dial)
+    /// or crystallized onto it (anonymous discovery at msg2, inbound at msg3
+    /// promote). `None` while the peer is still anonymous.
+    #[cfg(test)]
+    pub(crate) fn identity(&self) -> Option<&PeerIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// Crystallize a learned identity onto an anonymous machine: XX msg2 is
+    /// where an anonymous-discovery leg first learns who answered its dial.
+    /// Sets the identity, the node address, and the conn's expected identity —
+    /// control-tier fields only; no action is emitted and no state transition
+    /// runs. A no-op when the identity is already known (identified dials fix
+    /// it at birth), so callers on shared paths need not distinguish the two.
+    pub(crate) fn crystallize_identity(&mut self, identity: PeerIdentity) {
+        if self.identity.is_some() {
+            return;
+        }
+        self.identity = Some(identity);
+        self.node_addr = Some(*identity.node_addr());
+        self.conn.set_expected_identity(identity);
     }
 
     /// The msg1 resend count for this outbound handshake leg. The per-peer
@@ -1555,7 +1585,7 @@ mod tests {
         let id = peer_identity();
         let addr = *id.node_addr();
         let link = LinkId::new(3);
-        let mut m = PeerMachine::new_outbound(link, id, 0);
+        let mut m = PeerMachine::new_outbound(link, Some(id), 0);
         let their_index = SessionIndex::new(0x77);
 
         let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
@@ -1585,7 +1615,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let link = LinkId::new(4);
-        let mut m = PeerMachine::new_outbound(link, id, 0);
+        let mut m = PeerMachine::new_outbound(link, Some(id), 0);
         let their_index = SessionIndex::new(0x88);
 
         let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
@@ -1729,7 +1759,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         // Arrange: a completed rekey pending cutover.
         m.state = PeerState::Maintaining {
             addr,
@@ -1791,7 +1821,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Active { addr };
 
         let actions = m.step(
@@ -1826,7 +1856,7 @@ mod tests {
             let mut alloc = IndexAllocator::new();
             let our = *smaller.node_addr();
             let peer = larger;
-            let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+            let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
             let peer_addr = *peer.node_addr();
             m.state = PeerState::Maintaining {
                 addr: peer_addr,
@@ -1874,7 +1904,7 @@ mod tests {
             let mut alloc = IndexAllocator::new();
             let our = *larger.node_addr();
             let peer = smaller;
-            let mut m = PeerMachine::new_outbound(LinkId::new(2), peer, 0);
+            let mut m = PeerMachine::new_outbound(LinkId::new(2), Some(peer), 0);
             let peer_addr = *peer.node_addr();
             m.state = PeerState::Maintaining {
                 addr: peer_addr,
@@ -2391,7 +2421,7 @@ mod tests {
         let our = *peer_identity().node_addr();
 
         // Persisted at dial: Discovered, conn.our_index deliberately NOT set.
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
         assert_eq!(m.our_index(), None);
 
         // Promote via msg2 from Discovered (the production path — the former
@@ -2479,7 +2509,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
         // Connectionless dial: no OpenTransport, straight to Handshaking{SentMsg1}.
         let dial = m.step(
             PeerEvent::Dial {
@@ -2547,7 +2577,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
         // Connection-oriented dial: open the transport first, no msg1 yet.
         let dial = m.step(
             PeerEvent::Dial {
@@ -2605,7 +2635,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Active { addr };
         m.our_index = Some(SessionIndex::new(0x4242));
 
@@ -2649,7 +2679,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Maintaining {
             addr,
             kind: MaintainKind::Rekey(RekeyPhase::PendingCutover),
@@ -2708,7 +2738,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Established { addr };
 
         let acts = m.step(PeerEvent::RekeyInitiated, 5_000, &mut alloc);
@@ -2734,7 +2764,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Maintaining {
             addr,
             kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent),
@@ -2768,7 +2798,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Active { addr };
         m.conn.set_our_index(SessionIndex::new(0x1111));
         m.conn.set_their_index(SessionIndex::new(0x2222));
@@ -2797,7 +2827,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
         m.state = PeerState::Active { addr };
         m.conn.set_our_index(SessionIndex::new(0x1111));
         m.conn.set_their_index(SessionIndex::new(0x2222));

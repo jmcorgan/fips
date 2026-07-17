@@ -168,7 +168,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
     // crystallizes that same machine in place.
     initiator.node.peer_machines.insert(
         link_id,
-        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, 1000),
+        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), 1000),
     );
     initiator
         .node

@@ -2031,6 +2031,12 @@ async fn drive_xx_handshake(
     node_a
         .pending_outbound
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
+    // Mirror the production dial path: an outbound leg persists its control
+    // machine at dial.
+    node_a.peer_machines.insert(
+        link_id_a,
+        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
+    );
 
     let transport = node_a.transports.get(&transport_id).unwrap();
     transport
