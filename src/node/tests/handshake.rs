@@ -81,16 +81,10 @@ async fn test_two_node_handshake_udp() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.connections.insert(link_id_a, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
-    // Mirror the production dial path: an outbound leg persists its control
-    // machine at dial.
-    node_a.peer_machines.insert(
-        link_id_a,
-        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
-    );
 
     // Send msg1 from A to B over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -118,7 +112,7 @@ async fn test_two_node_handshake_udp() {
         "Node B should have 0 peers after msg1 (XX awaits msg3)"
     );
     assert_eq!(
-        node_b.connections.len(),
+        node_b.connection_count(),
         1,
         "Node B should have 1 pending connection awaiting msg3"
     );
@@ -346,16 +340,10 @@ async fn test_run_rx_loop_handshake() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.connections.insert(link_id_a, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
-    // Mirror the production dial path: an outbound leg persists its control
-    // machine at dial.
-    node_a.peer_machines.insert(
-        link_id_a,
-        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
-    );
 
     // Send msg1 from A to B over real UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -394,7 +382,7 @@ async fn test_run_rx_loop_handshake() {
         "Node B should have 0 peers after rx loop processed msg1 (XX awaits msg3)"
     );
     assert_eq!(
-        node_b.connections.len(),
+        node_b.connection_count(),
         1,
         "Node B should have 1 pending connection"
     );
@@ -445,7 +433,7 @@ async fn test_run_rx_loop_handshake() {
     // This test verifies rx_loop correctly dispatches PHASE_MSG1 (Phase 2)
     // and PHASE_MSG2 (Phase 3). B still has a pending connection awaiting msg3.
     assert_eq!(
-        node_b.connections.len(),
+        node_b.connection_count(),
         1,
         "Node B should still have pending connection awaiting msg3"
     );
@@ -540,16 +528,10 @@ async fn test_cross_connection_both_initiate() {
     node_a
         .addr_to_link
         .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
-    node_a.connections.insert(link_id_a_out, conn_a);
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
-    // Mirror the production dial path: an outbound leg persists its control
-    // machine at dial.
-    node_a.peer_machines.insert(
-        link_id_a_out,
-        crate::peer::machine::PeerMachine::new_outbound(link_id_a_out, Some(peer_b_identity), 1000),
-    );
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
@@ -576,16 +558,10 @@ async fn test_cross_connection_both_initiate() {
     node_b
         .addr_to_link
         .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
-    node_b.connections.insert(link_id_b_out, conn_b);
+    node_b.add_connection(conn_b).unwrap();
     node_b
         .pending_outbound
         .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
-    // Mirror the production dial path: an outbound leg persists its control
-    // machine at dial.
-    node_b.peer_machines.insert(
-        link_id_b_out,
-        crate::peer::machine::PeerMachine::new_outbound(link_id_b_out, Some(peer_a_identity), 1000),
-    );
 
     // Both send msg1 over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -750,7 +726,7 @@ async fn test_stale_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
+    node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
@@ -828,7 +804,7 @@ async fn test_failed_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
+    node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
@@ -924,11 +900,11 @@ async fn test_resend_scheduling() {
         .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
-    node.connections.insert(link_id, conn);
 
-    // The msg1-resend counter and its due timer live on the per-peer machine.
-    // Dial it to `SentMsg1` (connectionless: no connect step) and arm its
-    // retransmit timer at now + 1000ms, mirroring what a real dial arms.
+    // The msg1-resend counter and its due timer live on the per-peer machine,
+    // which also carries the pending connection. Dial it to `SentMsg1`
+    // (connectionless: no connect step) and arm its retransmit timer at
+    // now + 1000ms, mirroring what a real dial arms.
     let mut machine =
         crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), now_ms);
     let _ = machine.step(
@@ -941,6 +917,7 @@ async fn test_resend_scheduling() {
         now_ms,
         &mut node.index_allocator,
     );
+    machine.set_leg(conn);
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
         crate::peer::machine::TimerKind::HandshakeRetransmit,
@@ -999,11 +976,11 @@ async fn test_handshake_timeout_drive() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.connections.insert(link_id, conn);
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
-    // Machine in SentMsg1 with a HandshakeTimeout timer armed at dial + 30s.
+    // Machine in SentMsg1, carrying the pending connection, with a
+    // HandshakeTimeout timer armed at dial + 30s.
     let mut machine =
         crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), dial_ms);
     let _ = machine.step(
@@ -1016,6 +993,7 @@ async fn test_handshake_timeout_drive() {
         dial_ms,
         &mut node.index_allocator,
     );
+    machine.set_leg(conn);
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
         crate::peer::machine::TimerKind::HandshakeTimeout,
@@ -1505,14 +1483,10 @@ async fn drive_to_msg3(
         .node
         .addr_to_link
         .insert((initiator.transport_id, responder.addr.clone()), link_id);
-    initiator.node.connections.insert(link_id, conn);
-    // Mirror the production dial path: an identified outbound leg persists
-    // its control machine at dial, and the promote feedback later
-    // crystallizes that same machine in place.
-    initiator.node.peer_machines.insert(
-        link_id,
-        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), now_ms),
-    );
+    // Mirror the production dial path: the seam seeds the identified outbound
+    // leg's control machine (carrying the connection) at dial, and the promote
+    // feedback later crystallizes that same machine in place.
+    initiator.node.add_connection(conn).unwrap();
     initiator
         .node
         .pending_outbound
@@ -1698,8 +1672,8 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
 
     // After msg1 the responder's window leg carries a machine parked at
     // `SentMsg2`, seeded with the leg's msg1-allocated index.
-    assert_eq!(responder.node.connections.len(), 1);
-    let leg_link = *responder.node.connections.keys().next().unwrap();
+    assert_eq!(responder.node.connection_count(), 1);
+    let leg_link = responder.node.connections().next().unwrap().link_id();
     let leg_index = responder
         .node
         .get_connection(&leg_link)
@@ -1777,7 +1751,10 @@ async fn test_msg3_crypto_fail_disposes_leg_machine() {
     responder.node.handle_msg3(msg3).await;
 
     assert_eq!(responder.node.peer_count(), 0, "no promotion");
-    assert!(responder.node.connections.is_empty(), "leg torn down");
+    assert!(
+        responder.node.connections().next().is_none(),
+        "leg torn down"
+    );
     assert!(
         responder.node.peer_machines.is_empty(),
         "crypto-fail teardown disposes the leg's machine"
@@ -1864,8 +1841,8 @@ async fn test_anonymous_dial_births_identityless_machine_at_leg_birth() {
         .await
         .expect("anonymous dial");
 
-    assert_eq!(initiator.node.connections.len(), 1);
-    let leg_link = *initiator.node.connections.keys().next().unwrap();
+    assert_eq!(initiator.node.connection_count(), 1);
+    let leg_link = initiator.node.connections().next().unwrap().link_id();
     let machine = initiator
         .node
         .peer_machines
@@ -1900,7 +1877,7 @@ async fn test_anonymous_msg2_crystallizes_identity_and_promotes() {
         .initiate_connection(initiator.transport_id, responder.addr.clone(), None)
         .await
         .expect("anonymous dial");
-    let leg_link = *initiator.node.connections.keys().next().unwrap();
+    let leg_link = initiator.node.connections().next().unwrap().link_id();
     initiator.node.debug_assert_peer_maps_coherent();
 
     // Responder answers msg1 with msg2; the initiator's msg2 processing learns
@@ -1960,7 +1937,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
         .initiate_connection(node.transport_id, self_addr, None)
         .await
         .expect("anonymous self dial");
-    let leg_link = *node.node.connections.keys().next().unwrap();
+    let leg_link = node.node.connections().next().unwrap().link_id();
     assert_eq!(node.node.peer_machines.len(), 1);
 
     // We answer our own msg1, then our msg2 processing discovers the learned
@@ -1972,7 +1949,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
 
     assert_eq!(node.node.peer_count(), 0, "no promotion");
     assert!(
-        !node.node.connections.contains_key(&leg_link),
+        node.node.get_connection(&leg_link).is_none(),
         "self-connect drop removes the outbound leg"
     );
     assert!(

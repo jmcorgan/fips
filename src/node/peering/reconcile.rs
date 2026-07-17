@@ -147,7 +147,7 @@ pub(crate) struct Observed {
     #[allow(dead_code)]
     // ceiling-only posture: no layer reads the scalar counts (future set-point)
     pub peers: usize,
-    /// `self.connections.len()`.
+    /// `self.connection_count()`.
     #[allow(dead_code)]
     // ceiling-only posture: no layer reads the scalar counts (future set-point)
     pub connections: usize,

@@ -199,7 +199,6 @@ impl Node {
                             // (`handle_msg1` L665): the send error text is surfaced
                             // at the executor point where the failure is now handled.
                             warn!(link_id = %link, error = %e, "Failed to send msg2");
-                            self.connections.remove(&link);
                             self.links.remove(&link);
                             self.addr_to_link
                                 .remove(&(ambient.transport_id, ambient.remote_addr.clone()));
@@ -247,8 +246,7 @@ impl Node {
                     let wire_msg2 = if ambient.is_outbound {
                         None
                     } else {
-                        self.connections
-                            .get(&promote_link)
+                        self.leg(&promote_link)
                             .and_then(|c| c.handshake_msg2().map(|m| m.to_vec()))
                     };
 
@@ -393,10 +391,11 @@ impl Node {
                             // records the reject but performs no link/index teardown
                             // and leaves the `pending_outbound` entry for the stale-
                             // connection reaper. The leg's machine must go with the
-                            // leg, though: `promote_connection` consumed the
-                            // `connections` entry before erring, so the reaper (which
-                            // sweeps `connections`) can never reach this link's
-                            // machine — dropping it here is the only disposal point.
+                            // leg, though: `promote_connection` took the pending
+                            // connection off the machine before erring, so the reaper
+                            // (which sweeps the machines' embedded legs) can never
+                            // reach this link's machine — dropping it here is the
+                            // only disposal point.
                             warn!(
                                 target: "fips::node::handlers::handshake",
                                 link_id = %promote_link,
@@ -581,27 +580,22 @@ impl Node {
                     if our_inbound_wins {
                         // Larger node side: swap to the inbound session so it pairs
                         // with the peer's kept outbound session.
-                        let inbound_session = match self
-                            .connections
-                            .get_mut(&link)
-                            .and_then(|c| c.take_session())
-                        {
-                            Some(s) => s,
-                            None => {
-                                self.connections.remove(&link);
-                                self.remove_link(&link);
-                                self.remove_peer_machine(link);
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
-                                return;
-                            }
-                        };
+                        let inbound_session =
+                            match self.leg_mut(&link).and_then(|c| c.take_session()) {
+                                Some(s) => s,
+                                None => {
+                                    self.remove_link(&link);
+                                    self.remove_peer_machine(link);
+                                    self.stats_mut().record_reject(RejectReason::Handshake(
+                                        HandshakeReject::BadState,
+                                    ));
+                                    return;
+                                }
+                            };
                         if let Some(peer_ref) = self.peers.get_mut(&peer) {
                             let old_our_index =
                                 peer_ref.replace_session(inbound_session, our_index, their_index);
                             let Some(transport_id) = peer_ref.transport_id() else {
-                                self.connections.remove(&link);
                                 self.remove_link(&link);
                                 self.remove_peer_machine(link);
                                 self.stats_mut().record_reject(RejectReason::Handshake(
@@ -636,8 +630,8 @@ impl Node {
 
                     // Both branches tear down the temporary inbound link fully
                     // (including its `addr_to_link` mapping) via `remove_link`,
-                    // disposing the leg's machine with it.
-                    self.connections.remove(&link);
+                    // disposing the leg's machine (and its embedded connection)
+                    // with it.
                     self.remove_link(&link);
                     self.remove_peer_machine(link);
                     return;
@@ -677,7 +671,7 @@ impl Node {
 
                     // Rekey: process as responder, store new session as pending.
                     let noise_session = {
-                        let Some(conn) = self.connections.get_mut(&link) else {
+                        let Some(conn) = self.leg_mut(&link) else {
                             warn!(link_id = %link, "Connection removed during rekey msg3 processing");
                             self.links.remove(&link);
                             self.remove_peer_machine(link);
@@ -694,7 +688,6 @@ impl Node {
                         Some(s) => s,
                         None => {
                             warn!("Rekey msg3: no session from handshake");
-                            self.connections.remove(&link);
                             self.links.remove(&link);
                             self.remove_peer_machine(link);
                             self.stats_mut()
@@ -713,13 +706,13 @@ impl Node {
                     self.peers_by_index
                         .insert((ambient.transport_id, our_new_index.as_u32()), peer);
 
-                    // Clean up: remove the temporary connection/link and the leg's
-                    // machine (the established peer keeps its own, keyed by its own
-                    // link). Do NOT remove addr_to_link — the entry must remain
-                    // pointing to the original link so the established peer stays
-                    // routable, so this uses the bare `links.remove` rather than
-                    // the full `remove_link`.
-                    self.connections.remove(&link);
+                    // Clean up: remove the temporary link and the leg's machine
+                    // (dropping its embedded connection; the established peer
+                    // keeps its own machine, keyed by its own link). Do NOT
+                    // remove addr_to_link — the entry must remain pointing to
+                    // the original link so the established peer stays routable,
+                    // so this uses the bare `links.remove` rather than the full
+                    // `remove_link`.
                     self.links.remove(&link);
                     self.remove_peer_machine(link);
 

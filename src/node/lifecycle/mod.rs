@@ -372,7 +372,7 @@ impl Node {
     }
 
     fn is_connecting_to_peer(&self, peer_node_addr: &NodeAddr) -> bool {
-        self.connections.values().any(|conn| {
+        self.connections().any(|conn| {
             conn.expected_identity()
                 .map(|id| id.node_addr() == peer_node_addr)
                 .unwrap_or(false)
@@ -385,7 +385,7 @@ impl Node {
         transport_id: TransportId,
         remote_addr: &TransportAddr,
     ) -> bool {
-        self.connections.values().any(|conn| {
+        self.connections().any(|conn| {
             conn.expected_identity()
                 .map(|id| id.node_addr() == peer_node_addr)
                 .unwrap_or(false)
@@ -583,15 +583,16 @@ impl Node {
 
     /// Prepare an outbound Noise msg1 at dial for an IDENTIFIED leg: allocate the
     /// session index, run the Noise leaf, frame the wire, arm the shell-side
-    /// resend, track `pending_outbound`, and persist the connection. Returns
-    /// `Err` on index-allocation or Noise failure (cleaning the partial leg,
-    /// including the dial-time control machine), leaving the armed wire on the
-    /// connection for `send_stored_msg1` to transmit. Does NOT send — so the
-    /// fallible setup can propagate its error synchronously before any machine
-    /// drive. Anonymous-discovery legs use the monolithic `start_handshake`
-    /// instead, whose machine is born after its fallible setup — so this is
-    /// the only caller path whose Err arms clean up `peer_machines` (the
-    /// dial-time machine predates the failure).
+    /// resend, track `pending_outbound`, and embed the prepared connection on
+    /// the dial-time control machine. Returns `Err` on index-allocation or
+    /// Noise failure (cleaning the partial leg, including the dial-time control
+    /// machine), leaving the armed wire on the connection for
+    /// `send_stored_msg1` to transmit. Does NOT send — so the fallible setup
+    /// can propagate its error synchronously before any machine drive.
+    /// Anonymous-discovery legs use the monolithic `start_handshake` instead,
+    /// whose machine is born after its fallible setup — so this is the only
+    /// caller path whose Err arms clean up `peer_machines` (the dial-time
+    /// machine predates the failure).
     pub(in crate::node) fn prepare_outbound_msg1(
         &mut self,
         link_id: LinkId,
@@ -658,7 +659,21 @@ impl Node {
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
             .insert((transport_id, our_index.as_u32()), link_id);
-        self.connections.insert(link_id, connection);
+
+        // The dial-born machine (persisted in `initiate_connection`) carries
+        // the prepared connection from here. Every live caller dialed first,
+        // so the machine exists; recover with a fresh one if a direct caller
+        // ever skips the dial.
+        debug_assert!(
+            self.peer_machines.contains_key(&link_id),
+            "outbound msg1 prepared for link {link_id} with no dial-time machine"
+        );
+        self.peer_machines
+            .entry(link_id)
+            .or_insert_with(|| {
+                PeerMachine::new_outbound(link_id, Some(peer_identity), current_time_ms)
+            })
+            .set_leg(connection);
 
         Ok(())
     }
@@ -745,23 +760,21 @@ impl Node {
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
             .insert((transport_id, our_index.as_u32()), link_id);
-        self.connections.insert(link_id, connection);
-        // The leg's persistent control machine is born alongside its pending
+        // The leg's persistent control machine is born carrying its pending
         // connection, after all fallible setup (the index-alloc and Noise Err
         // returns above predate it and need no disposal). Both production
         // callers dial anonymously (identified dials persist their machine at
         // dial and go through `prepare_outbound_msg1`), so the machine starts
         // identity-less; `handle_msg2` crystallizes the identity the XX
         // handshake learns. Inserted before the send below so no suspension
-        // point observes a leg without a machine. The send-failure arm retains
-        // the failed connection, and the machine stays with it — the stale-
-        // connection reaper disposes both together. No timers are armed and no
-        // event is dispatched: this path sends msg1 inline, so the machine
-        // parks at `Discovered` until msg2.
-        self.peer_machines.insert(
-            link_id,
-            PeerMachine::new_outbound(link_id, peer_identity, current_time_ms),
-        );
+        // point observes a leg in flight without a machine. The send-failure
+        // arm retains the failed connection, and the machine keeps carrying
+        // it — the stale-connection reaper disposes both together. No timers
+        // are armed and no event is dispatched: this path sends msg1 inline,
+        // so the machine parks at `Discovered` until msg2.
+        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, current_time_ms);
+        machine.set_leg(connection);
+        self.peer_machines.insert(link_id, machine);
 
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
@@ -782,7 +795,7 @@ impl Node {
                     );
                     // Mark connection as failed but don't remove it yet
                     // The event loop can handle retry logic
-                    if let Some(conn) = self.connections.get_mut(&link_id) {
+                    if let Some(conn) = self.leg_mut(&link_id) {
                         conn.mark_failed();
                     }
                 }
@@ -804,15 +817,11 @@ impl Node {
         transport_id: TransportId,
         remote_addr: &TransportAddr,
     ) {
-        let wire_msg1 = match self
-            .connections
-            .get(&link_id)
-            .and_then(|c| c.handshake_msg1())
-        {
+        let wire_msg1 = match self.leg(&link_id).and_then(|c| c.handshake_msg1()) {
             Some(w) => w.to_vec(),
             None => return,
         };
-        let our_index = self.connections.get(&link_id).and_then(|c| c.our_index());
+        let our_index = self.leg(&link_id).and_then(|c| c.our_index());
 
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
@@ -835,7 +844,7 @@ impl Node {
                     );
                     // Mark connection as failed but don't remove it yet
                     // The event loop can handle retry logic
-                    if let Some(conn) = self.connections.get_mut(&link_id) {
+                    if let Some(conn) = self.leg_mut(&link_id) {
                         conn.mark_failed();
                     }
                 }
@@ -1066,14 +1075,13 @@ impl Node {
                             );
                             let now_ms = Self::now_ms();
                             let stale: Vec<LinkId> = self
-                                .connections
-                                .iter()
-                                .filter(|(_, conn)| {
+                                .connections()
+                                .filter(|conn| {
                                     conn.expected_identity()
                                         .map(|id| id.node_addr() == &peer_addr)
                                         .unwrap_or(false)
                                 })
-                                .map(|(link_id, _)| *link_id)
+                                .map(|conn| conn.link_id())
                                 .collect();
                             for link_id in stale {
                                 self.cleanup_stale_connection(link_id, now_ms);
@@ -2043,7 +2051,7 @@ impl Node {
         info!("Node started:");
         info!("       state: {}", self.supervisor.state);
         info!("  transports: {}", self.transports.len());
-        info!(" connections: {}", self.connections.len());
+        info!(" connections: {}", self.connection_count());
         Ok(())
     }
 
@@ -2887,18 +2895,17 @@ impl Node {
     /// The `connected` / `connecting` sets gate the floor, retry-dial, overlay,
     /// and LAN layers; `in_flight_by_peer` feeds the opportunistic layer's
     /// per-peer parallel cap, computed exactly as the deleted
-    /// `path_candidate_attempt_budget` did: `connections(expected == addr) +
+    /// `path_candidate_attempt_budget` did: `pending legs(expected == addr) +
     /// pending_connects(addr)`. The scalar counts stay unpopulated at the
     /// ceiling-only posture (no layer reads them; see [`Observed`]).
     pub(in crate::node) fn observe_peering(&self) -> Observed {
         let connected: HashSet<NodeAddr> = self.peers.keys().copied().collect();
         let connecting: HashSet<NodeAddr> = self
-            .connections
-            .values()
+            .connections()
             .filter_map(|conn| conn.expected_identity().map(|id| *id.node_addr()))
             .collect();
         let mut in_flight_by_peer: HashMap<NodeAddr, usize> = HashMap::new();
-        for conn in self.connections.values() {
+        for conn in self.connections() {
             if let Some(id) = conn.expected_identity() {
                 *in_flight_by_peer.entry(*id.node_addr()).or_default() += 1;
             }
@@ -2940,9 +2947,11 @@ impl Node {
     }
 
     fn outbound_handshake_slots(&self) -> usize {
+        // Count pending connections (legs), not machines: a dial-born machine
+        // in the connect window has no connection yet but DOES hold a
+        // `pending_connects` slot, so counting machines would tally it twice.
         let used = self
-            .connections
-            .len()
+            .connection_count()
             .saturating_add(self.peering.pending_connects.len());
         if self.max_connections() == 0 {
             usize::MAX
@@ -2968,8 +2977,7 @@ impl Node {
         }
 
         let in_flight_for_peer = self
-            .connections
-            .values()
+            .connections()
             .filter(|conn| {
                 conn.expected_identity()
                     .map(|identity| identity.node_addr() == peer_node_addr)

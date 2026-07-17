@@ -78,6 +78,7 @@
 
 #![allow(dead_code)]
 
+use crate::peer::PeerConnection;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision,
     InboundReject, PeerSnapshot, PromotionResult, RekeyCfg, RekeyResendSnapshot, WireOutcome,
@@ -428,6 +429,12 @@ pub(crate) struct PeerMachine {
     /// The crystallized peer node address. Known up front for outbound (from the
     /// dial identity); learned at msg3 for inbound (from [`WireOutcome`]).
     node_addr: Option<NodeAddr>,
+    /// The pending handshake connection this machine owns while the leg is in
+    /// the handshake window. `None` before the connection is built (the dial
+    /// window) and after promotion consumes it (the machine survives as the
+    /// active peer's control machine). Pure storage — the machine never reads
+    /// or drives it; the shell reaches it through the accessors below.
+    leg: Option<PeerConnection>,
     /// Pure handshake-phase bookkeeping (link/direction/indices/transport/
     /// stored handshake bytes/epoch). Reused verbatim from the FMP state core.
     conn: ConnectionState,
@@ -475,6 +482,7 @@ impl PeerMachine {
             link,
             identity,
             node_addr: identity.map(|id| *id.node_addr()),
+            leg: None,
             conn: match identity {
                 Some(id) => ConnectionState::outbound(link, id, now),
                 None => ConnectionState::outbound_anonymous(link, now),
@@ -505,6 +513,7 @@ impl PeerMachine {
             link,
             identity: None,
             node_addr: None,
+            leg: None,
             conn: ConnectionState::inbound(link, now),
             remote_epoch: None,
             rekey_in_progress: false,
@@ -572,6 +581,7 @@ impl PeerMachine {
             link,
             identity: Some(identity),
             node_addr: Some(addr),
+            leg: None,
             conn,
             remote_epoch,
             rekey_in_progress: false,
@@ -592,6 +602,28 @@ impl PeerMachine {
     /// Current lifecycle state.
     pub(crate) fn state(&self) -> PeerState {
         self.state
+    }
+
+    /// The pending handshake connection, if this leg is still in the
+    /// handshake window.
+    pub(crate) fn leg(&self) -> Option<&PeerConnection> {
+        self.leg.as_ref()
+    }
+
+    /// Mutable access to the pending handshake connection.
+    pub(crate) fn leg_mut(&mut self) -> Option<&mut PeerConnection> {
+        self.leg.as_mut()
+    }
+
+    /// Take the pending handshake connection off the machine (promotion and
+    /// teardown consume it by value).
+    pub(crate) fn take_leg(&mut self) -> Option<PeerConnection> {
+        self.leg.take()
+    }
+
+    /// Embed a pending handshake connection on the machine.
+    pub(crate) fn set_leg(&mut self, leg: PeerConnection) {
+        self.leg = Some(leg);
     }
 
     /// The index we allocated for this peer's inbound session at msg1. `None`

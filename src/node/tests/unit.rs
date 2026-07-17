@@ -137,8 +137,7 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
         .unwrap();
 
     let mut addrs = node
-        .connections
-        .values()
+        .connections()
         .filter_map(|conn| conn.source_addr().and_then(|addr| addr.as_str()))
         .collect::<Vec<_>>();
     addrs.sort();
@@ -733,7 +732,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     node.links.insert(pending_link_id, pending_link);
     node.addr_to_link
         .insert((transport_id, pending_addr.clone()), pending_link_id);
-    node.connections.insert(pending_link_id, pending_conn);
+    node.add_connection(pending_conn).unwrap();
     node.pending_outbound
         .insert((transport_id, pending_index.as_u32()), pending_link_id);
 
@@ -1255,8 +1254,7 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     assert_eq!(node.peer_count(), 1, "existing link must stay live");
     assert_eq!(node.connection_count(), 1);
     assert_eq!(
-        node.connections
-            .values()
+        node.connections()
             .next()
             .and_then(|conn| conn.source_addr()),
         Some(&new_addr)
@@ -2027,16 +2025,12 @@ async fn drive_xx_handshake(
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.connections.insert(link_id_a, conn_a);
+    // Mirror the production dial path: the seam seeds the outbound leg's
+    // control machine and embeds the connection on it.
+    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
-    // Mirror the production dial path: an outbound leg persists its control
-    // machine at dial.
-    node_a.peer_machines.insert(
-        link_id_a,
-        crate::peer::machine::PeerMachine::new_outbound(link_id_a, Some(peer_b_identity), 1000),
-    );
 
     let transport = node_a.transports.get(&transport_id).unwrap();
     transport

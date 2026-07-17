@@ -162,14 +162,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
         .node
         .addr_to_link
         .insert((transport_id, responder_addr.clone()), link_id);
-    initiator.node.connections.insert(link_id, conn);
-    // Mirror the production dial path: an identified outbound leg persists
-    // its control machine at dial, and the promote feedback later
-    // crystallizes that same machine in place.
-    initiator.node.peer_machines.insert(
-        link_id,
-        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), 1000),
-    );
+    initiator.node.add_connection(conn).unwrap();
     initiator
         .node
         .pending_outbound
