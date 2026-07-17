@@ -1482,6 +1482,13 @@ async fn drive_to_msg3(
         .addr_to_link
         .insert((initiator.transport_id, responder.addr.clone()), link_id);
     initiator.node.connections.insert(link_id, conn);
+    // Mirror the production dial path: an identified outbound leg persists
+    // its control machine at dial, and the promote feedback later
+    // crystallizes that same machine in place.
+    initiator.node.peer_machines.insert(
+        link_id,
+        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms),
+    );
     initiator
         .node
         .pending_outbound
@@ -1564,6 +1571,12 @@ async fn test_msg3_dual_rekey_won_frees_index() {
         "DualRekeyWon must free the msg1-allocated index"
     );
     assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
+    // The rejected leg's msg1-born machine goes with the leg; only the
+    // established peer's machine remains.
+    let peer_link = responder.node.get_peer(&peer_addr).unwrap().link_id();
+    assert_eq!(responder.node.peer_machines.len(), 1);
+    assert!(responder.node.peer_machines.contains_key(&peer_link));
+    responder.node.debug_assert_peer_maps_coherent();
     assert!(
         responder
             .node
@@ -1624,6 +1637,12 @@ async fn test_msg3_resend_msg2_frees_index() {
         "ResendMsg2 must free the msg1-allocated index"
     );
     assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
+    // The duplicate leg's msg1-born machine goes with the leg; only the
+    // established peer's machine remains.
+    let peer_link = responder.node.get_peer(&peer_addr).unwrap().link_id();
+    assert_eq!(responder.node.peer_machines.len(), 1);
+    assert!(responder.node.peer_machines.contains_key(&peer_link));
+    responder.node.debug_assert_peer_maps_coherent();
     assert!(
         responder
             .node
@@ -1633,6 +1652,167 @@ async fn test_msg3_resend_msg2_frees_index() {
             .is_none(),
         "duplicate-handshake arm must not store rekey-responder state"
     );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+// ===========================================================================
+// Inbound machine lifecycle: every window leg carries a persistent machine
+// from msg1 — parked `SentMsg2`, crystallized in place on promote, disposed
+// with the leg on every terminating msg3 arm.
+// ===========================================================================
+
+#[tokio::test]
+async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
+    use crate::peer::machine::{HandshakePhase, PeerState};
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+
+    // After msg1 the responder's window leg carries a machine parked at
+    // `SentMsg2`, seeded with the leg's msg1-allocated index.
+    assert_eq!(responder.node.connections.len(), 1);
+    let leg_link = *responder.node.connections.keys().next().unwrap();
+    let leg_index = responder
+        .node
+        .get_connection(&leg_link)
+        .unwrap()
+        .our_index();
+    assert!(leg_index.is_some(), "msg1 allocated the leg index");
+    {
+        let machine = responder
+            .node
+            .peer_machines
+            .get(&leg_link)
+            .expect("window leg carries a machine from msg1");
+        assert!(matches!(
+            machine.state(),
+            PeerState::Handshaking {
+                phase: HandshakePhase::SentMsg2,
+                ..
+            }
+        ));
+        assert_eq!(machine.our_index(), leg_index);
+    }
+    responder.node.debug_assert_peer_maps_coherent();
+
+    // msg3 promotes; the SAME machine survives and crystallizes in place.
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let peer = responder.node.get_peer(&peer_addr).unwrap();
+    assert_eq!(peer.link_id(), leg_link, "promote keeps the leg's link");
+    let peer_index = peer.our_index();
+    assert_eq!(peer_index, leg_index, "promote keeps the msg1 index");
+    let machine = responder
+        .node
+        .peer_machines
+        .get(&leg_link)
+        .expect("machine survives promotion");
+    assert_eq!(machine.state(), PeerState::Established { addr: peer_addr });
+    assert_eq!(machine.our_index(), peer_index);
+    responder.node.debug_assert_peer_maps_coherent();
+
+    // The initiator's dial-persisted machine crystallized in place too.
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+    let init_link = initiator.node.get_peer(&responder_addr).unwrap().link_id();
+    let init_machine = initiator
+        .node
+        .peer_machines
+        .get(&init_link)
+        .expect("dial machine survives promotion");
+    assert_eq!(
+        init_machine.state(),
+        PeerState::Established {
+            addr: responder_addr
+        }
+    );
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+#[tokio::test]
+async fn test_msg3_crypto_fail_disposes_leg_machine() {
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+
+    let mut msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    assert_eq!(responder.node.peer_machines.len(), 1, "msg1-born machine");
+    assert_eq!(responder.node.index_allocator.count(), 1);
+
+    // Corrupt the Noise payload so `complete_handshake_msg3` fails.
+    let last = msg3.data.len() - 1;
+    msg3.data[last] ^= 0xFF;
+    responder.node.handle_msg3(msg3).await;
+
+    assert_eq!(responder.node.peer_count(), 0, "no promotion");
+    assert!(responder.node.connections.is_empty(), "leg torn down");
+    assert!(
+        responder.node.peer_machines.is_empty(),
+        "crypto-fail teardown disposes the leg's machine"
+    );
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        0,
+        "msg1-allocated index returned"
+    );
+    responder.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+#[tokio::test]
+async fn test_msg3_rekey_respond_disposes_leg_machine() {
+    // Rekey enabled with a tiny interval so the rekey age floor collapses to
+    // its 5s minimum; with the session backdated past it and NO rekey of our
+    // own in flight, a fresh inbound msg3 classifies as rekey-responder.
+    let mut config = Config::new();
+    config.node.rekey.enabled = true;
+    config.node.rekey.after_secs = 1;
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(config).await;
+
+    // First handshake establishes the active peer (and its machine).
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    responder
+        .node
+        .get_peer_mut(&peer_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(6));
+
+    // Second handshake lands on the rekey-responder arm: the pending session
+    // moves onto the established peer; the window leg and its msg1-born
+    // machine are consumed.
+    let msg3b = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
+    responder.node.handle_msg3(msg3b).await;
+
+    let peer = responder.node.get_peer(&peer_addr).unwrap();
+    assert!(
+        peer.pending_new_session().is_some(),
+        "rekey-responder arm stores the pending session"
+    );
+    let peer_link = peer.link_id();
+    assert_eq!(
+        responder.node.peer_machines.len(),
+        1,
+        "the rekey window leg's machine is disposed with the leg"
+    );
+    assert!(responder.node.peer_machines.contains_key(&peer_link));
+    responder.node.debug_assert_peer_maps_coherent();
 
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;

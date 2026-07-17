@@ -515,6 +515,26 @@ impl PeerMachine {
         }
     }
 
+    /// New inbound machine for a leg whose msg1 was already processed
+    /// shell-side: the index is allocated and msg2 has been built and sent, so
+    /// the machine is born parked at `Handshaking{SentMsg2}` awaiting msg3
+    /// (where identity crystallizes). This is the birth ctor for the
+    /// msg1-inline path (`handle_msg1` runs the crypto and the msg2 send
+    /// itself, so no `InboundMsg1` event is dispatched); it seeds exactly the
+    /// state that event's handler would have left behind, minus the timers —
+    /// no timer is armed on inbound legs (the stale-connection reaper owns
+    /// their timeout).
+    pub(crate) fn inbound_msg2_sent(link: LinkId, our_index: SessionIndex, now: u64) -> Self {
+        let mut machine = Self::new_inbound(link, now);
+        machine.conn.set_our_index(our_index);
+        machine.our_index = Some(our_index);
+        machine.state = PeerState::Handshaking {
+            link,
+            phase: HandshakePhase::SentMsg2,
+        };
+        machine
+    }
+
     /// New machine for an ALREADY-established peer: the post-handshake state a
     /// promoted peer occupies before any rekey. The driver inserts one of these
     /// into `Node.peer_machines` at each `promote_connection` establishment site

@@ -300,6 +300,15 @@ impl Node {
         self.links.insert(link_id, link);
         self.addr_to_link.insert(addr_key, link_id);
         self.connections.insert(link_id, conn);
+        // The leg's persistent control machine is born alongside its pending
+        // connection, parked at `SentMsg2` awaiting msg3 (identity is unknown
+        // until then). Inserted before the msg2 send below so no suspension
+        // point observes a leg without a machine. `handle_msg3` steps this
+        // same machine; every teardown path disposes it with the leg.
+        self.peer_machines.insert(
+            link_id,
+            PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms),
+        );
 
         // Build and send msg2 response, storing for potential resend
         let wire_msg2 = build_msg2(our_index, header.sender_idx, &msg2_response);
@@ -330,6 +339,7 @@ impl Node {
                     self.addr_to_link
                         .remove(&(packet.transport_id, packet.remote_addr));
                     let _ = self.index_allocator.free(our_index);
+                    self.remove_peer_machine(link_id);
                     self.msg1_rate_limiter.complete_handshake();
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -881,16 +891,18 @@ impl Node {
         //
         // Net-new outbound promote via the per-peer machine. Look up the machine
         // persisted at DIAL for an identified leg and step `OutboundMsg2 →
-        // [PromoteToActive]` in place; an anonymous-discovery leg never persisted
-        // a machine at dial and falls to the transient in the `None` arm. The
-        // transient is NOT inserted into `peer_machines` — the persistent
-        // Established machine is created inside `promote_connection` (next's
-        // invariant: `promote_connection` owns the Established machine). With no
-        // outbound decision core to run, the machine emits `PromoteToActive`
-        // unconditionally (the net-new-vs-cross-connection decision was the
-        // `peers.contains_key` test above, which returns on an existing peer). The
-        // promote tail (info log, tree/bloom/backoff, `pending_outbound` removal)
-        // lives in the executor's `PromoteToActive` arm.
+        // [PromoteToActive]` in place; the machine survives the promotion and the
+        // executor crystallizes it via the `PromotionResolved` feedback. An
+        // anonymous-discovery leg never persisted a machine at dial and falls to
+        // the transient in the `None` arm; the transient is NOT inserted into
+        // `peer_machines`, so an anonymous promote leaves no machine behind (the
+        // anonymous leg's machine birth lands with the outbound-side convention
+        // work). With no outbound decision core to run, the machine emits
+        // `PromoteToActive` unconditionally (the net-new-vs-cross-connection
+        // decision was the `peers.contains_key` test above, which returns on an
+        // existing peer). The promote tail (info log, tree/bloom/backoff,
+        // `pending_outbound` removal) lives in the executor's `PromoteToActive`
+        // arm.
         let promote_actions = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => machine.step(
                 PeerEvent::OutboundMsg2 {
@@ -1022,6 +1034,7 @@ impl Node {
                             self.connections.get(&link_id).and_then(|c| c.our_index());
                         self.connections.remove(&link_id);
                         self.remove_link(&link_id);
+                        self.remove_peer_machine(link_id);
                         if let Some(idx) = our_idx_to_free {
                             let _ = self.index_allocator.free(idx);
                         }
@@ -1039,6 +1052,7 @@ impl Node {
                         warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
                         self.connections.remove(&link_id);
                         self.remove_link(&link_id);
+                        self.remove_peer_machine(link_id);
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -1053,6 +1067,7 @@ impl Node {
                     warn!("Identity not learned from msg3");
                     self.connections.remove(&link_id);
                     self.remove_link(&link_id);
+                    self.remove_peer_machine(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -1106,6 +1121,7 @@ impl Node {
             }
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
+            self.remove_peer_machine(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1115,6 +1131,7 @@ impl Node {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
             self.connections.remove(&link_id);
             self.remove_link(&link_id);
+            self.remove_peer_machine(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1213,6 +1230,7 @@ impl Node {
                 let _ = self.index_allocator.free(our_index);
                 self.connections.remove(&link_id);
                 self.links.remove(&link_id);
+                self.remove_peer_machine(link_id);
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
@@ -1240,6 +1258,7 @@ impl Node {
                 let _ = self.index_allocator.free(our_index);
                 self.connections.remove(&link_id);
                 self.links.remove(&link_id);
+                self.remove_peer_machine(link_id);
                 return;
             }
             decision @ (InboundDecision::RestartThenPromote { .. }
@@ -1255,8 +1274,8 @@ impl Node {
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
                 }
-                // Machine-driven inbound establish/rekey resolution. A TRANSIENT
-                // inbound machine, seeded with the msg1-allocated index, re-derives
+                // Machine-driven inbound establish/rekey resolution. The leg's
+                // PERSISTENT machine — born at msg1, parked `SentMsg2` — re-derives
                 // the decision from the same snapshot and emits the action stream:
                 //   `[PromoteToActive]` for `Promote`;
                 //   `[InvalidateSendState, ReportLost, PromoteToActive]` for
@@ -1264,22 +1283,47 @@ impl Node {
                 //     `remove_active_peer` / `note_link_dead`, in that order);
                 //   `[SwapToInboundSession]` for a simultaneous-init cross-connection;
                 //   `[RekeyRespondTrigger]` for a rekey-responder tie-break.
-                // The transient is never inserted into `peer_machines`; the
-                // persistent `established()` machine is created inside
-                // `promote_connection`, so there is no double-insert. The relocated
+                // On a promote the machine survives and crystallizes in place via
+                // the executor's `PromotionResolved` feedback; on the other arms the
+                // executor's teardown disposes it with the leg. The relocated
                 // session-swap / promote / teardown bodies live in the executor's
                 // `SwapToInboundSession` / `RekeyRespondTrigger` / `PromoteToActive`
                 // / `InvalidateSendState` / `ReportLost` arms.
-                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
-                let actions = machine.step(
-                    PeerEvent::InboundMsg3 {
-                        wire,
-                        est: snap,
-                        our_index,
-                    },
-                    packet.timestamp_ms,
-                    &mut self.index_allocator,
-                );
+                let actions = match self.peer_machines.get_mut(&link_id) {
+                    // Disjoint field borrow: `self.peer_machines` (the map entry)
+                    // and `self.index_allocator` (the capability) are separate
+                    // fields.
+                    Some(machine) => machine.step(
+                        PeerEvent::InboundMsg3 {
+                            wire,
+                            est: snap,
+                            our_index,
+                        },
+                        packet.timestamp_ms,
+                        &mut self.index_allocator,
+                    ),
+                    None => {
+                        // Every inbound leg's machine is born at msg1, so a miss
+                        // here means a teardown path dropped the machine but left
+                        // the leg behind. Recover with a fresh machine seeded the
+                        // way msg1 would have left it, so the step below behaves
+                        // identically.
+                        debug_assert!(false, "peer machine present for every pending inbound leg");
+                        let mut machine =
+                            PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms);
+                        let actions = machine.step(
+                            PeerEvent::InboundMsg3 {
+                                wire,
+                                est: snap,
+                                our_index,
+                            },
+                            packet.timestamp_ms,
+                            &mut self.index_allocator,
+                        );
+                        self.peer_machines.insert(link_id, machine);
+                        actions
+                    }
+                };
                 let ambient = PeerActionCtx {
                     verified_identity: peer_identity,
                     transport_id: packet.transport_id,
@@ -1316,13 +1360,14 @@ impl Node {
                 link_id = %link_id,
                 "Leaf node rejecting additional peer (single-peer enforcement)"
             );
-            // Clean up the connection
+            // Clean up the connection and its control machine
             if let Some(conn) = self.connections.remove(&link_id)
                 && let Some(idx) = conn.our_index()
             {
                 let _ = self.index_allocator.free(idx);
             }
             self.remove_link(&link_id);
+            self.remove_peer_machine(link_id);
             return Err(NodeError::MaxPeersExceeded { max: 1 });
         }
 
@@ -1464,20 +1509,9 @@ impl Node {
                 );
 
                 self.peers.insert(peer_node_addr, new_peer);
-                // Populate the inert per-peer machine so every
-                // established peer has exactly one machine, keyed by its
-                // link_id (the winner link here). Nothing drives it yet.
-                self.peer_machines.insert(
-                    link_id,
-                    PeerMachine::established(
-                        link_id,
-                        verified_identity,
-                        our_index,
-                        is_outbound,
-                        remote_epoch,
-                        current_time_ms,
-                    ),
-                );
+                // The winning leg's machine (keyed by the winner link) survives
+                // the promotion; the executor crystallizes it in place via the
+                // `PromotionResolved` feedback after this returns.
                 self.peers_by_index
                     .insert((transport_id, our_index.as_u32()), peer_node_addr);
                 self.peering
@@ -1513,6 +1547,13 @@ impl Node {
                 // This connection loses, keep existing
                 // Free the index we allocated
                 let _ = self.index_allocator.free(our_index);
+
+                // Dispose the losing leg's machine here, with the leg. The
+                // executor's post-promote `PromotionResolved` dispatch then
+                // misses on this link, so the machine-side `FreeIndex` for the
+                // lost leg never fires — the inline free above stays the only
+                // one.
+                self.remove_peer_machine(link_id);
 
                 debug!(
                     peer = %self.peer_display_name(&peer_node_addr),
@@ -1595,20 +1636,9 @@ impl Node {
             }
 
             self.peers.insert(peer_node_addr, new_peer);
-            // Populate the inert per-peer machine so every
-            // established peer has exactly one machine, keyed by its link_id.
-            // Nothing drives it yet.
-            self.peer_machines.insert(
-                link_id,
-                PeerMachine::established(
-                    link_id,
-                    verified_identity,
-                    our_index,
-                    is_outbound,
-                    remote_epoch,
-                    current_time_ms,
-                ),
-            );
+            // The promoted leg's machine (born at msg1 for inbound, at dial for
+            // outbound) survives the promotion; the executor crystallizes it in
+            // place via the `PromotionResolved` feedback after this returns.
             self.peers_by_index
                 .insert((transport_id, our_index.as_u32()), peer_node_addr);
             self.peering

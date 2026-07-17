@@ -20,11 +20,13 @@
 //! `LinkDeadSuspected`, driving `InvalidateSendState` → `remove_active_peer`).
 //!
 //! Inbound msg1 is not machine-driven here: `handle_msg1` builds and sends
-//! msg2 inline, so `PeerEvent::InboundMsg1` is never dispatched and the
-//! `SendHandshake` `their_index == Some` (msg2) branch stays dormant. Inbound
-//! msg3 IS machine-driven: `handle_msg3` steps a throwaway decision machine and
-//! this executor performs its verdict (`PromoteToActive`,
-//! `SwapToInboundSession`, `RekeyRespondTrigger`).
+//! msg2 inline (persisting the leg's machine parked at `SentMsg2` alongside),
+//! so `PeerEvent::InboundMsg1` is never dispatched and the `SendHandshake`
+//! `their_index == Some` (msg2) branch stays dormant. Inbound msg3 IS
+//! machine-driven: `handle_msg3` steps the leg's persistent machine and this
+//! executor performs its verdict (`PromoteToActive`, `SwapToInboundSession`,
+//! `RekeyRespondTrigger`), disposing the machine on every path that consumes
+//! the leg without promoting it.
 //!
 //! The genuine inert stubs remaining are `SendRekey`, `SendLinkMessage`, and
 //! the connected-UDP arms. `RegisterDecryptSession` is a deliberate no-op —
@@ -230,13 +232,13 @@ impl Node {
                 PeerAction::PromoteToActive { link: promote_link } => {
                     // Establish promote, driven through the machine. Transcribes
                     // `handle_msg3`'s shared inbound promote block verbatim, adapted
-                    // to the executor's ambient context. Two XX-specific choices vs
-                    // the IK-lineage executor: (1) the decrypt-worker register stays
+                    // to the executor's ambient context. One XX-specific choice vs
+                    // the IK-lineage executor: the decrypt-worker register stays
                     // INSIDE `promote_connection` (NOT relocated here) — re-
-                    // registering would double-register; (2) NO `PromotionResolved`
-                    // is fed back — the persistent machine is born `established()` by
-                    // `promote_connection`, so feeding it would perturb that ctor
-                    // state that the rekey/reap folds read.
+                    // registering would double-register. The promoted leg's machine
+                    // (msg1-born inbound, dial-born outbound) survives the promotion
+                    // and is crystallized in place by the `PromotionResolved`
+                    // feedback fed back after the Ok handling below.
 
                     // Capture msg2 BEFORE `promote_connection` removes the pending
                     // connection, so a duplicate msg1 can be answered with it. Only
@@ -274,12 +276,14 @@ impl Node {
                             self.peers.contains_key(ambient.verified_identity.node_addr()),
                         );
                     }
-                    match self.promote_connection(
+                    let promote_result = self.promote_connection(
                         promote_link,
                         ambient.verified_identity,
                         ambient.now_ms,
-                    ) {
+                    );
+                    match &promote_result {
                         Ok(PromotionResult::Promoted(node_addr)) => {
+                            let node_addr = *node_addr;
                             if ambient.is_outbound {
                                 // The outbound promote logs a second line here in
                                 // addition to `promote_connection`'s "Connection
@@ -319,6 +323,7 @@ impl Node {
                             loser_link_id,
                             node_addr,
                         }) => {
+                            let (loser_link_id, node_addr) = (*loser_link_id, *node_addr);
                             // UNREACHABLE on driven XX establish paths: `Promote`
                             // and `RestartThenPromote` (which removes the old peer
                             // first) both imply no existing peer at promote time, so
@@ -358,6 +363,7 @@ impl Node {
                             self.reset_lookup_backoff();
                         }
                         Ok(PromotionResult::CrossConnectionLost { winner_link_id }) => {
+                            let winner_link_id = *winner_link_id;
                             // UNREACHABLE on driven XX establish paths (see the Won
                             // arm). Body kept byte-equivalent to next; uses the
                             // ambient transport/addr in place of next's `packet.*`.
@@ -386,13 +392,18 @@ impl Node {
                             // The outbound promote-failure path is warn-only: it
                             // records the reject but performs no link/index teardown
                             // and leaves the `pending_outbound` entry for the stale-
-                            // connection reaper.
+                            // connection reaper. The leg's machine must go with the
+                            // leg, though: `promote_connection` consumed the
+                            // `connections` entry before erring, so the reaper (which
+                            // sweeps `connections`) can never reach this link's
+                            // machine — dropping it here is the only disposal point.
                             warn!(
                                 target: "fips::node::handlers::handshake",
                                 link_id = %promote_link,
                                 error = %e,
                                 "Failed to promote connection"
                             );
+                            self.remove_peer_machine(promote_link);
                             self.stats_mut()
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
@@ -430,9 +441,31 @@ impl Node {
                             if let Some(idx) = ambient.our_index {
                                 let _ = self.index_allocator.free(idx);
                             }
+                            self.remove_peer_machine(promote_link);
                             self.stats_mut()
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         }
+                    }
+
+                    // Feed the promotion outcome back into the surviving machine
+                    // and fold the follow-up actions onto the worklist (the
+                    // `Promoted` arm crystallizes the machine in place and emits
+                    // `RegisterDecryptSession`, a redundant no-op here — see its
+                    // arm). Unconditional across Ok variants; on
+                    // `CrossConnectionLost` the losing leg's machine was disposed
+                    // inside `promote_connection`, so the lookup misses and no
+                    // machine-side index free can double the inline one. Disjoint
+                    // field borrow again.
+                    if let Ok(result) = promote_result {
+                        let follow = match self.peer_machines.get_mut(&promote_link) {
+                            Some(machine) => machine.step(
+                                PeerEvent::PromotionResolved { result },
+                                ambient.now_ms,
+                                &mut self.index_allocator,
+                            ),
+                            None => Vec::new(),
+                        };
+                        queue.extend(follow);
                     }
                 }
                 PeerAction::SwapSendState { .. } => {
@@ -557,6 +590,7 @@ impl Node {
                             None => {
                                 self.connections.remove(&link);
                                 self.remove_link(&link);
+                                self.remove_peer_machine(link);
                                 self.stats_mut().record_reject(RejectReason::Handshake(
                                     HandshakeReject::BadState,
                                 ));
@@ -569,6 +603,7 @@ impl Node {
                             let Some(transport_id) = peer_ref.transport_id() else {
                                 self.connections.remove(&link);
                                 self.remove_link(&link);
+                                self.remove_peer_machine(link);
                                 self.stats_mut().record_reject(RejectReason::Handshake(
                                     HandshakeReject::BadState,
                                 ));
@@ -600,9 +635,11 @@ impl Node {
                     }
 
                     // Both branches tear down the temporary inbound link fully
-                    // (including its `addr_to_link` mapping) via `remove_link`.
+                    // (including its `addr_to_link` mapping) via `remove_link`,
+                    // disposing the leg's machine with it.
                     self.connections.remove(&link);
                     self.remove_link(&link);
+                    self.remove_peer_machine(link);
                     return;
                 }
                 PeerAction::RekeyRespondTrigger {
@@ -643,6 +680,7 @@ impl Node {
                         let Some(conn) = self.connections.get_mut(&link) else {
                             warn!(link_id = %link, "Connection removed during rekey msg3 processing");
                             self.links.remove(&link);
+                            self.remove_peer_machine(link);
                             self.stats_mut().record_reject(RejectReason::Handshake(
                                 HandshakeReject::UnknownConnection,
                             ));
@@ -658,6 +696,7 @@ impl Node {
                             warn!("Rekey msg3: no session from handshake");
                             self.connections.remove(&link);
                             self.links.remove(&link);
+                            self.remove_peer_machine(link);
                             self.stats_mut()
                                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                             return;
@@ -674,12 +713,15 @@ impl Node {
                     self.peers_by_index
                         .insert((ambient.transport_id, our_new_index.as_u32()), peer);
 
-                    // Clean up: remove the temporary connection/link. Do NOT remove
-                    // addr_to_link — the entry must remain pointing to the original
-                    // link so the established peer stays routable, so this uses the
-                    // bare `links.remove` rather than the full `remove_link`.
+                    // Clean up: remove the temporary connection/link and the leg's
+                    // machine (the established peer keeps its own, keyed by its own
+                    // link). Do NOT remove addr_to_link — the entry must remain
+                    // pointing to the original link so the established peer stays
+                    // routable, so this uses the bare `links.remove` rather than
+                    // the full `remove_link`.
                     self.connections.remove(&link);
                     self.links.remove(&link);
+                    self.remove_peer_machine(link);
 
                     debug!(
                         peer = %self.peer_display_name(&peer),
