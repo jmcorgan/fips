@@ -12,14 +12,17 @@
 //! (`handle_msg1` → `step(InboundMsg1)`), the outbound msg2 promote
 //! (`handle_msg2` looks up the dial-persisted machine), the connectionless
 //! outbound msg1 send (`SendHandshake` with `their_index == None` →
-//! `send_stored_msg1`, driven from `initiate_connection`), and the
+//! `send_stored_msg1`, driven from `initiate_connection`), the
 //! connection-oriented dial (`OpenTransport` performs the non-blocking
 //! `transport.connect`; `TransportConnected` drives the connect-resolution msg1
-//! send from `poll_pending_connects`).
+//! send from `poll_pending_connects`), the rekey cadence (`check_rekey` →
+//! `route_rekey_cadence` → `RekeyConsume`, driving the `SwapSendState` and
+//! `CompleteDrain` arms), and the liveness reap (`route_link_dead` →
+//! `LinkDeadSuspected`, driving `InvalidateSendState` → `remove_active_peer`).
 //!
-//! Not yet driven, so their arms stay inert stubs: rekey/crypto installs,
-//! link-control frames, and the connected-UDP plane. `RegisterDecryptSession` is
-//! a deliberate no-op — see its arm for the note.
+//! The genuine inert stubs remaining are `SendRekey`, `SendLinkMessage`, and
+//! the connected-UDP arms. `RegisterDecryptSession` is a deliberate no-op —
+//! see its arm for the note.
 //!
 //! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
 //! store (`peer_timers`). The `HandshakeRetransmit` and `HandshakeTimeout`
@@ -386,13 +389,15 @@ impl Node {
                     }
                 }
                 PeerAction::SwapSendState { .. } => {
-                    // Initiator cutover. Reproduces the `ConnAction::Cutover`
-                    // body in `handlers/rekey.rs:53-88` EXACTLY. `addr` is resolved
+                    // Initiator cutover: the live authoritative rekey-cadence
+                    // path, routed here from `check_rekey` via
+                    // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the
+                    // inline body survives only as `cutover_peer_inline`, a
+                    // debug-assert release fallback. `addr` is resolved
                     // from the ambient verified identity (as `InvalidateSendState`
                     // does). The decrypt re-register folds HERE, gated on
                     // `did_cutover` — the generic `RegisterDecryptSession` arm stays a
-                    // no-op so a promote never double-registers. Shadow-only until the
-                    // cadence fold routes here.
+                    // no-op so a promote never double-registers.
                     let node_addr = *ambient.verified_identity.node_addr();
                     let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
                         if let Some(_old_our_index) = peer.cutover_to_new_session() {
@@ -436,12 +441,14 @@ impl Node {
                     let _ = did_cutover;
                 }
                 PeerAction::CompleteDrain { peer: node_addr } => {
-                    // Initiator drain completion. Reproduces the
-                    // `ConnAction::Drain` body in `handlers/rekey.rs:90-111` EXACTLY.
-                    // Extract the real previous index + transport_id under the peer
-                    // borrow, drop the borrow, then run the cache_key cleanup (which
-                    // takes &mut self for unregister_decrypt_worker_session).
-                    // Shadow-only until the cadence fold routes here.
+                    // Initiator drain completion: the live authoritative
+                    // rekey-cadence path, routed here from `check_rekey` via
+                    // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the
+                    // inline body survives only as `drain_peer_inline`, a
+                    // debug-assert release fallback. Extract the real previous
+                    // index + transport_id under the peer borrow, drop the
+                    // borrow, then run the cache_key cleanup (which takes
+                    // &mut self for unregister_decrypt_worker_session).
                     let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
                         peer.complete_drain().map(|idx| (idx, peer.transport_id()))
                     });

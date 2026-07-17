@@ -355,22 +355,27 @@ pub struct Node {
 
     // === Per-Peer Control Machines ===
     /// Per-peer lifecycle control FSMs, keyed by the stable `LinkId` that spans
-    /// the handshake→active lifetime. A NEW parallel structure introduced by the
+    /// the handshake→active lifetime. A parallel structure introduced by the
     /// node-runtime decomposition: `connections`/`peers` stay byte-unchanged (hot
-    /// path pristine) and are cut over to this machine home path-by-path. Unwired
-    /// initially — the executor (`dataplane/peer_actions.rs`) and advance helper
-    /// exist but the live `handle_msg1`/`handle_msg2` path does not drive them yet;
-    /// the inbound cutover is wired later.
-    #[allow(dead_code)]
+    /// path pristine) and are cut over to this machine home path-by-path.
+    /// Machines are inserted at dial and inbound msg1, and stepped in production
+    /// by the handshake handlers, the rekey-cadence and liveness-reap routers,
+    /// and the lifecycle paths, with the executor (`dataplane/peer_actions.rs`)
+    /// performing the returned actions. Timer FIRING decisions remain
+    /// shell-side: `PeerEvent::Timeout` is never dispatched in production.
     peer_machines: HashMap<LinkId, PeerMachine>,
 
     /// Per-peer timer store, keyed by `LinkId` then `TimerKind`, holding each
     /// armed timer's absolute deadline (ms). The sans-IO time-as-input backing
     /// for `PeerEvent::Timeout`: populated/cleared by the machine's
     /// `SetTimer`/`CancelTimer` actions (`dataplane/peer_actions.rs`) and dropped
-    /// alongside the machine through the `remove_peer_machine` choke-point. At
-    /// this rung it is a SHADOW of the legacy tick timers — written but not yet
-    /// read by any driver (the handshake-kind fold wires the reader).
+    /// alongside the machine through the `remove_peer_machine` choke-point. The
+    /// `HandshakeRetransmit`/`HandshakeTimeout` kinds are driven by
+    /// `drive_peer_timers` (the retransmit fires on the stored deadline; the
+    /// timeout reap keys on the timer's presence, with the threshold read from
+    /// config); the rekey/liveness kinds are still SHADOWS of their
+    /// own shell drivers, and the machine's `on_timeout` handlers stay dormant
+    /// (`PeerEvent::Timeout` is never dispatched in production).
     peer_timers: HashMap<LinkId, HashMap<TimerKind, u64>>,
 
     // === Peers (Active Phase) ===

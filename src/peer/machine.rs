@@ -3,9 +3,12 @@
 //! The unified per-peer lifecycle state machine that folds the scattered
 //! `connections`/`peers`/rekey state carriers into one place. It provides the
 //! FSM types, the machine struct (control-tier state only), and the pure `step`
-//! reducer, plus its unit tests. It is **unwired** — nothing in the codebase
-//! calls it yet; the driver wiring and the send-state boundary land in later
-//! commits.
+//! reducer, plus its unit tests. `step` is driven in production by the
+//! handshake handlers, the rekey-cadence and liveness-reap routers, and the
+//! dial/lifecycle paths, with the executor in
+//! `crate::node::dataplane::peer_actions` performing the returned actions.
+//! Still dormant: `PeerEvent::Timeout` is never dispatched — timer FIRING
+//! decisions stay with the shell drivers.
 //!
 //! ## Shape
 //!
@@ -66,11 +69,14 @@ use crate::{NodeAddr, PeerIdentity};
 // ============================================================================
 // Timing placeholders
 //
-// This module is unwired; the real intervals come from `NodeConfig` when the
-// driver is wired. The `poll_*` cores already take the interval/backoff as
-// arguments, so these are only used to compute `SetTimer{at_ms}` deadlines and
-// the `Closed{backoff_deadline_ms}` park time. The unit tests assert on timer
-// *kinds*, not exact deadlines.
+// The `poll_*` cores already take the interval/backoff as arguments, so these
+// are only used to compute `SetTimer{at_ms}` deadlines and the
+// `Closed{backoff_deadline_ms}` park time. The handshake timers are armed
+// live at dial time from these constants: the retransmit driver fires on the
+// machine-armed deadline, while the timeout reaper keys on the timer's
+// presence with its threshold read from `NodeConfig`, which also governs the
+// reschedule cadence shell-side. The unit tests assert on timer *kinds*, not
+// exact deadlines.
 // ============================================================================
 
 const HANDSHAKE_RETRANSMIT_INTERVAL_MS: u64 = 1_000;
@@ -1267,9 +1273,9 @@ impl PeerMachine {
     }
 
     fn on_tick(&mut self, now: u64) -> Vec<PeerAction> {
-        // The driver evaluates due machine timers on the quantized tick and
-        // re-enters the Timeout{kind} handlers. This module is unwired; the
-        // deadline bookkeeping is threaded from the driver, so Tick is a no-op here.
+        // Dormant no-op: `PeerEvent::Tick` is not dispatched in production.
+        // The shell drivers evaluate due timer deadlines themselves, so there
+        // is no machine-side bookkeeping to advance here.
         let _ = now;
         Vec::new()
     }
