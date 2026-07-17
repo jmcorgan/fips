@@ -743,7 +743,11 @@ impl PeerMachine {
                 wire,
                 est,
                 our_index,
-            } => self.on_inbound_msg3(wire, est, our_index, now, index_allocator),
+            } => {
+                let (_decision, actions) =
+                    self.inbound_msg3(wire, est, our_index, now, index_allocator);
+                actions
+            }
             PeerEvent::OutboundMsg2 { their_index, out } => {
                 self.on_outbound_msg2(their_index, out, now)
             }
@@ -886,7 +890,7 @@ impl PeerMachine {
     fn on_inbound_msg1(
         &mut self,
         link: LinkId,
-        now: u64,
+        _now: u64,
         alloc: &mut IndexAllocator,
     ) -> Vec<PeerAction> {
         let our_index = match alloc.allocate() {
@@ -906,27 +910,29 @@ impl PeerMachine {
             link,
             phase: HandshakePhase::SentMsg2,
         };
-        vec![
-            PeerAction::SendHandshake { bytes: Vec::new() },
-            PeerAction::SetTimer {
-                kind: TimerKind::HandshakeTimeout,
-                at_ms: now + HANDSHAKE_TIMEOUT_MS,
-            },
-        ]
+        // No timer is armed on inbound legs — the stale-connection reaper owns
+        // their timeout (see `inbound_msg2_sent`).
+        vec![PeerAction::SendHandshake { bytes: Vec::new() }]
     }
 
-    /// Inbound **msg3**: identity crystallizes here; classify via
-    /// `establish_inbound` and dispatch the 6-arm decision. The ACL gate and the
-    /// Noise finalize already ran shell-side before this event. Our index was
-    /// allocated at msg1 (`self.our_index`).
-    fn on_inbound_msg3(
+    /// Inbound **msg3**: identity crystallizes here. Compute the establish
+    /// decision for the driver, alongside the machine-phase actions. The single
+    /// `establish_inbound` evaluation happens here; the driver routes on the
+    /// returned [`InboundDecision`], while the terminal arms' effect actions —
+    /// the tie-break/duplicate `FreeIndex` and the `fail` flip — are legitimate
+    /// carrier effects on this map-resident machine. The duplicate-resend send
+    /// stays a driver mechanism (the stored msg2 bytes are replayed as-is), so
+    /// this method emits no `SendHandshake`. The ACL gate and the Noise finalize
+    /// already ran shell-side before this event; our index was allocated at msg1
+    /// (`self.our_index`).
+    pub(crate) fn inbound_msg3(
         &mut self,
         wire: WireOutcome,
         est: EstablishSnapshot,
         our_index: SessionIndex,
         now: u64,
         _alloc: &mut IndexAllocator,
-    ) -> Vec<PeerAction> {
+    ) -> (InboundDecision, Vec<PeerAction>) {
         // Identity crystallizes at msg3 on XX (WireOutcome carries only the node
         // address + epoch; the full static key stays shell-side).
         self.node_addr = Some(wire.peer_node_addr);
@@ -940,7 +946,8 @@ impl PeerMachine {
         self.conn.set_our_index(our_index);
         self.our_index = Some(our_index);
 
-        match Fmp::new().establish_inbound(&est, &wire) {
+        let decision = Fmp::new().establish_inbound(&est, &wire);
+        let actions = match &decision {
             InboundDecision::Reject {
                 reason: InboundReject::DualRekeyWon,
             } => {
@@ -953,27 +960,25 @@ impl PeerMachine {
                 let _ = self.fail(FailReason::Rejected);
                 actions
             }
-            InboundDecision::ResendMsg2 { msg2 } => {
-                // Same-epoch duplicate: resend the existing peer's stored msg2 (if
-                // any), leaving the active peer untouched, return the msg1-allocated
-                // index, then terminate this leg so a later timeout on a persistent
-                // machine cannot fire against the healthy established peer.
-                let mut actions = Vec::new();
-                if let Some(bytes) = msg2 {
-                    actions.push(PeerAction::SendHandshake { bytes });
-                }
-                actions.push(PeerAction::FreeIndex { index: our_index });
+            InboundDecision::ResendMsg2 { .. } => {
+                // Same-epoch duplicate: the driver resends the existing peer's
+                // stored msg2 inline (the bytes ride the decision, not an action),
+                // leaving the active peer untouched. Here we return the
+                // msg1-allocated index and terminate this leg so a later timeout on
+                // a persistent machine cannot fire against the healthy established
+                // peer.
+                let actions = vec![PeerAction::FreeIndex { index: our_index }];
                 let _ = self.fail(FailReason::Rejected);
                 actions
             }
             InboundDecision::CrossConnect {
                 peer,
                 our_inbound_wins,
-            } => self.on_cross_connect(peer, our_inbound_wins),
+            } => self.on_cross_connect(*peer, *our_inbound_wins),
             InboundDecision::RekeyRespond {
                 peer,
                 abandon_first,
-            } => self.rekey_respond(peer, abandon_first, now),
+            } => self.rekey_respond(*peer, *abandon_first, now),
             InboundDecision::RestartThenPromote { peer } => {
                 // Epoch mismatch — peer restarted. `InvalidateSendState` maps to
                 // the shell's `remove_active_peer(&peer)` and `ReportLost` to
@@ -982,7 +987,7 @@ impl PeerMachine {
                 vec![
                     PeerAction::InvalidateSendState,
                     PeerAction::ReportLost {
-                        peer,
+                        peer: *peer,
                         kind: LostKind::LinkDead,
                     },
                     PeerAction::PromoteToActive { link: self.link },
@@ -994,7 +999,8 @@ impl PeerMachine {
                 // won/lost handling resolve via the `PromotionResolved` feedback.
                 vec![PeerAction::PromoteToActive { link: self.link }]
             }
-        }
+        };
+        (decision, actions)
     }
 
     /// Outbound completion after msg2 completes the initiator handshake:
@@ -2562,11 +2568,13 @@ mod tests {
     }
 
     // ---- Test 7e: same-epoch duplicate frees the index and terminates -----
-    // A same-epoch duplicate handshake (no cross-connection, no rekey) resends the
-    // stored msg2, returns the msg1-allocated index, and terminates the leg. The
-    // terminal transition matters: a persistent machine parked here would keep its
-    // handshake-timeout armed and later free the index + report loss against the
-    // healthy established peer.
+    // A same-epoch duplicate handshake (no cross-connection, no rekey) returns the
+    // msg1-allocated index and terminates the leg. The stored-msg2 resend is a
+    // driver mechanism (the bytes ride the decision, replayed as-is), so the
+    // machine emits `FreeIndex` only — no `SendHandshake`. The terminal transition
+    // matters: a persistent machine parked here would keep its handshake-timeout
+    // armed and later free the index + report loss against the healthy established
+    // peer.
     #[test]
     fn resend_msg2_frees_index_and_terminates() {
         let peer = peer_identity();
@@ -2595,13 +2603,7 @@ mod tests {
             200,
             &mut alloc,
         );
-        assert_eq!(
-            actions,
-            vec![
-                PeerAction::SendHandshake { bytes: stored_msg2 },
-                PeerAction::FreeIndex { index: seed },
-            ]
-        );
+        assert_eq!(actions, vec![PeerAction::FreeIndex { index: seed }]);
         assert_eq!(
             m.state(),
             PeerState::Failed {
