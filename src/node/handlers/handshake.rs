@@ -13,8 +13,8 @@ use crate::peer::machine::{
 use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
-    EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundDecision,
-    OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
+    EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundSnapshot,
+    PromotionResult, WireOutcome, cross_connection_winner,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use crate::utils::index::SessionIndex;
@@ -1074,21 +1074,62 @@ impl Node {
         //
         // This ensures both nodes use the same Noise handshake (the winner's
         // outbound = the loser's inbound).
-        // Structured classification (pure core): cross-connection swap/keep, or
-        // a net-new promote. The tie-break is pre-evaluated in the snapshot; the
-        // effect bodies below are unchanged.
+        // The machine is the sole computation site of the establish decision:
+        // the shell builds the outbound snapshot, steps the machine once here,
+        // and routes on the returned decision — a cross-connection resolves as
+        // a single `ResolveCrossConnection { swap }` action, a net-new
+        // establish as the promote action sequence. The Swap/Keep resolution
+        // bodies stay inline in the shell because they mutate the already
+        // promoted peer via `replace_session`, for which no `PeerAction`
+        // exists. The machine was persisted at DIAL, so the executor's
+        // `PromoteToActive` arm can feed `PromotionResolved` back via the same
+        // lookup; the `pending_outbound` lifecycle stays shell-side — the
+        // machine never touches it.
         let out_snap = self.outbound_snapshot(&peer_node_addr);
-        let out_decision = self.fmp.establish_outbound(&out_snap);
-        if out_decision != OutboundDecision::Promote {
+        let actions = match self.peer_machines.get_mut(&link_id) {
+            Some(machine) => machine.step(
+                PeerEvent::Msg2 {
+                    their_index: header.sender_idx,
+                    out: out_snap,
+                },
+                packet.timestamp_ms,
+                &mut self.index_allocator,
+            ),
+            None => {
+                // No machine persisted at dial (e.g. a test that seeds
+                // `connections`/`pending_outbound` directly, or any path that
+                // reaches msg2 without `start_handshake`): reproduce the
+                // pre-persistence transient exactly.
+                let mut machine =
+                    PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
+                let actions = machine.step(
+                    PeerEvent::Msg2 {
+                        their_index: header.sender_idx,
+                        out: out_snap,
+                    },
+                    packet.timestamp_ms,
+                    &mut self.index_allocator,
+                );
+                self.peer_machines.insert(link_id, machine);
+                actions
+            }
+        };
+
+        let cross_swap = actions.iter().find_map(|action| match action {
+            PeerAction::ResolveCrossConnection { swap } => Some(*swap),
+            _ => None,
+        });
+        if let Some(swap) = cross_swap {
+            // The cross-connection arms are decision-only: the resolution
+            // action is the whole vector.
+            debug_assert_eq!(actions, vec![PeerAction::ResolveCrossConnection { swap }]);
             // Extract the outbound connection from its machine FIRST — the
             // machine owns it, so disposing the machine before the take would
-            // destroy the connection. The dial-persisted outbound machine is
-            // not consumed by the inline Swap/Keep resolution below (which
-            // mutates the existing promoted peer directly, with no machine),
-            // so drop it right after the take — unconditionally, whether or
-            // not a connection was carried — so none of this block's exits
-            // leave a dangling machine. Matches the pre-persistence path,
-            // which created no machine for a cross-connection.
+            // destroy the connection. The machine has delivered its decision
+            // and the inline resolution below needs no machine, so drop it
+            // right after the take — unconditionally, whether or not a
+            // connection was carried — so none of this block's exits leave a
+            // dangling machine.
             let taken_conn = self
                 .peer_machines
                 .get_mut(&link_id)
@@ -1105,7 +1146,7 @@ impl Node {
             };
 
             let mut cross_conn_outcome: Option<CrossConnOutcome> = None;
-            if out_decision == OutboundDecision::CrossConnectionSwap {
+            if swap {
                 // We're the smaller node. Swap to outbound session + indices.
                 // The peer will keep their inbound session (complement of ours).
                 let outbound_our_index = conn.our_index();
@@ -1224,72 +1265,18 @@ impl Node {
         }
 
         // === Net-new outbound establish, driven by the machine. ===
-        // ONLY the `establish_outbound == Promote` arm is cut over here. The
-        // Swap/Keep cross-connection arms and the rekey-msg2 completion branch
-        // above STAY INLINE: they mutate an existing already-promoted peer
-        // via `replace_session` with no PeerAction, so the machine's Swap/Keep
-        // arms cannot be neutral until `PeerSendState` expresses `replace_session`.
-        //
         // This arm is `has_existing_peer == false` only, so `promote_connection`
         // always hits its else branch and returns `Promoted`; the defensive
-        // `CrossConnectionWon/Lost` follow-ups are UNREACHABLE here (their
-        // loser-link surgery is wired later). Direct analog of the inbound
-        // net-new arm — no ordering constraint, lowest risk.
+        // `CrossConnectionWon/Lost` follow-ups are UNREACHABLE here.
         //
-        // Look up the outbound machine persisted at DIAL, and step `Msg2 →
-        // [PromoteToActive]` in place. Both dial paths reach msg2 in
-        // `Handshaking{SentMsg1}` — each drives the machine to send msg1 before
-        // msg2 — and `on_msg2` is state-independent regardless: it decides from
-        // the outbound snapshot, not the
-        // machine's state, and reads the machine's unset `conn.our_index`
-        // as `None`, so stepping the persisted (vs the former transient) machine
-        // is byte-identical: same `Promote` decision (`has_existing_peer == false`),
-        // same `our_index == None`. The machine is already in `peer_machines`
-        // (inserted at dial), so the executor's `PromoteToActive` arm can feed
-        // `PromotionResolved` back via the same lookup. A defensive transient
-        // reproduces the pre-persistence path if the machine is somehow absent — a
-        // state-machine inconsistency, since every dialed leg persists one. The
-        // outbound `our_index` was allocated at DIAL (unchanged), the promote
-        // sends nothing on the wire, and `promote_connection` frees nothing new,
-        // so index sequence, `peers`/`peers_by_index`/`addr_to_link` state, and
-        // metrics are byte-identical. `pending_outbound` lifecycle stays shell-side
-        // (removed on the Established tail); the machine never touches it.
-        let promote_actions = match self.peer_machines.get_mut(&link_id) {
-            Some(machine) => machine.step(
-                PeerEvent::Msg2 {
-                    their_index: header.sender_idx,
-                    out: out_snap,
-                },
-                packet.timestamp_ms,
-                &mut self.index_allocator,
-            ),
-            None => {
-                // No machine persisted at dial (e.g. a test that seeds
-                // `connections`/`pending_outbound` directly, or any path that
-                // reaches msg2 without `start_handshake`): reproduce the
-                // pre-persistence transient exactly.
-                let mut machine =
-                    PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
-                let actions = machine.step(
-                    PeerEvent::Msg2 {
-                        their_index: header.sender_idx,
-                        out: out_snap,
-                    },
-                    packet.timestamp_ms,
-                    &mut self.index_allocator,
-                );
-                self.peer_machines.insert(link_id, machine);
-                actions
-            }
-        };
         // The outbound Msg2 Promote step cancels the two dial-armed handshake
         // timers (the machine survives promotion, so they would otherwise linger
         // in `peer_timers` until `drive_peer_timers` lazily discards them — the
         // promoted leg's pending connection is consumed and the machine has left
         // `SentMsg1`, so they can no longer fire) and then promotes.
-        // `PromoteToActive` is still what performs the promotion.
+        // `PromoteToActive` is what performs the promotion.
         debug_assert_eq!(
-            promote_actions,
+            actions,
             vec![
                 PeerAction::CancelTimer {
                     kind: TimerKind::HandshakeRetransmit
@@ -1318,8 +1305,7 @@ impl Node {
             now_ms: packet.timestamp_ms,
             is_outbound: true,
         };
-        self.execute_peer_actions(link_id, &ambient, promote_actions)
-            .await;
+        self.execute_peer_actions(link_id, &ambient, actions).await;
 
         // Post-`Promoted` shell tail (byte-identical to the pre-refactor Promoted
         // arm), reached only when promotion succeeded (machine now Established).
