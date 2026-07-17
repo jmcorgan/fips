@@ -354,6 +354,11 @@ impl Node {
                     self.sample_transport_congestion();
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.activate_connected_udp_sessions().await;
+                    // Debug-build sweep of the peer-lifecycle map invariant
+                    // (leaked machines / machine-less legs); two map scans,
+                    // compiled out of release builds.
+                    #[cfg(debug_assertions)]
+                    self.debug_assert_peer_maps_coherent();
                 }
                 // Shutdown signal → enter the bounded drain in place, ONCE.
                 // Gated on `is_none()` so it only fires while serving; after
