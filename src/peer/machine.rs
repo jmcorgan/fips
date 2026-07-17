@@ -574,7 +574,8 @@ impl PeerMachine {
             PeerEvent::TransportFailed => self.on_transport_failed(now),
             PeerEvent::HandshakeSendFailed => self.on_handshake_send_failed(),
             PeerEvent::InboundMsg1 { link, wire, est } => {
-                self.on_inbound_msg1(link, wire, est, now, index_allocator)
+                let (_decision, actions) = self.inbound_msg1(link, &wire, est, now);
+                actions
             }
             PeerEvent::Msg2 { their_index, out } => {
                 self.on_msg2(their_index, out, now, index_allocator)
@@ -584,7 +585,8 @@ impl PeerMachine {
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::RekeyMsg1 { wire, est } => {
                 // A rekey msg1 is a msg1 on an established peer — same core.
-                self.on_inbound_msg1(self.link, wire, est, now, index_allocator)
+                let (_decision, actions) = self.inbound_msg1(self.link, &wire, est, now);
+                actions
             }
             PeerEvent::RekeyMsg2 { their_index } => self.on_rekey_msg2(their_index),
             PeerEvent::RekeyConsume { action } => self.map_rekey_action(action, now),
@@ -764,15 +766,22 @@ impl PeerMachine {
     // Inbound establish
     // ------------------------------------------------------------------
 
-    fn on_inbound_msg1(
+    /// Inbound msg1 (fresh or rekey): compute the establish decision for the
+    /// driver, alongside any machine-phase actions. The single
+    /// `establish_inbound` evaluation happens here; the driver routes on the
+    /// returned [`InboundDecision`] and owns the effect-bearing arm bodies
+    /// (the rekey-respond abandon/alloc/send/store, the duplicate resend, the
+    /// reject bookkeeping). Only the `Promote`/`RestartThenPromote` phase-1
+    /// actions (and the fresh-context reject state flip) are machine-side.
+    pub(crate) fn inbound_msg1(
         &mut self,
         link: LinkId,
-        wire: WireOutcome,
+        wire: &WireOutcome,
         est: EstablishSnapshot,
-        now: u64,
-        alloc: &mut IndexAllocator,
-    ) -> Vec<PeerAction> {
-        match Fmp::new().establish_inbound(&est, &wire) {
+        _now: u64,
+    ) -> (InboundDecision, Vec<PeerAction>) {
+        let decision = Fmp::new().establish_inbound(&est, wire);
+        let actions = match &decision {
             InboundDecision::Reject { .. } => {
                 // In an establish-leg context this fails the leg; on an
                 // established peer (rekey context) the msg1 is dropped and the
@@ -783,15 +792,15 @@ impl PeerMachine {
                     self.fail(FailReason::Rejected)
                 }
             }
-            InboundDecision::ResendMsg2 { msg2 } => match msg2 {
-                Some(bytes) => vec![PeerAction::SendHandshake { bytes }],
-                None => Vec::new(),
-            },
-            InboundDecision::RekeyRespond {
-                peer,
-                abandon_first,
-            } => self.rekey_respond(peer, abandon_first, &wire, now, alloc),
+            // The decision carries the stored msg2 bytes; the driver's inline
+            // resend owns the send. No machine state is touched.
+            InboundDecision::ResendMsg2 { .. } => Vec::new(),
+            // Decision-only: the driver's inline body owns the abandon, the
+            // index allocation, the framed msg2 send, the pending-session
+            // store, and the dampening stamp. The machine mutates nothing.
+            InboundDecision::RekeyRespond { .. } => Vec::new(),
             InboundDecision::RestartThenPromote { peer } => {
+                let peer = *peer;
                 let mut actions = vec![PeerAction::InvalidateSendState];
                 if let Some(idx) = self.our_index.take() {
                     actions.push(PeerAction::UnregisterDecryptSession { index: idx });
@@ -802,11 +811,12 @@ impl PeerMachine {
                     peer,
                     kind: LostKind::LinkDead,
                 });
-                actions.extend(self.inbound_classify(link, &wire));
+                actions.extend(self.inbound_classify(link, wire));
                 actions
             }
-            InboundDecision::Promote => self.inbound_classify(link, &wire),
-        }
+            InboundDecision::Promote => self.inbound_classify(link, wire),
+        };
+        (decision, actions)
     }
 
     /// Inbound **Phase 1**: classify the fresh leg *without*
@@ -865,42 +875,6 @@ impl PeerMachine {
             PeerAction::SendHandshake { bytes },
             PeerAction::PromoteToActive { link },
         ]
-    }
-
-    /// Rekey responder: (optionally) abandon our in-flight rekey, allocate a new
-    /// index, send the rekey msg2, record the peer rekey (dampening).
-    fn rekey_respond(
-        &mut self,
-        _peer: NodeAddr,
-        abandon_first: bool,
-        wire: &WireOutcome,
-        now: u64,
-        alloc: &mut IndexAllocator,
-    ) -> Vec<PeerAction> {
-        let mut actions = Vec::new();
-        if abandon_first {
-            if let Some(idx) = self.rekey_our_index.take() {
-                actions.push(PeerAction::FreeIndex { index: idx });
-            }
-            self.rekey_in_progress = false;
-            self.rekey_msg1 = None;
-        }
-        let new_index = alloc.allocate().ok();
-        if let Some(idx) = new_index {
-            self.rekey_our_index = Some(idx);
-        }
-        actions.push(PeerAction::SendRekey {
-            bytes: wire.msg2_payload.clone(),
-        });
-        self.last_peer_rekey_ms = now;
-        let addr = self
-            .addr()
-            .unwrap_or_else(|| *wire.peer_identity.node_addr());
-        self.state = PeerState::Maintaining {
-            addr,
-            kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent),
-        };
-        actions
     }
 
     // ------------------------------------------------------------------
@@ -1703,18 +1677,25 @@ mod tests {
             let wire = wire_outcome(peer, Some([1u8; 8]), 0x77);
 
             let actions = m.step(PeerEvent::RekeyMsg1 { wire, est }, 1_000, &mut alloc);
-            // We win the tie-break: drop the peer's msg1, no rekey response.
+            // We win the tie-break: drop the peer's msg1, no rekey response,
+            // established-context state untouched (the peer keeps running).
             assert!(actions.is_empty());
             assert!(
                 !actions
                     .iter()
                     .any(|a| matches!(a, PeerAction::SendRekey { .. }))
             );
+            assert_eq!(
+                m.state(),
+                PeerState::Maintaining {
+                    addr: peer_addr,
+                    kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent)
+                }
+            );
         }
 
         // Case B: PEER is smaller -> we lose -> RekeyRespond{abandon_first:true}.
         {
-            let mut alloc = IndexAllocator::new();
             let our = *larger.node_addr();
             let peer = smaller;
             let mut m = PeerMachine::new_outbound(LinkId::new(2), peer, 0);
@@ -1734,16 +1715,60 @@ mod tests {
             est.rekey_in_progress = true;
             let wire = wire_outcome(peer, Some([1u8; 8]), 0x77);
 
-            let actions = m.step(PeerEvent::RekeyMsg1 { wire, est }, 1_000, &mut alloc);
-            // abandon_first -> FreeIndex(old rekey index) then SendRekey(msg2).
+            let (decision, actions) = m.inbound_msg1(LinkId::new(2), &wire, est, 1_000);
+            // We lose the tie-break: the decision names the responder path with
+            // the abandon flag; the machine emits nothing and mutates nothing
+            // (the driver's inline body owns the abandon/alloc/send/store).
+            assert!(matches!(
+                decision,
+                InboundDecision::RekeyRespond {
+                    abandon_first: true,
+                    ..
+                }
+            ));
+            assert!(actions.is_empty());
             assert_eq!(
-                actions[0],
-                PeerAction::FreeIndex {
-                    index: SessionIndex::new(0x55)
+                m.state(),
+                PeerState::Maintaining {
+                    addr: peer_addr,
+                    kind: MaintainKind::Rekey(RekeyPhase::Msg1Sent)
                 }
             );
-            assert!(matches!(actions[1], PeerAction::SendRekey { .. }));
+            assert_eq!(m.rekey_our_index, Some(SessionIndex::new(0x55)));
+            assert!(m.rekey_in_progress);
         }
+    }
+
+    // ---- Test 3b: duplicate msg1 -> resend decision only ------------------
+    #[test]
+    fn inbound_resend_msg2_decision_only() {
+        let peer = peer_identity();
+        let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let our = *peer_identity().node_addr();
+        let mut est = est_new_peer(our);
+        est.has_existing_peer = true;
+        est.existing_peer_epoch = Some([1u8; 8]);
+        est.has_session = true;
+        est.is_healthy = true;
+        est.existing_session_age_secs = 5; // young session -> duplicate, not rekey
+        est.existing_msg2 = Some(vec![0xC4; 16]);
+        let wire = wire_outcome(peer, Some([1u8; 8]), 0x77);
+
+        let (decision, actions) = m.inbound_msg1(LinkId::new(1), &wire, est, 1_000);
+        // The decision carries the stored msg2 bytes; no SendHandshake action,
+        // no state change (the driver's inline resend owns the send).
+        assert!(matches!(
+            &decision,
+            InboundDecision::ResendMsg2 { msg2: Some(bytes) } if bytes.as_slice() == [0xC4; 16]
+        ));
+        assert!(actions.is_empty());
+        assert_eq!(
+            m.state(),
+            PeerState::Handshaking {
+                link: LinkId::new(1),
+                phase: HandshakePhase::Initial
+            }
+        );
     }
 
     // ---- Test 4: restart-override -----------------------------------------
