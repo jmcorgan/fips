@@ -230,6 +230,12 @@ pub(crate) enum PeerEvent {
     TransportConnected,
     /// Transport connect failed.
     TransportFailed,
+    /// The transport accepted the dial but sending a stored handshake
+    /// initiation failed. The machine marks the embedded leg failed so the
+    /// stale-connection sweep reclaims it, WITHOUT leaving the handshaking
+    /// state — the retransmit driver may still resend in the window before
+    /// the sweep.
+    HandshakeSendFailed,
     /// Inbound handshake msg1 processed shell-side (Noise + snapshot).
     InboundMsg1 {
         link: LinkId,
@@ -566,6 +572,7 @@ impl PeerMachine {
             } => self.on_dial(transport_id, remote_addr, connection_oriented, now),
             PeerEvent::TransportConnected => self.on_transport_connected(now),
             PeerEvent::TransportFailed => self.on_transport_failed(now),
+            PeerEvent::HandshakeSendFailed => self.on_handshake_send_failed(),
             PeerEvent::InboundMsg1 { link, wire, est } => {
                 self.on_inbound_msg1(link, wire, est, now, index_allocator)
             }
@@ -666,6 +673,19 @@ impl PeerMachine {
             backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
         };
         actions
+    }
+
+    /// A stored handshake initiation failed to send: mark the embedded leg
+    /// failed so the stale-connection sweep (which reads the leg's
+    /// `is_failed`) reclaims it. NO state flip — the machine stays in
+    /// `Handshaking{SentMsg1}` so retransmit eligibility
+    /// (`is_handshaking_sent_msg1`) survives until the sweep, and no timer
+    /// actions are emitted.
+    fn on_handshake_send_failed(&mut self) -> Vec<PeerAction> {
+        if let Some(leg) = self.leg.as_mut() {
+            leg.mark_failed();
+        }
+        Vec::new()
     }
 
     /// Emit msg1 and arm the retransmit/timeout timers. The Noise msg1
@@ -2394,6 +2414,53 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // ---- Test 7e: HandshakeSendFailed marks the leg, keeps the state ------
+    // A stored-msg1 send failure marks the embedded leg failed (the
+    // stale-connection sweep reads the leg's `is_failed`) WITHOUT leaving
+    // `Handshaking{SentMsg1}` — retransmit eligibility
+    // (`is_handshaking_sent_msg1`) must survive until the sweep — and emits
+    // no actions. On a machine with no leg it is a defensive no-op.
+    #[test]
+    fn handshake_send_failed_marks_leg_without_leaving_handshaking() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+
+        // Dial-persisted outbound machine carrying a prepared leg, driven to
+        // Handshaking{SentMsg1} via the connectionless dial.
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
+        let _ = m.step(
+            PeerEvent::Dial {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+                peer_identity: peer,
+                connection_oriented: false,
+            },
+            100,
+            &mut alloc,
+        );
+        m.set_leg(PeerConnection::outbound(LinkId::new(1), peer, 100));
+        assert!(m.is_handshaking_sent_msg1());
+        assert!(!m.leg().expect("leg embedded").is_failed());
+
+        let actions = m.step(PeerEvent::HandshakeSendFailed, 200, &mut alloc);
+        assert_eq!(actions, Vec::new(), "HandshakeSendFailed emits no actions");
+        assert!(
+            m.is_handshaking_sent_msg1(),
+            "retransmit eligibility survives a send failure"
+        );
+        assert!(
+            m.leg().expect("leg retained").is_failed(),
+            "the leg carries the failed mark the sweep reads"
+        );
+
+        // With no leg (e.g. after take_leg) the event is a defensive no-op.
+        let _ = m.take_leg();
+        let actions = m.step(PeerEvent::HandshakeSendFailed, 300, &mut alloc);
+        assert_eq!(actions, Vec::new());
+        assert!(m.is_handshaking_sent_msg1());
+        assert!(m.leg().is_none());
     }
 
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------

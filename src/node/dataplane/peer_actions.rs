@@ -208,8 +208,13 @@ impl Node {
                         // (`prepare_outbound_msg1`); send the stored wire. The
                         // machine's empty payload is ignored.
                         let _ = bytes;
-                        self.send_stored_msg1(link, ambient.transport_id, &ambient.remote_addr)
-                            .await;
+                        self.send_stored_msg1(
+                            link,
+                            ambient.transport_id,
+                            &ambient.remote_addr,
+                            ambient.now_ms,
+                        )
+                        .await;
                     }
                 }
                 PeerAction::SendRekey { .. } => {

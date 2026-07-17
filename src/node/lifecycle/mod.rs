@@ -651,9 +651,10 @@ impl Node {
     }
 
     /// Send the msg1 wire that `prepare_outbound_msg1` armed on the connection.
-    /// On send error, marks the connection failed and RETAINS it (the legacy
-    /// resend tick retries); a missing wire or transport is a no-op. This is the
-    /// body of the executor's `SendHandshake` msg1 action — reached on both the
+    /// On send error, steps the machine with `HandshakeSendFailed` — the machine
+    /// marks its embedded leg failed and RETAINS it (the legacy resend tick
+    /// retries); a missing wire or transport is a no-op. This is the body of the
+    /// executor's `SendHandshake` msg1 action — reached on both the
     /// connectionless dial and the connection-oriented connect-resolution path,
     /// after `prepare_outbound_msg1` has armed the wire.
     pub(in crate::node) async fn send_stored_msg1(
@@ -661,6 +662,7 @@ impl Node {
         link_id: LinkId,
         transport_id: TransportId,
         remote_addr: &TransportAddr,
+        now_ms: u64,
     ) {
         let wire_msg1 = match self.leg(&link_id).and_then(|c| c.handshake_msg1()) {
             Some(w) => w.to_vec(),
@@ -687,10 +689,19 @@ impl Node {
                         error = %e,
                         "Failed to send handshake message"
                     );
-                    // Mark connection as failed but don't remove it yet
-                    // The event loop can handle retry logic
-                    if let Some(conn) = self.leg_mut(&link_id) {
-                        conn.mark_failed();
+                    // The machine marks its leg failed but retains it —
+                    // the stale-connection sweep reclaims it, and the
+                    // event loop can handle retry logic until then.
+                    if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+                        let actions = machine.step(
+                            PeerEvent::HandshakeSendFailed,
+                            now_ms,
+                            &mut self.index_allocator,
+                        );
+                        debug_assert!(
+                            actions.is_empty(),
+                            "HandshakeSendFailed must emit no actions"
+                        );
                     }
                 }
             }
