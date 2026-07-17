@@ -324,35 +324,32 @@ impl Node {
         // registry, matching the pre-refactor read points.
         let est = self.establish_snapshot(&peer_node_addr);
 
-        // === PHASE C: structured classification (pure core) ===
-        // The decision reads only the snapshot + wire outcome; the shell below
-        // drives the effects. `Promote`/`RestartThenPromote` fall through to the
+        // === PHASE C: structured classification ===
+        // Evaluate the inbound decision once on a local establish leg and route
+        // on it. The single `establish_inbound` evaluation lives in
+        // `inbound_msg1`, which also returns the machine-phase actions the
+        // Promote/Restart arms drive; the effect-bearing arm bodies stay inline
+        // in the shell below. `Promote`/`RestartThenPromote` fall through to the
         // shared authorize → allocate → send-msg2 → promote tail; the other
-        // variants complete the rate-limiter and return here.
-        match self.fmp.establish_inbound(&est, &wire) {
+        // variants complete the rate-limiter and return here. The local machine
+        // enters `peer_machines` only at the promote tails.
+        let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+        let (decision, actions) = machine.inbound_msg1(link_id, &wire, est, packet.timestamp_ms);
+        match decision {
             InboundDecision::Reject {
                 reason: InboundReject::AtMaxPeers,
             } => {
-                // Net-new arm: drive the reject through the machine so a
-                // net-new msg1 at the max-peers cap reaches `Failed{Rejected}`
-                // with the index allocator untouched (no allocate before the
-                // reject). The transient machine is discarded (never inserted
-                // into `peer_machines`); `conn`/`link_id` were never inserted
-                // into the registry either.
+                // Net-new arm at the max-peers cap: the classification already
+                // drove the local establish leg to `Failed{Rejected}` with the
+                // index allocator untouched (no allocate before the reject).
+                // That local machine is discarded (never inserted into
+                // `peer_machines`); `conn`/`link_id` were never inserted into
+                // the registry either.
+                let _ = actions;
                 debug!(
                     peer = %self.peer_display_name(&peer_node_addr),
                     max = self.max_peers(),
                     "Silent-dropping Msg1 at max_peers cap (early gate; no Msg2 sent)"
-                );
-                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
-                let _ = machine.step(
-                    PeerEvent::InboundMsg1 {
-                        link: link_id,
-                        wire,
-                        est,
-                    },
-                    packet.timestamp_ms,
-                    &mut self.index_allocator,
                 );
                 debug_assert!(matches!(
                     machine.state(),
@@ -367,8 +364,10 @@ impl Node {
             InboundDecision::Reject {
                 reason: reason @ (InboundReject::PendingSession | InboundReject::DualRekeyWon),
             } => {
-                // Existing-peer rekey rejects — still inline. Byte-unchanged
-                // from the pre-refactor shared reject tail.
+                // Existing-peer rekey rejects: the classification took the
+                // fresh-context fail path (no actions) and the local machine is
+                // dropped; the reject bookkeeping below is the whole effect.
+                debug_assert!(actions.is_empty());
                 match reason {
                     InboundReject::PendingSession => debug!(
                         peer = %self.peer_display_name(&peer_node_addr),
@@ -387,6 +386,10 @@ impl Node {
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             }
             InboundDecision::ResendMsg2 { msg2 } => {
+                // Duplicate msg1 at the same epoch: the decision carries the
+                // stored msg2 bytes and the inline resend below owns the send;
+                // the classification touched no state.
+                debug_assert!(actions.is_empty());
                 if let Some(msg2) = msg2.as_deref()
                     && let Some(transport) = self.transports.get(&packet.transport_id)
                 {
@@ -408,6 +411,11 @@ impl Node {
                 peer,
                 abandon_first,
             } => {
+                // Rekey responder: the decision carries the routing; the inline
+                // body below owns the abandon, index allocation, framed msg2
+                // send, pending-session store, and dampening stamp. The
+                // classification machine mutates nothing.
+                debug_assert!(actions.is_empty());
                 if abandon_first {
                     // Dual-initiation loser: abandon our own in-flight rekey and
                     // free its index before responding as the rekey responder.
@@ -517,26 +525,18 @@ impl Node {
                     "Peer restart detected (epoch mismatch), removing stale session"
                 );
 
-                // Keep the shell's own copies of the msg2 framing inputs before
-                // the machine event consumes `wire` (WireOutcome is not Clone).
+                // Snapshot the msg2 framing inputs (`their_index` and the opaque
+                // payload) for the `build_msg2` call at the promote tail below.
+                // The classification borrows `wire`, so these locals carry the
+                // two fields the later framing needs.
                 let msg2_payload = wire.msg2_payload.clone();
                 let their_index = wire.their_index;
 
-                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
-
-                // Phase 1: classify + emit the old-peer teardown. For a restart the
-                // fresh leg has `our_index == None`, so the emitted sequence is
-                // exactly [InvalidateSendState, ReportLost{peer}]; the machine then
-                // parks at Handshaking{ReceivedMsg1} (no allocation).
-                let phase1 = machine.step(
-                    PeerEvent::InboundMsg1 {
-                        link: link_id,
-                        wire,
-                        est,
-                    },
-                    packet.timestamp_ms,
-                    &mut self.index_allocator,
-                );
+                // The classification parked the machine at
+                // `Handshaking{ReceivedMsg1}` (no allocation) and returned the
+                // old-peer teardown as `actions`. For a restart the fresh leg
+                // has `our_index == None`, so that sequence is exactly
+                // [InvalidateSendState, ReportLost{peer}].
                 debug_assert!(matches!(
                     machine.state(),
                     PeerState::Handshaking {
@@ -564,7 +564,7 @@ impl Node {
                     now_ms: packet.timestamp_ms,
                     is_outbound: false,
                 };
-                self.execute_peer_actions(link_id, &teardown_ctx, phase1)
+                self.execute_peer_actions(link_id, &teardown_ctx, actions)
                     .await;
 
                 // Shell interposition: late-ACL authorize BEFORE any allocation.
@@ -698,24 +698,17 @@ impl Node {
                 // matching the pre-refactor authorize-before-allocate ordering
                 // exactly.
 
-                // Keep the shell's own copies of the msg2 framing inputs before
-                // the machine event consumes `wire` (WireOutcome is not Clone).
+                // Snapshot the msg2 framing inputs (`their_index` and the opaque
+                // payload) for the `build_msg2` call at the promote tail below.
+                // The classification borrows `wire`, so these locals carry the
+                // two fields the later framing needs.
                 let msg2_payload = wire.msg2_payload.clone();
                 let their_index = wire.their_index;
 
-                let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
-
-                // Phase 1: classify (no allocation, no actions for a net-new leg).
-                let phase1 = machine.step(
-                    PeerEvent::InboundMsg1 {
-                        link: link_id,
-                        wire,
-                        est,
-                    },
-                    packet.timestamp_ms,
-                    &mut self.index_allocator,
-                );
-                debug_assert!(phase1.is_empty());
+                // Phase 1: a net-new leg classifies with no allocation and emits
+                // no actions; the classification parked the machine at
+                // `Handshaking{ReceivedMsg1}` awaiting the late-ACL gate.
+                debug_assert!(actions.is_empty());
                 debug_assert!(matches!(
                     machine.state(),
                     PeerState::Handshaking {
