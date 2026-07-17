@@ -266,6 +266,21 @@ pub(crate) struct EstablishSnapshot {
     pub our_node_addr: NodeAddr,
 }
 
+/// A snapshot of the registry state the *outbound* establish decision reads
+/// about the peer whose msg2 just completed our handshake, taken by the shell.
+///
+/// Both fields are pre-evaluated shell-side (the tie-break is a pure function of
+/// the two node addresses, resolved into a plain `bool` here) so the core never
+/// touches live `Node` state or the `crate::peer` tie-break helper.
+pub(crate) struct OutboundSnapshot {
+    /// The peer identity is already a promoted active peer — i.e. this outbound
+    /// completion is a cross-connection (we also processed their msg1).
+    pub has_existing_peer: bool,
+    /// Pre-evaluated cross-connection tie-break: our *outbound* connection wins
+    /// (we are the smaller NodeAddr). Only meaningful when `has_existing_peer`.
+    pub our_outbound_wins: bool,
+}
+
 /// A registry/transport effect the async shell performs on the core's behalf.
 ///
 /// The scaffold subset covers the maintain/teardown half of the lifecycle. The
@@ -398,6 +413,30 @@ pub(crate) enum InboundReject {
     /// Dual rekey initiation and we are the tie-break *winner* (smaller
     /// NodeAddr): drop the peer's `msg3` and keep driving our own rekey.
     DualRekeyWon,
+}
+
+/// The classification outcome for one outbound `handle_msg2` completion, decided
+/// purely from the [`OutboundSnapshot`]. The shell matches on this and drives
+/// the effects; the core consumes nothing and touches no live state.
+///
+/// Only the case where the peer is *not* yet a promoted active peer is a plain
+/// promotion; when it is, this msg2 completes the outbound half of a
+/// cross-connection and the tie-break decides whether we swap our session to the
+/// (winning) outbound one or keep our existing inbound session. The rekey-msg2
+/// completion path is handled by a separate shell driver (it mutates
+/// `ActivePeer`, not a `PeerConnection`) and never reaches this decision.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OutboundDecision {
+    /// No existing peer for this identity: promote the completed outbound
+    /// connection to an active peer via the normal promotion path.
+    Promote,
+    /// Cross-connection and our outbound wins (smaller NodeAddr): swap the peer
+    /// to the outbound session + indices, freeing the old inbound index.
+    CrossConnectionSwap,
+    /// Cross-connection and our outbound loses (larger NodeAddr): keep the
+    /// existing inbound session and original `their_index`, freeing the unused
+    /// outbound index.
+    CrossConnectionKeep,
 }
 
 impl Fmp {
@@ -629,6 +668,23 @@ impl Fmp {
                     msg2: snap.existing_msg2.clone(),
                 }
             }
+        }
+    }
+
+    /// Classify one outbound `handle_msg2` completion from the outbound snapshot.
+    /// Pure: reads only `snap`, mutates nothing.
+    ///
+    /// Mirrors the pre-refactor branch exactly: an existing same-identity peer
+    /// makes this a cross-connection resolved by the (pre-evaluated) tie-break —
+    /// swap on a win, keep on a loss — otherwise a net-new promote.
+    pub(crate) fn establish_outbound(&self, snap: &OutboundSnapshot) -> OutboundDecision {
+        if !snap.has_existing_peer {
+            return OutboundDecision::Promote;
+        }
+        if snap.our_outbound_wins {
+            OutboundDecision::CrossConnectionSwap
+        } else {
+            OutboundDecision::CrossConnectionKeep
         }
     }
 }

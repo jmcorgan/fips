@@ -54,12 +54,17 @@
 //! triggers are live: `handle_msg3` steps the decision machine and the
 //! executor performs its verdict.
 //!
-//! Likewise the outbound completion is NOT routed through the machine: next has
-//! no `establish_outbound` core — `handle_msg2` learns the identity from
-//! `conn.expected_identity()` and drives `promote_connection` inline. The
-//! machine's outbound role is `Dial`→`OpenTransport`, `start_outbound_handshake`,
-//! and the resend/timeout timers; the shell drives promote and feeds the outcome
-//! back via [`PromotionResolved`](PeerEvent::PromotionResolved).
+//! The outbound completion is routed through the machine the same way:
+//! `handle_msg2` crystallizes the learned identity, builds an
+//! [`OutboundSnapshot`], and steps the persistent machine once; the machine
+//! computes the establish decision via `establish_outbound`. A net-new
+//! completion promotes through [`PromoteToActive`](PeerAction::PromoteToActive)
+//! (the executor feeds the outcome back via
+//! [`PromotionResolved`](PeerEvent::PromotionResolved)), while a
+//! cross-connection resolves as a
+//! [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection) decision the
+//! shell intercepts — its inline Swap/Keep bodies mutate the already-promoted
+//! peer, for which no `PeerAction` exists.
 //!
 //! ## Realizability notes
 //!
@@ -81,7 +86,8 @@
 use crate::peer::PeerConnection;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision,
-    InboundReject, PeerSnapshot, PromotionResult, RekeyCfg, RekeyResendSnapshot, WireOutcome,
+    InboundReject, OutboundDecision, OutboundSnapshot, PeerSnapshot, PromotionResult, RekeyCfg,
+    RekeyResendSnapshot, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
 use crate::transport::{LinkId, TransportAddr, TransportId};
@@ -258,6 +264,12 @@ pub(crate) enum PeerEvent {
     TransportConnected,
     /// Transport connect failed.
     TransportFailed,
+    /// The transport accepted the dial but sending a stored handshake
+    /// initiation failed. The machine marks the embedded leg failed so the
+    /// stale-connection sweep reclaims it, WITHOUT leaving the handshaking
+    /// state — the retransmit driver may still resend in the window before
+    /// the sweep.
+    HandshakeSendFailed,
     /// Inbound handshake msg1 processed shell-side: allocate our index and reply
     /// with msg2, deferring identity/classification to msg3. Carries no identity
     /// or wire outcome — on XX neither is known at msg1.
@@ -275,12 +287,16 @@ pub(crate) enum PeerEvent {
         our_index: SessionIndex,
     },
     /// Outbound handshake msg2 completed (Noise finalized, identity crystallized
-    /// shell-side from the connection's expected identity, ACL already gated,
-    /// msg3 sent). The net-new-vs-cross-connection decision is the shell's
-    /// peer-map membership test; this event is emitted only on the net-new path,
-    /// so it maps directly to a promote. `their_index` carries the peer's session
-    /// index for shape parity with the inbound path.
-    OutboundMsg2 { their_index: SessionIndex },
+    /// onto the machine shell-side, ACL already gated, msg3 sent). Carries the
+    /// shell-built [`OutboundSnapshot`]; the machine computes the establish
+    /// decision from it — a net-new promote, or a cross-connection swap/keep
+    /// conveyed as [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection).
+    /// `their_index` carries the peer's session index for shape parity with the
+    /// inbound path.
+    OutboundMsg2 {
+        their_index: SessionIndex,
+        out: OutboundSnapshot,
+    },
     /// `promote_connection` resolved the [`PromoteToActive`](PeerAction::PromoteToActive)
     /// action shell-side; the machine consumes the outcome (it does not
     /// re-decide the tie-break).
@@ -359,6 +375,11 @@ pub(crate) enum PeerAction {
     /// Crystallize identity, re-home the map key, publish send-state
     /// (`promote_connection`). Resolves to a [`PromotionResolved`](PeerEvent::PromotionResolved).
     PromoteToActive { link: LinkId },
+    /// A DECISION conveyed to the driver, not an effect: emitted by the
+    /// outbound-msg2 arm when the establish decision is a cross-connection
+    /// resolution. The shell intercepts it and runs the inline swap/keep
+    /// resolution; it must never reach the action executor.
+    ResolveCrossConnection { swap: bool },
     /// Initiator-side rekey cutover: swap the published send-state to the pending
     /// epoch.
     SwapSendState { epoch: [u8; 8] },
@@ -716,13 +737,16 @@ impl PeerMachine {
             } => self.on_dial(transport_id, remote_addr, connection_oriented, now),
             PeerEvent::TransportConnected => self.on_transport_connected(now),
             PeerEvent::TransportFailed => self.on_transport_failed(now),
+            PeerEvent::HandshakeSendFailed => self.on_handshake_send_failed(),
             PeerEvent::InboundMsg1 { link } => self.on_inbound_msg1(link, now, index_allocator),
             PeerEvent::InboundMsg3 {
                 wire,
                 est,
                 our_index,
             } => self.on_inbound_msg3(wire, est, our_index, now, index_allocator),
-            PeerEvent::OutboundMsg2 { their_index } => self.on_outbound_msg2(their_index, now),
+            PeerEvent::OutboundMsg2 { their_index, out } => {
+                self.on_outbound_msg2(their_index, out, now)
+            }
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
             PeerEvent::RekeyMsg2 { their_index } => self.on_rekey_msg2(their_index),
             PeerEvent::RekeyConsume { action } => self.map_rekey_action(action, now),
@@ -811,6 +835,19 @@ impl PeerMachine {
             backoff_deadline_ms: now + CLOSED_BACKOFF_MS,
         };
         actions
+    }
+
+    /// A stored handshake initiation failed to send: mark the embedded leg
+    /// failed so the stale-connection sweep (which reads the leg's
+    /// `is_failed`) reclaims it. NO state flip — the machine stays in
+    /// `Handshaking{SentMsg1}` so retransmit eligibility
+    /// (`is_handshaking_sent_msg1`) survives until the sweep, and no timer
+    /// actions are emitted.
+    fn on_handshake_send_failed(&mut self) -> Vec<PeerAction> {
+        if let Some(leg) = self.leg.as_mut() {
+            leg.mark_failed();
+        }
+        Vec::new()
     }
 
     /// Emit msg1 and arm the retransmit/timeout timers. The Noise msg1
@@ -960,33 +997,63 @@ impl PeerMachine {
         }
     }
 
-    /// Net-new outbound promote after msg2 completes the initiator handshake.
+    /// Outbound completion after msg2 completes the initiator handshake:
+    /// compute the establish decision from the snapshot via
+    /// `establish_outbound`. `Promote` drives promotion via actions; the
+    /// Swap/Keep outcomes are conveyed as a
+    /// [`ResolveCrossConnection`](PeerAction::ResolveCrossConnection) decision
+    /// for the shell's inline resolution, which owns all effects (index frees,
+    /// session replacement) permanently. No state guard: anonymous-discovery
+    /// legs reach msg2 parked in `Discovered` (identified dials in
+    /// `Handshaking{SentMsg1}`), and the decision reads only the snapshot.
     ///
-    /// The net-new-vs-cross-connection decision is made shell-side (via the peer
-    /// map), so this handler is reached only on the net-new path and maps
-    /// directly to an unconditional promote — there is no sub-decision to run
-    /// here. The persistent `Established` machine is created inside
-    /// `promote_connection`; this machine is a transient decision vehicle that is
-    /// discarded after the step, so the `set_their_index` and state write below
-    /// are behaviorally inert (kept to make the transient's intent explicit and
-    /// to match the established lifecycle shape).
-    fn on_outbound_msg2(&mut self, their_index: SessionIndex, _now: u64) -> Vec<PeerAction> {
+    /// On `Promote` the persistent machine survives as the active peer's
+    /// control machine, and `Established` is written here, ahead of the
+    /// `PromotionResolved` feedback (which re-crystallizes it). The shell
+    /// crystallizes the learned identity onto the machine before the step, so
+    /// the `addr()` read is `Some` for anonymous legs too. On Swap/Keep the
+    /// `set_their_index` write lands on the machine's shadow connection and
+    /// the shell discards the machine right after the step, so it is
+    /// unobservable.
+    fn on_outbound_msg2(
+        &mut self,
+        their_index: SessionIndex,
+        out: OutboundSnapshot,
+        _now: u64,
+    ) -> Vec<PeerAction> {
         self.conn.set_their_index(their_index);
-        let addr = self.addr().unwrap_or_else(zero_addr);
-        self.state = PeerState::Established { addr };
-        // The machine survives promotion (it becomes the active peer's control
-        // machine), so cancel the outbound handshake timers here or they would
-        // linger in the driver's store. A late fire would no-op against the
-        // non-`Handshaking` state, but leaving them armed is a timer leak.
-        vec![
-            PeerAction::CancelTimer {
-                kind: TimerKind::HandshakeRetransmit,
-            },
-            PeerAction::CancelTimer {
-                kind: TimerKind::HandshakeTimeout,
-            },
-            PeerAction::PromoteToActive { link: self.link },
-        ]
+        match Fmp::new().establish_outbound(&out) {
+            OutboundDecision::Promote => {
+                let addr = self.addr().unwrap_or_else(zero_addr);
+                self.state = PeerState::Established { addr };
+                // The machine survives promotion (it becomes the active peer's
+                // control machine), so cancel the outbound handshake timers here
+                // or they would linger in the driver's store. A late fire would
+                // no-op against the non-`Handshaking` state, but leaving them
+                // armed is a timer leak.
+                vec![
+                    PeerAction::CancelTimer {
+                        kind: TimerKind::HandshakeRetransmit,
+                    },
+                    PeerAction::CancelTimer {
+                        kind: TimerKind::HandshakeTimeout,
+                    },
+                    PeerAction::PromoteToActive { link: self.link },
+                ]
+            }
+            OutboundDecision::CrossConnectionSwap => {
+                // Our outbound wins: convey the decision only. The shell's
+                // inline resolution swaps the peer to the outbound session and
+                // owns the index frees and session replacement.
+                vec![PeerAction::ResolveCrossConnection { swap: true }]
+            }
+            OutboundDecision::CrossConnectionKeep => {
+                // Our outbound loses: convey the decision only. The shell's
+                // inline resolution keeps the existing inbound session and
+                // frees the unused outbound index.
+                vec![PeerAction::ResolveCrossConnection { swap: false }]
+            }
+        }
     }
 
     /// XX inbound cross-connection at msg3. The Noise session swap and the
@@ -1620,7 +1687,17 @@ mod tests {
         let mut m = PeerMachine::new_outbound(link, Some(id), 0);
         let their_index = SessionIndex::new(0x77);
 
-        let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
+        let actions = m.step(
+            PeerEvent::OutboundMsg2 {
+                their_index,
+                out: OutboundSnapshot {
+                    has_existing_peer: false,
+                    our_outbound_wins: false,
+                },
+            },
+            0,
+            &mut alloc,
+        );
 
         assert_eq!(
             actions,
@@ -1650,7 +1727,17 @@ mod tests {
         let mut m = PeerMachine::new_outbound(link, Some(id), 0);
         let their_index = SessionIndex::new(0x88);
 
-        let actions = m.step(PeerEvent::OutboundMsg2 { their_index }, 0, &mut alloc);
+        let actions = m.step(
+            PeerEvent::OutboundMsg2 {
+                their_index,
+                out: OutboundSnapshot {
+                    has_existing_peer: false,
+                    our_outbound_wins: false,
+                },
+            },
+            0,
+            &mut alloc,
+        );
 
         assert_eq!(
             actions,
@@ -1664,6 +1751,92 @@ mod tests {
                 PeerAction::PromoteToActive { link },
             ]
         );
+    }
+
+    // ---- Test: outbound msg2 cross-connection decision arms ---------------
+    // Swap/Keep are decision-only: a single `ResolveCrossConnection { swap }`
+    // action, no index actions, no state change — the shell's inline
+    // resolution owns all effects and discards the machine after the step.
+    #[test]
+    fn outbound_msg2_cross_connection_decisions() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+
+        // Cross-connection SWAP: our outbound wins -> decision only; the
+        // shell's inline resolution owns the index frees and session
+        // replacement.
+        let mut m2 = PeerMachine::new_outbound(LinkId::new(2), Some(peer), 0);
+        m2.state = PeerState::Handshaking {
+            link: LinkId::new(2),
+            phase: HandshakePhase::SentMsg1,
+        };
+        m2.conn.set_our_index(SessionIndex::new(0x2222)); // outbound index
+        m2.our_index = Some(SessionIndex::new(0x1111)); // old inbound index
+        let swap = m2.step(
+            PeerEvent::OutboundMsg2 {
+                their_index: SessionIndex::new(0x99),
+                out: OutboundSnapshot {
+                    has_existing_peer: true,
+                    our_outbound_wins: true,
+                },
+            },
+            400,
+            &mut alloc,
+        );
+        assert_eq!(
+            swap,
+            vec![PeerAction::ResolveCrossConnection { swap: true }]
+        );
+        assert!(!swap.iter().any(|a| matches!(
+            a,
+            PeerAction::FreeIndex { .. } | PeerAction::RegisterDecryptSession { .. }
+        )));
+        // The decision arm leaves the machine untouched: still Handshaking,
+        // our_index unchanged.
+        assert_eq!(
+            m2.state(),
+            PeerState::Handshaking {
+                link: LinkId::new(2),
+                phase: HandshakePhase::SentMsg1,
+            }
+        );
+        assert_eq!(m2.our_index(), Some(SessionIndex::new(0x1111)));
+
+        // Cross-connection KEEP: our outbound loses -> decision only; the
+        // shell's inline resolution frees the unused outbound index.
+        let mut m3 = PeerMachine::new_outbound(LinkId::new(3), Some(peer), 0);
+        m3.state = PeerState::Handshaking {
+            link: LinkId::new(3),
+            phase: HandshakePhase::SentMsg1,
+        };
+        m3.conn.set_our_index(SessionIndex::new(0x3333));
+        let keep = m3.step(
+            PeerEvent::OutboundMsg2 {
+                their_index: SessionIndex::new(0x9A),
+                out: OutboundSnapshot {
+                    has_existing_peer: true,
+                    our_outbound_wins: false,
+                },
+            },
+            500,
+            &mut alloc,
+        );
+        assert_eq!(
+            keep,
+            vec![PeerAction::ResolveCrossConnection { swap: false }]
+        );
+        assert!(!keep.iter().any(|a| matches!(
+            a,
+            PeerAction::FreeIndex { .. } | PeerAction::RegisterDecryptSession { .. }
+        )));
+        assert_eq!(
+            m3.state(),
+            PeerState::Handshaking {
+                link: LinkId::new(3),
+                phase: HandshakePhase::SentMsg1,
+            }
+        );
+        assert_eq!(m3.our_index(), None);
     }
 
     // ---- Contract: actions are runtime-agnostic data ----------------------
@@ -1700,6 +1873,7 @@ mod tests {
             PeerAction::PromoteToActive {
                 link: LinkId::new(7),
             },
+            PeerAction::ResolveCrossConnection { swap: true },
             PeerAction::SwapSendState { epoch: [1u8; 8] },
             PeerAction::CompleteDrain { peer },
             PeerAction::InvalidateSendState,
@@ -1745,6 +1919,7 @@ mod tests {
                 | PeerAction::SendRekey { .. }
                 | PeerAction::SendLinkMessage { .. }
                 | PeerAction::PromoteToActive { .. }
+                | PeerAction::ResolveCrossConnection { .. }
                 | PeerAction::SwapSendState { .. }
                 | PeerAction::CompleteDrain { .. }
                 | PeerAction::InvalidateSendState
@@ -2461,6 +2636,10 @@ mod tests {
         let promote = m.step(
             PeerEvent::OutboundMsg2 {
                 their_index: SessionIndex::new(0x77),
+                out: OutboundSnapshot {
+                    has_existing_peer: false,
+                    our_outbound_wins: false,
+                },
             },
             300,
             &mut alloc,
@@ -2575,6 +2754,10 @@ mod tests {
         let promote = m.step(
             PeerEvent::OutboundMsg2 {
                 their_index: SessionIndex::new(0x77),
+                out: OutboundSnapshot {
+                    has_existing_peer: false,
+                    our_outbound_wins: false,
+                },
             },
             200,
             &mut alloc,
@@ -2659,6 +2842,53 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // ---- Test 7e: HandshakeSendFailed marks the leg, keeps the state ------
+    // A stored-msg1 send failure marks the embedded leg failed (the
+    // stale-connection sweep reads the leg's `is_failed`) WITHOUT leaving
+    // `Handshaking{SentMsg1}` — retransmit eligibility
+    // (`is_handshaking_sent_msg1`) must survive until the sweep — and emits
+    // no actions. On a machine with no leg it is a defensive no-op.
+    #[test]
+    fn handshake_send_failed_marks_leg_without_leaving_handshaking() {
+        let mut alloc = IndexAllocator::new();
+        let peer = peer_identity();
+
+        // Dial-persisted outbound machine carrying a prepared leg, driven to
+        // Handshaking{SentMsg1} via the connectionless dial.
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
+        let _ = m.step(
+            PeerEvent::Dial {
+                transport_id: TransportId::new(1),
+                remote_addr: TransportAddr::from_string("127.0.0.1:9999"),
+                peer_identity: peer,
+                connection_oriented: false,
+            },
+            100,
+            &mut alloc,
+        );
+        m.set_leg(PeerConnection::outbound(LinkId::new(1), peer, 100));
+        assert!(m.is_handshaking_sent_msg1());
+        assert!(!m.leg().expect("leg embedded").is_failed());
+
+        let actions = m.step(PeerEvent::HandshakeSendFailed, 200, &mut alloc);
+        assert_eq!(actions, Vec::new(), "HandshakeSendFailed emits no actions");
+        assert!(
+            m.is_handshaking_sent_msg1(),
+            "retransmit eligibility survives a send failure"
+        );
+        assert!(
+            m.leg().expect("leg retained").is_failed(),
+            "the leg carries the failed mark the sweep reads"
+        );
+
+        // With no leg (e.g. after take_leg) the event is a defensive no-op.
+        let _ = m.take_leg();
+        let actions = m.step(PeerEvent::HandshakeSendFailed, 300, &mut alloc);
+        assert_eq!(actions, Vec::new());
+        assert!(m.is_handshaking_sent_msg1());
+        assert!(m.leg().is_none());
     }
 
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------

@@ -216,8 +216,13 @@ impl Node {
                         // (`prepare_outbound_msg1`); send the stored wire. The
                         // machine's empty payload is ignored.
                         let _ = bytes;
-                        self.send_stored_msg1(link, ambient.transport_id, &ambient.remote_addr)
-                            .await;
+                        self.send_stored_msg1(
+                            link,
+                            ambient.transport_id,
+                            &ambient.remote_addr,
+                            ambient.now_ms,
+                        )
+                        .await;
                     }
                 }
                 PeerAction::SendRekey { .. } => {
@@ -466,6 +471,16 @@ impl Node {
                         };
                         queue.extend(follow);
                     }
+                }
+                PeerAction::ResolveCrossConnection { .. } => {
+                    // A decision token, not an effect: the outbound msg2
+                    // handler intercepts it and runs the inline swap/keep
+                    // resolution itself, so it must never reach the executor.
+                    debug_assert!(
+                        false,
+                        "ResolveCrossConnection is intercepted by the msg2 \
+                         handler and must never reach the executor"
+                    );
                 }
                 PeerAction::SwapSendState { .. } => {
                     // Initiator cutover: the live authoritative rekey-cadence

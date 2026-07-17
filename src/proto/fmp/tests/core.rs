@@ -5,8 +5,8 @@ use super::util::{
     wire_outcome,
 };
 use crate::proto::fmp::{
-    ConnAction, Fmp, InboundDecision, InboundReject, NegotiationPayload, NodeProfile, RekeyCfg,
-    cross_connection_winner,
+    ConnAction, Fmp, InboundDecision, InboundReject, NegotiationPayload, NodeProfile,
+    OutboundDecision, OutboundSnapshot, RekeyCfg, cross_connection_winner,
 };
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
@@ -537,6 +537,47 @@ fn establish_aged_unhealthy_is_duplicate() {
         fmp.establish_inbound(&snap, &wire),
         InboundDecision::ResendMsg2 { .. }
     ));
+}
+
+// ===========================================================================
+// establish_outbound — outbound msg2 classification (E4)
+// ===========================================================================
+
+#[test]
+fn establish_outbound_no_existing_peer_promotes() {
+    let fmp = Fmp::new();
+    // our_outbound_wins is irrelevant when there is no existing peer.
+    let snap = OutboundSnapshot {
+        has_existing_peer: false,
+        our_outbound_wins: true,
+    };
+    assert_eq!(fmp.establish_outbound(&snap), OutboundDecision::Promote);
+}
+
+#[test]
+fn establish_outbound_cross_connection_win_swaps() {
+    let fmp = Fmp::new();
+    let snap = OutboundSnapshot {
+        has_existing_peer: true,
+        our_outbound_wins: true,
+    };
+    assert_eq!(
+        fmp.establish_outbound(&snap),
+        OutboundDecision::CrossConnectionSwap
+    );
+}
+
+#[test]
+fn establish_outbound_cross_connection_loss_keeps() {
+    let fmp = Fmp::new();
+    let snap = OutboundSnapshot {
+        has_existing_peer: true,
+        our_outbound_wins: false,
+    };
+    assert_eq!(
+        fmp.establish_outbound(&snap),
+        OutboundDecision::CrossConnectionKeep
+    );
 }
 
 // ===== cross_connection_winner tie-break tests =====
