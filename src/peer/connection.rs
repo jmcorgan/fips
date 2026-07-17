@@ -237,21 +237,6 @@ impl PeerConnection {
         self.state.handshake_msg2()
     }
 
-    /// Number of resends performed.
-    pub fn resend_count(&self) -> u32 {
-        self.state.resend_count()
-    }
-
-    /// When the next resend is scheduled (Unix ms).
-    pub fn next_resend_at_ms(&self) -> u64 {
-        self.state.next_resend_at_ms()
-    }
-
-    /// Record a resend and schedule the next one.
-    pub fn record_resend(&mut self, next_resend_at_ms: u64) {
-        self.state.record_resend(next_resend_at_ms);
-    }
-
     // === Noise Handshake Operations (shell: drives crypto, updates pure state) ===
 
     /// Start the handshake as initiator and generate message 1.

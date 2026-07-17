@@ -421,6 +421,7 @@ impl ConnectionState {
     }
 
     /// When the next resend is scheduled (Unix ms).
+    #[cfg(test)]
     pub fn next_resend_at_ms(&self) -> u64 {
         self.next_resend_at_ms
     }
