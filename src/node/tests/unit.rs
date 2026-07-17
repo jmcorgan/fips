@@ -364,6 +364,64 @@ fn test_node_connection_duplicate() {
     assert!(matches!(result, Err(NodeError::ConnectionAlreadyExists(_))));
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn test_peer_maps_coherent_after_add_connection() {
+    let mut node = make_node();
+
+    let identity = make_peer_identity();
+    let link_id = LinkId::new(1);
+    let conn = PeerConnection::outbound(link_id, identity, 1000);
+
+    node.add_connection(conn).unwrap();
+
+    assert!(
+        node.peer_machines.contains_key(&link_id),
+        "add_connection seeds a control machine for its leg"
+    );
+    node.debug_assert_peer_maps_coherent();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn test_peer_maps_coherent_through_establish() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    let link_id = LinkId::new(1);
+    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+
+    node.add_connection(conn).unwrap();
+    node.debug_assert_peer_maps_coherent();
+
+    let result = node.promote_connection(link_id, identity, 2000).unwrap();
+    assert!(matches!(result, PromotionResult::Promoted(_)));
+
+    // The leg's connection entry is consumed by the promote; the active peer
+    // on the same link is now the machine's carrier.
+    node.debug_assert_peer_maps_coherent();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn test_peer_maps_coherence_detects_orphaned_machine() {
+    let mut node = make_node();
+
+    // A machine with no connection, no active peer, and no pending connect
+    // has no live carrier; the check must panic on it.
+    let link_id = LinkId::new(7);
+    let machine = crate::peer::machine::PeerMachine::new_inbound(link_id, 1000);
+    node.peer_machines.insert(link_id, machine);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node.debug_assert_peer_maps_coherent();
+    }));
+    assert!(
+        result.is_err(),
+        "coherence check accepts a machine with no live carrier"
+    );
+}
+
 #[test]
 fn test_node_promote_connection() {
     let mut node = make_node();
