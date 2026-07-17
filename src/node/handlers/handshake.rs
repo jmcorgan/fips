@@ -913,9 +913,10 @@ impl Node {
         };
         // The outbound Msg2 Promote step cancels the two dial-armed handshake
         // timers (the machine survives promotion, so they would otherwise linger
-        // in the driver's shadow store) and then promotes. The cancels are
-        // behavior-neutral at this rung — `peer_timers` is written but not yet
-        // driven — and `PromoteToActive` is still what performs the promotion.
+        // in `peer_timers` until `drive_peer_timers` lazily discards them — the
+        // promoted leg's `connections` entry is gone and the machine has left
+        // `SentMsg1`, so they can no longer fire) and then promotes.
+        // `PromoteToActive` is still what performs the promotion.
         debug_assert_eq!(
             promote_actions,
             vec![

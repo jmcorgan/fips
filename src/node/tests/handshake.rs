@@ -860,8 +860,6 @@ async fn test_msg1_stored_for_resend() {
 
     // Verify stored msg1 matches what was built
     assert_eq!(conn.handshake_msg1().unwrap(), &wire_msg1);
-    assert_eq!(conn.resend_count(), 0);
-    assert!(conn.next_resend_at_ms() > now_ms);
 }
 
 /// Test that resend scheduling respects max_resends and backoff.
@@ -1032,31 +1030,6 @@ fn test_msg2_stored_on_connection() {
     conn.set_handshake_msg2(msg2_bytes.clone());
 
     assert_eq!(conn.handshake_msg2().unwrap(), &msg2_bytes);
-}
-
-/// Test that resend_count and next_resend_at_ms track correctly.
-#[test]
-fn test_resend_count_tracking() {
-    let peer_identity = make_peer_identity();
-    let mut conn = PeerConnection::outbound(LinkId::new(1), peer_identity, 1000);
-
-    assert_eq!(conn.resend_count(), 0);
-    assert_eq!(conn.next_resend_at_ms(), 0);
-
-    // Simulate storing msg1 and scheduling first resend
-    conn.set_handshake_msg1(vec![0x01], 2000);
-    assert_eq!(conn.resend_count(), 0);
-    assert_eq!(conn.next_resend_at_ms(), 2000);
-
-    // Record first resend
-    conn.record_resend(4000); // next at 4000 (2s backoff)
-    assert_eq!(conn.resend_count(), 1);
-    assert_eq!(conn.next_resend_at_ms(), 4000);
-
-    // Record second resend
-    conn.record_resend(8000); // next at 8000 (4s backoff)
-    assert_eq!(conn.resend_count(), 2);
-    assert_eq!(conn.next_resend_at_ms(), 8000);
 }
 
 /// Test that duplicate msg2 is silently dropped when pending_outbound is already cleared.
