@@ -1981,7 +1981,7 @@ impl Node {
             .map(|conn| snap::ConnectionRow {
                 link_id: conn.link_id().as_u64(),
                 direction: format!("{}", conn.direction()),
-                handshake_state: format!("{}", conn.handshake_state()),
+                handshake_state: self.connection_handshake_state(conn.link_id()).to_string(),
                 started_at_ms: conn.started_at(),
                 last_activity_ms: conn.last_activity(),
                 resend_count: self.connection_resend_count(conn.link_id()),
@@ -2307,6 +2307,17 @@ impl Node {
         self.peer_machines
             .get(&link)
             .map_or(0, |machine| machine.resend_count())
+    }
+
+    /// Operator-visible handshake-state string for a pending handshake `link`,
+    /// derived from the per-peer control machine (the phase's home now that the
+    /// leg no longer carries it). Every leg surfaced by `connections()` is
+    /// embedded in a machine, so the lookup resolves; the `"initial"` default is
+    /// unreachable in that view and only guards a missing machine.
+    pub(crate) fn connection_handshake_state(&self, link: LinkId) -> &'static str {
+        self.peer_machines
+            .get(&link)
+            .map_or("initial", |machine| machine.displayed_handshake_state())
     }
 
     pub(crate) fn cleanup_bootstrap_transport_if_unused(&mut self, transport_id: TransportId) {

@@ -1,8 +1,11 @@
 //! Peer Connection (Handshake Phase)
 //!
 //! Represents an in-progress connection before authentication completes.
-//! PeerConnection tracks the Noise IK handshake state and transitions to
-//! ActivePeer upon successful authentication.
+//! PeerConnection tracks the Noise IK handshake and transitions to
+//! ActivePeer upon successful authentication. The handshake *phase* (initial /
+//! sent_msg1 / complete / failed) is no longer tracked here — it lives on the
+//! per-peer control machine; the leg's crypto methods gate on the presence of
+//! their Noise handles (`noise_handshake` / `noise_session`) directly.
 
 use crate::PeerIdentity;
 use crate::noise::{self, NoiseError, NoiseSession};
@@ -11,12 +14,6 @@ use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, Transpor
 use crate::utils::index::SessionIndex;
 use secp256k1::Keypair;
 use std::fmt;
-
-// The pure handshake-phase bookkeeping (`ConnectionState`) and its
-// `HandshakeState` phase enum now live in `proto::fmp::state`. Re-export
-// `HandshakeState` here so its original public path
-// (`crate::peer::HandshakeState`) is preserved for existing call sites.
-pub use crate::proto::fmp::HandshakeState;
 
 /// A connection in the handshake phase, before authentication completes.
 ///
@@ -101,11 +98,6 @@ impl PeerConnection {
         self.state.direction()
     }
 
-    /// Get the handshake state.
-    pub fn handshake_state(&self) -> HandshakeState {
-        self.state.handshake_state()
-    }
-
     /// Get the expected/learned peer identity, if known.
     pub fn expected_identity(&self) -> Option<&PeerIdentity> {
         self.state.expected_identity()
@@ -119,21 +111,6 @@ impl PeerConnection {
     /// Check if this is an inbound connection.
     pub fn is_inbound(&self) -> bool {
         self.state.is_inbound()
-    }
-
-    /// Check if handshake is in progress.
-    pub fn is_in_progress(&self) -> bool {
-        self.state.is_in_progress()
-    }
-
-    /// Check if handshake completed.
-    pub fn is_complete(&self) -> bool {
-        self.state.is_complete()
-    }
-
-    /// Check if handshake failed.
-    pub fn is_failed(&self) -> bool {
-        self.state.is_failed()
     }
 
     /// When the connection started.
@@ -256,13 +233,6 @@ impl PeerConnection {
             });
         }
 
-        if self.state.handshake_state() != HandshakeState::Initial {
-            return Err(NoiseError::WrongState {
-                expected: "initial state".to_string(),
-                got: self.state.handshake_state().to_string(),
-            });
-        }
-
         let remote_static = self
             .state
             .expected_identity()
@@ -274,7 +244,6 @@ impl PeerConnection {
         let msg1 = hs.write_message_1()?;
 
         self.noise_handshake = Some(hs);
-        self.state.set_handshake_state(HandshakeState::SentMsg1);
         self.state.touch(current_time_ms);
 
         Ok(msg1)
@@ -295,13 +264,6 @@ impl PeerConnection {
             return Err(NoiseError::WrongState {
                 expected: "inbound connection".to_string(),
                 got: "outbound connection".to_string(),
-            });
-        }
-
-        if self.state.handshake_state() != HandshakeState::Initial {
-            return Err(NoiseError::WrongState {
-                expected: "initial state".to_string(),
-                got: self.state.handshake_state().to_string(),
             });
         }
 
@@ -328,7 +290,6 @@ impl PeerConnection {
         // Handshake is complete for responder
         let session = hs.into_session()?;
         self.noise_session = Some(session);
-        self.state.set_handshake_state(HandshakeState::Complete);
         self.state.touch(current_time_ms);
 
         Ok(msg2)
@@ -342,10 +303,14 @@ impl PeerConnection {
         message: &[u8],
         current_time_ms: u64,
     ) -> Result<(), NoiseError> {
-        if self.state.handshake_state() != HandshakeState::SentMsg1 {
+        // The leg is at `SentMsg1` iff its Noise handshake handle is present
+        // (set by `start_handshake`, taken here on completion). Gate on the
+        // handle directly now that the phase enum is gone — byte-equivalent to
+        // the old `!= SentMsg1` guard for every reachable transition.
+        if self.noise_handshake.is_none() {
             return Err(NoiseError::WrongState {
                 expected: "sent_msg1 state".to_string(),
-                got: self.state.handshake_state().to_string(),
+                got: "no active handshake".to_string(),
             });
         }
 
@@ -361,7 +326,6 @@ impl PeerConnection {
 
         let session = hs.into_session()?;
         self.noise_session = Some(session);
-        self.state.set_handshake_state(HandshakeState::Complete);
         self.state.touch(current_time_ms);
 
         Ok(())
@@ -372,24 +336,23 @@ impl PeerConnection {
     /// Returns the NoiseSession for use in ActivePeer. Can only be called
     /// once after handshake completes.
     pub fn take_session(&mut self) -> Option<NoiseSession> {
-        if self.state.handshake_state() == HandshakeState::Complete {
-            self.noise_session.take()
-        } else {
-            None
-        }
+        // The session exists iff the handshake reached `Complete`, so taking it
+        // unconditionally is byte-equivalent to the old `== Complete` gate.
+        self.noise_session.take()
     }
 
     /// Check if we have a completed session ready to take.
     pub fn has_session(&self) -> bool {
-        self.state.handshake_state() == HandshakeState::Complete && self.noise_session.is_some()
+        self.noise_session.is_some()
     }
 
     // === State Transitions (for manual control if needed) ===
 
-    /// Mark handshake as failed. Sets the pure lifecycle state and drops the
-    /// shell-owned crypto handshake handle.
+    /// Drop the shell-owned crypto handshake handle. The failure *state* now
+    /// lives on the control machine (`PeerMachine`); this only releases the
+    /// leg's Noise handle at the identical point it was released before, so a
+    /// subsequent `complete_handshake` on this leg still reports `WrongState`.
     pub fn mark_failed(&mut self) {
-        self.state.mark_failed();
         self.noise_handshake = None;
     }
 
@@ -411,7 +374,6 @@ impl fmt::Debug for PeerConnection {
         f.debug_struct("PeerConnection")
             .field("link_id", &self.state.link_id())
             .field("direction", &self.state.direction())
-            .field("handshake_state", &self.state.handshake_state())
             .field("expected_identity", &self.state.expected_identity())
             .field("has_noise_handshake", &self.noise_handshake.is_some())
             .field("has_noise_session", &self.noise_session.is_some())
@@ -447,25 +409,13 @@ mod tests {
     }
 
     #[test]
-    fn test_handshake_state_properties() {
-        assert!(HandshakeState::Initial.is_in_progress());
-        assert!(HandshakeState::SentMsg1.is_in_progress());
-        assert!(HandshakeState::ReceivedMsg1.is_in_progress());
-        assert!(!HandshakeState::Complete.is_in_progress());
-        assert!(!HandshakeState::Failed.is_in_progress());
-
-        assert!(HandshakeState::Complete.is_complete());
-        assert!(HandshakeState::Failed.is_failed());
-    }
-
-    #[test]
     fn test_outbound_connection() {
         let identity = make_peer_identity();
         let conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
 
         assert!(conn.is_outbound());
         assert!(!conn.is_inbound());
-        assert_eq!(conn.handshake_state(), HandshakeState::Initial);
+        assert!(!conn.has_session());
         assert!(conn.expected_identity().is_some());
         assert_eq!(conn.started_at(), 1000);
     }
@@ -476,7 +426,7 @@ mod tests {
 
         assert!(conn.is_inbound());
         assert!(!conn.is_outbound());
-        assert_eq!(conn.handshake_state(), HandshakeState::Initial);
+        assert!(!conn.has_session());
         assert!(conn.expected_identity().is_none());
         assert_eq!(conn.started_at(), 2000);
     }
@@ -503,13 +453,15 @@ mod tests {
         let msg1 = initiator_conn
             .start_handshake(initiator_keypair, initiator_epoch, 1100)
             .unwrap();
-        assert_eq!(initiator_conn.handshake_state(), HandshakeState::SentMsg1);
+        // Post-msg1 the initiator holds an in-flight handshake, not yet a session.
+        assert!(!initiator_conn.has_session());
 
         // Responder processes msg1 and sends msg2
         let msg2 = responder_conn
             .receive_handshake_init(responder_keypair, responder_epoch, &msg1, 1200)
             .unwrap();
-        assert_eq!(responder_conn.handshake_state(), HandshakeState::Complete);
+        // The IK responder completes in one step: it now holds a session.
+        assert!(responder_conn.has_session());
 
         // Responder learned initiator's identity
         let discovered = responder_conn.expected_identity().unwrap();
@@ -520,7 +472,7 @@ mod tests {
 
         // Initiator completes handshake
         initiator_conn.complete_handshake(&msg2, 1300).unwrap();
-        assert_eq!(initiator_conn.handshake_state(), HandshakeState::Complete);
+        assert!(initiator_conn.has_session());
 
         // Initiator learned responder's epoch
         assert_eq!(initiator_conn.remote_epoch(), Some(responder_epoch));
@@ -553,13 +505,19 @@ mod tests {
 
     #[test]
     fn test_connection_failure() {
+        // `mark_failed` releases the leg's Noise handshake handle. The failure
+        // *state* now lives on the control machine, but the leg-local effect is
+        // still observable: a completion attempt afterward reports `WrongState`
+        // (the handle-presence gate) and no session is produced.
         let identity = make_peer_identity();
+        let keypair = make_keypair();
         let mut conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
+        conn.start_handshake(keypair, make_epoch(), 1100).unwrap();
 
         conn.mark_failed();
-        assert!(conn.is_failed());
-        assert!(!conn.is_in_progress());
-        assert!(!conn.is_complete());
+
+        assert!(!conn.has_session());
+        assert!(conn.complete_handshake(&[0u8; 96], 1200).is_err());
     }
 
     #[test]

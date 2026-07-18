@@ -997,7 +997,18 @@ impl Node {
                     error = %e,
                     "Handshake completion failed"
                 );
+                // Drop the leg's Noise handle (byte-identical point) and record
+                // the failure on the control machine as `send_failed` — the
+                // failure state's new home. The machine PHASE stays exactly
+                // where the old leg-carried failure left it (`SentMsg1`): the
+                // stale-connection sweep reclaims the leg unconditionally via
+                // the machine `is_failed()` at the next tick, before any
+                // projection or resend, so the phase in that window is
+                // byte-identical to the pre-collapse machine.
                 conn.mark_failed();
+                if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+                    machine.mark_send_failed();
+                }
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;

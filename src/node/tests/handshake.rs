@@ -751,7 +751,6 @@ async fn test_failed_connection_cleanup() {
     conn.set_our_index(our_index);
     conn.set_transport_id(transport_id);
     conn.set_source_addr(remote_addr.clone());
-    conn.mark_failed(); // Simulate send failure
 
     let link = Link::connectionless(
         link_id,
@@ -766,6 +765,24 @@ async fn test_failed_connection_cleanup() {
     node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
+
+    // Simulate a stored-handshake send failure through the control machine —
+    // the failure carrier the stale-connection sweep now reads (the leg no
+    // longer carries a failed phase of its own).
+    {
+        let machine = node
+            .peer_machines
+            .get_mut(&link_id)
+            .expect("machine seeded by add_connection");
+        let alloc = &mut node.index_allocator;
+        let actions = machine.step(
+            crate::peer::machine::PeerEvent::HandshakeSendFailed,
+            now_ms,
+            alloc,
+        );
+        assert!(actions.is_empty());
+        assert!(machine.is_failed());
+    }
 
     assert_eq!(node.connection_count(), 1);
 

@@ -19,15 +19,15 @@ impl LifecycleView for Node {
         // reap.
         self.peer_machines
             .iter()
-            .filter_map(|(link_id, machine)| machine.leg().map(|conn| (link_id, conn)))
-            .filter(|(link_id, conn)| {
-                conn.is_failed()
+            .filter_map(|(link_id, machine)| machine.leg().map(|conn| (link_id, machine, conn)))
+            .filter(|(link_id, machine, conn)| {
+                machine.is_failed()
                     || (conn.is_timed_out(now_ms, timeout_ms)
                         && !self.peer_timers.get(*link_id).is_some_and(|timers| {
                             timers.contains_key(&TimerKind::HandshakeTimeout)
                         }))
             })
-            .map(|(link_id, conn)| ConnSnapshot {
+            .map(|(link_id, _machine, conn)| ConnSnapshot {
                 link: *link_id,
                 is_outbound: conn.is_outbound(),
                 retry_addr: conn.expected_identity().map(|id| *id.node_addr()),
@@ -70,10 +70,16 @@ impl Node {
             match action {
                 ConnAction::ScheduleRetry { peer } => self.note_handshake_timeout(peer, now_ms),
                 ConnAction::Teardown { link } => {
-                    // Log before cleanup (needs live connection state).
+                    // Log before cleanup (needs live connection state). The
+                    // failure signal is now read from the control machine; the
+                    // leg still carries direction/idle for the log fields.
+                    let is_failed = self
+                        .peer_machines
+                        .get(&link)
+                        .is_some_and(|machine| machine.is_failed());
                     if let Some(conn) = self.leg(&link) {
                         let direction = conn.direction();
-                        if conn.is_failed() {
+                        if is_failed {
                             debug!(
                                 link_id = %link,
                                 direction = %direction,

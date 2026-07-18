@@ -11,7 +11,7 @@ mod connection;
 pub(crate) mod machine;
 
 pub use active::{ActivePeer, ConnectivityState};
-pub use connection::{HandshakeState, PeerConnection};
+pub use connection::PeerConnection;
 
 use crate::NodeAddr;
 use crate::transport::LinkId;
