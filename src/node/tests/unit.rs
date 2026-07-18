@@ -418,6 +418,102 @@ fn test_peer_maps_coherence_detects_orphaned_machine() {
     );
 }
 
+/// Promotion detaches the pending connection before it validates anything, and
+/// then validates the required fields in a fixed order. Both properties are
+/// depended on: the caller of a rejected promotion disposes of a machine it
+/// expects to be leg-less, and the reported error names the first field that is
+/// missing, not an arbitrary one.
+#[test]
+fn test_promote_connection_error_order_and_leg_detach() {
+    fn expect_promotion_failure(
+        shape: impl FnOnce(HandshakeSeed) -> HandshakeSeed,
+        expected_reason: &str,
+    ) {
+        let mut node = make_node();
+        let link_id = LinkId::new(1);
+        let identity = seed_completed_connection_with(&mut node, link_id, 1000, shape);
+
+        let err = node
+            .promote_connection(link_id, identity, 2000)
+            .expect_err("promotion must reject an incomplete connection");
+        match err {
+            NodeError::PromotionFailed { reason, .. } => assert_eq!(
+                reason, expected_reason,
+                "promotion named the wrong missing field"
+            ),
+            other => panic!("expected PromotionFailed, got {other:?}"),
+        }
+        assert!(
+            node.peer_machines
+                .get(&link_id)
+                .expect("the control machine survives a failed promotion")
+                .leg()
+                .is_none(),
+            "a failed promotion must leave the machine leg-less"
+        );
+        assert_eq!(node.peer_count(), 0);
+    }
+
+    // Each case leaves every later field missing as well, so a promotion that
+    // gathered all of them before validating would name the wrong one.
+    expect_promotion_failure(|seed| seed, "missing our_index");
+    expect_promotion_failure(
+        |seed| seed.with_our_index(SessionIndex::new(7)),
+        "missing their_index",
+    );
+    expect_promotion_failure(
+        |seed| {
+            seed.with_our_index(SessionIndex::new(7))
+                .with_their_index(SessionIndex::new(42))
+        },
+        "missing transport_id",
+    );
+    expect_promotion_failure(
+        |seed| {
+            seed.with_our_index(SessionIndex::new(7))
+                .with_their_index(SessionIndex::new(42))
+                .with_transport_id(TransportId::new(1))
+        },
+        "missing source_addr",
+    );
+
+    // An unknown link and a machine carrying no connection are both
+    // ConnectionNotFound, ahead of every field check.
+    let mut node = make_node();
+    let identity = make_peer_identity();
+    assert!(matches!(
+        node.promote_connection(LinkId::new(9), identity, 2000),
+        Err(NodeError::ConnectionNotFound(_))
+    ));
+
+    let link_id = LinkId::new(2);
+    node.peer_machines
+        .insert(link_id, PeerMachine::new_inbound(link_id, 1000));
+    assert!(matches!(
+        node.promote_connection(link_id, identity, 2000),
+        Err(NodeError::ConnectionNotFound(_))
+    ));
+
+    // A connection that never ran the handshake fails on the session check,
+    // after the detach and ahead of every field check — the seed below
+    // supplies none of the four fields above.
+    let link_id = LinkId::new(3);
+    node.seed_handshake_machine(HandshakeSeed::outbound(link_id, identity, 1000))
+        .unwrap();
+    assert!(matches!(
+        node.promote_connection(link_id, identity, 2000),
+        Err(NodeError::HandshakeIncomplete(_))
+    ));
+    assert!(
+        node.peer_machines
+            .get(&link_id)
+            .expect("the control machine survives a failed promotion")
+            .leg()
+            .is_none(),
+        "an incomplete handshake must still leave the machine leg-less"
+    );
+}
+
 #[test]
 fn test_node_promote_connection() {
     let mut node = make_node();

@@ -90,6 +90,23 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
 /// session, indices, and transport info set, and is installed on the node
 /// through [`Node::seed_handshake_machine`] — the test-surface twin of
 /// `Node::add_connection`.
+pub(super) fn seed_completed_connection(
+    node: &mut Node,
+    link_id: LinkId,
+    transport_id: TransportId,
+    current_time_ms: u64,
+) -> PeerIdentity {
+    let our_index = node.index_allocator.allocate().unwrap();
+    seed_completed_connection_with(node, link_id, current_time_ms, |seed| {
+        seed.with_our_index(our_index)
+            .with_their_index(SessionIndex::new(42))
+            .with_transport_id(transport_id)
+            .with_source_addr(TransportAddr::from_string("127.0.0.1:5000"))
+    })
+}
+
+/// [`seed_completed_connection`] with the seed left to the caller, for tests
+/// that need a leg deliberately missing one of the fields promotion requires.
 ///
 /// The Noise exchange runs on the already-seeded leg, where it used to run
 /// before the leg was handed over. That reordering is neutral, but not
@@ -100,24 +117,21 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
 /// been learned, and an outbound leg never runs that method. The remaining
 /// reads (`link_id`, `started_at`, `is_outbound`, `their_index`,
 /// `transport_id`) are genuinely untouched by the handshake.
-pub(super) fn seed_completed_connection(
+pub(super) fn seed_completed_connection_with(
     node: &mut Node,
     link_id: LinkId,
-    transport_id: TransportId,
     current_time_ms: u64,
+    shape: impl FnOnce(HandshakeSeed) -> HandshakeSeed,
 ) -> PeerIdentity {
     let peer_identity_full = Identity::generate();
     // Must use from_pubkey_full to preserve parity for ECDH
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
-    let our_index = node.index_allocator.allocate().unwrap();
-    node.seed_handshake_machine(
-        HandshakeSeed::outbound(link_id, peer_identity, current_time_ms)
-            .with_our_index(our_index)
-            .with_their_index(SessionIndex::new(42))
-            .with_transport_id(transport_id)
-            .with_source_addr(TransportAddr::from_string("127.0.0.1:5000")),
-    )
+    node.seed_handshake_machine(shape(HandshakeSeed::outbound(
+        link_id,
+        peer_identity,
+        current_time_ms,
+    )))
     .unwrap();
 
     // Run initiator side of handshake

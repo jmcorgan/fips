@@ -1366,14 +1366,26 @@ impl Node {
         verified_identity: PeerIdentity,
         current_time_ms: u64,
     ) -> Result<PromotionResult, NodeError> {
-        // Take the pending connection off its control machine. The machine
+        // Take the pending connection off its control machine, and read the
+        // carrier fields the promotion needs in the same borrow. The machine
         // survives the promotion (it becomes the active peer's control
         // machine), left with no pending connection.
-        let mut connection = self
+        //
+        // The connection is detached before anything is validated, so every
+        // error return below leaves the machine leg-less — the caller disposes
+        // of it. Gathering the carrier reads up front is only a borrow shape:
+        // they are infallible, so the order in which the missing-field errors
+        // are reported below is unchanged.
+        let machine = self
             .peer_machines
             .get_mut(&link_id)
-            .and_then(|machine| machine.take_leg())
             .ok_or(NodeError::ConnectionNotFound(link_id))?;
+        let mut connection = machine
+            .take_leg()
+            .ok_or(NodeError::ConnectionNotFound(link_id))?;
+        let carrier_their_index = machine.conn_their_index();
+        let carrier_transport_id = machine.conn_transport_id();
+        let link_stats = machine.conn_link_stats().clone();
 
         // Verify handshake is complete and extract session
         if !connection.has_session() {
@@ -1390,22 +1402,14 @@ impl Node {
                 link_id,
                 reason: "missing our_index".into(),
             })?;
-        let their_index = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_their_index())
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing their_index".into(),
-            })?;
-        let transport_id = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_transport_id())
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing transport_id".into(),
-            })?;
+        let their_index = carrier_their_index.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing their_index".into(),
+        })?;
+        let transport_id = carrier_transport_id.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing transport_id".into(),
+        })?;
         let current_addr = connection
             .source_addr()
             .ok_or_else(|| NodeError::PromotionFailed {
@@ -1413,11 +1417,6 @@ impl Node {
                 reason: "missing source_addr".into(),
             })?
             .clone();
-        let link_stats = self
-            .peer_machines
-            .get(&link_id)
-            .map(|machine| machine.conn_link_stats().clone())
-            .unwrap_or_default();
         let remote_epoch = connection.remote_epoch();
 
         let peer_node_addr = *verified_identity.node_addr();
