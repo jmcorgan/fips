@@ -192,10 +192,9 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     // A pending inbound connection with a stored msg2, keyed in addr_to_link,
     // NOT promoted to an active peer.
     let link_id = node.allocate_link_id();
-    let mut conn =
+    let conn =
         PeerConnection::inbound_with_transport(link_id, transport_id, peer_addr.clone(), 1000);
     let stored_msg2 = vec![0xC1, 0xC2, 0xC3, 0xC4, 0xC5];
-    conn.set_handshake_msg2(stored_msg2.clone());
     let link = Link::connectionless(
         link_id,
         transport_id,
@@ -207,6 +206,12 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     node.addr_to_link
         .insert((transport_id, peer_addr.clone()), link_id);
     node.add_connection(conn).unwrap();
+    // The stored msg2 lives on the control machine's carrier (the resend source
+    // for a duplicate msg1 while pending), mirroring the inbound establish path.
+    node.peer_machines
+        .get_mut(&link_id)
+        .unwrap()
+        .set_conn_handshake_msg2(stored_msg2.clone());
     assert_eq!(node.peer_count(), 0);
 
     let before_pending = node.msg1_rate_limiter.pending_count();

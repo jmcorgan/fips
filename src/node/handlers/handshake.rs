@@ -627,7 +627,9 @@ impl Node {
                 self.links.insert(link_id, link);
                 self.addr_to_link.insert(addr_key, link_id);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
-                conn.set_handshake_msg2(wire_msg2.clone());
+                // Store the framed msg2 on the surviving carrier for duplicate-
+                // msg1 resend while the connection is still pending.
+                machine.set_conn_handshake_msg2(wire_msg2.clone());
 
                 // Register the machine, carrying the connection
                 // (Promote/Restart tail only).
@@ -774,7 +776,9 @@ impl Node {
                 self.links.insert(link_id, link);
                 self.addr_to_link.insert(addr_key, link_id);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
-                conn.set_handshake_msg2(wire_msg2.clone());
+                // Store the framed msg2 on the surviving carrier for duplicate-
+                // msg1 resend while the connection is still pending.
+                machine.set_conn_handshake_msg2(wire_msg2.clone());
 
                 // Register the machine, carrying the connection (Promote tail
                 // only — discarded on every reject/resend/rekey arm per the
@@ -829,12 +833,15 @@ impl Node {
 
     /// Find stored msg2 bytes for a given link (pre- or post-promotion).
     ///
-    /// Checks the PeerConnection (if still pending) and then the ActivePeer
-    /// (if already promoted).
+    /// Checks the control machine's carrier (if still pending) and then the
+    /// ActivePeer (if already promoted).
     fn find_stored_msg2(&self, link_id: LinkId) -> Option<Vec<u8>> {
-        // Check pending connection first
-        if let Some(conn) = self.leg(&link_id)
-            && let Some(msg2) = conn.handshake_msg2()
+        // Check pending connection first (its stored msg2 lives on the control
+        // machine's carrier).
+        if let Some(msg2) = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_handshake_msg2())
         {
             return Some(msg2.to_vec());
         }

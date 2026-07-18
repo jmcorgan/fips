@@ -273,7 +273,11 @@ impl Node {
                     continue;
                 }
             };
-            match self.leg(&link).and_then(|c| c.handshake_msg1()) {
+            match self
+                .peer_machines
+                .get(&link)
+                .and_then(|machine| machine.conn_handshake_msg1())
+            {
                 // Armed but the stored wire isn't there yet — leave the timer and
                 // retry next tick (matches the old candidate filter skipping it).
                 None => continue,

@@ -596,6 +596,30 @@ impl PeerMachine {
         self.conn.expected_identity()
     }
 
+    /// Stored wire-format msg1 of the surviving carrier — the resend source for
+    /// the outbound handshake retransmit, now that the leg no longer carries it.
+    pub(crate) fn conn_handshake_msg1(&self) -> Option<&[u8]> {
+        self.conn.handshake_msg1()
+    }
+
+    /// Stored wire-format msg2 of the surviving carrier — the resend source for a
+    /// duplicate msg1 while the inbound handshake is still pending.
+    pub(crate) fn conn_handshake_msg2(&self) -> Option<&[u8]> {
+        self.conn.handshake_msg2()
+    }
+
+    /// Store the wire-format msg1 for resend on the surviving carrier and record
+    /// the first resend deadline, mirroring the leg's start-of-handshake write.
+    pub(crate) fn set_conn_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
+        self.conn.set_handshake_msg1(msg1, first_resend_at_ms);
+    }
+
+    /// Store the wire-format msg2 for duplicate-msg1 resend on the surviving
+    /// carrier, mirroring the leg's responder write.
+    pub(crate) fn set_conn_handshake_msg2(&mut self, msg2: Vec<u8>) {
+        self.conn.set_handshake_msg2(msg2);
+    }
+
     /// Adopt an explicit connection-start timestamp on the carrier, so the
     /// surviving state keeps the leg's start provenance rather than the
     /// dial-time construction default.

@@ -862,7 +862,7 @@ async fn test_resend_scheduling() {
 
     // Store msg1 with first resend at now + 1000ms
     let wire_msg1 = crate::proto::fmp::wire::build_msg1(our_index, &noise_msg1);
-    conn.set_handshake_msg1(wire_msg1, now_ms + 1000);
+    conn.set_handshake_msg1(wire_msg1.clone(), now_ms + 1000);
 
     let link = Link::connectionless(
         link_id,
@@ -893,6 +893,9 @@ async fn test_resend_scheduling() {
         now_ms,
         &mut node.index_allocator,
     );
+    // The msg1 wire lives on the machine's carrier (the retransmit driver's
+    // resend source), mirroring `prepare_outbound_msg1`.
+    machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
     machine.set_leg(conn);
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(

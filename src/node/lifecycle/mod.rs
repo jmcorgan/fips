@@ -626,9 +626,10 @@ impl Node {
             "Connection initiated"
         );
 
-        // Store msg1 for resend and schedule first resend
+        // Schedule the first msg1 resend; the wire itself is stored on the
+        // surviving carrier once the machine is in hand below.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        connection.set_handshake_msg1(wire_msg1, current_time_ms + resend_interval);
+        let first_resend_at_ms = current_time_ms + resend_interval;
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
@@ -652,6 +653,9 @@ impl Node {
         // round-trip separates dial from msg1 preparation.
         machine.set_conn_started_at(current_time_ms);
         machine.touch_conn(current_time_ms);
+        // Store the msg1 wire on the surviving carrier (the leg no longer holds
+        // the resend source); the retransmit driver reads it from here.
+        machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);
         machine.set_leg(connection);
 
         Ok(())
@@ -671,7 +675,11 @@ impl Node {
         remote_addr: &TransportAddr,
         now_ms: u64,
     ) {
-        let wire_msg1 = match self.leg(&link_id).and_then(|c| c.handshake_msg1()) {
+        let wire_msg1 = match self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_handshake_msg1())
+        {
             Some(w) => w.to_vec(),
             None => return,
         };
