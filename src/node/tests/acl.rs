@@ -84,14 +84,22 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
 
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
-    let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id)
+                .with_source_addr(remote_addr.clone()),
+        )
         .unwrap();
-    conn_a.set_our_index(our_index_a);
-    conn_a.set_transport_id(transport_id);
-    conn_a.set_source_addr(remote_addr.clone());
+    let keypair_a = node_a.identity().keypair();
+    let epoch_a = node_a.startup_epoch();
+    let noise_msg1 = node_a
+        .get_connection_mut(&link_id_a)
+        .unwrap()
+        .start_handshake(keypair_a, epoch_a, 1000)
+        .unwrap();
 
     let link_a = Link::connectionless(
         link_id_a,
@@ -104,7 +112,6 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     node_a
         .addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id_a);
-    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id, our_index_a.as_u32()), link_id_a);

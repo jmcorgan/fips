@@ -2463,6 +2463,77 @@ impl Node {
         Ok(())
     }
 
+    /// Test-support: seed a control machine for `seed.link_id` the way
+    /// [`Node::add_connection`] does, without the caller having to build a
+    /// free-standing leg first.
+    ///
+    /// The carrier seeding below is a verbatim copy of `add_connection`'s: the
+    /// two conditional writes (`their_index`, `transport_id`) and `set_leg`,
+    /// built through the same `entry(..).or_insert_with(..)` so an existing
+    /// leg-less machine keeps its constructor-side fields. Nothing else is
+    /// written to the carrier — `our_index`, `source_addr`, post-construction
+    /// `started_at`, and the stored handshake bytes stay leg-only, exactly as
+    /// they do for a test that goes through `add_connection` today.
+    ///
+    /// The duplication is deliberate: keeping the carrier writes visible here
+    /// is what lets each later step of the leg dissolution revise them at a
+    /// single reviewable site. The two bodies must stay in sync until
+    /// `add_connection` itself is removed; any drift surfaces as a test
+    /// failure while both paths still exist.
+    #[cfg(test)]
+    pub(crate) fn seed_handshake_machine(&mut self, seed: HandshakeSeed) -> Result<(), NodeError> {
+        let link_id = seed.link_id;
+
+        let mut connection = match seed.expected_identity {
+            Some(identity) => PeerConnection::outbound(link_id, identity, seed.started_at_ms),
+            None => PeerConnection::inbound(link_id, seed.started_at_ms),
+        };
+        if let Some(id) = seed.transport_id {
+            connection.set_transport_id(id);
+        }
+        if let Some(addr) = seed.source_addr {
+            connection.set_source_addr(addr);
+        }
+        if let Some(index) = seed.our_index {
+            connection.set_our_index(index);
+        }
+        if let Some(index) = seed.their_index {
+            connection.set_their_index(index);
+        }
+
+        if self
+            .peer_machines
+            .get(&link_id)
+            .is_some_and(|machine| machine.leg().is_some())
+        {
+            return Err(NodeError::ConnectionAlreadyExists(link_id));
+        }
+
+        if self.max_connections() > 0 && self.connection_count() >= self.max_connections() {
+            return Err(NodeError::MaxConnectionsExceeded {
+                max: self.max_connections(),
+            });
+        }
+
+        let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
+            let now = connection.started_at();
+            match connection.expected_identity() {
+                Some(identity) if connection.is_outbound() => {
+                    PeerMachine::new_outbound(link_id, *identity, now)
+                }
+                _ => PeerMachine::new_inbound(link_id, now),
+            }
+        });
+        if let Some(their) = connection.their_index() {
+            machine.set_conn_their_index(their);
+        }
+        if let Some(tid) = connection.transport_id() {
+            machine.set_conn_transport_id(tid);
+        }
+        machine.set_leg(connection);
+        Ok(())
+    }
+
     /// Get a connection by LinkId.
     pub fn get_connection(&self, link_id: &LinkId) -> Option<&PeerConnection> {
         self.leg(link_id)
@@ -3181,5 +3252,76 @@ impl fmt::Debug for Node {
             .field("links", &self.link_count())
             .field("transports", &self.transport_count())
             .finish()
+    }
+}
+
+/// Test-support seed spec for [`Node::seed_handshake_machine`].
+///
+/// Mirrors the leg constructors plus the setters tests apply to a connection
+/// *before* handing it to `add_connection`. Only fields that exist on the leg
+/// at add time belong here; crypto is run afterwards through
+/// `get_connection_mut`, which `add_connection` never reads.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct HandshakeSeed {
+    link_id: LinkId,
+    expected_identity: Option<PeerIdentity>,
+    started_at_ms: u64,
+    transport_id: Option<TransportId>,
+    source_addr: Option<TransportAddr>,
+    our_index: Option<crate::utils::index::SessionIndex>,
+    their_index: Option<crate::utils::index::SessionIndex>,
+}
+
+#[cfg(test)]
+impl HandshakeSeed {
+    /// Outbound leg: we know who we are dialing.
+    pub(crate) fn outbound(
+        link_id: LinkId,
+        expected_identity: PeerIdentity,
+        started_at_ms: u64,
+    ) -> Self {
+        Self {
+            link_id,
+            expected_identity: Some(expected_identity),
+            started_at_ms,
+            transport_id: None,
+            source_addr: None,
+            our_index: None,
+            their_index: None,
+        }
+    }
+
+    /// Inbound leg: identity is unknown until msg1 decrypts.
+    pub(crate) fn inbound(link_id: LinkId, started_at_ms: u64) -> Self {
+        Self {
+            link_id,
+            expected_identity: None,
+            started_at_ms,
+            transport_id: None,
+            source_addr: None,
+            our_index: None,
+            their_index: None,
+        }
+    }
+
+    pub(crate) fn with_transport_id(mut self, transport_id: TransportId) -> Self {
+        self.transport_id = Some(transport_id);
+        self
+    }
+
+    pub(crate) fn with_source_addr(mut self, source_addr: TransportAddr) -> Self {
+        self.source_addr = Some(source_addr);
+        self
+    }
+
+    pub(crate) fn with_our_index(mut self, index: crate::utils::index::SessionIndex) -> Self {
+        self.our_index = Some(index);
+        self
+    }
+
+    pub(crate) fn with_their_index(mut self, index: crate::utils::index::SessionIndex) -> Self {
+        self.their_index = Some(index);
+        self
     }
 }

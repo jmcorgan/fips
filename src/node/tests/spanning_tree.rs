@@ -116,16 +116,25 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
     let transport_id = initiator.transport_id;
 
     let link_id = initiator.node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, 1000);
 
     let our_index = initiator.node.index_allocator.allocate().unwrap();
-    let our_keypair = initiator.node.identity().keypair();
-    let noise_msg1 = conn
-        .start_handshake(our_keypair, initiator.node.startup_epoch(), 1000)
+    initiator
+        .node
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id, peer_identity, 1000)
+                .with_our_index(our_index)
+                .with_transport_id(transport_id)
+                .with_source_addr(responder_addr.clone()),
+        )
         .unwrap();
-    conn.set_our_index(our_index);
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(responder_addr.clone());
+    let our_keypair = initiator.node.identity().keypair();
+    let startup_epoch = initiator.node.startup_epoch();
+    let noise_msg1 = initiator
+        .node
+        .get_connection_mut(&link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, 1000)
+        .unwrap();
 
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
 
@@ -141,7 +150,6 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
         .node
         .addr_to_link
         .insert((transport_id, responder_addr.clone()), link_id);
-    initiator.node.add_connection(conn).unwrap();
     initiator
         .node
         .pending_outbound

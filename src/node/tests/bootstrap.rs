@@ -127,9 +127,8 @@ async fn test_adopted_traversal_skips_already_connected_peer() {
 
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
-    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1_000);
+    let peer_identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let peer_node_addr = *peer_identity.node_addr();
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, peer_identity, 2_000)
         .unwrap();
 

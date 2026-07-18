@@ -84,27 +84,49 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
     PeerIdentity::from_pubkey(identity.pubkey())
 }
 
-/// Create a PeerConnection with a completed Noise IK handshake.
+/// Seed a control machine whose leg carries a completed Noise IK handshake.
 ///
-/// Returns (connection, peer_identity) where the connection is outbound,
-/// in Complete state, with session, indices, and transport info set.
-pub(super) fn make_completed_connection(
+/// Returns the peer identity. The leg is outbound, in Complete state, with
+/// session, indices, and transport info set, and is installed on the node
+/// through [`Node::seed_handshake_machine`] — the test-surface twin of
+/// `Node::add_connection`.
+///
+/// The Noise exchange runs on the already-seeded leg, where it used to run
+/// before the leg was handed over. That reordering is neutral, but not
+/// because the handshake leaves the seeded fields alone —
+/// `receive_handshake_init` does write `expected_identity`. It is neutral
+/// because the only read of `expected_identity` is guarded by `is_outbound`:
+/// an inbound leg takes the `new_inbound` arm whether or not the identity has
+/// been learned, and an outbound leg never runs that method. The remaining
+/// reads (`link_id`, `started_at`, `is_outbound`, `their_index`,
+/// `transport_id`) are genuinely untouched by the handshake.
+pub(super) fn seed_completed_connection(
     node: &mut Node,
     link_id: LinkId,
     transport_id: TransportId,
     current_time_ms: u64,
-) -> (PeerConnection, PeerIdentity) {
+) -> PeerIdentity {
     let peer_identity_full = Identity::generate();
     // Must use from_pubkey_full to preserve parity for ECDH
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
-    // Create outbound connection
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
+    let our_index = node.index_allocator.allocate().unwrap();
+    node.seed_handshake_machine(
+        HandshakeSeed::outbound(link_id, peer_identity, current_time_ms)
+            .with_our_index(our_index)
+            .with_their_index(SessionIndex::new(42))
+            .with_transport_id(transport_id)
+            .with_source_addr(TransportAddr::from_string("127.0.0.1:5000")),
+    )
+    .unwrap();
 
     // Run initiator side of handshake
     let our_keypair = node.identity().keypair();
-    let msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), current_time_ms)
+    let startup_epoch = node.startup_epoch();
+    let msg1 = node
+        .get_connection_mut(&link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, current_time_ms)
         .unwrap();
 
     // Run responder side to generate msg2
@@ -117,14 +139,10 @@ pub(super) fn make_completed_connection(
         .unwrap();
 
     // Complete initiator handshake
-    conn.complete_handshake(&msg2, current_time_ms).unwrap();
+    node.get_connection_mut(&link_id)
+        .unwrap()
+        .complete_handshake(&msg2, current_time_ms)
+        .unwrap();
 
-    // Set indices and transport info
-    let our_index = node.index_allocator.allocate().unwrap();
-    conn.set_our_index(our_index);
-    conn.set_their_index(SessionIndex::new(42));
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(TransportAddr::from_string("127.0.0.1:5000"));
-
-    (conn, peer_identity)
+    peer_identity
 }

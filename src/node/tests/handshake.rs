@@ -53,19 +53,27 @@ async fn test_two_node_handshake_udp() {
     let peer_b_node_addr = *peer_b_identity.node_addr();
 
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
 
     // Allocate session index for A's outbound
     let our_index_a = node_a.index_allocator.allocate().unwrap();
 
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id_a)
+                .with_source_addr(remote_addr_b.clone()),
+        )
+        .unwrap();
+
     // Start handshake (generates Noise IK msg1)
     let our_keypair_a = node_a.identity().keypair();
-    let noise_msg1 = conn_a
-        .start_handshake(our_keypair_a, node_a.startup_epoch(), 1000)
+    let startup_epoch_a = node_a.startup_epoch();
+    let noise_msg1 = node_a
+        .get_connection_mut(&link_id_a)
+        .unwrap()
+        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
         .unwrap();
-    conn_a.set_our_index(our_index_a);
-    conn_a.set_transport_id(transport_id_a);
-    conn_a.set_source_addr(remote_addr_b.clone());
 
     // Build wire msg1 and track in node state
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
@@ -78,7 +86,6 @@ async fn test_two_node_handshake_udp() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
@@ -294,16 +301,23 @@ async fn test_run_rx_loop_handshake() {
     let peer_b_node_addr = *peer_b_identity.node_addr();
 
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
 
     let our_index_a = node_a.index_allocator.allocate().unwrap();
-    let our_keypair_a = node_a.identity().keypair();
-    let noise_msg1 = conn_a
-        .start_handshake(our_keypair_a, node_a.startup_epoch(), 1000)
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id_a)
+                .with_source_addr(remote_addr_b.clone()),
+        )
         .unwrap();
-    conn_a.set_our_index(our_index_a);
-    conn_a.set_transport_id(transport_id_a);
-    conn_a.set_source_addr(remote_addr_b.clone());
+    let our_keypair_a = node_a.identity().keypair();
+    let startup_epoch_a = node_a.startup_epoch();
+    let noise_msg1 = node_a
+        .get_connection_mut(&link_id_a)
+        .unwrap()
+        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .unwrap();
 
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
 
@@ -315,7 +329,6 @@ async fn test_run_rx_loop_handshake() {
         Duration::from_millis(100),
     );
     node_a.links.insert(link_id_a, link_a);
-    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
@@ -483,15 +496,22 @@ async fn test_cross_connection_both_initiate() {
 
     // Node A initiates to Node B
     let link_id_a_out = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a_out, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
-    let our_keypair_a = node_a.identity().keypair();
-    let noise_msg1_a = conn_a
-        .start_handshake(our_keypair_a, node_a.startup_epoch(), 1000)
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a_out, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id_a)
+                .with_source_addr(remote_addr_b.clone()),
+        )
         .unwrap();
-    conn_a.set_our_index(our_index_a);
-    conn_a.set_transport_id(transport_id_a);
-    conn_a.set_source_addr(remote_addr_b.clone());
+    let our_keypair_a = node_a.identity().keypair();
+    let startup_epoch_a = node_a.startup_epoch();
+    let noise_msg1_a = node_a
+        .get_connection_mut(&link_id_a_out)
+        .unwrap()
+        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .unwrap();
 
     let wire_msg1_a = build_msg1(our_index_a, &noise_msg1_a);
 
@@ -506,22 +526,28 @@ async fn test_cross_connection_both_initiate() {
     node_a
         .addr_to_link
         .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
-    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
-    let mut conn_b = PeerConnection::outbound(link_id_b_out, peer_a_identity, 1000);
     let our_index_b = node_b.index_allocator.allocate().unwrap();
-    let our_keypair_b = node_b.identity().keypair();
-    let noise_msg1_b = conn_b
-        .start_handshake(our_keypair_b, node_b.startup_epoch(), 1000)
+    node_b
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_b_out, peer_a_identity, 1000)
+                .with_our_index(our_index_b)
+                .with_transport_id(transport_id_b)
+                .with_source_addr(remote_addr_a.clone()),
+        )
         .unwrap();
-    conn_b.set_our_index(our_index_b);
-    conn_b.set_transport_id(transport_id_b);
-    conn_b.set_source_addr(remote_addr_a.clone());
+    let our_keypair_b = node_b.identity().keypair();
+    let startup_epoch_b = node_b.startup_epoch();
+    let noise_msg1_b = node_b
+        .get_connection_mut(&link_id_b_out)
+        .unwrap()
+        .start_handshake(our_keypair_b, startup_epoch_b, 1000)
+        .unwrap();
 
     let wire_msg1_b = build_msg1(our_index_b, &noise_msg1_b);
 
@@ -536,7 +562,6 @@ async fn test_cross_connection_both_initiate() {
     node_b
         .addr_to_link
         .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
-    node_b.add_connection(conn_b).unwrap();
     node_b
         .pending_outbound
         .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
@@ -662,17 +687,23 @@ async fn test_stale_connection_cleanup() {
     // Create outbound connection with a timestamp far in the past
     let past_time_ms = 1000; // A very early timestamp
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, past_time_ms);
 
     // Allocate session index and set transport info
     let our_index = node.index_allocator.allocate().unwrap();
+    node.seed_handshake_machine(
+        HandshakeSeed::outbound(link_id, peer_identity, past_time_ms)
+            .with_our_index(our_index)
+            .with_transport_id(transport_id)
+            .with_source_addr(remote_addr.clone()),
+    )
+    .unwrap();
     let our_keypair = node.identity().keypair();
-    let _noise_msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), past_time_ms)
+    let startup_epoch = node.startup_epoch();
+    let _noise_msg1 = node
+        .get_connection_mut(&link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, past_time_ms)
         .unwrap();
-    conn.set_our_index(our_index);
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(remote_addr.clone());
 
     // Set up all the state that initiate_peer_connection would create
     let link = Link::connectionless(
@@ -685,7 +716,6 @@ async fn test_stale_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 
@@ -741,16 +771,22 @@ async fn test_failed_connection_cleanup() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, now_ms);
 
     let our_index = node.index_allocator.allocate().unwrap();
+    node.seed_handshake_machine(
+        HandshakeSeed::outbound(link_id, peer_identity, now_ms)
+            .with_our_index(our_index)
+            .with_transport_id(transport_id)
+            .with_source_addr(remote_addr.clone()),
+    )
+    .unwrap();
     let our_keypair = node.identity().keypair();
-    let _noise_msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), now_ms)
+    let startup_epoch = node.startup_epoch();
+    let _noise_msg1 = node
+        .get_connection_mut(&link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, now_ms)
         .unwrap();
-    conn.set_our_index(our_index);
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(remote_addr.clone());
 
     let link = Link::connectionless(
         link_id,
@@ -762,7 +798,6 @@ async fn test_failed_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.add_connection(conn).unwrap();
     node.pending_outbound
         .insert((transport_id, our_index.as_u32()), link_id);
 

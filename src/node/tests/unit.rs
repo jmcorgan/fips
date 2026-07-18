@@ -337,9 +337,9 @@ fn test_node_connection_management() {
 
     let identity = make_peer_identity();
     let link_id = LinkId::new(1);
-    let conn = PeerConnection::outbound(link_id, identity, 1000);
+    node.seed_handshake_machine(HandshakeSeed::outbound(link_id, identity, 1000))
+        .unwrap();
 
-    node.add_connection(conn).unwrap();
     assert_eq!(node.connection_count(), 1);
 
     assert!(node.get_connection(&link_id).is_some());
@@ -354,11 +354,10 @@ fn test_node_connection_duplicate() {
 
     let identity = make_peer_identity();
     let link_id = LinkId::new(1);
-    let conn1 = PeerConnection::outbound(link_id, identity, 1000);
-    let conn2 = PeerConnection::outbound(link_id, identity, 2000);
+    node.seed_handshake_machine(HandshakeSeed::outbound(link_id, identity, 1000))
+        .unwrap();
 
-    node.add_connection(conn1).unwrap();
-    let result = node.add_connection(conn2);
+    let result = node.seed_handshake_machine(HandshakeSeed::outbound(link_id, identity, 2000));
 
     assert!(matches!(result, Err(NodeError::ConnectionAlreadyExists(_))));
 }
@@ -370,9 +369,8 @@ fn test_peer_maps_coherent_after_add_connection() {
 
     let identity = make_peer_identity();
     let link_id = LinkId::new(1);
-    let conn = PeerConnection::outbound(link_id, identity, 1000);
-
-    node.add_connection(conn).unwrap();
+    node.seed_handshake_machine(HandshakeSeed::outbound(link_id, identity, 1000))
+        .unwrap();
 
     assert!(
         node.peer_machines.contains_key(&link_id),
@@ -388,9 +386,8 @@ fn test_peer_maps_coherent_through_establish() {
     let transport_id = TransportId::new(1);
 
     let link_id = LinkId::new(1);
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
 
-    node.add_connection(conn).unwrap();
     node.debug_assert_peer_maps_coherent();
 
     let result = node.promote_connection(link_id, identity, 2000).unwrap();
@@ -427,10 +424,9 @@ fn test_node_promote_connection() {
     let transport_id = TransportId::new(1);
 
     let link_id = LinkId::new(1);
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let node_addr = *identity.node_addr();
 
-    node.add_connection(conn).unwrap();
     assert_eq!(node.connection_count(), 1);
     assert_eq!(node.peer_count(), 0);
 
@@ -467,10 +463,9 @@ fn test_node_cross_connection_resolution() {
 
     // First connection and promotion (becomes active peer)
     let link_id1 = LinkId::new(1);
-    let (conn1, identity) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let identity = seed_completed_connection(&mut node, link_id1, transport_id, 1000);
     let node_addr = *identity.node_addr();
 
-    node.add_connection(conn1).unwrap();
     node.promote_connection(link_id1, identity, 1500).unwrap();
 
     assert_eq!(node.peer_count(), 1);
@@ -500,8 +495,7 @@ fn test_node_peer_limit() {
     // Add two peers via promotion
     for i in 0..2 {
         let link_id = LinkId::new(i as u64 + 1);
-        let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
-        node.add_connection(conn).unwrap();
+        let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
         node.promote_connection(link_id, identity, 2000).unwrap();
     }
 
@@ -509,8 +503,7 @@ fn test_node_peer_limit() {
 
     // Third should fail
     let link_id = LinkId::new(3);
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 3000);
-    node.add_connection(conn).unwrap();
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 3000);
 
     let result = node.promote_connection(link_id, identity, 4000);
     assert!(matches!(result, Err(NodeError::MaxPeersExceeded { .. })));
@@ -558,22 +551,19 @@ fn test_node_sendable_peers() {
 
     // Add a healthy peer
     let link_id1 = LinkId::new(1);
-    let (conn1, identity1) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let identity1 = seed_completed_connection(&mut node, link_id1, transport_id, 1000);
     let node_addr1 = *identity1.node_addr();
-    node.add_connection(conn1).unwrap();
     node.promote_connection(link_id1, identity1, 2000).unwrap();
 
     // Add another peer and mark it stale (still sendable)
     let link_id2 = LinkId::new(2);
-    let (conn2, identity2) = make_completed_connection(&mut node, link_id2, transport_id, 1000);
-    node.add_connection(conn2).unwrap();
+    let identity2 = seed_completed_connection(&mut node, link_id2, transport_id, 1000);
     node.promote_connection(link_id2, identity2, 2000).unwrap();
 
     // Add a third peer and mark it disconnected (not sendable)
     let link_id3 = LinkId::new(3);
-    let (conn3, identity3) = make_completed_connection(&mut node, link_id3, transport_id, 1000);
+    let identity3 = seed_completed_connection(&mut node, link_id3, transport_id, 1000);
     let node_addr3 = *identity3.node_addr();
-    node.add_connection(conn3).unwrap();
     node.promote_connection(link_id3, identity3, 2000).unwrap();
     node.get_peer_mut(&node_addr3).unwrap().mark_disconnected();
 
@@ -708,19 +698,23 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     // This simulates A having sent msg1 to B before B was running.
     let pending_link_id = LinkId::new(1);
     let pending_time_ms = 1000;
-    let mut pending_conn =
-        PeerConnection::outbound(pending_link_id, peer_b_identity, pending_time_ms);
+    let pending_index = node.index_allocator.allocate().unwrap();
+    let pending_addr = TransportAddr::from_string("10.0.0.2:2121");
+    node.seed_handshake_machine(
+        HandshakeSeed::outbound(pending_link_id, peer_b_identity, pending_time_ms)
+            .with_our_index(pending_index)
+            .with_transport_id(transport_id)
+            .with_source_addr(pending_addr.clone()),
+    )
+    .unwrap();
 
     let our_keypair = node.identity().keypair();
-    let _msg1 = pending_conn
-        .start_handshake(our_keypair, node.startup_epoch(), pending_time_ms)
+    let startup_epoch = node.startup_epoch();
+    let _msg1 = node
+        .get_connection_mut(&pending_link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, pending_time_ms)
         .unwrap();
-
-    let pending_index = node.index_allocator.allocate().unwrap();
-    pending_conn.set_our_index(pending_index);
-    pending_conn.set_transport_id(transport_id);
-    let pending_addr = TransportAddr::from_string("10.0.0.2:2121");
-    pending_conn.set_source_addr(pending_addr.clone());
 
     let pending_link = Link::connectionless(
         pending_link_id,
@@ -732,7 +726,6 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     node.links.insert(pending_link_id, pending_link);
     node.addr_to_link
         .insert((transport_id, pending_addr.clone()), pending_link_id);
-    node.add_connection(pending_conn).unwrap();
     node.pending_outbound
         .insert((transport_id, pending_index.as_u32()), pending_link_id);
 
@@ -747,12 +740,22 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let completing_link_id = LinkId::new(2);
     let completing_time_ms = 2000;
 
-    let mut completing_conn =
-        PeerConnection::outbound(completing_link_id, peer_b_identity, completing_time_ms);
+    let completing_index = node.index_allocator.allocate().unwrap();
+    node.seed_handshake_machine(
+        HandshakeSeed::outbound(completing_link_id, peer_b_identity, completing_time_ms)
+            .with_our_index(completing_index)
+            .with_their_index(SessionIndex::new(99))
+            .with_transport_id(transport_id)
+            .with_source_addr(TransportAddr::from_string("10.0.0.2:4001")),
+    )
+    .unwrap();
 
     let our_keypair = node.identity().keypair();
-    let msg1 = completing_conn
-        .start_handshake(our_keypair, node.startup_epoch(), completing_time_ms)
+    let startup_epoch = node.startup_epoch();
+    let msg1 = node
+        .get_connection_mut(&completing_link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, completing_time_ms)
         .unwrap();
 
     // B responds
@@ -764,17 +767,10 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         .receive_handshake_init(peer_keypair, resp_epoch, &msg1, completing_time_ms)
         .unwrap();
 
-    completing_conn
+    node.get_connection_mut(&completing_link_id)
+        .unwrap()
         .complete_handshake(&msg2, completing_time_ms)
         .unwrap();
-
-    let completing_index = node.index_allocator.allocate().unwrap();
-    completing_conn.set_our_index(completing_index);
-    completing_conn.set_their_index(SessionIndex::new(99));
-    completing_conn.set_transport_id(transport_id);
-    completing_conn.set_source_addr(TransportAddr::from_string("10.0.0.2:4001"));
-
-    node.add_connection(completing_conn).unwrap();
 
     // Now 2 connections, 1 link (pending has link, completing doesn't yet need one for this test)
     assert_eq!(node.connection_count(), 2);
@@ -1039,9 +1035,8 @@ fn test_schedule_retry_skips_connected_peer() {
 
     // Promote a peer so it's in the peers map
     let link_id = LinkId::new(1);
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let node_addr = *identity.node_addr();
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, identity, 2000).unwrap();
     assert_eq!(node.peer_count(), 1);
 
@@ -1058,10 +1053,9 @@ async fn test_try_peer_addresses_skips_connected_peer() {
     let mut node = make_node();
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
-    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let peer_identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_config = crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9");
 
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, peer_identity, 2000)
         .unwrap();
     let link_count = node.link_count();
@@ -1088,8 +1082,8 @@ async fn test_try_peer_addresses_skips_connecting_peer() {
     let mut node = make_node();
     let peer_identity = make_peer_identity();
     let peer_config = crate::config::PeerConfig::new(peer_identity.npub(), "udp", "127.0.0.1:9");
-    let pending = PeerConnection::outbound(LinkId::new(1), peer_identity, 1000);
-    node.add_connection(pending).unwrap();
+    node.seed_handshake_machine(HandshakeSeed::outbound(LinkId::new(1), peer_identity, 1000))
+        .unwrap();
 
     node.try_peer_addresses(&peer_config, peer_identity, true)
         .await
@@ -1270,8 +1264,7 @@ async fn test_nostr_traversal_failure_skips_connected_peer() {
     let mut node = make_node();
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
-    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
-    node.add_connection(conn).unwrap();
+    let peer_identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     node.promote_connection(link_id, peer_identity, 2000)
         .unwrap();
 
@@ -1304,8 +1297,7 @@ async fn test_nostr_traversal_established_skips_connected_peer() {
     let mut node = make_node();
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
-    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
-    node.add_connection(conn).unwrap();
+    let peer_identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     node.promote_connection(link_id, peer_identity, 2000)
         .unwrap();
     let link_count = node.link_count();
@@ -1525,7 +1517,7 @@ fn test_promote_clears_retry_pending() {
     let transport_id = TransportId::new(1);
 
     let link_id = LinkId::new(1);
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let node_addr = *identity.node_addr();
 
     // Simulate a retry entry existing for this peer
@@ -1535,7 +1527,6 @@ fn test_promote_clears_retry_pending() {
     );
     assert_eq!(node.peering.reconciler.retry_pending.len(), 1);
 
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, identity, 2000).unwrap();
 
     assert!(

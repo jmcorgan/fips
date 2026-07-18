@@ -28,10 +28,9 @@ fn test_decrypt_failure_threshold_removes_peer() {
 
     // Build a fully-promoted active peer with our_index/transport_id set
     // so peers_by_index is populated by promote_connection.
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1_000);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let node_addr = *identity.node_addr();
 
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, identity, 2_000).unwrap();
 
     // Sanity: peer is registered and indexed.

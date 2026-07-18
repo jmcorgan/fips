@@ -2971,3 +2971,22 @@ mod tests {
         assert_eq!(alloc.count(), 0);
     }
 }
+
+/// T-SANSIO: the action vocabulary must stay plain, comparable data.
+///
+/// `PeerAction` is the sans-IO boundary between the pure reducer and its
+/// driver. Requiring `Clone + Eq` is a compile-time statement that no variant
+/// may carry a runtime handle (a socket, a `JoinHandle`, a channel sender),
+/// since none of those are `Clone + Eq`. If a future variant smuggles one in,
+/// this bound stops compiling.
+#[cfg(test)]
+mod action_contract {
+    use super::PeerAction;
+
+    fn assert_clone_eq<T: Clone + Eq>() {}
+
+    #[test]
+    fn peer_action_is_plain_comparable_data() {
+        assert_clone_eq::<PeerAction>();
+    }
+}
