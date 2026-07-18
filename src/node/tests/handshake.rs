@@ -70,7 +70,8 @@ async fn test_two_node_handshake_udp() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .get_connection_mut(&link_id_a)
+        .peer_machines
+        .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, 1000)
         .unwrap();
@@ -314,7 +315,8 @@ async fn test_run_rx_loop_handshake() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1 = node_a
-        .get_connection_mut(&link_id_a)
+        .peer_machines
+        .get_mut(&link_id_a)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, 1000)
         .unwrap();
@@ -508,7 +510,8 @@ async fn test_cross_connection_both_initiate() {
     let our_keypair_a = node_a.identity().keypair();
     let startup_epoch_a = node_a.startup_epoch();
     let noise_msg1_a = node_a
-        .get_connection_mut(&link_id_a_out)
+        .peer_machines
+        .get_mut(&link_id_a_out)
         .unwrap()
         .start_handshake(our_keypair_a, startup_epoch_a, 1000)
         .unwrap();
@@ -544,7 +547,8 @@ async fn test_cross_connection_both_initiate() {
     let our_keypair_b = node_b.identity().keypair();
     let startup_epoch_b = node_b.startup_epoch();
     let noise_msg1_b = node_b
-        .get_connection_mut(&link_id_b_out)
+        .peer_machines
+        .get_mut(&link_id_b_out)
         .unwrap()
         .start_handshake(our_keypair_b, startup_epoch_b, 1000)
         .unwrap();
@@ -700,7 +704,8 @@ async fn test_stale_connection_cleanup() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _noise_msg1 = node
-        .get_connection_mut(&link_id)
+        .peer_machines
+        .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, past_time_ms)
         .unwrap();
@@ -783,7 +788,8 @@ async fn test_failed_connection_cleanup() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _noise_msg1 = node
-        .get_connection_mut(&link_id)
+        .peer_machines
+        .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, now_ms)
         .unwrap();
@@ -853,24 +859,26 @@ async fn test_msg1_stored_for_resend() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, now_ms);
+    let mut conn = outbound_leg(link_id, peer_identity, now_ms);
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
         .unwrap();
-    conn.set_our_index(our_index);
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(remote_addr.clone());
+    conn.leg_mut().unwrap().set_our_index(our_index);
+    conn.leg_mut().unwrap().set_transport_id(transport_id);
+    conn.leg_mut().unwrap().set_source_addr(remote_addr.clone());
 
     // Build wire msg1 and store it (as initiate_peer_connection does)
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
     let resend_interval = node.config().node.rate_limit.handshake_resend_interval_ms;
-    conn.set_handshake_msg1(wire_msg1.clone(), now_ms + resend_interval);
+    conn.leg_mut()
+        .unwrap()
+        .set_handshake_msg1(wire_msg1.clone(), now_ms + resend_interval);
 
     // Verify stored msg1 matches what was built
-    assert_eq!(conn.handshake_msg1().unwrap(), &wire_msg1);
+    assert_eq!(conn.leg().unwrap().handshake_msg1().unwrap(), &wire_msg1);
 }
 
 /// Test that resend scheduling respects max_resends and backoff.
@@ -884,20 +892,22 @@ async fn test_resend_scheduling() {
 
     let now_ms = 100_000u64; // Use a fixed time for predictable testing
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, now_ms);
+    let mut conn = outbound_leg(link_id, peer_identity, now_ms);
 
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
         .unwrap();
-    conn.set_our_index(our_index);
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(remote_addr.clone());
+    conn.leg_mut().unwrap().set_our_index(our_index);
+    conn.leg_mut().unwrap().set_transport_id(transport_id);
+    conn.leg_mut().unwrap().set_source_addr(remote_addr.clone());
 
     // Store msg1 with first resend at now + 1000ms
     let wire_msg1 = crate::proto::fmp::wire::build_msg1(our_index, &noise_msg1);
-    conn.set_handshake_msg1(wire_msg1.clone(), now_ms + 1000);
+    conn.leg_mut()
+        .unwrap()
+        .set_handshake_msg1(wire_msg1.clone(), now_ms + 1000);
 
     let link = Link::connectionless(
         link_id,
@@ -931,7 +941,7 @@ async fn test_resend_scheduling() {
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
     machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
-    machine.set_leg(conn);
+    machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
         crate::peer::machine::TimerKind::HandshakeRetransmit,
@@ -970,15 +980,15 @@ async fn test_handshake_timeout_drive() {
 
     let dial_ms = 1000u64;
     let link_id = node.allocate_link_id();
-    let mut conn = PeerConnection::outbound(link_id, peer_identity, dial_ms);
+    let mut conn = outbound_leg(link_id, peer_identity, dial_ms);
     let our_index = node.index_allocator.allocate().unwrap();
     let our_keypair = node.identity().keypair();
     let _ = conn
         .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
         .unwrap();
-    conn.set_our_index(our_index);
-    conn.set_transport_id(transport_id);
-    conn.set_source_addr(remote_addr.clone());
+    conn.leg_mut().unwrap().set_our_index(our_index);
+    conn.leg_mut().unwrap().set_transport_id(transport_id);
+    conn.leg_mut().unwrap().set_source_addr(remote_addr.clone());
 
     let link = Link::connectionless(
         link_id,
@@ -1007,7 +1017,7 @@ async fn test_handshake_timeout_drive() {
         dial_ms,
         &mut node.index_allocator,
     );
-    machine.set_leg(conn);
+    machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
         crate::peer::machine::TimerKind::HandshakeTimeout,

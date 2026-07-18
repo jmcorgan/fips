@@ -808,7 +808,8 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _msg1 = node
-        .get_connection_mut(&pending_link_id)
+        .peer_machines
+        .get_mut(&pending_link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, pending_time_ms)
         .unwrap();
@@ -850,13 +851,14 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let msg1 = node
-        .get_connection_mut(&completing_link_id)
+        .peer_machines
+        .get_mut(&completing_link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, completing_time_ms)
         .unwrap();
 
     // B responds
-    let mut resp_conn = PeerConnection::inbound(LinkId::new(999), completing_time_ms);
+    let mut resp_conn = inbound_leg(LinkId::new(999), completing_time_ms);
     let peer_keypair = peer_b_full.keypair();
     let mut resp_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
@@ -864,7 +866,8 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         .receive_handshake_init(peer_keypair, resp_epoch, &msg1, completing_time_ms)
         .unwrap();
 
-    node.get_connection_mut(&completing_link_id)
+    node.peer_machines
+        .get_mut(&completing_link_id)
         .unwrap()
         .complete_handshake(&msg2, completing_time_ms)
         .unwrap();
@@ -2083,7 +2086,7 @@ async fn craft_and_send_msg1(
     let sender_node_addr = *sender_pubkey_id.node_addr();
 
     let link_id = LinkId::new(0xDEAD_BEEF);
-    let mut conn = PeerConnection::outbound(link_id, peer_b_identity, timestamp_ms);
+    let mut conn = outbound_leg(link_id, peer_b_identity, timestamp_ms);
 
     let sender_keypair = sender_identity.keypair();
     let mut startup_epoch = [0u8; 8];
@@ -2344,4 +2347,131 @@ async fn start_skips_system_tun_when_app_owned() {
     assert_eq!(node.tun_state(), crate::upper::tun::TunState::Active);
 
     node.stop().await.unwrap();
+}
+
+/// A connection whose handshake failed is retained with BOTH Noise handles
+/// empty, and the stale-connection sweep depends on that: presence of the
+/// pending connection — not presence of a handle — is what marks a machine as
+/// handshake-phase. If presence were ever derived from the handles, every
+/// failed connection would become invisible to the sweep and leak forever,
+/// holding a peering-budget slot and a wrong `connection_count` permanently.
+#[test]
+fn test_failed_connection_is_retained_and_reaped() {
+    use crate::proto::fmp::LifecycleView;
+
+    let mut node = make_node();
+    let link_id = LinkId::new(1);
+    let peer_identity = make_peer_identity();
+
+    node.seed_handshake_machine(HandshakeSeed::outbound(link_id, peer_identity, 1000))
+        .unwrap();
+    let our_keypair = node.identity().keypair();
+    let startup_epoch = node.startup_epoch();
+    node.peer_machines
+        .get_mut(&link_id)
+        .unwrap()
+        .start_handshake(our_keypair, startup_epoch, 1000)
+        .unwrap();
+
+    // The send of that stored initiation fails.
+    let machine = node.peer_machines.get_mut(&link_id).unwrap();
+    machine.mark_failed();
+    machine.mark_send_failed();
+
+    // Both handles are now empty — the initiation handle was dropped and no
+    // session was ever reached — yet the connection is deliberately retained.
+    let leg = node.peer_machines.get(&link_id).unwrap().leg().unwrap();
+    assert!(
+        leg.noise_handshake.is_none() && leg.noise_session.is_none(),
+        "a failed connection holds neither handle"
+    );
+
+    // (a) it still counts while it waits for the sweep
+    assert_eq!(
+        node.connection_count(),
+        1,
+        "a failed connection stays counted until it is reaped"
+    );
+
+    // (b) the sweep yields it
+    let stale = node.stale_connections(2000, 30_000);
+    assert_eq!(
+        stale.len(),
+        1,
+        "the sweep must see a failed connection despite its empty handles"
+    );
+    assert_eq!(stale[0].link, link_id);
+
+    // (c) reaping it clears the carrier
+    node.remove_peer_machine(link_id);
+    assert_eq!(node.connection_count(), 0);
+}
+
+/// A msg1 that fails Noise processing must leave no trace in the registry.
+/// The control machine is built above the crypto so it can drive the
+/// handshake, but it stays a local until a promote tail inserts it — a
+/// rejected msg1 drops it.
+#[tokio::test]
+async fn test_rejected_msg1_leaves_no_registry_trace() {
+    let mut node = make_node();
+
+    // Well-formed framing, garbage Noise payload: processing fails.
+    let wire_msg1 = crate::proto::fmp::wire::build_msg1(
+        SessionIndex::new(7),
+        &[0u8; crate::noise::HANDSHAKE_MSG1_SIZE],
+    );
+    let packet = ReceivedPacket::with_timestamp(
+        TransportId::new(1),
+        TransportAddr::from_string("127.0.0.1:5000"),
+        wire_msg1,
+        1000,
+    );
+
+    node.handle_msg1(packet).await;
+
+    assert!(
+        node.peer_machines.is_empty(),
+        "a rejected msg1 must leave no control machine behind"
+    );
+    assert_eq!(node.connection_count(), 0);
+    assert_eq!(node.peer_count(), 0);
+    assert_eq!(node.link_count(), 0);
+    assert!(
+        node.peers_by_index.is_empty(),
+        "a rejected msg1 must allocate no session index"
+    );
+    assert_eq!(
+        node.stats().handshake.bad_state,
+        1,
+        "the rejection is attributed to the handshake state-machine counter"
+    );
+}
+
+/// The outbound path registers its control machine at dial, before msg1 is
+/// prepared, so a preparation failure has to unwind that registration rather
+/// than drop a local.
+#[tokio::test]
+async fn test_failed_msg1_preparation_unwinds_the_dial_machine() {
+    let mut node = make_node();
+    let link_id = LinkId::new(1);
+    let transport_id = TransportId::new(1);
+    let remote_addr = TransportAddr::from_string("127.0.0.1:5000");
+    let peer_identity = make_peer_identity();
+
+    // Stand in for the dial: the machine exists before msg1 is prepared.
+    node.peer_machines.insert(
+        link_id,
+        PeerMachine::new_outbound(link_id, peer_identity, 1000),
+    );
+    // Force the index allocation inside msg1 preparation to fail.
+    node.index_allocator = crate::utils::index::IndexAllocator::with_max_attempts(0);
+
+    let result = node.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity);
+
+    assert!(matches!(result, Err(NodeError::IndexAllocationFailed(_))));
+    assert!(
+        !node.peer_machines.contains_key(&link_id),
+        "a failed msg1 preparation must unwind the dial-time machine"
+    );
+    assert_eq!(node.connection_count(), 0);
 }

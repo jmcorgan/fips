@@ -131,7 +131,8 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
     let startup_epoch = initiator.node.startup_epoch();
     let noise_msg1 = initiator
         .node
-        .get_connection_mut(&link_id)
+        .peer_machines
+        .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, 1000)
         .unwrap();

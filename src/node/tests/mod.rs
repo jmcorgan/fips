@@ -84,6 +84,30 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
     PeerIdentity::from_pubkey(identity.pubkey())
 }
 
+/// A control machine carrying a fresh outbound connection, for tests that
+/// drive one end of a handshake without a whole node behind it. The machine
+/// owns the handshake operations, so it is what the crypto runs on.
+pub(super) fn outbound_leg(
+    link_id: LinkId,
+    expected_identity: PeerIdentity,
+    current_time_ms: u64,
+) -> PeerMachine {
+    let mut machine = PeerMachine::new_outbound(link_id, expected_identity, current_time_ms);
+    machine.set_leg(PeerConnection::outbound(
+        link_id,
+        expected_identity,
+        current_time_ms,
+    ));
+    machine
+}
+
+/// The responder twin of [`outbound_leg`].
+pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
+    let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
+    machine.set_leg(PeerConnection::inbound(link_id, current_time_ms));
+    machine
+}
+
 /// Seed a control machine whose leg carries a completed Noise IK handshake.
 ///
 /// Returns the peer identity. The leg is outbound, in Complete state, with
@@ -138,13 +162,14 @@ pub(super) fn seed_completed_connection_with(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let msg1 = node
-        .get_connection_mut(&link_id)
+        .peer_machines
+        .get_mut(&link_id)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, current_time_ms)
         .unwrap();
 
     // Run responder side to generate msg2
-    let mut resp_conn = PeerConnection::inbound(LinkId::new(999), current_time_ms);
+    let mut resp_conn = inbound_leg(LinkId::new(999), current_time_ms);
     let peer_keypair = peer_identity_full.keypair();
     let mut resp_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
@@ -153,7 +178,8 @@ pub(super) fn seed_completed_connection_with(
         .unwrap();
 
     // Complete initiator handshake
-    node.get_connection_mut(&link_id)
+    node.peer_machines
+        .get_mut(&link_id)
         .unwrap()
         .complete_handshake(&msg2, current_time_ms)
         .unwrap();

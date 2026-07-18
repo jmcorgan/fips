@@ -585,7 +585,20 @@ impl Node {
 
         // Create connection in handshake phase (outbound knows expected identity)
         let current_time_ms = Self::now_ms();
-        let mut connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
+        let connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
+
+        // The control machine drives the handshake, so it takes the connection
+        // before the crypto runs. The machine was born at dial and persisted in
+        // `initiate_connection`, so every live caller already has one; recover
+        // with a fresh one if a direct caller ever skips the dial.
+        debug_assert!(
+            self.peer_machines.contains_key(&link_id),
+            "outbound msg1 prepared for link {link_id} with no dial-time machine"
+        );
+        self.peer_machines
+            .entry(link_id)
+            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms))
+            .set_leg(connection);
 
         // Allocate a session index for this handshake
         let our_index = match self.index_allocator.allocate() {
@@ -602,23 +615,35 @@ impl Node {
 
         // Start the Noise handshake and get message 1
         let our_keypair = self.identity().keypair();
-        let noise_msg1 =
-            match connection.start_handshake(our_keypair, self.startup_epoch(), current_time_ms) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    // Clean up the index, link, and dial-time machine
-                    let _ = self.index_allocator.free(our_index);
-                    self.links.remove(&link_id);
-                    self.addr_to_link
-                        .remove(&(transport_id, remote_addr.clone()));
-                    self.remove_peer_machine(link_id);
-                    return Err(NodeError::HandshakeFailed(e.to_string()));
-                }
-            };
+        let startup_epoch = self.startup_epoch();
+        let noise_msg1 = match self
+            .peer_machines
+            .get_mut(&link_id)
+            .expect("dial-time machine carries the connection")
+            .start_handshake(our_keypair, startup_epoch, current_time_ms)
+        {
+            Ok(msg) => msg,
+            Err(e) => {
+                // Clean up the index, link, and dial-time machine
+                let _ = self.index_allocator.free(our_index);
+                self.links.remove(&link_id);
+                self.addr_to_link
+                    .remove(&(transport_id, remote_addr.clone()));
+                self.remove_peer_machine(link_id);
+                return Err(NodeError::HandshakeFailed(e.to_string()));
+            }
+        };
 
         // Set index and transport info on the connection
-        connection.set_our_index(our_index);
-        connection.set_source_addr(remote_addr.clone());
+        {
+            let conn = self
+                .peer_machines
+                .get_mut(&link_id)
+                .and_then(|machine| machine.leg_mut())
+                .expect("dial-time machine carries the connection");
+            conn.set_our_index(our_index);
+            conn.set_source_addr(remote_addr.clone());
+        }
 
         // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
         let wire_msg1 = build_msg1(our_index, &noise_msg1);
@@ -641,21 +666,13 @@ impl Node {
         self.pending_outbound
             .insert((transport_id, our_index.as_u32()), link_id);
 
-        // The dial-born machine (persisted in `initiate_connection`) carries
-        // the prepared connection from here. Every live caller dialed first,
-        // so the machine exists; recover with a fresh one if a direct caller
-        // ever skips the dial.
-        debug_assert!(
-            self.peer_machines.contains_key(&link_id),
-            "outbound msg1 prepared for link {link_id} with no dial-time machine"
-        );
         let machine = self
             .peer_machines
-            .entry(link_id)
-            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms));
+            .get_mut(&link_id)
+            .expect("dial-time machine carries the connection");
         // The dial-born machine carrier was stamped at dial; re-stamp it with the
-        // leg's msg1-prep clock so the surviving `started_at`/`last_activity`
-        // carry the leg's provenance. The two clocks differ when a connect
+        // msg1-prep clock so the surviving `started_at`/`last_activity` carry
+        // the preparation's provenance. The two clocks differ when a connect
         // round-trip separates dial from msg1 preparation.
         machine.set_conn_started_at(current_time_ms);
         machine.touch_conn(current_time_ms);
@@ -663,14 +680,14 @@ impl Node {
         // projects it to the promotion hand-off); holds even if a direct caller
         // reached here without the dial-time `on_dial` write.
         machine.set_conn_transport_id(transport_id);
-        // Record our session index on the surviving carrier — the same index just
-        // written on the leg above — so the carrier is the single index home on
-        // the outbound path (the inbound path writes it at authorize).
+        // Record our session index on the surviving carrier — the same index
+        // just written on the connection above — so the carrier is the single
+        // index home on the outbound path (the inbound path writes it at
+        // authorize).
         machine.set_conn_our_index(our_index);
-        // Store the msg1 wire on the surviving carrier (the leg no longer holds
-        // the resend source); the retransmit driver reads it from here.
+        // Store the msg1 wire on the surviving carrier (the connection does not
+        // hold the resend source); the retransmit driver reads it from here.
         machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);
-        machine.set_leg(connection);
 
         Ok(())
     }

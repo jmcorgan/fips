@@ -49,7 +49,7 @@ fn craft_msg1_wire(
     use crate::proto::fmp::wire::build_msg1;
     let peer_b_identity = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let link_id = LinkId::new(0x0BAD_C0DE);
-    let mut conn = PeerConnection::outbound(link_id, peer_b_identity, ts);
+    let mut conn = outbound_leg(link_id, peer_b_identity, ts);
     let noise_msg1 = conn
         .start_handshake(sender.keypair(), epoch, ts)
         .expect("start_handshake produces noise msg1");
@@ -341,7 +341,8 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _ = node
-        .get_connection_mut(&out_link)
+        .peer_machines
+        .get_mut(&out_link)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, 1000)
         .unwrap();
@@ -421,7 +422,8 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
     let our_keypair = node.identity().keypair();
     let startup_epoch = node.startup_epoch();
     let _ = node
-        .get_connection_mut(&out_link)
+        .peer_machines
+        .get_mut(&out_link)
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, 1000)
         .unwrap();
@@ -524,7 +526,8 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     let keypair_a = node_a.identity().keypair();
     let epoch_a = node_a.startup_epoch();
     let noise_msg1_a = node_a
-        .get_connection_mut(&link_a_out)
+        .peer_machines
+        .get_mut(&link_a_out)
         .unwrap()
         .start_handshake(keypair_a, epoch_a, 1000)
         .unwrap();
@@ -560,7 +563,8 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
     let keypair_b = node_b.identity().keypair();
     let epoch_b = node_b.startup_epoch();
     let noise_msg1_b = node_b
-        .get_connection_mut(&link_b_out)
+        .peer_machines
+        .get_mut(&link_b_out)
         .unwrap()
         .start_handshake(keypair_b, epoch_b, 1000)
         .unwrap();

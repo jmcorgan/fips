@@ -266,16 +266,28 @@ impl Node {
 
         // === CRYPTO COST PAID HERE ===
         let link_id = self.allocate_link_id();
-        let mut conn = PeerConnection::inbound_with_transport(
+        let conn = PeerConnection::inbound_with_transport(
             link_id,
             packet.transport_id,
             packet.remote_addr.clone(),
             packet.timestamp_ms,
         );
 
+        // The control machine drives the handshake, so it is built here, above
+        // the crypto, carrying the pending connection. It stays a local: it
+        // enters `peer_machines` only at the promote tails, so a rejected msg1
+        // still leaves no registry trace and allocates no index.
+        let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+        // The inbound connection carries the transport ID from msg1, but the
+        // machine's carrier is only written on the outbound dial. Seed it here
+        // so the promotion hand-off reads it from the surviving carrier,
+        // matching the connection's own inbound seed.
+        machine.set_conn_transport_id(packet.transport_id);
+        machine.set_leg(conn);
+
         let our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
-        let msg2_response = match conn.receive_handshake_init(
+        let msg2_response = match machine.receive_handshake_init(
             our_keypair,
             self.startup_epoch(),
             noise_msg1,
@@ -295,7 +307,11 @@ impl Node {
         };
 
         // Learn peer identity from msg1
-        let peer_identity = match conn.expected_identity() {
+        let peer_identity = match machine
+            .leg()
+            .expect("pending connection attached above")
+            .expected_identity()
+        {
             Some(id) => *id,
             None => {
                 self.msg1_rate_limiter.complete_handshake();
@@ -314,7 +330,10 @@ impl Node {
         // state; from here the decision reads only `wire` and the snapshot.
         let wire = WireOutcome {
             peer_identity,
-            remote_epoch: conn.remote_epoch(),
+            remote_epoch: machine
+                .leg()
+                .expect("pending connection attached above")
+                .remote_epoch(),
             their_index: header.sender_idx,
             msg2_payload: msg2_response,
         };
@@ -336,12 +355,6 @@ impl Node {
         // shared authorize → allocate → send-msg2 → promote tail; the other
         // variants complete the rate-limiter and return here. The local machine
         // enters `peer_machines` only at the promote tails.
-        let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
-        // The inbound leg carries the transport ID from msg1, but the machine's
-        // carrier is only written on the outbound dial. Seed it here so the
-        // promotion hand-off reads it from the surviving carrier, matching the
-        // leg's inbound seed.
-        machine.set_conn_transport_id(packet.transport_id);
         let (decision, actions) = machine.inbound_msg1(link_id, &wire, est, packet.timestamp_ms);
         match decision {
             InboundDecision::Reject {
@@ -443,7 +456,7 @@ impl Node {
                 }
 
                 // Rekey: process as responder, store new session as pending.
-                let noise_session = conn.take_session();
+                let noise_session = machine.take_session();
                 let our_new_index = match self.index_allocator.allocate() {
                     Ok(idx) => idx,
                     Err(e) => {
@@ -623,7 +636,10 @@ impl Node {
                 // connection, then build + store the framed msg2. The old index was
                 // already freed by `remove_active_peer` above, BEFORE this fresh
                 // allocation — matching the pre-refactor allocation sequence.
-                conn.set_our_index(our_index);
+                machine
+                    .leg_mut()
+                    .expect("pending connection attached above")
+                    .set_our_index(our_index);
                 let link = Link::connectionless(
                     link_id,
                     packet.transport_id,
@@ -638,9 +654,8 @@ impl Node {
                 // msg1 resend while the connection is still pending.
                 machine.set_conn_handshake_msg2(wire_msg2.clone());
 
-                // Register the machine, carrying the connection
+                // Register the machine, which already carries the connection
                 // (Promote/Restart tail only).
-                machine.set_leg(conn);
                 self.peer_machines.insert(link_id, machine);
 
                 // Execute [SendHandshake, PromoteToActive]. Because the old peer was
@@ -771,7 +786,10 @@ impl Node {
                 // Shell registry surgery, in the pre-refactor order:
                 // set indices on the shell connection, insert link / reverse map /
                 // connection, then build + store the framed msg2.
-                conn.set_our_index(our_index);
+                machine
+                    .leg_mut()
+                    .expect("pending connection attached above")
+                    .set_our_index(our_index);
                 let link = Link::connectionless(
                     link_id,
                     packet.transport_id,
@@ -786,10 +804,9 @@ impl Node {
                 // msg1 resend while the connection is still pending.
                 machine.set_conn_handshake_msg2(wire_msg2.clone());
 
-                // Register the machine, carrying the connection (Promote tail
-                // only — discarded on every reject/resend/rekey arm per the
-                // insertion discipline).
-                machine.set_leg(conn);
+                // Register the machine, which already carries the connection
+                // (Promote tail only — discarded on every reject/resend/rekey
+                // arm per the insertion discipline).
                 self.peer_machines.insert(link_id, machine);
 
                 // Execute [SendHandshake, PromoteToActive]. The executor frames +
@@ -1001,32 +1018,32 @@ impl Node {
         }
 
         let (peer_identity, our_index) = {
-            let conn = self.leg_mut(&link_id).unwrap();
+            let machine = self.peer_machines.get_mut(&link_id).unwrap();
 
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-            if let Err(e) = conn.complete_handshake(noise_msg2, packet.timestamp_ms) {
+            if let Err(e) = machine.complete_handshake(noise_msg2, packet.timestamp_ms) {
                 warn!(
                     link_id = %link_id,
                     error = %e,
                     "Handshake completion failed"
                 );
-                // Drop the leg's Noise handle (byte-identical point) and record
-                // the failure on the control machine as `send_failed` — the
-                // failure state's new home. The machine PHASE stays exactly
-                // where the old leg-carried failure left it (`SentMsg1`): the
-                // stale-connection sweep reclaims the leg unconditionally via
-                // the machine `is_failed()` at the next tick, before any
-                // projection or resend, so the phase in that window is
-                // byte-identical to the pre-collapse machine.
-                conn.mark_failed();
-                if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-                    machine.mark_send_failed();
-                }
+                // Drop the Noise handle (byte-identical point) and record the
+                // failure on the control machine as `send_failed` — the
+                // failure state's home. The machine PHASE stays exactly where
+                // the old failure left it (`SentMsg1`): the stale-connection
+                // sweep reclaims the connection unconditionally via the
+                // machine `is_failed()` at the next tick, before any
+                // projection or resend.
+                machine.mark_failed();
+                machine.mark_send_failed();
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
 
+            let conn = machine
+                .leg_mut()
+                .expect("pending connection present for msg2 completion");
             conn.set_source_addr(packet.remote_addr.clone());
 
             let peer_identity = match conn.expected_identity() {
@@ -1041,13 +1058,6 @@ impl Node {
 
             (peer_identity, conn.our_index())
         };
-
-        // Mirror the leg's completion `touch` on the surviving carrier so the
-        // connection's last-activity advances at msg2 completion, matching the
-        // leg's clock.
-        if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-            machine.touch_conn(packet.timestamp_ms);
-        }
 
         if self
             .authorize_peer(
@@ -1173,7 +1183,7 @@ impl Node {
                 // We're the smaller node. Swap to outbound session + indices.
                 // The peer will keep their inbound session (complement of ours).
                 let outbound_our_index = conn.our_index();
-                let outbound_session = conn.take_session();
+                let outbound_session = conn.noise_session.take();
 
                 let (outbound_session, outbound_our_index) = match (
                     outbound_session,
@@ -1391,12 +1401,13 @@ impl Node {
         let link_stats = machine.conn_link_stats().clone();
 
         // Verify handshake is complete and extract session
-        if !connection.has_session() {
+        if connection.noise_session.is_none() {
             return Err(NodeError::HandshakeIncomplete(link_id));
         }
 
         let noise_session = connection
-            .take_session()
+            .noise_session
+            .take()
             .ok_or(NodeError::NoSession(link_id))?;
 
         let our_index = connection

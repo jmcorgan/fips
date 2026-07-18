@@ -56,6 +56,7 @@
 
 #![allow(dead_code)]
 
+use crate::noise::{self, NoiseError, NoiseSession};
 use crate::peer::PeerConnection;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision,
@@ -63,9 +64,10 @@ use crate::proto::fmp::{
     RekeyResendSnapshot, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
-use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
+use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::{IndexAllocator, SessionIndex};
 use crate::{NodeAddr, PeerIdentity};
+use secp256k1::Keypair;
 
 // ============================================================================
 // Timing placeholders
@@ -406,6 +408,15 @@ pub(crate) enum PeerAction {
 // The machine (control tier)
 // ============================================================================
 
+/// The handshake operations are only reachable while a pending connection is
+/// attached; every path that drives the crypto attaches it first.
+fn no_pending_connection() -> NoiseError {
+    NoiseError::WrongState {
+        expected: "attached connection".to_string(),
+        got: "no connection".to_string(),
+    }
+}
+
 /// Per-peer control FSM. Holds control-tier lifecycle state only; the
 /// send-critical state is published as `PeerSendState` and mutated via the
 /// emitted [`PeerAction`]s.
@@ -413,11 +424,12 @@ pub(crate) struct PeerMachine {
     state: PeerState,
     link: LinkId,
     identity: Option<PeerIdentity>,
-    /// The pending handshake connection this machine owns while the leg is in
-    /// the handshake window. `None` before the connection is built (the dial
+    /// The pending handshake connection this machine owns while it is in the
+    /// handshake window. `None` before the connection is built (the dial
     /// window) and after promotion consumes it (the machine survives as the
-    /// active peer's control machine). Pure storage — the machine never reads
-    /// or drives it; the shell reaches it through the accessors below.
+    /// active peer's control machine). Its bookkeeping is storage the shell
+    /// reaches through the accessors below; its Noise handles are driven by
+    /// this machine's handshake operations.
     leg: Option<PeerConnection>,
     /// Pure handshake-phase bookkeeping (link/direction/indices/transport/
     /// stored handshake bytes/epoch). Reused verbatim from the FMP state core.
@@ -540,6 +552,181 @@ impl PeerMachine {
     /// Embed a pending handshake connection on the machine.
     pub(crate) fn set_leg(&mut self, leg: PeerConnection) {
         self.leg = Some(leg);
+    }
+
+    // === Noise handshake operations ===
+    //
+    // Mechanism, not decision: these are called by the shell, are never
+    // reached from `step()`, and no event triggers them. Each drives the
+    // Noise crypto on the pending connection and records the results on both
+    // that connection and the surviving carrier, so a reader of either sees
+    // the same value at the same point.
+
+    /// Start the handshake as initiator and generate message 1.
+    ///
+    /// For outbound connections only. Returns the handshake message to send.
+    /// The epoch is our startup epoch, encrypted into msg1 for restart detection.
+    pub(crate) fn start_handshake(
+        &mut self,
+        our_keypair: Keypair,
+        epoch: [u8; 8],
+        current_time_ms: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        let msg1 = {
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            if leg.direction() != LinkDirection::Outbound {
+                return Err(NoiseError::WrongState {
+                    expected: "outbound connection".to_string(),
+                    got: "inbound connection".to_string(),
+                });
+            }
+
+            let remote_static = leg
+                .expected_identity()
+                .expect("outbound must have expected identity")
+                .pubkey_full();
+
+            let mut hs = noise::HandshakeState::new_initiator(our_keypair, remote_static);
+            hs.set_local_epoch(epoch);
+            let msg1 = hs.write_message_1()?;
+
+            leg.noise_handshake = Some(hs);
+            leg.state_mut().touch(current_time_ms);
+
+            msg1
+        };
+        self.conn.touch(current_time_ms);
+
+        Ok(msg1)
+    }
+
+    /// Initialize responder and process incoming message 1.
+    ///
+    /// For inbound connections only. Returns the handshake message 2 to send.
+    /// The epoch is our startup epoch, encrypted into msg2 for restart detection.
+    pub(crate) fn receive_handshake_init(
+        &mut self,
+        our_keypair: Keypair,
+        epoch: [u8; 8],
+        message: &[u8],
+        current_time_ms: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        let (msg2, learned_identity, remote_epoch) = {
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            if leg.direction() != LinkDirection::Inbound {
+                return Err(NoiseError::WrongState {
+                    expected: "inbound connection".to_string(),
+                    got: "outbound connection".to_string(),
+                });
+            }
+
+            let mut hs = noise::HandshakeState::new_responder(our_keypair);
+            hs.set_local_epoch(epoch);
+
+            // Process message 1 (this reveals the initiator's identity and epoch)
+            hs.read_message_1(message)?;
+
+            // Extract the discovered identity from the crypto and record it as
+            // pure data on the state.
+            let remote_static = *hs
+                .remote_static()
+                .expect("remote static available after msg1");
+            let learned_identity = PeerIdentity::from_pubkey_full(remote_static);
+            leg.state_mut().set_expected_identity(learned_identity);
+
+            // Capture remote epoch from msg1
+            let remote_epoch = hs.remote_epoch();
+            leg.state_mut().set_remote_epoch(remote_epoch);
+
+            // Generate message 2
+            let msg2 = hs.write_message_2()?;
+
+            // Handshake is complete for responder
+            let session = hs.into_session()?;
+            leg.noise_session = Some(session);
+            leg.state_mut().touch(current_time_ms);
+
+            (msg2, learned_identity, remote_epoch)
+        };
+        self.conn.set_expected_identity(learned_identity);
+        self.conn.set_remote_epoch(remote_epoch);
+        self.conn.touch(current_time_ms);
+
+        Ok(msg2)
+    }
+
+    /// Complete the handshake by processing message 2.
+    ///
+    /// For outbound connections only (initiator completing handshake).
+    pub(crate) fn complete_handshake(
+        &mut self,
+        message: &[u8],
+        current_time_ms: u64,
+    ) -> Result<(), NoiseError> {
+        let remote_epoch = {
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            // The connection is at `SentMsg1` iff its Noise handshake handle is
+            // present (set by `start_handshake`, taken here on completion).
+            // Gating on the handle directly is byte-equivalent to the old
+            // `!= SentMsg1` guard for every reachable transition.
+            if leg.noise_handshake.is_none() {
+                return Err(NoiseError::WrongState {
+                    expected: "sent_msg1 state".to_string(),
+                    got: "no active handshake".to_string(),
+                });
+            }
+
+            let mut hs = leg
+                .noise_handshake
+                .take()
+                .expect("noise handshake must exist in SentMsg1 state");
+
+            hs.read_message_2(message)?;
+
+            // Capture remote epoch from msg2
+            let remote_epoch = hs.remote_epoch();
+            leg.state_mut().set_remote_epoch(remote_epoch);
+
+            let session = hs.into_session()?;
+            leg.noise_session = Some(session);
+            leg.state_mut().touch(current_time_ms);
+
+            remote_epoch
+        };
+        self.conn.set_remote_epoch(remote_epoch);
+        self.conn.touch(current_time_ms);
+
+        Ok(())
+    }
+
+    /// Take the completed Noise session.
+    ///
+    /// Returns the NoiseSession for use in ActivePeer. Can only be called
+    /// once after the handshake completes.
+    pub(crate) fn take_session(&mut self) -> Option<NoiseSession> {
+        // The session exists iff the handshake reached `Complete`, so taking it
+        // unconditionally is byte-equivalent to the old `== Complete` gate.
+        self.leg.as_mut().and_then(|leg| leg.noise_session.take())
+    }
+
+    /// Check if we have a completed session ready to take.
+    pub(crate) fn has_session(&self) -> bool {
+        self.leg
+            .as_ref()
+            .is_some_and(|leg| leg.noise_session.is_some())
+    }
+
+    /// Drop the crypto handshake handle. The failure *state* lives on this
+    /// machine; this only releases the Noise handle at the identical point it
+    /// was released before, so a subsequent `complete_handshake` still reports
+    /// `WrongState`.
+    pub(crate) fn mark_failed(&mut self) {
+        if let Some(leg) = self.leg.as_mut() {
+            leg.noise_handshake = None;
+        }
     }
 
     /// The session index we allocated for this peer, read from the surviving
@@ -861,11 +1048,9 @@ impl PeerMachine {
     /// (`is_handshaking_sent_msg1`) survives until the sweep, and no timer
     /// actions are emitted.
     fn on_handshake_send_failed(&mut self) -> Vec<PeerAction> {
-        if let Some(leg) = self.leg.as_mut() {
-            // Drop the leg's Noise handshake handle at the identical point as
-            // before; the failure *state* is recorded on the machine.
-            leg.mark_failed();
-        }
+        // Drop the Noise handshake handle at the identical point as before;
+        // the failure *state* is recorded on the machine.
+        self.mark_failed();
         self.send_failed = true;
         Vec::new()
     }
@@ -2969,6 +3154,176 @@ mod tests {
         assert_eq!(m.conn.their_index(), Some(SessionIndex::new(0x2222)));
         assert_eq!(m.state(), PeerState::Active { addr });
         assert_eq!(alloc.count(), 0);
+    }
+
+    // ---- Moved from `PeerConnection`'s own test module ---------------------
+    // These exercise the Noise handshake operations, which now live on the
+    // control machine. Constructed as a machine with a leg attached; the
+    // assertions are unchanged.
+
+    fn make_peer_identity() -> PeerIdentity {
+        let identity = Identity::generate();
+        PeerIdentity::from_pubkey(identity.pubkey())
+    }
+
+    fn make_keypair() -> Keypair {
+        let identity = Identity::generate();
+        identity.keypair()
+    }
+
+    fn make_epoch() -> [u8; 8] {
+        let mut epoch = [0u8; 8];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut epoch);
+        epoch
+    }
+
+    fn outbound_leg(
+        link_id: LinkId,
+        expected_identity: PeerIdentity,
+        current_time_ms: u64,
+    ) -> PeerMachine {
+        let mut machine = PeerMachine::new_outbound(link_id, expected_identity, current_time_ms);
+        machine.set_leg(PeerConnection::outbound(
+            link_id,
+            expected_identity,
+            current_time_ms,
+        ));
+        machine
+    }
+
+    fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
+        let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
+        machine.set_leg(PeerConnection::inbound(link_id, current_time_ms));
+        machine
+    }
+
+    #[test]
+    fn test_outbound_connection() {
+        let identity = make_peer_identity();
+        let conn = outbound_leg(LinkId::new(1), identity, 1000);
+
+        assert!(conn.leg().unwrap().is_outbound());
+        assert!(!conn.leg().unwrap().is_inbound());
+        assert!(!conn.has_session());
+        assert!(conn.leg().unwrap().expected_identity().is_some());
+        assert_eq!(conn.leg().unwrap().started_at(), 1000);
+    }
+
+    #[test]
+    fn test_inbound_connection() {
+        let conn = inbound_leg(LinkId::new(2), 2000);
+
+        assert!(conn.leg().unwrap().is_inbound());
+        assert!(!conn.leg().unwrap().is_outbound());
+        assert!(!conn.has_session());
+        assert!(conn.leg().unwrap().expected_identity().is_none());
+        assert_eq!(conn.leg().unwrap().started_at(), 2000);
+    }
+
+    #[test]
+    fn test_full_handshake_flow() {
+        // Create identities
+        let initiator_identity = Identity::generate();
+        let responder_identity = Identity::generate();
+
+        let initiator_keypair = initiator_identity.keypair();
+        let responder_keypair = responder_identity.keypair();
+        let initiator_epoch = make_epoch();
+        let responder_epoch = make_epoch();
+
+        // Use from_pubkey_full to preserve parity for ECDH
+        let responder_peer_id = PeerIdentity::from_pubkey_full(responder_identity.pubkey_full());
+
+        // Create connections
+        let mut initiator_conn = outbound_leg(LinkId::new(1), responder_peer_id, 1000);
+        let mut responder_conn = inbound_leg(LinkId::new(2), 1000);
+
+        // Initiator starts handshake
+        let msg1 = initiator_conn
+            .start_handshake(initiator_keypair, initiator_epoch, 1100)
+            .unwrap();
+        // Post-msg1 the initiator holds an in-flight handshake, not yet a session.
+        assert!(!initiator_conn.has_session());
+
+        // Responder processes msg1 and sends msg2
+        let msg2 = responder_conn
+            .receive_handshake_init(responder_keypair, responder_epoch, &msg1, 1200)
+            .unwrap();
+        // The IK responder completes in one step: it now holds a session.
+        assert!(responder_conn.has_session());
+
+        // Responder learned initiator's identity
+        let discovered = responder_conn.leg().unwrap().expected_identity().unwrap();
+        assert_eq!(discovered.pubkey(), initiator_identity.pubkey());
+
+        // Responder learned initiator's epoch
+        assert_eq!(
+            responder_conn.leg().unwrap().remote_epoch(),
+            Some(initiator_epoch)
+        );
+
+        // Initiator completes handshake
+        initiator_conn.complete_handshake(&msg2, 1300).unwrap();
+        assert!(initiator_conn.has_session());
+
+        // Initiator learned responder's epoch
+        assert_eq!(
+            initiator_conn.leg().unwrap().remote_epoch(),
+            Some(responder_epoch)
+        );
+
+        // Both have sessions
+        assert!(initiator_conn.has_session());
+        assert!(responder_conn.has_session());
+
+        // Take and verify sessions work
+        let mut init_session = initiator_conn.take_session().unwrap();
+        let mut resp_session = responder_conn.take_session().unwrap();
+
+        // Encrypt/decrypt test
+        let plaintext = b"test message";
+        let ciphertext = init_session.encrypt(plaintext).unwrap();
+        let decrypted = resp_session.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_connection_failure() {
+        // `mark_failed` releases the leg's Noise handshake handle. The failure
+        // *state* now lives on the control machine, but the leg-local effect is
+        // still observable: a completion attempt afterward reports `WrongState`
+        // (the handle-presence gate) and no session is produced.
+        let identity = make_peer_identity();
+        let keypair = make_keypair();
+        let mut conn = outbound_leg(LinkId::new(1), identity, 1000);
+        conn.start_handshake(keypair, make_epoch(), 1100).unwrap();
+
+        conn.mark_failed();
+
+        assert!(!conn.has_session());
+        assert!(conn.complete_handshake(&[0u8; 96], 1200).is_err());
+    }
+
+    #[test]
+    fn test_wrong_direction_errors() {
+        let identity = make_peer_identity();
+        let keypair = make_keypair();
+
+        // Outbound can't receive_handshake_init
+        let mut outbound = outbound_leg(LinkId::new(1), identity, 1000);
+        assert!(
+            outbound
+                .receive_handshake_init(keypair, make_epoch(), &[0u8; 106], 1100)
+                .is_err()
+        );
+
+        // Inbound can't start_handshake
+        let mut inbound = inbound_leg(LinkId::new(2), 1000);
+        assert!(
+            inbound
+                .start_handshake(keypair, make_epoch(), 1100)
+                .is_err()
+        );
     }
 }
 
