@@ -10,7 +10,7 @@
 use crate::PeerIdentity;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::{ConnectionState, NodeProfile};
-use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
+use crate::transport::{LinkDirection, LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use secp256k1::Keypair;
 use std::fmt;
@@ -126,14 +126,12 @@ impl PeerConnection {
         self.state.is_inbound()
     }
 
-    /// When the connection started.
+    /// When the connection started. Retained only to seed a control machine's
+    /// carrier from a pre-built leg (`Node::add_connection`); the operator-facing
+    /// `started_at_ms`/`last_activity_ms` telemetry now reads the machine carrier,
+    /// not the leg.
     pub fn started_at(&self) -> u64 {
         self.state.started_at()
-    }
-
-    /// When the last activity occurred.
-    pub fn last_activity(&self) -> u64 {
-        self.state.last_activity()
     }
 
     /// Connection duration so far.
@@ -144,16 +142,6 @@ impl PeerConnection {
     /// Time since last activity.
     pub fn idle_time(&self, current_time_ms: u64) -> u64 {
         self.state.idle_time(current_time_ms)
-    }
-
-    /// Get link statistics.
-    pub fn link_stats(&self) -> &LinkStats {
-        self.state.link_stats()
-    }
-
-    /// Get mutable link statistics.
-    pub fn link_stats_mut(&mut self) -> &mut LinkStats {
-        self.state.link_stats_mut()
     }
 
     // === Index Accessors ===
@@ -486,11 +474,6 @@ impl PeerConnection {
     /// subsequent `complete_handshake` on this leg still reports `WrongState`.
     pub fn mark_failed(&mut self) {
         self.noise_handshake = None;
-    }
-
-    /// Update last activity timestamp.
-    pub fn touch(&mut self, current_time_ms: u64) {
-        self.state.touch(current_time_ms);
     }
 
     // === Validation ===

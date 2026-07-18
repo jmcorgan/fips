@@ -385,12 +385,14 @@ impl Node {
         transport_id: TransportId,
         remote_addr: &TransportAddr,
     ) -> bool {
-        self.connections().any(|conn| {
-            conn.expected_identity()
-                .map(|id| id.node_addr() == peer_node_addr)
-                .unwrap_or(false)
-                && conn.transport_id() == Some(transport_id)
-                && conn.source_addr() == Some(remote_addr)
+        self.peer_machines.values().any(|machine| {
+            machine.leg().is_some_and(|conn| {
+                conn.expected_identity()
+                    .map(|id| id.node_addr() == peer_node_addr)
+                    .unwrap_or(false)
+                    && machine.conn_transport_id() == Some(transport_id)
+                    && conn.source_addr() == Some(remote_addr)
+            })
         }) || self.peering.pending_connects.iter().any(|pending| {
             pending
                 .peer_identity
@@ -491,11 +493,14 @@ impl Node {
                 // connection. It parks in `Discovered` (inert to reap and rekey —
                 // absent from `peers`, never established) until `handle_msg2`
                 // looks it up to drive the promote, or a connectionless dial
-                // drives it to `Handshaking` to send. Its `our_index` is
-                // deliberately left unset so a later inbound restart does not emit
-                // a spurious `UnregisterDecryptSession`. It is removed on every
-                // failure path in the dial window (`prepare_outbound_msg1` /
-                // `poll_pending_connects`), mirroring the connection's lifetime.
+                // drives it to `Handshaking` to send. Its carrier index is
+                // written at msg1 preparation (`prepare_outbound_msg1` /
+                // `start_handshake`); a later inbound msg1 for the same peer is
+                // handled on a FRESH `new_inbound` machine (`handle_msg1`), never
+                // by driving this map-resident machine through the inbound path.
+                // It is removed on every failure path in the dial window
+                // (`prepare_outbound_msg1` / `poll_pending_connects`), mirroring
+                // the connection's lifetime.
                 let machine = PeerMachine::new_outbound(link_id, Some(identity), Self::now_ms());
                 self.peer_machines.insert(link_id, machine);
 
@@ -637,7 +642,6 @@ impl Node {
 
         // Set index and transport info on the connection
         connection.set_our_index(our_index);
-        connection.set_transport_id(transport_id);
         connection.set_source_addr(remote_addr.clone());
 
         // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
@@ -652,9 +656,10 @@ impl Node {
             "Connection initiated"
         );
 
-        // Store msg1 for resend and schedule first resend
+        // Schedule the first msg1 resend; the wire itself is stored on the
+        // surviving carrier once the machine is in hand below.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        connection.set_handshake_msg1(wire_msg1, current_time_ms + resend_interval);
+        let first_resend_at_ms = current_time_ms + resend_interval;
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
@@ -668,12 +673,27 @@ impl Node {
             self.peer_machines.contains_key(&link_id),
             "outbound msg1 prepared for link {link_id} with no dial-time machine"
         );
-        self.peer_machines
-            .entry(link_id)
-            .or_insert_with(|| {
-                PeerMachine::new_outbound(link_id, Some(peer_identity), current_time_ms)
-            })
-            .set_leg(connection);
+        let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
+            PeerMachine::new_outbound(link_id, Some(peer_identity), current_time_ms)
+        });
+        // The dial-born machine carrier was stamped at dial; re-stamp it with the
+        // leg's msg1-prep clock so the surviving `started_at`/`last_activity`
+        // carry the leg's provenance. The two clocks differ when a connect
+        // round-trip separates dial from msg1 preparation.
+        machine.set_conn_started_at(current_time_ms);
+        machine.touch_conn(current_time_ms);
+        // Record the transport ID on the surviving carrier (the leg no longer
+        // projects it to the promotion hand-off); holds even if a direct caller
+        // reached here without the dial-time `on_dial` write.
+        machine.set_conn_transport_id(transport_id);
+        // Record our session index on the surviving carrier — the same index just
+        // written on the leg above — so the carrier is the single index home on
+        // the outbound path (the inbound path writes it at authorize).
+        machine.set_conn_our_index(our_index);
+        // Store the msg1 wire on the surviving carrier (the leg no longer holds
+        // the resend source); the retransmit driver reads it from here.
+        machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);
+        machine.set_leg(connection);
 
         Ok(())
     }
@@ -755,7 +775,8 @@ impl Node {
 
         // Store msg1 for resend and schedule first resend
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        connection.set_handshake_msg1(wire_msg1.clone(), current_time_ms + resend_interval);
+        let first_resend_at_ms = current_time_ms + resend_interval;
+        connection.set_handshake_msg1(wire_msg1.clone(), first_resend_at_ms);
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
@@ -773,6 +794,15 @@ impl Node {
         // are armed and no event is dispatched: this path sends msg1 inline,
         // so the machine parks at `Discovered` until msg2.
         let mut machine = PeerMachine::new_outbound(link_id, peer_identity, current_time_ms);
+        // Seed the surviving carrier with the leg's msg1-prep provenance so the
+        // started_at/last_activity timestamps, the transport ID, our index, and
+        // the msg1 resend wire all live on the carrier — the promotion hand-off
+        // and the retransmit driver read them there, not the leg.
+        machine.set_conn_started_at(current_time_ms);
+        machine.touch_conn(current_time_ms);
+        machine.set_conn_transport_id(transport_id);
+        machine.set_conn_our_index(our_index);
+        machine.set_conn_handshake_msg1(wire_msg1.clone(), first_resend_at_ms);
         machine.set_leg(connection);
         self.peer_machines.insert(link_id, machine);
 
@@ -828,7 +858,11 @@ impl Node {
         remote_addr: &TransportAddr,
         now_ms: u64,
     ) {
-        let wire_msg1 = match self.leg(&link_id).and_then(|c| c.handshake_msg1()) {
+        let wire_msg1 = match self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_handshake_msg1())
+        {
             Some(w) => w.to_vec(),
             None => return,
         };

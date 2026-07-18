@@ -316,10 +316,10 @@ impl Node {
         self.links.insert(link_id, link);
         self.addr_to_link.insert(addr_key, link_id);
 
-        // Build the msg2 response, storing it on the connection for potential
-        // resend before the connection is embedded on the machine below.
+        // Build the msg2 response, storing it on the surviving carrier for
+        // potential resend before the connection is embedded on the machine
+        // below.
         let wire_msg2 = build_msg2(our_index, header.sender_idx, &msg2_response);
-        conn.set_handshake_msg2(wire_msg2.clone());
 
         // The leg's persistent control machine is born carrying its pending
         // connection, parked at `SentMsg2` awaiting msg3 (identity is unknown
@@ -328,6 +328,15 @@ impl Node {
         // steps this same machine; every teardown path disposes it with the
         // embedded leg.
         let mut machine = PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms);
+        // The inbound leg carries the transport ID and peer index from msg1, but
+        // the machine's carrier is only written on the outbound dial and at msg3.
+        // Seed both here so the promotion hand-off reads them from the surviving
+        // carrier, matching the leg's inbound seeds.
+        machine.set_conn_transport_id(packet.transport_id);
+        machine.set_conn_their_index(header.sender_idx);
+        // Store the framed msg2 on the surviving carrier for duplicate-msg1
+        // resend while the connection is still pending.
+        machine.set_conn_handshake_msg2(wire_msg2.clone());
         machine.set_leg(conn);
         self.peer_machines.insert(link_id, machine);
 
@@ -373,12 +382,15 @@ impl Node {
 
     /// Find stored msg2 bytes for a given link (pre- or post-promotion).
     ///
-    /// Checks the PeerConnection (if still pending) and then the ActivePeer
-    /// (if already promoted).
+    /// Checks the control machine's carrier (if still pending) and then the
+    /// ActivePeer (if already promoted).
     fn find_stored_msg2(&self, link_id: LinkId) -> Option<Vec<u8>> {
-        // Check pending connection first
-        if let Some(conn) = self.leg(&link_id)
-            && let Some(msg2) = conn.handshake_msg2()
+        // Check pending connection first (its stored msg2 lives on the control
+        // machine's carrier).
+        if let Some(msg2) = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_handshake_msg2())
         {
             return Some(msg2.to_vec());
         }
@@ -699,6 +711,18 @@ impl Node {
         };
 
         let peer_node_addr = *peer_identity.node_addr();
+
+        // Mirror the leg's completion `touch` and the negotiated peer profile
+        // onto the surviving carrier so the connection's last-activity advances
+        // at msg2 completion (matching the leg's clock) and the promotion
+        // hand-off reads the profile from the carrier.
+        let negotiated_profile = self.leg(&link_id).and_then(|conn| conn.peer_profile());
+        if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+            machine.touch_conn(packet.timestamp_ms);
+            if let Some(profile) = negotiated_profile {
+                machine.set_conn_peer_profile(profile);
+            }
+        }
 
         // ACL check: with XX, this is the first point where the initiator
         // knows the responder's identity.
@@ -1158,6 +1182,15 @@ impl Node {
 
         let peer_node_addr = *peer_identity.node_addr();
 
+        // Mirror the negotiated peer profile onto the surviving carrier so the
+        // promotion hand-off reads it from the carrier, not the leg.
+        let negotiated_profile = self.leg(&link_id).and_then(|conn| conn.peer_profile());
+        if let Some(profile) = negotiated_profile
+            && let Some(machine) = self.peer_machines.get_mut(&link_id)
+        {
+            machine.set_conn_peer_profile(profile);
+        }
+
         // ACL check: with XX, this is the first point where the responder
         // knows the initiator's identity.
         if self
@@ -1492,14 +1525,18 @@ impl Node {
                 link_id,
                 reason: "missing our_index".into(),
             })?;
-        let their_index = connection
-            .their_index()
+        let their_index = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_their_index())
             .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing their_index".into(),
             })?;
-        let transport_id = connection
-            .transport_id()
+        let transport_id = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_transport_id())
             .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing transport_id".into(),
@@ -1511,10 +1548,16 @@ impl Node {
                 reason: "missing source_addr".into(),
             })?
             .clone();
-        let link_stats = connection.link_stats().clone();
+        let link_stats = self
+            .peer_machines
+            .get(&link_id)
+            .map(|machine| machine.conn_link_stats().clone())
+            .unwrap_or_default();
         let remote_epoch = connection.remote_epoch();
-        let peer_profile = connection
-            .peer_profile()
+        let peer_profile = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_peer_profile())
             .unwrap_or(crate::proto::fmp::NodeProfile::Full);
 
         let peer_node_addr = *verified_identity.node_addr();
