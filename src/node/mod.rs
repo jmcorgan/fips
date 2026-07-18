@@ -1985,7 +1985,9 @@ impl Node {
                 started_at_ms: self.connection_started_at(conn.link_id()),
                 last_activity_ms: self.connection_last_activity(conn.link_id()),
                 resend_count: self.connection_resend_count(conn.link_id()),
-                expected_peer: conn.expected_identity().map(|id| id.npub()),
+                expected_peer: self
+                    .connection_expected_identity(conn.link_id())
+                    .map(|id| id.npub()),
             })
             .collect();
 
@@ -2328,6 +2330,17 @@ impl Node {
         self.peer_machines
             .get(&link)
             .map_or(0, |machine| machine.conn_last_activity())
+    }
+
+    /// Operator-visible expected peer identity for a pending handshake `link`,
+    /// read from the per-peer machine carrier (the identity's telemetry home now
+    /// that the leg no longer projects it). A link with no machine reports
+    /// `None`; every leg surfaced by `connections()` is embedded in a machine, so
+    /// the lookup resolves.
+    pub(crate) fn connection_expected_identity(&self, link: LinkId) -> Option<PeerIdentity> {
+        self.peer_machines
+            .get(&link)
+            .and_then(|machine| machine.conn_expected_identity().copied())
     }
 
     /// Operator-visible handshake-state string for a pending handshake `link`,

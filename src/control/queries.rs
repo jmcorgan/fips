@@ -1313,7 +1313,7 @@ pub fn show_connections(node: &Node) -> Value {
                 "resend_count": node.connection_resend_count(conn.link_id()),
             });
 
-            if let Some(identity) = conn.expected_identity() {
+            if let Some(identity) = node.connection_expected_identity(conn.link_id()) {
                 conn_json["expected_peer"] = json!(identity.npub());
             }
 

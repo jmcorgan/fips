@@ -587,6 +587,15 @@ impl PeerMachine {
         self.conn.is_timed_out(now_ms, timeout_ms)
     }
 
+    /// Expected peer identity of the surviving carrier — the home for the
+    /// operator-visible `expected_peer` now that the leg no longer projects it.
+    /// Outbound carries the dial identity from construction; inbound stays `None`
+    /// in this view (the identity learned mid-handshake never rests here, as the
+    /// leg is consumed by promotion within the same message-handling step).
+    pub(crate) fn conn_expected_identity(&self) -> Option<&PeerIdentity> {
+        self.conn.expected_identity()
+    }
+
     /// Adopt an explicit connection-start timestamp on the carrier, so the
     /// surviving state keeps the leg's start provenance rather than the
     /// dial-time construction default.
