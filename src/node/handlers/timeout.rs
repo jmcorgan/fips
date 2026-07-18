@@ -124,12 +124,17 @@ impl Node {
             Some(c) => c,
             None => return,
         };
+        // Read the transport ID off the surviving carrier before disposing the
+        // machine (the leg no longer projects it).
+        let transport_id = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_transport_id());
         self.remove_peer_machine(link_id);
-        let transport_id = conn.transport_id();
 
         // Free session index and pending_outbound if allocated
         if let Some(idx) = conn.our_index() {
-            if let Some(tid) = conn.transport_id() {
+            if let Some(tid) = transport_id {
                 self.pending_outbound.remove(&(tid, idx.as_u32()));
             }
             let _ = self.index_allocator.free(idx);
@@ -310,7 +315,12 @@ impl Node {
             };
 
             let (transport_id, remote_addr) = match self.leg(&link) {
-                Some(conn) => match (conn.transport_id(), conn.source_addr()) {
+                Some(conn) => match (
+                    self.peer_machines
+                        .get(&link)
+                        .and_then(|machine| machine.conn_transport_id()),
+                    conn.source_addr(),
+                ) {
                     (Some(tid), Some(addr)) => (tid, addr.clone()),
                     _ => continue,
                 },

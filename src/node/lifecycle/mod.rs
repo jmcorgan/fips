@@ -385,12 +385,14 @@ impl Node {
         transport_id: TransportId,
         remote_addr: &TransportAddr,
     ) -> bool {
-        self.connections().any(|conn| {
-            conn.expected_identity()
-                .map(|id| id.node_addr() == peer_node_addr)
-                .unwrap_or(false)
-                && conn.transport_id() == Some(transport_id)
-                && conn.source_addr() == Some(remote_addr)
+        self.peer_machines.values().any(|machine| {
+            machine.leg().is_some_and(|conn| {
+                conn.expected_identity()
+                    .map(|id| id.node_addr() == peer_node_addr)
+                    .unwrap_or(false)
+                    && machine.conn_transport_id() == Some(transport_id)
+                    && conn.source_addr() == Some(remote_addr)
+            })
         }) || self.peering.pending_connects.iter().any(|pending| {
             pending.peer_identity.node_addr() == peer_node_addr
                 && pending.transport_id == transport_id
@@ -611,7 +613,6 @@ impl Node {
 
         // Set index and transport info on the connection
         connection.set_our_index(our_index);
-        connection.set_transport_id(transport_id);
         connection.set_source_addr(remote_addr.clone());
 
         // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
@@ -653,6 +654,10 @@ impl Node {
         // round-trip separates dial from msg1 preparation.
         machine.set_conn_started_at(current_time_ms);
         machine.touch_conn(current_time_ms);
+        // Record the transport ID on the surviving carrier (the leg no longer
+        // projects it to the promotion hand-off); holds even if a direct caller
+        // reached here without the dial-time `on_dial` write.
+        machine.set_conn_transport_id(transport_id);
         // Store the msg1 wire on the surviving carrier (the leg no longer holds
         // the resend source); the retransmit driver reads it from here.
         machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);

@@ -334,6 +334,11 @@ impl Node {
         // variants complete the rate-limiter and return here. The local machine
         // enters `peer_machines` only at the promote tails.
         let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+        // The inbound leg carries the transport ID from msg1, but the machine's
+        // carrier is only written on the outbound dial. Seed it here so the
+        // promotion hand-off reads it from the surviving carrier, matching the
+        // leg's inbound seed.
+        machine.set_conn_transport_id(packet.transport_id);
         let (decision, actions) = machine.inbound_msg1(link_id, &wire, est, packet.timestamp_ms);
         match decision {
             InboundDecision::Reject {
@@ -616,7 +621,6 @@ impl Node {
                 // already freed by `remove_active_peer` above, BEFORE this fresh
                 // allocation — matching the pre-refactor allocation sequence.
                 conn.set_our_index(our_index);
-                conn.set_their_index(their_index);
                 let link = Link::connectionless(
                     link_id,
                     packet.transport_id,
@@ -765,7 +769,6 @@ impl Node {
                 // set indices on the shell connection, insert link / reverse map /
                 // connection, then build + store the framed msg2.
                 conn.set_our_index(our_index);
-                conn.set_their_index(their_index);
                 let link = Link::connectionless(
                     link_id,
                     packet.transport_id,
@@ -1021,7 +1024,6 @@ impl Node {
                 return;
             }
 
-            conn.set_their_index(header.sender_idx);
             conn.set_source_addr(packet.remote_addr.clone());
 
             let peer_identity = match conn.expected_identity() {
@@ -1388,14 +1390,18 @@ impl Node {
                 link_id,
                 reason: "missing our_index".into(),
             })?;
-        let their_index = connection
-            .their_index()
+        let their_index = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_their_index())
             .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing their_index".into(),
             })?;
-        let transport_id = connection
-            .transport_id()
+        let transport_id = self
+            .peer_machines
+            .get(&link_id)
+            .and_then(|machine| machine.conn_transport_id())
             .ok_or_else(|| NodeError::PromotionFailed {
                 link_id,
                 reason: "missing transport_id".into(),
@@ -1407,7 +1413,11 @@ impl Node {
                 reason: "missing source_addr".into(),
             })?
             .clone();
-        let link_stats = connection.link_stats().clone();
+        let link_stats = self
+            .peer_machines
+            .get(&link_id)
+            .map(|machine| machine.conn_link_stats().clone())
+            .unwrap_or_default();
         let remote_epoch = connection.remote_epoch();
 
         let peer_node_addr = *verified_identity.node_addr();

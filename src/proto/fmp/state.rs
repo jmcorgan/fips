@@ -93,9 +93,6 @@ pub struct ConnectionState {
 
     /// Number of resends performed so far.
     resend_count: u32,
-
-    /// When the next resend should fire (Unix ms). 0 = no resend scheduled.
-    next_resend_at_ms: u64,
 }
 
 impl ConnectionState {
@@ -122,7 +119,6 @@ impl ConnectionState {
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
-            next_resend_at_ms: 0,
         }
     }
 
@@ -146,7 +142,6 @@ impl ConnectionState {
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
-            next_resend_at_ms: 0,
         }
     }
 
@@ -174,7 +169,6 @@ impl ConnectionState {
             handshake_msg1: None,
             handshake_msg2: None,
             resend_count: 0,
-            next_resend_at_ms: 0,
         }
     }
 
@@ -228,11 +222,6 @@ impl ConnectionState {
     /// Get link statistics.
     pub fn link_stats(&self) -> &LinkStats {
         &self.link_stats
-    }
-
-    /// Get mutable link statistics.
-    pub fn link_stats_mut(&mut self) -> &mut LinkStats {
-        &mut self.link_stats
     }
 
     // === Index Accessors ===
@@ -300,11 +289,12 @@ impl ConnectionState {
 
     // === Handshake Resend ===
 
-    /// Store the wire-format msg1 bytes for resend and schedule the first resend.
-    pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
+    /// Store the wire-format msg1 bytes for resend and reset the resend counter.
+    /// The first-resend deadline is scheduled by the shell timer driver, not
+    /// tracked here.
+    pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>, _first_resend_at_ms: u64) {
         self.handshake_msg1 = Some(msg1);
         self.resend_count = 0;
-        self.next_resend_at_ms = first_resend_at_ms;
     }
 
     /// Store the wire-format msg2 bytes for resend on duplicate msg1.
@@ -327,16 +317,10 @@ impl ConnectionState {
         self.resend_count
     }
 
-    /// When the next resend is scheduled (Unix ms).
-    #[cfg(test)]
-    pub fn next_resend_at_ms(&self) -> u64 {
-        self.next_resend_at_ms
-    }
-
-    /// Record a resend and schedule the next one.
-    pub fn record_resend(&mut self, next_resend_at_ms: u64) {
+    /// Record a resend. The next-resend deadline is scheduled by the shell
+    /// timer driver, not tracked here.
+    pub fn record_resend(&mut self, _next_resend_at_ms: u64) {
         self.resend_count += 1;
-        self.next_resend_at_ms = next_resend_at_ms;
     }
 
     // === Activity / Timeout ===

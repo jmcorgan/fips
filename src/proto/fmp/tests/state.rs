@@ -27,7 +27,6 @@ fn outbound_initializes_pure_fields() {
     assert!(state.source_addr().is_none());
     assert!(state.remote_epoch().is_none());
     assert_eq!(state.resend_count(), 0);
-    assert_eq!(state.next_resend_at_ms(), 0);
 }
 
 #[test]
@@ -102,21 +101,17 @@ fn resend_bookkeeping() {
     state.set_handshake_msg1(vec![1, 2, 3], 500);
     assert_eq!(state.handshake_msg1(), Some(&[1u8, 2, 3][..]));
     assert_eq!(state.resend_count(), 0);
-    assert_eq!(state.next_resend_at_ms(), 500);
 
     state.record_resend(900);
     assert_eq!(state.resend_count(), 1);
-    assert_eq!(state.next_resend_at_ms(), 900);
 
     state.record_resend(1300);
     assert_eq!(state.resend_count(), 2);
-    assert_eq!(state.next_resend_at_ms(), 1300);
 
     // set_handshake_msg1 resets the resend counter.
     state.set_handshake_msg1(vec![4, 5], 100);
     assert_eq!(state.handshake_msg1(), Some(&[4u8, 5][..]));
     assert_eq!(state.resend_count(), 0);
-    assert_eq!(state.next_resend_at_ms(), 100);
 
     state.set_handshake_msg2(vec![6, 7, 8]);
     assert_eq!(state.handshake_msg2(), Some(&[6u8, 7, 8][..]));

@@ -10,7 +10,7 @@
 use crate::PeerIdentity;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::ConnectionState;
-use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
+use crate::transport::{LinkDirection, LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use secp256k1::Keypair;
 use std::fmt;
@@ -129,16 +129,6 @@ impl PeerConnection {
     /// Time since last activity.
     pub fn idle_time(&self, current_time_ms: u64) -> u64 {
         self.state.idle_time(current_time_ms)
-    }
-
-    /// Get link statistics.
-    pub fn link_stats(&self) -> &LinkStats {
-        self.state.link_stats()
-    }
-
-    /// Get mutable link statistics.
-    pub fn link_stats_mut(&mut self) -> &mut LinkStats {
-        self.state.link_stats_mut()
     }
 
     // === Index Accessors ===

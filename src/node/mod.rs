@@ -2367,9 +2367,9 @@ impl Node {
             .links
             .values()
             .any(|link| link.transport_id() == transport_id)
-            || self
-                .connections()
-                .any(|conn| conn.transport_id() == Some(transport_id))
+            || self.peer_machines.values().any(|machine| {
+                machine.leg().is_some() && machine.conn_transport_id() == Some(transport_id)
+            })
             || self
                 .peers
                 .values()
@@ -2441,18 +2441,25 @@ impl Node {
             });
         }
 
-        self.peer_machines
-            .entry(link_id)
-            .or_insert_with(|| {
-                let now = connection.started_at();
-                match connection.expected_identity() {
-                    Some(identity) if connection.is_outbound() => {
-                        PeerMachine::new_outbound(link_id, *identity, now)
-                    }
-                    _ => PeerMachine::new_inbound(link_id, now),
+        let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
+            let now = connection.started_at();
+            match connection.expected_identity() {
+                Some(identity) if connection.is_outbound() => {
+                    PeerMachine::new_outbound(link_id, *identity, now)
                 }
-            })
-            .set_leg(connection);
+                _ => PeerMachine::new_inbound(link_id, now),
+            }
+        });
+        // Seed the surviving carrier's peer index and transport from the
+        // pre-built leg so the promotion hand-off reads them from the machine,
+        // matching the establish paths that write them on the machine directly.
+        if let Some(their) = connection.their_index() {
+            machine.set_conn_their_index(their);
+        }
+        if let Some(tid) = connection.transport_id() {
+            machine.set_conn_transport_id(tid);
+        }
+        machine.set_leg(connection);
         Ok(())
     }
 

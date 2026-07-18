@@ -63,7 +63,7 @@ use crate::proto::fmp::{
     RekeyResendSnapshot, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
-use crate::transport::{LinkId, TransportAddr, TransportId};
+use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::{IndexAllocator, SessionIndex};
 use crate::{NodeAddr, PeerIdentity};
 
@@ -618,6 +618,39 @@ impl PeerMachine {
     /// carrier, mirroring the leg's responder write.
     pub(crate) fn set_conn_handshake_msg2(&mut self, msg2: Vec<u8>) {
         self.conn.set_handshake_msg2(msg2);
+    }
+
+    /// Peer session index of the surviving carrier — the source for the
+    /// promotion hand-off now that the leg no longer projects it.
+    pub(crate) fn conn_their_index(&self) -> Option<SessionIndex> {
+        self.conn.their_index()
+    }
+
+    /// Transport ID of the surviving carrier — the source for the promotion
+    /// hand-off, the stale-connection cleanup, and the msg1 resend send.
+    pub(crate) fn conn_transport_id(&self) -> Option<TransportId> {
+        self.conn.transport_id()
+    }
+
+    /// Link statistics of the surviving carrier — the seed copied into the
+    /// active peer at promotion.
+    pub(crate) fn conn_link_stats(&self) -> &LinkStats {
+        self.conn.link_stats()
+    }
+
+    /// Record the peer session index on the surviving carrier. Seeds the
+    /// carrier from a pre-built leg (`Node::add_connection`) so the promotion
+    /// hand-off matches the establish paths that write it on the machine.
+    pub(crate) fn set_conn_their_index(&mut self, index: SessionIndex) {
+        self.conn.set_their_index(index);
+    }
+
+    /// Record the transport ID on the surviving carrier. Populated on the
+    /// inbound establish path (the leg seeds it at msg1, but the machine's
+    /// carrier is only written on the outbound dial) and when seeding the
+    /// carrier from a pre-built leg (`Node::add_connection`).
+    pub(crate) fn set_conn_transport_id(&mut self, id: TransportId) {
+        self.conn.set_transport_id(id);
     }
 
     /// Adopt an explicit connection-start timestamp on the carrier, so the
