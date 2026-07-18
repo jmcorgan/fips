@@ -302,6 +302,34 @@ alternative — running under a dedicated unprivileged service
 account with the capability granted on the binary — see
 [../how-to/run-as-unprivileged-user.md](../how-to/run-as-unprivileged-user.md).
 
+### App-Owned TUN (embedded hosts)
+
+On platforms where FIPS is embedded rather than run as a daemon — notably
+Android, where the `VpnService` owns the TUN fd and the app has no
+`CAP_NET_ADMIN` — FIPS does not create `fips0` itself. Instead the embedder owns
+the fd and exchanges IPv6 packet bytes with FIPS over channels.
+
+`Node::enable_app_owned_tun()` sets this up. It is called after `Node::new` and
+before `start()` (and before the node is moved into a background task), mirroring
+`control_read_handle()`, and returns two app-side channel ends:
+
+- **app → mesh** — the embedder pushes IPv6 packets read from its fd into
+  `app_outbound_tx`. These are drained by `run_rx_loop` into `handle_tun_outbound`
+  and routed exactly as the Reader Thread's output would be.
+- **mesh → app** — inbound mesh traffic on port 256 is reconstructed and written
+  to the node's `tun_tx` (the same sink the Writer Thread reads); the embedder
+  pulls from `app_inbound_rx` and writes to its fd.
+
+With the channels installed, `start()` skips system-TUN creation (it gates on
+`tun_tx` being unset), so FIPS does no `CAP_NET_ADMIN` operations.
+
+Because packets enter via `app_outbound_tx` rather than the Reader Thread, they
+**bypass `handle_tun_packet`** — the `fd00::/8` destination filter, the ICMPv6
+Destination Unreachable for off-mesh dests (see [Reader Thread](#reader-thread)),
+and the [TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping). The embedder is
+therefore responsible for routing only `fd00::/8` to its TUN (so only mesh-bound
+packets arrive) and for clamping TCP MSS on outbound SYNs.
+
 ## Implementation Status
 
 | Feature | Status |

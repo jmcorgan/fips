@@ -1596,7 +1596,10 @@ impl Node {
         // Singleton child booleans, with today's exact enable conditions.
         let nostr = self.config().node.rendezvous.nostr.enabled;
         let mdns = self.config().node.rendezvous.lan.enabled;
-        let tun = self.config().tun.enabled;
+        // No Tun child when the TUN is app-owned (the embedder pre-set
+        // `tun_tx` via `enable_app_owned_tun`) — FIPS does no system-TUN ops;
+        // the channels installed before `start` carry both directions.
+        let tun = self.config().tun.enabled && self.supervisor.tun_tx.is_none();
         let dns = self.config().dns.enabled;
 
         // Worker-pool booleans + counts. Unix only — the workers issue

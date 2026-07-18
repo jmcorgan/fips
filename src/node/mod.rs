@@ -64,7 +64,7 @@ use crate::proto::lookup::{Lookup, LookupBackoff, LookupForwardRateLimiter};
 use crate::proto::mmp::Mmp;
 use crate::proto::routing::{self, Router, RoutingErrorRateLimiter};
 use crate::proto::stp::TreeState;
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::transport::ethernet::EthernetTransport;
 use crate::transport::nym::NymTransport;
 use crate::transport::tcp::TcpTransport;
@@ -76,7 +76,7 @@ use crate::transport::{
 };
 use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
-use crate::upper::tun::{TunError, TunState, TunTx};
+use crate::upper::tun::{TunError, TunOutboundTx, TunState, TunTx};
 use crate::utils::index::IndexAllocator;
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity, TreeCoordinate};
 use rand::Rng;
@@ -901,7 +901,7 @@ impl Node {
         }
 
         // Create Ethernet transport instances (Unix only — requires raw sockets)
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let eth_instances: Vec<_> = self
                 .config()
@@ -1031,7 +1031,7 @@ impl Node {
         &self,
         addr_str: &str,
     ) -> Result<(TransportId, TransportAddr), NodeError> {
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (iface, mac_str) = addr_str.split_once('/').ok_or_else(|| {
                 NodeError::NoTransportForType(format!(
@@ -1063,7 +1063,7 @@ impl Node {
 
             Ok((transport_id, TransportAddr::from_bytes(&mac)))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(NodeError::NoTransportForType(
                 "Ethernet transport is not supported on this platform".to_string(),
@@ -2859,6 +2859,36 @@ impl Node {
     /// Returns None if TUN is not active or the node hasn't been started.
     pub fn tun_tx(&self) -> Option<&TunTx> {
         self.supervisor.tun_tx.as_ref()
+    }
+
+    /// Set up an **app-owned TUN**: rather than FIPS creating a system TUN
+    /// device, the embedder (e.g. an Android `VpnService`) owns the fd and
+    /// exchanges IPv6 packet bytes with FIPS over the returned channels. Call
+    /// this after [`Node::new`] and **before** [`Self::start`] — and before
+    /// moving the node into a background task.
+    ///
+    /// Returns `(app_outbound_tx, app_inbound_rx)`:
+    /// - push IPv6 packets read from the app's TUN fd into `app_outbound_tx`
+    ///   (app → mesh); FIPS routes them to the destination node.
+    /// - pull IPv6 packets destined for the app's TUN fd from `app_inbound_rx`
+    ///   (mesh → app) and write them to the fd (`recv_timeout` for clean stop).
+    ///
+    /// With this set, [`Self::start`] skips system-TUN creation (it gates on
+    /// `tun_tx` being unset). Packets pushed into `app_outbound_tx` bypass the
+    /// system-TUN reader's `handle_tun_packet`, so the embedder must do what that
+    /// path otherwise would: push only `fd::/8`-destined IPv6 packets — FIPS no
+    /// longer filters the destination or emits ICMPv6 unreachable for off-mesh
+    /// dests — and clamp TCP MSS on outbound SYNs.
+    pub fn enable_app_owned_tun(&mut self) -> (TunOutboundTx, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let tun_channel_size = self.config().node.buffers.tun_channel;
+        // app → mesh: the app pushes; `run_rx_loop` drains `tun_outbound_rx`.
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
+        // mesh → app: the node writes inbound packets to `tun_tx`; the app pulls.
+        let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+        self.supervisor.tun_tx = Some(tun_tx);
+        self.supervisor.tun_outbound_rx = Some(outbound_rx);
+        self.tun_state = TunState::Active;
+        (outbound_tx, tun_rx)
     }
 
     // === Sending ===

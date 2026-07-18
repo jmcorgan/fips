@@ -2213,3 +2213,66 @@ async fn handle_msg3_admits_existing_peer_at_cap() {
         "existing peer must still be present after a known-peer reconnect"
     );
 }
+
+/// App-owned TUN seam: `enable_app_owned_tun` wires the embedder's packet
+/// channels (an Android `VpnService` owns the fd) and marks the TUN active so
+/// `start()` skips system-TUN creation.
+#[test]
+fn app_owned_tun_seam_wires_channels() {
+    let mut config = crate::Config::new();
+    config.tun.enabled = true;
+    let mut node = make_node_with(config);
+
+    let (outbound_tx, tun_rx) = node.enable_app_owned_tun();
+
+    // TUN is active and the inbound (mesh→app) sender is installed, so `start()`
+    // will skip `TunDevice::create` (it gates on `tun_tx.is_none()`).
+    assert_eq!(node.tun_state(), crate::upper::tun::TunState::Active);
+    assert!(node.tun_tx().is_some(), "inbound sender installed");
+
+    // mesh → app: a packet the node delivers to its `tun_tx` reaches the app's rx.
+    let pkt = vec![0x60u8, 0, 0, 0, 0, 0];
+    node.tun_tx().unwrap().send(pkt.clone()).unwrap();
+    assert_eq!(
+        tun_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .unwrap(),
+        pkt,
+        "the app pulls the same bytes the node wrote",
+    );
+
+    // app → mesh: the returned sender is live (its matching rx is held by the node
+    // and drained by `run_rx_loop` → `handle_tun_outbound`).
+    assert!(outbound_tx.try_send(vec![0x60]).is_ok());
+}
+
+/// With an app-owned TUN configured, `start()` must NOT create a system TUN
+/// device: it leaves `tun_name` unset (a real device records its interface name)
+/// and keeps the TUN `Active` with the app-owned channels.
+#[tokio::test]
+async fn start_skips_system_tun_when_app_owned() {
+    // Mirror `make_healthy_node` (one loopback UDP transport so bring-up
+    // reaches `Full`), plus tun.enabled so the Tun child WOULD spawn if the
+    // app-owned gate failed.
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    config.tun.enabled = true;
+    let mut node = make_node_with(config);
+
+    let (_outbound_tx, _tun_rx) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+
+    // No system device was created (that path records the interface name); the
+    // app-owned TUN stayed active.
+    assert!(
+        node.tun_name().is_none(),
+        "app-owned TUN must not create a named system device",
+    );
+    assert_eq!(node.tun_state(), crate::upper::tun::TunState::Active);
+
+    node.stop().await.unwrap();
+}

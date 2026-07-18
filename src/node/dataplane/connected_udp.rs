@@ -45,12 +45,10 @@ impl Node {
     /// (e.g. only non-UDP transports). Enabled on Linux and macOS:
     /// both kernels route a matching peer 5-tuple to the connected
     /// socket when it shares the wildcard listen port via SO_REUSEPORT.
+    /// Only compiled on Linux/macOS — the sole caller (the rx_loop tick) is
+    /// gated the same way, so on other targets (android) there is nothing to do.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(in crate::node) async fn activate_connected_udp_sessions(&mut self) {
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            // No-op on platforms without the connected-UDP fast path.
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             if !connected_udp_enabled() {
                 return;
