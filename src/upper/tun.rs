@@ -31,7 +31,7 @@ use tracing::error;
 use tracing::{debug, trace};
 #[cfg(windows)]
 use tracing::{error, warn};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use tun::Layer;
 
 /// Read-only handle to the per-destination path MTU map. Populated by
@@ -234,7 +234,10 @@ impl TunDevice {
             }
         }
 
-        // Create the TUN device
+        // Create the TUN device. `mut` is only exercised on linux/macos, where
+        // the name/layer/mtu are set below; other unix targets (android) pass
+        // the default config through unchanged.
+        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(unused_mut))]
         let mut tun_config = tun::Configuration::default();
 
         // On macOS, utun devices get kernel-assigned names (utun0, utun1, ...),
@@ -1223,6 +1226,32 @@ mod windows_tun {
 // Re-export Windows TUN types at module level
 #[cfg(windows)]
 pub use windows_tun::{TunDevice, TunWriter, run_tun_reader, shutdown_tun_interface};
+
+// Android uses an app-owned TUN (the embedder owns the fd, e.g. an Android
+// VpnService); FIPS never creates or configures a system TUN here. These no-op
+// stubs stand in for the platform ops so the shared TunDevice code compiles.
+#[cfg(target_os = "android")]
+mod platform {
+    use super::TunError;
+    use std::net::Ipv6Addr;
+
+    pub fn is_ipv6_disabled() -> bool {
+        false
+    }
+    pub async fn interface_exists(_name: &str) -> bool {
+        false
+    }
+    pub async fn delete_interface(_name: &str) -> Result<(), TunError> {
+        Ok(())
+    }
+    pub async fn configure_interface(
+        _name: &str,
+        _addr: Ipv6Addr,
+        _mtu: u16,
+    ) -> Result<(), TunError> {
+        Ok(())
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod platform {
