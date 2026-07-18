@@ -39,11 +39,14 @@ impl EstablishView for Node {
             rekey_in_progress: existing.map(|p| p.rekey_in_progress()).unwrap_or(false),
             existing_msg2: existing.and_then(|p| p.handshake_msg2().map(|m| m.to_vec())),
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
-            has_pending_outbound_to_peer: self.connections().any(|conn| {
-                conn.expected_identity()
-                    .map(|id| id.node_addr() == peer_addr)
-                    .unwrap_or(false)
-            }),
+            has_pending_outbound_to_peer: self
+                .connections()
+                .filter_map(|(_, machine)| machine.leg())
+                .any(|conn| {
+                    conn.expected_identity()
+                        .map(|id| id.node_addr() == peer_addr)
+                        .unwrap_or(false)
+                }),
             rekey_enabled: self.config().node.rekey.enabled,
             our_node_addr: *self.identity().node_addr(),
         }
@@ -1552,6 +1555,7 @@ impl Node {
             // the 30s handshake timeout.
             let pending_to_same_peer: Vec<LinkId> = self
                 .connections()
+                .filter_map(|(_, machine)| machine.leg())
                 .filter(|conn| {
                     conn.expected_identity()
                         .map(|id| *id.node_addr() == peer_node_addr)

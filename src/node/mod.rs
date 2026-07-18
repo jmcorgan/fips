@@ -1978,6 +1978,7 @@ impl Node {
         // --- connections (show_connections) ---
         let connection_rows: Vec<snap::ConnectionRow> = self
             .connections()
+            .filter_map(|(_, machine)| machine.leg())
             .map(|conn| snap::ConnectionRow {
                 link_id: conn.link_id().as_u64(),
                 direction: format!("{}", conn.direction()),
@@ -2557,11 +2558,20 @@ impl Node {
         connection
     }
 
-    /// Iterate over all connections.
-    pub fn connections(&self) -> impl Iterator<Item = &PeerConnection> {
+    /// Iterate over the control machines that carry a pending connection.
+    ///
+    /// Carrying a pending connection is what makes a machine handshake-phase,
+    /// so the filter below is the membership rule. It is the same predicate
+    /// that `connection_count` applies, and the one the stale-connection sweep
+    /// narrows further.
+    ///
+    /// Internal to the crate: this yields the control machine, which is not
+    /// part of the published surface. Callers outside the crate that need a
+    /// view of the pending handshakes go through the operator queries.
+    pub(crate) fn connections(&self) -> impl Iterator<Item = (&LinkId, &PeerMachine)> {
         self.peer_machines
-            .values()
-            .filter_map(|machine| machine.leg())
+            .iter()
+            .filter(|(_, machine)| machine.leg().is_some())
     }
 
     // === Peer Management (Active Phase) ===

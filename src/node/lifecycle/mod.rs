@@ -372,11 +372,13 @@ impl Node {
     }
 
     fn is_connecting_to_peer(&self, peer_node_addr: &NodeAddr) -> bool {
-        self.connections().any(|conn| {
-            conn.expected_identity()
-                .map(|id| id.node_addr() == peer_node_addr)
-                .unwrap_or(false)
-        })
+        self.connections()
+            .filter_map(|(_, machine)| machine.leg())
+            .any(|conn| {
+                conn.expected_identity()
+                    .map(|id| id.node_addr() == peer_node_addr)
+                    .unwrap_or(false)
+            })
     }
 
     fn is_connecting_to_peer_on_path(
@@ -928,6 +930,7 @@ impl Node {
                             let now_ms = Self::now_ms();
                             let stale: Vec<LinkId> = self
                                 .connections()
+                                .filter_map(|(_, machine)| machine.leg())
                                 .filter(|conn| {
                                     conn.expected_identity()
                                         .map(|id| id.node_addr() == &peer_addr)
@@ -2720,10 +2723,11 @@ impl Node {
         let connected: HashSet<NodeAddr> = self.peers.keys().copied().collect();
         let connecting: HashSet<NodeAddr> = self
             .connections()
+            .filter_map(|(_, machine)| machine.leg())
             .filter_map(|conn| conn.expected_identity().map(|id| *id.node_addr()))
             .collect();
         let mut in_flight_by_peer: HashMap<NodeAddr, usize> = HashMap::new();
-        for conn in self.connections() {
+        for conn in self.connections().filter_map(|(_, machine)| machine.leg()) {
             if let Some(id) = conn.expected_identity() {
                 *in_flight_by_peer.entry(*id.node_addr()).or_default() += 1;
             }
@@ -2793,6 +2797,7 @@ impl Node {
 
         let in_flight_for_peer = self
             .connections()
+            .filter_map(|(_, machine)| machine.leg())
             .filter(|conn| {
                 conn.expected_identity()
                     .map(|identity| identity.node_addr() == peer_node_addr)

@@ -138,6 +138,7 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
 
     let mut addrs = node
         .connections()
+        .filter_map(|(_, machine)| machine.leg())
         .filter_map(|conn| conn.source_addr().and_then(|addr| addr.as_str()))
         .collect::<Vec<_>>();
     addrs.sort();
@@ -1342,6 +1343,7 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     assert_eq!(node.connection_count(), 1);
     assert_eq!(
         node.connections()
+            .filter_map(|(_, machine)| machine.leg())
             .next()
             .and_then(|conn| conn.source_addr()),
         Some(&new_addr)

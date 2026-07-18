@@ -1303,6 +1303,7 @@ pub fn show_connections(node: &Node) -> Value {
     let now = now_ms();
     let connections: Vec<Value> = node
         .connections()
+        .filter_map(|(_, machine)| machine.leg())
         .map(|conn| {
             let mut conn_json = json!({
                 "link_id": conn.link_id().as_u64(),
