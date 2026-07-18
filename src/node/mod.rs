@@ -1982,8 +1982,8 @@ impl Node {
                 link_id: conn.link_id().as_u64(),
                 direction: format!("{}", conn.direction()),
                 handshake_state: self.connection_handshake_state(conn.link_id()).to_string(),
-                started_at_ms: conn.started_at(),
-                last_activity_ms: conn.last_activity(),
+                started_at_ms: self.connection_started_at(conn.link_id()),
+                last_activity_ms: self.connection_last_activity(conn.link_id()),
                 resend_count: self.connection_resend_count(conn.link_id()),
                 expected_peer: conn.expected_identity().map(|id| id.npub()),
             })
@@ -2307,6 +2307,27 @@ impl Node {
         self.peer_machines
             .get(&link)
             .map_or(0, |machine| machine.resend_count())
+    }
+
+    /// Operator-visible connection-start timestamp for a pending handshake
+    /// `link`, read from the per-peer machine carrier (the timing's home now
+    /// that the leg no longer projects it). A link with no machine reports 0;
+    /// every leg surfaced by `connections()` is embedded in a machine, so the
+    /// lookup resolves.
+    pub(crate) fn connection_started_at(&self, link: LinkId) -> u64 {
+        self.peer_machines
+            .get(&link)
+            .map_or(0, |machine| machine.conn_started_at())
+    }
+
+    /// Operator-visible last-activity timestamp for a pending handshake `link`,
+    /// read from the per-peer machine carrier. A link with no machine reports 0;
+    /// every leg surfaced by `connections()` is embedded in a machine, so the
+    /// lookup resolves.
+    pub(crate) fn connection_last_activity(&self, link: LinkId) -> u64 {
+        self.peer_machines
+            .get(&link)
+            .map_or(0, |machine| machine.conn_last_activity())
     }
 
     /// Operator-visible handshake-state string for a pending handshake `link`,

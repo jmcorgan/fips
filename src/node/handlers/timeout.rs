@@ -20,9 +20,9 @@ impl LifecycleView for Node {
         self.peer_machines
             .iter()
             .filter_map(|(link_id, machine)| machine.leg().map(|conn| (link_id, machine, conn)))
-            .filter(|(link_id, machine, conn)| {
+            .filter(|(link_id, machine, _conn)| {
                 machine.is_failed()
-                    || (conn.is_timed_out(now_ms, timeout_ms)
+                    || (machine.conn_is_timed_out(now_ms, timeout_ms)
                         && !self.peer_timers.get(*link_id).is_some_and(|timers| {
                             timers.contains_key(&TimerKind::HandshakeTimeout)
                         }))
@@ -89,7 +89,8 @@ impl Node {
                             debug!(
                                 link_id = %link,
                                 direction = %direction,
-                                idle_secs = conn.idle_time(now_ms) / 1000,
+                                idle_secs =
+                                    now_ms.saturating_sub(self.connection_last_activity(link)) / 1000,
                                 "Stale handshake connection timed out"
                             );
                         }
@@ -182,8 +183,15 @@ impl Node {
             .map(|(link, _)| *link)
             .collect();
         for link in timer_links {
+            // The idle-timeout threshold reads the survivor carrier's
+            // last-activity (the leg no longer projects it); the leg still
+            // supplies direction/identity for the retry decision below.
+            let timed_out = self
+                .peer_machines
+                .get(&link)
+                .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms));
             let (reap, retry_peer) = match self.leg(&link) {
-                Some(conn) if conn.is_timed_out(now_ms, timeout_ms) => {
+                Some(conn) if timed_out => {
                     let retry_peer = if conn.is_outbound() {
                         conn.expected_identity().map(|id| *id.node_addr())
                     } else {

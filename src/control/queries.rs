@@ -1308,8 +1308,8 @@ pub fn show_connections(node: &Node) -> Value {
                 "link_id": conn.link_id().as_u64(),
                 "direction": format!("{}", conn.direction()),
                 "handshake_state": node.connection_handshake_state(conn.link_id()),
-                "started_at_ms": conn.started_at(),
-                "idle_ms": now.saturating_sub(conn.last_activity()),
+                "started_at_ms": node.connection_started_at(conn.link_id()),
+                "idle_ms": now.saturating_sub(node.connection_last_activity(conn.link_id())),
                 "resend_count": node.connection_resend_count(conn.link_id()),
             });
 

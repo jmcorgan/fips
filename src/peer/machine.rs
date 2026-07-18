@@ -570,6 +570,36 @@ impl PeerMachine {
         self.conn.record_resend(next_resend_at_ms);
     }
 
+    /// Connection-start timestamp of the surviving carrier — the home for the
+    /// operator-visible `started_at_ms` now that the leg no longer projects it.
+    pub(crate) fn conn_started_at(&self) -> u64 {
+        self.conn.started_at()
+    }
+
+    /// Last-activity timestamp of the surviving carrier — the home for the
+    /// operator-visible `last_activity_ms`/`idle_ms` and the idle-timeout check.
+    pub(crate) fn conn_last_activity(&self) -> u64 {
+        self.conn.last_activity()
+    }
+
+    /// Whether the carrier has been idle past `timeout_ms`.
+    pub(crate) fn conn_is_timed_out(&self, now_ms: u64, timeout_ms: u64) -> bool {
+        self.conn.is_timed_out(now_ms, timeout_ms)
+    }
+
+    /// Adopt an explicit connection-start timestamp on the carrier, so the
+    /// surviving state keeps the leg's start provenance rather than the
+    /// dial-time construction default.
+    pub(crate) fn set_conn_started_at(&mut self, started_at_ms: u64) {
+        self.conn.set_started_at(started_at_ms);
+    }
+
+    /// Advance the carrier's last-activity timestamp — the machine-tier paired
+    /// write for the leg's handshake `touch`.
+    pub(crate) fn touch_conn(&mut self, now_ms: u64) {
+        self.conn.touch(now_ms);
+    }
+
     /// Whether this is an outbound leg parked at `SentMsg1` — the only state in
     /// which a msg1 resend is due. Mirrors `on_handshake_retransmit`'s guard so
     /// the shell timer driver can gate without reaching into machine state.

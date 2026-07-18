@@ -341,6 +341,13 @@ impl ConnectionState {
 
     // === Activity / Timeout ===
 
+    /// Overwrite the connection-start timestamp. Used when the surviving
+    /// control-machine carrier adopts the leg's start provenance instead of the
+    /// machine-construction default.
+    pub fn set_started_at(&mut self, started_at_ms: u64) {
+        self.started_at = started_at_ms;
+    }
+
     /// Update last activity timestamp.
     pub fn touch(&mut self, current_time_ms: u64) {
         self.last_activity = current_time_ms;

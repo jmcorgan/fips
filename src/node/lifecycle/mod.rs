@@ -642,10 +642,17 @@ impl Node {
             self.peer_machines.contains_key(&link_id),
             "outbound msg1 prepared for link {link_id} with no dial-time machine"
         );
-        self.peer_machines
+        let machine = self
+            .peer_machines
             .entry(link_id)
-            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms))
-            .set_leg(connection);
+            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms));
+        // The dial-born machine carrier was stamped at dial; re-stamp it with the
+        // leg's msg1-prep clock so the surviving `started_at`/`last_activity`
+        // carry the leg's provenance. The two clocks differ when a connect
+        // round-trip separates dial from msg1 preparation.
+        machine.set_conn_started_at(current_time_ms);
+        machine.touch_conn(current_time_ms);
+        machine.set_leg(connection);
 
         Ok(())
     }

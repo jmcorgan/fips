@@ -1030,6 +1030,13 @@ impl Node {
             (peer_identity, conn.our_index())
         };
 
+        // Mirror the leg's completion `touch` on the surviving carrier so the
+        // connection's last-activity advances at msg2 completion, matching the
+        // leg's clock.
+        if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+            machine.touch_conn(packet.timestamp_ms);
+        }
+
         if self
             .authorize_peer(
                 &peer_identity,
