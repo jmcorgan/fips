@@ -236,6 +236,11 @@ impl ConnectionState {
         self.our_index = Some(index);
     }
 
+    /// Clear our session index (back to unset).
+    pub fn clear_our_index(&mut self) {
+        self.our_index = None;
+    }
+
     /// Get their session index (if known).
     pub fn their_index(&self) -> Option<SessionIndex> {
         self.their_index

@@ -485,11 +485,14 @@ impl Node {
         // `link_id` as the (soon-to-be-built) connection. It parks in
         // `Discovered` (inert to reap and rekey — absent from `peers`, never
         // established) until `handle_msg2` looks it up to drive the promote, or
-        // a connectionless dial drives it to `Handshaking` to send. Its
-        // `our_index` is deliberately left unset so a later inbound restart does
-        // not emit a spurious `UnregisterDecryptSession`. It is removed on every
-        // failure path in the dial window (below and in `prepare_outbound_msg1`
-        // / `poll_pending_connects`), mirroring the connection's own lifetime.
+        // a connectionless dial drives it to `Handshaking` to send. Its carrier
+        // index is written at msg1 preparation (`prepare_outbound_msg1`); a later
+        // inbound msg1 for the same peer is handled on a FRESH `new_inbound`
+        // machine (`handle_msg1`), never by driving this map-resident machine
+        // through `inbound_msg1`, so it does not restart through the decrypt-
+        // unregister path in production. It is removed on every failure path in
+        // the dial window (below and in `prepare_outbound_msg1` /
+        // `poll_pending_connects`), mirroring the connection's own lifetime.
         let machine = PeerMachine::new_outbound(link_id, peer_identity, Self::now_ms());
         self.peer_machines.insert(link_id, machine);
 
@@ -658,6 +661,10 @@ impl Node {
         // projects it to the promotion hand-off); holds even if a direct caller
         // reached here without the dial-time `on_dial` write.
         machine.set_conn_transport_id(transport_id);
+        // Record our session index on the surviving carrier — the same index just
+        // written on the leg above — so the carrier is the single index home on
+        // the outbound path (the inbound path writes it at authorize).
+        machine.set_conn_our_index(our_index);
         // Store the msg1 wire on the surviving carrier (the leg no longer holds
         // the resend source); the retransmit driver reads it from here.
         machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);

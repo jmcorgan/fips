@@ -452,13 +452,12 @@ pub(crate) struct PeerMachine {
     rekey_jitter_secs: i64,
     last_heartbeat_sent_ms: u64,
 
-    // --- decrypt-registration shadow ---
-    // The machine owns decrypt-worker register/unregister via actions, so it
-    // tracks which index it registered (to later unregister/free). This is
-    // control knowledge of the registration lifecycle, distinct from the hot
-    // send-state slots.
-    /// The currently-registered decrypt index (post-establish).
-    our_index: Option<SessionIndex>,
+    // --- decrypt-registration drain window ---
+    // The machine owns decrypt-worker register/unregister via actions. The
+    // currently-registered index lives on the surviving carrier (`conn`); this
+    // field tracks the previous index held open during a post-cutover drain
+    // window (to later unregister/free). Control knowledge of the registration
+    // lifecycle, distinct from the hot send-state slots.
     /// The previous index held open during a post-cutover drain window.
     draining_index: Option<SessionIndex>,
 }
@@ -485,7 +484,6 @@ impl PeerMachine {
             authenticated_at_ms: 0,
             rekey_jitter_secs: 0,
             last_heartbeat_sent_ms: 0,
-            our_index: None,
             draining_index: None,
         }
     }
@@ -513,7 +511,6 @@ impl PeerMachine {
             authenticated_at_ms: 0,
             rekey_jitter_secs: 0,
             last_heartbeat_sent_ms: 0,
-            our_index: None,
             draining_index: None,
         }
     }
@@ -545,12 +542,13 @@ impl PeerMachine {
         self.leg = Some(leg);
     }
 
-    /// The index we allocated for this peer's inbound session, once Phase 2
-    /// (`on_authorized`) has run. `None` before allocation (and after a
-    /// rejected/unauthorized msg1). The inbound cutover reads this to perform
-    /// the shell registry surgery with the machine-owned index.
+    /// The session index we allocated for this peer, read from the surviving
+    /// carrier. Populated once the index is allocated on either establish path
+    /// (inbound at `on_authorized`, outbound at msg1 preparation). `None` before
+    /// allocation (and after a rejected/unauthorized msg1). The inbound cutover
+    /// reads this to perform the shell registry surgery.
     pub(crate) fn our_index(&self) -> Option<SessionIndex> {
-        self.our_index
+        self.conn.our_index()
     }
 
     /// The msg1 resend count for this outbound handshake leg. The per-peer
@@ -651,6 +649,14 @@ impl PeerMachine {
     /// carrier from a pre-built leg (`Node::add_connection`).
     pub(crate) fn set_conn_transport_id(&mut self, id: TransportId) {
         self.conn.set_transport_id(id);
+    }
+
+    /// Record our session index on the surviving carrier. The outbound establish
+    /// path allocates the index shell-side and writes it on the leg; this paired
+    /// write keeps the carrier the single index home once the leg dissolves (the
+    /// inbound path writes the carrier directly at authorize).
+    pub(crate) fn set_conn_our_index(&mut self, index: SessionIndex) {
+        self.conn.set_our_index(index);
     }
 
     /// Adopt an explicit connection-start timestamp on the carrier, so the
@@ -903,9 +909,9 @@ impl PeerMachine {
         self.conn.set_their_index(their_index);
         match Fmp::new().establish_outbound(&out) {
             OutboundDecision::Promote => {
-                // Net-new: our outbound index (allocated at dial) is the one we
-                // register once promotion resolves.
-                self.our_index = self.conn.our_index();
+                // Net-new: our outbound index (allocated at dial) already sits on
+                // the surviving carrier; it is the one we register once promotion
+                // resolves.
                 // The machine survives promotion (it becomes the active peer's
                 // control machine), so cancel the outbound handshake timers here
                 // or they would linger in the driver's store. A late fire would
@@ -976,8 +982,9 @@ impl PeerMachine {
             InboundDecision::RestartThenPromote { peer } => {
                 let peer = *peer;
                 let mut actions = vec![PeerAction::InvalidateSendState];
-                if let Some(idx) = self.our_index.take() {
+                if let Some(idx) = self.conn.our_index() {
                     actions.push(PeerAction::UnregisterDecryptSession { index: idx });
+                    self.conn.clear_our_index();
                 }
                 // An established peer being replaced by a fresh inbound leg — the
                 // unconditional reconnect reflex (a live, cut-over producer).
@@ -1042,7 +1049,6 @@ impl PeerMachine {
             }
         };
         self.conn.set_our_index(our_index);
-        self.our_index = Some(our_index);
         let bytes = self.pending_msg2_payload.take().unwrap_or_default();
         let link = self.link;
         vec![
@@ -1076,8 +1082,9 @@ impl PeerMachine {
             }
             PromotionResult::CrossConnectionLost { .. } => {
                 let mut actions = Vec::new();
-                if let Some(idx) = self.our_index.take() {
+                if let Some(idx) = self.conn.our_index() {
                     actions.push(PeerAction::FreeIndex { index: idx });
+                    self.conn.clear_our_index();
                 }
                 self.state = PeerState::Failed {
                     reason: FailReason::HandshakeFailed,
@@ -1088,7 +1095,7 @@ impl PeerMachine {
     }
 
     fn register_current_index(&self) -> Vec<PeerAction> {
-        match self.our_index {
+        match self.conn.our_index() {
             Some(idx) => vec![PeerAction::RegisterDecryptSession { index: idx }],
             None => Vec::new(),
         }
@@ -1179,8 +1186,11 @@ impl PeerMachine {
                 // Initiator cutover: swap to the pending epoch, register the new
                 // index, open the drain window. Slot-rotation mechanics stay in
                 // active.rs; the machine emits the action sequence.
-                self.draining_index = self.our_index;
-                self.our_index = self.rekey_our_index.take();
+                self.draining_index = self.conn.our_index();
+                match self.rekey_our_index.take() {
+                    Some(idx) => self.conn.set_our_index(idx),
+                    None => self.conn.clear_our_index(),
+                }
                 self.rekey_in_progress = false;
                 self.state = PeerState::Maintaining {
                     addr: peer,
@@ -1189,7 +1199,7 @@ impl PeerMachine {
                 let mut actions = vec![PeerAction::SwapSendState {
                     epoch: self.remote_epoch.unwrap_or_default(),
                 }];
-                if let Some(idx) = self.our_index {
+                if let Some(idx) = self.conn.our_index() {
                     actions.push(PeerAction::RegisterDecryptSession { index: idx });
                 }
                 actions.push(PeerAction::SetTimer {
@@ -1332,7 +1342,7 @@ impl PeerMachine {
         }
         // `InvalidateSendState` maps to the executor's `remove_active_peer`, which
         // unregisters the decrypt worker by the REAL current index. The machine's
-        // shadow `our_index` is deliberately NOT used to unregister here: it
+        // tracked carrier index is deliberately NOT used to unregister here: it
         // can drift to a reused index and wrongly unregister ANOTHER peer's worker
         // session. `TeardownConnectedUdp` is inert (the old reap had no
         // connected-UDP teardown, so inert is neutral); `ReportLost` drives the
@@ -1454,8 +1464,9 @@ impl PeerMachine {
             msg: disconnect_frame(reason),
         }];
         actions.push(PeerAction::InvalidateSendState);
-        if let Some(idx) = self.our_index.take() {
+        if let Some(idx) = self.conn.our_index() {
             actions.push(PeerAction::UnregisterDecryptSession { index: idx });
+            self.conn.clear_our_index();
         }
         actions.push(PeerAction::TeardownConnectedUdp);
         // No ReportLost on operator Requested.
@@ -1741,7 +1752,7 @@ mod tests {
             kind: MaintainKind::Rekey(RekeyPhase::PendingCutover),
         };
         m.rekey_our_index = Some(SessionIndex::new(0x2222));
-        m.our_index = Some(SessionIndex::new(0x1111));
+        m.conn.set_our_index(SessionIndex::new(0x1111));
         m.remote_epoch = Some([9u8; 8]);
         m.session_established_at_ms = 0;
 
@@ -1953,7 +1964,7 @@ mod tests {
         let peer_addr = *peer.node_addr();
         let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
         // Existing peer at a different epoch -> restart.
-        m.our_index = Some(SessionIndex::new(0xDEAD));
+        m.conn.set_our_index(SessionIndex::new(0xDEAD));
         let our = *peer_identity().node_addr();
         let mut est = est_new_peer(our);
         est.has_existing_peer = true;
@@ -2085,7 +2096,7 @@ mod tests {
             la.iter()
                 .any(|a| matches!(a, PeerAction::PromoteToActive { .. }))
         );
-        let loser_index = loser.our_index;
+        let loser_index = loser.our_index();
         let lf = loser.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::CrossConnectionLost {
@@ -2310,7 +2321,6 @@ mod tests {
             phase: HandshakePhase::SentMsg1,
         };
         m2.conn.set_our_index(SessionIndex::new(0x2222)); // outbound index
-        m2.our_index = Some(SessionIndex::new(0x1111)); // old inbound index
         let out_swap = OutboundSnapshot {
             has_existing_peer: true,
             our_outbound_wins: true,
@@ -2332,7 +2342,7 @@ mod tests {
             PeerAction::FreeIndex { .. } | PeerAction::RegisterDecryptSession { .. }
         )));
         // The decision arm leaves the machine untouched: still Handshaking,
-        // our_index unchanged.
+        // the carrier's outbound index unchanged.
         assert_eq!(
             m2.state(),
             PeerState::Handshaking {
@@ -2340,7 +2350,7 @@ mod tests {
                 phase: HandshakePhase::SentMsg1,
             }
         );
-        assert_eq!(m2.our_index(), Some(SessionIndex::new(0x1111)));
+        assert_eq!(m2.our_index(), Some(SessionIndex::new(0x2222)));
 
         // Cross-connection KEEP: our outbound loses -> decision only; the
         // shell's inline resolution frees the unused outbound index.
@@ -2377,32 +2387,33 @@ mod tests {
                 phase: HandshakePhase::SentMsg1,
             }
         );
-        assert_eq!(m3.our_index(), None);
+        assert_eq!(m3.our_index(), Some(SessionIndex::new(0x3333)));
     }
 
-    // ---- Test 7b: dial-persisted outbound promote leaves our_index unset ---
-    // An outbound machine persisted at DIAL (`new_outbound`, `Discovered`, with
-    // `conn.our_index` UNSET — the shell owns the index on its own
-    // `PeerConnection`, never on the machine) must, on promote via msg2, end with
-    // `our_index == None`, exactly as the pre-persistence transient did. The
-    // guard: a subsequent inbound restart then emits NO
-    // `UnregisterDecryptSession` (contrast `restart_override`, whose machine has
-    // `our_index == Some`). A leaked `Some(dial_index)` here would wrongly
-    // unregister — on index reuse, ANOTHER peer's — worker session; keeping the
-    // field `None` is the Model-B dial-persistence neutrality property.
+    // ---- Test 7b: dial-persisted outbound promote keeps the carrier index ---
+    // An outbound machine persisted at DIAL carries the allocated index on its
+    // surviving carrier (the shell writes it at msg1 preparation). On promote via
+    // msg2 the machine keeps that index, so `our_index()` reads `Some(dial_index)`
+    // through Established. A synthetic `step(InboundMsg1)` restart driven onto this
+    // map-resident machine then unregisters that index — but this is a TEST-ONLY
+    // construction: production handles inbound msg1 on a FRESH `new_inbound`
+    // machine (`handle_msg1`), never driving the promoted outbound machine through
+    // `inbound_msg1`, so the unregister never fires in production.
     #[test]
-    fn dial_persisted_outbound_promote_no_restart_unregister() {
+    fn dial_persisted_outbound_promote_keeps_carrier_index() {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
         let our = *peer_identity().node_addr();
+        let dial_index = SessionIndex::new(0x55AA);
 
-        // Persisted at dial: Discovered, conn.our_index deliberately NOT set.
+        // Persisted at dial: Discovered, with the carrier index written by the
+        // shell at msg1 preparation.
         let mut m = PeerMachine::new_outbound(LinkId::new(1), peer, 0);
-        assert_eq!(m.our_index(), None);
+        m.conn.set_our_index(dial_index);
+        assert_eq!(m.our_index(), Some(dial_index));
 
-        // Promote via msg2 from Discovered (the production path — the former
-        // transient was likewise stepped from `new_outbound` without a state set).
+        // Promote via msg2 from Discovered.
         let out = OutboundSnapshot {
             has_existing_peer: false,
             our_outbound_wins: false,
@@ -2429,13 +2440,9 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(
-            m.our_index(),
-            None,
-            "outbound promote must leave our_index unset"
-        );
+        assert_eq!(m.our_index(), Some(dial_index));
 
-        // Drive promotion to Established (from Discovered, as in production).
+        // Drive promotion to Established.
         let _ = m.step(
             PeerEvent::PromotionResolved {
                 result: PromotionResult::Promoted(peer_addr),
@@ -2444,10 +2451,12 @@ mod tests {
             &mut alloc,
         );
         assert_eq!(m.state(), PeerState::Established { addr: peer_addr });
-        assert_eq!(m.our_index(), None);
+        assert_eq!(m.our_index(), Some(dial_index));
 
-        // A subsequent inbound restart (peer restart, new epoch) must NOT emit
-        // UnregisterDecryptSession, because our_index is None.
+        // A synthetic inbound restart (peer restart, new epoch) driven onto this
+        // map-resident machine unregisters the carrier index. Test-only: production
+        // builds a fresh `new_inbound` machine for inbound msg1, so the promoted
+        // outbound machine is never driven through this path.
         let mut est = est_new_peer(our);
         est.has_existing_peer = true;
         est.existing_peer_epoch = Some([1u8; 8]);
@@ -2462,10 +2471,11 @@ mod tests {
             &mut alloc,
         );
         assert!(
-            !restart
-                .iter()
-                .any(|a| matches!(a, PeerAction::UnregisterDecryptSession { .. })),
-            "no UnregisterDecryptSession when the promoted outbound machine's our_index is None"
+            restart.iter().any(|a| matches!(
+                a,
+                PeerAction::UnregisterDecryptSession { index } if *index == dial_index
+            )),
+            "synthetic restart unregisters the carrier index (test-only path)"
         );
         assert!(
             restart.iter().any(|a| matches!(
@@ -2747,7 +2757,7 @@ mod tests {
         let addr = *id.node_addr();
         let mut m = PeerMachine::new_outbound(LinkId::new(1), id, 0);
         m.state = PeerState::Active { addr };
-        m.our_index = Some(SessionIndex::new(0x4242));
+        m.conn.set_our_index(SessionIndex::new(0x4242));
 
         let hb = m.step(PeerEvent::HeartbeatDue, 1_000, &mut alloc);
         assert_eq!(
@@ -2797,7 +2807,7 @@ mod tests {
             kind: MaintainKind::Rekey(RekeyPhase::PendingCutover),
         };
         m.rekey_our_index = Some(SessionIndex::new(0x2222));
-        m.our_index = Some(SessionIndex::new(0x1111));
+        m.conn.set_our_index(SessionIndex::new(0x1111));
         m.remote_epoch = Some([9u8; 8]);
 
         // Consume the shell-decided Cutover: identical sequence to Test 1.
