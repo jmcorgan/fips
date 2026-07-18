@@ -10,7 +10,7 @@
 use crate::PeerIdentity;
 use crate::noise::{self, NoiseSession};
 use crate::proto::fmp::ConnectionState;
-use crate::transport::{LinkDirection, LinkId, TransportAddr, TransportId};
+use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use std::fmt;
 
@@ -91,29 +91,9 @@ impl PeerConnection {
 
     // === Accessors (delegated to the pure ConnectionState) ===
 
-    /// Get the link ID.
-    pub fn link_id(&self) -> LinkId {
-        self.state.link_id()
-    }
-
-    /// Get the connection direction.
-    pub fn direction(&self) -> LinkDirection {
-        self.state.direction()
-    }
-
     /// Get the expected/learned peer identity, if known.
     pub fn expected_identity(&self) -> Option<&PeerIdentity> {
         self.state.expected_identity()
-    }
-
-    /// Check if this is an outbound connection.
-    pub fn is_outbound(&self) -> bool {
-        self.state.is_outbound()
-    }
-
-    /// Check if this is an inbound connection.
-    pub fn is_inbound(&self) -> bool {
-        self.state.is_inbound()
     }
 
     /// When the connection started. Retained only to seed a control machine's
@@ -166,16 +146,6 @@ impl PeerConnection {
         self.state.set_transport_id(id);
     }
 
-    /// Get the source address (if known).
-    pub fn source_addr(&self) -> Option<&TransportAddr> {
-        self.state.source_addr()
-    }
-
-    /// Set the source address.
-    pub fn set_source_addr(&mut self, addr: TransportAddr) {
-        self.state.set_source_addr(addr);
-    }
-
     // === Epoch Accessors ===
 
     /// Get the remote peer's startup epoch (available after handshake).
@@ -210,6 +180,10 @@ impl PeerConnection {
     /// Mutable access to the pure bookkeeping, so the control machine's
     /// handshake operations can record their results here as well as on the
     /// surviving carrier.
+    pub(crate) fn state(&self) -> &ConnectionState {
+        &self.state
+    }
+
     pub(crate) fn state_mut(&mut self) -> &mut ConnectionState {
         &mut self.state
     }

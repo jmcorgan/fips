@@ -393,7 +393,7 @@ impl Node {
                     .map(|id| id.node_addr() == peer_node_addr)
                     .unwrap_or(false)
                     && machine.conn_transport_id() == Some(transport_id)
-                    && conn.source_addr() == Some(remote_addr)
+                    && machine.conn_source_addr() == Some(remote_addr)
             })
         }) || self.peering.pending_connects.iter().any(|pending| {
             pending.peer_identity.node_addr() == peer_node_addr
@@ -642,8 +642,11 @@ impl Node {
                 .and_then(|machine| machine.leg_mut())
                 .expect("dial-time machine carries the connection");
             conn.set_our_index(our_index);
-            conn.set_source_addr(remote_addr.clone());
         }
+        self.peer_machines
+            .get_mut(&link_id)
+            .expect("dial-time machine carries the connection")
+            .set_conn_source_addr(remote_addr.clone());
 
         // Build wire format msg1: [0x01][sender_idx:4 LE][noise_msg1:82]
         let wire_msg1 = build_msg1(our_index, &noise_msg1);
@@ -947,13 +950,14 @@ impl Node {
                             let now_ms = Self::now_ms();
                             let stale: Vec<LinkId> = self
                                 .connections()
-                                .filter_map(|(_, machine)| machine.leg())
-                                .filter(|conn| {
-                                    conn.expected_identity()
+                                .filter(|(_, machine)| {
+                                    machine
+                                        .leg()
+                                        .and_then(|conn| conn.expected_identity())
                                         .map(|id| id.node_addr() == &peer_addr)
                                         .unwrap_or(false)
                                 })
-                                .map(|conn| conn.link_id())
+                                .map(|(_, machine)| machine.link_id())
                                 .collect();
                             for link_id in stale {
                                 self.cleanup_stale_connection(link_id, now_ms);

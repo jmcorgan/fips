@@ -138,8 +138,7 @@ async fn test_try_peer_addresses_races_all_concrete_udp_candidates() {
 
     let mut addrs = node
         .connections()
-        .filter_map(|(_, machine)| machine.leg())
-        .filter_map(|conn| conn.source_addr().and_then(|addr| addr.as_str()))
+        .filter_map(|(_, machine)| machine.conn_source_addr().and_then(|addr| addr.as_str()))
         .collect::<Vec<_>>();
     addrs.sort();
     assert_eq!(addrs, vec!["127.0.0.1:10", "127.0.0.1:9"]);
@@ -1346,9 +1345,8 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
     assert_eq!(node.connection_count(), 1);
     assert_eq!(
         node.connections()
-            .filter_map(|(_, machine)| machine.leg())
             .next()
-            .and_then(|conn| conn.source_addr()),
+            .and_then(|(_, machine)| machine.conn_source_addr()),
         Some(&new_addr)
     );
     let active = node.get_peer(&peer_node_addr).unwrap();
@@ -2474,4 +2472,79 @@ async fn test_failed_msg1_preparation_unwinds_the_dial_machine() {
         "a failed msg1 preparation must unwind the dial-time machine"
     );
     assert_eq!(node.connection_count(), 0);
+}
+
+/// The link, direction, and peer address that promotion and the operator view
+/// read now come from the control machine rather than the pending connection.
+/// A machine's direction is seeded at construction and must match the side that
+/// actually opened the link, and its address must be populated by the time
+/// promotion needs it.
+///
+/// This covers the two shapes that seed a carrier independently: the dial and
+/// an accepted inbound message 1. The cross-connection winner derives both
+/// values from a carrier one of those two already seeded, so it has nothing
+/// separate to pin.
+#[tokio::test]
+async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
+    // Outbound: the dial builds the machine, msg1 preparation fills it in.
+    let mut node = make_node();
+    let link_id = LinkId::new(1);
+    let transport_id = TransportId::new(1);
+    let remote_addr = TransportAddr::from_string("127.0.0.1:5000");
+    let peer_identity = make_peer_identity();
+    node.peer_machines.insert(
+        link_id,
+        PeerMachine::new_outbound(link_id, peer_identity, 1000),
+    );
+    node.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)
+        .unwrap();
+
+    let machine = node.peer_machines.get(&link_id).unwrap();
+    assert_eq!(machine.link_id(), link_id);
+    assert!(machine.conn_is_outbound(), "a dial is outbound");
+    assert!(!machine.conn_is_inbound());
+    assert_eq!(machine.conn_direction(), LinkDirection::Outbound);
+    assert_eq!(
+        machine.conn_source_addr(),
+        Some(&remote_addr),
+        "the dialled address must reach the surviving carrier"
+    );
+
+    // Inbound: msg1 builds the machine from the packet.
+    let mut responder = make_node();
+    let initiator = make_node();
+    let responder_identity = PeerIdentity::from_pubkey_full(responder.identity().pubkey_full());
+    let mut initiator_leg = outbound_leg(LinkId::new(9), responder_identity, 1000);
+    let noise_msg1 = initiator_leg
+        .start_handshake(
+            initiator.identity().keypair(),
+            initiator.startup_epoch(),
+            1000,
+        )
+        .unwrap();
+    let inbound_addr = TransportAddr::from_string("127.0.0.1:6000");
+    let packet = ReceivedPacket::with_timestamp(
+        TransportId::new(1),
+        inbound_addr.clone(),
+        crate::proto::fmp::wire::build_msg1(SessionIndex::new(7), &noise_msg1),
+        1000,
+    );
+    responder.handle_msg1(packet).await;
+
+    // The responder completes at msg1 and promotes, so the machine survives as
+    // the active peer's control machine — the carrier outlives the connection.
+    let (link, machine) = responder
+        .peer_machines
+        .iter()
+        .next()
+        .expect("msg1 leaves a control machine behind");
+    assert!(machine.conn_is_inbound(), "an accepted msg1 is inbound");
+    assert!(!machine.conn_is_outbound());
+    assert_eq!(machine.conn_direction(), LinkDirection::Inbound);
+    assert_eq!(
+        machine.conn_source_addr(),
+        Some(&inbound_addr),
+        "the sender's address must reach the surviving carrier"
+    );
+    assert_eq!(machine.link_id(), *link);
 }

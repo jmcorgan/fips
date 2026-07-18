@@ -283,6 +283,9 @@ impl Node {
         // so the promotion hand-off reads it from the surviving carrier,
         // matching the connection's own inbound seed.
         machine.set_conn_transport_id(packet.transport_id);
+        // The inbound connection is constructed carrying the peer's address;
+        // seed the surviving carrier with it at the same point.
+        machine.set_conn_source_addr(packet.remote_addr.clone());
         machine.set_leg(conn);
 
         let our_keypair = self.identity().keypair();
@@ -1041,10 +1044,10 @@ impl Node {
                 return;
             }
 
+            machine.set_conn_source_addr(packet.remote_addr.clone());
             let conn = machine
                 .leg_mut()
                 .expect("pending connection present for msg2 completion");
-            conn.set_source_addr(packet.remote_addr.clone());
 
             let peer_identity = match conn.expected_identity() {
                 Some(id) => *id,
@@ -1398,6 +1401,8 @@ impl Node {
             .ok_or(NodeError::ConnectionNotFound(link_id))?;
         let carrier_their_index = machine.conn_their_index();
         let carrier_transport_id = machine.conn_transport_id();
+        let carrier_source_addr = machine.conn_source_addr().cloned();
+        let carrier_is_outbound = machine.conn_is_outbound();
         let link_stats = machine.conn_link_stats().clone();
 
         // Verify handshake is complete and extract session
@@ -1424,17 +1429,14 @@ impl Node {
             link_id,
             reason: "missing transport_id".into(),
         })?;
-        let current_addr = connection
-            .source_addr()
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing source_addr".into(),
-            })?
-            .clone();
+        let current_addr = carrier_source_addr.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing source_addr".into(),
+        })?;
         let remote_epoch = connection.remote_epoch();
 
         let peer_node_addr = *verified_identity.node_addr();
-        let is_outbound = connection.is_outbound();
+        let is_outbound = carrier_is_outbound;
 
         // Check for cross-connection
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
@@ -1566,13 +1568,14 @@ impl Node {
             // the 30s handshake timeout.
             let pending_to_same_peer: Vec<LinkId> = self
                 .connections()
-                .filter_map(|(_, machine)| machine.leg())
-                .filter(|conn| {
-                    conn.expected_identity()
+                .filter(|(_, machine)| {
+                    machine
+                        .leg()
+                        .and_then(|conn| conn.expected_identity())
                         .map(|id| *id.node_addr() == peer_node_addr)
                         .unwrap_or(false)
                 })
-                .map(|conn| conn.link_id())
+                .map(|(_, machine)| machine.link_id())
                 .collect();
 
             for pending_link_id in &pending_to_same_peer {

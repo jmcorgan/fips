@@ -1978,16 +1978,17 @@ impl Node {
         // --- connections (show_connections) ---
         let connection_rows: Vec<snap::ConnectionRow> = self
             .connections()
-            .filter_map(|(_, machine)| machine.leg())
-            .map(|conn| snap::ConnectionRow {
-                link_id: conn.link_id().as_u64(),
-                direction: format!("{}", conn.direction()),
-                handshake_state: self.connection_handshake_state(conn.link_id()).to_string(),
-                started_at_ms: self.connection_started_at(conn.link_id()),
-                last_activity_ms: self.connection_last_activity(conn.link_id()),
-                resend_count: self.connection_resend_count(conn.link_id()),
+            .map(|(_, machine)| snap::ConnectionRow {
+                link_id: machine.link_id().as_u64(),
+                direction: format!("{}", machine.conn_direction()),
+                handshake_state: self
+                    .connection_handshake_state(machine.link_id())
+                    .to_string(),
+                started_at_ms: self.connection_started_at(machine.link_id()),
+                last_activity_ms: self.connection_last_activity(machine.link_id()),
+                resend_count: self.connection_resend_count(machine.link_id()),
                 expected_peer: self
-                    .connection_expected_identity(conn.link_id())
+                    .connection_expected_identity(machine.link_id())
                     .map(|id| id.npub()),
             })
             .collect();
@@ -2426,7 +2427,7 @@ impl Node {
     /// than through the dial or inbound-msg1 paths, which build the machine
     /// themselves.
     pub fn add_connection(&mut self, connection: PeerConnection) -> Result<(), NodeError> {
-        let link_id = connection.link_id();
+        let link_id = connection.state().link_id();
 
         if self
             .peer_machines
@@ -2444,8 +2445,8 @@ impl Node {
 
         let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
             let now = connection.started_at();
-            match connection.expected_identity() {
-                Some(identity) if connection.is_outbound() => {
+            match connection.state().expected_identity() {
+                Some(identity) if connection.state().is_outbound() => {
                     PeerMachine::new_outbound(link_id, *identity, now)
                 }
                 _ => PeerMachine::new_inbound(link_id, now),
@@ -2459,6 +2460,9 @@ impl Node {
         }
         if let Some(tid) = connection.transport_id() {
             machine.set_conn_transport_id(tid);
+        }
+        if let Some(addr) = connection.state().source_addr() {
+            machine.set_conn_source_addr(addr.clone());
         }
         machine.set_leg(connection);
         Ok(())
@@ -2492,9 +2496,7 @@ impl Node {
         if let Some(id) = seed.transport_id {
             connection.set_transport_id(id);
         }
-        if let Some(addr) = seed.source_addr {
-            connection.set_source_addr(addr);
-        }
+        let seeded_source_addr = seed.source_addr.clone();
         if let Some(index) = seed.our_index {
             connection.set_our_index(index);
         }
@@ -2518,8 +2520,8 @@ impl Node {
 
         let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
             let now = connection.started_at();
-            match connection.expected_identity() {
-                Some(identity) if connection.is_outbound() => {
+            match connection.state().expected_identity() {
+                Some(identity) if connection.state().is_outbound() => {
                     PeerMachine::new_outbound(link_id, *identity, now)
                 }
                 _ => PeerMachine::new_inbound(link_id, now),
@@ -2530,6 +2532,9 @@ impl Node {
         }
         if let Some(tid) = connection.transport_id() {
             machine.set_conn_transport_id(tid);
+        }
+        if let Some(addr) = seeded_source_addr {
+            machine.set_conn_source_addr(addr);
         }
         machine.set_leg(connection);
         Ok(())

@@ -27,9 +27,9 @@ impl LifecycleView for Node {
                             timers.contains_key(&TimerKind::HandshakeTimeout)
                         }))
             })
-            .map(|(link_id, _machine, conn)| ConnSnapshot {
+            .map(|(link_id, machine, conn)| ConnSnapshot {
                 link: *link_id,
-                is_outbound: conn.is_outbound(),
+                is_outbound: machine.conn_is_outbound(),
                 retry_addr: conn.expected_identity().map(|id| *id.node_addr()),
                 resend_count: 0,
                 msg1: Vec::new(),
@@ -77,8 +77,12 @@ impl Node {
                         .peer_machines
                         .get(&link)
                         .is_some_and(|machine| machine.is_failed());
-                    if let Some(conn) = self.leg(&link) {
-                        let direction = conn.direction();
+                    if let Some(machine) = self
+                        .peer_machines
+                        .get(&link)
+                        .filter(|machine| machine.leg().is_some())
+                    {
+                        let direction = machine.conn_direction();
                         if is_failed {
                             debug!(
                                 link_id = %link,
@@ -197,7 +201,11 @@ impl Node {
                 .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms));
             let (reap, retry_peer) = match self.leg(&link) {
                 Some(conn) if timed_out => {
-                    let retry_peer = if conn.is_outbound() {
+                    let retry_peer = if self
+                        .peer_machines
+                        .get(&link)
+                        .is_some_and(|machine| machine.conn_is_outbound())
+                    {
                         conn.expected_identity().map(|id| *id.node_addr())
                     } else {
                         None
@@ -314,17 +322,14 @@ impl Node {
                 continue;
             };
 
-            let (transport_id, remote_addr) = match self.leg(&link) {
-                Some(conn) => match (
-                    self.peer_machines
-                        .get(&link)
-                        .and_then(|machine| machine.conn_transport_id()),
-                    conn.source_addr(),
-                ) {
-                    (Some(tid), Some(addr)) => (tid, addr.clone()),
-                    _ => continue,
-                },
-                None => continue,
+            let (transport_id, remote_addr) = match self.peer_machines.get(&link) {
+                Some(machine) if machine.leg().is_some() => {
+                    match (machine.conn_transport_id(), machine.conn_source_addr()) {
+                        (Some(tid), Some(addr)) => (tid, addr.clone()),
+                        _ => continue,
+                    }
+                }
+                _ => continue,
             };
 
             let sent = if let Some(transport) = self.transports.get(&transport_id) {

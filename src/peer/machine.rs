@@ -573,9 +573,10 @@ impl PeerMachine {
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
         let msg1 = {
+            let direction = self.conn.direction();
             let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
 
-            if leg.direction() != LinkDirection::Outbound {
+            if direction != LinkDirection::Outbound {
                 return Err(NoiseError::WrongState {
                     expected: "outbound connection".to_string(),
                     got: "inbound connection".to_string(),
@@ -613,9 +614,10 @@ impl PeerMachine {
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
         let (msg2, learned_identity, remote_epoch) = {
+            let direction = self.conn.direction();
             let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
 
-            if leg.direction() != LinkDirection::Inbound {
+            if direction != LinkDirection::Inbound {
                 return Err(NoiseError::WrongState {
                     expected: "inbound connection".to_string(),
                     got: "outbound connection".to_string(),
@@ -803,6 +805,39 @@ impl PeerMachine {
     /// carrier, mirroring the leg's responder write.
     pub(crate) fn set_conn_handshake_msg2(&mut self, msg2: Vec<u8>) {
         self.conn.set_handshake_msg2(msg2);
+    }
+
+    /// The link this machine controls.
+    pub(crate) fn link_id(&self) -> LinkId {
+        self.link
+    }
+
+    /// Which side opened this connection, read from the surviving carrier.
+    /// Seeded at construction: an outbound machine carries an outbound
+    /// connection state and an inbound machine an inbound one.
+    pub(crate) fn conn_direction(&self) -> LinkDirection {
+        self.conn.direction()
+    }
+
+    /// Whether we opened this connection.
+    pub(crate) fn conn_is_outbound(&self) -> bool {
+        self.conn.is_outbound()
+    }
+
+    /// Whether the peer opened this connection.
+    pub(crate) fn conn_is_inbound(&self) -> bool {
+        self.conn.is_inbound()
+    }
+
+    /// The peer's address on this link, read from the surviving carrier.
+    /// Written at the same three points the connection's own copy was: the
+    /// inbound seed, the outbound dial, and message-2 completion.
+    pub(crate) fn conn_source_addr(&self) -> Option<&TransportAddr> {
+        self.conn.source_addr()
+    }
+
+    pub(crate) fn set_conn_source_addr(&mut self, addr: TransportAddr) {
+        self.conn.set_source_addr(addr);
     }
 
     /// Peer session index of the surviving carrier — the source for the
@@ -3202,8 +3237,8 @@ mod tests {
         let identity = make_peer_identity();
         let conn = outbound_leg(LinkId::new(1), identity, 1000);
 
-        assert!(conn.leg().unwrap().is_outbound());
-        assert!(!conn.leg().unwrap().is_inbound());
+        assert!(conn.conn_is_outbound());
+        assert!(!conn.conn_is_inbound());
         assert!(!conn.has_session());
         assert!(conn.leg().unwrap().expected_identity().is_some());
         assert_eq!(conn.leg().unwrap().started_at(), 1000);
@@ -3213,8 +3248,8 @@ mod tests {
     fn test_inbound_connection() {
         let conn = inbound_leg(LinkId::new(2), 2000);
 
-        assert!(conn.leg().unwrap().is_inbound());
-        assert!(!conn.leg().unwrap().is_outbound());
+        assert!(conn.conn_is_inbound());
+        assert!(!conn.conn_is_outbound());
         assert!(!conn.has_session());
         assert!(conn.leg().unwrap().expected_identity().is_none());
         assert_eq!(conn.leg().unwrap().started_at(), 2000);

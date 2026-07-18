@@ -868,7 +868,7 @@ async fn test_msg1_stored_for_resend() {
         .unwrap();
     conn.leg_mut().unwrap().set_our_index(our_index);
     conn.leg_mut().unwrap().set_transport_id(transport_id);
-    conn.leg_mut().unwrap().set_source_addr(remote_addr.clone());
+    conn.set_conn_source_addr(remote_addr.clone());
 
     // Build wire msg1 and store it (as initiate_peer_connection does)
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
@@ -901,7 +901,7 @@ async fn test_resend_scheduling() {
         .unwrap();
     conn.leg_mut().unwrap().set_our_index(our_index);
     conn.leg_mut().unwrap().set_transport_id(transport_id);
-    conn.leg_mut().unwrap().set_source_addr(remote_addr.clone());
+    conn.set_conn_source_addr(remote_addr.clone());
 
     // Store msg1 with first resend at now + 1000ms
     let wire_msg1 = crate::proto::fmp::wire::build_msg1(our_index, &noise_msg1);
@@ -988,7 +988,7 @@ async fn test_handshake_timeout_drive() {
         .unwrap();
     conn.leg_mut().unwrap().set_our_index(our_index);
     conn.leg_mut().unwrap().set_transport_id(transport_id);
-    conn.leg_mut().unwrap().set_source_addr(remote_addr.clone());
+    conn.set_conn_source_addr(remote_addr.clone());
 
     let link = Link::connectionless(
         link_id,
