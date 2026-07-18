@@ -162,6 +162,57 @@ pub(crate) enum HandshakePhase {
     SentMsg2,
 }
 
+/// Map a lifecycle state to the operator-visible pending-connection handshake
+/// string. Total over `PeerState`; byte-identical to the strings the deleted
+/// leg `HandshakeState` `Display` produced for every (leg, machine) pairing that
+/// rests in the pending-connection view. On XX three arms are
+/// production-reachable in that view (verified against the pre-collapse leg
+/// display):
+/// - `Handshaking{SentMsg1}` → `"sent_msg1"` (outbound identified leg).
+/// - `Handshaking{SentMsg2}` → `"received_msg1"` (the inbound responder leg,
+///   which parks at `SentMsg2` after replying to msg1 while the deleted leg
+///   phase displayed `received_msg1` — a direction-aware synthesis with no leg
+///   twin).
+/// - `Discovered` → `"sent_msg1"` (GAP A: the anonymous-outbound leg rests with
+///   its machine parked at `Discovered` while its leg is already at `SentMsg1`;
+///   the anon path sends msg1 inline and dispatches no handshake-start event, so
+///   advancing the machine to `Handshaking{SentMsg1}` here would arm a retransmit
+///   timer the anon leg does not have — the overload is the neutral choice).
+///
+/// The `send_failed` → `"failed"` override is applied by the caller
+/// ([`displayed_handshake_state`](PeerMachine::displayed_handshake_state)). The
+/// remaining arms are kept total for a complete mapping and are not reachable in
+/// the view.
+fn handshake_state_str(state: PeerState) -> &'static str {
+    match state {
+        PeerState::Handshaking {
+            phase: HandshakePhase::Initial,
+            ..
+        } => "initial",
+        PeerState::Handshaking {
+            phase: HandshakePhase::SentMsg1,
+            ..
+        } => "sent_msg1",
+        PeerState::Handshaking {
+            phase: HandshakePhase::SentMsg2,
+            ..
+        } => "received_msg1",
+        // GAP A: the anonymous-outbound leg rests in the view with its machine
+        // parked at `Discovered` while the leg itself is at `SentMsg1`, so it
+        // displayed `"sent_msg1"` before the collapse. The only in-view
+        // `Discovered`-with-leg case is this anon leg (identified dials leave
+        // `Discovered` atomically within their handler before any tick), so the
+        // overload preserves display parity byte-for-byte.
+        PeerState::Discovered => "sent_msg1",
+        PeerState::Established { .. }
+        | PeerState::Active { .. }
+        | PeerState::Maintaining { .. }
+        | PeerState::Closing { .. } => "complete",
+        PeerState::Failed { .. } => "failed",
+        PeerState::Connecting { .. } | PeerState::Closed { .. } => "initial",
+    }
+}
+
 /// Which maintenance sub-machine `Maintaining` is running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MaintainKind {
@@ -461,6 +512,13 @@ pub(crate) struct PeerMachine {
     conn: ConnectionState,
     /// Remote startup epoch (establish-path-only; NOT in send-state).
     remote_epoch: Option<[u8; 8]>,
+    /// A stored-handshake send failure was observed on this leg. The failure is
+    /// carried as a flag (not a `PeerState::Failed` transition) so retransmit
+    /// eligibility (`is_handshaking_sent_msg1`) survives until the
+    /// stale-connection sweep reclaims the leg. It drives both `is_failed`
+    /// (reaping) and the displayed handshake state (`"failed"`), reproducing the
+    /// pre-collapse leg `is_failed`/display signal byte-for-byte.
+    send_failed: bool,
 
     // --- rekey negotiation sub-state (control tier; NOT the pending send slot) ---
     rekey_in_progress: bool,
@@ -509,6 +567,7 @@ impl PeerMachine {
                 None => ConnectionState::outbound_anonymous(link, now),
             },
             remote_epoch: None,
+            send_failed: false,
             rekey_in_progress: false,
             rekey_our_index: None,
             rekey_msg1: None,
@@ -537,6 +596,7 @@ impl PeerMachine {
             leg: None,
             conn: ConnectionState::inbound(link, now),
             remote_epoch: None,
+            send_failed: false,
             rekey_in_progress: false,
             rekey_our_index: None,
             rekey_msg1: None,
@@ -605,6 +665,7 @@ impl PeerMachine {
             leg: None,
             conn,
             remote_epoch,
+            send_failed: false,
             rekey_in_progress: false,
             rekey_our_index: None,
             rekey_msg1: None,
@@ -706,6 +767,41 @@ impl PeerMachine {
                 ..
             }
         )
+    }
+
+    /// Whether this peer's handshake has failed. The sole failure carrier now
+    /// that the leg's phase enum is gone: a terminal `PeerState::Failed`
+    /// (hard crypto/transport/ACL failures) OR the `send_failed` flag (a stored
+    /// handshake-initiation send failure that deliberately keeps the machine at
+    /// `Handshaking{SentMsg1}`). The stale-connection sweep reads this to reclaim
+    /// the leg, exactly as it read the leg's `is_failed` before.
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self.state, PeerState::Failed { .. }) || self.send_failed
+    }
+
+    /// The operator-visible handshake-state string for the pending-connection
+    /// view, derived from the machine phase. Byte-identical to the strings the
+    /// leg's `HandshakeState` `Display` produced before the phase collapsed onto
+    /// the machine. A `send_failed` leg renders `"failed"` while its phase stays
+    /// `SentMsg1`, matching the pre-collapse leg display.
+    pub(crate) fn displayed_handshake_state(&self) -> &'static str {
+        if self.send_failed {
+            return "failed";
+        }
+        handshake_state_str(self.state)
+    }
+
+    /// Record a handshake failure that the shell observed on the leg (e.g. a
+    /// `complete_handshake` that rejected msg2), WITHOUT leaving the current
+    /// handshake phase. Mirrors the `HandshakeSendFailed` carve-out: the failure
+    /// is carried as `send_failed`, so the machine PHASE is unchanged (matching
+    /// the pre-collapse behavior, where the shell marked only the leg failed and
+    /// left the machine in place) while `is_failed`/display report the failure.
+    /// The stale-connection sweep reclaims the leg via
+    /// [`is_failed`](Self::is_failed) at the next tick, before any projection or
+    /// resend.
+    pub(crate) fn mark_send_failed(&mut self) {
+        self.send_failed = true;
     }
 
     /// The crystallized node address, if identity is known.
@@ -849,8 +945,11 @@ impl PeerMachine {
     /// actions are emitted.
     fn on_handshake_send_failed(&mut self) -> Vec<PeerAction> {
         if let Some(leg) = self.leg.as_mut() {
+            // Drop the leg's Noise handshake handle at the identical point as
+            // before; the failure *state* is recorded on the machine.
             leg.mark_failed();
         }
+        self.send_failed = true;
         Vec::new()
     }
 
@@ -2872,7 +2971,8 @@ mod tests {
         );
         m.set_leg(PeerConnection::outbound(LinkId::new(1), peer, 100));
         assert!(m.is_handshaking_sent_msg1());
-        assert!(!m.leg().expect("leg embedded").is_failed());
+        assert!(!m.is_failed());
+        assert_eq!(m.displayed_handshake_state(), "sent_msg1");
 
         let actions = m.step(PeerEvent::HandshakeSendFailed, 200, &mut alloc);
         assert_eq!(actions, Vec::new(), "HandshakeSendFailed emits no actions");
@@ -2881,16 +2981,94 @@ mod tests {
             "retransmit eligibility survives a send failure"
         );
         assert!(
-            m.leg().expect("leg retained").is_failed(),
-            "the leg carries the failed mark the sweep reads"
+            m.is_failed(),
+            "the machine carries the failed mark the sweep reads"
+        );
+        assert_eq!(
+            m.displayed_handshake_state(),
+            "failed",
+            "the send-failed leg still displays as failed"
         );
 
-        // With no leg (e.g. after take_leg) the event is a defensive no-op.
+        // With no leg (e.g. after take_leg) the event stays a defensive no-op
+        // for the leg handle and keeps the state retransmit-eligible.
         let _ = m.take_leg();
         let actions = m.step(PeerEvent::HandshakeSendFailed, 300, &mut alloc);
         assert_eq!(actions, Vec::new());
         assert!(m.is_handshaking_sent_msg1());
         assert!(m.leg().is_none());
+    }
+
+    // ---- Test 7f: handshake_state_str is a total, byte-identical mapping ---
+    // Pins the displayed-string derivation for every `PeerState` arm against the
+    // strings the deleted leg `HandshakeState` `Display` produced.
+    #[test]
+    fn handshake_state_str_total_mapping() {
+        let link = LinkId::new(1);
+        let addr = *peer_identity().node_addr();
+
+        assert_eq!(
+            handshake_state_str(PeerState::Handshaking {
+                link,
+                phase: HandshakePhase::Initial,
+            }),
+            "initial"
+        );
+        assert_eq!(
+            handshake_state_str(PeerState::Handshaking {
+                link,
+                phase: HandshakePhase::SentMsg1,
+            }),
+            "sent_msg1"
+        );
+        assert_eq!(
+            handshake_state_str(PeerState::Handshaking {
+                link,
+                phase: HandshakePhase::SentMsg2,
+            }),
+            "received_msg1"
+        );
+
+        assert_eq!(
+            handshake_state_str(PeerState::Established { addr }),
+            "complete"
+        );
+        assert_eq!(handshake_state_str(PeerState::Active { addr }), "complete");
+        assert_eq!(
+            handshake_state_str(PeerState::Maintaining {
+                addr,
+                kind: MaintainKind::Mtu,
+            }),
+            "complete"
+        );
+        assert_eq!(
+            handshake_state_str(PeerState::Closing {
+                addr,
+                reason: CloseReason::Requested,
+            }),
+            "complete"
+        );
+
+        assert_eq!(
+            handshake_state_str(PeerState::Failed {
+                reason: FailReason::HandshakeFailed,
+            }),
+            "failed"
+        );
+
+        // GAP A: the anonymous-outbound leg rests at `Discovered` while its leg
+        // is at `SentMsg1`, so the pending-connection view displayed "sent_msg1".
+        assert_eq!(handshake_state_str(PeerState::Discovered), "sent_msg1");
+        assert_eq!(
+            handshake_state_str(PeerState::Connecting { link }),
+            "initial"
+        );
+        assert_eq!(
+            handshake_state_str(PeerState::Closed {
+                backoff_deadline_ms: 0,
+            }),
+            "initial"
+        );
     }
 
     // ---- Test 8: liveness -> LinkDeadSuspected -> ReportLost --------------

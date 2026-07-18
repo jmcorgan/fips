@@ -1,9 +1,9 @@
-//! Unit tests for the pure FMP connection state ([`ConnectionState`]) and its
-//! [`HandshakeState`] phase enum. These exercise the extracted bookkeeping
-//! directly, with no crypto involved; the crypto-driving transition behavior is
-//! covered by the shell `peer::connection` suite.
+//! Unit tests for the pure FMP connection state ([`ConnectionState`]). These
+//! exercise the extracted bookkeeping directly, with no crypto involved; the
+//! crypto-driving transition behavior is covered by the shell `peer::connection`
+//! suite, and the handshake phase itself lives on the control machine.
 
-use crate::proto::fmp::{ConnectionState, HandshakeState, NodeProfile};
+use crate::proto::fmp::{ConnectionState, NodeProfile};
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use crate::{Identity, PeerIdentity};
@@ -13,29 +13,12 @@ fn make_peer_identity() -> PeerIdentity {
 }
 
 #[test]
-fn handshake_state_predicates() {
-    assert!(HandshakeState::Initial.is_in_progress());
-    assert!(HandshakeState::SentMsg1.is_in_progress());
-    assert!(HandshakeState::ReceivedMsg1.is_in_progress());
-    assert!(!HandshakeState::Complete.is_in_progress());
-    assert!(!HandshakeState::Failed.is_in_progress());
-
-    assert!(HandshakeState::Complete.is_complete());
-    assert!(!HandshakeState::Initial.is_complete());
-
-    assert!(HandshakeState::Failed.is_failed());
-    assert!(!HandshakeState::Complete.is_failed());
-}
-
-#[test]
 fn outbound_initializes_pure_fields() {
     let identity = make_peer_identity();
     let state = ConnectionState::outbound(LinkId::new(1), identity, 1000);
 
     assert!(state.is_outbound());
     assert!(!state.is_inbound());
-    assert_eq!(state.handshake_state(), HandshakeState::Initial);
-    assert!(state.is_in_progress());
     assert!(state.expected_identity().is_some());
     assert_eq!(state.link_id(), LinkId::new(1));
     assert_eq!(state.started_at(), 1000);
@@ -53,7 +36,6 @@ fn inbound_initializes_pure_fields() {
 
     assert!(state.is_inbound());
     assert!(!state.is_outbound());
-    assert_eq!(state.handshake_state(), HandshakeState::Initial);
     assert!(state.expected_identity().is_none());
     assert_eq!(state.started_at(), 2000);
 }
@@ -112,27 +94,6 @@ fn identity_and_epoch_setters() {
 }
 
 #[test]
-fn handshake_state_advance_and_fail() {
-    let mut state = ConnectionState::outbound(LinkId::new(1), make_peer_identity(), 0);
-    assert!(state.is_in_progress());
-
-    state.set_handshake_state(HandshakeState::SentMsg1);
-    assert_eq!(state.handshake_state(), HandshakeState::SentMsg1);
-    assert!(state.is_in_progress());
-    assert!(!state.is_complete());
-
-    state.set_handshake_state(HandshakeState::Complete);
-    assert!(state.is_complete());
-    assert!(!state.is_in_progress());
-
-    state.mark_failed();
-    assert!(state.is_failed());
-    assert!(!state.is_in_progress());
-    assert!(!state.is_complete());
-    assert_eq!(state.handshake_state(), HandshakeState::Failed);
-}
-
-#[test]
 fn resend_bookkeeping() {
     let mut state = ConnectionState::outbound(LinkId::new(1), make_peer_identity(), 0);
     assert!(state.handshake_msg1().is_none());
@@ -182,7 +143,6 @@ fn outbound_anonymous_initializes_pure_fields() {
     let state = ConnectionState::outbound_anonymous(LinkId::new(5), 4000);
     assert!(state.is_outbound());
     assert!(!state.is_inbound());
-    assert_eq!(state.handshake_state(), HandshakeState::Initial);
     assert!(state.expected_identity().is_none());
     assert_eq!(state.link_id(), LinkId::new(5));
     assert_eq!(state.started_at(), 4000);

@@ -95,7 +95,7 @@ pub use cache::{CacheEntry, CacheError, CacheStats, CoordCache};
 pub use proto::fmp::{PromotionResult, cross_connection_winner};
 
 // Re-export peer types
-pub use peer::{ActivePeer, ConnectivityState, HandshakeState, PeerConnection, PeerError};
+pub use peer::{ActivePeer, ConnectivityState, PeerConnection, PeerError};
 
 // Re-export node types
 pub use node::{Node, NodeError, NodeState, UpdatePeersOutcome};

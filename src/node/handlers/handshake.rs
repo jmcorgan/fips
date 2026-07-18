@@ -640,7 +640,18 @@ impl Node {
                         error = %e,
                         "Handshake completion failed"
                     );
+                    // Drop the leg's Noise handle (byte-identical point) and
+                    // record the failure on the control machine as `send_failed`
+                    // — the failure state's new home. The machine PHASE stays
+                    // exactly where the old leg-carried failure left it
+                    // (`Handshaking{SentMsg1}`): the stale-connection sweep
+                    // reclaims the leg via the machine `is_failed()` at the next
+                    // tick, before any projection or resend, byte-identical to
+                    // the pre-collapse leg mark.
                     conn.mark_failed();
+                    if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+                        machine.mark_send_failed();
+                    }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -653,7 +664,13 @@ impl Node {
                     Ok(()) => {}
                     Err(e) => {
                         warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
+                        // Failure moves to the machine (`send_failed`); the phase
+                        // stays `Handshaking{SentMsg1}` so the sweep reclaims the
+                        // leg exactly as the pre-collapse leg mark did.
                         conn.mark_failed();
+                        if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+                            machine.mark_send_failed();
+                        }
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -741,8 +758,15 @@ impl Node {
                         error = %e,
                         "Failed to send msg3"
                     );
+                    // Failure moves to the machine (`send_failed`); the phase
+                    // stays `Handshaking{SentMsg1}` (promote has not run yet) so
+                    // the sweep reclaims the leg exactly as the pre-collapse leg
+                    // mark did.
                     if let Some(conn) = self.leg_mut(&link_id) {
                         conn.mark_failed();
+                    }
+                    if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+                        machine.mark_send_failed();
                     }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));

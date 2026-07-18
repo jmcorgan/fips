@@ -20,8 +20,8 @@
 //! - `limits.rs` — the pure connection-retry backoff math.
 //! - `state.rs` — [`ConnectionState`], the pure handshake-phase connection
 //!   bookkeeping (owned by the shell `PeerConnection` beside its Noise crypto
-//!   handles) and its [`HandshakeState`] phase enum, plus [`Fmp`], the
-//!   (stateless) lifecycle anchor owned by `Node`.
+//!   handles), plus [`Fmp`], the (stateless) lifecycle anchor owned by `Node`.
+//!   The handshake phase itself lives on the per-peer control machine.
 //! - `wire.rs` — the FMP wire codec: XX handshake message types, disconnect
 //!   reasons, the orderly disconnect message, and the negotiation payload.
 //!   Also carries the relocated FMP link wire framing (moved from
@@ -43,7 +43,6 @@ pub(crate) use core::{
 };
 pub use core::{PromotionResult, cross_connection_winner};
 pub(crate) use limits::backoff_ms;
-pub use state::HandshakeState;
 pub(crate) use state::{ConnectionState, Fmp};
 pub(crate) use wire::{Disconnect, DisconnectReason};
 pub use wire::{HandshakeMessageType, NegotiationPayload, NodeProfile, TlvEntry};

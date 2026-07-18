@@ -1,19 +1,20 @@
 //! Sans-IO FMP connection-lifecycle state.
 //!
 //! The pure, runtime-agnostic bookkeeping for an in-progress FMP peer
-//! connection — link/direction identity, the handshake-phase enum, learned
-//! peer identity and epoch, index/transport/address tracking, handshake-resend
-//! scheduling, and link statistics — extracted out of the async node shell.
+//! connection — link/direction identity, learned peer identity and epoch,
+//! index/transport/address tracking, handshake-resend scheduling, and link
+//! statistics — extracted out of the async node shell. The handshake phase
+//! itself lives solely on the per-peer control machine
+//! ([`PeerMachine`](crate::peer::machine::PeerMachine)), not here.
 //!
 //! [`ConnectionState`] owns every **pure** field of the handshake-phase
 //! connection. The Noise crypto handles (`noise::HandshakeState`,
 //! `NoiseSession`) stay shell-owned in
 //! [`PeerConnection`](crate::peer::PeerConnection), which holds a
 //! `ConnectionState` alongside them and drives the two halves side by side. The
-//! shell's XX transition methods validate against the pure phase, drive the
-//! Noise objects, then write learned results back through the pure setters here
-//! (`set_handshake_state`, `set_expected_identity`, `set_remote_epoch`,
-//! `touch`).
+//! shell's XX transition methods drive the Noise objects, then write learned
+//! results back through the pure setters here (`set_expected_identity`,
+//! `set_remote_epoch`, `touch`).
 //!
 //! This state is `no_std`+`alloc`-clean with respect to transport: the
 //! identifier/address/statistics value types are the plain-data `transport`
@@ -31,59 +32,6 @@ use super::wire::NodeProfile;
 use crate::PeerIdentity;
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
-use core::fmt;
-
-/// Handshake protocol state machine.
-///
-/// For Noise XX pattern:
-/// - Initiator: Initial → SentMsg1 → Complete (after processing msg2 + sending msg3)
-/// - Responder: Initial → ReceivedMsg1 → Complete (after processing msg3)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HandshakeState {
-    /// Initial state, ready to start handshake.
-    Initial,
-    /// Initiator: Sent message 1, awaiting message 2.
-    SentMsg1,
-    /// Responder: Received message 1, ready to send message 2.
-    ReceivedMsg1,
-    /// Handshake completed successfully.
-    Complete,
-    /// Handshake failed.
-    Failed,
-}
-
-impl HandshakeState {
-    /// Check if handshake is still in progress.
-    pub fn is_in_progress(&self) -> bool {
-        matches!(
-            self,
-            HandshakeState::Initial | HandshakeState::SentMsg1 | HandshakeState::ReceivedMsg1
-        )
-    }
-
-    /// Check if handshake completed successfully.
-    pub fn is_complete(&self) -> bool {
-        matches!(self, HandshakeState::Complete)
-    }
-
-    /// Check if handshake failed.
-    pub fn is_failed(&self) -> bool {
-        matches!(self, HandshakeState::Failed)
-    }
-}
-
-impl fmt::Display for HandshakeState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            HandshakeState::Initial => "initial",
-            HandshakeState::SentMsg1 => "sent_msg1",
-            HandshakeState::ReceivedMsg1 => "received_msg1",
-            HandshakeState::Complete => "complete",
-            HandshakeState::Failed => "failed",
-        };
-        write!(f, "{}", s)
-    }
-}
 
 /// Pure, runtime-agnostic bookkeeping for a connection in the handshake phase.
 ///
@@ -100,10 +48,6 @@ pub struct ConnectionState {
 
     /// Connection direction (we initiated or they initiated).
     direction: LinkDirection,
-
-    // === Handshake State ===
-    /// Current handshake state.
-    handshake_state: HandshakeState,
 
     /// Expected peer identity (known for outbound, learned for inbound).
     /// Updated after receiving their static key in the handshake.
@@ -171,7 +115,6 @@ impl ConnectionState {
         Self {
             link_id,
             direction: LinkDirection::Outbound,
-            handshake_state: HandshakeState::Initial,
             expected_identity: Some(expected_identity),
             started_at: current_time_ms,
             last_activity: current_time_ms,
@@ -199,7 +142,6 @@ impl ConnectionState {
         Self {
             link_id,
             direction: LinkDirection::Outbound,
-            handshake_state: HandshakeState::Initial,
             expected_identity: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
@@ -225,7 +167,6 @@ impl ConnectionState {
         Self {
             link_id,
             direction: LinkDirection::Inbound,
-            handshake_state: HandshakeState::Initial,
             expected_identity: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
@@ -255,7 +196,6 @@ impl ConnectionState {
         Self {
             link_id,
             direction: LinkDirection::Inbound,
-            handshake_state: HandshakeState::Initial,
             expected_identity: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
@@ -285,11 +225,6 @@ impl ConnectionState {
         self.direction
     }
 
-    /// Get the handshake state.
-    pub fn handshake_state(&self) -> HandshakeState {
-        self.handshake_state
-    }
-
     /// Get the expected/learned peer identity, if known.
     pub fn expected_identity(&self) -> Option<&PeerIdentity> {
         self.expected_identity.as_ref()
@@ -303,21 +238,6 @@ impl ConnectionState {
     /// Check if this is an inbound connection.
     pub fn is_inbound(&self) -> bool {
         self.direction == LinkDirection::Inbound
-    }
-
-    /// Check if handshake is in progress.
-    pub fn is_in_progress(&self) -> bool {
-        self.handshake_state.is_in_progress()
-    }
-
-    /// Check if handshake completed.
-    pub fn is_complete(&self) -> bool {
-        self.handshake_state.is_complete()
-    }
-
-    /// Check if handshake failed.
-    pub fn is_failed(&self) -> bool {
-        self.handshake_state.is_failed()
     }
 
     /// When the connection started.
@@ -423,20 +343,6 @@ impl ConnectionState {
     /// Record the peer's node profile learned during FMP negotiation.
     pub fn set_negotiation_results(&mut self, peer_profile: NodeProfile) {
         self.peer_profile = Some(peer_profile);
-    }
-
-    // === Handshake Phase Advance ===
-
-    /// Advance the pure handshake phase. Driven by the shell after it has
-    /// stepped the Noise objects.
-    pub fn set_handshake_state(&mut self, state: HandshakeState) {
-        self.handshake_state = state;
-    }
-
-    /// Mark the pure handshake phase failed. The shell drops the crypto handle
-    /// separately.
-    pub fn mark_failed(&mut self) {
-        self.handshake_state = HandshakeState::Failed;
     }
 
     // === Handshake Resend ===
