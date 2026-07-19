@@ -34,7 +34,7 @@ services:
     build:
       context: ../..
       dockerfile: examples/sidecar-nostr-relay/Dockerfile.app
-    container_name: fips-nat-relay
+    container_name: fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}
     restart: "no"
     volumes:
       - relay-data:/usr/src/app/strfry-db
@@ -49,7 +49,7 @@ services:
   stun:
     build:
       context: ./stun
-    container_name: fips-nat-stun
+    container_name: fips-nat-stun${FIPS_CI_NAME_SUFFIX:-}
     restart: "no"
     networks:
       wan:
@@ -61,7 +61,7 @@ services:
     build:
       context: ./router
     profiles: ["cone", "symmetric"]
-    container_name: fips-nat-router-a
+    container_name: fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}
     cap_add:
       - NET_ADMIN
     sysctls:
@@ -84,7 +84,7 @@ services:
     build:
       context: ./router
     profiles: ["cone", "symmetric"]
-    container_name: fips-nat-router-b
+    container_name: fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-}
     cap_add:
       - NET_ADMIN
     sysctls:
@@ -106,7 +106,7 @@ services:
   cone-a:
     <<: *fips-common
     profiles: ["cone"]
-    container_name: fips-nat-cone-a
+    container_name: fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-cone-a
     depends_on:
       - nat-a
@@ -132,7 +132,7 @@ services:
   cone-b:
     <<: *fips-common
     profiles: ["cone"]
-    container_name: fips-nat-cone-b
+    container_name: fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-cone-b
     depends_on:
       - nat-b
@@ -158,7 +158,7 @@ services:
   symmetric-a:
     <<: *fips-common
     profiles: ["symmetric"]
-    container_name: fips-nat-symmetric-a
+    container_name: fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-symmetric-a
     depends_on:
       - nat-a
@@ -184,7 +184,7 @@ services:
   symmetric-b:
     <<: *fips-common
     profiles: ["symmetric"]
-    container_name: fips-nat-symmetric-b
+    container_name: fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-symmetric-b
     depends_on:
       - nat-b
@@ -210,7 +210,7 @@ services:
   lan-a:
     <<: *fips-common
     profiles: ["lan"]
-    container_name: fips-nat-lan-a
+    container_name: fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-lan-a
     depends_on:
       - relay
@@ -225,7 +225,7 @@ services:
   lan-b:
     <<: *fips-common
     profiles: ["lan"]
-    container_name: fips-nat-lan-b
+    container_name: fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-lan-b
     depends_on:
       - relay
@@ -247,7 +247,7 @@ services:
   nostr-pub-a:
     <<: *fips-common
     profiles: ["nostr-publish-consume"]
-    container_name: fips-nat-nostr-pub-a
+    container_name: fips-nat-nostr-pub-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-nostr-pub-a
     depends_on:
       - relay
@@ -262,7 +262,7 @@ services:
   nostr-pub-b:
     <<: *fips-common
     profiles: ["nostr-publish-consume"]
-    container_name: fips-nat-nostr-pub-b
+    container_name: fips-nat-nostr-pub-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-nostr-pub-b
     depends_on:
       - relay
@@ -291,7 +291,7 @@ services:
   stun-fault-node:
     <<: *fips-common
     profiles: ["stun-faults"]
-    container_name: fips-nat-stun-fault-node
+    container_name: fips-nat-stun-fault-node${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-stun-fault-node
     depends_on:
       - relay
@@ -312,7 +312,7 @@ services:
   stun-fault-peer:
     <<: *fips-common
     profiles: ["stun-faults"]
-    container_name: fips-nat-stun-fault-peer
+    container_name: fips-nat-stun-fault-peer${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-nat-stun-fault-peer
     depends_on:
       - relay
@@ -327,7 +327,7 @@ services:
   stun-fault-shim:
     image: fips-test:latest
     profiles: ["stun-faults"]
-    container_name: fips-nat-stun-fault-shim
+    container_name: fips-nat-stun-fault-shim${FIPS_CI_NAME_SUFFIX:-}
     depends_on:
       - stun-fault-node
     cap_add:

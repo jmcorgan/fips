@@ -49,7 +49,7 @@ iperf_test() {
     if [ "$LIVE_OUTPUT" = true ]; then
         # Show live output
         echo "Running iperf3 test (live output):"
-        if docker exec "fips-$client_node" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL"; then
+        if docker exec "fips-${client_node}${FIPS_CI_NAME_SUFFIX:-}" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL"; then
             PASSED=$((PASSED + 1))
         else
             echo "FAIL"
@@ -59,7 +59,7 @@ iperf_test() {
         # Capture and summarize output
         echo -n "Running iperf3 test... "
         local output
-        if output=$(docker exec "fips-$client_node" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL" 2>&1); then
+        if output=$(docker exec "fips-${client_node}${FIPS_CI_NAME_SUFFIX:-}" timeout "$IPERF_TIMEOUT" iperf3 -c "${dest_npub}.fips" -t "$DURATION" -P "$PARALLEL" 2>&1); then
             # Check if we got valid results
             if echo "$output" | grep -q "sender"; then
                 # Extract and display results (get SUM line for aggregate bandwidth)

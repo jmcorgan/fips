@@ -223,7 +223,7 @@ ping_one() {
         if (( attempt > 1 )); then
             sleep "$PING_RETRY_DELAY"
         fi
-        if output=$(docker exec "fips-$from" ping6 -c 1 -W "$ping_timeout" "${to_npub}.fips" 2>&1); then
+        if output=$(docker exec "fips-${from}${FIPS_CI_NAME_SUFFIX:-}" ping6 -c 1 -W "$ping_timeout" "${to_npub}.fips" 2>&1); then
             rtt=$(echo "$output" | grep -oE 'time=[0-9.]+' | cut -d= -f2)
             if [ -z "$quiet" ]; then
                 if (( attempt == 1 )); then
@@ -289,7 +289,7 @@ count_log_pattern() {
     local pattern="$1"
     local total=0
     for node in $NODES; do
-        local count=$(docker logs "fips-node-$node" 2>&1 | grep -c "$pattern" || true)
+        local count=$(docker logs "fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 | grep -c "$pattern" || true)
         total=$((total + count))
     done
     echo "$total"
@@ -352,7 +352,7 @@ dump_peer_connectivity() {
     echo "=== Peer connectivity snapshot ==="
     for node in $NODES; do
         echo "--- node-$node ---"
-        docker exec "fips-node-$node" fipsctl show peers 2>/dev/null || true
+        docker exec "fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show peers 2>/dev/null || true
         echo ""
     done
 }
@@ -504,7 +504,7 @@ assert_zero_count "Session AEAD decryption failed" \
 if [ -n "$REKEY_ACCEPT_OFF_NODES" ]; then
     DUAL_INIT_THRESHOLD=10
     for off_node in ${REKEY_ACCEPT_OFF_NODES//,/ }; do
-        count=$(docker logs "fips-node-$off_node" 2>&1 \
+        count=$(docker logs "fips-node-${off_node}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 \
             | grep -cE "Dual rekey initiation: we win" || true)
         if [ "${count:-0}" -le "$DUAL_INIT_THRESHOLD" ]; then
             echo "  PASS: node-$off_node dual-init drops below threshold ($count <= $DUAL_INIT_THRESHOLD)"
@@ -527,7 +527,7 @@ fi
 if [ -n "$REKEY_OUTBOUND_ONLY_NODES" ]; then
     DUAL_INIT_THRESHOLD=10
     for n in $NODES; do
-        count=$(docker logs "fips-node-$n" 2>&1 \
+        count=$(docker logs "fips-node-${n}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 \
             | grep -cE "Dual rekey initiation: we win" || true)
         if [ "${count:-0}" -le "$DUAL_INIT_THRESHOLD" ]; then
             echo "  PASS: node-$n dual-init drops below threshold ($count <= $DUAL_INIT_THRESHOLD)"
@@ -562,7 +562,7 @@ else
     echo "=== Node logs (rekey-related, head -200) ==="
     for node in $NODES; do
         echo "--- node-$node ---"
-        docker logs "fips-node-$node" 2>&1 | \
+        docker logs "fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 | \
             grep -E "(rekey|Rekey|cross|Cross|teardown|ERROR|PANIC|K-bit|no route|next hop|TTL exhausted|MTU exceeded|Congestion|decrypt|Decrypt|AEAD|Notify|drain|Drain|promot)" | \
             head -200
         echo ""
@@ -571,7 +571,7 @@ else
     echo "=== Node logs (last 80 lines, unfiltered) ==="
     for node in $NODES; do
         echo "--- node-$node ---"
-        docker logs "fips-node-$node" 2>&1 | tail -80
+        docker logs "fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 | tail -80
         echo ""
     done
     exit 1

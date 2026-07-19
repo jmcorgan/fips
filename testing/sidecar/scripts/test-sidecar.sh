@@ -25,7 +25,14 @@ NODE_B_NPUB="npub15h7z0ljzudqe9pgwx99cjsz2c0ennuyvkcc8zvtk3lg97xwzex9ska6g4y"
 NODE_C_NSEC="15148ed0131f7da43fd13e369dfedede14fb64698f3756636b569c3a3e87438f"
 NODE_C_NPUB="npub1zhezcykd0e34z4fxtranl45jaasgnlxv0kjqwlq2v56ggssn0w4qelcrvr"
 
-NETWORK_NAME="fips-sidecar-test"
+NETWORK_NAME="fips-sidecar-test${FIPS_CI_NAME_SUFFIX:-}"
+
+# Compose project names. These are explicit (they override COMPOSE_PROJECT_NAME),
+# so they carry the run suffix themselves — otherwise concurrent runs would share
+# one project and tear down each other's containers.
+PROJ_A="sidecar-a${FIPS_CI_NAME_SUFFIX:-}"
+PROJ_B="sidecar-b${FIPS_CI_NAME_SUFFIX:-}"
+PROJ_C="sidecar-c${FIPS_CI_NAME_SUFFIX:-}"
 SUBNET="172.20.2.0/24"
 NODE_A_IP="172.20.2.10"
 NODE_B_IP="172.20.2.11"
@@ -48,10 +55,10 @@ fail()  { echo "  FAIL: $*"; FAILED=$((FAILED + 1)); }
 cleanup() {
     log "Cleaning up..."
     # Tear down B and C first (they reference A's network as external)
-    docker compose $COMPOSE_EXT -p sidecar-c down --volumes --remove-orphans 2>/dev/null || true
-    docker compose $COMPOSE_EXT -p sidecar-b down --volumes --remove-orphans 2>/dev/null || true
+    docker compose $COMPOSE_EXT -p "$PROJ_C" down --volumes --remove-orphans 2>/dev/null || true
+    docker compose $COMPOSE_EXT -p "$PROJ_B" down --volumes --remove-orphans 2>/dev/null || true
     # Tear down A last (it owns the network)
-    docker compose $COMPOSE_BASE -p sidecar-a down --volumes --remove-orphans 2>/dev/null || true
+    docker compose $COMPOSE_BASE -p "$PROJ_A" down --volumes --remove-orphans 2>/dev/null || true
 }
 
 # Always clean up on exit
@@ -84,7 +91,7 @@ FIPS_PEER_ADDR="" \
 FIPS_NETWORK="$NETWORK_NAME" \
 FIPS_SUBNET="$SUBNET" \
 FIPS_IPV4="$NODE_A_IP" \
-docker compose $COMPOSE_BASE -p sidecar-a up -d
+docker compose $COMPOSE_BASE -p "$PROJ_A" up -d
 
 log "Starting node-b (peers with node-a, joins external network)..."
 FIPS_NSEC="$NODE_B_NSEC" \
@@ -94,7 +101,7 @@ FIPS_PEER_ALIAS="node-a" \
 FIPS_NETWORK="$NETWORK_NAME" \
 FIPS_SUBNET="$SUBNET" \
 FIPS_IPV4="$NODE_B_IP" \
-docker compose $COMPOSE_EXT -p sidecar-b up -d
+docker compose $COMPOSE_EXT -p "$PROJ_B" up -d
 
 log "Starting node-c (peers with node-b, joins external network)..."
 FIPS_NSEC="$NODE_C_NSEC" \
@@ -104,7 +111,7 @@ FIPS_PEER_ALIAS="node-b" \
 FIPS_NETWORK="$NETWORK_NAME" \
 FIPS_SUBNET="$SUBNET" \
 FIPS_IPV4="$NODE_C_IP" \
-docker compose $COMPOSE_EXT -p sidecar-c up -d
+docker compose $COMPOSE_EXT -p "$PROJ_C" up -d
 
 # ── Wait for convergence ──────────────────────────────────────────────────
 
@@ -113,7 +120,7 @@ log "Waiting for link establishment (up to ${CONVERGE_TIMEOUT}s)..."
 converged=false
 for i in $(seq 1 "$CONVERGE_TIMEOUT"); do
     # node-b should have 2 links (A and C)
-    link_count=$(docker exec sidecar-b-fips-1 fipsctl show links 2>/dev/null \
+    link_count=$(docker exec "${PROJ_B}-fips-1" fipsctl show links 2>/dev/null \
         | grep -c '"state": "connected"' || true)
     if [ "$link_count" -ge 2 ]; then
         converged=true
@@ -127,11 +134,11 @@ if [ "$converged" = true ]; then
 else
     log "TIMEOUT: links did not converge in ${CONVERGE_TIMEOUT}s"
     log "node-a links:"
-    docker exec sidecar-a-fips-1 fipsctl show links 2>&1 || true
+    docker exec "${PROJ_A}-fips-1" fipsctl show links 2>&1 || true
     log "node-b links:"
-    docker exec sidecar-b-fips-1 fipsctl show links 2>&1 || true
+    docker exec "${PROJ_B}-fips-1" fipsctl show links 2>&1 || true
     log "node-c links:"
-    docker exec sidecar-c-fips-1 fipsctl show links 2>&1 || true
+    docker exec "${PROJ_C}-fips-1" fipsctl show links 2>&1 || true
     exit 1
 fi
 
@@ -141,9 +148,9 @@ fi
 # chain. The directed pings below remain the actual assertions.
 _sidecar_converged() {
     PASSED=0; FAILED=0
-    if docker exec sidecar-b-app-1 ping6 -c1 -W2 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
-    if docker exec sidecar-c-app-1 ping6 -c1 -W2 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
-    if docker exec sidecar-a-app-1 ping6 -c1 -W2 "${NODE_C_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    if docker exec "${PROJ_B}-app-1" ping6 -c1 -W2 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    if docker exec "${PROJ_C}-app-1" ping6 -c1 -W2 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
+    if docker exec "${PROJ_A}-app-1" ping6 -c1 -W2 "${NODE_C_NPUB}.fips" >/dev/null 2>&1; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
 }
 wait_until_connected _sidecar_converged "$CONVERGE_TIMEOUT" 10 || true
 
@@ -151,11 +158,11 @@ wait_until_connected _sidecar_converged "$CONVERGE_TIMEOUT" 10 || true
 
 log "Verifying link counts..."
 
-a_links=$(docker exec sidecar-a-fips-1 fipsctl show links 2>/dev/null \
+a_links=$(docker exec "${PROJ_A}-fips-1" fipsctl show links 2>/dev/null \
     | grep -c '"state": "connected"' || true)
-b_links=$(docker exec sidecar-b-fips-1 fipsctl show links 2>/dev/null \
+b_links=$(docker exec "${PROJ_B}-fips-1" fipsctl show links 2>/dev/null \
     | grep -c '"state": "connected"' || true)
-c_links=$(docker exec sidecar-c-fips-1 fipsctl show links 2>/dev/null \
+c_links=$(docker exec "${PROJ_C}-fips-1" fipsctl show links 2>/dev/null \
     | grep -c '"state": "connected"' || true)
 
 [ "$a_links" -ge 1 ] && pass "node-a has $a_links link(s)" || fail "node-a has $a_links links (expected >= 1)"
@@ -166,7 +173,7 @@ c_links=$(docker exec sidecar-c-fips-1 fipsctl show links 2>/dev/null \
 
 log "Testing direct connectivity (B app → A via fips0)..."
 
-if docker exec sidecar-b-app-1 ping6 -c2 -W5 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then
+if docker exec "${PROJ_B}-app-1" ping6 -c2 -W5 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then
     pass "node-b app can ping node-a via fips0"
 else
     fail "node-b app cannot ping node-a via fips0"
@@ -176,7 +183,7 @@ fi
 
 log "Testing multi-hop connectivity (C app → A via fips0, through B)..."
 
-if docker exec sidecar-c-app-1 ping6 -c2 -W10 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then
+if docker exec "${PROJ_C}-app-1" ping6 -c2 -W10 "${NODE_A_NPUB}.fips" >/dev/null 2>&1; then
     pass "node-c app can ping node-a via fips0 (multi-hop through B)"
 else
     fail "node-c app cannot ping node-a via fips0 (multi-hop through B)"
@@ -186,7 +193,7 @@ fi
 
 log "Testing reverse multi-hop (A app → C via fips0, through B)..."
 
-if docker exec sidecar-a-app-1 ping6 -c2 -W10 "${NODE_C_NPUB}.fips" >/dev/null 2>&1; then
+if docker exec "${PROJ_A}-app-1" ping6 -c2 -W10 "${NODE_C_NPUB}.fips" >/dev/null 2>&1; then
     pass "node-a app can ping node-c via fips0 (multi-hop through B)"
 else
     fail "node-a app cannot ping node-c via fips0 (multi-hop through B)"

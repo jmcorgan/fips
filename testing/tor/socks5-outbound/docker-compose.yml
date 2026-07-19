@@ -16,7 +16,7 @@ networks:
 services:
   tor-daemon:
     image: osminogin/tor-simple:latest
-    container_name: tor-daemon
+    container_name: tor-daemon${FIPS_CI_NAME_SUFFIX:-}
     restart: "no"
     volumes:
       - ../common/torrc:/etc/tor/torrc:ro
@@ -32,7 +32,7 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     restart: "no"
-    container_name: fips-tor-a
+    container_name: fips-tor-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-tor-a
     depends_on:
       - tor-daemon
@@ -53,7 +53,7 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     restart: "no"
-    container_name: fips-tor-b
+    container_name: fips-tor-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-tor-b
     depends_on:
       - tor-daemon

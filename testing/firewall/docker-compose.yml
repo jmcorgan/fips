@@ -27,7 +27,7 @@ x-fips-common: &fips-common
 services:
   service-a:
     <<: *fips-common
-    container_name: fips-fw-container-a
+    container_name: fips-fw-container-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -40,7 +40,7 @@ services:
 
   service-b:
     <<: *fips-common
-    container_name: fips-fw-container-b
+    container_name: fips-fw-container-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
