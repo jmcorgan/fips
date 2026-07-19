@@ -415,21 +415,38 @@ ping_all "" "$TIMEOUT" "$MAX_PING_ATTEMPTS"
 phase_result "Post-first-rekey (all 20 pairs)"
 echo ""
 
-# ── Phase 4: Wait for second rekey cycle ──────────────────────────────
+# ── Phase 4: Wait for further rekey cutovers ──────────────────────────
 # Poll for the FMP rekey cutovers instead of blind-sleeping: capture the
-# cutover count reached so far, then wait until two more land. The second
-# rekey cycle produces two initiator cutovers, which is exactly the total
-# the Phase 6 assertion (>= 4) requires. Waiting for only one guaranteed a
-# count of three and left the fourth cutover to land in the gap before the
-# Phase 6 snapshot, so host load could push it past the window and fail the
-# run even though every cutover completed correctly.
+# cutover count reached so far, then wait until two more land AND the
+# Phase 6 absolute threshold (>= 4) is covered. The relative "+2" alone
+# is not enough: it inherits whatever count Phase 4 starts from, and on
+# an unloaded host the ping phases can outrun the jittered first rekey
+# cycle, entering here with a single cutover on the books — then "+2"
+# releases at three, the remaining first-cycle cutovers land moments
+# after the Phase 6 snapshot, and the >= 4 assertion fails even though
+# every cutover completed on schedule. Flooring the wait target at the
+# Phase 6 threshold makes this wait's guarantee cover that assertion:
+# the log count is monotone over a container's lifetime, so a released
+# wait means the later count cannot lose the timing race.
+#
+# What the count measures: the counted line is emitted by the cadence
+# path on whichever side(s) flip first, so a completed link rekey yields
+# one or two lines (a side promoted by receiving a flipped-K frame logs
+# only a DEBUG on a target the test's log filter suppresses). With rekey
+# timers resetting at each cutover, the events landing inside this
+# test's window are first-cycle cutovers spread across the topology's
+# links, not a second cycle on one link.
 # Bounded by SECOND_REKEY_WAIT so a stalled rekey still falls through to
 # the strict Phase 5/6 assertions rather than hanging.
-echo "Phase 4: Second rekey cycle (waiting up to ${SECOND_REKEY_WAIT}s for the second-cycle cutovers)"
+echo "Phase 4: Further rekey cutovers (waiting up to ${SECOND_REKEY_WAIT}s)"
 fmp_cutovers_before=$(count_log_pattern "Rekey cutover complete (initiator), K-bit flipped")
+fmp_cutover_target=$((fmp_cutovers_before + 2))
+if [ "$fmp_cutover_target" -lt 4 ]; then
+    fmp_cutover_target=4
+fi
 wait_for_log_pattern_count \
     "Rekey cutover complete (initiator), K-bit flipped" \
-    "$((fmp_cutovers_before + 2))" "$SECOND_REKEY_WAIT" || true
+    "$fmp_cutover_target" "$SECOND_REKEY_WAIT" || true
 
 # Verify connectivity after second rekey (back-to-back). This is the
 # site of the recurring post-second-rekey straggler-pair flake: wait for
@@ -461,7 +478,7 @@ wait_for_log_pattern_count "Peer FSP new-epoch frame authenticated" 1 "$REKEY_SE
 
 # Positive checks: rekey machinery worked
 assert_min_count "Rekey cutover complete (initiator), K-bit flipped" 4 \
-    "FMP rekey initiator cutovers (>= 2 cycles)"
+    "FMP rekey initiator cutovers"
 
 # FSP rekey checks (sessions between non-adjacent nodes)
 assert_min_count "FSP rekey cutover complete (initiator)" 1 \
