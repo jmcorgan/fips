@@ -19,7 +19,7 @@ router-to-router *backhaul*, see
 For all `transports.ethernet.*` configuration keys, see
 [../reference/configuration.md](../reference/configuration.md).
 
-## Why open, why RA-only
+## Why open, why this addressing
 
 Three deliberate choices distinguish this from a stock guest network:
 
@@ -40,19 +40,25 @@ Three deliberate choices distinguish this from a stock guest network:
   overlay surface (handshake, discovery, lookup, routing) and peer with
   the router; L2 metadata is visible in the air; a hostile radio can
   burn airtime — all inherent to an open radio link.
-- **No DHCP — IPv6 router advertisements only.** odhcpd announces a
-  ULA prefix (`fd..`-range) for stateless SLAAC: no DHCPv4, no DHCPv6,
-  no lease state. FIPS itself only needs link-local + mDNS, but
-  Android's provisioning check requires an RA or a DHCP offer and
-  *disconnects* with neither — RA-only is the minimum that satisfies
-  it. The addressing is per-router and disposable: a roaming phone
-  SLAACs a fresh address on each router, and the FIPS overlay
-  identity, not the IP, is the mobility anchor.
+- **DHCPv4 from a fixed subnet, plus IPv6 router advertisements.**
+  dnsmasq leases IPv4 out of `10.21.<N>.0/24` (`N` = the radio index;
+  the prefix echoes FIPS port 2121). The subnet is deliberately
+  **identical on every router**: a roaming phone keeps its lease
+  across routers, and dnsmasq's authoritative mode (the OpenWrt
+  default, pinned by the helper) ACKs a renew the new router never
+  issued. odhcpd additionally announces a ULA prefix (`fd..`-range)
+  for stateless SLAAC; DHCPv6 stays off. FIPS itself only needs
+  link-local + mDNS, but Android's provisioning check requires an RA
+  or a DHCP offer and *disconnects* with neither, and plain laptops
+  expect a real IPv4 address. Works with or without an upstream —
+  nothing here depends on the WAN. The IPv6 side stays per-router and
+  disposable; in all cases the FIPS overlay identity, not the IP, is
+  the mobility anchor.
 - **Isolated interface** — its own network and firewall zone, with no
   path to `br-lan` and no forwarding to the WAN. Inbound traffic is
-  rejected except ICMPv6 (SLAAC itself), mDNS, and the FIPS transport
-  ports; the raw-Ethernet transport (EtherType 0x2121) is not IP and
-  never traverses the firewall. AP client isolation is on, so clients
+  rejected except DHCPv4, ICMPv6 (SLAAC itself), mDNS, and the FIPS
+  transport ports; the raw-Ethernet transport (EtherType 0x2121) is
+  not IP and never traverses the firewall. AP client isolation is on, so clients
   cannot reach each other at L2 — two FIPS phones on one router still
   reach each other through the router at the overlay layer.
 
@@ -83,8 +89,8 @@ Both can share a radio, at an airtime cost (see constraints).
 
 ## Requirements
 
-- OpenWrt 22.03+ with the FIPS package installed (fw4; odhcpd is part
-  of the default images).
+- OpenWrt 22.03+ with the FIPS package installed (fw4; dnsmasq and
+  odhcpd are part of the default images).
 - Any radio — AP mode needs no special driver support.
 
 ## Step 1 — create the access point(s)
@@ -97,9 +103,9 @@ fips-ap-setup radio0
 ```
 
 This creates an open AP with SSID `!FIPS` and client isolation, an
-isolated network with a static ULA `/64`, an RA-only odhcpd config
-(SLAAC, no DHCP), and a locked-down `fips_ap` firewall zone — then
-reloads the radio. Interfaces are named by radio index: `radio0` →
+isolated network with `10.21.<N>.1/24` and a static ULA `/64`, a
+DHCPv4 + RA dhcp config (dnsmasq leases, SLAAC, no DHCPv6), and a
+locked-down `fips_ap` firewall zone — then reloads the radio. Interfaces are named by radio index: `radio0` →
 `fips-ap0`, `radio1` → `fips-ap1`. Pass a second argument to use a
 different SSID — but the SSID, like the security type, must be
 identical on **all** routers or clients will treat them as separate
@@ -132,20 +138,25 @@ set wireless.fips_ap_radio0.ifname='fips-ap0'
 set wireless.fips_ap_radio0.network='fips_ap_radio0'
 set network.fips_ap_radio0=interface
 set network.fips_ap_radio0.proto='static'
+set network.fips_ap_radio0.ipaddr='10.21.0.1'
+set network.fips_ap_radio0.netmask='255.255.255.0'
 set network.fips_ap_radio0.ip6addr='fdxx:xxxx:xxxx:fa00::1/64'
 set dhcp.fips_ap_radio0=dhcp
 set dhcp.fips_ap_radio0.interface='fips_ap_radio0'
 set dhcp.fips_ap_radio0.ra='server'
 set dhcp.fips_ap_radio0.ra_default='2'
 set dhcp.fips_ap_radio0.dhcpv6='disabled'
-set dhcp.fips_ap_radio0.dhcpv4='disabled'
+set dhcp.fips_ap_radio0.dhcpv4='server'
+set dhcp.fips_ap_radio0.start='10'
+set dhcp.fips_ap_radio0.limit='200'
 EOF
 uci commit
 wifi reload
 ```
 
 plus the `fips_ap` firewall zone (input/forward REJECT, no
-forwardings, ACCEPT rules for ICMPv6, UDP 5353/2121, TCP 8443).
+forwardings, ACCEPT rules for DHCPv4/UDP 67, ICMPv6, UDP 5353/2121,
+TCP 8443).
 
 ## Step 2 — check the FIPS transport binding
 
@@ -193,13 +204,15 @@ L2 and addressing first, with a phone or laptop connected to `!FIPS`:
 
 ```sh
 iw dev fips-ap0 station dump    # one entry per associated client
-ip -6 addr show dev fips-ap0    # the fd..::1/64 the router announces
+ip addr show dev fips-ap0       # 10.21.0.1/24 and the fd..::1/64
+cat /tmp/dhcp.leases            # one lease per connected client
 ```
 
 No station entries means a radio problem; an association that drops
-after ~30 s usually means the client never got an RA — check
-`logread | grep odhcpd` and that the `dhcp.fips_ap_radio0` section
-survived (`uci show dhcp | grep fips_ap`).
+after ~30 s usually means the client never got an address — check
+`logread | grep -e dnsmasq -e odhcpd` and that the
+`dhcp.fips_ap_radio0` section survived
+(`uci show dhcp | grep fips_ap`).
 
 Then the FIPS layer on top, for a client running FIPS:
 
@@ -228,6 +241,17 @@ stays associated — that is the designed steady state, not an error.
   add forwardings to the `fips_ap` zone: that would turn the open SSID
   into a hotspot and hand the isolation away.
 - **Roaming is client-driven.** Clients decide when to hop BSSIDs
-  (standard ESS behavior) and renumber on each router; FIPS sessions
+  (standard ESS behavior); the IPv4 lease survives the hop (same
+  subnet everywhere), the SLAAC address renumbers, and FIPS sessions
   ride through because the overlay identity is the anchor. Expect a
   brief L2 gap during the hop, as on any ESS without 802.11r.
+- **The `10.21.<N>.0/24` convention must hold everywhere.** Lease
+  survival depends on every router serving the same subnet from the
+  same radio index — the helper guarantees this; don't hand-pick
+  per-router subnets. Two routers can lease the same address to two
+  different clients; after a roam the conflict is caught (dnsmasq
+  NAKs a renew for an address in use) and the client re-DHCPs. If a
+  laptop is *also* wired to a LAN that really uses `10.21.<N>.0/24`,
+  its routing table will conflict — a corner case worth knowing, not
+  designing around: the zone forwards nowhere, so the FIPS side never
+  reaches beyond the router either way.

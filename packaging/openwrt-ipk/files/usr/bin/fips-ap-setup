@@ -22,13 +22,17 @@
 #     may peer. Admission is open up to the daemon's max-peers cap; the
 #     firewall zone below is what confines every client to the FIPS
 #     overlay (no path to br-lan or the WAN).
-#   - NO DHCP            — odhcpd announces a ULA prefix in router
-#     advertisements (stateless SLAAC, no lease state). FIPS itself only
-#     needs link-local + mDNS, but Android's provisioning check requires an
-#     RA or DHCP and disconnects with neither; RA-only is the minimum that
-#     satisfies it. The network provides no internet, so phones mark it
-#     unvalidated and keep cellular as the default route while staying
-#     associated.
+#   - DHCPv4 + RA IPv6   — dnsmasq serves DHCPv4 from a FIXED subnet,
+#     10.21.<N>.0/24 (echoes FIPS port 2121), identical on every router:
+#     a roaming phone keeps its lease across routers, and dnsmasq's
+#     authoritative mode (the OpenWrt default) ACKs the renew a foreign
+#     router never issued. odhcpd additionally announces a ULA prefix in
+#     router advertisements (stateless SLAAC); DHCPv6 stays off. FIPS
+#     itself only needs link-local + mDNS, but client provisioning checks
+#     (Android disconnects without an RA or a DHCP offer) and plain
+#     laptops both want a real address. The network provides no internet,
+#     so phones mark it unvalidated and keep cellular as the default
+#     route while staying associated.
 #   - ISOLATED           — own network and firewall zone: no path to
 #     br-lan, no forwarding to the WAN, and AP client isolation on.
 #     Associated clients reach only the FIPS handshake surface.
@@ -128,6 +132,7 @@ if [ "$1" = "remove" ]; then
 	if [ -z "$(uci -q get firewall.fips_ap.network)" ]; then
 		uci -q delete firewall.fips_ap
 		uci -q delete firewall.fips_ap_icmpv6
+		uci -q delete firewall.fips_ap_dhcpv4
 		uci -q delete firewall.fips_ap_mdns
 		uci -q delete firewall.fips_ap_fips_udp
 		uci -q delete firewall.fips_ap_fips_tcp
@@ -137,6 +142,7 @@ if [ "$1" = "remove" ]; then
 	uci commit dhcp
 	uci commit firewall
 	wifi reload
+	/etc/init.d/dnsmasq reload
 	/etc/init.d/odhcpd reload
 	/etc/init.d/firewall reload
 	echo "Restart fips: /etc/init.d/fips restart"
@@ -206,11 +212,13 @@ CHANNEL="$(uci -q get "wireless.$RADIO.channel")"
 BAND="$(uci -q get "wireless.$RADIO.band")"
 
 # ---------------------------------------------------------------------------
-# Network: static ULA /64 so odhcpd has a prefix to announce. The address
-# space is per-router and disposable — a roaming phone SLAACs a fresh
-# address on each router, and the FIPS overlay identity (not the IP) is the
-# mobility anchor. Derived from the router's global ULA prefix; a re-run
-# keeps the address already configured.
+# Network: IPv4 from the fixed convention 10.21.<IDX>.1/24 — deterministic,
+# so every router serving the same radio index lands on the same subnet and
+# a roaming client's lease stays valid. IPv6 is a static ULA /64 so odhcpd
+# has a prefix to announce; that space is per-router and disposable — a
+# roaming phone SLAACs a fresh address on each router, and the FIPS overlay
+# identity (not the IP) is the mobility anchor. The ULA is derived from the
+# router's global ULA prefix; a re-run keeps the address already configured.
 # ---------------------------------------------------------------------------
 
 AP_ADDR="$(uci -q get "network.$SECTION.ip6addr")"
@@ -233,17 +241,24 @@ fd*) ;; # keep the existing address on re-run
 	;;
 esac
 
+AP_ADDR4="10.21.$IDX.1"
+
 uci -q delete "network.$SECTION"
 uci set "network.$SECTION=interface"
 uci set "network.$SECTION.proto=static"
+uci set "network.$SECTION.ipaddr=$AP_ADDR4"
+uci set "network.$SECTION.netmask=255.255.255.0"
 uci set "network.$SECTION.ip6addr=$AP_ADDR"
 
 # ---------------------------------------------------------------------------
-# DHCP/RA: router advertisements only — stateless SLAAC, no DHCPv4, no
-# DHCPv6, no lease state. ra_default '2' announces a default router even
-# without an upstream default route: Android's provisioning wants address +
-# route + DNS from the RA, and its validation probe then fails by design
-# (no internet), so the phone keeps cellular as the default route.
+# DHCP/RA: dnsmasq DHCPv4 leases out of 10.21.<IDX>.0/24, plus router
+# advertisements for the ULA (stateless SLAAC, no DHCPv6). ra_default '2'
+# announces a default router even without an upstream default route:
+# Android's provisioning wants address + route + DNS, and its validation
+# probe then fails by design (no internet), so the phone keeps cellular as
+# the default route. 'dhcpv4 server' is read by BOTH dnsmasq (the default
+# DHCPv4 server) and odhcpd (serves v4 only when odhcpd.maindhcp is set),
+# so either arrangement hands out leases.
 # ---------------------------------------------------------------------------
 
 uci -q delete "dhcp.$SECTION"
@@ -252,12 +267,19 @@ uci set "dhcp.$SECTION.interface=$SECTION"
 uci set "dhcp.$SECTION.ra=server"
 uci set "dhcp.$SECTION.ra_default=2"
 uci set "dhcp.$SECTION.dhcpv6=disabled"
-uci set "dhcp.$SECTION.dhcpv4=disabled"
+uci set "dhcp.$SECTION.dhcpv4=server"
+uci set "dhcp.$SECTION.start=10"
+uci set "dhcp.$SECTION.limit=200"
+
+# Authoritative is the OpenWrt default, but roaming correctness depends on
+# it (a foreign router must ACK a lease it never issued), so pin it.
+[ -n "$(uci -q get dhcp.@dnsmasq[0])" ] && uci set dhcp.@dnsmasq[0].authoritative=1
 
 # ---------------------------------------------------------------------------
 # Firewall: one shared 'fips_ap' zone for all instances. Everything is
-# rejected except what a FIPS client needs — ICMPv6 (SLAAC itself), mDNS
-# (discovery), and the FIPS UDP/TCP transports (the handshake surface).
+# rejected except what a FIPS client needs — DHCPv4 (addressing), ICMPv6
+# (SLAAC itself), mDNS (discovery), and the FIPS UDP/TCP transports (the
+# handshake surface).
 # The raw-Ethernet transport (EtherType 0x2121) is not IP and never
 # traverses the firewall. No forwardings exist, so there is no path to
 # br-lan or the WAN.
@@ -287,6 +309,8 @@ ap_rule() {
 
 ap_rule icmpv6 "FIPS-AP-ICMPv6" icmp
 uci set firewall.fips_ap_icmpv6.family=ipv6
+ap_rule dhcpv4 "FIPS-AP-DHCPv4" udp 67
+uci set firewall.fips_ap_dhcpv4.family=ipv4
 ap_rule mdns "FIPS-AP-mDNS" udp 5353
 ap_rule fips_udp "FIPS-AP-FIPS-UDP" udp 2121
 ap_rule fips_tcp "FIPS-AP-FIPS-TCP" tcp 8443
@@ -296,6 +320,7 @@ uci commit network
 uci commit dhcp
 uci commit firewall
 wifi reload
+/etc/init.d/dnsmasq reload
 /etc/init.d/odhcpd reload
 /etc/init.d/firewall reload
 
@@ -314,14 +339,15 @@ esac
 cat <<EOF
 Created open access SSID '$SSID' as $AP_IFNAME on $RADIO \
 (band ${BAND:-?}, channel ${CHANNEL:-auto}).
-RA-only IPv6 on $AP_ADDR — no DHCP, no internet, isolated from
-br-lan and the WAN.
+DHCPv4 on $AP_ADDR4/24 and RA IPv6 on $AP_ADDR — no internet,
+isolated from br-lan and the WAN.
 
 ALL FIPS routers must broadcast this SSID with the same security type
 (open) — phones then save it once and roam between routers as one
-network. Unlike the mesh backhaul, channels are free per router. On a
-dual-band router, run fips-ap-setup for the other radio too so clients
-can pick either band.
+network. The 10.21.$IDX.0/24 subnet is the same on every router on
+purpose: leases survive roaming. Unlike the mesh backhaul, channels
+are free per router. On a dual-band router, run fips-ap-setup for the
+other radio too so clients can pick either band.
 
 On first connect a phone warns that the network has no internet —
 choose "stay connected" and "don't ask again". That choice is stored
