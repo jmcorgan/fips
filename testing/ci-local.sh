@@ -254,6 +254,10 @@ CI_PROJECT_PREFIX="fipsci_${CI_RUN_ID}"
 CI_IMAGE_TEST="fips-test:${CI_RUN_ID}"
 CI_IMAGE_APP="fips-test-app:${CI_RUN_ID}"
 CI_LABEL="com.corganlabs.fips-ci=1"
+# Run-scoped companion to CI_LABEL. The generic label is shared by every run on
+# the host, so teardown filters on this one instead — otherwise this run's reap
+# would force-remove a concurrent run's containers out from under it.
+CI_LABEL_RUN="com.corganlabs.fips-ci.run=${CI_RUN_ID}"
 
 # Exported so child suite scripts + their compose/`docker run` invocations
 # inherit the run identity. Compose files read FIPS_TEST_IMAGE/FIPS_TEST_APP_IMAGE
@@ -261,6 +265,12 @@ CI_LABEL="com.corganlabs.fips-ci=1"
 export FIPS_CI_RUN_ID="$CI_RUN_ID"
 export FIPS_TEST_IMAGE="$CI_IMAGE_TEST"
 export FIPS_TEST_APP_IMAGE="$CI_IMAGE_APP"
+# Docker container names are GLOBAL — a compose project name does not scope
+# them — so the suite compose files append this suffix to every explicit
+# container_name, and the suite scripts append it wherever they address a
+# container by name. Empty when unset, so a bare `docker compose up` outside
+# this harness still produces today's plain names.
+export FIPS_CI_NAME_SUFFIX="-${CI_RUN_ID}"
 
 # Per-suite compose project name: ${prefix}_<suite-or-compose-basename>. Keeps
 # today's intra-run distinctness (one project per compose file / chaos child)
@@ -295,6 +305,7 @@ ci_teardown() {
     #    the whole sweep too so the trap can never wedge.
     timeout 150 bash "$SCRIPT_DIR/ci-cleanup.sh" \
         --label "$CI_LABEL" \
+        --run-id "$CI_RUN_ID" \
         --project-prefix "$CI_PROJECT_PREFIX" \
         --images "$CI_IMAGE_TEST $CI_IMAGE_APP" >/dev/null 2>&1 || true
 }
@@ -747,9 +758,9 @@ run_integration() {
     # reference fips-test:latest directly; the retag happens only after BOTH
     # builds succeed, so :latest never points at a half-built image.
     info "Building $CI_IMAGE_TEST Docker image"
-    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" testing/docker --quiet \
+    docker build -t "$CI_IMAGE_TEST" --label "$CI_LABEL" --label "$CI_LABEL_RUN" testing/docker --quiet \
         || { record "docker-build" 1; return; }
-    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" \
+    docker build -t "$CI_IMAGE_APP" --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
         -f testing/docker/Dockerfile.app testing/docker --quiet \
         || { record "docker-build-app" 1; return; }
     docker tag "$CI_IMAGE_TEST" fips-test:latest

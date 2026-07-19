@@ -284,7 +284,7 @@ DOCKERFILE
 # ─────────────────────────────────────────────────────────────────────
 
 test_debian12_resolved() {
-    local name="fips-dns-test-deb12-resolved"
+    local name="fips-dns-test-deb12-resolved${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:debian12-resolved"
     log "Debian 12 + systemd-resolved (expects global-drop-in)"
 
@@ -312,7 +312,7 @@ DOCKERFILE
 }
 
 test_debian13_resolved() {
-    local name="fips-dns-test-deb13-resolved"
+    local name="fips-dns-test-deb13-resolved${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:debian13-resolved"
     log "Debian 13 (trixie) + systemd-resolved (expects global-drop-in)"
 
@@ -340,7 +340,7 @@ DOCKERFILE
 }
 
 test_ubuntu22_resolved() {
-    local name="fips-dns-test-u22-resolved"
+    local name="fips-dns-test-u22-resolved${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:ubuntu22-resolved"
     log "Ubuntu 22.04 + systemd-resolved (expects global-drop-in)"
 
@@ -370,7 +370,7 @@ DOCKERFILE
 }
 
 test_ubuntu24_resolved() {
-    local name="fips-dns-test-u24-resolved"
+    local name="fips-dns-test-u24-resolved${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:ubuntu24-resolved"
     log "Ubuntu 24.04 + systemd-resolved (expects global-drop-in)"
 
@@ -398,7 +398,7 @@ DOCKERFILE
 }
 
 test_ubuntu26_resolved() {
-    local name="fips-dns-test-u26-resolved"
+    local name="fips-dns-test-u26-resolved${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:ubuntu26-resolved"
     log "Ubuntu 26.04 + systemd-resolved (expects global-drop-in)"
 
@@ -426,7 +426,7 @@ DOCKERFILE
 }
 
 test_dnsmasq() {
-    local name="fips-dns-test-dnsmasq"
+    local name="fips-dns-test-dnsmasq${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:dnsmasq"
     log "Debian 12 + dnsmasq standalone"
 
@@ -492,7 +492,7 @@ DOCKERFILE
 }
 
 test_nm_dnsmasq() {
-    local name="fips-dns-test-nm-dnsmasq"
+    local name="fips-dns-test-nm-dnsmasq${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:nm-dnsmasq"
     log "Fedora + NetworkManager + dnsmasq plugin"
 
@@ -555,7 +555,7 @@ DOCKERFILE
 }
 
 test_no_resolver() {
-    local name="fips-dns-test-none"
+    local name="fips-dns-test-none${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:none"
     log "Debian 12 bare (no resolver)"
 
@@ -625,7 +625,7 @@ _run_e2e_scenario() {
     local base_image="$2"
     local apt_packages="$3"
 
-    local name="fips-dns-test-e2e-${distro_label}"
+    local name="fips-dns-test-e2e-${distro_label}${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-dns-test:e2e-${distro_label}"
     log "End-to-end: ${base_image} + systemd-resolved + real fips + fips-gateway + dig"
 

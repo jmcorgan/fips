@@ -28,7 +28,7 @@ x-fips-common: &fips-common
 services:
   service-a:
     <<: *fips-common
-    container_name: fips-acl-container-a
+    container_name: fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -43,7 +43,7 @@ services:
 
   service-b:
     <<: *fips-common
-    container_name: fips-acl-container-b
+    container_name: fips-acl-container-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -58,7 +58,7 @@ services:
 
   service-c:
     <<: *fips-common
-    container_name: fips-acl-container-c
+    container_name: fips-acl-container-c${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -73,7 +73,7 @@ services:
 
   service-d:
     <<: *fips-common
-    container_name: fips-acl-container-d
+    container_name: fips-acl-container-d${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -88,7 +88,7 @@ services:
 
   service-e:
     <<: *fips-common
-    container_name: fips-acl-container-e
+    container_name: fips-acl-container-e${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -101,7 +101,7 @@ services:
 
   service-f:
     <<: *fips-common
-    container_name: fips-acl-container-f
+    container_name: fips-acl-container-f${FIPS_CI_NAME_SUFFIX:-}
     hostname: host-f
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro

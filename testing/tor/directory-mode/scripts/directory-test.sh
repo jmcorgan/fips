@@ -95,7 +95,7 @@ elapsed=0
 while [ "$elapsed" -lt "$MAX_WAIT_ONION" ]; do
     # Extract .onion address from structured log: onion_address=<addr>.onion
     # Strip ANSI color codes before matching (tracing emits them by default)
-    ONION_ADDR=$(docker logs fips-dir-a 2>&1 \
+    ONION_ADDR=$(docker logs fips-dir-a${FIPS_CI_NAME_SUFFIX:-} 2>&1 \
         | sed 's/\x1b\[[0-9;]*m//g' \
         | grep -oE 'onion_address=[a-z2-7]{56}\.onion' \
         | head -1 \
@@ -115,7 +115,7 @@ if [ -z "$ONION_ADDR" ]; then
     echo "  FAIL: Onion service not created within ${MAX_WAIT_ONION}s"
     echo ""
     echo "Node A logs (last 30 lines):"
-    docker logs fips-dir-a 2>&1 | tail -30
+    docker logs fips-dir-a${FIPS_CI_NAME_SUFFIX:-} 2>&1 | tail -30
     docker compose down
     exit 1
 fi
@@ -143,8 +143,8 @@ peers_a=0
 peers_b=0
 elapsed=0
 while [ "$elapsed" -lt "$MAX_WAIT_PEER" ]; do
-    peers_a=$(count_connected_peers fips-dir-a)
-    peers_b=$(count_connected_peers fips-dir-b)
+    peers_a=$(count_connected_peers fips-dir-a${FIPS_CI_NAME_SUFFIX:-})
+    peers_b=$(count_connected_peers fips-dir-b${FIPS_CI_NAME_SUFFIX:-})
 
     if [ "$peers_a" -ge 1 ] && [ "$peers_b" -ge 1 ]; then
         echo "  Both nodes connected after ${elapsed}s (A: ${peers_a}, B: ${peers_b})"
@@ -159,10 +159,10 @@ if [ "$peers_a" -lt 1 ] || [ "$peers_b" -lt 1 ]; then
     echo "  FAIL: Peers not established within ${MAX_WAIT_PEER}s"
     echo ""
     echo "Node A logs (last 30 lines):"
-    docker logs fips-dir-a 2>&1 | tail -30
+    docker logs fips-dir-a${FIPS_CI_NAME_SUFFIX:-} 2>&1 | tail -30
     echo ""
     echo "Node B logs (last 30 lines):"
-    docker logs fips-dir-b 2>&1 | tail -30
+    docker logs fips-dir-b${FIPS_CI_NAME_SUFFIX:-} 2>&1 | tail -30
     docker compose down
     exit 1
 fi
@@ -229,15 +229,15 @@ print(f'{sum(trimmed)/len(trimmed):.1f}')
 
 echo ""
 echo "  Ping via Tor onion service (directory mode, Sandbox 1):"
-ping_series fips-dir-a "$NPUB_B" "A → B"
-ping_series fips-dir-b "$NPUB_A" "B → A"
+ping_series fips-dir-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B" "A → B"
+ping_series fips-dir-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A" "B → A"
 
 echo ""
 
 # ── Phase 6: Log analysis ────────────────────────────────────────
 echo "Phase 6: Log analysis"
 
-for node in fips-dir-a fips-dir-b; do
+for node in fips-dir-a${FIPS_CI_NAME_SUFFIX:-} fips-dir-b${FIPS_CI_NAME_SUFFIX:-}; do
     panics=$(docker logs "$node" 2>&1 | grep -ci "panic" || true)
     errors=$(docker logs "$node" 2>&1 | grep -ci "error" || true)
     onion=$(docker logs "$node" 2>&1 | grep -ci "onion" || true)

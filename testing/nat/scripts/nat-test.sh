@@ -36,7 +36,7 @@ cleanup() {
 }
 
 helper_tcpdump_image() {
-    docker inspect -f '{{.Config.Image}}' fips-nat-router-a 2>/dev/null || echo nat-nat-a
+    docker inspect -f '{{.Config.Image}}' fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-} 2>/dev/null || echo nat-nat-a
 }
 
 dump_container_state() {
@@ -202,7 +202,7 @@ dump_stun_udp_probe() {
 
     local capture_file
     capture_file="$(mktemp)"
-    docker run --rm --label com.corganlabs.fips-ci=1 --net=container:fips-nat-stun --cap-add NET_ADMIN --cap-add NET_RAW \
+    docker run --rm --label com.corganlabs.fips-ci=1 --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}" --net=container:fips-nat-stun${FIPS_CI_NAME_SUFFIX:-} --cap-add NET_ADMIN --cap-add NET_RAW \
         --entrypoint sh "$helper_image" \
         -lc "timeout 8 tcpdump -ni any 'udp and not port 53' -c 80" \
         >"$capture_file" 2>&1 &
@@ -225,38 +225,38 @@ dump_stun_udp_probe() {
 dump_cone_diagnostics() {
     echo ""
     echo "=== cone diagnostics ==="
-    dump_fips_state fips-nat-cone-a 172.31.254.30 7777 172.31.254.40 3478
-    dump_node_udp_probe fips-nat-cone-a
-    dump_fips_state fips-nat-cone-b 172.31.254.30 7777 172.31.254.40 3478
-    dump_node_udp_probe fips-nat-cone-b
-    dump_container_state fips-nat-router-a
-    dump_router_udp_probe fips-nat-router-a fips-nat-cone-a
-    dump_container_state fips-nat-router-b
-    dump_router_udp_probe fips-nat-router-b fips-nat-cone-b
-    dump_container_state fips-nat-relay
-    dump_stun_udp_probe fips-nat-cone-a
-    dump_stun_udp_probe fips-nat-cone-b
-    dump_container_state fips-nat-stun
+    dump_fips_state fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_node_udp_probe fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}
+    dump_fips_state fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_node_udp_probe fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}
+    dump_router_udp_probe fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-} fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-}
+    dump_router_udp_probe fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-} fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}
+    dump_stun_udp_probe fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}
+    dump_stun_udp_probe fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-stun${FIPS_CI_NAME_SUFFIX:-}
 }
 
 dump_symmetric_diagnostics() {
     echo ""
     echo "=== symmetric diagnostics ==="
-    dump_fips_state fips-nat-symmetric-a 172.31.254.30 7777 172.31.254.40 3478
-    dump_fips_state fips-nat-symmetric-b 172.31.254.30 7777 172.31.254.40 3478
-    dump_container_state fips-nat-router-a
-    dump_container_state fips-nat-router-b
-    dump_container_state fips-nat-relay
-    dump_container_state fips-nat-stun
+    dump_fips_state fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_fips_state fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_container_state fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-stun${FIPS_CI_NAME_SUFFIX:-}
 }
 
 dump_lan_diagnostics() {
     echo ""
     echo "=== lan diagnostics ==="
-    dump_fips_state fips-nat-lan-a 172.31.10.30 7777 172.31.10.40 3478
-    dump_fips_state fips-nat-lan-b 172.31.10.30 7777 172.31.10.40 3478
-    dump_container_state fips-nat-relay
-    dump_container_state fips-nat-stun
+    dump_fips_state fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} 172.31.10.30 7777 172.31.10.40 3478
+    dump_fips_state fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} 172.31.10.30 7777 172.31.10.40 3478
+    dump_container_state fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}
+    dump_container_state fips-nat-stun${FIPS_CI_NAME_SUFFIX:-}
 }
 
 trap 'echo ""; echo "NAT test interrupted"; cleanup; exit 130' INT TERM
@@ -334,22 +334,22 @@ run_cone() {
     "$GENERATE_SCRIPT" cone
     "${COMPOSE[@]}" --profile cone up -d --build --force-recreate
     "$TOPOLOGY_SCRIPT" cone
-    wait_for_peers fips-nat-cone-a 1 45 || {
+    wait_for_peers fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} 1 45 || {
         dump_cone_diagnostics
         return 1
     }
-    wait_for_peers fips-nat-cone-b 1 45 || {
+    wait_for_peers fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} 1 45 || {
         dump_cone_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-cone-a udp 172.31.254.
-    assert_peer_path fips-nat-cone-b udp 172.31.254.
-    assert_link_path fips-nat-cone-a 172.31.254.
-    assert_link_path fips-nat-cone-b 172.31.254.
+    assert_peer_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} udp 172.31.254.
+    assert_peer_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} udp 172.31.254.
+    assert_link_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.
+    assert_link_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.
     # shellcheck disable=SC1090
     source "$NAT_DIR/generated-configs/cone/npubs.env"
-    ping_peer fips-nat-cone-a "$NPUB_B"
-    ping_peer fips-nat-cone-b "$NPUB_A"
+    ping_peer fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
+    ping_peer fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A"
     cleanup
 }
 
@@ -359,24 +359,24 @@ run_symmetric() {
     NAT_MODE_A=symmetric NAT_MODE_B=symmetric "$GENERATE_SCRIPT" symmetric
     NAT_MODE_A=symmetric NAT_MODE_B=symmetric "${COMPOSE[@]}" --profile symmetric up -d --build --force-recreate
     "$TOPOLOGY_SCRIPT" symmetric
-    wait_for_peers fips-nat-symmetric-a 1 60 || {
+    wait_for_peers fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} 1 60 || {
         dump_symmetric_diagnostics
         return 1
     }
-    wait_for_peers fips-nat-symmetric-b 1 60 || {
+    wait_for_peers fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} 1 60 || {
         dump_symmetric_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-symmetric-a tcp 172.31.254.11:
-    assert_peer_path fips-nat-symmetric-b tcp 172.31.254.10:
-    assert_link_path fips-nat-symmetric-a 172.31.254.11:
-    assert_link_path fips-nat-symmetric-b 172.31.254.10:
-    require_bootstrap_activity fips-nat-symmetric-a
-    require_bootstrap_activity fips-nat-symmetric-b
+    assert_peer_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} tcp 172.31.254.11:
+    assert_peer_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} tcp 172.31.254.10:
+    assert_link_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.11:
+    assert_link_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.10:
+    require_bootstrap_activity fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-}
+    require_bootstrap_activity fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-}
     # shellcheck disable=SC1090
     source "$NAT_DIR/generated-configs/symmetric/npubs.env"
-    ping_peer fips-nat-symmetric-a "$NPUB_B"
-    ping_peer fips-nat-symmetric-b "$NPUB_A"
+    ping_peer fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
+    ping_peer fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A"
     cleanup
 }
 
@@ -385,22 +385,22 @@ run_lan() {
     cleanup
     "$GENERATE_SCRIPT" lan
     "${COMPOSE[@]}" --profile lan up -d --build --force-recreate
-    wait_for_peers fips-nat-lan-a 1 45 || {
+    wait_for_peers fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} 1 45 || {
         dump_lan_diagnostics
         return 1
     }
-    wait_for_peers fips-nat-lan-b 1 45 || {
+    wait_for_peers fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} 1 45 || {
         dump_lan_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-lan-a udp 172.31.10.
-    assert_peer_path fips-nat-lan-b udp 172.31.10.
-    assert_link_path fips-nat-lan-a 172.31.10.
-    assert_link_path fips-nat-lan-b 172.31.10.
+    assert_peer_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} udp 172.31.10.
+    assert_peer_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} udp 172.31.10.
+    assert_link_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} 172.31.10.
+    assert_link_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} 172.31.10.
     # shellcheck disable=SC1090
     source "$NAT_DIR/generated-configs/lan/npubs.env"
-    ping_peer fips-nat-lan-a "$NPUB_B"
-    ping_peer fips-nat-lan-b "$NPUB_A"
+    ping_peer fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
+    ping_peer fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A"
     # Skip the final teardown when the mesh-lab harness wraps this
     # script: it needs to docker-logs the containers before teardown,
     # and will run its own cleanup after capture. Failure paths above

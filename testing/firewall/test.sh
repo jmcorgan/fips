@@ -22,8 +22,8 @@ TESTING_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 GENERATE_CONFIGS="$SCRIPT_DIR/generate-configs.sh"
 
-CONTAINER_A="fips-fw-container-a"
-CONTAINER_B="fips-fw-container-b"
+CONTAINER_A="fips-fw-container-a${FIPS_CI_NAME_SUFFIX:-}"
+CONTAINER_B="fips-fw-container-b${FIPS_CI_NAME_SUFFIX:-}"
 
 NPUB_A="npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
 NPUB_B="npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"

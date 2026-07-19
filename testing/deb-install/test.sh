@@ -187,7 +187,7 @@ _run_deb_install_scenario() {
     local distro_label="$1"
     local base_image="$2"
 
-    local name="fips-deb-test-${distro_label}"
+    local name="fips-deb-test-${distro_label}${FIPS_CI_NAME_SUFFIX:-}"
     local image="fips-deb-test:${distro_label}"
     log ".deb install: ${base_image}"
 
