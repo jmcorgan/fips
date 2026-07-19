@@ -1202,8 +1202,6 @@ impl Node {
     /// Returning the smallest (rather than the first-iterated, which used
     /// to vary across HashMap iteration order + async-startup race) makes
     /// the clamp deterministic across daemon restarts.
-    ///
-    /// See `ISSUE-2026-0011` for the empirical investigation.
     pub fn transport_mtu(&self) -> u16 {
         let min_operational = self
             .transports
@@ -1494,14 +1492,14 @@ impl Node {
 
         self.stats_history.tick(now, &snap, &peer_snaps);
 
-        // Publish the read-side snapshot (R2 dual-ring, Q1-b). The tick is the
+        // Publish the read copy of the dual-ring stats snapshot. The tick is the
         // natural and sole mutator of `stats_history`, so publishing here can
         // never produce false staleness: the snapshot and the underlying data
-        // advance together. This is data, not a rendered response (Q1-d), and
-        // it is published only here, not in a monolithic per-tick rebuild of
-        // every query (Q1-c). It also is not gated behind any slow I/O on the
-        // tick the way the abandoned 2edc8a1 republish was.
-        // Per-stats-history-peer metadata (R5). `show_stats_peers` /
+        // advance together. What is published is data, not a rendered response,
+        // and it is published only here, rather than as a monolithic per-tick
+        // rebuild of every query's result. It also is not gated behind any slow
+        // I/O on the tick the way the abandoned 2edc8a1 republish was.
+        // Per-stats-history-peer metadata. `show_stats_peers` /
         // `show_stats_history_all_peers` need each tracked peer's live
         // membership (`is_active`), resolved npub, and display name — all
         // cross-subsystem reads against the live peer table and host map,
@@ -1605,21 +1603,21 @@ impl Node {
     /// publish it via `ArcSwap`, so `show_tree` / `show_bloom` / `show_cache`
     /// / `show_routing` / `show_identity_cache` render off the rx_loop.
     ///
-    /// **Q1 publisher placement.** The four projected subsystems (tree / bloom
+    /// **Publisher placement.** The four projected subsystems (tree / bloom
     /// / coord cache / identity cache) mutate at dozens of scattered handler
     /// sites, and every projected row carries a *display name* resolved against
     /// the live peer/session tables and host map — state reachable only with
-    /// `&Node`. Per-mutator on-change publication (Q1-a) would therefore be
-    /// large, error-prone surgery, and each call would still need `&Node` to
-    /// resolve names across subsystem boundaries. So this projection is
-    /// published from the tick — the documented acceptable interim (the spec's
-    /// "publish from the tick" allowance, mirroring R2's stats publish). The
-    /// tick is the one site with coherent `&Node` access to resolve every
-    /// display name together. A single combined cell is the natural shape
-    /// because there is exactly one publisher, so the multi-mutator
-    /// whole-snapshot-rebuild hazard Q1-c warns against does not arise.
+    /// `&Node`. Publishing on change from each individual mutator would
+    /// therefore be large, error-prone surgery, and each call would still need
+    /// `&Node` to resolve names across subsystem boundaries. So this projection
+    /// is published from the tick instead, the same placement the stats
+    /// snapshot above uses. The tick is the one site with coherent `&Node`
+    /// access to resolve every display name together. A single combined cell is
+    /// the natural shape because there is exactly one publisher, so the
+    /// whole-snapshot-rebuild hazard that afflicts multi-mutator designs does
+    /// not arise.
     ///
-    /// The snapshot holds typed rows + scalars (Q1-d data, not rendered
+    /// The snapshot holds typed rows + scalars (data, not rendered
     /// responses); the counter-family `stats` blocks the queries also emit are
     /// served from the `MetricsRegistry` (already `Arc`-shared) at render time.
     fn publish_routing_snapshot(&self) {
@@ -1808,19 +1806,20 @@ impl Node {
     /// `show_connections` / `show_transports` / `show_mmp` render off the
     /// rx_loop.
     ///
-    /// **Q1 publisher placement (tick, like R3).** Every projected row needs a
-    /// display name resolved against the live peer/session tables and host map
+    /// **Publisher placement (from the tick, as with the routing snapshot
+    /// above).** Every projected row needs a display name resolved against the
+    /// live peer/session tables and host map
     /// (`&Node`); `show_peers` additionally needs the live tree state to derive
     /// `is_parent` / `is_child` plus the Nostr-discovery failure-state map —
     /// cross-subsystem reads available only with `&Node`. And most fields
     /// (link/session traffic counters, MMP metrics, `last_seen`, noise counters)
     /// mutate continuously on the data plane, not at the discrete entity
-    /// lifecycle mutators, so per-lifecycle-mutator publication (Q1-a) would not
-    /// capture their freshness anyway. The tick is the natural cadence with
-    /// coherent `&Node` access.
+    /// lifecycle mutators, so publishing on change from each lifecycle mutator
+    /// would not capture their freshness anyway. The tick is the natural
+    /// cadence with coherent `&Node` access.
     ///
-    /// **Structural sharing (the R4 umbrella mandate).** Each table is a
-    /// `Vec<Arc<Row>>`. The freshly-projected rows are reconciled against the
+    /// **Structural sharing.** Each table is a `Vec<Arc<Row>>`.
+    /// The freshly-projected rows are reconciled against the
     /// previously published snapshot via
     /// [`reconcile_rows`](crate::control::snapshot::reconcile_rows): a row's
     /// `Arc` is reused (kept by pointer) whenever it matches the prior row by
