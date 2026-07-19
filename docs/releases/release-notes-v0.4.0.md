@@ -1,6 +1,6 @@
 # FIPS v0.4.0
 
-**Released**: 2026-06-21 (provisional)
+**Released**: 2026-06-27
 
 v0.4.0 is the throughput-and-observability release on the v0.3.x wire
 format. It adds two new ways for nodes to find and reach each other (the

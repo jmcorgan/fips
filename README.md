@@ -213,7 +213,7 @@ testing/      Docker-based integration test harnesses + chaos simulation
 ## Status & roadmap
 
 FIPS is at **v0.5.0-dev** on the `master` branch.
-[v0.4.0](https://github.com/jmcorgan/fips/releases/tag/v0.4.0) has
+[v0.4.1](https://github.com/jmcorgan/fips/releases/tag/v0.4.1) has
 shipped; this development line continues the testing-and-polishing
 track toward v0.5.0. The core protocol works end-to-end over
 UDP, TCP, Ethernet, Tor, Nym, and Bluetooth on a global, public test
