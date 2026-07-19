@@ -57,7 +57,6 @@
 #![allow(dead_code)]
 
 use crate::noise::{self, NoiseError, NoiseSession};
-use crate::peer::PeerConnection;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision,
     OutboundDecision, OutboundSnapshot, PeerSnapshot, PromotionResult, RekeyCfg,
@@ -417,6 +416,46 @@ fn no_pending_connection() -> NoiseError {
     }
 }
 
+/// The handshake-phase Noise crypto, owned by the control machine.
+///
+/// PRESENCE OF THIS STRUCT (`PeerMachine::leg().is_some()`) IS THE
+/// HANDSHAKE-PHASE CARRIER SIGNAL — it is what `Node::connections()`,
+/// `connection_count()`, the stale-connection sweep, the transport-in-use
+/// check, and the peering budget all key on. It is attached and detached at
+/// exactly the points the pending connection was, and its presence is NOT a
+/// function of whether either handle is populated.
+///
+/// A present-but-empty value is legal and load-bearing: `mark_failed` drops
+/// the initiation handle while deliberately retaining the carrier so the
+/// sweep can reclaim it, and `take_session` empties the other. Deriving
+/// presence from handle presence would make every failed handshake invisible
+/// to the sweep — a permanent leak. See the presence tests in this module.
+pub(crate) struct HandshakeCrypto {
+    /// Noise handshake state (consumed on completion).
+    pub(crate) noise_handshake: Option<noise::HandshakeState>,
+    /// Completed Noise session (available once the handshake completes).
+    pub(crate) noise_session: Option<NoiseSession>,
+}
+
+impl HandshakeCrypto {
+    /// A fresh carrier holding neither handle, as every handshake begins.
+    pub(crate) fn new() -> Self {
+        Self {
+            noise_handshake: None,
+            noise_session: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for HandshakeCrypto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandshakeCrypto")
+            .field("has_noise_handshake", &self.noise_handshake.is_some())
+            .field("has_noise_session", &self.noise_session.is_some())
+            .finish()
+    }
+}
+
 /// Per-peer control FSM. Holds control-tier lifecycle state only; the
 /// send-critical state is published as `PeerSendState` and mutated via the
 /// emitted [`PeerAction`]s.
@@ -424,13 +463,13 @@ pub(crate) struct PeerMachine {
     state: PeerState,
     link: LinkId,
     identity: Option<PeerIdentity>,
-    /// The pending handshake connection this machine owns while it is in the
-    /// handshake window. `None` before the connection is built (the dial
-    /// window) and after promotion consumes it (the machine survives as the
-    /// active peer's control machine). Its bookkeeping is storage the shell
-    /// reaches through the accessors below; its Noise handles are driven by
-    /// this machine's handshake operations.
-    leg: Option<PeerConnection>,
+    /// The handshake-phase Noise crypto this machine owns while it is in the
+    /// handshake window. `None` before the handshake begins (the dial window)
+    /// and after promotion consumes it (the machine survives as the active
+    /// peer's control machine). Its presence — not the state of the handles
+    /// inside it — is what marks this machine as carrying a pending
+    /// handshake; see [`HandshakeCrypto`].
+    leg: Option<HandshakeCrypto>,
     /// Pure handshake-phase bookkeeping (link/direction/indices/transport/
     /// stored handshake bytes/epoch). Reused verbatim from the FMP state core.
     conn: ConnectionState,
@@ -532,25 +571,21 @@ impl PeerMachine {
         self.state
     }
 
-    /// The pending handshake connection, if this leg is still in the
-    /// handshake window.
-    pub(crate) fn leg(&self) -> Option<&PeerConnection> {
+    /// The handshake crypto carrier, if this machine is still in the
+    /// handshake window. Presence answers "is there a pending handshake
+    /// here", independently of whether either handle is populated.
+    pub(crate) fn leg(&self) -> Option<&HandshakeCrypto> {
         self.leg.as_ref()
     }
 
-    /// Mutable access to the pending handshake connection.
-    pub(crate) fn leg_mut(&mut self) -> Option<&mut PeerConnection> {
-        self.leg.as_mut()
-    }
-
-    /// Take the pending handshake connection off the machine (promotion and
+    /// Take the handshake crypto carrier off the machine (promotion and
     /// teardown consume it by value).
-    pub(crate) fn take_leg(&mut self) -> Option<PeerConnection> {
+    pub(crate) fn take_leg(&mut self) -> Option<HandshakeCrypto> {
         self.leg.take()
     }
 
-    /// Embed a pending handshake connection on the machine.
-    pub(crate) fn set_leg(&mut self, leg: PeerConnection) {
+    /// Attach a handshake crypto carrier to the machine.
+    pub(crate) fn set_leg(&mut self, leg: HandshakeCrypto) {
         self.leg = Some(leg);
     }
 
@@ -593,7 +628,6 @@ impl PeerMachine {
             let msg1 = hs.write_message_1()?;
 
             leg.noise_handshake = Some(hs);
-            leg.state_mut().touch(current_time_ms);
 
             msg1
         };
@@ -636,11 +670,9 @@ impl PeerMachine {
                 .remote_static()
                 .expect("remote static available after msg1");
             let learned_identity = PeerIdentity::from_pubkey_full(remote_static);
-            leg.state_mut().set_expected_identity(learned_identity);
 
             // Capture remote epoch from msg1
             let remote_epoch = hs.remote_epoch();
-            leg.state_mut().set_remote_epoch(remote_epoch);
 
             // Generate message 2
             let msg2 = hs.write_message_2()?;
@@ -648,7 +680,6 @@ impl PeerMachine {
             // Handshake is complete for responder
             let session = hs.into_session()?;
             leg.noise_session = Some(session);
-            leg.state_mut().touch(current_time_ms);
 
             (msg2, learned_identity, remote_epoch)
         };
@@ -690,11 +721,9 @@ impl PeerMachine {
 
             // Capture remote epoch from msg2
             let remote_epoch = hs.remote_epoch();
-            leg.state_mut().set_remote_epoch(remote_epoch);
 
             let session = hs.into_session()?;
             leg.noise_session = Some(session);
-            leg.state_mut().touch(current_time_ms);
 
             remote_epoch
         };
@@ -785,6 +814,14 @@ impl PeerMachine {
         self.conn.expected_identity()
     }
 
+    /// Remote startup epoch of the surviving carrier, recorded by the
+    /// handshake operations at the message that reveals it (msg1 inbound,
+    /// msg2 outbound). Promotion reads it to seed the active peer and to
+    /// detect a peer restart across a reconnect.
+    pub(crate) fn conn_remote_epoch(&self) -> Option<[u8; 8]> {
+        self.conn.remote_epoch()
+    }
+
     /// Stored wire-format msg1 of the surviving carrier — the resend source for
     /// the outbound handshake retransmit, now that the leg no longer carries it.
     pub(crate) fn conn_handshake_msg1(&self) -> Option<&[u8]> {
@@ -860,17 +897,14 @@ impl PeerMachine {
         self.conn.link_stats()
     }
 
-    /// Record the peer session index on the surviving carrier. Seeds the
-    /// carrier from a pre-built leg (`Node::add_connection`) so the promotion
-    /// hand-off matches the establish paths that write it on the machine.
+    /// Record the peer session index on the surviving carrier, so the
+    /// promotion hand-off reads it from the machine.
     pub(crate) fn set_conn_their_index(&mut self, index: SessionIndex) {
         self.conn.set_their_index(index);
     }
 
-    /// Record the transport ID on the surviving carrier. Populated on the
-    /// inbound establish path (the leg seeds it at msg1, but the machine's
-    /// carrier is only written on the outbound dial) and when seeding the
-    /// carrier from a pre-built leg (`Node::add_connection`).
+    /// Record the transport ID on the surviving carrier. Written on the
+    /// inbound establish path at msg1 and on the outbound dial.
     pub(crate) fn set_conn_transport_id(&mut self, id: TransportId) {
         self.conn.set_transport_id(id);
     }
@@ -2871,7 +2905,7 @@ mod tests {
             100,
             &mut alloc,
         );
-        m.set_leg(PeerConnection::outbound(LinkId::new(1), peer, 100));
+        m.set_leg(HandshakeCrypto::new());
         assert!(m.is_handshaking_sent_msg1());
         assert!(!m.is_failed());
         assert_eq!(m.displayed_handshake_state(), "sent_msg1");
@@ -3220,17 +3254,13 @@ mod tests {
         current_time_ms: u64,
     ) -> PeerMachine {
         let mut machine = PeerMachine::new_outbound(link_id, expected_identity, current_time_ms);
-        machine.set_leg(PeerConnection::outbound(
-            link_id,
-            expected_identity,
-            current_time_ms,
-        ));
+        machine.set_leg(HandshakeCrypto::new());
         machine
     }
 
     fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
         let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
-        machine.set_leg(PeerConnection::inbound(link_id, current_time_ms));
+        machine.set_leg(HandshakeCrypto::new());
         machine
     }
 
@@ -3294,20 +3324,14 @@ mod tests {
         assert_eq!(discovered.pubkey(), initiator_identity.pubkey());
 
         // Responder learned initiator's epoch
-        assert_eq!(
-            responder_conn.leg().unwrap().remote_epoch(),
-            Some(initiator_epoch)
-        );
+        assert_eq!(responder_conn.conn_remote_epoch(), Some(initiator_epoch));
 
         // Initiator completes handshake
         initiator_conn.complete_handshake(&msg2, 1300).unwrap();
         assert!(initiator_conn.has_session());
 
         // Initiator learned responder's epoch
-        assert_eq!(
-            initiator_conn.leg().unwrap().remote_epoch(),
-            Some(responder_epoch)
-        );
+        assert_eq!(initiator_conn.conn_remote_epoch(), Some(responder_epoch));
 
         // Both have sessions
         assert!(initiator_conn.has_session());

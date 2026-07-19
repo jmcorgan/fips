@@ -9,11 +9,11 @@
 //!
 //! [`ConnectionState`] owns every **pure** field of the handshake-phase
 //! connection. The Noise crypto handles (`noise::HandshakeState`,
-//! `NoiseSession`) stay shell-owned in
-//! [`PeerConnection`](crate::peer::PeerConnection), which holds a
-//! `ConnectionState` alongside them and drives the two halves side by side. The
-//! shell's XX transition methods drive the Noise objects, then write learned
-//! results back through the pure setters here (`set_expected_identity`,
+//! `NoiseSession`) stay shell-owned in the per-peer control machine's
+//! handshake carrier, which the machine drives alongside its own
+//! `ConnectionState`. The machine's transition methods drive the Noise
+//! objects, then write learned results back through the pure setters here
+//! (`set_expected_identity`,
 //! `set_remote_epoch`, `touch`).
 //!
 //! This state is `no_std`+`alloc`-clean with respect to transport: the
@@ -35,10 +35,9 @@ use crate::utils::index::SessionIndex;
 /// Pure, runtime-agnostic bookkeeping for a connection in the handshake phase.
 ///
 /// Owns every non-crypto field of the handshake-phase connection. The Noise
-/// crypto handles live beside it in the shell
-/// [`PeerConnection`](crate::peer::PeerConnection); this struct is written only
-/// as plain data — the shell extracts learned identity/epoch out of the crypto
-/// objects and sets them here through the setters.
+/// crypto handles live beside it on the per-peer control machine; this struct
+/// is written only as plain data — the machine extracts learned identity and
+/// epoch out of the crypto objects and sets them here through the setters.
 #[derive(Debug)]
 pub struct ConnectionState {
     // === Link Reference ===
@@ -148,6 +147,7 @@ impl ConnectionState {
     /// Create the pure state for a new inbound connection with transport info.
     ///
     /// Used when processing msg1 where we know the transport and source address.
+    #[cfg(test)]
     pub fn inbound_with_transport(
         link_id: LinkId,
         transport_id: TransportId,

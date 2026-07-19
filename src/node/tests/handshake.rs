@@ -814,7 +814,7 @@ async fn test_failed_connection_cleanup() {
         let machine = node
             .peer_machines
             .get_mut(&link_id)
-            .expect("machine seeded by add_connection");
+            .expect("machine seeded by the handshake seeder");
         let alloc = &mut node.index_allocator;
         let actions = machine.step(
             crate::peer::machine::PeerEvent::HandshakeSendFailed,

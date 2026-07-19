@@ -193,14 +193,14 @@ impl Node {
             .collect();
         for link in timer_links {
             // The idle-timeout threshold reads the survivor carrier's
-            // last-activity (the leg no longer projects it); the leg still
-            // supplies direction/identity for the retry decision below.
+            // last-activity; presence of a pending handshake is what decides
+            // between reaping and dropping an orphan timer.
             let timed_out = self
                 .peer_machines
                 .get(&link)
                 .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms));
-            let (reap, retry_peer) = match self.leg(&link) {
-                Some(_) if timed_out => {
+            let (reap, retry_peer) = match self.has_pending_leg(&link) {
+                true if timed_out => {
                     let retry_peer = if self
                         .peer_machines
                         .get(&link)
@@ -216,8 +216,8 @@ impl Node {
                     (true, retry_peer)
                 }
                 // Not yet idle-timed-out: leave the timer for a later tick.
-                Some(_) => (false, None),
-                None => {
+                true => (false, None),
+                false => {
                     // Orphan timer (connection already reaped elsewhere) — drop it.
                     if let Some(timers) = self.peer_timers.get_mut(&link) {
                         timers.remove(&TimerKind::HandshakeTimeout);

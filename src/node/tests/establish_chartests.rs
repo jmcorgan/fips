@@ -243,7 +243,7 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     );
     assert_eq!(node.peer_count(), 0, "duplicate msg1 promotes nothing");
     assert!(
-        node.get_connection(&link_id).is_some(),
+        node.has_pending_leg(&link_id),
         "pending connection is left intact"
     );
     assert_eq!(
@@ -376,7 +376,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     assert!(peer.has_session());
     assert_eq!(node.peer_count(), 1);
     assert!(
-        node.get_connection(&out_link).is_some(),
+        node.has_pending_leg(&out_link),
         "pending outbound to the same identity must be preserved (deferred cleanup)"
     );
     assert!(

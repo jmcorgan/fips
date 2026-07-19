@@ -15,8 +15,7 @@ use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::nostr::{BootstrapHandoffResult, EstablishedTraversal};
-use crate::peer::PeerConnection;
-use crate::peer::machine::{PeerEvent, PeerMachine};
+use crate::peer::machine::{HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
@@ -380,7 +379,7 @@ impl Node {
         })
     }
 
-    fn is_connecting_to_peer_on_path(
+    pub(in crate::node) fn is_connecting_to_peer_on_path(
         &self,
         peer_node_addr: &NodeAddr,
         transport_id: TransportId,
@@ -582,14 +581,12 @@ impl Node {
     ) -> Result<(), NodeError> {
         let peer_node_addr = *peer_identity.node_addr();
 
-        // Create connection in handshake phase (outbound knows expected identity)
         let current_time_ms = Self::now_ms();
-        let connection = PeerConnection::outbound(link_id, peer_identity, current_time_ms);
 
-        // The control machine drives the handshake, so it takes the connection
-        // before the crypto runs. The machine was born at dial and persisted in
-        // `initiate_connection`, so every live caller already has one; recover
-        // with a fresh one if a direct caller ever skips the dial.
+        // The control machine drives the handshake, so it takes the crypto
+        // carrier before the crypto runs. The machine was born at dial and
+        // persisted in `initiate_connection`, so every live caller already has
+        // one; recover with a fresh one if a direct caller ever skips the dial.
         debug_assert!(
             self.peer_machines.contains_key(&link_id),
             "outbound msg1 prepared for link {link_id} with no dial-time machine"
@@ -597,7 +594,7 @@ impl Node {
         self.peer_machines
             .entry(link_id)
             .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms))
-            .set_leg(connection);
+            .set_leg(HandshakeCrypto::new());
 
         // Allocate a session index for this handshake
         let our_index = match self.index_allocator.allocate() {

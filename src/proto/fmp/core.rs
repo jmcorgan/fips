@@ -188,9 +188,9 @@ pub(crate) struct RekeyCfg {
 /// The result of the shell-side Noise wire step (Phase B) for one inbound
 /// handshake msg1, handed to the establish decision core.
 ///
-/// The Noise step (`receive_handshake_init`) runs shell-side on the
-/// `PeerConnection`: it reads **no** `Node` registry state — the load-bearing
-/// invariant of this decomposition — and yields the learned peer identity, the
+/// The Noise step (`receive_handshake_init`) runs on the control machine: it
+/// reads **no** `Node` registry state — the essential invariant of this
+/// decomposition — and yields the learned peer identity, the
 /// remote startup epoch, the sender's session index, and the opaque msg2 noise
 /// payload to frame and send. The core never parses or builds Noise bytes; the
 /// payload is an opaque blob.
@@ -404,7 +404,7 @@ pub(crate) enum InboundReject {
 /// cross-connection and the tie-break decides whether we swap our session to the
 /// (winning) outbound one or keep our existing inbound session. The rekey-msg2
 /// completion path is handled by a separate shell driver (it mutates
-/// `ActivePeer`, not a `PeerConnection`) and never reaches this decision.
+/// `ActivePeer`, not a pending handshake) and never reaches this decision.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OutboundDecision {
     /// No existing peer for this identity: promote the completed outbound

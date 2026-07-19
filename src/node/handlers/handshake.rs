@@ -6,11 +6,11 @@ use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
+use crate::peer::ActivePeer;
 use crate::peer::machine::{
-    CrossConnOutcome, FailReason, HandshakePhase, PeerAction, PeerEvent, PeerMachine, PeerState,
-    TimerKind,
+    CrossConnOutcome, FailReason, HandshakeCrypto, HandshakePhase, PeerAction, PeerEvent,
+    PeerMachine, PeerState, TimerKind,
 };
-use crate::peer::{ActivePeer, PeerConnection};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
     EstablishSnapshot, EstablishView, InboundDecision, InboundReject, OutboundSnapshot,
@@ -264,27 +264,17 @@ impl Node {
 
         // === CRYPTO COST PAID HERE ===
         let link_id = self.allocate_link_id();
-        let conn = PeerConnection::inbound_with_transport(
-            link_id,
-            packet.transport_id,
-            packet.remote_addr.clone(),
-            packet.timestamp_ms,
-        );
 
         // The control machine drives the handshake, so it is built here, above
-        // the crypto, carrying the pending connection. It stays a local: it
-        // enters `peer_machines` only at the promote tails, so a rejected msg1
-        // still leaves no registry trace and allocates no index.
+        // the crypto. It stays a local: it enters `peer_machines` only at the
+        // promote tails, so a rejected msg1 still leaves no registry trace and
+        // allocates no index.
         let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
-        // The inbound connection carries the transport ID from msg1, but the
-        // machine's carrier is only written on the outbound dial. Seed it here
-        // so the promotion hand-off reads it from the surviving carrier,
-        // matching the connection's own inbound seed.
+        // Seed the carrier with the transport and address msg1 arrived on, so
+        // the promotion hand-off reads them from it.
         machine.set_conn_transport_id(packet.transport_id);
-        // The inbound connection is constructed carrying the peer's address;
-        // seed the surviving carrier with it at the same point.
         machine.set_conn_source_addr(packet.remote_addr.clone());
-        machine.set_leg(conn);
+        machine.set_leg(HandshakeCrypto::new());
 
         let our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
@@ -328,10 +318,7 @@ impl Node {
         // state; from here the decision reads only `wire` and the snapshot.
         let wire = WireOutcome {
             peer_identity,
-            remote_epoch: machine
-                .leg()
-                .expect("pending connection attached above")
-                .remote_epoch(),
+            remote_epoch: machine.conn_remote_epoch(),
             their_index: header.sender_idx,
             msg2_payload: msg2_response,
         };
@@ -900,8 +887,8 @@ impl Node {
         };
 
         // Check if this is a rekey msg2: the handshake state is on the
-        // ActivePeer (not a PeerConnection), so the link's machine — if one
-        // survives at all — carries no pending connection. A bare machine
+        // ActivePeer, not in a handshake carrier, so the link's machine — if
+        // one survives at all — carries no pending handshake. A bare machine
         // lookup would NOT discriminate here: an established peer's machine
         // stays keyed by this link, so the pending connection's presence is
         // what marks a fresh establish. Look for a peer with matching
@@ -1392,6 +1379,7 @@ impl Node {
         let carrier_transport_id = machine.conn_transport_id();
         let carrier_source_addr = machine.conn_source_addr().cloned();
         let carrier_is_outbound = machine.conn_is_outbound();
+        let carrier_remote_epoch = machine.conn_remote_epoch();
         let link_stats = machine.conn_link_stats().clone();
 
         // Verify handshake is complete and extract session
@@ -1420,7 +1408,7 @@ impl Node {
             link_id,
             reason: "missing source_addr".into(),
         })?;
-        let remote_epoch = connection.remote_epoch();
+        let remote_epoch = carrier_remote_epoch;
 
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = carrier_is_outbound;

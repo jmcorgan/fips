@@ -1,5 +1,6 @@
 use super::*;
 use crate::PeerIdentity;
+use crate::peer::machine::HandshakeCrypto;
 use crate::transport::{LinkDirection, ReceivedPacket, TransportAddr, packet_channel};
 use crate::utils::index::SessionIndex;
 use std::time::Duration;
@@ -93,18 +94,14 @@ pub(super) fn outbound_leg(
     current_time_ms: u64,
 ) -> PeerMachine {
     let mut machine = PeerMachine::new_outbound(link_id, expected_identity, current_time_ms);
-    machine.set_leg(PeerConnection::outbound(
-        link_id,
-        expected_identity,
-        current_time_ms,
-    ));
+    machine.set_leg(HandshakeCrypto::new());
     machine
 }
 
 /// The responder twin of [`outbound_leg`].
 pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
     let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
-    machine.set_leg(PeerConnection::inbound(link_id, current_time_ms));
+    machine.set_leg(HandshakeCrypto::new());
     machine
 }
 
@@ -112,8 +109,7 @@ pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine 
 ///
 /// Returns the peer identity. The leg is outbound, in Complete state, with
 /// session, indices, and transport info set, and is installed on the node
-/// through [`Node::seed_handshake_machine`] — the test-surface twin of
-/// `Node::add_connection`.
+/// through [`Node::seed_handshake_machine`].
 pub(super) fn seed_completed_connection(
     node: &mut Node,
     link_id: LinkId,

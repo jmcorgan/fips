@@ -315,7 +315,7 @@ impl ActivePeer {
 
     /// Create from verified identity with existing link stats.
     ///
-    /// Used when promoting from PeerConnection, preserving handshake stats.
+    /// Used when promoting a completed handshake, preserving its link stats.
     /// For peers with Noise sessions, use `with_session` instead.
     pub fn with_stats(
         identity: PeerIdentity,

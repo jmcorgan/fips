@@ -342,9 +342,9 @@ fn test_node_connection_management() {
 
     assert_eq!(node.connection_count(), 1);
 
-    assert!(node.get_connection(&link_id).is_some());
+    assert!(node.has_pending_leg(&link_id));
 
-    node.remove_connection(&link_id);
+    node.remove_peer_machine(link_id);
     assert_eq!(node.connection_count(), 0);
 }
 
@@ -364,7 +364,7 @@ fn test_node_connection_duplicate() {
 
 #[cfg(debug_assertions)]
 #[test]
-fn test_peer_maps_coherent_after_add_connection() {
+fn test_peer_maps_coherent_after_seeding_a_handshake() {
     let mut node = make_node();
 
     let identity = make_peer_identity();
@@ -374,7 +374,7 @@ fn test_peer_maps_coherent_after_add_connection() {
 
     assert!(
         node.peer_machines.contains_key(&link_id),
-        "add_connection seeds a control machine for its leg"
+        "seeding a handshake creates its control machine"
     );
     node.debug_assert_peer_maps_coherent();
 }
@@ -2067,7 +2067,7 @@ fn nostr_rendezvous_outbound_admission_atomic_roundtrip() {
 /// to `addr_b`. Returns the sender's NodeAddr so the test can assert on
 /// identity-keyed maps.
 ///
-/// Uses the same outbound-PeerConnection->Noise IK pattern as the
+/// Uses the same outbound-machine->Noise IK pattern as the
 /// integration handshake tests, but inlined and unit-scoped.
 async fn craft_and_send_msg1(
     node_b: &Node,
@@ -2405,6 +2405,126 @@ fn test_failed_connection_is_retained_and_reaped() {
     assert_eq!(node.connection_count(), 0);
 }
 
+/// Handshake-phase membership is decided by whether a crypto carrier is
+/// ATTACHED, never by whether either Noise handle inside it is populated.
+///
+/// The distinction is the whole reason the carrier is a struct rather than a
+/// pair of bare handle fields. A carrier legitimately sits attached and empty:
+/// `mark_failed` drops the initiation handle and deliberately keeps the
+/// carrier so the sweep can reclaim it, `take_session` empties the other, and
+/// every handshake begins with both handles unset. If presence were derived
+/// from the handles, every failed handshake would vanish from the sweep,
+/// the count, and the peering budget at once — a permanent leak that no
+/// existing test would notice.
+///
+/// This drives the empty-carrier shape past every presence predicate on
+/// `Node` and asserts each one reports "present", then detaches and asserts
+/// each reports "absent".
+#[test]
+fn handshake_presence_tracks_the_carrier_not_the_noise_handles() {
+    use crate::proto::fmp::LifecycleView;
+
+    let mut node = make_node();
+    let link_id = LinkId::new(31);
+    let transport_id = TransportId::new(9);
+    let peer_identity = make_peer_identity();
+    let peer_addr = TransportAddr::from_string("10.0.0.9:9999");
+
+    node.seed_handshake_machine(
+        HandshakeSeed::outbound(link_id, peer_identity, 1000)
+            .with_transport_id(transport_id)
+            .with_source_addr(peer_addr.clone()),
+    )
+    .unwrap();
+
+    // A freshly seeded carrier holds neither handle — the construction window.
+    let leg = node.peer_machines.get(&link_id).unwrap().leg().unwrap();
+    assert!(
+        leg.noise_handshake.is_none() && leg.noise_session.is_none(),
+        "the seeded carrier must start with both handles empty"
+    );
+
+    // Every presence predicate must see it, handles or not.
+    let assert_present = |node: &Node, when: &str| {
+        assert_eq!(node.connection_count(), 1, "connection_count: {when}");
+        assert_eq!(node.connections().count(), 1, "connections(): {when}");
+        assert!(node.has_pending_leg(&link_id), "has_pending_leg: {when}");
+        assert_eq!(
+            node.stale_connections(1_000_000, 30_000).len(),
+            1,
+            "stale_connections: {when}"
+        );
+        assert!(
+            node.is_connecting_to_peer_on_path(peer_identity.node_addr(), transport_id, &peer_addr),
+            "is_connecting_to_peer_on_path: {when}"
+        );
+        // The last two predicates sit inline in functions with no callable
+        // seam, so these MIRROR them rather than exercising them: the shape is
+        // pinned here, but a mutation at the production site would not fail
+        // this test. Both sites read `machine.leg().is_some()` verbatim.
+        assert!(
+            node.peer_machines.values().any(|machine| {
+                machine.leg().is_some() && machine.conn_transport_id() == Some(transport_id)
+            }),
+            "transport-in-use: {when}"
+        );
+        // The complement of the rekey-msg2 discriminator: a machine carrying
+        // a pending handshake marks a fresh establish, so `handle_msg2` must
+        // NOT take its rekey-completion branch.
+        assert!(
+            node.peer_machines
+                .get(&link_id)
+                .is_some_and(|machine| machine.leg().is_some()),
+            "rekey-msg2 discriminator: {when}"
+        );
+        // Fires the live-carrier coherence assertion; a machine that had gone
+        // invisible would panic here rather than fail an assert_eq above.
+        node.debug_assert_peer_maps_coherent();
+    };
+
+    assert_present(&node, "freshly seeded, both handles empty");
+
+    // Drive to the failed shape: the initiation handle is dropped and the
+    // carrier is deliberately retained for the sweep.
+    let our_keypair = node.identity().keypair();
+    let startup_epoch = node.startup_epoch();
+    let machine = node.peer_machines.get_mut(&link_id).unwrap();
+    machine
+        .start_handshake(our_keypair, startup_epoch, 1000)
+        .unwrap();
+    assert!(
+        machine.leg().unwrap().noise_handshake.is_some(),
+        "start_handshake arms the initiation handle"
+    );
+    machine.mark_failed();
+    machine.mark_send_failed();
+
+    let leg = node.peer_machines.get(&link_id).unwrap().leg().unwrap();
+    assert!(
+        leg.noise_handshake.is_none() && leg.noise_session.is_none(),
+        "a failed handshake holds neither handle"
+    );
+    assert_present(&node, "failed, both handles empty");
+
+    // Detaching the carrier — and only that — ends handshake-phase membership.
+    node.peer_machines.get_mut(&link_id).unwrap().take_leg();
+    assert_eq!(node.connection_count(), 0, "connection_count after detach");
+    assert_eq!(node.connections().count(), 0, "connections() after detach");
+    assert!(
+        !node.has_pending_leg(&link_id),
+        "has_pending_leg after detach"
+    );
+    assert_eq!(
+        node.stale_connections(1_000_000, 30_000).len(),
+        0,
+        "stale_connections after detach"
+    );
+    assert!(
+        !node.is_connecting_to_peer_on_path(peer_identity.node_addr(), transport_id, &peer_addr),
+        "is_connecting_to_peer_on_path after detach"
+    );
+}
+
 /// The identity a responder discovers in msg1 must land on the surviving
 /// carrier, not only on the pending leg. Everything that names an inbound
 /// peer mid-handshake reads the carrier: the stale-connection sweep's
@@ -2424,11 +2544,7 @@ fn inbound_msg1_records_the_learned_identity_on_the_carrier() {
     let initiator_link = LinkId::new(78);
     let mut initiator =
         crate::peer::machine::PeerMachine::new_outbound(initiator_link, node_identity, 1000);
-    initiator.set_leg(crate::peer::PeerConnection::outbound(
-        initiator_link,
-        node_identity,
-        1000,
-    ));
+    initiator.set_leg(crate::peer::machine::HandshakeCrypto::new());
     let noise_msg1 = initiator
         .start_handshake(sender.keypair(), [9u8; 8], 1000)
         .unwrap();
