@@ -180,7 +180,7 @@ do_apply() {
     echo ""
 
     for node in $NODES; do
-        local container="fips-node-$node"
+        local container="fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}"
         echo -n "  $container ... "
         if ! container_running "$container"; then
             echo "SKIP (not running)"
@@ -199,7 +199,7 @@ do_remove() {
     echo ""
 
     for node in $NODES; do
-        local container="fips-node-$node"
+        local container="fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}"
         echo -n "  $container ... "
         if ! container_running "$container"; then
             echo "SKIP (not running)"
@@ -219,7 +219,7 @@ do_status() {
     echo ""
 
     for node in $NODES; do
-        local container="fips-node-$node"
+        local container="fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}"
         echo "  $container:"
         if ! container_running "$container"; then
             echo "    (not running)"

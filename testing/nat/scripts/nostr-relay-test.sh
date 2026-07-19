@@ -25,11 +25,11 @@ WAIT_LIB="$ROOT_DIR/testing/lib/wait-converge.sh"
 PROFILE="nostr-publish-consume"
 SCENARIO="$PROFILE"
 COMPOSE=(docker compose -f "$NAT_DIR/docker-compose.yml")
-NODE_A="fips-nat-nostr-pub-a"
-NODE_B="fips-nat-nostr-pub-b"
+NODE_A="fips-nat-nostr-pub-a${FIPS_CI_NAME_SUFFIX:-}"
+NODE_B="fips-nat-nostr-pub-b${FIPS_CI_NAME_SUFFIX:-}"
 RELAY_HOST="172.31.10.30"
 RELAY_PORT=7777
-RELAY_CONTAINER="fips-nat-relay"
+RELAY_CONTAINER="fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}"
 
 # shellcheck disable=SC1090
 source "$WAIT_LIB"

@@ -27,7 +27,7 @@ x-boringtun-common: &boringtun-common
 services:
   alice:
     <<: *boringtun-common
-    container_name: bt-alice
+    container_name: bt-alice${FIPS_CI_NAME_SUFFIX:-}
     hostname: alice
     environment:
       - ROLE=alice
@@ -38,7 +38,7 @@ services:
 
   bob:
     <<: *boringtun-common
-    container_name: bt-bob
+    container_name: bt-bob${FIPS_CI_NAME_SUFFIX:-}
     hostname: bob
     environment:
       - ROLE=bob

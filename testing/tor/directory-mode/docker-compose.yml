@@ -24,7 +24,7 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     restart: "no"
-    container_name: fips-dir-a
+    container_name: fips-dir-a${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-dir-a
     volumes:
       - ./configs/node-a.yaml:/etc/fips/fips.yaml:ro
@@ -44,7 +44,7 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     restart: "no"
-    container_name: fips-dir-b
+    container_name: fips-dir-b${FIPS_CI_NAME_SUFFIX:-}
     hostname: fips-dir-b
     volumes:
       - ./configs/node-b.yaml:/etc/fips/fips.yaml:ro

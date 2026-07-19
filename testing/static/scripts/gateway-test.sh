@@ -20,11 +20,11 @@ source "$SCRIPT_DIR/../../lib/wait-converge.sh"
 GENERATED_DIR="$SCRIPT_DIR/../generated-configs"
 ENV_FILE="$GENERATED_DIR/npubs.env"
 
-GATEWAY="fips-gw-gateway"
-SERVER="fips-gw-server"
-SERVER2="fips-gw-server-2"
-CLIENT="fips-gw-client"
-CLIENT2="fips-gw-client-2"
+GATEWAY="fips-gw-gateway${FIPS_CI_NAME_SUFFIX:-}"
+SERVER="fips-gw-server${FIPS_CI_NAME_SUFFIX:-}"
+SERVER2="fips-gw-server-2${FIPS_CI_NAME_SUFFIX:-}"
+CLIENT="fips-gw-client${FIPS_CI_NAME_SUFFIX:-}"
+CLIENT2="fips-gw-client-2${FIPS_CI_NAME_SUFFIX:-}"
 
 # ── inject-config subcommand ─────────────────────────────────────────────
 

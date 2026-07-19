@@ -87,7 +87,7 @@ echo ""
 echo "Phase 2: Waiting for Tor daemon to bootstrap (up to ${MAX_WAIT_TOR}s)..."
 elapsed=0
 while [ "$elapsed" -lt "$MAX_WAIT_TOR" ]; do
-    if docker logs tor-daemon 2>&1 | grep -q "Bootstrapped 100%"; then
+    if docker logs tor-daemon${FIPS_CI_NAME_SUFFIX:-} 2>&1 | grep -q "Bootstrapped 100%"; then
         echo "  Tor bootstrapped after ${elapsed}s"
         break
     fi
@@ -100,7 +100,7 @@ if [ "$elapsed" -ge "$MAX_WAIT_TOR" ]; then
     echo "  FAIL: Tor daemon did not bootstrap within ${MAX_WAIT_TOR}s"
     echo ""
     echo "Tor daemon logs:"
-    docker logs tor-daemon 2>&1 | tail -20
+    docker logs tor-daemon${FIPS_CI_NAME_SUFFIX:-} 2>&1 | tail -20
     docker compose down
     exit 1
 fi
@@ -114,8 +114,8 @@ peers_a=0
 peers_b=0
 elapsed=0
 while [ "$elapsed" -lt "$MAX_WAIT_PEER" ]; do
-    peers_a=$(count_connected_peers fips-tor-a)
-    peers_b=$(count_connected_peers fips-tor-b)
+    peers_a=$(count_connected_peers fips-tor-a${FIPS_CI_NAME_SUFFIX:-})
+    peers_b=$(count_connected_peers fips-tor-b${FIPS_CI_NAME_SUFFIX:-})
 
     if [ "$peers_a" -ge 1 ] && [ "$peers_b" -ge 1 ]; then
         echo "  Both nodes have connected peers after ${elapsed}s (A: ${peers_a}, B: ${peers_b})"
@@ -130,10 +130,10 @@ if [ "$peers_a" -lt 1 ] || [ "$peers_b" -lt 1 ]; then
     echo "  FAIL: Peers not established within ${MAX_WAIT_PEER}s"
     echo ""
     echo "Node A logs (last 30 lines):"
-    docker logs fips-tor-a 2>&1 | tail -30
+    docker logs fips-tor-a${FIPS_CI_NAME_SUFFIX:-} 2>&1 | tail -30
     echo ""
     echo "Node B logs (last 30 lines):"
-    docker logs fips-tor-b 2>&1 | tail -30
+    docker logs fips-tor-b${FIPS_CI_NAME_SUFFIX:-} 2>&1 | tail -30
     docker compose down
     exit 1
 fi
@@ -200,15 +200,15 @@ print(f'{sum(trimmed)/len(trimmed):.1f}')
 
 echo ""
 echo "  Ping via Tor (routed through test-us01):"
-ping_series fips-tor-a "$NPUB_B" "A → B"
-ping_series fips-tor-b "$NPUB_A" "B → A"
+ping_series fips-tor-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B" "A → B"
+ping_series fips-tor-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A" "B → A"
 
 echo ""
 
 # ── Phase 5: Log analysis ────────────────────────────────────────
 echo "Phase 5: Log analysis"
 
-for node in fips-tor-a fips-tor-b; do
+for node in fips-tor-a${FIPS_CI_NAME_SUFFIX:-} fips-tor-b${FIPS_CI_NAME_SUFFIX:-}; do
     panics=$(docker logs "$node" 2>&1 | grep -ci "panic" || true)
     errors=$(docker logs "$node" 2>&1 | grep -ci "error" || true)
     socks5=$(docker logs "$node" 2>&1 | grep -ci "socks5\|socks" || true)

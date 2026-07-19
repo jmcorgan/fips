@@ -47,7 +47,7 @@ source "$ENV_FILE"
 iperf_once() {
     local client="$1" dest_npub="$2"
     local out
-    if ! out=$(docker exec "fips-$client" iperf3 -c "${dest_npub}.fips" \
+    if ! out=$(docker exec "fips-${client}${FIPS_CI_NAME_SUFFIX:-}" iperf3 -c "${dest_npub}.fips" \
         -t "$DURATION" -P "$PARALLEL" -J 2>&1); then
         echo FAIL
         return
@@ -105,7 +105,7 @@ PYEOF
 ping_path() {
     local client="$1" dest_npub="$2"
     local out
-    if ! out=$(docker exec "fips-$client" \
+    if ! out=$(docker exec "fips-${client}${FIPS_CI_NAME_SUFFIX:-}" \
         ping -c "$PING_COUNT" -i 0.2 -w "$((PING_COUNT * 2))" \
         -q "${dest_npub}.fips" 2>&1); then
         echo FAIL
@@ -203,7 +203,7 @@ CONVERGE_SECS="${FIPS_BENCH_CONVERGE_SECS:-15}"
 
 peer_is_direct() {
     local client="$1" dest_npub="$2"
-    docker exec "fips-$client" fipsctl show peers 2>/dev/null \
+    docker exec "fips-${client}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show peers 2>/dev/null \
         | python3 -c '
 import json, sys
 target = sys.argv[1]
@@ -225,7 +225,7 @@ except Exception:
 # multihop alternative).
 peer_bytes_sent_snapshot() {
     local client="$1"
-    docker exec "fips-$client" fipsctl show peers 2>/dev/null \
+    docker exec "fips-${client}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show peers 2>/dev/null \
         | python3 -c '
 import json, sys
 try:

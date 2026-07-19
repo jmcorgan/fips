@@ -99,7 +99,7 @@ info "phase 1: wait for node-$CAP_NODE peer_count to reach $MAX_PEERS (90s timeo
 deadline=$(($(date +%s) + 90))
 pc=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    pc=$(docker exec fips-node-$CAP_NODE fipsctl show status 2>/dev/null \
+    pc=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show status 2>/dev/null \
         | grep -m1 peer_count | sed 's/.*: *//' | tr -d ',' || echo 0)
     [ "$pc" = "$MAX_PEERS" ] && break
     sleep 2
@@ -109,7 +109,7 @@ done
 info "node-$CAP_NODE converged: peer_count=$pc"
 
 # Identify admitted vs denied peers among configured peers
-ADMITTED_NPUBS=$(docker exec fips-node-$CAP_NODE fipsctl show peers 2>/dev/null \
+ADMITTED_NPUBS=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show peers 2>/dev/null \
     | grep -oE 'npub1[a-z0-9]+' | sort -u || true)
 DENIED=""
 ADMITTED=""
@@ -137,8 +137,8 @@ info "denied (sustained-retry): ${DENIED:-<none>}"
 # with restarts every 15s we get ~30-50 firings across both denied peers.
 info "phase 2: capture UDP/2121 on node-$CAP_NODE for ${CAPTURE_SECS}s, with denied-peer restart loop"
 CAP_FILE=$(mktemp /tmp/admission-cap-pcap.XXXXXX.txt)
-HELPER_IMAGE=$(docker inspect -f '{{.Config.Image}}' fips-node-$CAP_NODE 2>/dev/null)
-[ -n "$HELPER_IMAGE" ] || fail "could not resolve helper image from fips-node-$CAP_NODE"
+HELPER_IMAGE=$(docker inspect -f '{{.Config.Image}}' "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" 2>/dev/null)
+[ -n "$HELPER_IMAGE" ] || fail "could not resolve helper image from fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}"
 
 # Background: cycle denied peers to reset their backoff and drive load.
 (
@@ -147,7 +147,7 @@ HELPER_IMAGE=$(docker inspect -f '{{.Config.Image}}' fips-node-$CAP_NODE 2>/dev/
         sleep 15
         elapsed=$((elapsed + 15))
         for n in $DENIED; do
-            docker restart "fips-node-$n" >/dev/null 2>&1 &
+            docker restart "fips-node-${n}${FIPS_CI_NAME_SUFFIX:-}" >/dev/null 2>&1 &
         done
         wait
         info "  [load-driver] restarted denied peers ($DENIED) at t+${elapsed}s"
@@ -156,7 +156,7 @@ HELPER_IMAGE=$(docker inspect -f '{{.Config.Image}}' fips-node-$CAP_NODE 2>/dev/
 LOAD_PID=$!
 
 # Foreground: tcpdump capture for CAPTURE_SECS
-docker run --rm --label com.corganlabs.fips-ci=1 --net=container:fips-node-$CAP_NODE \
+docker run --rm --label com.corganlabs.fips-ci=1 --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}" --net=container:"fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     --entrypoint sh "$HELPER_IMAGE" \
     -c "timeout $CAPTURE_SECS tcpdump -nn -i any 'udp port 2121' -l 2>&1 || true" \
@@ -198,7 +198,7 @@ for n in $DENIED; do
 done
 
 # ── Phase 4: cap'd node still at exactly max_peers ───────────────────
-pc_final=$(docker exec fips-node-$CAP_NODE fipsctl show status 2>/dev/null \
+pc_final=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show status 2>/dev/null \
     | grep -m1 peer_count | sed 's/.*: *//' | tr -d ',' || echo 0)
 info "node-$CAP_NODE final peer_count=$pc_final (expected $MAX_PEERS)"
 [ "$pc_final" = "$MAX_PEERS" ] || { info "    FAIL: peer_count drifted from cap"; OVERALL=1; }

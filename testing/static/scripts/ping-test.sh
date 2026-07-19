@@ -37,7 +37,7 @@ ping_test() {
 
     echo -n "  $label ... "
     local output
-    if output=$(docker exec "fips-$from" ping6 -c "$COUNT" -W "$TIMEOUT" "${to_npub}.fips" 2>&1); then
+    if output=$(docker exec "fips-${from}${FIPS_CI_NAME_SUFFIX:-}" ping6 -c "$COUNT" -W "$TIMEOUT" "${to_npub}.fips" 2>&1); then
         # Extract round-trip time from ping output
         local rtt
         rtt=$(echo "$output" | grep -oE 'time=[0-9.]+' | cut -d= -f2)
@@ -61,7 +61,7 @@ ping_all_quiet() {
     for ((i=0; i<n; i++)); do
         for ((j=0; j<n; j++)); do
             [ "$i" -eq "$j" ] && continue
-            if docker exec "fips-node-${LABELS[$i],,}" \
+            if docker exec "fips-node-${LABELS[$i],,}${FIPS_CI_NAME_SUFFIX:-}" \
                 ping6 -c 1 -W 1 "${NPUBS[$j]}.fips" >/dev/null 2>&1; then
                 PASSED=$((PASSED + 1))
             else
@@ -78,18 +78,18 @@ echo ""
 echo "Waiting for mesh convergence..."
 if [ "$PROFILE" = "chain" ]; then
     # Chain: A-B-C-D-E, each interior node has 2 peers, endpoints have 1
-    wait_for_peers fips-node-a 1 20 || true
-    wait_for_peers fips-node-b 2 20 || true
-    wait_for_peers fips-node-c 2 20 || true
-    wait_for_peers fips-node-d 2 20 || true
-    wait_for_peers fips-node-e 1 20 || true
+    wait_for_peers fips-node-a${FIPS_CI_NAME_SUFFIX:-} 1 20 || true
+    wait_for_peers fips-node-b${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
+    wait_for_peers fips-node-c${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
+    wait_for_peers fips-node-d${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
+    wait_for_peers fips-node-e${FIPS_CI_NAME_SUFFIX:-} 1 20 || true
 elif [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     # Mesh: check all nodes reach their configured peer counts
-    wait_for_peers fips-node-a 2 20 || true
-    wait_for_peers fips-node-b 1 20 || true
-    wait_for_peers fips-node-c 3 20 || true
-    wait_for_peers fips-node-d 3 20 || true
-    wait_for_peers fips-node-e 3 20 || true
+    wait_for_peers fips-node-a${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
+    wait_for_peers fips-node-b${FIPS_CI_NAME_SUFFIX:-} 1 20 || true
+    wait_for_peers fips-node-c${FIPS_CI_NAME_SUFFIX:-} 3 20 || true
+    wait_for_peers fips-node-d${FIPS_CI_NAME_SUFFIX:-} 3 20 || true
+    wait_for_peers fips-node-e${FIPS_CI_NAME_SUFFIX:-} 3 20 || true
 fi
 # Wait for full pairwise connectivity, progress-aware: the actual pings
 # are the convergence signal, the deadline extends while more pairs come

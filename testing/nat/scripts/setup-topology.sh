@@ -9,12 +9,12 @@ SCENARIO="${1:?usage: setup-topology.sh <cone|symmetric>}"
 
 case "$SCENARIO" in
     cone)
-        node_a="fips-nat-cone-a"
-        node_b="fips-nat-cone-b"
+        node_a="fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}"
+        node_b="fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-}"
         ;;
     symmetric)
-        node_a="fips-nat-symmetric-a"
-        node_b="fips-nat-symmetric-b"
+        node_a="fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-}"
+        node_b="fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-}"
         ;;
     *)
         echo "Unsupported topology scenario: $SCENARIO" >&2
@@ -22,8 +22,8 @@ case "$SCENARIO" in
         ;;
 esac
 
-router_a="fips-nat-router-a"
-router_b="fips-nat-router-b"
+router_a="fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}"
+router_b="fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-}"
 
 helper_image() {
     if [ -n "${IP_HELPER_IMAGE:-}" ]; then

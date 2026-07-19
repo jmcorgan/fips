@@ -7,18 +7,25 @@
 # prior run died:
 #
 #   1. The CI label  com.corganlabs.fips-ci=1  (attached to every direct
-#      `docker run`/network/volume ci-local drives).
+#      `docker run`/network/volume ci-local drives). Every run additionally
+#      stamps  com.corganlabs.fips-ci.run=<run-id>  on the same resources.
 #   2. The compose project-name prefix  fipsci_  (every compose project ci-local
 #      starts is named  fipsci_<run-id>_<suite>, so its containers/networks/
 #      volumes all carry  com.docker.compose.project=fipsci_...  and are named
 #      with that prefix).
 #
+# The generic CI label is shared by every run on the host, so an unscoped label
+# sweep would tear down a CONCURRENT run's resources. Pass --run-id to narrow
+# the label sweep to one run; a run's own teardown always does. Without it the
+# label sweep stays broad, which is what a manual "reap everything" wants.
+#
 # Usage:
 #   ci-cleanup.sh                       Reap ALL fips-ci resources (any run)
 #   ci-cleanup.sh --project-prefix P    Restrict the compose-project sweep to
 #                                       names starting with P (scopes the reap
-#                                       to a single run; the label sweep still
-#                                       runs)
+#                                       to a single run)
+#   ci-cleanup.sh --run-id ID           Restrict the label sweep to the run
+#                                       labelled ID (leaves other runs alone)
 #   ci-cleanup.sh --label L             Override the CI label (default above)
 #   ci-cleanup.sh --images "a b,c"      Also `docker rmi -f` these image tags
 #                                       (space- or comma-separated)
@@ -28,13 +35,16 @@
 set -uo pipefail
 
 LABEL="com.corganlabs.fips-ci=1"
+RUN_LABEL_KEY="com.corganlabs.fips-ci.run"
 PROJECT_PREFIX="fipsci_"   # broad default: every CI run
+RUN_ID=""                  # broad default: every CI run
 IMAGES=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --label)          LABEL="$2"; shift 2 ;;
         --project-prefix) PROJECT_PREFIX="$2"; shift 2 ;;
+        --run-id)         RUN_ID="$2"; shift 2 ;;
         --images)         IMAGES="$2"; shift 2 ;;
         -h|--help)        sed -n '2,/^set /{ /^set /d; s/^# \?//; p }' "$0"; exit 0 ;;
         *)                echo "Unknown option: $1" >&2; exit 2 ;;
@@ -54,6 +64,14 @@ fi
 # never wedge a caller (ci-local's signal trap relies on this being bounded).
 TMO=30
 
+# Selector for the label sweep. With --run-id it matches only the named run, so
+# a concurrent run's resources are left alone; without it, every CI run.
+if [[ -n "$RUN_ID" ]]; then
+    SWEEP_LABEL="${RUN_LABEL_KEY}=${RUN_ID}"
+else
+    SWEEP_LABEL="$LABEL"
+fi
+
 # Distinct compose project names (read off container labels) that start with
 # the configured prefix.
 ci_projects() {
@@ -63,7 +81,7 @@ ci_projects() {
 
 reap_containers() {
     # By CI label.
-    docker ps -aq --filter "label=${LABEL}" 2>/dev/null \
+    docker ps -aq --filter "label=${SWEEP_LABEL}" 2>/dev/null \
         | xargs -r timeout "$TMO" docker rm -f >/dev/null 2>&1 || true
     # By compose project (carried even when container_name is explicit).
     local p
@@ -74,7 +92,7 @@ reap_containers() {
 }
 
 reap_networks() {
-    docker network ls -q --filter "label=${LABEL}" 2>/dev/null \
+    docker network ls -q --filter "label=${SWEEP_LABEL}" 2>/dev/null \
         | xargs -r timeout "$TMO" docker network rm >/dev/null 2>&1 || true
     # Compose networks are named  <project>_<net>  → match by name prefix so
     # orphaned networks (whose containers are already gone) are still caught.
@@ -83,7 +101,7 @@ reap_networks() {
 }
 
 reap_volumes() {
-    docker volume ls -q --filter "label=${LABEL}" 2>/dev/null \
+    docker volume ls -q --filter "label=${SWEEP_LABEL}" 2>/dev/null \
         | xargs -r timeout "$TMO" docker volume rm >/dev/null 2>&1 || true
     docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${PROJECT_PREFIX}" \
         | xargs -r timeout "$TMO" docker volume rm >/dev/null 2>&1 || true
