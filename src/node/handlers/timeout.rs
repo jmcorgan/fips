@@ -19,18 +19,18 @@ impl LifecycleView for Node {
         // reap.
         self.peer_machines
             .iter()
-            .filter_map(|(link_id, machine)| machine.leg().map(|conn| (link_id, machine, conn)))
-            .filter(|(link_id, machine, _conn)| {
+            .filter(|(_, machine)| machine.leg().is_some())
+            .filter(|(link_id, machine)| {
                 machine.is_failed()
                     || (machine.conn_is_timed_out(now_ms, timeout_ms)
                         && !self.peer_timers.get(*link_id).is_some_and(|timers| {
                             timers.contains_key(&TimerKind::HandshakeTimeout)
                         }))
             })
-            .map(|(link_id, _machine, conn)| ConnSnapshot {
+            .map(|(link_id, machine)| ConnSnapshot {
                 link: *link_id,
-                is_outbound: conn.is_outbound(),
-                retry_addr: conn.expected_identity().map(|id| *id.node_addr()),
+                is_outbound: machine.conn_is_outbound(),
+                retry_addr: machine.conn_expected_identity().map(|id| *id.node_addr()),
                 resend_count: 0,
                 msg1: Vec::new(),
             })
@@ -77,8 +77,12 @@ impl Node {
                         .peer_machines
                         .get(&link)
                         .is_some_and(|machine| machine.is_failed());
-                    if let Some(conn) = self.leg(&link) {
-                        let direction = conn.direction();
+                    if let Some(machine) = self
+                        .peer_machines
+                        .get(&link)
+                        .filter(|machine| machine.leg().is_some())
+                    {
+                        let direction = machine.conn_direction();
                         if is_failed {
                             debug!(
                                 link_id = %link,
@@ -116,7 +120,7 @@ impl Node {
         // dangling machine. A no-op for promoted peers — `promote_connection`
         // already consumed their connection, so this reaper never runs for
         // them.
-        let conn = match self
+        let _detached_leg = match self
             .peer_machines
             .get_mut(&link_id)
             .and_then(|machine| machine.take_leg())
@@ -124,16 +128,16 @@ impl Node {
             Some(c) => c,
             None => return,
         };
-        // Read the transport ID off the surviving carrier before disposing the
-        // machine (the leg no longer projects it).
-        let transport_id = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_transport_id());
+        // Read the transport ID and session index off the surviving carrier
+        // before disposing the machine (the leg no longer projects them).
+        let (transport_id, our_index) = match self.peer_machines.get(&link_id) {
+            Some(machine) => (machine.conn_transport_id(), machine.our_index()),
+            None => (None, None),
+        };
         self.remove_peer_machine(link_id);
 
         // Free session index and pending_outbound/pending_inbound if allocated
-        if let Some(idx) = conn.our_index() {
+        if let Some(idx) = our_index {
             if let Some(tid) = transport_id {
                 self.pending_outbound.remove(&(tid, idx.as_u32()));
                 self.pending_inbound.remove(&(tid, idx.as_u32()));
@@ -190,24 +194,31 @@ impl Node {
             .collect();
         for link in timer_links {
             // The idle-timeout threshold reads the survivor carrier's
-            // last-activity (the leg no longer projects it); the leg still
-            // supplies direction/identity for the retry decision below.
+            // last-activity; presence of a pending handshake is what decides
+            // between reaping and dropping an orphan timer.
             let timed_out = self
                 .peer_machines
                 .get(&link)
                 .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms));
-            let (reap, retry_peer) = match self.leg(&link) {
-                Some(conn) if timed_out => {
-                    let retry_peer = if conn.is_outbound() {
-                        conn.expected_identity().map(|id| *id.node_addr())
+            let (reap, retry_peer) = match self.has_pending_leg(&link) {
+                true if timed_out => {
+                    let retry_peer = if self
+                        .peer_machines
+                        .get(&link)
+                        .is_some_and(|machine| machine.conn_is_outbound())
+                    {
+                        self.peer_machines
+                            .get(&link)
+                            .and_then(|machine| machine.conn_expected_identity())
+                            .map(|id| *id.node_addr())
                     } else {
                         None
                     };
                     (true, retry_peer)
                 }
                 // Not yet idle-timed-out: leave the timer for a later tick.
-                Some(_) => (false, None),
-                None => {
+                true => (false, None),
+                false => {
                     // Orphan timer (connection already reaped elsewhere) — drop it.
                     if let Some(timers) = self.peer_timers.get_mut(&link) {
                         timers.remove(&TimerKind::HandshakeTimeout);
@@ -266,9 +277,10 @@ impl Node {
             // Skip a resend whose target peer already promoted via the inbound
             // cross-connection path — resending msg1 would start a new handshake
             // (session mismatch).
-            if let Some(conn) = self.leg(&link)
-                && conn
-                    .expected_identity()
+            if let Some(machine) = self.peer_machines.get(&link)
+                && machine.leg().is_some()
+                && machine
+                    .conn_expected_identity()
                     .map(|id| self.peers.contains_key(id.node_addr()))
                     .unwrap_or(false)
             {
@@ -327,17 +339,14 @@ impl Node {
                 continue;
             };
 
-            let (transport_id, remote_addr) = match self.leg(&link) {
-                Some(conn) => match (
-                    self.peer_machines
-                        .get(&link)
-                        .and_then(|machine| machine.conn_transport_id()),
-                    conn.source_addr(),
-                ) {
-                    (Some(tid), Some(addr)) => (tid, addr.clone()),
-                    _ => continue,
-                },
-                None => continue,
+            let (transport_id, remote_addr) = match self.peer_machines.get(&link) {
+                Some(machine) if machine.leg().is_some() => {
+                    match (machine.conn_transport_id(), machine.conn_source_addr()) {
+                        (Some(tid), Some(addr)) => (tid, addr.clone()),
+                        _ => continue,
+                    }
+                }
+                _ => continue,
             };
 
             let sent = if let Some(transport) = self.transports.get(&transport_id) {

@@ -1316,17 +1316,18 @@ pub fn show_connections(node: &Node) -> Value {
     let now = now_ms();
     let connections: Vec<Value> = node
         .connections()
-        .map(|conn| {
+        .map(|(_, machine)| {
+            let link_id = machine.link_id();
             let mut conn_json = json!({
-                "link_id": conn.link_id().as_u64(),
-                "direction": format!("{}", conn.direction()),
-                "handshake_state": node.connection_handshake_state(conn.link_id()),
-                "started_at_ms": node.connection_started_at(conn.link_id()),
-                "idle_ms": now.saturating_sub(node.connection_last_activity(conn.link_id())),
-                "resend_count": node.connection_resend_count(conn.link_id()),
+                "link_id": link_id.as_u64(),
+                "direction": format!("{}", machine.conn_direction()),
+                "handshake_state": node.connection_handshake_state(link_id),
+                "started_at_ms": node.connection_started_at(link_id),
+                "idle_ms": now.saturating_sub(node.connection_last_activity(link_id)),
+                "resend_count": node.connection_resend_count(link_id),
             });
 
-            if let Some(identity) = node.connection_expected_identity(conn.link_id()) {
+            if let Some(identity) = node.connection_expected_identity(link_id) {
                 conn_json["expected_peer"] = json!(identity.npub());
             }
 

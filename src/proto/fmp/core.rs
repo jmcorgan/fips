@@ -199,10 +199,12 @@ pub(crate) struct RekeyCfg {
 ///
 /// On XX the responder learns the initiator's identity and startup epoch only
 /// once `msg3` completes the Noise handshake (unlike IK, which learns them at
-/// `msg1`). The shell-side Noise step (`complete_handshake_msg3`) yields these;
-/// the core reads them to classify. The Noise bytes themselves never reach the
-/// core — the fresh session extraction stays a shell effect. Only the two facts
-/// the classification depends on travel here: the peer's node address (for the
+/// `msg1`). The shell-side Noise step (`complete_handshake_msg3`) runs on the
+/// control machine and reads **no** `Node` registry state — the essential
+/// invariant of this decomposition — and yields these; the core reads them to
+/// classify. The Noise bytes themselves never reach the core — the fresh
+/// session extraction stays a shell effect. Only the two facts the
+/// classification depends on travel here: the peer's node address (for the
 /// smaller-NodeAddr tie-breaks) and the peer's captured startup epoch (for
 /// restart detection).
 pub(crate) struct WireOutcome {
@@ -424,7 +426,7 @@ pub(crate) enum InboundReject {
 /// cross-connection and the tie-break decides whether we swap our session to the
 /// (winning) outbound one or keep our existing inbound session. The rekey-msg2
 /// completion path is handled by a separate shell driver (it mutates
-/// `ActivePeer`, not a `PeerConnection`) and never reaches this decision.
+/// `ActivePeer`, not a pending handshake) and never reaches this decision.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OutboundDecision {
     /// No existing peer for this identity: promote the completed outbound

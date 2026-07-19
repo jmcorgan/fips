@@ -29,9 +29,8 @@ fn test_routing_direct_peer() {
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
 
-    let (conn, identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *identity.node_addr();
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, identity, 2000).unwrap();
 
     let result = node.find_next_hop(&peer_addr);
@@ -58,15 +57,13 @@ fn test_routing_bloom_filter_hit() {
 
     // Create two peers
     let link_id1 = LinkId::new(1);
-    let (conn1, id1) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let id1 = seed_completed_connection(&mut node, link_id1, transport_id, 1000);
     let peer1_addr = *id1.node_addr();
-    node.add_connection(conn1).unwrap();
     node.promote_connection(link_id1, id1, 2000).unwrap();
 
     let link_id2 = LinkId::new(2);
-    let (conn2, id2) = make_completed_connection(&mut node, link_id2, transport_id, 1000);
+    let id2 = seed_completed_connection(&mut node, link_id2, transport_id, 1000);
     let peer2_addr = *id2.node_addr();
-    node.add_connection(conn2).unwrap();
     node.promote_connection(link_id2, id2, 2000).unwrap();
 
     // Set up tree: we are root, both peers are our children
@@ -115,10 +112,9 @@ fn test_routing_bloom_filter_multiple_hits_tiebreak() {
     let mut peer_addrs = Vec::new();
     for i in 1..=3 {
         let link_id = LinkId::new(i);
-        let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+        let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
         let addr = *id.node_addr();
         peer_addrs.push(addr);
-        node.add_connection(conn).unwrap();
         node.promote_connection(link_id, id, 2000).unwrap();
     }
 
@@ -166,9 +162,8 @@ fn test_routing_tree_fallback() {
 
     // Create a peer
     let link_id = LinkId::new(1);
-    let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *id.node_addr();
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, id, 2000).unwrap();
 
     // Set up tree state through the public API.
@@ -220,9 +215,8 @@ fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
 
     // tree_peer: child of self, on the path to dest (greedy tree pick).
     let tree_link = LinkId::new(1);
-    let (tree_conn, tree_id) = make_completed_connection(&mut node, tree_link, transport_id, 1000);
+    let tree_id = seed_completed_connection(&mut node, tree_link, transport_id, 1000);
     let tree_peer_addr = *tree_id.node_addr();
-    node.add_connection(tree_conn).unwrap();
     node.promote_connection(tree_link, tree_id, 2000).unwrap();
 
     // bloom_peer: also a child of self, but with a stale/false-positive
@@ -230,10 +224,8 @@ fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
     // ours, so the self-distance check in select_best_candidate excludes
     // it — leaving zero viable bloom candidates.
     let bloom_link = LinkId::new(2);
-    let (bloom_conn, bloom_id) =
-        make_completed_connection(&mut node, bloom_link, transport_id, 1000);
+    let bloom_id = seed_completed_connection(&mut node, bloom_link, transport_id, 1000);
     let bloom_peer_addr = *bloom_id.node_addr();
-    node.add_connection(bloom_conn).unwrap();
     node.promote_connection(bloom_link, bloom_id, 2000).unwrap();
 
     // Tree topology (we are root):
@@ -300,8 +292,7 @@ fn test_routing_tree_no_coords_in_cache() {
 
     // Create a peer
     let link_id = LinkId::new(1);
-    let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
-    node.add_connection(conn).unwrap();
+    let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     node.promote_connection(link_id, id, 2000).unwrap();
 
     // Destination not in bloom filters and not in coord cache
@@ -319,9 +310,8 @@ fn test_routing_refreshes_coord_cache_ttl() {
 
     // Create a peer
     let link_id = LinkId::new(1);
-    let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *id.node_addr();
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, id, 2000).unwrap();
 
     // Set up tree coordinates
@@ -364,15 +354,13 @@ fn test_routing_bloom_hit_without_coords_returns_none() {
 
     // Create two peers
     let link_id1 = LinkId::new(1);
-    let (conn1, id1) = make_completed_connection(&mut node, link_id1, transport_id, 1000);
+    let id1 = seed_completed_connection(&mut node, link_id1, transport_id, 1000);
     let peer1_addr = *id1.node_addr();
-    node.add_connection(conn1).unwrap();
     node.promote_connection(link_id1, id1, 2000).unwrap();
 
     let link_id2 = LinkId::new(2);
-    let (conn2, id2) = make_completed_connection(&mut node, link_id2, transport_id, 1000);
+    let id2 = seed_completed_connection(&mut node, link_id2, transport_id, 1000);
     let peer2_addr = *id2.node_addr();
-    node.add_connection(conn2).unwrap();
     node.promote_connection(link_id2, id2, 2000).unwrap();
 
     let dest = make_node_addr(99);
@@ -404,9 +392,8 @@ fn test_routing_discovery_coord_cache() {
 
     // Create a peer
     let link_id = LinkId::new(1);
-    let (conn, id) = make_completed_connection(&mut node, link_id, transport_id, 1000);
+    let id = seed_completed_connection(&mut node, link_id, transport_id, 1000);
     let peer_addr = *id.node_addr();
-    node.add_connection(conn).unwrap();
     node.promote_connection(link_id, id, 2000).unwrap();
 
     // Set up tree: we are root, peer is our child

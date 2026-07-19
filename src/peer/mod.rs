@@ -1,17 +1,16 @@
 //! Peer Management
 //!
 //! Two-phase peer lifecycle:
-//! 1. **PeerConnection** - Handshake phase, before identity is verified
+//! 1. **PeerMachine** with a handshake carrier attached - handshake phase,
+//!    before identity is verified
 //! 2. **ActivePeer** - Authenticated phase, after successful Noise handshake
 
 mod active;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod connected_udp;
-mod connection;
 pub(crate) mod machine;
 
 pub use active::{ActivePeer, ConnectivityState};
-pub use connection::PeerConnection;
 
 use crate::NodeAddr;
 use crate::transport::LinkId;

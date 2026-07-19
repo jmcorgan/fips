@@ -19,8 +19,9 @@
 //!   decision logic (version agreement, profile validation).
 //! - `limits.rs` — the pure connection-retry backoff math.
 //! - `state.rs` — [`ConnectionState`], the pure handshake-phase connection
-//!   bookkeeping (owned by the shell `PeerConnection` beside its Noise crypto
-//!   handles), plus [`Fmp`], the (stateless) lifecycle anchor owned by `Node`.
+//!   bookkeeping (owned by the per-peer control machine beside its Noise
+//!   crypto carrier), plus [`Fmp`], the (stateless) lifecycle anchor owned by
+//!   `Node`.
 //!   The handshake phase itself lives on the per-peer control machine.
 //! - `wire.rs` — the FMP wire codec: XX handshake message types, disconnect
 //!   reasons, the orderly disconnect message, and the negotiation payload.

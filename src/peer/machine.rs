@@ -43,7 +43,7 @@
 //!
 //! The XX cross-connection swap ([`CrossConnect`](InboundDecision::CrossConnect))
 //! and rekey-responder ([`RekeyRespond`](InboundDecision::RekeyRespond)) arms both
-//! move a `NoiseSession` between a `PeerConnection` and an `ActivePeer`
+//! move a `NoiseSession` between a handshake carrier and an `ActivePeer`
 //! (`take_session`/`replace_session`/`set_pending_session`) — effects that cannot
 //! ride in a plain-data [`PeerAction`]. The machine owns only the *classification
 //! dispatch* + the index-plane facts; it emits a plain-data trigger
@@ -83,16 +83,17 @@
 
 #![allow(dead_code)]
 
-use crate::peer::PeerConnection;
+use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision,
     InboundReject, NodeProfile, OutboundDecision, OutboundSnapshot, PeerSnapshot, PromotionResult,
     RekeyCfg, RekeyResendSnapshot, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
-use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
+use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::{IndexAllocator, SessionIndex};
 use crate::{NodeAddr, PeerIdentity};
+use secp256k1::Keypair;
 
 // ============================================================================
 // Timing placeholders
@@ -491,6 +492,55 @@ pub(crate) enum PeerAction {
 // The machine (control tier)
 // ============================================================================
 
+/// The handshake operations are only reachable while a pending connection is
+/// attached; every path that drives the crypto attaches it first.
+fn no_pending_connection() -> NoiseError {
+    NoiseError::WrongState {
+        expected: "attached connection".to_string(),
+        got: "no connection".to_string(),
+    }
+}
+
+/// The handshake-phase Noise crypto, owned by the control machine.
+///
+/// PRESENCE OF THIS STRUCT (`PeerMachine::leg().is_some()`) IS THE
+/// HANDSHAKE-PHASE CARRIER SIGNAL — it is what `Node::connections()`,
+/// `connection_count()`, the stale-connection sweep, the transport-in-use
+/// check, and the peering budget all key on. It is attached and detached at
+/// exactly the points the pending connection was, and its presence is NOT a
+/// function of whether either handle is populated.
+///
+/// A present-but-empty value is legal and load-bearing: `mark_failed` drops
+/// the initiation handle while deliberately retaining the carrier so the
+/// sweep can reclaim it, and `take_session` empties the other. Deriving
+/// presence from handle presence would make every failed handshake invisible
+/// to the sweep — a permanent leak. See the presence tests in this module.
+pub(crate) struct HandshakeCrypto {
+    /// Noise handshake state (consumed on completion).
+    pub(crate) noise_handshake: Option<noise::HandshakeState>,
+    /// Completed Noise session (available once the handshake completes).
+    pub(crate) noise_session: Option<NoiseSession>,
+}
+
+impl HandshakeCrypto {
+    /// A fresh carrier holding neither handle, as every handshake begins.
+    pub(crate) fn new() -> Self {
+        Self {
+            noise_handshake: None,
+            noise_session: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for HandshakeCrypto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandshakeCrypto")
+            .field("has_noise_handshake", &self.noise_handshake.is_some())
+            .field("has_noise_session", &self.noise_session.is_some())
+            .finish()
+    }
+}
+
 /// Per-peer control FSM. Holds control-tier lifecycle state only; the
 /// send-critical state is published as `PeerSendState` and mutated via the
 /// emitted [`PeerAction`]s.
@@ -501,12 +551,13 @@ pub(crate) struct PeerMachine {
     /// The crystallized peer node address. Known up front for outbound (from the
     /// dial identity); learned at msg3 for inbound (from [`WireOutcome`]).
     node_addr: Option<NodeAddr>,
-    /// The pending handshake connection this machine owns while the leg is in
-    /// the handshake window. `None` before the connection is built (the dial
-    /// window) and after promotion consumes it (the machine survives as the
-    /// active peer's control machine). Pure storage — the machine never reads
-    /// or drives it; the shell reaches it through the accessors below.
-    leg: Option<PeerConnection>,
+    /// The handshake-phase Noise crypto this machine owns while it is in the
+    /// handshake window. `None` before the handshake begins (the dial window)
+    /// and after promotion consumes it (the machine survives as the active
+    /// peer's control machine). Its presence — not the state of the handles
+    /// inside it — is what marks this machine as carrying a pending
+    /// handshake; see [`HandshakeCrypto`].
+    leg: Option<HandshakeCrypto>,
     /// Pure handshake-phase bookkeeping (link/direction/indices/transport/
     /// stored handshake bytes/epoch). Reused verbatim from the FMP state core.
     conn: ConnectionState,
@@ -624,12 +675,21 @@ impl PeerMachine {
     /// their timeout).
     pub(crate) fn inbound_msg2_sent(link: LinkId, our_index: SessionIndex, now: u64) -> Self {
         let mut machine = Self::new_inbound(link, now);
-        machine.conn.set_our_index(our_index);
-        machine.state = PeerState::Handshaking {
-            link,
+        machine.park_inbound_msg2_sent(our_index);
+        machine
+    }
+
+    /// Park an inbound machine at `Handshaking{SentMsg2}`, recording the index
+    /// it allocated. The msg1-inline path builds its machine above the crypto
+    /// (the Noise step runs on the machine) and so cannot use the birth ctor,
+    /// which needs an index that does not exist until after the crypto; this
+    /// applies the same transition to the machine already in hand.
+    pub(crate) fn park_inbound_msg2_sent(&mut self, our_index: SessionIndex) {
+        self.conn.set_our_index(our_index);
+        self.state = PeerState::Handshaking {
+            link: self.link,
             phase: HandshakePhase::SentMsg2,
         };
-        machine
     }
 
     /// New machine for an ALREADY-established peer: the post-handshake state a
@@ -685,26 +745,310 @@ impl PeerMachine {
         self.state
     }
 
-    /// The pending handshake connection, if this leg is still in the
-    /// handshake window.
-    pub(crate) fn leg(&self) -> Option<&PeerConnection> {
+    /// The handshake crypto carrier, if this machine is still in the
+    /// handshake window. Presence answers "is there a pending handshake
+    /// here", independently of whether either handle is populated.
+    pub(crate) fn leg(&self) -> Option<&HandshakeCrypto> {
         self.leg.as_ref()
     }
 
-    /// Mutable access to the pending handshake connection.
-    pub(crate) fn leg_mut(&mut self) -> Option<&mut PeerConnection> {
-        self.leg.as_mut()
-    }
-
-    /// Take the pending handshake connection off the machine (promotion and
+    /// Take the handshake crypto carrier off the machine (promotion and
     /// teardown consume it by value).
-    pub(crate) fn take_leg(&mut self) -> Option<PeerConnection> {
+    pub(crate) fn take_leg(&mut self) -> Option<HandshakeCrypto> {
         self.leg.take()
     }
 
-    /// Embed a pending handshake connection on the machine.
-    pub(crate) fn set_leg(&mut self, leg: PeerConnection) {
+    /// Attach a handshake crypto carrier to the machine.
+    pub(crate) fn set_leg(&mut self, leg: HandshakeCrypto) {
         self.leg = Some(leg);
+    }
+
+    // === Noise handshake operations ===
+    //
+    // Mechanism, not decision: these are called by the shell, are never
+    // reached from `step()`, and no event triggers them. Each drives the
+    // Noise crypto on the pending connection and records the results on both
+    // that connection and the surviving carrier, so a reader of either sees
+    // the same value at the same point.
+
+    /// Start the handshake as initiator and generate message 1.
+    ///
+    /// For outbound connections only. Returns the Noise XX msg1 bytes.
+    /// XX msg1 is ephemeral-only (33 bytes) — no identity or epoch.
+    pub(crate) fn start_handshake(
+        &mut self,
+        our_keypair: Keypair,
+        epoch: [u8; 8],
+        current_time_ms: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        let msg1 = {
+            let direction = self.conn.direction();
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            if direction != LinkDirection::Outbound {
+                return Err(NoiseError::WrongState {
+                    expected: "outbound connection".to_string(),
+                    got: "inbound connection".to_string(),
+                });
+            }
+
+            // XX initiator: no remote static needed upfront, so an anonymous
+            // dial (no expected identity) is a first-class case rather than an
+            // error. The old `!= Initial` phase guard is dropped — this method
+            // creates the Noise handshake handle, so there is no
+            // `take().expect()` to protect, and its Err path was unreachable in
+            // production (one call per fresh outbound handshake).
+            let mut hs = noise::HandshakeState::new_initiator(our_keypair);
+            hs.set_local_epoch(epoch);
+            let msg1 = hs.write_message_1()?;
+
+            leg.noise_handshake = Some(hs);
+
+            msg1
+        };
+        self.conn.touch(current_time_ms);
+
+        Ok(msg1)
+    }
+
+    /// Initialize responder and process incoming message 1.
+    ///
+    /// For inbound connections only. Returns the Noise XX msg2 bytes.
+    /// XX: identity is NOT learned from msg1 (only ephemeral exchange).
+    /// The responder learns the initiator's identity from msg3.
+    ///
+    /// If `negotiation_payload` is provided, it is encrypted and appended
+    /// to the returned msg2 bytes.
+    pub(crate) fn receive_handshake_init(
+        &mut self,
+        our_keypair: Keypair,
+        epoch: [u8; 8],
+        message: &[u8],
+        negotiation_payload: Option<&[u8]>,
+        current_time_ms: u64,
+    ) -> Result<Vec<u8>, NoiseError> {
+        let msg2 = {
+            let direction = self.conn.direction();
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            if direction != LinkDirection::Inbound {
+                return Err(NoiseError::WrongState {
+                    expected: "inbound connection".to_string(),
+                    got: "outbound connection".to_string(),
+                });
+            }
+
+            let mut hs = noise::HandshakeState::new_responder(our_keypair);
+            hs.set_local_epoch(epoch);
+
+            // Process XX message 1 (ephemeral only — no identity learned)
+            hs.read_message_1(message)?;
+
+            // Generate XX message 2 (sends our static + epoch)
+            let mut msg2 = hs.write_message_2()?;
+
+            // Append encrypted negotiation payload if provided
+            if let Some(payload) = negotiation_payload {
+                let encrypted = hs.encrypt_payload(payload)?;
+                msg2.extend_from_slice(&encrypted);
+            }
+
+            // XX: handshake NOT complete yet — need msg3. Keep the Noise
+            // handshake handle for `complete_handshake_msg3()`; the phase
+            // (formerly `ReceivedMsg1`) lives on this machine, so no phase is
+            // set here. The handle's presence is the crypto-local
+            // `ReceivedMsg1` signal.
+            leg.noise_handshake = Some(hs);
+
+            msg2
+        };
+        self.conn.touch(current_time_ms);
+
+        Ok(msg2)
+    }
+
+    /// Complete the handshake by processing message 2 and generating message 3.
+    ///
+    /// For outbound connections only (initiator). Processes the responder's
+    /// msg2 (learning their identity and epoch), then generates msg3.
+    /// Returns the Noise XX msg3 bytes to send.
+    ///
+    /// If `negotiation_payload` is provided, it is encrypted and appended
+    /// to the returned msg3 bytes. If the received msg2 contains a negotiation
+    /// payload (bytes beyond the base XX msg2), it is decrypted and returned.
+    pub(crate) fn complete_handshake(
+        &mut self,
+        message: &[u8],
+        negotiation_payload: Option<&[u8]>,
+        current_time_ms: u64,
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), NoiseError> {
+        let (msg3, received_negotiation, learned_identity, remote_epoch) = {
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            // The connection is at `SentMsg1` iff its Noise handshake handle is
+            // present (set by `start_handshake`, taken here on completion).
+            // Gating on the handle directly is byte-equivalent to the old
+            // `!= SentMsg1` guard for every reachable transition.
+            if leg.noise_handshake.is_none() {
+                return Err(NoiseError::WrongState {
+                    expected: "sent_msg1 state".to_string(),
+                    got: "no active handshake".to_string(),
+                });
+            }
+
+            let mut hs = leg
+                .noise_handshake
+                .take()
+                .expect("noise handshake must exist in SentMsg1 state");
+
+            // Split msg2 into base XX part and optional negotiation
+            let base_size = noise::HANDSHAKE_MSG2_SIZE;
+            let (base_msg2, extra) = if message.len() > base_size {
+                (&message[..base_size], Some(&message[base_size..]))
+            } else {
+                (message, None)
+            };
+
+            // Process XX msg2 (learns responder identity + epoch)
+            hs.read_message_2(base_msg2)?;
+
+            // Decrypt negotiation payload from msg2 if present
+            let received_negotiation = if let Some(encrypted) = extra {
+                Some(hs.decrypt_payload(encrypted)?)
+            } else {
+                None
+            };
+
+            // Learn responder identity from msg2
+            let remote_static = *hs
+                .remote_static()
+                .expect("remote static available after XX msg2");
+            let learned_identity = PeerIdentity::from_pubkey_full(remote_static);
+
+            // Capture remote epoch from msg2
+            let remote_epoch = hs.remote_epoch();
+
+            // Generate XX msg3
+            let mut msg3 = hs.write_message_3()?;
+
+            // Append encrypted negotiation payload if provided
+            if let Some(payload) = negotiation_payload {
+                let encrypted = hs.encrypt_payload(payload)?;
+                msg3.extend_from_slice(&encrypted);
+            }
+
+            // Handshake complete for initiator
+            let session = hs.into_session()?;
+            leg.noise_session = Some(session);
+
+            (msg3, received_negotiation, learned_identity, remote_epoch)
+        };
+        self.conn.set_expected_identity(learned_identity);
+        self.conn.set_remote_epoch(remote_epoch);
+        self.conn.touch(current_time_ms);
+
+        Ok((msg3, received_negotiation))
+    }
+
+    /// Complete the responder handshake by processing message 3.
+    ///
+    /// For inbound connections only (responder). Processes the initiator's
+    /// msg3, learning their identity and epoch.
+    ///
+    /// If the msg3 contains a negotiation payload (bytes beyond base XX msg3),
+    /// it is decrypted and returned.
+    pub(crate) fn complete_handshake_msg3(
+        &mut self,
+        message: &[u8],
+        current_time_ms: u64,
+    ) -> Result<Option<Vec<u8>>, NoiseError> {
+        let (received_negotiation, learned_identity, remote_epoch) = {
+            let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
+
+            // The responder is at `ReceivedMsg1` iff its Noise handshake handle
+            // is present (set by `receive_handshake_init`, taken here on msg3).
+            // Gating on the handle directly is byte-equivalent to the old
+            // `!= ReceivedMsg1` guard for every reachable transition, and it
+            // protects the `take().expect()` below.
+            if leg.noise_handshake.is_none() {
+                return Err(NoiseError::WrongState {
+                    expected: "received_msg1 state".to_string(),
+                    got: "no active handshake".to_string(),
+                });
+            }
+
+            let mut hs = leg
+                .noise_handshake
+                .take()
+                .expect("noise handshake must exist in ReceivedMsg1 state");
+
+            // Split msg3 into base XX part and optional negotiation
+            let base_size = noise::HANDSHAKE_MSG3_SIZE;
+            let (base_msg3, extra) = if message.len() > base_size {
+                (&message[..base_size], Some(&message[base_size..]))
+            } else {
+                (message, None)
+            };
+
+            // Process XX msg3 (learns initiator identity + epoch)
+            hs.read_message_3(base_msg3)?;
+
+            // Decrypt negotiation payload from msg3 if present
+            let received_negotiation = if let Some(encrypted) = extra {
+                Some(hs.decrypt_payload(encrypted)?)
+            } else {
+                None
+            };
+
+            // Learn initiator identity from msg3
+            let remote_static = *hs
+                .remote_static()
+                .expect("remote static available after XX msg3");
+            let learned_identity = PeerIdentity::from_pubkey_full(remote_static);
+
+            // Capture remote epoch from msg3
+            let remote_epoch = hs.remote_epoch();
+
+            // Handshake complete for responder. The completion signal is the
+            // Noise session's presence (the phase enum is gone); no phase is
+            // set.
+            let session = hs.into_session()?;
+            leg.noise_session = Some(session);
+
+            (received_negotiation, learned_identity, remote_epoch)
+        };
+        self.conn.set_expected_identity(learned_identity);
+        self.conn.set_remote_epoch(remote_epoch);
+        self.conn.touch(current_time_ms);
+
+        Ok(received_negotiation)
+    }
+
+    /// Take the completed Noise session.
+    ///
+    /// Returns the NoiseSession for use in ActivePeer. Can only be called
+    /// once after the handshake completes.
+    pub(crate) fn take_session(&mut self) -> Option<NoiseSession> {
+        // The session exists iff the handshake reached `Complete`, so taking it
+        // unconditionally is byte-equivalent to the old `== Complete` gate.
+        self.leg.as_mut().and_then(|leg| leg.noise_session.take())
+    }
+
+    /// Check if we have a completed session ready to take.
+    pub(crate) fn has_session(&self) -> bool {
+        self.leg
+            .as_ref()
+            .is_some_and(|leg| leg.noise_session.is_some())
+    }
+
+    /// Drop the crypto handshake handle. The failure *state* lives on this
+    /// machine; this only releases the Noise handle at the identical point it
+    /// was released before, so a subsequent `complete_handshake` still reports
+    /// `WrongState`.
+    pub(crate) fn mark_failed(&mut self) {
+        if let Some(leg) = self.leg.as_mut() {
+            leg.noise_handshake = None;
+        }
     }
 
     /// The session index we allocated for this peer, read from the surviving
@@ -775,11 +1119,21 @@ impl PeerMachine {
 
     /// Expected peer identity of the surviving carrier — the home for the
     /// operator-visible `expected_peer` now that the leg no longer projects it.
-    /// Outbound carries the dial identity from construction; inbound stays `None`
-    /// in this view (the identity learned mid-handshake never rests here, as the
-    /// leg is consumed by promotion within the same message-handling step).
+    /// Outbound carries the dial identity from construction; inbound records
+    /// the identity discovered in msg1, written here by `receive_handshake_init`
+    /// at the same point it reaches the pending connection. Everything that
+    /// names a peer mid-handshake reads this, including the stale-connection
+    /// sweep's retry address.
     pub(crate) fn conn_expected_identity(&self) -> Option<&PeerIdentity> {
         self.conn.expected_identity()
+    }
+
+    /// Remote startup epoch of the surviving carrier, recorded by the
+    /// handshake operations at the message that reveals it (msg1 inbound,
+    /// msg2 outbound). Promotion reads it to seed the active peer and to
+    /// detect a peer restart across a reconnect.
+    pub(crate) fn conn_remote_epoch(&self) -> Option<[u8; 8]> {
+        self.conn.remote_epoch()
     }
 
     /// Stored wire-format msg1 of the surviving carrier — the resend source for
@@ -806,6 +1160,39 @@ impl PeerMachine {
         self.conn.set_handshake_msg2(msg2);
     }
 
+    /// The link this machine controls.
+    pub(crate) fn link_id(&self) -> LinkId {
+        self.link
+    }
+
+    /// Which side opened this connection, read from the surviving carrier.
+    /// Seeded at construction: an outbound machine carries an outbound
+    /// connection state and an inbound machine an inbound one.
+    pub(crate) fn conn_direction(&self) -> LinkDirection {
+        self.conn.direction()
+    }
+
+    /// Whether we opened this connection.
+    pub(crate) fn conn_is_outbound(&self) -> bool {
+        self.conn.is_outbound()
+    }
+
+    /// Whether the peer opened this connection.
+    pub(crate) fn conn_is_inbound(&self) -> bool {
+        self.conn.is_inbound()
+    }
+
+    /// The peer's address on this link, read from the surviving carrier.
+    /// Written at the same three points the connection's own copy was: the
+    /// inbound seed, the outbound dial, and message-2 completion.
+    pub(crate) fn conn_source_addr(&self) -> Option<&TransportAddr> {
+        self.conn.source_addr()
+    }
+
+    pub(crate) fn set_conn_source_addr(&mut self, addr: TransportAddr) {
+        self.conn.set_source_addr(addr);
+    }
+
     /// Peer session index of the surviving carrier — the source for the
     /// promotion hand-off now that the leg no longer projects it.
     pub(crate) fn conn_their_index(&self) -> Option<SessionIndex> {
@@ -830,23 +1217,19 @@ impl PeerMachine {
         self.conn.peer_profile()
     }
 
-    /// Record the negotiated peer profile on the surviving carrier, mirroring
-    /// the leg's `set_negotiation_results` write.
+    /// Record the negotiated peer profile on the surviving carrier.
     pub(crate) fn set_conn_peer_profile(&mut self, profile: NodeProfile) {
         self.conn.set_negotiation_results(profile);
     }
 
-    /// Record the peer session index on the surviving carrier. Seeds the
-    /// carrier from a pre-built leg (`Node::add_connection`) so the promotion
-    /// hand-off matches the establish paths that write it on the machine.
+    /// Record the peer session index on the surviving carrier, so the
+    /// promotion hand-off reads it from the machine.
     pub(crate) fn set_conn_their_index(&mut self, index: SessionIndex) {
         self.conn.set_their_index(index);
     }
 
-    /// Record the transport ID on the surviving carrier. Populated on the
-    /// inbound establish path (the leg seeds it at msg1, but the machine's
-    /// carrier is only written on the outbound dial) and when seeding the
-    /// carrier from a pre-built leg (`Node::add_connection`).
+    /// Record the transport ID on the surviving carrier. Written on the
+    /// inbound establish path at msg1 and on the outbound dial.
     pub(crate) fn set_conn_transport_id(&mut self, id: TransportId) {
         self.conn.set_transport_id(id);
     }
@@ -1060,11 +1443,9 @@ impl PeerMachine {
     /// (`is_handshaking_sent_msg1`) survives until the sweep, and no timer
     /// actions are emitted.
     fn on_handshake_send_failed(&mut self) -> Vec<PeerAction> {
-        if let Some(leg) = self.leg.as_mut() {
-            // Drop the leg's Noise handshake handle at the identical point as
-            // before; the failure *state* is recorded on the machine.
-            leg.mark_failed();
-        }
+        // Drop the Noise handshake handle at the identical point as before;
+        // the failure *state* is recorded on the machine.
+        self.mark_failed();
         self.send_failed = true;
         Vec::new()
     }
@@ -3082,7 +3463,7 @@ mod tests {
             100,
             &mut alloc,
         );
-        m.set_leg(PeerConnection::outbound(LinkId::new(1), peer, 100));
+        m.set_leg(HandshakeCrypto::new());
         assert!(m.is_handshaking_sent_msg1());
         assert!(!m.is_failed());
         assert_eq!(m.displayed_handshake_state(), "sent_msg1");
@@ -3399,5 +3780,195 @@ mod tests {
         assert_eq!(m.conn.their_index(), Some(SessionIndex::new(0x2222)));
         assert_eq!(m.state(), PeerState::Active { addr });
         assert_eq!(alloc.count(), 0);
+    }
+
+    // ---- Moved from the handshake leg's own test module --------------------
+    // These exercise the Noise handshake operations, which now live on the
+    // control machine. Constructed as a machine with a leg attached; the
+    // assertions are unchanged.
+
+    fn make_peer_identity() -> PeerIdentity {
+        let identity = Identity::generate();
+        PeerIdentity::from_pubkey(identity.pubkey())
+    }
+
+    fn make_keypair() -> Keypair {
+        let identity = Identity::generate();
+        identity.keypair()
+    }
+
+    fn make_epoch() -> [u8; 8] {
+        let mut epoch = [0u8; 8];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut epoch);
+        epoch
+    }
+
+    fn outbound_leg(
+        link_id: LinkId,
+        expected_identity: PeerIdentity,
+        current_time_ms: u64,
+    ) -> PeerMachine {
+        let mut machine =
+            PeerMachine::new_outbound(link_id, Some(expected_identity), current_time_ms);
+        machine.set_leg(HandshakeCrypto::new());
+        machine
+    }
+
+    fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
+        let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
+        machine.set_leg(HandshakeCrypto::new());
+        machine
+    }
+
+    #[test]
+    fn test_outbound_connection() {
+        let identity = make_peer_identity();
+        let conn = outbound_leg(LinkId::new(1), identity, 1000);
+
+        assert!(conn.conn_is_outbound());
+        assert!(!conn.conn_is_inbound());
+        assert!(!conn.has_session());
+        assert!(conn.conn_expected_identity().is_some());
+        assert_eq!(conn.conn_started_at(), 1000);
+    }
+
+    #[test]
+    fn test_inbound_connection() {
+        let conn = inbound_leg(LinkId::new(2), 2000);
+
+        assert!(conn.conn_is_inbound());
+        assert!(!conn.conn_is_outbound());
+        assert!(!conn.has_session());
+        assert!(conn.conn_expected_identity().is_none());
+        assert_eq!(conn.conn_started_at(), 2000);
+    }
+
+    #[test]
+    fn test_full_handshake_flow() {
+        // Create identities
+        let initiator_identity = Identity::generate();
+        let responder_identity = Identity::generate();
+
+        let initiator_keypair = initiator_identity.keypair();
+        let responder_keypair = responder_identity.keypair();
+        let initiator_epoch = make_epoch();
+        let responder_epoch = make_epoch();
+
+        // Use from_pubkey_full to preserve parity for ECDH
+        let responder_peer_id = PeerIdentity::from_pubkey_full(responder_identity.pubkey_full());
+
+        // Create connections
+        let mut initiator_conn = outbound_leg(LinkId::new(1), responder_peer_id, 1000);
+        let mut responder_conn = inbound_leg(LinkId::new(2), 1000);
+
+        // Initiator starts XX handshake
+        let msg1 = initiator_conn
+            .start_handshake(initiator_keypair, initiator_epoch, 1100)
+            .unwrap();
+        // Post-msg1 the initiator holds an in-flight handshake, not yet a session.
+        assert!(!initiator_conn.has_session());
+
+        // Responder processes msg1 and sends msg2 (XX: does NOT complete yet)
+        let msg2 = responder_conn
+            .receive_handshake_init(responder_keypair, responder_epoch, &msg1, None, 1200)
+            .unwrap();
+        // XX: the responder parks awaiting msg3 — it holds an in-flight
+        // handshake, not yet a session (the deleted phase was `ReceivedMsg1`).
+        assert!(!responder_conn.has_session());
+        // Responder does NOT know initiator's identity yet (XX property)
+        assert!(responder_conn.conn_expected_identity().is_none());
+
+        // Initiator processes msg2 and generates msg3
+        let (msg3, _neg) = initiator_conn
+            .complete_handshake(&msg2, None, 1300)
+            .unwrap();
+        // The initiator completes at msg3 generation: it now holds a session.
+        assert!(initiator_conn.has_session());
+
+        // Initiator learned responder's identity from msg2
+        let discovered = initiator_conn.conn_expected_identity().unwrap();
+        assert_eq!(discovered.pubkey(), responder_identity.pubkey());
+        assert_eq!(initiator_conn.conn_remote_epoch(), Some(responder_epoch));
+
+        // Responder processes msg3 (completes handshake): it now holds a session.
+        let _neg = responder_conn.complete_handshake_msg3(&msg3, 1400).unwrap();
+        assert!(responder_conn.has_session());
+
+        // Responder learned initiator's identity from msg3
+        let discovered = responder_conn.conn_expected_identity().unwrap();
+        assert_eq!(discovered.pubkey(), initiator_identity.pubkey());
+        assert_eq!(responder_conn.conn_remote_epoch(), Some(initiator_epoch));
+
+        // Both have sessions
+        assert!(initiator_conn.has_session());
+        assert!(responder_conn.has_session());
+
+        // Take and verify sessions work
+        let mut init_session = initiator_conn.take_session().unwrap();
+        let mut resp_session = responder_conn.take_session().unwrap();
+
+        // Encrypt/decrypt test
+        let plaintext = b"test message";
+        let ciphertext = init_session.encrypt(plaintext).unwrap();
+        let decrypted = resp_session.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_connection_failure() {
+        // `mark_failed` releases the leg's Noise handshake handle. The failure
+        // *state* now lives on the control machine, but the leg-local effect is
+        // still observable: a completion attempt afterward reports `WrongState`
+        // (the handle-presence gate) and no session is produced.
+        let identity = make_peer_identity();
+        let keypair = make_keypair();
+        let mut conn = outbound_leg(LinkId::new(1), identity, 1000);
+        conn.start_handshake(keypair, make_epoch(), 1100).unwrap();
+
+        conn.mark_failed();
+
+        assert!(!conn.has_session());
+        assert!(conn.complete_handshake(&[0u8; 96], None, 1200).is_err());
+    }
+
+    #[test]
+    fn test_wrong_direction_errors() {
+        let identity = make_peer_identity();
+        let keypair = make_keypair();
+
+        // Outbound can't receive_handshake_init
+        let mut outbound = outbound_leg(LinkId::new(1), identity, 1000);
+        assert!(
+            outbound
+                .receive_handshake_init(keypair, make_epoch(), &[0u8; 33], None, 1100)
+                .is_err()
+        );
+
+        // Inbound can't start_handshake
+        let mut inbound = inbound_leg(LinkId::new(2), 1000);
+        assert!(
+            inbound
+                .start_handshake(keypair, make_epoch(), 1100)
+                .is_err()
+        );
+    }
+}
+
+/// T-SANSIO: the action vocabulary must stay plain, comparable data.
+///
+/// `PeerAction` is the sans-IO boundary between the pure reducer and its
+/// driver. Requiring `Clone + Eq` is a compile-time statement that no variant
+/// may carry a runtime handle (a socket, a `JoinHandle`, a channel sender),
+/// since none of those are `Clone + Eq`. If a future variant smuggles one in,
+/// this bound stops compiling.
+#[cfg(test)]
+mod action_contract {
+    use super::PeerAction;
+
+    fn assert_clone_eq<T: Clone + Eq>() {}
+
+    #[test]
+    fn peer_action_is_plain_comparable_data() {
+        assert_clone_eq::<PeerAction>();
     }
 }

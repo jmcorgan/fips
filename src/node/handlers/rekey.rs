@@ -270,7 +270,7 @@ impl Node {
     ///
     /// Creates a new XX handshake as initiator, sends msg1 over the existing
     /// link (same transport, same remote address), and stores the handshake
-    /// state on the ActivePeer. No new Link or PeerConnection is created.
+    /// state on the ActivePeer. No new Link or handshake leg is created.
     async fn initiate_rekey(&mut self, node_addr: &NodeAddr) {
         let peer = match self.peers.get(node_addr) {
             Some(p) => p,
@@ -302,7 +302,7 @@ impl Node {
             }
         };
 
-        // Create XX initiator handshake directly (no PeerConnection)
+        // Create XX initiator handshake directly (no handshake leg)
         let our_keypair = self.identity().keypair();
         let mut hs = HandshakeState::new_initiator(our_keypair);
         hs.set_local_epoch(self.startup_epoch());
@@ -348,7 +348,7 @@ impl Node {
             }
         }
 
-        // Store handshake state on the ActivePeer (not a separate PeerConnection)
+        // Store handshake state on the ActivePeer (not a separate handshake leg)
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let now_ms = Self::now_ms();
         if let Some(peer) = self.peers.get_mut(node_addr) {

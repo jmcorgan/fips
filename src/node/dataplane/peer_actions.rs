@@ -251,8 +251,9 @@ impl Node {
                     let wire_msg2 = if ambient.is_outbound {
                         None
                     } else {
-                        self.leg(&promote_link)
-                            .and_then(|c| c.handshake_msg2().map(|m| m.to_vec()))
+                        self.peer_machines
+                            .get(&promote_link)
+                            .and_then(|m| m.conn_handshake_msg2().map(|b| b.to_vec()))
                     };
 
                     if ambient.is_outbound {
@@ -595,18 +596,21 @@ impl Node {
                     if our_inbound_wins {
                         // Larger node side: swap to the inbound session so it pairs
                         // with the peer's kept outbound session.
-                        let inbound_session =
-                            match self.leg_mut(&link).and_then(|c| c.take_session()) {
-                                Some(s) => s,
-                                None => {
-                                    self.remove_link(&link);
-                                    self.remove_peer_machine(link);
-                                    self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::BadState,
-                                    ));
-                                    return;
-                                }
-                            };
+                        let inbound_session = match self
+                            .peer_machines
+                            .get_mut(&link)
+                            .and_then(|m| m.take_session())
+                        {
+                            Some(s) => s,
+                            None => {
+                                self.remove_link(&link);
+                                self.remove_peer_machine(link);
+                                self.stats_mut().record_reject(RejectReason::Handshake(
+                                    HandshakeReject::BadState,
+                                ));
+                                return;
+                            }
+                        };
                         if let Some(peer_ref) = self.peers.get_mut(&peer) {
                             let old_our_index =
                                 peer_ref.replace_session(inbound_session, our_index, their_index);
@@ -686,7 +690,7 @@ impl Node {
 
                     // Rekey: process as responder, store new session as pending.
                     let noise_session = {
-                        let Some(conn) = self.leg_mut(&link) else {
+                        let Some(machine) = self.peer_machines.get_mut(&link) else {
                             warn!(link_id = %link, "Connection removed during rekey msg3 processing");
                             self.links.remove(&link);
                             self.remove_peer_machine(link);
@@ -695,7 +699,7 @@ impl Node {
                             ));
                             return;
                         };
-                        conn.take_session()
+                        machine.take_session()
                     };
                     let our_new_index = our_index;
 

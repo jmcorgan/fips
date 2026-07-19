@@ -11,8 +11,10 @@ use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
-use crate::peer::machine::{CrossConnOutcome, PeerAction, PeerEvent, PeerMachine, TimerKind};
-use crate::peer::{ActivePeer, PeerConnection};
+use crate::peer::ActivePeer;
+use crate::peer::machine::{
+    CrossConnOutcome, HandshakeCrypto, PeerAction, PeerEvent, PeerMachine, TimerKind,
+};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
     Disconnect, DisconnectReason, EstablishSnapshot, InboundDecision, InboundReject,
@@ -247,19 +249,24 @@ impl Node {
 
         // === CRYPTO COST PAID HERE ===
         let link_id = self.allocate_link_id();
-        let mut conn = PeerConnection::inbound_with_transport(
-            link_id,
-            packet.transport_id,
-            packet.remote_addr.clone(),
-            packet.timestamp_ms,
-        );
+
+        // The control machine drives the handshake, so it is built here, above
+        // the crypto. It stays a local: it enters `peer_machines` only at the
+        // promote tails, so a rejected msg1 still leaves no registry trace and
+        // allocates no index.
+        let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+        // Seed the carrier with the transport and address msg1 arrived on, so
+        // the promotion hand-off reads them from it.
+        machine.set_conn_transport_id(packet.transport_id);
+        machine.set_conn_source_addr(packet.remote_addr.clone());
+        machine.set_leg(HandshakeCrypto::new());
 
         // Create FMP negotiation payload for msg2 (includes profile, MMP bits, bloom TLV)
         let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile()).encode();
 
         let our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
-        let msg2_response = match conn.receive_handshake_init(
+        let msg2_response = match machine.receive_handshake_init(
             our_keypair,
             self.startup_epoch(),
             noise_msg1,
@@ -301,8 +308,7 @@ impl Node {
             }
         };
 
-        conn.set_our_index(our_index);
-        conn.set_their_index(header.sender_idx);
+        machine.set_conn_their_index(header.sender_idx);
 
         // Create link
         let link = Link::connectionless(
@@ -317,27 +323,19 @@ impl Node {
         self.addr_to_link.insert(addr_key, link_id);
 
         // Build the msg2 response, storing it on the surviving carrier for
-        // potential resend before the connection is embedded on the machine
-        // below.
+        // potential resend before the machine enters the registry below.
         let wire_msg2 = build_msg2(our_index, header.sender_idx, &msg2_response);
 
-        // The leg's persistent control machine is born carrying its pending
-        // connection, parked at `SentMsg2` awaiting msg3 (identity is unknown
-        // until then). Inserted before the msg2 send below so no suspension
-        // point observes a leg in flight without a machine. `handle_msg3`
-        // steps this same machine; every teardown path disposes it with the
-        // embedded leg.
-        let mut machine = PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms);
-        // The inbound leg carries the transport ID and peer index from msg1, but
-        // the machine's carrier is only written on the outbound dial and at msg3.
-        // Seed both here so the promotion hand-off reads them from the surviving
-        // carrier, matching the leg's inbound seeds.
-        machine.set_conn_transport_id(packet.transport_id);
-        machine.set_conn_their_index(header.sender_idx);
+        // The machine built above the crypto now parks at `SentMsg2` awaiting
+        // msg3 (identity is unknown until then), recording the index it owns.
+        // It enters the registry before the msg2 send below so no suspension
+        // point observes a handshake in flight without a machine. `handle_msg3`
+        // steps this same machine; every teardown path disposes it along with
+        // the Noise handles it carries.
+        machine.park_inbound_msg2_sent(our_index);
         // Store the framed msg2 on the surviving carrier for duplicate-msg1
-        // resend while the connection is still pending.
+        // resend while the handshake is still pending.
         machine.set_conn_handshake_msg2(wire_msg2.clone());
-        machine.set_leg(conn);
         self.peer_machines.insert(link_id, machine);
 
         if let Some(transport) = self.transports.get(&packet.transport_id) {
@@ -357,8 +355,8 @@ impl Node {
                         error = %e,
                         "Failed to send msg2"
                     );
-                    // Clean up on failure (the machine disposal drops the
-                    // embedded connection with it)
+                    // Clean up on failure (disposing the machine drops the
+                    // Noise handles it carries with it)
                     self.links.remove(&link_id);
                     self.addr_to_link
                         .remove(&(packet.transport_id, packet.remote_addr));
@@ -439,8 +437,8 @@ impl Node {
         };
 
         // Check if this is a rekey msg2: the handshake state is on the
-        // ActivePeer (not a PeerConnection), so the link's machine — if one
-        // survives at all — carries no pending connection. A bare machine
+        // ActivePeer, not in a handshake carrier, so the link's machine — if
+        // one survives at all — carries no pending handshake. A bare machine
         // lookup would NOT discriminate here: an established peer's machine
         // stays keyed by this link, so the pending connection's presence is
         // what marks a fresh establish. Look for a peer with matching
@@ -627,7 +625,7 @@ impl Node {
 
         let our_profile = self.node_profile();
         let (peer_identity, msg3_bytes, our_index) = {
-            let Some(conn) = self.leg_mut(&link_id) else {
+            let Some(machine) = self.peer_machines.get_mut(&link_id) else {
                 warn!(link_id = %link_id, "Connection removed during msg2 processing");
                 self.pending_outbound.remove(&key);
                 self.stats_mut()
@@ -640,7 +638,7 @@ impl Node {
 
             // Process Noise msg2 and generate msg3
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-            let (msg3_bytes, received_negotiation) = match conn.complete_handshake(
+            let (msg3_bytes, received_negotiation) = match machine.complete_handshake(
                 noise_msg2,
                 Some(&neg_payload),
                 packet.timestamp_ms,
@@ -652,18 +650,15 @@ impl Node {
                         error = %e,
                         "Handshake completion failed"
                     );
-                    // Drop the leg's Noise handle (byte-identical point) and
-                    // record the failure on the control machine as `send_failed`
-                    // — the failure state's new home. The machine PHASE stays
-                    // exactly where the old leg-carried failure left it
-                    // (`Handshaking{SentMsg1}`): the stale-connection sweep
-                    // reclaims the leg via the machine `is_failed()` at the next
-                    // tick, before any projection or resend, byte-identical to
-                    // the pre-collapse leg mark.
-                    conn.mark_failed();
-                    if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-                        machine.mark_send_failed();
-                    }
+                    // Drop the Noise handle (byte-identical point) and record
+                    // the failure on the control machine as `send_failed` — the
+                    // failure state's home. The machine PHASE stays exactly
+                    // where the old failure left it (`Handshaking{SentMsg1}`):
+                    // the stale-connection sweep reclaims the handshake via the
+                    // machine `is_failed()` at the next tick, before any
+                    // projection or resend.
+                    machine.mark_failed();
+                    machine.mark_send_failed();
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -672,17 +667,15 @@ impl Node {
 
             // Process peer's FMP negotiation payload from msg2
             if let Some(neg_bytes) = &received_negotiation {
-                match process_fmp_negotiation(our_profile, conn, neg_bytes) {
+                match process_fmp_negotiation(our_profile, machine, neg_bytes) {
                     Ok(()) => {}
                     Err(e) => {
                         warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
                         // Failure moves to the machine (`send_failed`); the phase
                         // stays `Handshaking{SentMsg1}` so the sweep reclaims the
-                        // leg exactly as the pre-collapse leg mark did.
-                        conn.mark_failed();
-                        if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-                            machine.mark_send_failed();
-                        }
+                        // handshake exactly as the pre-collapse mark did.
+                        machine.mark_failed();
+                        machine.mark_send_failed();
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -691,11 +684,11 @@ impl Node {
             }
 
             // Store their index
-            conn.set_their_index(header.sender_idx);
-            conn.set_source_addr(packet.remote_addr.clone());
+            machine.set_conn_their_index(header.sender_idx);
+            machine.set_conn_source_addr(packet.remote_addr.clone());
 
             // Get peer identity for promotion (learned from msg2 in XX)
-            let peer_identity = match conn.expected_identity() {
+            let peer_identity = match machine.conn_expected_identity() {
                 Some(id) => *id,
                 None => {
                     warn!(link_id = %link_id, "No identity after handshake");
@@ -705,24 +698,17 @@ impl Node {
                 }
             };
 
-            let our_index = conn.our_index();
+            let our_index = machine.our_index();
 
             (peer_identity, msg3_bytes, our_index)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
 
-        // Mirror the leg's completion `touch` and the negotiated peer profile
-        // onto the surviving carrier so the connection's last-activity advances
-        // at msg2 completion (matching the leg's clock) and the promotion
-        // hand-off reads the profile from the carrier.
-        let negotiated_profile = self.leg(&link_id).and_then(|conn| conn.peer_profile());
-        if let Some(machine) = self.peer_machines.get_mut(&link_id) {
-            machine.touch_conn(packet.timestamp_ms);
-            if let Some(profile) = negotiated_profile {
-                machine.set_conn_peer_profile(profile);
-            }
-        }
+        // The completion `touch` and the negotiated peer profile are written
+        // directly onto the surviving carrier by `complete_handshake` and
+        // `process_fmp_negotiation` above, so last-activity advances at msg2
+        // completion and the promotion hand-off reads the profile from it.
 
         // ACL check: with XX, this is the first point where the initiator
         // knows the responder's identity.
@@ -784,12 +770,10 @@ impl Node {
                     );
                     // Failure moves to the machine (`send_failed`); the phase
                     // stays `Handshaking{SentMsg1}` (promote has not run yet) so
-                    // the sweep reclaims the leg exactly as the pre-collapse leg
-                    // mark did.
-                    if let Some(conn) = self.leg_mut(&link_id) {
-                        conn.mark_failed();
-                    }
+                    // the sweep reclaims the handshake exactly as the
+                    // pre-collapse mark did.
                     if let Some(machine) = self.peer_machines.get_mut(&link_id) {
+                        machine.mark_failed();
                         machine.mark_send_failed();
                     }
                     self.stats_mut()
@@ -887,10 +871,10 @@ impl Node {
             // right after the take — unconditionally, whether or not a
             // connection was carried — so none of this block's exits leave a
             // dangling machine.
-            let taken_conn = self
-                .peer_machines
-                .get_mut(&link_id)
-                .and_then(|machine| machine.take_leg());
+            let (taken_conn, carrier_our_index) = match self.peer_machines.get_mut(&link_id) {
+                Some(machine) => (machine.take_leg(), machine.our_index()),
+                None => (None, None),
+            };
             self.remove_peer_machine(link_id);
 
             let mut conn = match taken_conn {
@@ -907,8 +891,8 @@ impl Node {
             if swap {
                 // We're the smaller node. Swap to outbound session + indices.
                 // The peer will keep their inbound session (complement of ours).
-                let outbound_our_index = conn.our_index();
-                let outbound_session = conn.take_session();
+                let outbound_our_index = carrier_our_index;
+                let outbound_session = conn.noise_session.take();
 
                 let (outbound_session, outbound_our_index) = match (
                     outbound_session,
@@ -976,7 +960,7 @@ impl Node {
                 // their outbound session, that index is exactly what they'll use.
                 // The msg2 sender_idx we see here is the peer's INBOUND our_index,
                 // which becomes stale after the peer swaps.
-                let outbound_our_index = conn.our_index();
+                let outbound_our_index = carrier_our_index;
 
                 if let Some(peer) = self.peers.get(&peer_node_addr) {
                     debug!(
@@ -1106,8 +1090,8 @@ impl Node {
         let our_profile = self.node_profile();
         let (peer_identity, our_index, remote_epoch) = {
             // Get the pending connection
-            let conn = match self.leg_mut(&link_id) {
-                Some(c) => c,
+            let machine = match self.peer_machines.get_mut(&link_id) {
+                Some(m) => m,
                 None => {
                     debug!(
                         link_id = %link_id,
@@ -1122,7 +1106,7 @@ impl Node {
             // Process msg3 — learns initiator's identity and epoch
             let noise_msg3 = &packet.data[header.noise_msg3_offset..];
             let received_negotiation =
-                match conn.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
+                match machine.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
                     Ok(neg) => neg,
                     Err(e) => {
                         warn!(
@@ -1131,10 +1115,11 @@ impl Node {
                             "Msg3 processing failed"
                         );
                         // Clean up. Capture the index before disposing the
-                        // machine (and the connection embedded on it); reading
+                        // machine (and the Noise handles it carries); reading
                         // it after the disposal would always return None and
                         // leak the allocated index.
-                        let our_idx_to_free = self.leg(&link_id).and_then(|c| c.our_index());
+                        let our_idx_to_free =
+                            self.peer_machines.get(&link_id).and_then(|m| m.our_index());
                         self.remove_link(&link_id);
                         self.remove_peer_machine(link_id);
                         if let Some(idx) = our_idx_to_free {
@@ -1148,7 +1133,7 @@ impl Node {
 
             // Process peer's FMP negotiation payload from msg3
             if let Some(neg_bytes) = &received_negotiation {
-                match process_fmp_negotiation(our_profile, conn, neg_bytes) {
+                match process_fmp_negotiation(our_profile, machine, neg_bytes) {
                     Ok(()) => {}
                     Err(e) => {
                         warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
@@ -1162,7 +1147,7 @@ impl Node {
             }
 
             // Learn peer identity from msg3
-            let peer_identity = match conn.expected_identity() {
+            let peer_identity = match machine.conn_expected_identity() {
                 Some(id) => *id,
                 None => {
                     warn!("Identity not learned from msg3");
@@ -1174,22 +1159,17 @@ impl Node {
                 }
             };
 
-            let our_index = conn.our_index();
-            let remote_epoch = conn.remote_epoch();
+            let our_index = machine.our_index();
+            let remote_epoch = machine.conn_remote_epoch();
 
             (peer_identity, our_index, remote_epoch)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
 
-        // Mirror the negotiated peer profile onto the surviving carrier so the
-        // promotion hand-off reads it from the carrier, not the leg.
-        let negotiated_profile = self.leg(&link_id).and_then(|conn| conn.peer_profile());
-        if let Some(profile) = negotiated_profile
-            && let Some(machine) = self.peer_machines.get_mut(&link_id)
-        {
-            machine.set_conn_peer_profile(profile);
-        }
+        // The negotiated peer profile is written straight onto the surviving
+        // carrier by `process_fmp_negotiation` above, so the promotion hand-off
+        // reads it from there.
 
         // ACL check: with XX, this is the first point where the responder
         // knows the initiator's identity.
@@ -1208,8 +1188,8 @@ impl Node {
             // and the initiator has a matching session from processing
             // msg2. Reason `Other` is used instead of `SecurityViolation`
             // to avoid naming the ACL mechanism on the wire.
-            let reject_info = match self.leg_mut(&link_id) {
-                Some(conn) => match (conn.their_index(), conn.take_session()) {
+            let reject_info = match self.peer_machines.get_mut(&link_id) {
+                Some(machine) => match (machine.conn_their_index(), machine.take_session()) {
                     (Some(idx), Some(session)) => Some((idx, session)),
                     _ => None,
                 },
@@ -1486,14 +1466,14 @@ impl Node {
                 link_id = %link_id,
                 "Leaf node rejecting additional peer (single-peer enforcement)"
             );
-            // Clean up the connection (taken off its machine first) and its
-            // control machine
-            if let Some(conn) = self
-                .peer_machines
-                .get_mut(&link_id)
-                .and_then(|machine| machine.take_leg())
-                && let Some(idx) = conn.our_index()
-            {
+            // Detach the Noise handles from the machine and free the index the
+            // handshake allocated, then dispose of the machine itself.
+            if let Some(idx) = self.peer_machines.get_mut(&link_id).and_then(|machine| {
+                // Freeing stays conditional on a handshake actually being
+                // attached, as it was when the index lived on the leg.
+                machine.take_leg()?;
+                machine.our_index()
+            }) {
                 let _ = self.index_allocator.free(idx);
             }
             self.remove_link(&link_id);
@@ -1501,67 +1481,65 @@ impl Node {
             return Err(NodeError::MaxPeersExceeded { max: 1 });
         }
 
-        // Take the pending connection off its control machine. The machine
+        // Take the pending connection off its control machine, and read the
+        // carrier fields the promotion needs in the same borrow. The machine
         // survives the promotion (it becomes the active peer's control
         // machine), left with no pending connection.
-        let mut connection = self
+        //
+        // The connection is detached before anything is validated, so every
+        // error return below leaves the machine leg-less — the caller disposes
+        // of it. Gathering the carrier reads up front is only a borrow shape:
+        // they are infallible, so the order in which the missing-field errors
+        // are reported below is unchanged.
+        let machine = self
             .peer_machines
             .get_mut(&link_id)
-            .and_then(|machine| machine.take_leg())
             .ok_or(NodeError::ConnectionNotFound(link_id))?;
+        let mut connection = machine
+            .take_leg()
+            .ok_or(NodeError::ConnectionNotFound(link_id))?;
+        let carrier_our_index = machine.our_index();
+        let carrier_their_index = machine.conn_their_index();
+        let carrier_transport_id = machine.conn_transport_id();
+        let carrier_source_addr = machine.conn_source_addr().cloned();
+        let carrier_is_outbound = machine.conn_is_outbound();
+        let carrier_remote_epoch = machine.conn_remote_epoch();
+        let link_stats = machine.conn_link_stats().clone();
+        // The negotiated peer profile, read from the same carrier borrow.
+        let peer_profile = machine
+            .conn_peer_profile()
+            .unwrap_or(crate::proto::fmp::NodeProfile::Full);
 
         // Verify handshake is complete and extract session
-        if !connection.has_session() {
+        if connection.noise_session.is_none() {
             return Err(NodeError::HandshakeIncomplete(link_id));
         }
 
         let noise_session = connection
-            .take_session()
+            .noise_session
+            .take()
             .ok_or(NodeError::NoSession(link_id))?;
 
-        let our_index = connection
-            .our_index()
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing our_index".into(),
-            })?;
-        let their_index = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_their_index())
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing their_index".into(),
-            })?;
-        let transport_id = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_transport_id())
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing transport_id".into(),
-            })?;
-        let current_addr = connection
-            .source_addr()
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing source_addr".into(),
-            })?
-            .clone();
-        let link_stats = self
-            .peer_machines
-            .get(&link_id)
-            .map(|machine| machine.conn_link_stats().clone())
-            .unwrap_or_default();
-        let remote_epoch = connection.remote_epoch();
-        let peer_profile = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_peer_profile())
-            .unwrap_or(crate::proto::fmp::NodeProfile::Full);
+        let our_index = carrier_our_index.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing our_index".into(),
+        })?;
+        let their_index = carrier_their_index.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing their_index".into(),
+        })?;
+        let transport_id = carrier_transport_id.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing transport_id".into(),
+        })?;
+        let current_addr = carrier_source_addr.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing source_addr".into(),
+        })?;
+        let remote_epoch = carrier_remote_epoch;
 
         let peer_node_addr = *verified_identity.node_addr();
-        let is_outbound = connection.is_outbound();
+        let is_outbound = carrier_is_outbound;
 
         // Check for cross-connection
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
@@ -1719,12 +1697,13 @@ impl Node {
             // the 30s handshake timeout.
             let pending_to_same_peer: Vec<LinkId> = self
                 .connections()
-                .filter(|conn| {
-                    conn.expected_identity()
+                .filter(|(_, machine)| {
+                    machine
+                        .conn_expected_identity()
                         .map(|id| *id.node_addr() == peer_node_addr)
                         .unwrap_or(false)
                 })
-                .map(|conn| conn.link_id())
+                .map(|(_, machine)| machine.link_id())
                 .collect();
 
             for pending_link_id in &pending_to_same_peer {
@@ -1819,20 +1798,20 @@ impl Node {
 /// Process an FMP negotiation payload received from a peer.
 ///
 /// Decodes the payload, validates profile pairing, and stores the
-/// results on the PeerConnection.
+/// results on the peer's control machine.
 fn process_fmp_negotiation(
     our_profile: crate::proto::fmp::NodeProfile,
-    conn: &mut PeerConnection,
+    machine: &mut PeerMachine,
     neg_bytes: &[u8],
 ) -> Result<(), crate::proto::Error> {
     // The decode -> validate -> profile decision is the pure core split; the
     // shell records the result on the connection and logs.
     let their_profile = decide_fmp_negotiation(our_profile, neg_bytes)?;
 
-    conn.set_negotiation_results(their_profile);
+    machine.set_conn_peer_profile(their_profile);
 
     debug!(
-        link_id = %conn.link_id(),
+        link_id = %machine.link_id(),
         our_profile = %our_profile,
         peer_profile = %their_profile,
         "FMP negotiation complete"

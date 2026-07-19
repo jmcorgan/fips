@@ -124,7 +124,7 @@ impl TcpTransport {
     /// node-wide `node.limits.max_connections` > built-in default. This is a
     /// per-transport *raw-accept* ceiling; the true node-wide peer budget is
     /// still enforced downstream by the handshake-phase `max_connections`
-    /// admission check (`Node::add_connection`), so deriving this ceiling
+    /// admission check, so deriving this ceiling
     /// from `max_connections` does not let multiple transports exceed the
     /// node-wide total — it only stops the transport from rejecting inbound
     /// below the configured node budget.

@@ -47,6 +47,12 @@ async fn test_outbound_connect_denied_by_denylist() {
     assert_eq!(node.peer_count(), 0);
 }
 
+// The master-line `test_inbound_msg1_denied_by_acl` has no counterpart here.
+// Under XX, msg1 is an ephemeral-only exchange that carries no identity, so
+// there is no peer to authorize at that step and no ACL decision to assert.
+// The equivalent gate on this line runs once msg3 has revealed the initiator's
+// static key; `test_inbound_msg3_denied_by_acl` covers it there.
+
 #[tokio::test]
 async fn test_outbound_msg2_denied_after_acl_reload() {
     let (dir, mut node_a) = make_acl_node();
@@ -56,14 +62,23 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
 
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
-    let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id)
+                .with_source_addr(remote_addr.clone()),
+        )
         .unwrap();
-    conn_a.set_our_index(our_index_a);
-    conn_a.set_transport_id(transport_id);
-    conn_a.set_source_addr(remote_addr.clone());
+    let keypair_a = node_a.identity().keypair();
+    let epoch_a = node_a.startup_epoch();
+    let noise_msg1 = node_a
+        .peer_machines
+        .get_mut(&link_id_a)
+        .unwrap()
+        .start_handshake(keypair_a, epoch_a, 1000)
+        .unwrap();
 
     let link_a = Link::connectionless(
         link_id_a,
@@ -76,12 +91,11 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     node_a
         .addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id_a);
-    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
 
-    let mut conn_b = PeerConnection::inbound(LinkId::new(2), 1000);
+    let mut conn_b = inbound_leg(LinkId::new(2), 1000);
     let responder_epoch = [0x11; 8];
     let noise_msg2 = conn_b
         .receive_handshake_init(
@@ -175,14 +189,25 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
 
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let link_id_a = node_a.allocate_link_id();
-    let mut conn_a = PeerConnection::outbound(link_id_a, peer_b_identity, 1000);
     let our_index_a = node_a.index_allocator.allocate().unwrap();
-    let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+    // Mirror the production dial path: the seam seeds the outbound leg's
+    // control machine, which owns the handshake crypto.
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id_a)
+                .with_source_addr(addr_b.clone()),
+        )
         .unwrap();
-    conn_a.set_our_index(our_index_a);
-    conn_a.set_transport_id(transport_id_a);
-    conn_a.set_source_addr(addr_b.clone());
+    let our_keypair_a = node_a.identity().keypair();
+    let startup_epoch_a = node_a.startup_epoch();
+    let noise_msg1 = node_a
+        .peer_machines
+        .get_mut(&link_id_a)
+        .unwrap()
+        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .unwrap();
 
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
     let link_a = Link::connectionless(
@@ -196,9 +221,6 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
     node_a
         .addr_to_link
         .insert((transport_id_a, addr_b.clone()), link_id_a);
-    // Mirror the production dial path: the seam seeds the outbound leg's
-    // control machine and embeds the connection on it.
-    node_a.add_connection(conn_a).unwrap();
     node_a
         .pending_outbound
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
@@ -308,3 +330,9 @@ async fn test_outbound_connect_not_denied_by_allowlist_miss() {
 
     assert!(!matches!(result, Err(NodeError::AccessDenied(_))));
 }
+
+// The master-line `test_acl_rejected_msg1_leaves_no_registry_trace` asserts a
+// no-registry-trace property at the msg1 ACL denial. XX has no ACL decision at
+// msg1 (identity is unknown until msg3), so the property has no landing site at
+// that step. The same guard belongs at the msg3 `authorize_peer` gate, where
+// this line actually rejects an inbound peer.

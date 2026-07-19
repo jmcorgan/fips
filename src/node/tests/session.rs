@@ -1005,9 +1005,7 @@ fn test_identity_cache_populated_on_promote() {
     let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
 
-    let (conn, peer_identity) = make_completed_connection(&mut node, link_id, transport_id, 1000);
-
-    node.add_connection(conn).unwrap();
+    let peer_identity = seed_completed_connection(&mut node, link_id, transport_id, 1000);
 
     // Promote
     let result = node
