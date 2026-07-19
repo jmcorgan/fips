@@ -94,13 +94,23 @@ CAP_IP=$(node_ip "$CAP_NODE")
 [ -n "$CAP_IP" ] || fail "could not resolve docker_ip for node-$CAP_NODE in $TOPO_FILE"
 info "cap'd node: node-$CAP_NODE (ip $CAP_IP, max_peers=$MAX_PEERS)"
 
+# Read the cap'd node's peer_count, or the empty string if it did not answer.
+#
+# Empty is deliberately distinct from a real 0. An `|| echo 0` fallback cannot
+# do that job here: `||` binds to the last stage of the pipeline, which succeeds
+# on empty input, so the fallback never fires and an unreachable container would
+# be reported as a legitimate zero.
+read_peer_count() {
+    docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show status 2>/dev/null \
+        | grep -m1 peer_count | sed 's/.*: *//' | tr -d ','
+}
+
 # ── Phase 1: wait for convergence ────────────────────────────────────
 info "phase 1: wait for node-$CAP_NODE peer_count to reach $MAX_PEERS (90s timeout)"
 deadline=$(($(date +%s) + 90))
 pc=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    pc=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show status 2>/dev/null \
-        | grep -m1 peer_count | sed 's/.*: *//' | tr -d ',' || echo 0)
+    pc=$(read_peer_count)
     [ "$pc" = "$MAX_PEERS" ] && break
     sleep 2
 done
@@ -175,7 +185,7 @@ info "captured $captured tcpdump lines → $CAP_FILE"
 info "phase 3: per-denied-peer assertion (sustained inbound retries > 0, not promoted)"
 OVERALL=0
 TOTAL_IN=0
-FINAL_PEERS=$(docker exec fips-node-$CAP_NODE fipsctl show peers 2>/dev/null \
+FINAL_PEERS=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show peers 2>/dev/null \
     | grep -oE 'npub1[a-z0-9]+' | sort -u || true)
 for n in $DENIED; do
     n_ip=$(node_ip "$n")
@@ -198,9 +208,21 @@ for n in $DENIED; do
 done
 
 # ── Phase 4: cap'd node still at exactly max_peers ───────────────────
-pc_final=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show status 2>/dev/null \
-    | grep -m1 peer_count | sed 's/.*: *//' | tr -d ',' || echo 0)
-info "node-$CAP_NODE final peer_count=$pc_final (expected $MAX_PEERS)"
+#
+# Polled rather than sampled once. The load driver above restarts the denied
+# peers every 15s and its final restart lands in the same second this runs, so a
+# single read can hit a daemon busy with those restarts and come back empty --
+# which is a harness race, not a cap regression. Retry briefly before believing
+# the answer. A genuine regression still fails, just after the retry window,
+# because the loop exits early only on the expected value.
+pc_final=""
+deadline=$(($(date +%s) + 30))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    pc_final=$(read_peer_count)
+    [ "$pc_final" = "$MAX_PEERS" ] && break
+    sleep 2
+done
+info "node-$CAP_NODE final peer_count=${pc_final:-<no answer>} (expected $MAX_PEERS)"
 [ "$pc_final" = "$MAX_PEERS" ] || { info "    FAIL: peer_count drifted from cap"; OVERALL=1; }
 
 # ── Phase 5: daemon actively refused over-cap promotions ─────────────
@@ -211,7 +233,7 @@ info "node-$CAP_NODE final peer_count=$pc_final (expected $MAX_PEERS)"
 # mesh topology denied peers are also dialed by the cap'd node, so the
 # cross-connection path handles them and the late check is the active
 # enforcer.
-clogs=$(docker logs fips-node-$CAP_NODE 2>&1 || true)
+clogs=$(docker logs "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 || true)
 late_rejects=$(echo "$clogs" | grep -c "Rejecting inbound connection at max_peers cap" || true)
 enforcement=$late_rejects
 info "enforcement events on node-$CAP_NODE: late-check=$late_rejects (total $enforcement)"
