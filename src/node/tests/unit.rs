@@ -2553,12 +2553,70 @@ fn handshake_presence_tracks_the_carrier_not_the_noise_handles() {
     );
 }
 
-// The master-line `inbound_msg1_records_the_learned_identity_on_the_carrier`
-// pins the identity learn onto the surviving carrier at msg1. That is an IK
-// property: XX msg1 is ephemeral-only and learns nothing, so the responder has
-// no identity to record there. The learn happens in `complete_handshake` (msg2,
-// initiator) and `complete_handshake_msg3` (msg3, responder); the carrier guard
-// belongs at those two points on this line.
+/// The identity a handshake learns must land on the surviving carrier — the
+/// machine's own `ConnectionState` — and not stay locked inside the Noise
+/// handle. Every reader that names a peer mid-handshake goes to the carrier:
+/// the promotion hand-off in `handle_msg2`/`handle_msg3` reads
+/// `conn_expected_identity` to decide who is being admitted, and the
+/// stale-connection sweep reads it to decide whether a reaped leg is retried
+/// or torn down. A blank or stale value there silently changes both.
+///
+/// Noise XX carries no static key in msg1, so there is no identity to record
+/// at that step. Each role learns its peer exactly once, at a different
+/// message: the initiator learns the responder from msg2 (`complete_handshake`)
+/// and the responder learns the initiator from msg3
+/// (`complete_handshake_msg3`). Both writes are asserted here.
+///
+/// The wrong-on-purpose expectation the initiator starts from is the whole
+/// point of this test and must not be "simplified" to the real responder.
+/// The full-flow test alongside it checks the same values but seeds the
+/// dialing side with the true responder identity, so dropping the msg2 write
+/// leaves the correct value sitting there pre-seeded and that test still
+/// passes. Only a starting value that is deliberately wrong can tell a real
+/// write apart from a stale one.
+#[test]
+fn xx_handshake_records_each_learned_identity_on_the_carrier() {
+    let initiator = Identity::generate();
+    let responder = Identity::generate();
+    let initiator_identity = PeerIdentity::from_pubkey_full(initiator.pubkey_full());
+    let responder_identity = PeerIdentity::from_pubkey_full(responder.pubkey_full());
+
+    // The dial-time expectation is a third party: whoever actually answers
+    // overwrites it, and it is never compared against the learned key.
+    let decoy = PeerIdentity::from_pubkey_full(Identity::generate().pubkey_full());
+    assert_ne!(decoy, responder_identity);
+
+    let mut conn_i = outbound_leg(LinkId::new(1), decoy, 1000);
+    let mut conn_r = inbound_leg(LinkId::new(2), 1000);
+
+    let noise_msg1 = conn_i
+        .start_handshake(initiator.keypair(), [0x11; 8], 1000)
+        .unwrap();
+    let noise_msg2 = conn_r
+        .receive_handshake_init(responder.keypair(), [0x22; 8], &noise_msg1, None, 1100)
+        .unwrap();
+
+    // The responder is still anonymous: msg1 revealed nothing about who dialed.
+    assert_eq!(
+        conn_r.conn_expected_identity(),
+        None,
+        "XX msg1 is ephemeral-only, so the responder learns no identity there"
+    );
+
+    let (noise_msg3, _) = conn_i.complete_handshake(&noise_msg2, None, 1200).unwrap();
+    assert_eq!(
+        conn_i.conn_expected_identity(),
+        Some(&responder_identity),
+        "the identity learned from msg2 must be recorded on the surviving carrier"
+    );
+
+    conn_r.complete_handshake_msg3(&noise_msg3, 1300).unwrap();
+    assert_eq!(
+        conn_r.conn_expected_identity(),
+        Some(&initiator_identity),
+        "the identity learned from msg3 must be recorded on the surviving carrier"
+    );
+}
 
 /// A msg1 that fails Noise processing must leave no trace in the registry.
 /// The control machine is built above the crypto so it can drive the

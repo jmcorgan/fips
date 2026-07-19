@@ -331,8 +331,97 @@ async fn test_outbound_connect_not_denied_by_allowlist_miss() {
     assert!(!matches!(result, Err(NodeError::AccessDenied(_))));
 }
 
-// The master-line `test_acl_rejected_msg1_leaves_no_registry_trace` asserts a
-// no-registry-trace property at the msg1 ACL denial. XX has no ACL decision at
-// msg1 (identity is unknown until msg3), so the property has no landing site at
-// that step. The same guard belongs at the msg3 `authorize_peer` gate, where
-// this line actually rejects an inbound peer.
+/// A peer the ACL turns away must leave nothing behind in the registry.
+///
+/// Under Noise XX the inbound admission gate cannot sit at msg1 — no static
+/// key has crossed the wire yet — so it sits at the msg3 `authorize_peer`
+/// call, by which point the responder has built a control machine, allocated
+/// a session index, opened a link, and completed the Noise session. All of
+/// that has to come back down on the denial. A machine left in
+/// `peer_machines` is unreachable by every teardown path and holds a
+/// peering-budget slot forever, so that is what this pins, along with the
+/// link and the connection count.
+///
+/// What it deliberately does NOT pin is session-index hygiene. This arm does
+/// not return the index to the allocator today, unlike the sibling bad-state
+/// arm just above it; that gap is tracked and is left exactly as it is here,
+/// since this change adds tests only. Asserting on `peers_by_index` would
+/// look like coverage of it and would be worthless: nothing maps an index
+/// until promotion, which is downstream of this gate, so such an assertion
+/// holds no matter what the denial cleans up.
+#[tokio::test]
+async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
+    use crate::proto::fmp::wire::{Msg2Header, build_msg1, build_msg3};
+
+    let (dir_b, mut node_b) = make_acl_node();
+    let node_a = make_node();
+    std::fs::write(deny_path(&dir_b), format!("{}\n", node_a.npub())).unwrap();
+    assert!(node_b.reload_peer_acl().await);
+
+    let transport_id = TransportId::new(1);
+    let remote_addr = TransportAddr::from_string("127.0.0.1:5000");
+
+    // Neither node has a transport installed, so the wire bytes are carried
+    // across by hand. A dials B and B answers msg2.
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
+    let our_index_a = SessionIndex::new(7);
+    let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
+    let noise_msg1 = conn_a
+        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+        .unwrap();
+
+    node_b
+        .handle_msg1(ReceivedPacket::with_timestamp(
+            transport_id,
+            remote_addr.clone(),
+            build_msg1(our_index_a, &noise_msg1),
+            1000,
+        ))
+        .await;
+
+    // B has parked a machine awaiting msg3. No admission decision has run:
+    // it still does not know who dialed it.
+    let link_id_b = *node_b
+        .peer_machines
+        .keys()
+        .next()
+        .expect("msg1 parks a machine on the responder");
+    let machine_b = node_b.peer_machines.get(&link_id_b).unwrap();
+    let our_index_b = machine_b
+        .our_index()
+        .expect("msg1 allocates the responder's session index");
+    let wire_msg2 = machine_b
+        .conn_handshake_msg2()
+        .expect("msg1 stores the framed msg2 on the carrier")
+        .to_vec();
+    assert_eq!(node_b.link_count(), 1);
+
+    // A completes on msg2 and answers msg3, which is where its static key —
+    // and therefore the denial — first reaches B.
+    let msg2_header = Msg2Header::parse(&wire_msg2).unwrap();
+    let (noise_msg3, _) = conn_a
+        .complete_handshake(msg2_header.noise_msg2(&wire_msg2), None, 1100)
+        .unwrap();
+
+    node_b
+        .handle_msg3(ReceivedPacket::with_timestamp(
+            transport_id,
+            remote_addr,
+            build_msg3(our_index_a, our_index_b, &noise_msg3),
+            1200,
+        ))
+        .await;
+
+    assert!(
+        node_b.peer_machines.is_empty(),
+        "a denied peer must leave no control machine behind"
+    );
+    assert_eq!(node_b.connection_count(), 0);
+    assert_eq!(node_b.peer_count(), 0);
+    assert_eq!(node_b.link_count(), 0);
+    assert_eq!(
+        node_b.stats().handshake.bad_state,
+        1,
+        "the denial is attributed to the handshake state-machine counter"
+    );
+}
