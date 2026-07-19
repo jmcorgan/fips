@@ -19,18 +19,18 @@ impl LifecycleView for Node {
         // reap.
         self.peer_machines
             .iter()
-            .filter_map(|(link_id, machine)| machine.leg().map(|conn| (link_id, machine, conn)))
-            .filter(|(link_id, machine, _conn)| {
+            .filter(|(_, machine)| machine.leg().is_some())
+            .filter(|(link_id, machine)| {
                 machine.is_failed()
                     || (machine.conn_is_timed_out(now_ms, timeout_ms)
                         && !self.peer_timers.get(*link_id).is_some_and(|timers| {
                             timers.contains_key(&TimerKind::HandshakeTimeout)
                         }))
             })
-            .map(|(link_id, machine, conn)| ConnSnapshot {
+            .map(|(link_id, machine)| ConnSnapshot {
                 link: *link_id,
                 is_outbound: machine.conn_is_outbound(),
-                retry_addr: conn.expected_identity().map(|id| *id.node_addr()),
+                retry_addr: machine.conn_expected_identity().map(|id| *id.node_addr()),
                 resend_count: 0,
                 msg1: Vec::new(),
             })
@@ -120,7 +120,7 @@ impl Node {
         // dangling machine. A no-op for promoted peers — `promote_connection`
         // already consumed their connection, so this reaper never runs for
         // them.
-        let conn = match self
+        let _detached_leg = match self
             .peer_machines
             .get_mut(&link_id)
             .and_then(|machine| machine.take_leg())
@@ -128,16 +128,16 @@ impl Node {
             Some(c) => c,
             None => return,
         };
-        // Read the transport ID off the surviving carrier before disposing the
-        // machine (the leg no longer projects it).
-        let transport_id = self
-            .peer_machines
-            .get(&link_id)
-            .and_then(|machine| machine.conn_transport_id());
+        // Read the transport ID and session index off the surviving carrier
+        // before disposing the machine (the leg no longer projects them).
+        let (transport_id, our_index) = match self.peer_machines.get(&link_id) {
+            Some(machine) => (machine.conn_transport_id(), machine.our_index()),
+            None => (None, None),
+        };
         self.remove_peer_machine(link_id);
 
         // Free session index and pending_outbound if allocated
-        if let Some(idx) = conn.our_index() {
+        if let Some(idx) = our_index {
             if let Some(tid) = transport_id {
                 self.pending_outbound.remove(&(tid, idx.as_u32()));
             }
@@ -200,13 +200,16 @@ impl Node {
                 .get(&link)
                 .is_some_and(|machine| machine.conn_is_timed_out(now_ms, timeout_ms));
             let (reap, retry_peer) = match self.leg(&link) {
-                Some(conn) if timed_out => {
+                Some(_) if timed_out => {
                     let retry_peer = if self
                         .peer_machines
                         .get(&link)
                         .is_some_and(|machine| machine.conn_is_outbound())
                     {
-                        conn.expected_identity().map(|id| *id.node_addr())
+                        self.peer_machines
+                            .get(&link)
+                            .and_then(|machine| machine.conn_expected_identity())
+                            .map(|id| *id.node_addr())
                     } else {
                         None
                     };

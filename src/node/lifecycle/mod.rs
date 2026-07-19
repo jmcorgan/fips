@@ -372,13 +372,12 @@ impl Node {
     }
 
     fn is_connecting_to_peer(&self, peer_node_addr: &NodeAddr) -> bool {
-        self.connections()
-            .filter_map(|(_, machine)| machine.leg())
-            .any(|conn| {
-                conn.expected_identity()
-                    .map(|id| id.node_addr() == peer_node_addr)
-                    .unwrap_or(false)
-            })
+        self.connections().any(|(_, machine)| {
+            machine
+                .conn_expected_identity()
+                .map(|id| id.node_addr() == peer_node_addr)
+                .unwrap_or(false)
+        })
     }
 
     fn is_connecting_to_peer_on_path(
@@ -388,13 +387,13 @@ impl Node {
         remote_addr: &TransportAddr,
     ) -> bool {
         self.peer_machines.values().any(|machine| {
-            machine.leg().is_some_and(|conn| {
-                conn.expected_identity()
+            machine.leg().is_some()
+                && machine
+                    .conn_expected_identity()
                     .map(|id| id.node_addr() == peer_node_addr)
                     .unwrap_or(false)
-                    && machine.conn_transport_id() == Some(transport_id)
-                    && machine.conn_source_addr() == Some(remote_addr)
-            })
+                && machine.conn_transport_id() == Some(transport_id)
+                && machine.conn_source_addr() == Some(remote_addr)
         }) || self.peering.pending_connects.iter().any(|pending| {
             pending.peer_identity.node_addr() == peer_node_addr
                 && pending.transport_id == transport_id
@@ -635,14 +634,6 @@ impl Node {
         };
 
         // Set index and transport info on the connection
-        {
-            let conn = self
-                .peer_machines
-                .get_mut(&link_id)
-                .and_then(|machine| machine.leg_mut())
-                .expect("dial-time machine carries the connection");
-            conn.set_our_index(our_index);
-        }
         self.peer_machines
             .get_mut(&link_id)
             .expect("dial-time machine carries the connection")
@@ -683,10 +674,8 @@ impl Node {
         // projects it to the promotion hand-off); holds even if a direct caller
         // reached here without the dial-time `on_dial` write.
         machine.set_conn_transport_id(transport_id);
-        // Record our session index on the surviving carrier — the same index
-        // just written on the connection above — so the carrier is the single
-        // index home on the outbound path (the inbound path writes it at
-        // authorize).
+        // Record our session index on the surviving carrier, the single index
+        // home on the outbound path (the inbound path writes it at authorize).
         machine.set_conn_our_index(our_index);
         // Store the msg1 wire on the surviving carrier (the connection does not
         // hold the resend source); the retransmit driver reads it from here.
@@ -717,7 +706,11 @@ impl Node {
             Some(w) => w.to_vec(),
             None => return,
         };
-        let our_index = self.leg(&link_id).and_then(|c| c.our_index());
+        let our_index = self
+            .peer_machines
+            .get(&link_id)
+            .filter(|machine| machine.leg().is_some())
+            .and_then(|machine| machine.our_index());
 
         // Send the wire format handshake message
         if let Some(transport) = self.transports.get(&transport_id) {
@@ -952,8 +945,7 @@ impl Node {
                                 .connections()
                                 .filter(|(_, machine)| {
                                     machine
-                                        .leg()
-                                        .and_then(|conn| conn.expected_identity())
+                                        .conn_expected_identity()
                                         .map(|id| id.node_addr() == &peer_addr)
                                         .unwrap_or(false)
                                 })
@@ -2744,12 +2736,11 @@ impl Node {
         let connected: HashSet<NodeAddr> = self.peers.keys().copied().collect();
         let connecting: HashSet<NodeAddr> = self
             .connections()
-            .filter_map(|(_, machine)| machine.leg())
-            .filter_map(|conn| conn.expected_identity().map(|id| *id.node_addr()))
+            .filter_map(|(_, machine)| machine.conn_expected_identity().map(|id| *id.node_addr()))
             .collect();
         let mut in_flight_by_peer: HashMap<NodeAddr, usize> = HashMap::new();
-        for conn in self.connections().filter_map(|(_, machine)| machine.leg()) {
-            if let Some(id) = conn.expected_identity() {
+        for (_, machine) in self.connections() {
+            if let Some(id) = machine.conn_expected_identity() {
                 *in_flight_by_peer.entry(*id.node_addr()).or_default() += 1;
             }
         }
@@ -2818,9 +2809,9 @@ impl Node {
 
         let in_flight_for_peer = self
             .connections()
-            .filter_map(|(_, machine)| machine.leg())
-            .filter(|conn| {
-                conn.expected_identity()
+            .filter(|(_, machine)| {
+                machine
+                    .conn_expected_identity()
                     .map(|identity| identity.node_addr() == peer_node_addr)
                     .unwrap_or(false)
             })

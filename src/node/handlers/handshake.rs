@@ -39,14 +39,12 @@ impl EstablishView for Node {
             rekey_in_progress: existing.map(|p| p.rekey_in_progress()).unwrap_or(false),
             existing_msg2: existing.and_then(|p| p.handshake_msg2().map(|m| m.to_vec())),
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
-            has_pending_outbound_to_peer: self
-                .connections()
-                .filter_map(|(_, machine)| machine.leg())
-                .any(|conn| {
-                    conn.expected_identity()
-                        .map(|id| id.node_addr() == peer_addr)
-                        .unwrap_or(false)
-                }),
+            has_pending_outbound_to_peer: self.connections().any(|(_, machine)| {
+                machine
+                    .conn_expected_identity()
+                    .map(|id| id.node_addr() == peer_addr)
+                    .unwrap_or(false)
+            }),
             rekey_enabled: self.config().node.rekey.enabled,
             our_node_addr: *self.identity().node_addr(),
         }
@@ -310,11 +308,8 @@ impl Node {
         };
 
         // Learn peer identity from msg1
-        let peer_identity = match machine
-            .leg()
-            .expect("pending connection attached above")
-            .expected_identity()
-        {
+        assert!(machine.leg().is_some(), "pending connection attached above");
+        let peer_identity = match machine.conn_expected_identity() {
             Some(id) => *id,
             None => {
                 self.msg1_rate_limiter.complete_handshake();
@@ -639,10 +634,6 @@ impl Node {
                 // connection, then build + store the framed msg2. The old index was
                 // already freed by `remove_active_peer` above, BEFORE this fresh
                 // allocation — matching the pre-refactor allocation sequence.
-                machine
-                    .leg_mut()
-                    .expect("pending connection attached above")
-                    .set_our_index(our_index);
                 let link = Link::connectionless(
                     link_id,
                     packet.transport_id,
@@ -789,10 +780,6 @@ impl Node {
                 // Shell registry surgery, in the pre-refactor order:
                 // set indices on the shell connection, insert link / reverse map /
                 // connection, then build + store the framed msg2.
-                machine
-                    .leg_mut()
-                    .expect("pending connection attached above")
-                    .set_our_index(our_index);
                 let link = Link::connectionless(
                     link_id,
                     packet.transport_id,
@@ -1045,11 +1032,12 @@ impl Node {
             }
 
             machine.set_conn_source_addr(packet.remote_addr.clone());
-            let conn = machine
-                .leg_mut()
-                .expect("pending connection present for msg2 completion");
+            assert!(
+                machine.leg().is_some(),
+                "pending connection present for msg2 completion"
+            );
 
-            let peer_identity = match conn.expected_identity() {
+            let peer_identity = match machine.conn_expected_identity() {
                 Some(id) => *id,
                 None => {
                     warn!(link_id = %link_id, "No identity after handshake");
@@ -1059,7 +1047,7 @@ impl Node {
                 }
             };
 
-            (peer_identity, conn.our_index())
+            (peer_identity, machine.our_index())
         };
 
         if self
@@ -1166,10 +1154,10 @@ impl Node {
             // right after the take — unconditionally, whether or not a
             // connection was carried — so none of this block's exits leave a
             // dangling machine.
-            let taken_conn = self
-                .peer_machines
-                .get_mut(&link_id)
-                .and_then(|machine| machine.take_leg());
+            let (taken_conn, carrier_our_index) = match self.peer_machines.get_mut(&link_id) {
+                Some(machine) => (machine.take_leg(), machine.our_index()),
+                None => (None, None),
+            };
             self.remove_peer_machine(link_id);
             let mut conn = match taken_conn {
                 Some(c) => c,
@@ -1185,7 +1173,7 @@ impl Node {
             if swap {
                 // We're the smaller node. Swap to outbound session + indices.
                 // The peer will keep their inbound session (complement of ours).
-                let outbound_our_index = conn.our_index();
+                let outbound_our_index = carrier_our_index;
                 let outbound_session = conn.noise_session.take();
 
                 let (outbound_session, outbound_our_index) = match (
@@ -1250,7 +1238,7 @@ impl Node {
                 // their outbound session, that index is exactly what they'll use.
                 // The msg2 sender_idx we see here is the peer's INBOUND our_index,
                 // which becomes stale after the peer swaps.
-                let outbound_our_index = conn.our_index();
+                let outbound_our_index = carrier_our_index;
 
                 if let Some(peer) = self.peers.get(&peer_node_addr) {
                     debug!(
@@ -1399,6 +1387,7 @@ impl Node {
         let mut connection = machine
             .take_leg()
             .ok_or(NodeError::ConnectionNotFound(link_id))?;
+        let carrier_our_index = machine.our_index();
         let carrier_their_index = machine.conn_their_index();
         let carrier_transport_id = machine.conn_transport_id();
         let carrier_source_addr = machine.conn_source_addr().cloned();
@@ -1415,12 +1404,10 @@ impl Node {
             .take()
             .ok_or(NodeError::NoSession(link_id))?;
 
-        let our_index = connection
-            .our_index()
-            .ok_or_else(|| NodeError::PromotionFailed {
-                link_id,
-                reason: "missing our_index".into(),
-            })?;
+        let our_index = carrier_our_index.ok_or_else(|| NodeError::PromotionFailed {
+            link_id,
+            reason: "missing our_index".into(),
+        })?;
         let their_index = carrier_their_index.ok_or_else(|| NodeError::PromotionFailed {
             link_id,
             reason: "missing their_index".into(),
@@ -1570,8 +1557,7 @@ impl Node {
                 .connections()
                 .filter(|(_, machine)| {
                     machine
-                        .leg()
-                        .and_then(|conn| conn.expected_identity())
+                        .conn_expected_identity()
                         .map(|id| *id.node_addr() == peer_node_addr)
                         .unwrap_or(false)
                 })

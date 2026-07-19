@@ -210,6 +210,7 @@ impl ConnectionState {
     }
 
     /// Connection duration so far.
+    #[cfg(test)]
     pub fn duration(&self, current_time_ms: u64) -> u64 {
         current_time_ms.saturating_sub(self.started_at)
     }

@@ -574,6 +574,7 @@ impl PeerMachine {
     ) -> Result<Vec<u8>, NoiseError> {
         let msg1 = {
             let direction = self.conn.direction();
+            let expected_identity = self.conn.expected_identity().copied();
             let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
 
             if direction != LinkDirection::Outbound {
@@ -583,8 +584,7 @@ impl PeerMachine {
                 });
             }
 
-            let remote_static = leg
-                .expected_identity()
+            let remote_static = expected_identity
                 .expect("outbound must have expected identity")
                 .pubkey_full();
 
@@ -776,9 +776,11 @@ impl PeerMachine {
 
     /// Expected peer identity of the surviving carrier — the home for the
     /// operator-visible `expected_peer` now that the leg no longer projects it.
-    /// Outbound carries the dial identity from construction; inbound stays `None`
-    /// in this view (the identity learned mid-handshake never rests here, as the
-    /// leg is consumed by promotion within the same message-handling step).
+    /// Outbound carries the dial identity from construction; inbound records
+    /// the identity discovered in msg1, written here by `receive_handshake_init`
+    /// at the same point it reaches the pending connection. Everything that
+    /// names a peer mid-handshake reads this, including the stale-connection
+    /// sweep's retry address.
     pub(crate) fn conn_expected_identity(&self) -> Option<&PeerIdentity> {
         self.conn.expected_identity()
     }
@@ -3240,8 +3242,8 @@ mod tests {
         assert!(conn.conn_is_outbound());
         assert!(!conn.conn_is_inbound());
         assert!(!conn.has_session());
-        assert!(conn.leg().unwrap().expected_identity().is_some());
-        assert_eq!(conn.leg().unwrap().started_at(), 1000);
+        assert!(conn.conn_expected_identity().is_some());
+        assert_eq!(conn.conn_started_at(), 1000);
     }
 
     #[test]
@@ -3251,8 +3253,8 @@ mod tests {
         assert!(conn.conn_is_inbound());
         assert!(!conn.conn_is_outbound());
         assert!(!conn.has_session());
-        assert!(conn.leg().unwrap().expected_identity().is_none());
-        assert_eq!(conn.leg().unwrap().started_at(), 2000);
+        assert!(conn.conn_expected_identity().is_none());
+        assert_eq!(conn.conn_started_at(), 2000);
     }
 
     #[test]
@@ -3288,7 +3290,7 @@ mod tests {
         assert!(responder_conn.has_session());
 
         // Responder learned initiator's identity
-        let discovered = responder_conn.leg().unwrap().expected_identity().unwrap();
+        let discovered = responder_conn.conn_expected_identity().unwrap();
         assert_eq!(discovered.pubkey(), initiator_identity.pubkey());
 
         // Responder learned initiator's epoch

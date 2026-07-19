@@ -11,7 +11,6 @@ use crate::PeerIdentity;
 use crate::noise::{self, NoiseSession};
 use crate::proto::fmp::ConnectionState;
 use crate::transport::{LinkId, TransportAddr, TransportId};
-use crate::utils::index::SessionIndex;
 use std::fmt;
 
 /// A connection in the handshake phase, before authentication completes.
@@ -89,90 +88,11 @@ impl PeerConnection {
         }
     }
 
-    // === Accessors (delegated to the pure ConnectionState) ===
-
-    /// Get the expected/learned peer identity, if known.
-    pub fn expected_identity(&self) -> Option<&PeerIdentity> {
-        self.state.expected_identity()
-    }
-
-    /// When the connection started. Retained only to seed a control machine's
-    /// carrier from a pre-built leg (`Node::add_connection`); the operator-facing
-    /// `started_at_ms`/`last_activity_ms` telemetry now reads the machine carrier,
-    /// not the leg.
-    pub fn started_at(&self) -> u64 {
-        self.state.started_at()
-    }
-
-    /// Connection duration so far.
-    pub fn duration(&self, current_time_ms: u64) -> u64 {
-        self.state.duration(current_time_ms)
-    }
-
-    /// Time since last activity.
-    pub fn idle_time(&self, current_time_ms: u64) -> u64 {
-        self.state.idle_time(current_time_ms)
-    }
-
-    // === Index Accessors ===
-
-    /// Get our session index (if set).
-    pub fn our_index(&self) -> Option<SessionIndex> {
-        self.state.our_index()
-    }
-
-    /// Set our session index.
-    pub fn set_our_index(&mut self, index: SessionIndex) {
-        self.state.set_our_index(index);
-    }
-
-    /// Get their session index (if known).
-    pub fn their_index(&self) -> Option<SessionIndex> {
-        self.state.their_index()
-    }
-
-    /// Set their session index.
-    pub fn set_their_index(&mut self, index: SessionIndex) {
-        self.state.set_their_index(index);
-    }
-
-    /// Get the transport ID (if set).
-    pub fn transport_id(&self) -> Option<TransportId> {
-        self.state.transport_id()
-    }
-
-    /// Set the transport ID.
-    pub fn set_transport_id(&mut self, id: TransportId) {
-        self.state.set_transport_id(id);
-    }
-
     // === Epoch Accessors ===
 
     /// Get the remote peer's startup epoch (available after handshake).
     pub fn remote_epoch(&self) -> Option<[u8; 8]> {
         self.state.remote_epoch()
-    }
-
-    // === Handshake Resend ===
-
-    /// Store the wire-format msg1 bytes for resend and schedule the first resend.
-    pub fn set_handshake_msg1(&mut self, msg1: Vec<u8>, first_resend_at_ms: u64) {
-        self.state.set_handshake_msg1(msg1, first_resend_at_ms);
-    }
-
-    /// Store the wire-format msg2 bytes for resend on duplicate msg1.
-    pub fn set_handshake_msg2(&mut self, msg2: Vec<u8>) {
-        self.state.set_handshake_msg2(msg2);
-    }
-
-    /// Get the stored msg1 bytes (if any).
-    pub fn handshake_msg1(&self) -> Option<&[u8]> {
-        self.state.handshake_msg1()
-    }
-
-    /// Get the stored msg2 bytes (if any).
-    pub fn handshake_msg2(&self) -> Option<&[u8]> {
-        self.state.handshake_msg2()
     }
 
     // === Crypto handle plumbing (the control machine drives the handshake) ===
@@ -186,13 +106,6 @@ impl PeerConnection {
 
     pub(crate) fn state_mut(&mut self) -> &mut ConnectionState {
         &mut self.state
-    }
-
-    // === Validation ===
-
-    /// Check if the connection has timed out.
-    pub fn is_timed_out(&self, current_time_ms: u64, timeout_ms: u64) -> bool {
-        self.state.is_timed_out(current_time_ms, timeout_ms)
     }
 }
 
@@ -228,9 +141,9 @@ mod tests {
         let identity = make_peer_identity();
         let conn = PeerConnection::outbound(LinkId::new(1), identity, 1000);
 
-        assert_eq!(conn.duration(1500), 500);
-        assert_eq!(conn.idle_time(1500), 500);
-        assert!(!conn.is_timed_out(1500, 1000));
-        assert!(conn.is_timed_out(2500, 1000));
+        assert_eq!(conn.state().duration(1500), 500);
+        assert_eq!(conn.state().idle_time(1500), 500);
+        assert!(!conn.state().is_timed_out(1500, 1000));
+        assert!(conn.state().is_timed_out(2500, 1000));
     }
 }

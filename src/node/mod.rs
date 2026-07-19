@@ -2444,7 +2444,7 @@ impl Node {
         }
 
         let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
-            let now = connection.started_at();
+            let now = connection.state().started_at();
             match connection.state().expected_identity() {
                 Some(identity) if connection.state().is_outbound() => {
                     PeerMachine::new_outbound(link_id, *identity, now)
@@ -2455,10 +2455,13 @@ impl Node {
         // Seed the surviving carrier's peer index and transport from the
         // pre-built leg so the promotion hand-off reads them from the machine,
         // matching the establish paths that write them on the machine directly.
-        if let Some(their) = connection.their_index() {
+        if let Some(ours) = connection.state().our_index() {
+            machine.set_conn_our_index(ours);
+        }
+        if let Some(their) = connection.state().their_index() {
             machine.set_conn_their_index(their);
         }
-        if let Some(tid) = connection.transport_id() {
+        if let Some(tid) = connection.state().transport_id() {
             machine.set_conn_transport_id(tid);
         }
         if let Some(addr) = connection.state().source_addr() {
@@ -2473,12 +2476,13 @@ impl Node {
     /// free-standing leg first.
     ///
     /// The carrier seeding below is a verbatim copy of `add_connection`'s: the
-    /// two conditional writes (`their_index`, `transport_id`) and `set_leg`,
-    /// built through the same `entry(..).or_insert_with(..)` so an existing
-    /// leg-less machine keeps its constructor-side fields. Nothing else is
-    /// written to the carrier — `our_index`, `source_addr`, post-construction
-    /// `started_at`, and the stored handshake bytes stay leg-only, exactly as
-    /// they do for a test that goes through `add_connection` today.
+    /// conditional writes (`our_index`, `their_index`, `transport_id`,
+    /// `source_addr`) and `set_leg`, built through the same
+    /// `entry(..).or_insert_with(..)` so an existing leg-less machine keeps its
+    /// constructor-side fields. The seeded carrier matches what the establish
+    /// paths write: every field a promotion reads is present. Post-construction
+    /// `started_at` and the stored handshake bytes are not seeded here, exactly
+    /// as they are not for a test that goes through `add_connection` today.
     ///
     /// The duplication is deliberate: keeping the carrier writes visible here
     /// is what lets each later step of the leg dissolution revise them at a
@@ -2494,14 +2498,14 @@ impl Node {
             None => PeerConnection::inbound(link_id, seed.started_at_ms),
         };
         if let Some(id) = seed.transport_id {
-            connection.set_transport_id(id);
+            connection.state_mut().set_transport_id(id);
         }
         let seeded_source_addr = seed.source_addr.clone();
         if let Some(index) = seed.our_index {
-            connection.set_our_index(index);
+            connection.state_mut().set_our_index(index);
         }
         if let Some(index) = seed.their_index {
-            connection.set_their_index(index);
+            connection.state_mut().set_their_index(index);
         }
 
         if self
@@ -2519,7 +2523,7 @@ impl Node {
         }
 
         let machine = self.peer_machines.entry(link_id).or_insert_with(|| {
-            let now = connection.started_at();
+            let now = connection.state().started_at();
             match connection.state().expected_identity() {
                 Some(identity) if connection.state().is_outbound() => {
                     PeerMachine::new_outbound(link_id, *identity, now)
@@ -2527,10 +2531,13 @@ impl Node {
                 _ => PeerMachine::new_inbound(link_id, now),
             }
         });
-        if let Some(their) = connection.their_index() {
+        if let Some(ours) = connection.state().our_index() {
+            machine.set_conn_our_index(ours);
+        }
+        if let Some(their) = connection.state().their_index() {
             machine.set_conn_their_index(their);
         }
-        if let Some(tid) = connection.transport_id() {
+        if let Some(tid) = connection.state().transport_id() {
             machine.set_conn_transport_id(tid);
         }
         if let Some(addr) = seeded_source_addr {

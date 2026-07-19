@@ -2405,6 +2405,68 @@ fn test_failed_connection_is_retained_and_reaped() {
     assert_eq!(node.connection_count(), 0);
 }
 
+/// The identity a responder discovers in msg1 must land on the surviving
+/// carrier, not only on the pending leg. Everything that names an inbound
+/// peer mid-handshake reads the carrier: the stale-connection sweep's
+/// `retry_addr` decides whether a reaped leg is retried or torn down, and a
+/// blank identity there silently changes that choreography.
+#[test]
+fn inbound_msg1_records_the_learned_identity_on_the_carrier() {
+    use crate::proto::fmp::LifecycleView;
+
+    let mut node = make_node();
+    let link_id = LinkId::new(77);
+
+    // A genuine IK msg1 addressed to this node, from a known sender.
+    let sender = Identity::generate();
+    let sender_identity = PeerIdentity::from_pubkey_full(sender.pubkey_full());
+    let node_identity = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
+    let initiator_link = LinkId::new(78);
+    let mut initiator =
+        crate::peer::machine::PeerMachine::new_outbound(initiator_link, node_identity, 1000);
+    initiator.set_leg(crate::peer::PeerConnection::outbound(
+        initiator_link,
+        node_identity,
+        1000,
+    ));
+    let noise_msg1 = initiator
+        .start_handshake(sender.keypair(), [9u8; 8], 1000)
+        .unwrap();
+
+    // Drive the responder half over an inbound leg that stays pending.
+    node.seed_handshake_machine(HandshakeSeed::inbound(link_id, 1000))
+        .unwrap();
+    let our_keypair = node.identity().keypair();
+    let startup_epoch = node.startup_epoch();
+    let machine = node.peer_machines.get_mut(&link_id).unwrap();
+    machine
+        .receive_handshake_init(our_keypair, startup_epoch, &noise_msg1, 1000)
+        .unwrap();
+
+    assert_eq!(
+        machine.conn_expected_identity(),
+        Some(&sender_identity),
+        "msg1 identity learn must be recorded on the surviving carrier"
+    );
+
+    // The send of the responder's msg2 fails: the leg is retained, empty, for
+    // the sweep to reclaim.
+    machine.mark_failed();
+    machine.mark_send_failed();
+
+    let stale = node.stale_connections(2000, 30_000);
+    assert_eq!(
+        stale.len(),
+        1,
+        "the failed inbound leg must reach the sweep"
+    );
+    assert_eq!(
+        stale[0].retry_addr,
+        Some(*sender_identity.node_addr()),
+        "a failed inbound leg still names the peer it learned from msg1"
+    );
+}
+
 /// A msg1 that fails Noise processing must leave no trace in the registry.
 /// The control machine is built above the crypto so it can drive the
 /// handshake, but it stays a local until a promote tail inserts it — a

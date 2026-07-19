@@ -866,19 +866,17 @@ async fn test_msg1_stored_for_resend() {
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
         .unwrap();
-    conn.leg_mut().unwrap().set_our_index(our_index);
-    conn.leg_mut().unwrap().set_transport_id(transport_id);
+    conn.set_conn_our_index(our_index);
+    conn.set_conn_transport_id(transport_id);
     conn.set_conn_source_addr(remote_addr.clone());
 
     // Build wire msg1 and store it (as initiate_peer_connection does)
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
     let resend_interval = node.config().node.rate_limit.handshake_resend_interval_ms;
-    conn.leg_mut()
-        .unwrap()
-        .set_handshake_msg1(wire_msg1.clone(), now_ms + resend_interval);
+    conn.set_conn_handshake_msg1(wire_msg1.clone(), now_ms + resend_interval);
 
     // Verify stored msg1 matches what was built
-    assert_eq!(conn.leg().unwrap().handshake_msg1().unwrap(), &wire_msg1);
+    assert_eq!(conn.conn_handshake_msg1().unwrap(), &wire_msg1);
 }
 
 /// Test that resend scheduling respects max_resends and backoff.
@@ -899,15 +897,10 @@ async fn test_resend_scheduling() {
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
         .unwrap();
-    conn.leg_mut().unwrap().set_our_index(our_index);
-    conn.leg_mut().unwrap().set_transport_id(transport_id);
     conn.set_conn_source_addr(remote_addr.clone());
 
     // Store msg1 with first resend at now + 1000ms
     let wire_msg1 = crate::proto::fmp::wire::build_msg1(our_index, &noise_msg1);
-    conn.leg_mut()
-        .unwrap()
-        .set_handshake_msg1(wire_msg1.clone(), now_ms + 1000);
 
     let link = Link::connectionless(
         link_id,
@@ -941,6 +934,8 @@ async fn test_resend_scheduling() {
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
     machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
+    machine.set_conn_our_index(our_index);
+    machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
@@ -986,8 +981,6 @@ async fn test_handshake_timeout_drive() {
     let _ = conn
         .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
         .unwrap();
-    conn.leg_mut().unwrap().set_our_index(our_index);
-    conn.leg_mut().unwrap().set_transport_id(transport_id);
     conn.set_conn_source_addr(remote_addr.clone());
 
     let link = Link::connectionless(
@@ -1017,6 +1010,8 @@ async fn test_handshake_timeout_drive() {
         dial_ms,
         &mut node.index_allocator,
     );
+    machine.set_conn_our_index(our_index);
+    machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
     node.peer_timers.entry(link_id).or_default().insert(
@@ -1045,17 +1040,17 @@ async fn test_handshake_timeout_drive() {
     );
 }
 
-/// Test that msg2 is stored on PeerConnection for responder resend.
+/// Test that msg2 is stored on the control machine's carrier for responder resend.
 #[test]
 fn test_msg2_stored_on_connection() {
-    let mut conn = PeerConnection::inbound(LinkId::new(1), 1000);
+    let mut machine = crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), 1000);
 
-    assert!(conn.handshake_msg2().is_none());
+    assert!(machine.conn_handshake_msg2().is_none());
 
     let msg2_bytes = vec![0x01, 0x02, 0x03, 0x04];
-    conn.set_handshake_msg2(msg2_bytes.clone());
+    machine.set_conn_handshake_msg2(msg2_bytes.clone());
 
-    assert_eq!(conn.handshake_msg2().unwrap(), &msg2_bytes);
+    assert_eq!(machine.conn_handshake_msg2().unwrap(), &msg2_bytes);
 }
 
 /// Test that duplicate msg2 is silently dropped when pending_outbound is already cleared.
