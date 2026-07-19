@@ -1,6 +1,6 @@
 [package]
 name = "fips"
-version = "0.4.1"
+version = "0.4.2-dev"
 edition = "2024"
 description = "A distributed, decentralized network routing protocol for mesh nodes connecting over arbitrary transports"
 license = "MIT"
