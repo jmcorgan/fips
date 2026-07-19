@@ -210,6 +210,60 @@ with v0.4.x or earlier peers.
   smaller-NodeAddr resolution rule. Mirrored to the FSP rekey msg1
   path for symmetry.
 
+## [0.4.1] - 2026-07-19
+
+### Changed
+
+- `node.bloom.max_inbound_fpr` default raised from `0.10` to `0.20`. The
+  cap rejects inbound `FilterAnnounce` whose FPR (`fill^k`) exceeds it. On
+  the fixed 1 KB / k=5 filter, `0.10` corresponds to fill 0.631 (~1,630
+  reachable entries), and the busiest nodes' aggregates had again begun to
+  reach it as the mesh grew. `0.20` (fill 0.7248, ~2,114 entries) restores
+  headroom without materially weakening the antipoison gate: a saturated or
+  poisoned filter is ~100% FPR and still rejected. This is the second raise
+  of this cap in two releases; the fixed 1 KB filter is the underlying
+  constraint, and the structural remedy is the v2 filter work rather than a
+  further raise. A node running this default accepts announcements that a
+  v0.4.0 node drops, so during a rolling upgrade the two versions can
+  disagree about mesh size.
+- Bloom filter probing computes its SHA-256 digest once per operation
+  rather than once per hash function. All k indices were already derived
+  from a single digest, but the digest was recomputed inside the
+  per-function loop, so every insert and membership test hashed the same
+  bytes `hash_count` times (5x at the default). Output is bit-for-bit
+  identical; this is the hottest path in packet forwarding and mesh-size
+  estimation.
+- Identity operations reuse one shared `secp256k1` context instead of
+  constructing a fresh one at every sign, verify, and key-derive site.
+  Each construction allocated a context and ran randomization and blinding
+  table setup. Behavior is unchanged: the same API calls are made, only the
+  context lifetime differs, and the shared context still performs the
+  standard construction-time blinding.
+
+### Fixed
+
+- Spanning tree: the coordinate cache is now invalidated when the parent
+  link is lost through peer removal. That path reparents or self-roots the
+  node but omitted the invalidation every other position-change path
+  performs, so cached entries for downstream destinations kept the node's
+  now-stale coordinate prefix. Because routing access refreshes an entry's
+  TTL, an actively routed stale entry never self-expired and was corrected
+  only by a fresh insert.
+- Discovery: applying a `LookupResponse` now keeps the tighter of the
+  cached and received `path_mtu` rather than overwriting unconditionally.
+  A looser estimate arriving in a later response could clobber a tighter
+  value already learned from a reactive `MtuExceeded` or
+  `PathMtuNotification`, loosening a clamp that had been correctly
+  tightened.
+
+### Removed
+
+- The `parent_switched` spanning-tree metric counter. It was incremented on
+  the line immediately before `parent_switches` at every site and never
+  independently, so the two were always identical. `parent_switches`
+  remains as the sole counter. Consumers reading `parent_switched` from the
+  control socket or `fipstop` should use `parent_switches`.
+
 ## [0.4.0] - 2026-06-27
 
 ### Added

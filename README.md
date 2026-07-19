@@ -213,7 +213,7 @@ testing/      Docker-based integration test harnesses + chaos simulation
 ## Status & roadmap
 
 FIPS is at **v0.6.0-dev** on the `next` branch.
-[v0.4.0](https://github.com/jmcorgan/fips/releases/tag/v0.4.0)
+[v0.4.1](https://github.com/jmcorgan/fips/releases/tag/v0.4.1)
 has shipped from `master`; this development line carries
 wire-format-breaking work for v0.6.0 — unified Noise XX handshake
 at both layers, FMP node profiles, slimmer MMP reports, and an

@@ -364,14 +364,14 @@ control socket and `fipstop` dashboard. (See `compute_mesh_size()` in
 
 The estimator refuses to produce a value when any contributing filter
 is above the antipoison FPR cap (`node.bloom.max_inbound_fpr`,
-default `0.10`); a partial aggregate would silently underestimate.
+default `0.20`); a partial aggregate would silently underestimate.
 Consumers handle the resulting `None` by displaying an "unknown"
 state rather than a misleading number.
 
 ## Antipoison: Inbound FPR Cap
 
 Inbound `FilterAnnounce` payloads are checked against
-`node.bloom.max_inbound_fpr` (default `0.10`). Filters whose
+`node.bloom.max_inbound_fpr` (default `0.20`). Filters whose
 estimated false positive rate exceeds the cap are dropped silently
 (no NACK on the wire) — they would otherwise inflate downstream
 candidate evaluation cost without contributing useful discrimination.
