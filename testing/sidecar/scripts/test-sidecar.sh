@@ -256,7 +256,14 @@ fi
 log "Verifying network isolation on app containers..."
 
 for node in a b c; do
-    container="sidecar-${node}-app-1"
+    container="sidecar-${node}${FIPS_CI_NAME_SUFFIX:-}-app-1"
+    # Fail loudly if the container is missing. Without this the two isolation
+    # assertions below pass vacuously: they assert a ping FAILS, and a ping into
+    # a non-existent container fails for the wrong reason. Only the loopback
+    # check, which expects success, would notice — so a naming slip here would
+    # silently turn the security assertions into no-ops.
+    docker inspect "$container" >/dev/null 2>&1 \
+        || { fail "$container does not exist — isolation assertions cannot be trusted"; continue; }
     # Pick a peer IP that isn't this node's own address
     case $node in
         a) peer_ip="$NODE_B_IP" ;;
@@ -296,7 +303,7 @@ if [ "$FAILED" -gt 0 ]; then
     log "Dumping logs for failed run..."
     for node in a b c; do
         echo "--- sidecar-${node} logs ---"
-        docker logs "sidecar-${node}-fips-1" 2>&1 | tail -30
+        docker logs "sidecar-${node}${FIPS_CI_NAME_SUFFIX:-}-fips-1" 2>&1 | tail -30
         echo ""
     done
     exit 1
