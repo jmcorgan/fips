@@ -164,9 +164,19 @@ The `fips.yaml` shipped in the OpenWrt package carries one transport
 entry per access interface, but **commented out** — so a stock install
 that never runs this helper logs no per-boot "interface missing"
 warning. `fips-ap-setup` uncommented the matching `apN` entry in Step 1,
-so there is normally nothing to do here. If you maintain your own config
-(or ran the manual UCI above instead of the helper), make sure the
-entries are present and uncommented:
+and also enabled `node.rendezvous.lan` (the daemon's mDNS/DNS-SD
+rendezvous — phone FIPS apps cannot see raw-Ethernet beacons, so mDNS
+is how they find the daemon; the switch is daemon-wide and stays on if
+you later remove the AP). So there is normally nothing to do here. If
+you maintain your own config (or ran the manual UCI above instead of
+the helper), make sure both are present and uncommented:
+
+```yaml
+node:
+  rendezvous:
+    lan:
+      enabled: true
+```
 
 ```yaml
 transports:

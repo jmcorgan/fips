@@ -47,7 +47,10 @@
 # install that never creates fips-ap* then logs no bind warning. This
 # helper uncomments the matching entry when it creates an interface and
 # re-comments it on remove, so the daemon binds the transport without a
-# manual config edit. After an interface is up, restart fips.
+# manual config edit. It also uncomments the node.rendezvous.lan block
+# (mDNS/DNS-SD — how phone FIPS apps discover the daemon); that switch is
+# daemon-wide and stays on at remove. After an interface is up, restart
+# fips.
 # See docs/how-to/set-up-open-access-ssid.md for the full guide.
 
 DEFAULT_SSID="!FIPS"
@@ -70,6 +73,35 @@ ap_config_enable() {
 	grep -q "^    # ap$idx:" "$CONFIG" || return 2
 	awk -v idx="$idx" '
 		$0 ~ ("^    # ap" idx ":[ \t]*$") { blk = 1; sub(/^    # /, "    "); print; next }
+		blk && /^    #   / { sub(/^    # /, "    "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
+}
+
+# Uncomment the 'lan' block under node.rendezvous in $CONFIG — the daemon's
+# mDNS/DNS-SD responder+browser. Phone FIPS apps cannot open raw-Ethernet
+# sockets, so mDNS is how they find this router's daemon. The match is
+# scoped to node.rendezvous: transports.ethernet also has a 'lan' entry at
+# the same indent. Daemon-wide switch — enabled here, deliberately NOT
+# re-commented on remove (other transports use it once on). Returns:
+#   0 enabled (or already active)   1 no config file   2 no such block
+lan_rendezvous_enable() {
+	[ -f "$CONFIG" ] || return 1
+	state="$(awk '
+		/^[A-Za-z_]/ { top = $1 }
+		top == "node:" && /^  [A-Za-z_]/ { sec = $1 }
+		top == "node:" && sec == "rendezvous:" && /^    lan:[ \t]*$/ { print "active"; exit }
+		top == "node:" && sec == "rendezvous:" && /^    # lan:[ \t]*$/ { print "commented"; exit }
+	' "$CONFIG")"
+	case "$state" in
+	active) return 0 ;;
+	commented) ;;
+	*) return 2 ;;
+	esac
+	awk '
+		/^[A-Za-z_]/ { top = $1 }
+		top == "node:" && /^  [A-Za-z_]/ { sec = $1 }
+		top == "node:" && sec == "rendezvous:" && $0 ~ /^    # lan:[ \t]*$/ { blk = 1; sub(/^    # /, "    "); print; next }
 		blk && /^    #   / { sub(/^    # /, "    "); print; next }
 		{ blk = 0; print }
 	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
@@ -336,6 +368,17 @@ case $? in
      entry binding interface '$AP_IFNAME' by hand (copy the ap0 block)." ;;
 esac
 
+# Phones discover the daemon via mDNS, not raw-Ethernet beacons — make sure
+# the daemon-wide mDNS rendezvous is on.
+if lan_rendezvous_enable; then
+	MDNS_NOTE="node.rendezvous.lan (mDNS) is enabled — phone FIPS apps
+     discover this router via DNS-SD."
+else
+	MDNS_NOTE="Could not enable mDNS in $CONFIG — set
+     'node.rendezvous.lan.enabled: true' by hand; phone FIPS apps rely
+     on it to discover this router."
+fi
+
 cat <<EOF
 Created open access SSID '$SSID' as $AP_IFNAME on $RADIO \
 (band ${BAND:-?}, channel ${CHANNEL:-auto}).
@@ -355,10 +398,11 @@ per SSID, so it covers every FIPS router.
 
 Next steps:
   1. $TRANSPORT_NOTE
+  2. $MDNS_NOTE
      Restart the daemon AFTER the interface is up — a transport whose
      interface is missing at startup is skipped, not retried:
        /etc/init.d/fips restart
-  2. Associate a phone or laptop running FIPS and verify:
+  3. Associate a phone or laptop running FIPS and verify:
        iw dev $AP_IFNAME station dump
      and the FIPS link on top of it:
        fipsctl show peers

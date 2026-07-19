@@ -43,6 +43,14 @@ node:
     #     - "stun:stun.cloudflare.com:3478"
     #     - "stun:global.stun.twilio.com:3478"
 
+    # mDNS/DNS-SD peer rendezvous on the local link. Ships commented (the
+    # daemon default is off); 'fips-ap-setup' uncomments it when creating
+    # the access SSID — phone FIPS apps cannot see raw-Ethernet beacons,
+    # so mDNS is how they find this router's daemon. Daemon-wide switch,
+    # left enabled on 'fips-ap-setup remove'.
+    # lan:
+    #   enabled: true
+
 tun:
   enabled: true
   name: fips0
