@@ -33,10 +33,20 @@ NETWORK_NAME="fips-sidecar-test${FIPS_CI_NAME_SUFFIX:-}"
 PROJ_A="sidecar-a${FIPS_CI_NAME_SUFFIX:-}"
 PROJ_B="sidecar-b${FIPS_CI_NAME_SUFFIX:-}"
 PROJ_C="sidecar-c${FIPS_CI_NAME_SUFFIX:-}"
-SUBNET="172.20.2.0/24"
-NODE_A_IP="172.20.2.10"
-NODE_B_IP="172.20.2.11"
-NODE_C_IP="172.20.2.12"
+# Network address range — claimed at startup by alloc_network below rather than
+# hardcoded, so two concurrent runs cannot request the same range.
+#
+# 10.40.0.0/16 is unclaimed in-tree: the suites use 172.20-172.32 and 172.99,
+# the chaos children 10.30.x, boringtun's inner network 10.99.x, and docker's
+# own default pool is 172.17-31 plus 192.168.
+NET_BASE="10.40"
+NET_CANDIDATES=64
+
+SUBNET=""
+GATEWAY_IP=""
+NODE_A_IP=""
+NODE_B_IP=""
+NODE_C_IP=""
 
 CONVERGE_TIMEOUT=30
 PASSED=0
@@ -52,13 +62,50 @@ log()   { echo "=== $*"; }
 pass()  { echo "  PASS: $*"; PASSED=$((PASSED + 1)); }
 fail()  { echo "  FAIL: $*"; FAILED=$((FAILED + 1)); }
 
+# Claim a free /24 for this run's network.
+#
+# Claim-and-advance rather than deriving an offset from the run id: we attempt
+# creation on a candidate range and, if docker reports the range is taken, move
+# to the next. Docker's own address pool is then the arbiter, which makes an
+# overlap between two concurrent runs *impossible*. A hashed offset would only
+# make it unlikely, and an overlap is precisely the failure being avoided here.
+#
+# Deliberately does NOT discard stderr: only an address-pool conflict is worth
+# advancing on. Any other failure (name already taken, daemon error) is real,
+# and retrying it 64 times would bury the reason.
+alloc_network() {
+    local i err
+    for (( i = 0; i < NET_CANDIDATES; i++ )); do
+        SUBNET="${NET_BASE}.${i}.0/24"
+        if err=$(docker network create \
+                --subnet "$SUBNET" \
+                --label com.corganlabs.fips-ci=1 \
+                --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}" \
+                "$NETWORK_NAME" 2>&1); then
+            GATEWAY_IP="${NET_BASE}.${i}.1"
+            NODE_A_IP="${NET_BASE}.${i}.10"
+            NODE_B_IP="${NET_BASE}.${i}.11"
+            NODE_C_IP="${NET_BASE}.${i}.12"
+            log "Claimed network $NETWORK_NAME on $SUBNET"
+            return 0
+        fi
+        case "$err" in
+            *"Pool overlaps"*|*"pool overlaps"*) continue ;;
+            *) echo "  FAIL: docker network create: $err" >&2; return 1 ;;
+        esac
+    done
+    echo "  FAIL: no free /24 in ${NET_BASE}.0.0/16 after ${NET_CANDIDATES} attempts" >&2
+    return 1
+}
+
 cleanup() {
     log "Cleaning up..."
-    # Tear down B and C first (they reference A's network as external)
+    # Tear down C and B first, then A. All three attach to the network as
+    # external, so none of them removes it — we do that last, by name.
     docker compose $COMPOSE_EXT -p "$PROJ_C" down --volumes --remove-orphans 2>/dev/null || true
     docker compose $COMPOSE_EXT -p "$PROJ_B" down --volumes --remove-orphans 2>/dev/null || true
-    # Tear down A last (it owns the network)
-    docker compose $COMPOSE_BASE -p "$PROJ_A" down --volumes --remove-orphans 2>/dev/null || true
+    docker compose $COMPOSE_EXT -p "$PROJ_A" down --volumes --remove-orphans 2>/dev/null || true
+    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 }
 
 # Always clean up on exit
@@ -80,7 +127,9 @@ fi
 #   node-b: peers with A (middle node, transit router)
 #   node-c: peers with B (end node)
 
-log "Starting node-a (no peers, creates network)..."
+alloc_network || exit 1
+
+log "Starting node-a (no peers, joins the claimed network)..."
 # node-a is the root: explicitly clear FIPS_PEER_* so it does not inherit the
 # external peer default from .env (which points at a real public mesh node).
 # Without this, node-a auto-connects to the live mesh and the chain attaches
@@ -91,7 +140,7 @@ FIPS_PEER_ADDR="" \
 FIPS_NETWORK="$NETWORK_NAME" \
 FIPS_SUBNET="$SUBNET" \
 FIPS_IPV4="$NODE_A_IP" \
-docker compose $COMPOSE_BASE -p "$PROJ_A" up -d
+docker compose $COMPOSE_EXT -p "$PROJ_A" up -d
 
 log "Starting node-b (peers with node-a, joins external network)..."
 FIPS_NSEC="$NODE_B_NSEC" \
@@ -217,7 +266,7 @@ for node in a b c; do
     log "  Checking $container..."
 
     # IPv4 gateway should be unreachable (iptables DROP on eth0)
-    if docker exec "$container" ping -c1 -W2 172.20.2.1 >/dev/null 2>&1; then
+    if docker exec "$container" ping -c1 -W2 "$GATEWAY_IP" >/dev/null 2>&1; then
         fail "$container can reach IPv4 gateway (isolation broken!)"
     else
         pass "$container cannot reach IPv4 gateway (IPv4 blocked)"
