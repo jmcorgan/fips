@@ -317,9 +317,11 @@ pub(crate) enum ConnAction {
 /// Read-only view of FMP connection/peer state the lifecycle core needs.
 ///
 /// The core defines this interface; the async shell (`node`) implements it over
-/// the live `connections`/`peers` maps. It is a **snapshot-iterator** seam:
-/// each method returns owned snapshot vectors with all clock reads already
-/// resolved shell-side, so the pure decisions never borrow `Node` and never
+/// the live `peer_machines`/`peers` maps — handshake-phase state is read off
+/// the machines still carrying a pending handshake, active-peer state off
+/// `peers`. It is a **snapshot-iterator** seam: each method returns owned
+/// snapshot vectors with all clock reads already resolved shell-side, so the
+/// pure decisions never borrow `Node` and never
 /// read a clock. Keeping it a trait keeps `proto` free of a `node` dependency
 /// and lets the decisions be unit-tested against hand-built snapshots.
 pub(crate) trait LifecycleView {
@@ -430,8 +432,8 @@ const REKEY_MIN_SESSION_AGE_SECS: u64 = 30;
 /// needs about a peer whose msg1 has just been processed.
 ///
 /// The core defines this interface; the async shell (`node`) implements it over
-/// the live `peers`/`connections` maps, resolving every clock read into a plain
-/// `u64` before the [`EstablishSnapshot`] reaches the core. Keeping it a trait
+/// the live `peers` map, resolving every clock read into a plain `u64` before
+/// the [`EstablishSnapshot`] reaches the core. Keeping it a trait
 /// keeps `proto` free of a `node` dependency and lets the establish decision be
 /// unit-tested against hand-built snapshots.
 pub(crate) trait EstablishView {
