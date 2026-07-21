@@ -72,7 +72,11 @@ dns:
 
 transports:
   udp:
-    bind_addr: "0.0.0.0:2121"
+    # Dual-stack wildcard, not "0.0.0.0": access-SSID clients (phones) learn
+    # this node's addresses from the mDNS advert and prefer the IPv6
+    # link-local — a v4-only bind silently drops their Noise msg1.
+    # OpenWrt is Linux (bindv6only=0), so "[::]" accepts v4 too.
+    bind_addr: "[::]:2121"
     # advertise_on_nostr: true
     # public: false # false => advertise udp:nat; true => advertise bound host:port
     # accept_connections: true # default; refuse inbound msg1 when false
