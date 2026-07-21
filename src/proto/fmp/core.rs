@@ -283,6 +283,49 @@ pub(crate) struct OutboundSnapshot {
     pub our_outbound_wins: bool,
 }
 
+/// A snapshot of the two identities the *initiator's rekey* `msg2` completion
+/// decision compares, taken by the shell once the Noise step has run.
+///
+/// A rekey `msg2` is dispatched to its peer by the session index the initiator
+/// itself allocated, which travels in the cleartext rekey-`msg1` header and is
+/// therefore observable on path. Under XX the responder's static is *learned*
+/// from `msg2` rather than pinned a priori (as it was under IK), so a
+/// cryptographically valid `msg2` on its own proves only that *someone*
+/// answered — not that the peer we are already bonded to answered. This
+/// snapshot carries the two facts that settle it; no Noise material reaches the
+/// core.
+pub(crate) struct RekeyMsg2Snapshot {
+    /// The node address of the established peer whose rekey this `msg2` claims
+    /// to complete — the `Node::peers` key the rekey index resolved to.
+    pub established_peer: NodeAddr,
+    /// The node address derived from the static key learned in this `msg2`,
+    /// i.e. the identity the completed Noise session would actually be bound to.
+    pub learned_peer: NodeAddr,
+}
+
+/// A snapshot of the two identities the *initial outbound* `msg2` completion
+/// decision compares, taken by the shell once the Noise step has run.
+///
+/// The sibling of [`RekeyMsg2Snapshot`] one rung earlier in the lifecycle: the
+/// rekey gate protects a link that is already established, this one protects the
+/// link being formed. Same root cause — XX *learns* the responder's static from
+/// `msg2` instead of pinning it a priori as IK did, so a cryptographically valid
+/// `msg2` proves only that *someone* answered the dial, never that the peer we
+/// meant to reach answered it. No Noise material reaches the core.
+pub(crate) struct DialMsg2Snapshot {
+    /// The node address this leg was dialed at, or `None` if the dial named no
+    /// peer.
+    ///
+    /// `None` is an *anonymous* leg — a shared-media beacon dial, whose beacon
+    /// asserts no identity for anyone to substitute — and it is decided locally
+    /// when the leg is built, never from anything on the wire, so no peer can
+    /// steer an identified dial into the `None` branch.
+    pub dialed_peer: Option<NodeAddr>,
+    /// The node address derived from the static key learned in this `msg2`,
+    /// i.e. the identity this leg would actually be promoted under.
+    pub learned_peer: NodeAddr,
+}
+
 /// A registry/transport effect the async shell performs on the core's behalf.
 ///
 /// The scaffold subset covers the maintain/teardown half of the lifecycle. The
@@ -441,6 +484,71 @@ pub(crate) enum OutboundDecision {
     /// existing inbound session and original `their_index`, freeing the unused
     /// outbound index.
     CrossConnectionKeep,
+}
+
+/// The classification outcome for one initiator-side rekey `msg2` completion,
+/// decided purely from the [`RekeyMsg2Snapshot`]. The shell matches on this and
+/// drives the effects; the core consumes nothing and touches no live state.
+///
+/// This is the initiator-side counterpart of the continuity the responder gets
+/// structurally: an inbound rekey completes keyed by the node address derived
+/// from the authenticated static, so a non-matching static resolves to a
+/// different peer and can never displace an established session. The initiator
+/// dispatches by its own session index instead, so the same guarantee has to be
+/// stated as an explicit decision.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RekeyMsg2Decision {
+    /// The rekey was answered by the peer we are bonded to: install the fresh
+    /// session as the peer's pending (post-rekey) session awaiting K-bit
+    /// cutover, the unchanged pre-existing behaviour.
+    Install,
+    /// The rekey was answered by some other identity: drop this `msg2` with a
+    /// handshake reject, abandon the rekey cycle, and leave the established
+    /// session completely undisturbed. `reason` selects only the diagnostic
+    /// log line.
+    Reject { reason: RekeyMsg2Reject },
+}
+
+/// Why an initiator-side rekey `msg2` was dropped by the core classification.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RekeyMsg2Reject {
+    /// The static learned in `msg2` derives to a different node address than
+    /// the established peer's — an on-path party raced a valid XX `msg2` of its
+    /// own against the observable rekey `msg1`, or the peer's identity changed
+    /// underneath the link. Either way the established session is kept.
+    StaticMismatch,
+}
+
+/// The classification outcome for one initiator-side *initial* `msg2`
+/// completion, decided purely from the [`DialMsg2Snapshot`]. The shell matches
+/// on this and drives the effects; the core consumes nothing and touches no
+/// live state.
+///
+/// The responder gets the equivalent guarantee structurally — an inbound leg is
+/// promoted under the node address derived from the authenticated static, so
+/// there is no prior expectation for a foreign static to contradict. Only the
+/// initiator holds an intent that the wire can disagree with, so only here does
+/// it have to be stated as an explicit decision.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DialMsg2Decision {
+    /// Either the dial named no peer (an anonymous leg, where any answer is a
+    /// legitimate first contact) or it named the peer that answered. Carry on
+    /// into the ACL gate and promotion, the unchanged pre-existing behaviour.
+    Accept,
+    /// The dial named a peer and someone else answered: drop this `msg2` with a
+    /// handshake reject and promote nothing. `reason` selects only the
+    /// diagnostic log line.
+    Reject { reason: DialMsg2Reject },
+}
+
+/// Why an initiator-side initial `msg2` was dropped by the core classification.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DialMsg2Reject {
+    /// The static learned in `msg2` derives to a different node address than the
+    /// one dialed — an on-path party observed the outbound `msg1` and raced a
+    /// valid XX `msg2` under its own static, or the address we dialed is no
+    /// longer the peer we recorded there. Either way this leg never promotes.
+    StaticMismatch,
 }
 
 impl Fmp {
@@ -690,6 +798,50 @@ impl Fmp {
         } else {
             OutboundDecision::CrossConnectionKeep
         }
+    }
+
+    /// Classify one initiator-side rekey `msg2` completion: the static-key
+    /// continuity gate. Pure: reads only `snap`, mutates nothing.
+    ///
+    /// A rekey may only replace the session of the peer that already holds the
+    /// link, so the identity learned from `msg2` must derive to the established
+    /// peer's node address. Anything else is
+    /// [`Reject`](RekeyMsg2Decision::Reject) — the shell abandons the rekey and
+    /// keeps the current session. A match is
+    /// [`Install`](RekeyMsg2Decision::Install), the unchanged legitimate path.
+    pub(crate) fn rekey_outbound(&self, snap: &RekeyMsg2Snapshot) -> RekeyMsg2Decision {
+        if snap.learned_peer != snap.established_peer {
+            return RekeyMsg2Decision::Reject {
+                reason: RekeyMsg2Reject::StaticMismatch,
+            };
+        }
+        RekeyMsg2Decision::Install
+    }
+
+    /// Classify one initiator-side *initial* `msg2` completion: the dial-time
+    /// identity gate. Pure: reads only `snap`, mutates nothing.
+    ///
+    /// A dial that named a peer may only be completed by that peer, so the
+    /// identity learned from `msg2` must derive to the dialed node address.
+    /// Anything else is [`Reject`](DialMsg2Decision::Reject) and the shell
+    /// promotes nothing.
+    ///
+    /// A dial that named nobody has nothing to contradict: an anonymous
+    /// shared-media beacon asserts no identity, so answering one and being
+    /// admitted is peering rather than substitution, and the ACL — which runs
+    /// against the learned identity either way — stays the correct and only gate
+    /// there. That carve-out cannot be reached as an exemption, because whether
+    /// `dialed_peer` is `Some` is settled when the leg is built and never by the
+    /// wire.
+    pub(crate) fn dial_outbound(&self, snap: &DialMsg2Snapshot) -> DialMsg2Decision {
+        if let Some(dialed) = snap.dialed_peer
+            && dialed != snap.learned_peer
+        {
+            return DialMsg2Decision::Reject {
+                reason: DialMsg2Reject::StaticMismatch,
+            };
+        }
+        DialMsg2Decision::Accept
     }
 }
 

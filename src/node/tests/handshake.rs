@@ -2030,3 +2030,522 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
 
     stop_hs(&mut node).await;
 }
+
+// ===========================================================================
+// Initiator rekey static-key continuity
+//
+// The rekey msg2 is dispatched to its peer by the session index the initiator
+// itself allocated, and that index travels in the CLEARTEXT rekey msg1 header.
+// Under XX the responder's static arrives in msg2 rather than being pinned at
+// dial (as IK pinned it), so an on-path party that beats the real peer to the
+// reply produces a perfectly valid handshake under its own static. The
+// continuity gate is what stops that session from taking the peer's slot.
+// ===========================================================================
+
+/// Establish initiator↔responder, start a real rekey on the initiator, then
+/// let a third node answer the rekey msg1 with a valid XX msg2 built from its
+/// OWN static. The initiator must reject it and keep the established session
+/// live and usable.
+#[tokio::test]
+async fn test_rekey_msg2_foreign_static_rejected() {
+    let mut rekey_config = Config::new();
+    rekey_config.node.rekey.enabled = true;
+    rekey_config.node.rekey.after_secs = 1;
+
+    let mut initiator = make_hs_node(rekey_config).await;
+    let mut responder = make_hs_node(Config::new()).await;
+    let mut attacker = make_hs_node(Config::new()).await;
+
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+    let initiator_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let attacker_addr =
+        *PeerIdentity::from_pubkey_full(attacker.node.identity().pubkey_full()).node_addr();
+
+    // Establish the link both ways.
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(initiator.node.peer_count(), 1);
+    assert_eq!(responder.node.peer_count(), 1);
+
+    // Record what the established session must still look like afterwards.
+    let session_hash = *initiator
+        .node
+        .get_peer(&responder_addr)
+        .unwrap()
+        .noise_session()
+        .unwrap()
+        .handshake_hash();
+    let peer_link = initiator.node.get_peer(&responder_addr).unwrap().link_id();
+
+    // Age the session past the (jittered) rekey threshold and let the real
+    // cadence fire, so the rekey msg1 and its index are produced exactly as in
+    // production.
+    initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
+    let baseline = initiator.node.index_allocator.count();
+    initiator.node.check_rekey().await;
+    let rekey_index = initiator
+        .node
+        .get_peer(&responder_addr)
+        .unwrap()
+        .rekey_our_index()
+        .expect("cadence started a rekey");
+    assert_eq!(
+        initiator.node.index_allocator.count(),
+        baseline + 1,
+        "rekey allocated its own index"
+    );
+
+    // The attacker observes the cleartext rekey msg1 on path and answers it
+    // first, under its own static. The real responder never sees it.
+    let rekey_msg1 = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
+    attacker.node.handle_msg1(rekey_msg1).await;
+    let forged_msg2 = recv_phase(&mut initiator.packet_rx, 2, "forged rekey msg2").await;
+    initiator.node.handle_msg2(forged_msg2).await;
+
+    // The impostor never becomes (or displaces) a peer.
+    assert_eq!(initiator.node.peer_count(), 1, "peer set unchanged");
+    assert!(
+        initiator.node.get_peer(&attacker_addr).is_none(),
+        "impostor must not enter the peer set"
+    );
+    let peer = initiator.node.get_peer(&responder_addr).expect("kept");
+    assert!(
+        peer.pending_new_session().is_none(),
+        "a foreign static must not be installed as the pending session"
+    );
+    assert!(
+        !peer.rekey_in_progress(),
+        "the rejected rekey cycle is abandoned"
+    );
+    assert_eq!(peer.link_id(), peer_link, "the peer keeps its link");
+
+    // The established session is byte-for-byte the one we started with, still
+    // bound to the real responder.
+    assert_eq!(
+        peer.noise_session().unwrap().handshake_hash(),
+        &session_hash,
+        "the established session was not replaced"
+    );
+    assert_eq!(
+        peer.noise_session().unwrap().remote_static_xonly(),
+        responder.node.identity().pubkey(),
+        "the established session stays bound to the real peer"
+    );
+
+    // The rekey index is returned and its msg2 dispatch entry is gone, so a
+    // late (or replayed) msg2 on that index cannot re-enter the dead cycle.
+    assert_eq!(
+        initiator.node.index_allocator.count(),
+        baseline,
+        "the rejected rekey must free its index"
+    );
+    assert!(
+        !initiator
+            .node
+            .pending_outbound
+            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
+        "the rejected rekey's dispatch entry must not survive"
+    );
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    // ...and it is still usable: the initiator encrypts under the surviving
+    // session and the real responder decrypts it.
+    let probe = b"link still live after the rejected rekey";
+    let counter = initiator
+        .node
+        .get_peer(&responder_addr)
+        .unwrap()
+        .noise_session()
+        .unwrap()
+        .current_send_counter();
+    let ciphertext = initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .noise_session_mut()
+        .unwrap()
+        .encrypt(probe)
+        .expect("encrypt under the surviving session");
+    let plaintext = responder
+        .node
+        .get_peer_mut(&initiator_addr)
+        .unwrap()
+        .noise_session_mut()
+        .unwrap()
+        .decrypt_with_replay_check(&ciphertext, counter)
+        .expect("the peer still decrypts under the original session");
+    assert_eq!(plaintext, probe);
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+    stop_hs(&mut attacker).await;
+}
+
+/// The same cadence-driven rekey, answered by the REAL peer, still installs the
+/// pending session — the gate must be invisible on the legitimate path.
+#[tokio::test]
+async fn test_rekey_msg2_matching_static_installs() {
+    let mut rekey_config = Config::new();
+    rekey_config.node.rekey.enabled = true;
+    rekey_config.node.rekey.after_secs = 1;
+
+    let mut initiator = make_hs_node(rekey_config).await;
+    let mut responder = make_hs_node(Config::new()).await;
+
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(initiator.node.peer_count(), 1);
+
+    initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
+    initiator.node.check_rekey().await;
+    let rekey_index = initiator
+        .node
+        .get_peer(&responder_addr)
+        .unwrap()
+        .rekey_our_index()
+        .expect("cadence started a rekey");
+
+    // The real peer answers its own rekey msg1.
+    let rekey_msg1 = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
+    responder.node.handle_msg1(rekey_msg1).await;
+    let rekey_msg2 = recv_phase(&mut initiator.packet_rx, 2, "rekey msg2").await;
+    initiator.node.handle_msg2(rekey_msg2).await;
+
+    let peer = initiator.node.get_peer(&responder_addr).expect("kept");
+    assert!(
+        peer.pending_new_session().is_some(),
+        "a matching static installs the pending session"
+    );
+    assert_eq!(
+        peer.pending_new_session().unwrap().remote_static_xonly(),
+        responder.node.identity().pubkey(),
+        "the pending session is bound to the real peer"
+    );
+    assert!(
+        initiator
+            .node
+            .peers_by_index
+            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
+        "the rekey index maps to the peer, awaiting K-bit cutover"
+    );
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+// ===========================================================================
+// Initiator dial-identity pinning (initial outbound handshake)
+//
+// The rekey gate above protects a link that is already established; this one
+// protects the link being formed, and needs no rekey to reach. Under XX the
+// responder's static arrives in msg2 rather than being pinned at dial (as IK
+// pinned it), so an on-path party that observes our msg1 and answers it first
+// produces a perfectly valid handshake under its own static. The dial-identity
+// gate is what stops that leg from being promoted as the peer we dialed.
+//
+// The three cases below are the whole decision surface: a named dial answered
+// by a stranger (reject), a named dial answered by its peer (promote), and an
+// anonymous dial, which names nobody and so must still promote whoever answers
+// - the carve-out that keeps shared-media discovery working.
+// ===========================================================================
+
+/// A named dial answered by a foreign static must not promote, and must leave
+/// no residue behind: no machine, no leg, no link, no `pending_outbound`
+/// dispatch entry, and no orphaned session index.
+#[tokio::test]
+async fn test_dial_msg2_foreign_static_rejected() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut intended = make_hs_node(Config::new()).await;
+    let mut attacker = make_hs_node(Config::new()).await;
+
+    let intended_identity = PeerIdentity::from_pubkey_full(intended.node.identity().pubkey_full());
+    let intended_addr = *intended_identity.node_addr();
+    let attacker_addr =
+        *PeerIdentity::from_pubkey_full(attacker.node.identity().pubkey_full()).node_addr();
+    assert_ne!(intended_addr, attacker_addr);
+
+    let baseline = initiator.node.index_allocator.count();
+
+    // A named dial whose msg1 reaches the attacker instead of the peer. From
+    // the initiator's side this is indistinguishable from an on-path party
+    // racing the real responder's msg2, and it is the same thing the code sees.
+    initiator
+        .node
+        .initiate_connection(
+            initiator.transport_id,
+            attacker.addr.clone(),
+            Some(intended_identity),
+        )
+        .await
+        .expect("named dial");
+
+    let leg_link = initiator.node.connections().next().unwrap().1.link_id();
+    let leg_index = initiator
+        .node
+        .peer_machines
+        .get(&leg_link)
+        .unwrap()
+        .our_index()
+        .expect("msg1 preparation allocated our index");
+    assert_eq!(
+        initiator.node.index_allocator.count(),
+        baseline + 1,
+        "the dial allocated its own index"
+    );
+
+    // The attacker answers the dial with a valid XX msg2 under its own static.
+    let msg1 = recv_phase(&mut attacker.packet_rx, 1, "msg1").await;
+    attacker.node.handle_msg1(msg1).await;
+    let forged_msg2 = recv_phase(&mut initiator.packet_rx, 2, "forged msg2").await;
+    initiator.node.handle_msg2(forged_msg2).await;
+
+    // Nothing is promoted - not the impostor, and not the peer we dialed
+    // (whose identity never authenticated anything here).
+    assert_eq!(initiator.node.peer_count(), 0, "no promotion");
+    assert!(
+        initiator.node.get_peer(&attacker_addr).is_none(),
+        "the impostor must not enter the peer set"
+    );
+    assert!(
+        initiator.node.get_peer(&intended_addr).is_none(),
+        "the dialed peer must not be credited with a handshake it never ran"
+    );
+
+    // No registry residue: the leg, its machine, its link, its dispatch entry
+    // and its index are all gone.
+    assert!(
+        !initiator.node.has_pending_leg(&leg_link),
+        "the rejected leg is torn down"
+    );
+    assert!(
+        !initiator.node.peer_machines.contains_key(&leg_link),
+        "the rejected leg's machine is disposed"
+    );
+    assert!(
+        !initiator.node.links.contains_key(&leg_link),
+        "the rejected leg's link is removed"
+    );
+    assert!(
+        !initiator
+            .node
+            .pending_outbound
+            .contains_key(&(initiator.transport_id, leg_index.as_u32())),
+        "the rejected leg's dispatch entry must not survive, or a replayed \
+         msg2 could re-enter the dead leg"
+    );
+    assert_eq!(
+        initiator.node.index_allocator.count(),
+        baseline,
+        "the rejected dial must free the index it allocated"
+    );
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    // The gate sits ahead of the msg3 send, so the impostor's handshake is
+    // never completed: it is left waiting on a msg3 that never comes.
+    assert!(
+        timeout(Duration::from_millis(250), attacker.packet_rx.recv())
+            .await
+            .is_err(),
+        "no msg3 may be sent to a responder that substituted its identity"
+    );
+    assert_eq!(
+        attacker.node.peer_count(),
+        0,
+        "the impostor never completes its own side either"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut intended).await;
+    stop_hs(&mut attacker).await;
+}
+
+/// The rejected dial must stay on the dial schedule. Disposing the leg takes it
+/// out of both reapers, so the handshake-timeout sweep that normally reschedules
+/// a stuck outbound dial never sees it; the reject arm has to fire that reflex
+/// itself. Without it a configured peer is dialed once at startup and, after one
+/// substituted msg2, never again for the life of the process - a persistent
+/// outbound blackhole costing the attacker a single packet. The retry must also
+/// name the peer we dialed, not the static that answered.
+#[tokio::test]
+async fn test_dial_msg2_foreign_static_reschedules_dial() {
+    let intended_local = Identity::generate();
+    let intended_identity =
+        PeerIdentity::from_npub(&intended_local.npub()).expect("generated npub parses");
+    let intended_addr = *intended_identity.node_addr();
+
+    let mut attacker = make_hs_node(Config::new()).await;
+    let attacker_addr =
+        *PeerIdentity::from_pubkey_full(attacker.node.identity().pubkey_full()).node_addr();
+    assert_ne!(intended_addr, attacker_addr);
+
+    // The dialed peer is a configured auto-connect peer: that is the only
+    // shape the retry machinery will seed a schedule entry for, and it is the
+    // shape the blackhole strands.
+    let mut config = Config::new();
+    config.peers.push(crate::config::PeerConfig::new(
+        intended_local.npub(),
+        "udp",
+        "10.0.0.2:2121",
+    ));
+    let mut initiator = make_hs_node(config).await;
+
+    assert!(
+        initiator.node.peering.reconciler.retry_pending.is_empty(),
+        "nothing is scheduled before the dial"
+    );
+
+    initiator
+        .node
+        .initiate_connection(
+            initiator.transport_id,
+            attacker.addr.clone(),
+            Some(intended_identity),
+        )
+        .await
+        .expect("named dial");
+
+    let msg1 = recv_phase(&mut attacker.packet_rx, 1, "msg1").await;
+    attacker.node.handle_msg1(msg1).await;
+    let forged_msg2 = recv_phase(&mut initiator.packet_rx, 2, "forged msg2").await;
+    initiator.node.handle_msg2(forged_msg2).await;
+
+    assert_eq!(initiator.node.peer_count(), 0, "no promotion");
+    assert!(
+        initiator
+            .node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&intended_addr),
+        "the rejected dial must leave the peer we dialed scheduled for retry, \
+         or the configured peer is never dialed again"
+    );
+    assert!(
+        !initiator
+            .node
+            .peering
+            .reconciler
+            .retry_pending
+            .contains_key(&attacker_addr),
+        "the retry must name the peer we dialed, never the static that answered"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut attacker).await;
+}
+
+/// The same named dial, answered by the peer it named, still promotes - the
+/// gate must be invisible on the legitimate path.
+#[tokio::test]
+async fn test_dial_msg2_matching_static_promotes() {
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+
+    let responder_identity =
+        PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full());
+    let responder_addr = *responder_identity.node_addr();
+
+    initiator
+        .node
+        .initiate_connection(
+            initiator.transport_id,
+            responder.addr.clone(),
+            Some(responder_identity),
+        )
+        .await
+        .expect("named dial");
+    let leg_link = initiator.node.connections().next().unwrap().1.link_id();
+
+    let msg1 = recv_phase(&mut responder.packet_rx, 1, "msg1").await;
+    responder.node.handle_msg1(msg1).await;
+    let msg2 = recv_phase(&mut initiator.packet_rx, 2, "msg2").await;
+    initiator.node.handle_msg2(msg2).await;
+
+    assert_eq!(initiator.node.peer_count(), 1);
+    let peer = initiator.node.get_peer(&responder_addr).expect("promoted");
+    assert_eq!(peer.link_id(), leg_link, "promote keeps the leg's link");
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    // The responder completes its own side from the msg3 the gate let through.
+    let msg3 = recv_phase(&mut responder.packet_rx, 3, "msg3").await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+    responder.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// The anonymous carve-out. A shared-media dial names nobody, so the msg2
+/// static is the ONLY identity the leg will ever have and there is no intent
+/// for it to contradict - it must promote exactly as before. A gate that
+/// pinned the wrong thing (or pinned unconditionally) stops anonymous
+/// discovery promoting anything at all, and this is where that shows up.
+///
+/// Whether a leg is anonymous is settled here, at construction, from what the
+/// caller passed - never from anything on the wire - so no responder can steer
+/// a named dial onto this path.
+#[tokio::test]
+async fn test_anonymous_dial_msg2_promotes_whoever_answers() {
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut responder = make_hs_node(Config::new()).await;
+
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    initiator
+        .node
+        .initiate_connection(initiator.transport_id, responder.addr.clone(), None)
+        .await
+        .expect("anonymous dial");
+    let leg_link = initiator.node.connections().next().unwrap().1.link_id();
+    assert_eq!(
+        initiator
+            .node
+            .peer_machines
+            .get(&leg_link)
+            .unwrap()
+            .conn_dialed_identity(),
+        None,
+        "an anonymous dial records no dial intent, which is what selects the \
+         no-comparison branch"
+    );
+
+    let msg1 = recv_phase(&mut responder.packet_rx, 1, "msg1").await;
+    responder.node.handle_msg1(msg1).await;
+    let msg2 = recv_phase(&mut initiator.packet_rx, 2, "msg2").await;
+    initiator.node.handle_msg2(msg2).await;
+
+    assert_eq!(
+        initiator.node.peer_count(),
+        1,
+        "an anonymous dial promotes whoever answered it"
+    );
+    let peer = initiator.node.get_peer(&responder_addr).expect("promoted");
+    assert_eq!(peer.link_id(), leg_link);
+    initiator.node.debug_assert_peer_maps_coherent();
+
+    let msg3 = recv_phase(&mut responder.packet_rx, 3, "msg3").await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}

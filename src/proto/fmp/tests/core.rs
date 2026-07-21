@@ -5,8 +5,9 @@ use super::util::{
     wire_outcome,
 };
 use crate::proto::fmp::{
-    ConnAction, Fmp, InboundDecision, InboundReject, NegotiationPayload, NodeProfile,
-    OutboundDecision, OutboundSnapshot, RekeyCfg, cross_connection_winner,
+    ConnAction, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot, Fmp, InboundDecision,
+    InboundReject, NegotiationPayload, NodeProfile, OutboundDecision, OutboundSnapshot, RekeyCfg,
+    RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot, cross_connection_winner,
 };
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
@@ -578,6 +579,81 @@ fn establish_outbound_cross_connection_loss_keeps() {
         fmp.establish_outbound(&snap),
         OutboundDecision::CrossConnectionKeep
     );
+}
+
+// ===========================================================================
+// rekey_outbound — initiator rekey msg2 static-continuity classification
+// ===========================================================================
+
+#[test]
+fn rekey_outbound_matching_static_installs() {
+    let fmp = Fmp::new();
+    let peer = make_node_addr(1);
+    let snap = RekeyMsg2Snapshot {
+        established_peer: peer,
+        learned_peer: peer,
+    };
+    assert_eq!(fmp.rekey_outbound(&snap), RekeyMsg2Decision::Install);
+}
+
+#[test]
+fn rekey_outbound_foreign_static_rejects() {
+    let fmp = Fmp::new();
+    let snap = RekeyMsg2Snapshot {
+        established_peer: make_node_addr(1),
+        learned_peer: make_node_addr(2),
+    };
+    assert_eq!(
+        fmp.rekey_outbound(&snap),
+        RekeyMsg2Decision::Reject {
+            reason: RekeyMsg2Reject::StaticMismatch
+        }
+    );
+}
+
+// ===========================================================================
+// dial_outbound — initiator initial msg2 dial-identity classification
+// ===========================================================================
+
+#[test]
+fn dial_outbound_matching_static_accepts() {
+    let fmp = Fmp::new();
+    let peer = make_node_addr(1);
+    let snap = DialMsg2Snapshot {
+        dialed_peer: Some(peer),
+        learned_peer: peer,
+    };
+    assert_eq!(fmp.dial_outbound(&snap), DialMsg2Decision::Accept);
+}
+
+#[test]
+fn dial_outbound_foreign_static_rejects() {
+    let fmp = Fmp::new();
+    let snap = DialMsg2Snapshot {
+        dialed_peer: Some(make_node_addr(1)),
+        learned_peer: make_node_addr(2),
+    };
+    assert_eq!(
+        fmp.dial_outbound(&snap),
+        DialMsg2Decision::Reject {
+            reason: DialMsg2Reject::StaticMismatch
+        }
+    );
+}
+
+/// The anonymous carve-out: a dial that named nobody has no intent for the
+/// answer to contradict, so any static is accepted and the ACL remains the only
+/// gate. Breaking this stops shared-media discovery promoting anything.
+#[test]
+fn dial_outbound_anonymous_accepts_any_static() {
+    let fmp = Fmp::new();
+    for learned in [make_node_addr(1), make_node_addr(2), make_node_addr(200)] {
+        let snap = DialMsg2Snapshot {
+            dialed_peer: None,
+            learned_peer: learned,
+        };
+        assert_eq!(fmp.dial_outbound(&snap), DialMsg2Decision::Accept);
+    }
 }
 
 // ===== cross_connection_winner tie-break tests =====

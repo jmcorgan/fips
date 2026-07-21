@@ -876,6 +876,15 @@ impl PeerMachine {
     /// If `negotiation_payload` is provided, it is encrypted and appended
     /// to the returned msg3 bytes. If the received msg2 contains a negotiation
     /// payload (bytes beyond the base XX msg2), it is decrypted and returned.
+    ///
+    /// Deliberately identity-agnostic, like its rekey sibling
+    /// `ActivePeer::complete_rekey_msg2`: this is the crypto leaf, and whether
+    /// the identity that answered may be admitted as the one dialed is a
+    /// decision, taken by the caller against the FMP core. The learned identity
+    /// lands on the carrier unconditionally — on an anonymous leg that write is
+    /// the only way the carrier ever gets an identity — while the dial intent
+    /// sits untouched in `conn_dialed_identity` for the caller to compare
+    /// against.
     pub(crate) fn complete_handshake(
         &mut self,
         message: &[u8],
@@ -1126,6 +1135,16 @@ impl PeerMachine {
     /// sweep's retry address.
     pub(crate) fn conn_expected_identity(&self) -> Option<&PeerIdentity> {
         self.conn.expected_identity()
+    }
+
+    /// The identity this leg was *dialed at*, as opposed to the one that
+    /// answered. `Some` only on an identified outbound dial; `None` on an
+    /// anonymous shared-media dial and on every inbound leg. Fixed when the
+    /// carrier is built and untouched by the handshake, so `handle_msg2` can
+    /// hold the msg2-learned identity up against the dial intent instead of
+    /// finding the intent already overwritten by it.
+    pub(crate) fn conn_dialed_identity(&self) -> Option<&PeerIdentity> {
+        self.conn.dialed_identity()
     }
 
     /// Remote startup epoch of the surviving carrier, recorded by the

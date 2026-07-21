@@ -17,9 +17,10 @@ use crate::peer::machine::{
 };
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
-    Disconnect, DisconnectReason, EstablishSnapshot, InboundDecision, InboundReject,
-    NegotiationPayload, OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
-    decide_fmp_negotiation,
+    DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
+    EstablishSnapshot, InboundDecision, InboundReject, NegotiationPayload, OutboundSnapshot,
+    PromotionResult, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot, WireOutcome,
+    cross_connection_winner, decide_fmp_negotiation,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use crate::utils::index::SessionIndex;
@@ -479,107 +480,165 @@ impl Node {
                 let mut rekey_completed = false;
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
-                        Ok((msg3_bytes, session, remote_epoch)) => {
-                            let our_index = peer.rekey_our_index().unwrap_or(header.receiver_idx);
-                            // Detect a peer restart: the epoch carried in this
-                            // rekey msg2 differs from the one recorded at the
-                            // last handshake. Compute before updating the field.
-                            let remote_epoch_changed = matches!(
-                                (peer.remote_epoch(), remote_epoch),
-                                (Some(old), Some(new)) if old != new
-                            );
-                            if remote_epoch.is_some() {
-                                peer.set_remote_epoch(remote_epoch);
-                            }
-
-                            // Send msg3 before setting pending session
-                            let wire_msg3 = build_msg3(our_index, header.sender_idx, &msg3_bytes);
-                            let msg3_sent = if let (Some(tid), Some(addr)) =
-                                (transport_id, &remote_addr)
-                                && let Some(transport) = self.transports.get(&tid)
-                            {
-                                match transport.send(addr, &wire_msg3).await {
-                                    Ok(_) => {
-                                        debug!(
-                                            peer = %display_name,
-                                            "Sent rekey msg3"
-                                        );
-                                        true
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            peer = %display_name,
-                                            error = %e,
-                                            "Failed to send rekey msg3"
-                                        );
-                                        false
-                                    }
-                                }
-                            } else {
-                                false
-                            };
-
-                            if msg3_sent {
-                                peer.set_pending_session(session, our_index, header.sender_idx);
-
-                                // Retain msg3 for retransmission until the
-                                // responder is confirmed on the new epoch.
-                                // FMP sends msg3 exactly once otherwise; a
-                                // lost datagram leaves the responder without
-                                // the new session, so when the initiator cuts
-                                // over its new-epoch frames silently miss at
-                                // the peer → 30s link-dead. Mirrors FSP's
-                                // resend_pending_session_msg3 liveness path.
-                                peer.set_rekey_msg3_payload(
-                                    wire_msg3.clone(),
-                                    msg3_now_ms + msg3_resend_interval,
-                                );
-
-                                if let Some(tid) = transport_id {
-                                    self.peers_by_index
-                                        .insert((tid, our_index.as_u32()), peer_node_addr);
-                                }
-
-                                // Peer restart detected during this rekey:
-                                // drop the stale FSP session-layer entry so the
-                                // session map does not linger out of sync with
-                                // the freshly rekeyed FMP link. Only after a
-                                // successful msg3 send (the rekey actually
-                                // completed); on a send failure the rekey is
-                                // abandoned above and no teardown is warranted.
-                                if remote_epoch_changed {
-                                    if self.sessions.remove(&peer_node_addr).is_some() {
-                                        debug!(
-                                            peer = %display_name,
-                                            "Cleared stale FSP session after peer restart during FMP rekey"
-                                        );
-                                    }
-                                    debug!(
-                                        peer = %display_name,
-                                        "Peer restart detected during FMP rekey, replacing stale endpoint session"
+                        Ok((msg3_bytes, session, remote_epoch, learned_peer)) => {
+                            // Static-key continuity gate. The rekey msg2 was
+                            // matched to this peer by the session index WE
+                            // allocated, which travels in the cleartext rekey
+                            // msg1 header and is observable on path; under XX
+                            // the responder's static is learned from msg2
+                            // rather than pinned a priori, so crypto success
+                            // alone does not prove the peer already holding
+                            // this link is the one that answered. The core
+                            // decides. A Reject costs the established session
+                            // nothing: its send/recv cipher state is never
+                            // touched here and set_remote_epoch is confined to
+                            // the Install arm, so the working session survives
+                            // intact and usable. The rekey cycle, by contrast,
+                            // is already gone — complete_rekey_msg2 above
+                            // consumed the handshake state and cleared the
+                            // msg1-resend fields — which is why the reject arm
+                            // must abandon the cycle rather than retry it.
+                            let continuity = self.fmp.rekey_outbound(&RekeyMsg2Snapshot {
+                                established_peer: peer_node_addr,
+                                learned_peer,
+                            });
+                            match continuity {
+                                RekeyMsg2Decision::Install => {
+                                    let our_index =
+                                        peer.rekey_our_index().unwrap_or(header.receiver_idx);
+                                    // Detect a peer restart: the epoch carried in this
+                                    // rekey msg2 differs from the one recorded at the
+                                    // last handshake. Compute before updating the field.
+                                    let remote_epoch_changed = matches!(
+                                        (peer.remote_epoch(), remote_epoch),
+                                        (Some(old), Some(new)) if old != new
                                     );
-                                }
-
-                                debug!(
-                                    peer = %display_name,
-                                    our_addr = %self.identity().node_addr(),
-                                    new_our_index = %our_index,
-                                    new_their_index = %header.sender_idx,
-                                    "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
-                                );
-
-                                rekey_completed = true;
-                            } else {
-                                // msg3 send failed — abandon rekey
-                                if let Some(idx) = peer.abandon_rekey() {
-                                    if let Some(tid) = peer.transport_id() {
-                                        self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                    if remote_epoch.is_some() {
+                                        peer.set_remote_epoch(remote_epoch);
                                     }
-                                    let _ = self.index_allocator.free(idx);
+
+                                    // Send msg3 before setting pending session
+                                    let wire_msg3 =
+                                        build_msg3(our_index, header.sender_idx, &msg3_bytes);
+                                    let msg3_sent = if let (Some(tid), Some(addr)) =
+                                        (transport_id, &remote_addr)
+                                        && let Some(transport) = self.transports.get(&tid)
+                                    {
+                                        match transport.send(addr, &wire_msg3).await {
+                                            Ok(_) => {
+                                                debug!(
+                                                    peer = %display_name,
+                                                    "Sent rekey msg3"
+                                                );
+                                                true
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    peer = %display_name,
+                                                    error = %e,
+                                                    "Failed to send rekey msg3"
+                                                );
+                                                false
+                                            }
+                                        }
+                                    } else {
+                                        false
+                                    };
+
+                                    if msg3_sent {
+                                        peer.set_pending_session(
+                                            session,
+                                            our_index,
+                                            header.sender_idx,
+                                        );
+
+                                        // Retain msg3 for retransmission until the
+                                        // responder is confirmed on the new epoch.
+                                        // FMP sends msg3 exactly once otherwise; a
+                                        // lost datagram leaves the responder without
+                                        // the new session, so when the initiator cuts
+                                        // over its new-epoch frames silently miss at
+                                        // the peer → 30s link-dead. Mirrors FSP's
+                                        // resend_pending_session_msg3 liveness path.
+                                        peer.set_rekey_msg3_payload(
+                                            wire_msg3.clone(),
+                                            msg3_now_ms + msg3_resend_interval,
+                                        );
+
+                                        if let Some(tid) = transport_id {
+                                            self.peers_by_index
+                                                .insert((tid, our_index.as_u32()), peer_node_addr);
+                                        }
+
+                                        // Peer restart detected during this rekey:
+                                        // drop the stale FSP session-layer entry so the
+                                        // session map does not linger out of sync with
+                                        // the freshly rekeyed FMP link. Only after a
+                                        // successful msg3 send (the rekey actually
+                                        // completed); on a send failure the rekey is
+                                        // abandoned above and no teardown is warranted.
+                                        if remote_epoch_changed {
+                                            if self.sessions.remove(&peer_node_addr).is_some() {
+                                                debug!(
+                                                    peer = %display_name,
+                                                    "Cleared stale FSP session after peer restart during FMP rekey"
+                                                );
+                                            }
+                                            debug!(
+                                                peer = %display_name,
+                                                "Peer restart detected during FMP rekey, replacing stale endpoint session"
+                                            );
+                                        }
+
+                                        debug!(
+                                            peer = %display_name,
+                                            our_addr = %self.identity().node_addr(),
+                                            new_our_index = %our_index,
+                                            new_their_index = %header.sender_idx,
+                                            "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
+                                        );
+
+                                        rekey_completed = true;
+                                    } else {
+                                        // msg3 send failed — abandon rekey
+                                        if let Some(idx) = peer.abandon_rekey() {
+                                            if let Some(tid) = peer.transport_id() {
+                                                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                            }
+                                            let _ = self.index_allocator.free(idx);
+                                        }
+                                        self.stats_mut().record_reject(RejectReason::Handshake(
+                                            HandshakeReject::BadState,
+                                        ));
+                                    }
                                 }
-                                self.stats_mut().record_reject(RejectReason::Handshake(
-                                    HandshakeReject::BadState,
-                                ));
+                                RekeyMsg2Decision::Reject {
+                                    reason: RekeyMsg2Reject::StaticMismatch,
+                                } => {
+                                    // Not our peer: the freshly derived session
+                                    // is never installed (it falls out of
+                                    // scope here), this rekey cycle is
+                                    // abandoned, and the current session, its
+                                    // indices and its recorded epoch are left
+                                    // exactly as they were. No msg3 is sent,
+                                    // so the impostor learns nothing beyond
+                                    // what it already observed on the wire.
+                                    warn!(
+                                        peer = %display_name,
+                                        established = %peer_node_addr,
+                                        learned = %learned_peer,
+                                        "rekey-msg2 initiator: learned static is not the established peer, keeping current session"
+                                    );
+                                    if let Some(idx) = peer.abandon_rekey() {
+                                        if let Some(tid) = peer.transport_id() {
+                                            self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                        }
+                                        let _ = self.index_allocator.free(idx);
+                                    }
+                                    self.stats_mut().record_reject(RejectReason::Handshake(
+                                        HandshakeReject::BadState,
+                                    ));
+                                }
                             }
                         }
                         Err(e) => {
@@ -624,7 +683,7 @@ impl Node {
         }
 
         let our_profile = self.node_profile();
-        let (peer_identity, msg3_bytes, our_index) = {
+        let (peer_identity, dialed_identity, msg3_bytes, our_index) = {
             let Some(machine) = self.peer_machines.get_mut(&link_id) else {
                 warn!(link_id = %link_id, "Connection removed during msg2 processing");
                 self.pending_outbound.remove(&key);
@@ -698,9 +757,13 @@ impl Node {
                 }
             };
 
+            // The dial intent, read from the same carrier and untouched by the
+            // completion above. `None` on an anonymous shared-media leg.
+            let dialed_identity = machine.conn_dialed_identity().copied();
+
             let our_index = machine.our_index();
 
-            (peer_identity, msg3_bytes, our_index)
+            (peer_identity, dialed_identity, msg3_bytes, our_index)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
@@ -709,6 +772,69 @@ impl Node {
         // directly onto the surviving carrier by `complete_handshake` and
         // `process_fmp_negotiation` above, so last-activity advances at msg2
         // completion and the promotion hand-off reads the profile from it.
+
+        // Dial-identity gate. Under XX the responder's static arrives in msg2
+        // rather than being pinned at dial (as IK pinned it), so an on-path
+        // party that observes our msg1 and answers it first produces a
+        // perfectly valid handshake under its own static. Crypto success
+        // therefore proves only that someone answered — the core decides
+        // whether that someone is who we dialed. This sits ahead of every
+        // subsequent step, including the msg3 send, so a substituted responder
+        // never gets its handshake completed and nothing downstream ever sees
+        // its identity. Nothing outside the doomed machine has been mutated by
+        // the crypto above, which is why rejecting here needs only to dispose
+        // of the leg.
+        let dialed_peer = dialed_identity.map(|id| *id.node_addr());
+        let continuity = self.fmp.dial_outbound(&DialMsg2Snapshot {
+            dialed_peer,
+            learned_peer: peer_node_addr,
+        });
+        match continuity {
+            // The dial named nobody, or it named whoever answered: fall
+            // through to the ACL gate and promotion below, unchanged.
+            DialMsg2Decision::Accept => {}
+            DialMsg2Decision::Reject {
+                reason: DialMsg2Reject::StaticMismatch,
+            } => {
+                warn!(
+                    link_id = %link_id,
+                    dialed = ?dialed_peer,
+                    learned = %peer_node_addr,
+                    "msg2 answered by a different static than the one dialed, dropping the leg"
+                );
+                // Free everything this leg holds. `our_index` is the index WE
+                // allocated at msg1 preparation, read back off the machine —
+                // never the `receiver_idx` the msg2 header supplied, which an
+                // attacker chooses. Capture happened above, before the disposal
+                // that would make it unreadable.
+                self.pending_outbound.remove(&key);
+                self.remove_peer_machine(link_id);
+                self.remove_link(&link_id);
+                if let Some(idx) = our_index {
+                    let _ = self.index_allocator.free(idx);
+                }
+                // Put the dial back on the retry schedule. The disposal above
+                // takes the leg out of both reapers — its machine and its
+                // handshake timer are gone — so the stuck-leg sweep that
+                // normally reaches `note_handshake_timeout` never runs for it,
+                // and that reflex is the only thing that seeds `retry_pending`
+                // for a configured peer. Without this call a single rejected
+                // dial would retire the peer for the process lifetime: the
+                // configured-peer floor dials once at startup and every later
+                // dial comes off `retry_pending`.
+                //
+                // The reschedule targets `dialed_peer`, the dial-time
+                // expectation, NOT the machine's expected identity — the
+                // completion above already overwrote that with the answering
+                // static, so reading it here would re-dial the impostor.
+                if let Some(peer) = dialed_peer {
+                    self.note_handshake_timeout(peer, packet.timestamp_ms);
+                }
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                return;
+            }
+        }
 
         // ACL check: with XX, this is the first point where the initiator
         // knows the responder's identity.
@@ -733,13 +859,14 @@ impl Node {
 
         if peer_node_addr == *self.identity().node_addr() {
             // Reachable by any outbound leg whose msg2 static key turns out to
-            // be our own — usually an anonymous shared-media beacon, but an
-            // identified dial misdirected at ourselves lands here too (the
-            // learned identity overwrites the dial-time expectation and is
-            // never compared against it). This leg never promotes; its machine
-            // goes with it (dropping the embedded pending connection). The
-            // index, link, and `pending_outbound` entry are deliberately NOT
-            // freed here (pre-existing shape).
+            // be our own: an anonymous shared-media beacon that echoed us back
+            // at ourselves, or a dial that named our own identity and reached
+            // it. An identified dial that reached someone ELSE no longer
+            // arrives here — the dial-identity gate above catches it first,
+            // and only a dialed == learned == us leg gets this far. This leg
+            // never promotes; its machine goes with it (dropping the embedded
+            // pending connection). The index, link, and `pending_outbound`
+            // entry are deliberately NOT freed here (pre-existing shape).
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
             self.remove_peer_machine(link_id);
             self.stats_mut()

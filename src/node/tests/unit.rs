@@ -2582,7 +2582,11 @@ fn xx_handshake_records_each_learned_identity_on_the_carrier() {
     let responder_identity = PeerIdentity::from_pubkey_full(responder.pubkey_full());
 
     // The dial-time expectation is a third party: whoever actually answers
-    // overwrites it, and it is never compared against the learned key.
+    // overwrites it here. The dial intent is not lost with it — it lives on in
+    // the carrier's separate write-once `dialed_identity`, which `handle_msg2`
+    // holds the learned key up against before promoting. That comparison is the
+    // caller's; this crypto leaf performs the write regardless, which is what
+    // is asserted below.
     let decoy = PeerIdentity::from_pubkey_full(Identity::generate().pubkey_full());
     assert_ne!(decoy, responder_identity);
 
@@ -2608,6 +2612,17 @@ fn xx_handshake_records_each_learned_identity_on_the_carrier() {
         conn_i.conn_expected_identity(),
         Some(&responder_identity),
         "the identity learned from msg2 must be recorded on the surviving carrier"
+    );
+    assert_eq!(
+        conn_i.conn_dialed_identity(),
+        Some(&decoy),
+        "the dial intent must survive the msg2 write, or there is nothing left \
+         to compare the learned identity against"
+    );
+    assert_eq!(
+        conn_r.conn_dialed_identity(),
+        None,
+        "an inbound leg dialed nobody"
     );
 
     conn_r.complete_handshake_msg3(&noise_msg3, 1300).unwrap();

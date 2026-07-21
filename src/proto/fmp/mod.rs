@@ -14,7 +14,10 @@
 //!
 //! - `core.rs` — the [`LifecycleView`] read-seam trait, the [`ConnAction`]
 //!   effect vocabulary, the snapshot types, the [`InboundDecision`] establish
-//!   classification, the pure `poll_*`/`establish_inbound` decisions, the
+//!   classification, the [`RekeyMsg2Decision`] initiator-side rekey `msg2`
+//!   static-continuity classification, the [`DialMsg2Decision`]
+//!   initiator-side initial `msg2` dial-identity classification, the pure
+//!   `poll_*`/`establish_inbound`/`rekey_outbound`/`dial_outbound` decisions, the
 //!   [`cross_connection_winner`] tie-break helper, and the FMP negotiation
 //!   decision logic (version agreement, profile validation).
 //! - `limits.rs` — the pure connection-retry backoff math.
@@ -38,9 +41,10 @@ pub(crate) mod wire;
 mod tests;
 
 pub(crate) use core::{
-    ConnAction, ConnSnapshot, EstablishSnapshot, InboundDecision, InboundReject, LifecycleView,
-    OutboundDecision, OutboundSnapshot, PeerSnapshot, RekeyCfg, RekeyResendSnapshot, WireOutcome,
-    decide_fmp_negotiation,
+    ConnAction, ConnSnapshot, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot,
+    EstablishSnapshot, InboundDecision, InboundReject, LifecycleView, OutboundDecision,
+    OutboundSnapshot, PeerSnapshot, RekeyCfg, RekeyMsg2Decision, RekeyMsg2Reject,
+    RekeyMsg2Snapshot, RekeyResendSnapshot, WireOutcome, decide_fmp_negotiation,
 };
 pub use core::{PromotionResult, cross_connection_winner};
 pub(crate) use limits::backoff_ms;

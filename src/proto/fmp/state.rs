@@ -52,6 +52,23 @@ pub struct ConnectionState {
     /// Updated after receiving their static key in the handshake.
     expected_identity: Option<PeerIdentity>,
 
+    /// The identity this leg was *dialed at*, fixed at construction and never
+    /// written again — `Some` only for an identified outbound dial (a
+    /// configured peer, an mDNS/rendezvous npub, or discovery that carried a
+    /// `pubkey_hint`), `None` for an anonymous shared-media dial and for every
+    /// inbound leg.
+    ///
+    /// This is deliberately *not* [`expected_identity`](Self::expected_identity).
+    /// That field carries a different fact — *who answered* — and under XX the
+    /// answer arrives late (msg2 for the initiator, msg3 for the responder) and
+    /// must overwrite whatever was there, because on an anonymous leg it is the
+    /// only way the carrier ever acquires an identity at all. Holding both facts
+    /// in one field meant the second silently destroyed the first, leaving
+    /// nothing for the initiator to check the answer against. Keeping the dial
+    /// intent in its own write-once field is what makes the check possible; see
+    /// [`Fmp::dial_outbound`](super::core::Fmp::dial_outbound).
+    dialed_identity: Option<PeerIdentity>,
+
     // === Timing ===
     /// When the connection attempt started (Unix milliseconds).
     started_at: u64,
@@ -112,6 +129,7 @@ impl ConnectionState {
             link_id,
             direction: LinkDirection::Outbound,
             expected_identity: Some(expected_identity),
+            dialed_identity: Some(expected_identity),
             started_at: current_time_ms,
             last_activity: current_time_ms,
             link_stats: LinkStats::new(),
@@ -138,6 +156,7 @@ impl ConnectionState {
             link_id,
             direction: LinkDirection::Outbound,
             expected_identity: None,
+            dialed_identity: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
             link_stats: LinkStats::new(),
@@ -162,6 +181,7 @@ impl ConnectionState {
             link_id,
             direction: LinkDirection::Inbound,
             expected_identity: None,
+            dialed_identity: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
             link_stats: LinkStats::new(),
@@ -191,6 +211,7 @@ impl ConnectionState {
             link_id,
             direction: LinkDirection::Inbound,
             expected_identity: None,
+            dialed_identity: None,
             started_at: current_time_ms,
             last_activity: current_time_ms,
             link_stats: LinkStats::new(),
@@ -221,6 +242,16 @@ impl ConnectionState {
     /// Get the expected/learned peer identity, if known.
     pub fn expected_identity(&self) -> Option<&PeerIdentity> {
         self.expected_identity.as_ref()
+    }
+
+    /// Get the identity this leg was dialed at, if it was an identified dial.
+    ///
+    /// Decided locally at construction and never from the wire, so no peer can
+    /// steer an identified dial into reporting `None` here. There is no setter
+    /// by design — the whole point of the field is that the handshake cannot
+    /// move it.
+    pub fn dialed_identity(&self) -> Option<&PeerIdentity> {
+        self.dialed_identity.as_ref()
     }
 
     /// Check if this is an outbound connection.

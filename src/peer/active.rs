@@ -19,9 +19,16 @@ use std::fmt;
 use std::time::Instant;
 
 /// Result of completing a rekey msg2 on the initiator (XX pattern):
-/// the XX msg3 bytes to send, the completed Noise session, and the remote
-/// peer's startup epoch (for peer-restart detection).
-type RekeyMsg2Completion = (Vec<u8>, NoiseSession, Option<[u8; 8]>);
+/// the XX msg3 bytes to send, the completed Noise session, the remote
+/// peer's startup epoch (for peer-restart detection), and the node address
+/// derived from the static key the returned session is bound to.
+///
+/// XX transmits the responder's static in msg2 rather than pinning it a priori
+/// (as IK did), so the learned identity is surfaced here for the caller's
+/// static-continuity decision: a cryptographically valid handshake alone does
+/// not establish that the rekey was answered by the peer already holding the
+/// link.
+type RekeyMsg2Completion = (Vec<u8>, NoiseSession, Option<[u8; 8]>, NodeAddr);
 
 /// Draw a fresh per-session rekey jitter from `[-REKEY_JITTER_SECS, +REKEY_JITTER_SECS]`.
 fn draw_rekey_jitter() -> i64 {
@@ -1268,11 +1275,17 @@ impl ActivePeer {
 
     /// Complete the rekey by processing msg2 (initiator side, XX pattern).
     ///
-    /// Takes the stored handshake state, reads XX msg2, generates XX msg3,
-    /// and returns (msg3_bytes, completed NoiseSession, remote startup epoch).
-    /// Clears the handshake-related fields but leaves rekey_our_index for
-    /// set_pending_session to use. The remote epoch is surfaced so the caller
-    /// can detect a peer restart (changed epoch) during recovery rekey.
+    /// Takes the stored handshake state, reads XX msg2, generates XX msg3, and
+    /// returns (msg3_bytes, completed NoiseSession, remote startup epoch,
+    /// learned peer node address). Clears the handshake-related fields but
+    /// leaves rekey_our_index for set_pending_session to use. The remote epoch
+    /// is surfaced so the caller can detect a peer restart (changed epoch)
+    /// during recovery rekey; the learned node address is surfaced so the
+    /// caller can gate the install on static-key continuity.
+    ///
+    /// Completing the handshake here is deliberately identity-agnostic: this
+    /// is the crypto leaf, and whether the learned identity may replace the
+    /// peer's session is a decision, taken by the caller against the FMP core.
     pub fn complete_rekey_msg2(
         &mut self,
         msg2_bytes: &[u8],
@@ -1308,12 +1321,17 @@ impl ActivePeer {
         let msg3 = hs.write_message_3()?;
         let session = hs.into_session()?;
 
+        // Derive the learned identity from the session rather than the consumed
+        // handshake so the address returned is provably the one the session
+        // about to be installed is bound to.
+        let learned_peer = NodeAddr::from_pubkey(&session.remote_static_xonly());
+
         // Clear msg1 resend state
         self.rekey_msg1 = None;
         self.rekey_msg1_next_resend = 0;
         self.rekey_msg1_resend_count = 0;
 
-        Ok((msg3, session, remote_epoch))
+        Ok((msg3, session, remote_epoch, learned_peer))
     }
 
     /// Complete the rekey by processing msg3 (responder side, XX pattern).
