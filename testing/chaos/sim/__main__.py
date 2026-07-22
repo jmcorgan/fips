@@ -60,6 +60,11 @@ def main():
     runner = SimRunner(scenario)
     result = runner.run()
 
+    # Liveness before content. A simulation that raised on its way up, or part
+    # way through, has no panic count or assertion outcome worth reporting, and
+    # saying so is more useful than whatever partial content it did produce.
+    if runner.aborted:
+        sys.exit(4)
     if result and result.panics:
         sys.exit(2)
     if runner.assertions_failed:

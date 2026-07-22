@@ -47,7 +47,7 @@ services:
 {% for node in nodes %}
   {{ node.node_id }}:
     <<: *fips-common
-    container_name: fips-node-{{ node.node_id }}
+    container_name: {{ topology.container_name(node.node_id) }}
     hostname: {{ node.node_id }}
     volumes:
       - ./{{ node.node_id }}.yaml:/etc/fips/fips.yaml:ro
@@ -82,6 +82,7 @@ def generate_compose(
         image=FIPS_SIM_IMAGE,
         nodes=nodes,
         resolv_conf=resolv_conf,
+        topology=topology,
     )
 
     path = os.path.join(output_dir, "docker-compose.yml")

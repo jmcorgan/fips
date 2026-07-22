@@ -257,12 +257,51 @@ since they use beacon discovery.
 Results written to `sim-results/` (configurable via
 `logging.output_dir`):
 
+- `status.txt` -- How the run ended, plus the scenario, the seed and the
+  container names it used; one `key=value` per line
 - `analysis.txt` -- Summary: panics, errors, sessions, metrics
 - `metadata.txt` -- Seed, node count, edges, adjacency list
 - `runner.log` -- Orchestration events (topology, netem, churn, traffic) with timestamps
 - `fips-node-nXX.log` -- Per-node log output
 
-Exit code 0 on success, 2 if panics detected.
+The `status` field reads:
+
+- `completed` -- ran for its configured duration
+- `interrupted` -- a signal cut the run short, so the artifacts are real
+  but describe less time than the scenario asked for
+- `aborted` -- the run raised part way through; same caveat, and
+  `runner.log` carries the traceback
+- `setup-failed` -- the containers never started
+- `teardown-failed` -- the mesh ran but its logs or analysis could not be
+  produced
+
+A `setup-failed` directory holds `runner.log` and `status.txt` and nothing
+else. Nothing is harvested, because container names are global to the host
+and reading them after a failed setup describes whichever run holds them
+now. So `analysis.txt` in a result directory is proof that this scenario's
+own mesh existed. A directory with no `status.txt` was written before this
+was the case and says nothing either way.
+
+Exit codes:
+
+- `0` -- Ran to completion, no panics, every assertion passed
+- `1` -- The scenario file could not be loaded, or a second interrupt
+  arrived while the first was being handled
+- `2` -- Panics found in the collected node logs. Also what the argument
+  parser exits with when it rejects the command line, before any run starts
+- `3` -- A post-run assertion failed
+- `4` -- Setup, warmup, the simulation loop or teardown raised, so the run
+  did not complete; `runner.log` carries the traceback
+
+Codes 2 and 3 describe what a mesh that ran did. Code 4 says there is
+nothing to describe, and takes precedence over both. Code 2 is dual-use:
+a run that never started cannot have panicked, so read it together with
+whether `runner.log` exists.
+
+A run stopped by a signal exits on this same ladder rather than one of its
+own: what it collected before stopping is still worth reporting, and
+`status.txt` says it was cut short. `chaos.sh` reports 130 for a Ctrl-C of
+its own accord.
 
 ## Creating Custom Scenarios
 
