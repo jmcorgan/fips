@@ -40,22 +40,116 @@ async fn test_forwarding_hop_limit_exhausted() {
     node.handle_session_datagram(&from, &encoded[1..], false)
         .await;
     // No panic, no send (node has no peers)
+    let fwd = &node.metrics().forwarding;
+    assert_eq!(
+        fwd.ttl_exhausted_packets.get(),
+        1,
+        "transit ttl=0 should be charged to TtlExhausted"
+    );
+    assert_eq!(
+        fwd.drop_no_route_packets.get(),
+        0,
+        "transit ttl=0 should never reach the routing step"
+    );
 }
 
 #[tokio::test]
-async fn test_forwarding_hop_limit_one_drops_at_transit() {
-    // ttl=1 means after decrement it becomes 0 — the datagram can
-    // still be delivered this hop but would be dropped at the next.
-    // decrement_ttl returns true (1 > 0), so the handler proceeds.
+async fn test_forwarding_ttl_one_local_delivery_is_not_gated() {
+    // dest == self, so this is local delivery, not transit: the TTL gate
+    // does not apply and the datagram is handed to the session layer.
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     let my_addr = *node.node_addr();
     let src = make_node_addr(0x01);
     let dg = SessionDatagram::new(src, my_addr, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(1);
     let encoded = dg.encode();
-    // Should succeed — ttl=1 decrements to 0 but packet is still processed
     node.handle_session_datagram(&from, &encoded[1..], false)
         .await;
+    let fwd = &node.metrics().forwarding;
+    assert_eq!(fwd.delivered_packets.get(), 1, "ttl=1 should be delivered");
+    assert_eq!(fwd.ttl_exhausted_packets.get(), 0);
+}
+
+/// Acceptance: a datagram addressed to this node with ttl=0 is delivered
+/// locally. The TTL governs forwarding, not delivery to the addressed host,
+/// so the gate must sit after the local-delivery test — and the
+/// `TtlExhausted` reject must not be charged for a delivered datagram.
+#[tokio::test]
+async fn test_forwarding_ttl_zero_local_delivery_is_not_gated() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let my_addr = *node.node_addr();
+    let src = make_node_addr(0x01);
+    let dg = SessionDatagram::new(src, my_addr, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(0);
+    let encoded = dg.encode();
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
+    let fwd = &node.metrics().forwarding;
+    assert_eq!(
+        fwd.delivered_packets.get(),
+        1,
+        "ttl=0 addressed to this node must still be delivered locally"
+    );
+    assert_eq!(
+        fwd.ttl_exhausted_packets.get(),
+        0,
+        "local delivery must not be charged to the TtlExhausted reject"
+    );
+    assert_eq!(fwd.drop_no_route_packets.get(), 0);
+}
+
+/// Acceptance: a transit datagram arriving with ttl=1 would leave with ttl=0,
+/// so it is dropped here rather than transmitted. Reaching the routing step at
+/// all (`drop_no_route`) would mean it had been handed to the forwarder.
+#[tokio::test]
+async fn test_forwarding_ttl_one_transit_dropped_before_routing() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let src = make_node_addr(0x01);
+    let dest = make_node_addr(0x02);
+    let dg = SessionDatagram::new(src, dest, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(1);
+    let encoded = dg.encode();
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
+    let fwd = &node.metrics().forwarding;
+    assert_eq!(
+        fwd.ttl_exhausted_packets.get(),
+        1,
+        "transit ttl=1 must be dropped as TTL-exhausted, not forwarded"
+    );
+    assert_eq!(
+        fwd.drop_no_route_packets.get(),
+        0,
+        "transit ttl=1 must not reach the routing step"
+    );
+    assert_eq!(fwd.forwarded_packets.get(), 0);
+    assert_eq!(fwd.delivered_packets.get(), 0);
+}
+
+/// The other side of the same boundary: ttl=2 clears the gate. This node has
+/// no peers, so it fails at the routing step instead — which is the evidence
+/// that the TTL gate passed it through.
+#[tokio::test]
+async fn test_forwarding_ttl_two_transit_clears_the_gate() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let src = make_node_addr(0x01);
+    let dest = make_node_addr(0x02);
+    let dg = SessionDatagram::new(src, dest, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(2);
+    let encoded = dg.encode();
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
+    let fwd = &node.metrics().forwarding;
+    assert_eq!(
+        fwd.ttl_exhausted_packets.get(),
+        0,
+        "transit ttl=2 must clear the TTL gate"
+    );
+    assert_eq!(
+        fwd.drop_no_route_packets.get(),
+        1,
+        "transit ttl=2 should have reached the routing step and found no route"
+    );
 }
 
 // --- Local delivery ---
@@ -392,9 +486,9 @@ async fn test_forwarding_multi_hop() {
 #[tokio::test]
 async fn test_forwarding_hop_limit_prevents_infinite_loops() {
     // 3-node chain: 0 -- 1 -- 2
-    // Send a datagram with ttl=1. It should be forwarded by node 1
-    // (decrement to 0) and delivered at node 2 (local delivery). If node 2
-    // tried to forward further, the 0 ttl would prevent it.
+    // Send a datagram with ttl=2. Node 1 forwards it as transit (2 -> 1) and
+    // node 2 delivers it locally, which is not TTL-gated. Had node 2 been
+    // transit instead, the arriving ttl=1 would have stopped it there.
     let edges = vec![(0, 1), (1, 2)];
     let mut nodes = run_tree_test(3, &edges, false).await;
     verify_tree_convergence(&nodes);
@@ -409,7 +503,7 @@ async fn test_forwarding_hop_limit_prevents_infinite_loops() {
         node2_addr,
         vec![0x10, 0x00, 0x04, 0x00, 1, 2, 3, 4],
     )
-    .with_ttl(2); // Enough for 0->1 (decrement to 1) and 1->2 (decrement to 0, local delivery)
+    .with_ttl(2); // Node 1 forwards with ttl=1; node 2 is the destination
 
     let encoded = dg.encode();
 
@@ -425,6 +519,115 @@ async fn test_forwarding_hop_limit_prevents_infinite_loops() {
     }
 
     // No panic, no infinite loop
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Acceptance: a transit datagram arriving with ttl=2 leaves with ttl=1.
+///
+/// Pinned on a live 3-node chain (0 -- 1 -- 2) by where the datagram stops,
+/// since the TTL that leaves node 0 is only observable through what the next
+/// hop does with it. Both injections are transit at node 0 (external source,
+/// destined for node 2), so node 1 is a forwarder in both.
+///
+/// - ttl=2 in: node 0 must emit ttl=1, which node 1 (transit) drops. If node 0
+///   emitted ttl=2 unchanged, node 1 would forward and node 2 would deliver.
+/// - ttl=3 in: node 0 emits 2, node 1 emits 1, node 2 delivers (delivery is
+///   not TTL-gated). If either hop decremented by more than one, the datagram
+///   would have died at node 1 instead.
+///
+/// Together the two pin the decrement at exactly one per hop and the drop at
+/// would-leave-zero.
+#[tokio::test]
+async fn test_forwarding_ttl_decrement_is_one_per_hop() {
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test(3, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node2_addr = *nodes[2].node.node_addr();
+    let external_src = make_node_addr(0xEE);
+
+    // --- ttl=2: must die at node 1, one hop short of the destination ---
+    let dg =
+        SessionDatagram::new(external_src, node2_addr, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(2);
+    let encoded = dg.encode();
+    nodes[0]
+        .node
+        .handle_session_datagram(&node0_addr, &encoded[1..], false)
+        .await;
+
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    assert_eq!(
+        nodes[0].node.metrics().forwarding.forwarded_packets.get(),
+        1,
+        "node 0 should have forwarded the ttl=2 datagram"
+    );
+    assert_eq!(
+        nodes[1]
+            .node
+            .metrics()
+            .forwarding
+            .ttl_exhausted_packets
+            .get(),
+        1,
+        "node 1 should have received ttl=1 and dropped it as TTL-exhausted"
+    );
+    assert_eq!(
+        nodes[1].node.metrics().forwarding.forwarded_packets.get(),
+        0,
+        "node 1 must not forward a datagram that would leave with ttl=0"
+    );
+    assert_eq!(
+        nodes[2].node.metrics().forwarding.delivered_packets.get(),
+        0,
+        "node 2 must never see the ttl=2 datagram"
+    );
+
+    // --- ttl=3: must survive both transit hops and be delivered at node 2 ---
+    let dg =
+        SessionDatagram::new(external_src, node2_addr, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(3);
+    let encoded = dg.encode();
+    nodes[0]
+        .node
+        .handle_session_datagram(&node0_addr, &encoded[1..], false)
+        .await;
+
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    assert_eq!(
+        nodes[0].node.metrics().forwarding.forwarded_packets.get(),
+        2,
+        "node 0 should have forwarded the ttl=3 datagram too"
+    );
+    assert_eq!(
+        nodes[1].node.metrics().forwarding.forwarded_packets.get(),
+        1,
+        "node 1 should have forwarded the ttl=2 it received"
+    );
+    assert_eq!(
+        nodes[1]
+            .node
+            .metrics()
+            .forwarding
+            .ttl_exhausted_packets
+            .get(),
+        1,
+        "node 1 should not have dropped the second datagram"
+    );
+    assert_eq!(
+        nodes[2].node.metrics().forwarding.delivered_packets.get(),
+        1,
+        "node 2 should have delivered the datagram that arrived with ttl=1"
+    );
+
     cleanup_nodes(&mut nodes).await;
 }
 

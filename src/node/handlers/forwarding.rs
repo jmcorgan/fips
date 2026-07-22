@@ -1,9 +1,10 @@
 //! SessionDatagram forwarding handler.
 //!
 //! Handles incoming SessionDatagram (0x00) link messages: decodes the
-//! envelope, enforces hop limits, performs coordinate cache warming from
-//! plaintext session-layer headers, routes to the next hop or delivers
-//! locally, and generates error signals on routing failure.
+//! envelope, performs coordinate cache warming from plaintext session-layer
+//! headers, delivers locally when the datagram is addressed to this node,
+//! otherwise enforces the transit hop limit and routes to the next hop, and
+//! generates error signals on routing failure.
 
 use crate::NodeAddr;
 use crate::node::reject::ForwardingReject;
@@ -43,26 +44,16 @@ impl Node {
             }
         };
 
-        // TTL enforcement: decrement for forwarding and drop only if the
-        // received datagram was already exhausted.
-        if datagram_ref.ttl == 0 {
-            self.metrics()
-                .forwarding
-                .record_reject_bytes(ForwardingReject::TtlExhausted, payload.len());
-            debug!(
-                src = %datagram_ref.src_addr,
-                dest = %datagram_ref.dest_addr,
-                "SessionDatagram TTL exhausted, dropping"
-            );
-            return;
-        }
-        let forwarded_ttl = datagram_ref.ttl - 1;
-
-        // Coordinate cache warming from plaintext session-layer headers
+        // Coordinate cache warming from plaintext session-layer headers.
+        // Runs ahead of both the delivery and the TTL decisions: the coords
+        // a peer put on the wire are equally valid whichever way those go.
         self.try_warm_coord_cache_ref(&datagram_ref);
 
         // Local delivery: dispatch to session layer handlers without
-        // materializing an owned SessionDatagram payload Vec.
+        // materializing an owned SessionDatagram payload Vec. Delivery to
+        // the addressed node is *not* TTL-gated — under IP semantics the
+        // TTL governs forwarding, not delivery to the addressed host — so
+        // this test precedes the TTL gate below.
         if datagram_ref.dest_addr == *self.node_addr() {
             self.metrics().forwarding.record_delivered(payload.len());
             self.handle_session_payload(
@@ -72,6 +63,24 @@ impl Node {
                 incoming_ce,
             )
             .await;
+            return;
+        }
+
+        // TTL enforcement on the transit path: decrement first, then drop if
+        // the datagram would leave with a TTL of zero. `saturating_sub` folds
+        // the already-exhausted arrival (ttl=0) into the same test as the
+        // last-hop arrival (ttl=1); neither is transmitted.
+        let forwarded_ttl = datagram_ref.ttl.saturating_sub(1);
+        if forwarded_ttl == 0 {
+            self.metrics()
+                .forwarding
+                .record_reject_bytes(ForwardingReject::TtlExhausted, payload.len());
+            debug!(
+                src = %datagram_ref.src_addr,
+                dest = %datagram_ref.dest_addr,
+                ttl = datagram_ref.ttl,
+                "SessionDatagram TTL exhausted, dropping"
+            );
             return;
         }
 
