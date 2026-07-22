@@ -64,7 +64,10 @@ pub(crate) struct NextHop {
 
 /// Why a datagram was dropped without forwarding or delivering.
 pub(crate) enum DropReason {
-    /// Received TTL was already exhausted (0) — cannot decrement further.
+    /// The datagram would leave this node with a TTL of zero, so it is not
+    /// transmittable. Covers both the already-exhausted arrival (ttl=0) and
+    /// the last-hop arrival (ttl=1). Transit only: delivery to the addressed
+    /// node is never TTL-gated.
     TtlExhausted,
 }
 
@@ -100,14 +103,20 @@ pub(crate) enum RouteAction {
 }
 
 impl Router {
-    /// Decide the fate of an inbound SessionDatagram: drop (TTL), local
-    /// delivery, transit forward, or no-route. Pure over the datagram, the
+    /// Decide the fate of an inbound SessionDatagram: local delivery, drop
+    /// (TTL), transit forward, or no-route. Pure over the datagram, the
     /// shell-resolved next hop, and the [`RoutingView`] reads.
     ///
-    /// The shell pre-resolves `next_hop` only for genuine transit packets
-    /// (TTL > 0 and dest not local), so `find_next_hop`'s LRU-touch side
-    /// effect keeps the same scope it has today. `route` still re-checks TTL
-    /// and local delivery authoritatively.
+    /// Follows IP hop-limit semantics: the TTL governs forwarding, not
+    /// delivery to the addressed host, so the local-delivery test precedes
+    /// the TTL gate; and the decrement precedes the drop decision, so a
+    /// datagram that would leave with a TTL of zero is not transmitted.
+    ///
+    /// The shell pre-resolves `next_hop` only for datagrams this can actually
+    /// forward (dest not local and TTL surviving the decrement), so
+    /// `find_next_hop`'s LRU-touch side effect stays scoped to genuine
+    /// forwards. `route` still re-checks local delivery and the TTL
+    /// authoritatively.
     pub(crate) fn route(
         &mut self,
         dg: &SessionDatagramRef<'_>,
@@ -116,14 +125,24 @@ impl Router {
         next_hop: Option<NextHop>,
         rv: &impl RoutingView,
     ) -> RouteOutcome {
-        if dg.ttl == 0 {
+        // Delivery to the addressed node is *not* TTL-gated — under IP
+        // semantics the TTL governs forwarding, not delivery to the addressed
+        // host — so this test precedes the TTL gate below.
+        if dg.dest_addr == *my_addr {
+            return RouteOutcome::DeliverLocal;
+        }
+
+        // TTL enforcement on the transit path: decrement first, then drop if
+        // the datagram would leave with a TTL of zero. `saturating_sub` folds
+        // the already-exhausted arrival (ttl=0) into the same test as the
+        // last-hop arrival (ttl=1); neither is transmitted.
+        let forwarded_ttl = dg.ttl.saturating_sub(1);
+        if forwarded_ttl == 0 {
             return RouteOutcome::Drop {
                 reason: DropReason::TtlExhausted,
             };
         }
-        if dg.dest_addr == *my_addr {
-            return RouteOutcome::DeliverLocal;
-        }
+
         let nh = match next_hop {
             Some(nh) => nh,
             None => return RouteOutcome::NoRoute,
@@ -133,7 +152,7 @@ impl Router {
         // the outgoing link. This is the single owned copy + encode the shell
         // performed inline today.
         let mut datagram = SessionDatagram::new(dg.src_addr, dg.dest_addr, dg.payload.to_vec());
-        datagram.ttl = dg.ttl - 1;
+        datagram.ttl = forwarded_ttl;
         datagram.path_mtu = dg.path_mtu.min(nh.link_mtu);
         let outgoing_ce = incoming_ce || rv.is_congested(&nh.addr);
         let bytes = datagram.encode();

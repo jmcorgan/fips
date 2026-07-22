@@ -6,7 +6,7 @@
 //!
 //! - `core.rs` — the `RoutingView` read-seam trait, the `NextHop` /
 //!   `RouteOutcome` types, `Router::route`, the pure transit-forward
-//!   decision (TTL, local-vs-forward, path-MTU min-fold, ECN CE), and the
+//!   decision (local-vs-forward, transit TTL, path-MTU min-fold, ECN CE), and the
 //!   pure candidate assembly + hop-selection / route-classification helpers
 //!   (`Candidate`, `RouteClass`, `routing_candidates`, `select_best_candidate`,
 //!   `classify_forward`). The assembly reads raw per-peer data through the

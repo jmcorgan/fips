@@ -1,9 +1,11 @@
 //! SessionDatagram forwarding handler.
 //!
 //! Handles incoming SessionDatagram (0x00) link messages: decodes the
-//! envelope, enforces hop limits, performs coordinate cache warming from
-//! plaintext session-layer headers, routes to the next hop or delivers
-//! locally, and generates error signals on routing failure.
+//! envelope, performs coordinate cache warming from plaintext session-layer
+//! headers, pre-resolves the next hop for forwardable transit datagrams, and
+//! drives the routing core's outcome — local delivery when the datagram is
+//! addressed to this node, the transit hop-limit drop, the forward, or the
+//! error signal generated on routing failure.
 
 use crate::NodeAddr;
 use crate::node::reject::ForwardingReject;
@@ -44,19 +46,21 @@ impl Node {
 
         let my_addr = *self.node_addr();
 
-        // Coordinate cache warming from plaintext session-layer headers. Gated
-        // on a non-exhausted TTL so a datagram the core will drop as
-        // TTL-exhausted does not warm the cache, matching the pre-refactor
-        // ordering (warming ran only after the TTL early-return).
-        if datagram_ref.ttl != 0 {
-            self.try_warm_coord_cache_ref(&datagram_ref);
-        }
+        // Coordinate cache warming from plaintext session-layer headers. Runs
+        // ahead of both the delivery and the TTL decisions the core makes: the
+        // coords a peer put on the wire are equally valid whichever way those
+        // go, and the only arrivals this newly warms from are those with an
+        // exhausted TTL, whose every insert is already achievable at TTL 1.
+        self.try_warm_coord_cache_ref(&datagram_ref);
 
-        // Pre-resolve the next hop only for genuine transit packets (TTL > 0
-        // and not locally destined) so `find_next_hop`'s coord-cache LRU-touch
-        // side effect keeps the same scope it had inline. Warming above has
-        // already run, so the resolution observes freshly cached coords.
-        let next_hop = if datagram_ref.ttl != 0 && datagram_ref.dest_addr != my_addr {
+        // Pre-resolve the next hop only for datagrams the core can actually
+        // forward: not locally destined, and carrying a TTL that survives the
+        // decrement (`ttl > 1` — the shell-side mirror of the core's
+        // would-leave-zero drop). This keeps `find_next_hop`'s coord-cache
+        // LRU-touch side effect scoped to genuine forwards, as it was when the
+        // TTL test ran inline ahead of it. Warming above has already run, so
+        // the resolution observes freshly cached coords.
+        let next_hop = if datagram_ref.dest_addr != my_addr && datagram_ref.ttl > 1 {
             self.resolve_next_hop(&datagram_ref.dest_addr)
         } else {
             None
@@ -93,6 +97,7 @@ impl Node {
                 debug!(
                     src = %datagram_ref.src_addr,
                     dest = %datagram_ref.dest_addr,
+                    ttl = datagram_ref.ttl,
                     "SessionDatagram TTL exhausted, dropping"
                 );
             }
