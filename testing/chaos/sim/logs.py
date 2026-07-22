@@ -29,9 +29,18 @@ __all__ = ["AnalysisResult", "analyze_logs", "collect_logs", "write_sim_metadata
 
 
 def collect_logs(container_names: list[str], output_dir: str) -> dict[str, str]:
-    """Collect all output (stdout + stderr) from all containers."""
+    """Collect all output (stdout + stderr) from all containers.
+
+    Raises RuntimeError if any container's output could not be read, or if
+    there was nothing to read. `docker logs` writes its own failures to
+    stderr and exits non-zero, so without the returncode check the daemon's
+    "No such container" reply was stored as though it were the node's log
+    and analysed as a mesh with no panics, no errors and no sessions --
+    which reads exactly like a clean run.
+    """
     os.makedirs(output_dir, exist_ok=True)
     logs = {}
+    failed = []
 
     for name in container_names:
         try:
@@ -41,17 +50,35 @@ def collect_logs(container_names: list[str], output_dir: str) -> dict[str, str]:
                 text=True,
                 timeout=30,
             )
-            raw = result.stdout + result.stderr
-            log_text = strip_ansi(raw)
-            logs[name] = log_text
-
-            path = os.path.join(output_dir, f"{name}.log")
-            with open(path, "w") as f:
-                f.write(log_text)
-
-        except (subprocess.TimeoutExpired, Exception) as e:
+        except Exception as e:
             log.warning("Failed to collect logs from %s: %s", name, e)
-            logs[name] = ""
+            failed.append(name)
+            continue
+
+        if result.returncode != 0:
+            log.warning(
+                "docker logs %s exited %d: %s",
+                name, result.returncode, result.stderr.strip(),
+            )
+            failed.append(name)
+            continue
+
+        # A container's own stderr comes back on our stderr, so both
+        # streams are log content on the success path.
+        log_text = strip_ansi(result.stdout + result.stderr)
+        logs[name] = log_text
+
+        path = os.path.join(output_dir, f"{name}.log")
+        with open(path, "w") as f:
+            f.write(log_text)
+
+    if failed:
+        raise RuntimeError(
+            f"could not collect logs from {len(failed)}/{len(container_names)} "
+            f"containers: {', '.join(failed)}"
+        )
+    if not logs:
+        raise RuntimeError("no container logs were collected")
 
     return logs
 

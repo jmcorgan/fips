@@ -14,9 +14,14 @@
 #   --list               List available integration suites
 #   --check-parity       Verify this suite set matches ci.yml's integration
 #                        matrix (see testing/check-ci-parity.sh), then exit
-#   --reap               Force-remove all leftover FIPS CI docker resources
+#   --reap               Force-remove all leftover FIPS CI resources
 #                        (containers/networks/volumes carrying the CI label or a
-#                        fipsci_ compose project), then exit. See ci-cleanup.sh.
+#                        fipsci_ compose project, plus every chaos-simulation
+#                        host veth interface), then exit. See ci-cleanup.sh.
+#                        Host interfaces carry no label, so they are matched by
+#                        name shape: this reaps a bare chaos.sh run's live
+#                        interfaces too, though not its containers. Don't run
+#                        it while a bare simulation is up.
 #   -h, --help           Show this help
 #
 # Integration suites (default coverage):
@@ -271,11 +276,24 @@ export FIPS_TEST_APP_IMAGE="$CI_IMAGE_APP"
 # container by name. Empty when unset, so a bare `docker compose up` outside
 # this harness still produces today's plain names.
 export FIPS_CI_NAME_SUFFIX="-${CI_RUN_ID}"
+# run_chaos narrows that export to one scenario, and bash scopes a `local`
+# dynamically: a function called while run_chaos is on the stack — the signal
+# trap, on the `--only chaos-*` path where run_chaos is not a subshell — reads
+# the narrowed value, not this one. Snapshot the run-wide value so the rebuild
+# below always sees it, and make it readonly so no scope can shadow it either.
+CI_RUN_NAME_SUFFIX="$FIPS_CI_NAME_SUFFIX"
+readonly CI_RUN_NAME_SUFFIX
 
 # Per-suite compose project name: ${prefix}_<suite-or-compose-basename>. Keeps
 # today's intra-run distinctness (one project per compose file / chaos child)
 # while adding the cross-run prefix that scopes the reap.
 ci_project() { printf '%s_%s' "$CI_PROJECT_PREFIX" "$1"; }
+
+# The name suffix one chaos scenario runs under. Its container names, its
+# generated-config directory and the token in its host veth names all derive
+# from this, so teardown recomputes it to know which interfaces are ours. Reads
+# the snapshot rather than the export for the reason given above.
+ci_chaos_suffix() { printf -- '-%s%s' "$1" "$CI_RUN_NAME_SUFFIX"; }
 
 # PIDs of in-flight parallel chaos children (subshells). The trap signals these.
 CI_CHAOS_PIDS=()
@@ -301,13 +319,25 @@ ci_teardown() {
     fi
 
     # 2. Remove all compose projects + direct-run resources + per-run images
-    #    for this run. ci-cleanup.sh wraps each docker op in `timeout`; bound
-    #    the whole sweep too so the trap can never wedge.
+    #    for this run, plus any host veth interface a chaos scenario was
+    #    killed part-way through creating. Host interfaces carry no docker
+    #    label, so hand over the suffixes this run's scenarios used and let
+    #    the reap derive their names — a blind sweep would take a concurrent
+    #    run's live interfaces with it. ci-cleanup.sh wraps each docker op in
+    #    `timeout`; bound the whole sweep too so the trap can never wedge.
+    #    Its stdout is routine progress and goes nowhere, but stderr carries
+    #    only a skipped sweep or a bad option, and a sweep that quietly stops
+    #    reaping is how interfaces would accumulate unnoticed. Let it through.
+    local _suffixes=() _entry
+    for _entry in "${CHAOS_SUITES[@]}"; do
+        _suffixes+=("$(ci_chaos_suffix "${_entry%% *}")")
+    done
     timeout 150 bash "$SCRIPT_DIR/ci-cleanup.sh" \
         --label "$CI_LABEL" \
         --run-id "$CI_RUN_ID" \
         --project-prefix "$CI_PROJECT_PREFIX" \
-        --images "$CI_IMAGE_TEST $CI_IMAGE_APP" >/dev/null 2>&1 || true
+        --images "$CI_IMAGE_TEST $CI_IMAGE_APP" \
+        --veth-suffixes "${_suffixes[*]}" >/dev/null || true
 }
 
 on_signal() {
@@ -541,9 +571,17 @@ run_chaos() {
     local name="$1"
     shift
     local rc=0
-    # Distinct project per scenario (chaos children run in parallel). When
-    # invoked from a background subshell this export is local to that child.
-    export COMPOSE_PROJECT_NAME="$(ci_project "chaos-$name")"
+    # Distinct project per scenario (chaos children run in parallel). Scoped to
+    # this function so the --only path cannot leak it into a later suite.
+    local -x COMPOSE_PROJECT_NAME="$(ci_project "chaos-$name")"
+
+    # Container names and the generated-config directory are GLOBAL and are not
+    # scoped by the compose project, so narrow the run-wide suffix to this
+    # scenario. Parallel children then cannot claim each other's names or
+    # overwrite each other's compose file.
+    local suffix
+    suffix="$(ci_chaos_suffix "$name")"
+    local -x FIPS_CI_NAME_SUFFIX="$suffix"
 
     info "[chaos/$name] Running simulation"
     if bash testing/chaos/scripts/chaos.sh "$@" 2>&1; then
@@ -553,6 +591,17 @@ run_chaos() {
     fi
 
     record "chaos-$name" $rc
+
+    # record() ends in pass()/fail(), which are echoes, so it returns 0 for any
+    # rc — and without this return so does run_chaos. On the parallel path the
+    # function's status is the child subshell's status, and that is the only
+    # thing the waiting parent can see: the child's own RESULTS entry and its
+    # OVERALL=1 die with its process, and its FAIL line goes to a logfile only
+    # the unreachable branch reads. So a bare record() left every scenario
+    # recorded as a pass whatever the simulation reported. On the --only path
+    # record() already wrote the true rc into the parent's own RESULTS, and
+    # returning it as well is inert: this script does not set -e.
+    return $rc
 }
 
 # Run gateway integration test
@@ -960,7 +1009,12 @@ run_suite() {
                 fi
             done
             if [[ "$found" != true ]]; then
-                # Fall back to using the name as the scenario directly
+                # Fall back to using the name as the scenario directly. Note
+                # teardown rebuilds veth suffixes from CHAOS_SUITES only, so a
+                # scenario named here but absent from that list is outside the
+                # host-interface reap. Harmless while every ethernet-transport
+                # scenario is declared there; add one that isn't and its
+                # orphaned pairs will need an unscoped `--reap` to clear.
                 run_chaos "$chaos_name" "$chaos_name"
             fi
             ;;

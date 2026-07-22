@@ -4,7 +4,8 @@ Creates veth pairs between Docker containers for Ethernet-transport
 edges. Each Ethernet edge gets a veth pair with one end moved into
 each container's network namespace. Naming:
 
-  Host (temporary):  vh{NN}{MM}a / vh{NN}{MM}b
+  Host (temporary):  vh{token}{NN}{MM}a / vh{token}{NN}{MM}b
+                     (via SimTopology.veth_host_name())
   Container:         ve-{local}-{peer}  (via veth_interface_name())
 
 After creation, the container-side MAC addresses are queried and
@@ -113,9 +114,7 @@ class VethManager:
             if a != node_id and b != node_id:
                 continue
             # Remove existing pair if any (host-side might still exist)
-            nn_a = a.replace("n", "")
-            nn_b = b.replace("n", "")
-            host_a = f"vh{nn_a}{nn_b}a"
+            host_a = self.topology.veth_host_name(a, b, "a")
             _run_host(["ip", "link", "delete", host_a], image, check=False)
             # Re-create
             self._create_veth_pair(a, b, image)
@@ -142,14 +141,14 @@ class VethManager:
             return
 
         # Generate names
-        nn_a = node_a.replace("n", "")
-        nn_b = node_b.replace("n", "")
-        host_a = f"vh{nn_a}{nn_b}a"
-        host_b = f"vh{nn_a}{nn_b}b"
+        host_a = self.topology.veth_host_name(node_a, node_b, "a")
+        host_b = self.topology.veth_host_name(node_a, node_b, "b")
         final_a = veth_interface_name(node_a, node_b)
         final_b = veth_interface_name(node_b, node_a)
 
-        # Clean up any stale pair
+        # Clean up a stale pair left by this scenario. The token makes the
+        # name unique to this run, so a pair orphaned by an earlier run is
+        # no longer reclaimed here — `ci-cleanup.sh` reaps those instead.
         _run_host(["ip", "link", "delete", host_a], image, check=False)
 
         # Create veth pair on host
@@ -253,7 +252,11 @@ def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
             timeout=30,
         )
         if check and result.returncode != 0:
-            log.debug(
+            # Warning, not debug: the runner logs at INFO unless asked for
+            # -v, so at debug this never reached runner.log and the callers
+            # below report only that a pair could not be created. The
+            # check=False deletes are expected to fail and stay silent.
+            log.warning(
                 "ip cmd failed: %s -> %s",
                 " ".join(cmd),
                 result.stderr.strip(),
