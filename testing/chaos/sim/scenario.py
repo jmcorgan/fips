@@ -249,8 +249,9 @@ class Scenario:
 # link_swap.policies and topology.transport_mix. Two sub-trees are passed through
 # whole and are likewise not checked: fips_overrides and topology.params.
 #
-# NOTE: adding a new assertion type means adding it to _ASSERTION_KEYS below and
-# giving it an entry here, or scenarios using it will be rejected at load.
+# NOTE: adding a new assertion type means registering it in TWO places below —
+# _SECTION_KEYS["assertions"] (so the block accepts its name) and _ASSERTION_KEYS
+# (so its own members are checked) — or scenarios using it are rejected at load.
 _TOP_KEYS = {
     "scenario", "topology", "netem", "link_flaps", "traffic", "node_churn",
     "peer_churn", "bandwidth", "ingress", "link_swap", "assertions", "logging",

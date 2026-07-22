@@ -136,16 +136,26 @@ with open(ci_yml_path, encoding="utf-8") as fh:
 
 include = doc["jobs"]["integration"]["strategy"]["matrix"]["include"]
 github_chaos, github_deb, github = {}, set(), set()
+malformed = []
 for leg in include:
-    if "suite" not in leg:
+    if "suite" not in leg and "scenario" not in leg:
         continue
     kind = str(leg.get("type", ""))
-    if kind == "chaos":
-        github_chaos[str(leg["scenario"])] = str(leg.get("chaos_flags", ""))
-    elif kind == "deb-install":
-        github_deb.add(str(leg["scenario"]))
-    else:
+    if kind in ("chaos", "deb-install"):
+        # scenario: is the identity for these; suite: is cosmetic.
+        if "scenario" not in leg:
+            malformed.append(f"{leg.get('suite', '(unnamed leg)')} has type "
+                             f"{kind} but no scenario:")
+            continue
+        if kind == "chaos":
+            github_chaos[str(leg["scenario"])] = str(leg.get("chaos_flags", ""))
+        else:
+            github_deb.add(str(leg["scenario"]))
+    elif "suite" in leg:
         github.add(str(leg["suite"]))
+    else:
+        malformed.append(f"leg with scenario {leg['scenario']} has no suite: "
+                         f"and no chaos/deb-install type")
 
 # ── Dispatch cross-check: every run_suite arm needs a backing array ──────────
 # A suite dispatched without an array is invisible to the sweep above, so the
@@ -159,14 +169,26 @@ if body is None:
 # Arms sit at one fixed indentation inside the case block. Pin to it, taken from
 # the first arm rather than assumed, so a body line that happens to end in ')'
 # cannot be read as an arm.
-arm_re = re.compile(r"^([ \t]+)([a-z0-9|*_-]+)\)", re.MULTILINE)
+arm_re = re.compile(r"^([ \t]+)['\"]?([a-z0-9|*_.-]+)['\"]?\)", re.MULTILINE)
 first = arm_re.search(body.group(0))
 if first is None:
     print("check-ci-parity: no dispatch arms found in run_suite()", file=sys.stderr)
     sys.exit(2)
 
 indent = first.group(1)
-known = set(local) | set(local_chaos) | local_deb | {"deb-install"}
+# An arm-shaped line at a different indent is not skipped silently: it would
+# make this check quietly stop covering a suite, which is the failure mode the
+# check exists to prevent.
+odd_arms = [
+    m.group(2) for m in arm_re.finditer(body.group(0)) if m.group(1) != indent
+]
+if odd_arms:
+    print("check-ci-parity: run_suite has arm-shaped lines at an unexpected "
+          f"indent, so the dispatch check cannot be trusted: {', '.join(odd_arms)}",
+          file=sys.stderr)
+    sys.exit(2)
+known = (set(local) | set(local_chaos) | local_deb
+         | {e.split()[0] for e in arrays.get("DEB_INSTALL_SUITES", [])})
 for m in arm_re.finditer(body.group(0)):
     if m.group(1) != indent:
         continue
@@ -197,7 +219,7 @@ deb_github_only = sorted(github_deb - local_deb)
 
 problems = (local_only or github_only or chaos_local_only or chaos_github_only
             or chaos_flag_drift or deb_local_only or deb_github_only
-            or dispatch_uncovered)
+            or dispatch_uncovered or malformed)
 
 if problems:
     print("CI parity FAILED: the two runners do not cover the same work.\n")
@@ -229,6 +251,10 @@ if problems:
     if deb_github_only:
         print("  deb-install distros GitHub-only:")
         for n in deb_github_only:
+            print(f"    - {n}")
+    if malformed:
+        print("  Matrix legs this guard cannot identify:")
+        for n in malformed:
             print(f"    - {n}")
     if dispatch_uncovered:
         print("  run_suite dispatches these with no backing *_SUITES array, so "
