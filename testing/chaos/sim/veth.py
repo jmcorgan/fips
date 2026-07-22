@@ -252,7 +252,11 @@ def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
             timeout=30,
         )
         if check and result.returncode != 0:
-            log.debug(
+            # Warning, not debug: the runner logs at INFO unless asked for
+            # -v, so at debug this never reached runner.log and the callers
+            # below report only that a pair could not be created. The
+            # check=False deletes are expected to fail and stay silent.
+            log.warning(
                 "ip cmd failed: %s -> %s",
                 " ".join(cmd),
                 result.stderr.strip(),
