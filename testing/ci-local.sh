@@ -93,6 +93,7 @@ ONLY_SUITE=""
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
 REKEY_SUITES=(rekey rekey-accept-off rekey-outbound-only)
+MIXED_PROFILE_SUITES=(mixed-profile)
 ADMISSION_SUITES=(admission-cap)
 # Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
@@ -147,6 +148,9 @@ list_suites() {
     echo ""
     echo "  Rekey:"
     for s in "${REKEY_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Mixed profile:"
+    for s in "${MIXED_PROFILE_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Admission cap:"
     for s in "${ADMISSION_SUITES[@]}"; do echo "    $s"; done
@@ -859,7 +863,9 @@ run_integration() {
     run_rekey_outbound_only
 
     # Mixed-profile (Full + NonRouting + Leaf)
-    run_mixed_profile
+    for _suite in "${MIXED_PROFILE_SUITES[@]}"; do
+        run_mixed_profile
+    done
 
     # Admission cap (mesh profile, max_peers=1 on one node)
     for _suite in "${ADMISSION_SUITES[@]}"; do
