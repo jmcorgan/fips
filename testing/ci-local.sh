@@ -566,6 +566,17 @@ run_chaos() {
     fi
 
     record "chaos-$name" $rc
+
+    # record() ends in pass()/fail(), which are echoes, so it returns 0 for any
+    # rc — and without this return so does run_chaos. On the parallel path the
+    # function's status is the child subshell's status, and that is the only
+    # thing the waiting parent can see: the child's own RESULTS entry and its
+    # OVERALL=1 die with its process, and its FAIL line goes to a logfile only
+    # the unreachable branch reads. So a bare record() left every scenario
+    # recorded as a pass whatever the simulation reported. On the --only path
+    # record() already wrote the true rc into the parent's own RESULTS, and
+    # returning it as well is inert: this script does not set -e.
+    return $rc
 }
 
 # Run gateway integration test

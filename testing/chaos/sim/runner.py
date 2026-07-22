@@ -40,6 +40,11 @@ class SimRunner:
         self.output_dir: str = self._resolve_output_dir(scenario)
         self._interrupted = False
 
+        # Set when setup, warmup or the simulation loop raises. The exception
+        # is logged rather than propagated, so nothing else on the return path
+        # of run() carries the fact that the simulation did not complete.
+        self.aborted = False
+
         # Shared set of currently-down node IDs (updated by NodeManager,
         # read by NetemManager, LinkManager, TrafficManager)
         self._down_nodes: set[str] = set()
@@ -82,7 +87,12 @@ class SimRunner:
             self._warmup()
             self._simulation_loop()
         except Exception:
+            # Log rather than re-raise: the default excepthook writes to stderr
+            # and would not reach the file handler installed in _setup(), so a
+            # re-raise would lose the traceback from runner.log, which is the
+            # artifact that survives into CI. The flag carries the abort out.
             log.exception("Simulation failed")
+            self.aborted = True
         finally:
             result = self._teardown()
 
