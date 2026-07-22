@@ -15,19 +15,100 @@ fn decode_forward(bytes: &[u8]) -> SessionDatagramRef<'_> {
     SessionDatagramRef::decode(&bytes[1..]).expect("forwarded datagram re-decodes")
 }
 
+/// A transit datagram that arrived already exhausted is dropped and charged
+/// to `TtlExhausted`. A next hop is supplied so the drop is evidence of the
+/// TTL gate rather than of an absent route.
 #[test]
 fn ttl_zero_drops_as_exhausted() {
     let mut router = Router::new();
     let my_addr = make_node_addr(0x10);
     let dg = make_datagram_ref(0, make_node_addr(0x20));
     let rv = MockRoutingView::new(false);
-    let out = router.route(&dg, &my_addr, false, None, &rv);
+    let out = router.route(
+        &dg,
+        &my_addr,
+        false,
+        Some(make_next_hop(make_node_addr(0x30), 1400)),
+        &rv,
+    );
     assert!(matches!(
         out,
         RouteOutcome::Drop {
             reason: DropReason::TtlExhausted
         }
     ));
+}
+
+/// Acceptance: a datagram addressed to this node with ttl=0 is delivered
+/// locally. The TTL governs forwarding, not delivery to the addressed host,
+/// so the gate sits after the local-delivery test — and `TtlExhausted` is
+/// not charged for a delivered datagram.
+#[test]
+fn ttl_zero_to_self_delivers_local() {
+    let mut router = Router::new();
+    let my_addr = make_node_addr(0x10);
+    let dg = make_datagram_ref(0, my_addr);
+    let rv = MockRoutingView::new(false);
+    let out = router.route(&dg, &my_addr, false, None, &rv);
+    assert!(
+        matches!(out, RouteOutcome::DeliverLocal),
+        "ttl=0 addressed to this node must still be delivered locally"
+    );
+}
+
+/// Acceptance: a transit datagram arriving with ttl=1 would leave with ttl=0,
+/// so it is dropped here rather than transmitted. A next hop is supplied, so
+/// a `Forward` outcome would mean it had been put on the wire at ttl=0.
+#[test]
+fn ttl_one_transit_drops_before_forwarding() {
+    let mut router = Router::new();
+    let my_addr = make_node_addr(0x10);
+    let dg = make_datagram_ref(1, make_node_addr(0x20));
+    let rv = MockRoutingView::new(false);
+    let out = router.route(
+        &dg,
+        &my_addr,
+        false,
+        Some(make_next_hop(make_node_addr(0x30), 1400)),
+        &rv,
+    );
+    assert!(
+        matches!(
+            out,
+            RouteOutcome::Drop {
+                reason: DropReason::TtlExhausted
+            }
+        ),
+        "transit ttl=1 must be dropped as TTL-exhausted, not forwarded at ttl=0"
+    );
+}
+
+/// Acceptance: the other side of the same boundary — a transit datagram
+/// arriving with ttl=2 clears the gate and leaves with ttl=1.
+#[test]
+fn ttl_two_transit_forwards_at_one() {
+    let mut router = Router::new();
+    let my_addr = make_node_addr(0x10);
+    let nh_addr = make_node_addr(0x30);
+    let dg = make_datagram_ref(2, make_node_addr(0x20));
+    let rv = MockRoutingView::new(false);
+    let out = router.route(
+        &dg,
+        &my_addr,
+        false,
+        Some(make_next_hop(nh_addr, 1400)),
+        &rv,
+    );
+    match out {
+        RouteOutcome::Forward { bytes, .. } => {
+            assert_eq!(
+                decode_forward(&bytes).ttl,
+                1,
+                "transit ttl=2 must leave with ttl=1"
+            );
+        }
+        _ => panic!("expected Forward"),
+    }
 }
 
 #[test]
