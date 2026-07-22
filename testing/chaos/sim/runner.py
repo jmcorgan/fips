@@ -133,9 +133,17 @@ class SimRunner:
             log.info("  %s: peers=%s", nid, ",".join(peers))
 
         # 2. Generate configs
+        #
+        # The directory carries the same suffix as the container names, so
+        # parallel scenarios cannot overwrite each other's compose file
+        # between writing it and starting containers from it.
         docker_network_dir = os.path.join(os.path.dirname(__file__), "..")
         config_dir = os.path.normpath(
-            os.path.join(docker_network_dir, "generated-configs", "sim")
+            os.path.join(
+                docker_network_dir,
+                "generated-configs",
+                f"sim{self.topology.name_suffix}",
+            )
         )
         # Select ephemeral identity nodes (if peer churn enabled)
         self._ephemeral_nodes: set[str] = set()

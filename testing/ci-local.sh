@@ -516,9 +516,16 @@ run_chaos() {
     local name="$1"
     shift
     local rc=0
-    # Distinct project per scenario (chaos children run in parallel). When
-    # invoked from a background subshell this export is local to that child.
-    export COMPOSE_PROJECT_NAME="$(ci_project "chaos-$name")"
+    # Distinct project per scenario (chaos children run in parallel). Scoped to
+    # this function so the --only path cannot leak it into a later suite.
+    local -x COMPOSE_PROJECT_NAME="$(ci_project "chaos-$name")"
+
+    # Container names and the generated-config directory are GLOBAL and are not
+    # scoped by the compose project, so narrow the run-wide suffix to this
+    # scenario. Parallel children then cannot claim each other's names or
+    # overwrite each other's compose file.
+    local suffix="-${name}${FIPS_CI_NAME_SUFFIX:-}"
+    local -x FIPS_CI_NAME_SUFFIX="$suffix"
 
     info "[chaos/$name] Running simulation"
     if bash testing/chaos/scripts/chaos.sh "$@" 2>&1; then

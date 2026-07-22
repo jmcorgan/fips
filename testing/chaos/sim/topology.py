@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .keys import derive
+from .naming import name_suffix
 from .scenario import TopologyConfig
 
 
@@ -28,6 +29,9 @@ class SimTopology:
     edges: set[tuple[str, str]] = field(default_factory=set)
     # Per-edge transport type; edges not in this dict default to "udp"
     edge_transport: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Suffix scoping globally-visible names to this run and scenario; empty
+    # outside the CI harness, which keeps a bare run's names unchanged.
+    name_suffix: str = ""
 
     def transport_for_edge(self, a: str, b: str) -> str:
         """Get the transport type for an edge (defaults to 'udp')."""
@@ -107,7 +111,7 @@ class SimTopology:
         return not connected
 
     def container_name(self, node_id: str) -> str:
-        return f"fips-node-{node_id}"
+        return f"fips-node-{node_id}{self.name_suffix}"
 
     def directed_outbound(self) -> dict[str, list[str]]:
         """Assign each static-config edge to exactly one node for outbound connection.
@@ -219,7 +223,14 @@ def generate_topology(
         nodes[a].peers.append(b)
         nodes[b].peers.append(a)
 
-    topo = SimTopology(nodes=nodes, edges=edges, edge_transport=edge_transport)
+    # Read the environment once, here, so every name a run produces comes
+    # from the same value.
+    topo = SimTopology(
+        nodes=nodes,
+        edges=edges,
+        edge_transport=edge_transport,
+        name_suffix=name_suffix(),
+    )
 
     # Connectivity check with retry
     if config.ensure_connected:
