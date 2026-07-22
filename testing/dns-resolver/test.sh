@@ -270,13 +270,49 @@ DOCKERFILE
     fi
 
     log "Extracting fips + fips-gateway binaries from builder image"
-    local cid
-    cid=$(docker create "$builder_tag")
-    docker cp "$cid:/src/target/release/fips" "$FIPS_BIN_CACHE" >/dev/null 2>&1
-    docker cp "$cid:/src/target/release/fips-gateway" "$FIPS_GATEWAY_BIN_CACHE" >/dev/null 2>&1
+    # Drop the previous run's binaries before extracting. Without this, a failed
+    # extraction below leaves them in place, they satisfy the caller's -x check,
+    # and the e2e scenarios silently exercise the previous commit's code.
+    rm -f "$FIPS_BIN_CACHE" "$FIPS_GATEWAY_BIN_CACHE"
+
+    # stderr goes to its own file rather than into $cid: docker prints
+    # warnings (a platform mismatch, say) on success too, and folding them
+    # into the id would leave every later reference pointing at nothing.
+    local cid err errfile
+    errfile=$(mktemp)
+    if ! cid=$(docker create "$builder_tag" 2>"$errfile"); then
+        echo "  ERROR: docker create failed: $(cat "$errfile")"
+        rm -f "$errfile"
+        return 1
+    fi
+    rm -f "$errfile"
+
+    local rc=0 spec bin dest
+    for spec in "fips:$FIPS_BIN_CACHE" "fips-gateway:$FIPS_GATEWAY_BIN_CACHE"; do
+        bin="${spec%%:*}"
+        dest="${spec#*:}"
+        if ! err=$(docker cp "$cid:/src/target/release/$bin" "$dest" 2>&1); then
+            echo "  ERROR: extracting $bin from the builder image failed: $err"
+            rc=1
+        fi
+    done
     docker rm "$cid" >/dev/null
-    chmod +x "$FIPS_BIN_CACHE" "$FIPS_GATEWAY_BIN_CACHE"
+    [ "$rc" -eq 0 ] || return 1
+
+    if ! chmod +x "$FIPS_BIN_CACHE" "$FIPS_GATEWAY_BIN_CACHE"; then
+        echo "  ERROR: chmod +x failed on the extracted binaries"
+        return 1
+    fi
+
+    for dest in "$FIPS_BIN_CACHE" "$FIPS_GATEWAY_BIN_CACHE"; do
+        if [ ! -s "$dest" ] || [ ! -x "$dest" ]; then
+            echo "  ERROR: extracted binary missing, empty or not executable: $dest"
+            return 1
+        fi
+    done
+
     log "Cached fips ($(stat -c %s "$FIPS_BIN_CACHE") bytes) + fips-gateway ($(stat -c %s "$FIPS_GATEWAY_BIN_CACHE") bytes)"
+    return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────

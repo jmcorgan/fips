@@ -38,12 +38,12 @@ env:
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
 #
-# Granularity-only differences (same coverage, different matrix shape —
-# NOT a divergence):
-#   deb-install    — split here into per-distro legs (debian12/debian13/
-#                    ubuntu22/ubuntu24/ubuntu26) for parallelism; local runs the
-#                    same distro set in one suite.
-#   dns-resolver   — single leg here; runs all scenarios (same as local).
+# The two runners express the same work in different matrix shapes, and the
+# parity guard compares through that shape rather than around it: chaos legs
+# are compared per scenario (and per flag) via their `scenario:` field,
+# deb-install legs per distro. The one leg still compared at leg granularity
+# is dns-resolver — a single leg here, running all of its scenarios
+# internally, exactly as the local suite does.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,6 +52,16 @@ env:
 # Builds on Linux x86_64, Linux aarch64, and macOS.
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
+  ci-parity:
+    name: CI parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Python deps
+        run: pip3 install --quiet pyyaml
+      - name: Check local and GitHub runners cover the same work
+        run: bash testing/check-ci-parity.sh
+
   fmt:
     name: Format check
     runs-on: ubuntu-latest
