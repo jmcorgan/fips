@@ -79,8 +79,11 @@ a per-commit gate; not part of `ci-local.sh`.
 clippy, unit tests, and the integration suites (including the chaos
 scenarios) — mirroring the GitHub `ci.yml` integration matrix. Run
 `./ci-local.sh --help` for the full option list and `--list` for the
-available suites. `--check-parity` verifies the local suite set matches
-the GitHub matrix (see [check-ci-parity.sh](check-ci-parity.sh)).
+available suites. Every run starts with a parity check that verifies the
+local suite set covers the same work as the GitHub matrix, per scenario for
+chaos and per distro for deb-install; a divergence fails the run. GitHub
+runs the same check as its own `ci-parity` job. `--check-parity` runs it
+alone (see [check-ci-parity.sh](check-ci-parity.sh)).
 
 ### Per-run isolation and the `FIPS_CI_RUN_ID` override
 

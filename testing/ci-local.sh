@@ -1,5 +1,6 @@
 #!/bin/bash
-# Run the CI pipeline locally: build, unit tests, integration tests.
+# Run the CI pipeline locally: CI parity check, build, unit tests,
+# integration tests.
 #
 # Usage: ./ci-local.sh [options]
 #
@@ -53,19 +54,19 @@
 # (.github/workflows/ci.yml) MUST run the same integration suites, EXCEPT for
 # the deliberate local-only entries below. Adding a suite to one runner
 # without the other means "local green" and "GitHub green" stop being
-# equivalent. testing/check-ci-parity.sh enforces this and fails on drift.
+# equivalent. testing/check-ci-parity.sh enforces this and fails on drift; it
+# runs as the first stage of every local run, before the build.
 #
 # Deliberate local-only (NOT on the GitHub gate), with reason:
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
 #                    unreliable on GitHub-hosted runners.
 #   tor-directory  — same; live Tor dependency.
 #
-# Granularity-only differences (same coverage, different matrix shape —
-# NOT a divergence):
-#   deb-install    — local runs all distros sequentially in one suite; GitHub
-#                    splits into per-distro legs (debian12/debian13/ubuntu22/
-#                    ubuntu24/ubuntu26 — the same distro set).
-#   dns-resolver   — single suite both sides; runs all scenarios.
+# The two runners express the same work in different matrix shapes, and the
+# guard compares through that shape rather than around it: chaos legs are
+# compared per scenario (and per flag), deb-install legs per distro. The one
+# leg still compared at leg granularity is dns-resolver — a single suite on
+# both sides that runs all of its scenarios internally.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -1064,6 +1065,16 @@ print_summary() {
     echo ""
 }
 
+# Verify the local default suite set and the GitHub matrix still cover the
+# same work. Runs first: it takes about a second, and a divergence should be
+# reported before a half-hour suite rather than after it.
+run_ci_parity() {
+    local rc=0
+    info "[ci-parity] Comparing the local suite set against the GitHub matrix"
+    "$SCRIPT_DIR/check-ci-parity.sh" || rc=$?
+    record "ci-parity" $rc
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 main() {
@@ -1071,6 +1082,11 @@ main() {
 
     stage "FIPS Local CI"
     info "Project root: $PROJECT_ROOT"
+
+    # Above the mode branches deliberately, so --only, --test-only and
+    # --build-only are gated too: a divergence invalidates any claim that a
+    # local run means what a GitHub run means, whichever subset was asked for.
+    run_ci_parity
 
     if [[ "$TEST_ONLY" == true ]]; then
         run_tests
