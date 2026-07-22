@@ -144,3 +144,22 @@ and leaves resources behind, reap them with:
 label or a `fipsci_` compose-project prefix; it is safe to run when there
 is nothing to reap and safe to run repeatedly. Pass `--project-prefix` to
 scope the sweep to a single run.
+
+It also removes the chaos simulation's leftover host-namespace veth
+interfaces (`vh…a`/`vh…b`), the one resource it touches that is neither a
+docker object nor labelled — a host interface can carry neither a label
+nor a compose project, so it is matched by name shape alone. That makes
+the reach here asymmetric with everything above, and worth stating
+plainly:
+
+- A bare `chaos.sh` run's **containers** survive a broad reap. Its
+  compose project is not `fipsci_`, and the simulation labels only the
+  network, not the services.
+- A bare `chaos.sh` run's **veth interfaces do not.** An unscoped reap
+  deletes them while they are in use, severing the Ethernet links of a
+  live simulation and leaving its containers running.
+
+So do not run a broad `--reap` while a bare simulation is up. Scope the
+interface sweep with `--veth-suffixes` (which is what `ci-local.sh`'s own
+teardown passes) or wait for the simulation to finish. `--project-prefix`
+does not help here: it scopes only the compose-project sweep.

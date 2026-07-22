@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import sys
 
 
 def name_suffix() -> str:
@@ -15,3 +17,25 @@ def name_suffix() -> str:
     bare ``chaos.sh`` run renders exactly the same names as it always has.
     """
     return os.environ.get("FIPS_CI_NAME_SUFFIX", "")
+
+
+def veth_token(suffix: str) -> str:
+    """Shorten a name suffix to four hex characters.
+
+    Host interface names have only 15 characters to work with, far fewer
+    than the suffix needs, so concurrent scenarios are told apart by a
+    hash of it instead. Empty for an empty suffix, so a bare run's
+    interface names are unchanged.
+    """
+    if not suffix:
+        return ""
+    return hashlib.sha1(suffix.encode()).hexdigest()[:4]
+
+
+if __name__ == "__main__":
+    # Print the token for each suffix given on the command line, one per
+    # line. ci-cleanup.sh reaps host interfaces by token and calls this
+    # rather than re-deriving the hash, so widening the token here cannot
+    # leave the reaper matching the old width.
+    for arg in sys.argv[1:]:
+        print(veth_token(arg))

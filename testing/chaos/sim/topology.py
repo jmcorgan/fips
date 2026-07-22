@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .keys import derive
-from .naming import name_suffix
+from .naming import name_suffix, veth_token
 from .scenario import TopologyConfig
 
 
@@ -32,6 +32,15 @@ class SimTopology:
     # Suffix scoping globally-visible names to this run and scenario; empty
     # outside the CI harness, which keeps a bare run's names unchanged.
     name_suffix: str = ""
+
+    @property
+    def veth_token(self) -> str:
+        """Short stand-in for the suffix, for names bound by IFNAMSIZ.
+
+        Derived rather than stored so no caller can build a topology whose
+        host names are scoped differently from its container names.
+        """
+        return veth_token(self.name_suffix)
 
     def transport_for_edge(self, a: str, b: str) -> str:
         """Get the transport type for an edge (defaults to 'udp')."""
@@ -112,6 +121,26 @@ class SimTopology:
 
     def container_name(self, node_id: str) -> str:
         return f"fips-node-{node_id}{self.name_suffix}"
+
+    def veth_host_name(self, node_a: str, node_b: str, end: str) -> str:
+        """Generate the host-namespace veth name for one end of an edge.
+
+        Format: ``vh{token}{NN}{MM}{end}`` (max 15 chars for IFNAMSIZ).
+        Host interfaces are global, so the token keeps a scenario from
+        deleting a concurrent scenario's pair; it is empty outside the CI
+        harness, yielding the same "vh0104a" this has always produced.
+
+        ``node_a`` and ``node_b`` must be in canonical edge order. Unlike
+        ``veth_interface_name()`` this is not symmetric: the far end is
+        ``end="b"`` on the same ordering, so swapping the arguments names
+        an interface that does not exist.
+        """
+        nn_local = node_a.replace("n", "")
+        nn_peer = node_b.replace("n", "")
+        name = f"vh{self.veth_token}{nn_local}{nn_peer}{end}"
+        if len(name) > 15:
+            raise ValueError(f"veth host name too long: {name!r} ({len(name)} > 15)")
+        return name
 
     def directed_outbound(self) -> dict[str, list[str]]:
         """Assign each static-config edge to exactly one node for outbound connection.
