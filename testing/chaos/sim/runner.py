@@ -20,6 +20,7 @@ from .docker_exec import docker_compose
 from .link_swap import LinkSwapManager
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
+from .naming import name_suffix
 from .netem import NetemManager
 from .nodes import NodeManager
 from .peer_churn import PeerChurnManager
@@ -44,6 +45,13 @@ class SimRunner:
         # is logged rather than propagated, so nothing else on the return path
         # of run() carries the fact that the simulation did not complete.
         self.aborted = False
+
+        # Whether this run ever owned containers. Teardown runs from a
+        # finally, so it runs after a failed setup too, and container names
+        # are global: without this it would harvest whatever currently
+        # answers to them. topology and compose_file are both set well
+        # before the containers start and so cannot stand in for it.
+        self._containers_started = False
 
         # Shared set of currently-down node IDs (updated by NodeManager,
         # read by NetemManager, LinkManager, TrafficManager)
@@ -190,6 +198,7 @@ class SimRunner:
         # 5. Start containers
         log.info("Starting %d containers...", len(self.topology.nodes))
         docker_compose(self.compose_file, ["up", "-d"])
+        self._containers_started = True
 
         # 6. Set up veth pairs for Ethernet edges (before netem)
         #
@@ -427,11 +436,57 @@ class SimRunner:
     def assertions_failed(self) -> bool:
         return any(not o.passed for o in self.assertion_outcomes)
 
+    def _run_status(self) -> str:
+        """Name for how the run itself ended, before teardown is considered."""
+        if self.aborted:
+            return "aborted"
+        if self._interrupted:
+            return "interrupted"
+        return "completed"
+
+    def _write_status(self, status: str) -> None:
+        """Record how the run ended, for a reader who has only this directory.
+
+        One field per line so it can be grepped. The container names are
+        included because they are the handle on everything else the run
+        touched, and because a directory that names them cannot be mistaken
+        for a directory assembled from some other scenario's mesh.
+
+        Never raises. Both callers run this immediately before stopping the
+        containers, so letting a full disk or a vanished output directory
+        out of here would leak the mesh it was about to tear down.
+        """
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            path = os.path.join(self.output_dir, "status.txt")
+            with open(path, "w") as f:
+                f.write(f"status={status}\n")
+                f.write(f"scenario={self.scenario.name}\n")
+                f.write(f"seed={self.scenario.seed}\n")
+                f.write(f"containers=fips-node-nNN{name_suffix()}\n")
+        except Exception:
+            log.exception("Could not write status file")
+
     def _teardown(self) -> AnalysisResult | None:
         """Stop dynamic elements, collect logs, analyze, stop containers."""
-        result = None
+        if not self._containers_started:
+            # There is no mesh to harvest. Snapshots, logs, analysis and
+            # assertions all address containers by a name that is global to
+            # the host, so running them here would describe whoever holds
+            # those names now and leave a plausible report of a run that
+            # never happened. Leaving them out makes the presence of
+            # analysis.txt proof that this scenario's own mesh existed.
+            self._write_status("setup-failed")
+            if self.compose_file:
+                # `up -d` can fail part way through, so this run may own
+                # containers or a network even with no mesh to speak of.
+                log.info("Stopping containers...")
+                docker_compose(self.compose_file, ["down"], check=False)
+            return None
 
-        if self.topology and self.compose_file:
+        result = None
+        status = self._run_status()
+        try:
             # Evaluate post-run assertions before doing any teardown so
             # control sockets are still reachable.
             self._evaluate_assertions()
@@ -516,8 +571,19 @@ class SimRunner:
             if self.veth_mgr:
                 log.info("Cleaning up veth pairs...")
                 self.veth_mgr.teardown_all()
-
-            # Stop containers
+        except Exception:
+            # Same reasoning as run(): logging keeps the traceback in
+            # runner.log, where re-raising would send it to stderr instead
+            # and past the exit ladder, which would report a harvest that
+            # fell over as a bad command line.
+            log.exception("Teardown failed")
+            self.aborted = True
+            status = "teardown-failed"
+            result = None
+        finally:
+            # Status first: it is the one artifact that must exist whatever
+            # else happens, and stopping containers can still time out.
+            self._write_status(status)
             log.info("Stopping containers...")
             docker_compose(
                 self.compose_file,
