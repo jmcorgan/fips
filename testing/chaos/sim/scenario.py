@@ -239,15 +239,90 @@ class Scenario:
     fips_overrides: dict = field(default_factory=dict)
 
 
+# Keys each fixed-schema section understands. A key absent from these sets is a
+# typo, and silently ignoring it leaves the block default-constructed while the
+# YAML still looks correct — a mistyped "assertion:" disarms a scenario's only
+# assertions, a mistyped "link_flap:" turns off the chaos it was meant to inject.
+#
+# Three mappings are deliberately NOT listed, because their keys are names the
+# scenario author chooses rather than a schema: netem.mutation.policies,
+# link_swap.policies and topology.transport_mix. Two sub-trees are passed through
+# whole and are likewise not checked: fips_overrides and topology.params.
+#
+# NOTE: adding a new assertion type means adding it to _ASSERTION_KEYS below and
+# giving it an entry here, or scenarios using it will be rejected at load.
+_TOP_KEYS = {
+    "scenario", "topology", "netem", "link_flaps", "traffic", "node_churn",
+    "peer_churn", "bandwidth", "ingress", "link_swap", "assertions", "logging",
+    "fips_overrides",
+}
+_SECTION_KEYS = {
+    "scenario": {"name", "seed", "duration_secs"},
+    "topology": {
+        "num_nodes", "algorithm", "params", "ensure_connected", "subnet",
+        "ip_start", "default_transport", "transport_mix",
+    },
+    "netem": {"enabled", "default_policy", "link_policies", "mutation"},
+    "netem.link_policies[]": {"edges", "policy", "policy_name"},
+    "netem.mutation": {"interval_secs", "fraction", "policies"},
+    "link_flaps": {
+        "enabled", "interval_secs", "max_down_links", "down_duration_secs",
+        "protect_connectivity",
+    },
+    "traffic": {
+        "enabled", "max_concurrent", "interval_secs", "duration_secs",
+        "parallel_streams",
+    },
+    "node_churn": {
+        "enabled", "interval_secs", "max_down_nodes", "down_duration_secs",
+        "protect_connectivity",
+    },
+    "peer_churn": {"enabled", "interval_secs", "ephemeral_fraction"},
+    "bandwidth": {"enabled", "tiers_mbps"},
+    "ingress": {"enabled", "tiers_kbps", "burst_bytes"},
+    "link_swap": {"enabled", "interval_secs", "policies", "edges"},
+    "link_swap.edges[]": {"edge", "policy"},
+    "assertions": {"bloom_send_rate", "min_parent_switches"},
+    "logging": {"rust_log", "output_dir"},
+}
+_ASSERTION_KEYS = {
+    "bloom_send_rate": {"window_secs", "max_per_node"},
+    "min_parent_switches": {"min_total"},
+}
+_NETEM_POLICY_KEYS = {
+    "delay_ms", "jitter_ms", "loss_pct", "duplicate_pct", "reorder_pct",
+    "corrupt_pct",
+}
+_RANGE_KEYS = {"min", "max"}
+
+
+def _reject_unknown(data, known, context: str):
+    """Raise unless every key in `data` is one the loader understands."""
+    if data is None:
+        raise ValueError(
+            f"{context}: section is present but empty; give it a body or remove it"
+        )
+    if not isinstance(data, dict):
+        raise ValueError(f"{context}: expected a mapping, got {type(data).__name__}")
+    unknown = sorted(str(k) for k in set(data) - set(known))
+    if unknown:
+        raise ValueError(
+            f"{context}: unknown key(s): {', '.join(unknown)} "
+            f"(known: {', '.join(sorted(known))})"
+        )
+
+
 def _parse_range(data, name: str) -> Range:
     """Parse a {min, max} dict into a Range."""
     if isinstance(data, dict):
+        _reject_unknown(data, _RANGE_KEYS, name)
         return Range(min=float(data["min"]), max=float(data["max"]))
     raise ValueError(f"{name}: expected {{min, max}} dict, got {type(data).__name__}")
 
 
-def _parse_netem_policy(data: dict) -> NetemPolicy:
+def _parse_netem_policy(data: dict, name: str = "netem policy") -> NetemPolicy:
     """Parse a netem policy from a dict with [min, max] lists or {min, max} dicts."""
+    _reject_unknown(data, _NETEM_POLICY_KEYS, name)
     policy = NetemPolicy()
     for attr in (
         "delay_ms",
@@ -273,16 +348,22 @@ def load_scenario(path: str) -> Scenario:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
+    if raw is None:
+        raise ValueError(f"{path}: file is empty")
+    _reject_unknown(raw, _TOP_KEYS, "(top level)")
+
     s = Scenario()
 
     # Scenario section
     sc = raw.get("scenario", {})
+    _reject_unknown(sc, _SECTION_KEYS["scenario"], "scenario")
     s.name = sc.get("name", os.path.splitext(os.path.basename(path))[0])
     s.seed = int(sc.get("seed", 42))
     s.duration_secs = int(sc.get("duration_secs", 120))
 
     # Topology section
     tc = raw.get("topology", {})
+    _reject_unknown(tc, _SECTION_KEYS["topology"], "topology")
     s.topology.num_nodes = int(tc.get("num_nodes", 10))
     s.topology.algorithm = tc.get("algorithm", "random_geometric")
     s.topology.params = tc.get("params", {})
@@ -298,33 +379,43 @@ def load_scenario(path: str) -> Scenario:
 
     # Netem section
     nc = raw.get("netem", {})
+    _reject_unknown(nc, _SECTION_KEYS["netem"], "netem")
     s.netem.enabled = nc.get("enabled", False)
     if "default_policy" in nc:
-        s.netem.default_policy = _parse_netem_policy(nc["default_policy"])
+        s.netem.default_policy = _parse_netem_policy(
+            nc["default_policy"], "netem.default_policy"
+        )
     if "link_policies" in nc:
         for lp_data in nc["link_policies"]:
+            _reject_unknown(
+                lp_data, _SECTION_KEYS["netem.link_policies[]"], "netem.link_policies[]"
+            )
             override = LinkPolicyOverride(
                 edges=lp_data.get("edges", []),
             )
             if "policy" in lp_data:
-                override.policy = _parse_netem_policy(lp_data["policy"])
+                override.policy = _parse_netem_policy(
+                    lp_data["policy"], "netem.link_policies[].policy"
+                )
             if "policy_name" in lp_data:
                 override.policy_name = lp_data["policy_name"]
             s.netem.link_policies.append(override)
     if "mutation" in nc:
         mc = nc["mutation"]
+        _reject_unknown(mc, _SECTION_KEYS["netem.mutation"], "netem.mutation")
         s.netem.mutation.interval_secs = _parse_range(
             mc.get("interval_secs", {"min": 15, "max": 30}), "netem.mutation.interval_secs"
         )
         s.netem.mutation.fraction = float(mc.get("fraction", 0.3))
         if "policies" in mc:
             s.netem.mutation.policies = {
-                name: _parse_netem_policy(pdata)
+                name: _parse_netem_policy(pdata, f"netem.mutation.policies.{name}")
                 for name, pdata in mc["policies"].items()
             }
 
     # Link flaps section
     lf = raw.get("link_flaps", {})
+    _reject_unknown(lf, _SECTION_KEYS["link_flaps"], "link_flaps")
     s.link_flaps.enabled = lf.get("enabled", False)
     if "interval_secs" in lf:
         s.link_flaps.interval_secs = _parse_range(lf["interval_secs"], "link_flaps.interval_secs")
@@ -337,6 +428,7 @@ def load_scenario(path: str) -> Scenario:
 
     # Traffic section
     tf = raw.get("traffic", {})
+    _reject_unknown(tf, _SECTION_KEYS["traffic"], "traffic")
     s.traffic.enabled = tf.get("enabled", False)
     s.traffic.max_concurrent = int(tf.get("max_concurrent", 3))
     if "interval_secs" in tf:
@@ -347,6 +439,7 @@ def load_scenario(path: str) -> Scenario:
 
     # Node churn section
     nc2 = raw.get("node_churn", {})
+    _reject_unknown(nc2, _SECTION_KEYS["node_churn"], "node_churn")
     s.node_churn.enabled = nc2.get("enabled", False)
     if "interval_secs" in nc2:
         s.node_churn.interval_secs = _parse_range(nc2["interval_secs"], "node_churn.interval_secs")
@@ -359,6 +452,7 @@ def load_scenario(path: str) -> Scenario:
 
     # Peer churn section
     pc = raw.get("peer_churn", {})
+    _reject_unknown(pc, _SECTION_KEYS["peer_churn"], "peer_churn")
     s.peer_churn.enabled = pc.get("enabled", False)
     if "interval_secs" in pc:
         s.peer_churn.interval_secs = _parse_range(pc["interval_secs"], "peer_churn.interval_secs")
@@ -366,6 +460,7 @@ def load_scenario(path: str) -> Scenario:
 
     # Bandwidth section
     bw = raw.get("bandwidth", {})
+    _reject_unknown(bw, _SECTION_KEYS["bandwidth"], "bandwidth")
     s.bandwidth.enabled = bw.get("enabled", False)
     if "tiers_mbps" in bw:
         tiers = bw["tiers_mbps"]
@@ -375,6 +470,7 @@ def load_scenario(path: str) -> Scenario:
 
     # Ingress section
     ig = raw.get("ingress", {})
+    _reject_unknown(ig, _SECTION_KEYS["ingress"], "ingress")
     s.ingress.enabled = ig.get("enabled", False)
     if "tiers_kbps" in ig:
         tiers = ig["tiers_kbps"]
@@ -385,18 +481,22 @@ def load_scenario(path: str) -> Scenario:
 
     # Link swap section (deterministic asymmetric link-cost flapping).
     ls = raw.get("link_swap", {})
+    _reject_unknown(ls, _SECTION_KEYS["link_swap"], "link_swap")
     s.link_swap.enabled = ls.get("enabled", False)
     if "interval_secs" in ls:
         s.link_swap.interval_secs = float(ls["interval_secs"])
     if "policies" in ls:
         s.link_swap.policies = {
-            name: _parse_netem_policy(pdata)
+            name: _parse_netem_policy(pdata, f"link_swap.policies.{name}")
             for name, pdata in ls["policies"].items()
         }
     if "edges" in ls:
         for edata in ls["edges"]:
             if not isinstance(edata, dict):
                 raise ValueError("link_swap.edges entries must be dicts")
+            _reject_unknown(
+                edata, _SECTION_KEYS["link_swap.edges[]"], "link_swap.edges[]"
+            )
             edge = str(edata.get("edge", ""))
             policy = str(edata.get("policy", ""))
             if not edge or not policy:
@@ -405,20 +505,29 @@ def load_scenario(path: str) -> Scenario:
 
     # Assertions section (post-run control-socket-based checks).
     asrt = raw.get("assertions", {})
+    _reject_unknown(asrt, _SECTION_KEYS["assertions"], "assertions")
     if "bloom_send_rate" in asrt:
         bsr = asrt["bloom_send_rate"]
+        _reject_unknown(
+            bsr, _ASSERTION_KEYS["bloom_send_rate"], "assertions.bloom_send_rate"
+        )
         s.assertions.bloom_send_rate = BloomSendRateAssertion(
             window_secs=int(bsr.get("window_secs", 30)),
             max_per_node=int(bsr.get("max_per_node", 30)),
         )
     if "min_parent_switches" in asrt:
         mps = asrt["min_parent_switches"]
+        _reject_unknown(
+            mps, _ASSERTION_KEYS["min_parent_switches"],
+            "assertions.min_parent_switches",
+        )
         s.assertions.min_parent_switches = MinParentSwitchesAssertion(
             min_total=int(mps.get("min_total", 1)),
         )
 
     # Logging section
     lg = raw.get("logging", {})
+    _reject_unknown(lg, _SECTION_KEYS["logging"], "logging")
     s.logging.rust_log = lg.get("rust_log", "info")
     s.logging.output_dir = lg.get("output_dir", "./sim-results")
 
