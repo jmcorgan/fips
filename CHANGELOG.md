@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SessionDatagram` hop-limit handling now follows IP semantics. Delivery to
+  the addressed node is no longer TTL-gated, and a forwarder decrements before
+  deciding rather than after, so a datagram that would leave with a TTL of zero
+  is dropped instead of transmitted. Previously the TTL check ran ahead of the
+  local-delivery test, so a datagram addressed to this node that arrived with
+  TTL 0 was dropped, and a forwarder receiving a transit datagram at TTL 1
+  transmitted it at TTL 0 for the next hop to discard, wasting one transmission
+  per expiring datagram. The reachable radius is unchanged, because the two
+  behaviors compensated exactly: a path of `h` links still delivers for any
+  source TTL of `h` or more. During a rolling upgrade, an unupgraded forwarder
+  feeding an upgraded destination delivers one hop further than either version
+  does on its own; no version mix delivers less far. The `TtlExhausted` reject
+  counter now charges at the node that makes the decision rather than at the
+  hop after it.
+
 ## [0.4.1] - 2026-07-19
 
 ### Changed
