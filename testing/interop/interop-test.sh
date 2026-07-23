@@ -846,10 +846,10 @@ declare -A GLOBAL_PATTERNS=(
     ["ERROR"]="error-level log lines"
     ["unknown FMP version|Unknown FMP version"]="unknown-FMP-version drops"
     ["MMP link teardown"]="MMP link teardowns"
-    ["Excessive decrypt failures"]="excessive-decrypt-failure removals"
+    ["Excessive decryption failures"]="excessive-decryption-failure removals"
     ["Session AEAD decryption failed"]="FSP AEAD decrypt failures"
     ["Rekey msg2 processing failed"]="rekey msg2 failures"
-    ["Handshake failed|handshake failed|Handshake error"]="handshake failures"
+    ["Handshake failed|handshake failed"]="handshake failures"
 )
 
 for pat in "${!GLOBAL_PATTERNS[@]}"; do
