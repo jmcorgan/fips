@@ -7,7 +7,7 @@ use super::signal::{
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
 use super::traversal::{
-    PunchStrategy, build_punch_packet, parse_punch_packet, plan_punch_targets,
+    PunchStrategy, build_punch_packet, now_ms, parse_punch_packet, plan_punch_targets,
     planned_remote_endpoints, session_hash,
 };
 use super::traversal_machine::suppress_responder_for_own_initiator;
@@ -670,4 +670,41 @@ fn responder_suppression_election() {
     assert!(!suppress_responder_for_own_initiator(
         &smaller, &smaller, true
     ));
+}
+
+#[test]
+fn now_ms_tracks_the_wall_clock() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn wall_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_millis() as u64
+    }
+
+    // Bracket a sample between two independent wall-clock reads taken either
+    // side of it. This is the property the traversal clock has to hold for the
+    // NIP-40 expiration tags it computes to be in the future when published.
+    //
+    // Read this for what it is: it pins the contract (Unix epoch, milliseconds,
+    // tracking real time) and it fires on a host that has actually suspended,
+    // where the sample falls below `before` by the suspend duration. It is NOT a
+    // regression guard for the anchored-clock defect. Nothing reachable from a
+    // unit test can simulate a suspend, so on a machine that has not slept, an
+    // anchored implementation passes this -- deterministically when this is the
+    // first caller of `now_ms()` in the binary, and otherwise with a probability
+    // set by the fractional millisecond the anchor happened to capture.
+    let before = wall_ms();
+    let sampled = now_ms();
+    let after = wall_ms();
+
+    assert!(
+        sampled >= before,
+        "now_ms() is behind the wall clock: {sampled} < {before}"
+    );
+    assert!(
+        sampled <= after,
+        "now_ms() is ahead of the wall clock: {sampled} > {after}"
+    );
 }
