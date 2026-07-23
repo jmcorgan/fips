@@ -183,6 +183,7 @@ install -m 0755 "$RELEASE_DIR/fipsctl"      "$STAGE_DIR/usr/bin/fipsctl"
 install -m 0755 "$RELEASE_DIR/fipstop"      "$STAGE_DIR/usr/bin/fipstop"
 install -m 0755 "$RELEASE_DIR/fips-gateway" "$STAGE_DIR/usr/bin/fips-gateway"
 install -m 0755 "$FILES_DIR/usr/bin/fips-mesh-setup" "$STAGE_DIR/usr/bin/fips-mesh-setup"
+install -m 0755 "$FILES_DIR/usr/bin/fips-ap-setup"   "$STAGE_DIR/usr/bin/fips-ap-setup"
 
 install -d "$STAGE_DIR/etc/init.d"
 install -m 0755 "$FILES_DIR/etc/init.d/fips"         "$STAGE_DIR/etc/init.d/fips"

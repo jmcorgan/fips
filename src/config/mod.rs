@@ -786,21 +786,23 @@ node:
     }
 
     /// The fips.yaml shipped in the OpenWrt package must keep parsing as the
-    /// config schema evolves. The 802.11s mesh backhaul entries (one per
-    /// radio, so dual-band routers can mesh on both bands) ship commented
-    /// out — a stock install that never creates fips-mesh* logs no per-boot
-    /// bind warning; `fips-mesh-setup` uncomments the matching block when it
-    /// creates the interface (docs/how-to/set-up-80211s-mesh-backhaul.md).
-    /// Verify both states parse: as shipped (mesh inactive), and after the
-    /// uncomment `fips-mesh-setup` performs.
+    /// config schema evolves. Both the 802.11s mesh backhaul entries
+    /// (docs/how-to/set-up-80211s-mesh-backhaul.md) and the open-access SSID
+    /// entries (docs/how-to/set-up-open-access-ssid.md) ship commented out —
+    /// one per radio, so dual-band routers can run either on both bands — so
+    /// a stock install that never creates fips-mesh*/fips-ap* logs no
+    /// per-boot bind warning; `fips-mesh-setup`/`fips-ap-setup` uncomment the
+    /// matching block when they create the interface. Verify both states
+    /// parse: as shipped (both inactive), and after the uncomment the helpers
+    /// perform.
     #[test]
     fn shipped_openwrt_config_parses() {
         let yaml = include_str!("../../packaging/openwrt-ipk/files/etc/fips/fips.yaml");
 
-        // As shipped: parses, and the mesh entries are commented out (a
-        // running daemon binds no fips-mesh* transport, so no bind warning).
+        // As shipped: parses, and the mesh/ap entries are commented out (a
+        // running daemon binds no fips-mesh*/fips-ap* transport, no warning).
         let config: Config = serde_yaml::from_str(yaml).expect("shipped OpenWrt fips.yaml");
-        for name in ["mesh0", "mesh1"] {
+        for name in ["mesh0", "mesh1", "ap0", "ap1"] {
             assert!(
                 !config
                     .transports
@@ -811,31 +813,40 @@ node:
             );
         }
 
-        // What `fips-mesh-setup` produces: uncomment each mesh block, which
-        // must still parse into a transport entry bound to the right netdev.
-        let config: Config = serde_yaml::from_str(&uncomment_mesh_blocks(yaml))
-            .expect("fips.yaml with mesh transports uncommented");
-        for (name, interface) in [("mesh0", "fips-mesh0"), ("mesh1", "fips-mesh1")] {
+        // What `fips-mesh-setup`/`fips-ap-setup` produce: uncomment each
+        // block, which must still parse into a transport bound to the right
+        // netdev.
+        let uncommented =
+            uncomment_transport_blocks(&uncomment_transport_blocks(yaml, "mesh"), "ap");
+        let config: Config = serde_yaml::from_str(&uncommented)
+            .expect("fips.yaml with mesh and ap transports uncommented");
+        for (name, interface) in [
+            ("mesh0", "fips-mesh0"),
+            ("mesh1", "fips-mesh1"),
+            ("ap0", "fips-ap0"),
+            ("ap1", "fips-ap1"),
+        ] {
             assert!(
                 config
                     .transports
                     .ethernet
                     .iter()
                     .any(|(n, eth)| n == Some(name) && eth.interface == interface),
-                "{name} backhaul entry missing after uncommenting shipped fips.yaml"
+                "{name} entry missing after uncommenting shipped fips.yaml"
             );
         }
     }
 
-    /// Mirror `fips-mesh-setup`'s block uncomment: strip the `    # ` prefix
-    /// from each `# mesh<N>:` header and its `    #   ` continuation lines,
-    /// leaving every other comment untouched.
-    fn uncomment_mesh_blocks(yaml: &str) -> String {
+    /// Mirror the setup helpers' block uncomment: strip the `    # ` prefix
+    /// from each `# <prefix><N>:` header and its `    #   ` continuation
+    /// lines, leaving every other comment untouched.
+    fn uncomment_transport_blocks(yaml: &str, prefix: &str) -> String {
+        let header = format!("    # {prefix}");
         let mut out = String::new();
         let mut in_block = false;
         for line in yaml.lines() {
             let is_header = line
-                .strip_prefix("    # mesh")
+                .strip_prefix(&header)
                 .and_then(|r| r.strip_suffix(':'))
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
             if is_header {

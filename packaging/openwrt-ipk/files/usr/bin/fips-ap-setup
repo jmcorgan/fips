@@ -1,0 +1,412 @@
+#!/bin/sh
+# fips-ap-setup — configure the open "FIPS" access SSID for phones/laptops.
+#
+# Usage:
+#   fips-ap-setup <radio> [ssid]     e.g. fips-ap-setup radio0
+#   fips-ap-setup remove [radio]     no radio: remove all instances
+#
+# Creates an open AP on the given radio so client devices running FIPS can
+# reach the router. Every FIPS router broadcasts the SAME SSID ("!FIPS" by
+# default — the leading '!' sorts it to the top of alphabetically ordered
+# network pickers): same SSID + unique BSSIDs is one standard ESS, so a
+# phone saves the network once and roams between all FIPS routers natively.
+#
+#   - encryption 'none'  — the AP is OPEN on purpose. FIPS's Noise IK
+#     handshake authenticates and encrypts everything above the radio, and
+#     the security type must be uniform across ALL routers anyway: clients
+#     key a saved network on SSID + security type, so one router with a PSK
+#     splits the ESS into a different saved network. A stranger can
+#     associate AND form a FIPS peer link — that is the point of open
+#     access. The Noise handshake authenticates each link (no
+#     impersonation of another identity, no MITM); it does NOT gate who
+#     may peer. Admission is open up to the daemon's max-peers cap; the
+#     firewall zone below is what confines every client to the FIPS
+#     overlay (no path to br-lan or the WAN).
+#   - DHCPv4 + RA IPv6   — dnsmasq serves DHCPv4 from a FIXED subnet,
+#     10.21.<N>.0/24 (echoes FIPS port 2121), identical on every router:
+#     a roaming phone keeps its lease across routers, and dnsmasq's
+#     authoritative mode (the OpenWrt default) ACKs the renew a foreign
+#     router never issued. odhcpd additionally announces a ULA prefix in
+#     router advertisements (stateless SLAAC); DHCPv6 stays off. FIPS
+#     itself only needs link-local + mDNS, but client provisioning checks
+#     (Android disconnects without an RA or a DHCP offer) and plain
+#     laptops both want a real address. The network provides no internet,
+#     so phones mark it unvalidated and keep cellular as the default
+#     route while staying associated.
+#   - ISOLATED           — own network and firewall zone: no path to
+#     br-lan, no forwarding to the WAN, and AP client isolation on.
+#     Associated clients reach only the FIPS handshake surface.
+#
+# Interfaces are named per radio index (radio0 -> fips-ap0, radio1 ->
+# fips-ap1). Unlike the 802.11s backhaul there is NO same-channel
+# constraint — clients scan when they roam, so every router picks its
+# access channels freely.
+#
+# The shipped /etc/fips/fips.yaml carries 'ap0' and 'ap1' entries under
+# 'transports.ethernet' bound to these names, but commented out — a stock
+# install that never creates fips-ap* then logs no bind warning. This
+# helper uncomments the matching entry when it creates an interface and
+# re-comments it on remove, so the daemon binds the transport without a
+# manual config edit. It also uncomments the node.rendezvous.lan block
+# (mDNS/DNS-SD — how phone FIPS apps discover the daemon); that switch is
+# daemon-wide and stays on at remove. After an interface is up, restart
+# fips.
+# See docs/how-to/set-up-open-access-ssid.md for the full guide.
+
+DEFAULT_SSID="!FIPS"
+CONFIG="/etc/fips/fips.yaml"
+
+# Replace $CONFIG with the rewritten $CONFIG.tmp. Force mode 0600 first: the
+# package installs fips.yaml 0600 (it may hold an inline 'nsec' private key),
+# and a fresh tmp file would otherwise land world-readable after the move.
+ap_config_write() {
+	chmod 600 "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
+}
+
+# Uncomment the 'ap<idx>' transports.ethernet block in $CONFIG (created by
+# 'fips-ap-setup'). Reversible with ap_config_disable. Returns:
+#   0 enabled (or already active)   1 no config file   2 no such block
+ap_config_enable() {
+	idx="$1"
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^    ap$idx:" "$CONFIG" && return 0
+	grep -q "^    # ap$idx:" "$CONFIG" || return 2
+	awk -v idx="$idx" '
+		$0 ~ ("^    # ap" idx ":[ \t]*$") { blk = 1; sub(/^    # /, "    "); print; next }
+		blk && /^    #   / { sub(/^    # /, "    "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
+}
+
+# Uncomment the 'lan' block under node.rendezvous in $CONFIG — the daemon's
+# mDNS/DNS-SD responder+browser. Phone FIPS apps cannot open raw-Ethernet
+# sockets, so mDNS is how they find this router's daemon. The match is
+# scoped to node.rendezvous: transports.ethernet also has a 'lan' entry at
+# the same indent. Daemon-wide switch — enabled here, deliberately NOT
+# re-commented on remove (other transports use it once on). Returns:
+#   0 enabled (or already active)   1 no config file   2 no such block
+lan_rendezvous_enable() {
+	[ -f "$CONFIG" ] || return 1
+	state="$(awk '
+		/^[A-Za-z_]/ { top = $1 }
+		top == "node:" && /^  [A-Za-z_]/ { sec = $1 }
+		top == "node:" && sec == "rendezvous:" && /^    lan:[ \t]*$/ { print "active"; exit }
+		top == "node:" && sec == "rendezvous:" && /^    # lan:[ \t]*$/ { print "commented"; exit }
+	' "$CONFIG")"
+	case "$state" in
+	active) return 0 ;;
+	commented) ;;
+	*) return 2 ;;
+	esac
+	awk '
+		/^[A-Za-z_]/ { top = $1 }
+		top == "node:" && /^  [A-Za-z_]/ { sec = $1 }
+		top == "node:" && sec == "rendezvous:" && $0 ~ /^    # lan:[ \t]*$/ { blk = 1; sub(/^    # /, "    "); print; next }
+		blk && /^    #   / { sub(/^    # /, "    "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
+}
+
+# Re-comment the 'ap<idx>' block so the daemon stops binding it (and stops
+# warning about the now-missing interface). Inverse of ap_config_enable.
+ap_config_disable() {
+	idx="$1"
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^    ap$idx:" "$CONFIG" || return 0
+	awk -v idx="$idx" '
+		$0 ~ ("^    ap" idx ":[ \t]*$") { blk = 1; sub(/^    /, "    # "); print; next }
+		blk && /^      / { sub(/^    /, "    # "); print; next }
+		{ blk = 0; print }
+	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
+}
+
+usage() {
+	echo "Usage: fips-ap-setup <radio> [ssid]" >&2
+	echo "       fips-ap-setup remove [radio]" >&2
+	echo "Radios on this device:" >&2
+	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/  \1/p" >&2
+	exit 1
+}
+
+# List the UCI section names of fips-managed access-point wifi-ifaces.
+ap_sections() {
+	uci show wireless 2>/dev/null | sed -n "s/^wireless\.\(fips_ap[^.=]*\)=wifi-iface$/\1/p"
+}
+
+# ---------------------------------------------------------------------------
+# remove [radio] — delete the wireless, network, dhcp, and firewall sections
+# created below
+# ---------------------------------------------------------------------------
+
+if [ "$1" = "remove" ]; then
+	if [ -n "$2" ]; then
+		SECTIONS="fips_ap_$(printf '%s' "$2" | tr -c 'a-zA-Z0-9_' '_')"
+	else
+		SECTIONS="$(ap_sections)"
+	fi
+	[ -n "$SECTIONS" ] || {
+		echo "No fips access-point instances configured."
+		exit 0
+	}
+	for section in $SECTIONS; do
+		ifname="$(uci -q get "wireless.$section.ifname")"
+		uci -q delete "wireless.$section"
+		uci -q delete "network.$section"
+		uci -q delete "dhcp.$section"
+		uci -q del_list "firewall.fips_ap.network=$section"
+		# Re-comment the matching ap<N> transport in fips.yaml so the
+		# daemon stops warning about the interface we just removed.
+		idx="$(printf '%s' "$ifname" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
+		[ -n "$idx" ] && ap_config_disable "$idx"
+		echo "Removed ${ifname:-$section}."
+	done
+	# Drop the shared zone and its rules once the last instance is gone.
+	if [ -z "$(uci -q get firewall.fips_ap.network)" ]; then
+		uci -q delete firewall.fips_ap
+		uci -q delete firewall.fips_ap_icmpv6
+		uci -q delete firewall.fips_ap_dhcpv4
+		uci -q delete firewall.fips_ap_mdns
+		uci -q delete firewall.fips_ap_fips_udp
+		uci -q delete firewall.fips_ap_fips_tcp
+	fi
+	uci commit wireless
+	uci commit network
+	uci commit dhcp
+	uci commit firewall
+	wifi reload
+	/etc/init.d/dnsmasq reload
+	/etc/init.d/odhcpd reload
+	/etc/init.d/firewall reload
+	echo "Restart fips: /etc/init.d/fips restart"
+	exit 0
+fi
+
+RADIO="$1"
+SSID="${2:-$DEFAULT_SSID}"
+
+[ -n "$RADIO" ] || usage
+
+if [ "$(uci -q get "wireless.$RADIO")" != "wifi-device" ]; then
+	echo "Error: '$RADIO' is not a wifi-device in /etc/config/wireless." >&2
+	usage
+fi
+
+# One instance per radio: section fips_ap_<radio>, netdev fips-ap<N>
+# where N is the radio's trailing index (radio0 -> fips-ap0). For radios
+# named without a trailing number, fall back to the first free index.
+SECTION="fips_ap_$(printf '%s' "$RADIO" | tr -c 'a-zA-Z0-9_' '_')"
+IDX="$(printf '%s' "$RADIO" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
+[ -n "$IDX" ] || IDX="$(printf '%s' "$RADIO" | sed -n 's/^\([0-9]\{1,\}\)$/\1/p')"
+if [ -z "$IDX" ]; then
+	IDX=0
+	while uci show wireless 2>/dev/null | grep -q "\.ifname='fips-ap$IDX'"; do
+		IDX=$((IDX + 1))
+	done
+fi
+AP_IFNAME="fips-ap$IDX"
+
+# Refuse a name collision from another radio's instance (e.g. two radios
+# whose names end in the same digit) rather than silently hijacking it.
+OWNER="$(uci show wireless 2>/dev/null \
+	| sed -n "s/^wireless\.\(fips_ap[^.=]*\)\.ifname='$AP_IFNAME'$/\1/p")"
+if [ -n "$OWNER" ] && [ "$OWNER" != "$SECTION" ]; then
+	echo "Error: $AP_IFNAME is already used by section '$OWNER'." >&2
+	echo "Remove it first: fips-ap-setup remove" >&2
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Wireless: open AP with client isolation. Clients of the same AP cannot
+# exchange L2 frames directly — two FIPS phones on one router still reach
+# each other through the router at the overlay layer. Isolation is an L2
+# control only: a stranger who peers is an overlay peer like any other, so
+# the FIPS overlay (not L2) is the trust boundary between clients.
+# ---------------------------------------------------------------------------
+
+uci -q delete "wireless.$SECTION"
+uci set "wireless.$SECTION=wifi-iface"
+uci set "wireless.$SECTION.device=$RADIO"
+uci set "wireless.$SECTION.mode=ap"
+uci set "wireless.$SECTION.ssid=$SSID"
+uci set "wireless.$SECTION.encryption=none"
+uci set "wireless.$SECTION.isolate=1"
+uci set "wireless.$SECTION.ifname=$AP_IFNAME"
+uci set "wireless.$SECTION.network=$SECTION"
+
+# Radios ship disabled on fresh OpenWrt installs; a disabled radio would
+# leave the AP down with no error anywhere visible.
+if [ "$(uci -q get "wireless.$RADIO.disabled")" = "1" ]; then
+	echo "Note: enabling $RADIO (was disabled)."
+	uci -q delete "wireless.$RADIO.disabled"
+fi
+
+CHANNEL="$(uci -q get "wireless.$RADIO.channel")"
+BAND="$(uci -q get "wireless.$RADIO.band")"
+
+# ---------------------------------------------------------------------------
+# Network: IPv4 from the fixed convention 10.21.<IDX>.1/24 — deterministic,
+# so every router serving the same radio index lands on the same subnet and
+# a roaming client's lease stays valid. IPv6 is a static ULA /64 so odhcpd
+# has a prefix to announce; that space is per-router and disposable — a
+# roaming phone SLAACs a fresh address on each router, and the FIPS overlay
+# identity (not the IP) is the mobility anchor. The ULA is derived from the
+# router's global ULA prefix; a re-run keeps the address already configured.
+# ---------------------------------------------------------------------------
+
+AP_ADDR="$(uci -q get "network.$SECTION.ip6addr")"
+case "$AP_ADDR" in
+fd*) ;; # keep the existing address on re-run
+*)
+	ULA_BASE=""
+	ULA_PREFIX="$(uci -q get network.globals.ula_prefix)"
+	case "$ULA_PREFIX" in
+	fd*::/48) ULA_BASE="${ULA_PREFIX%::/48}" ;;
+	esac
+	if [ -z "$ULA_BASE" ]; then
+		HEX="$(head -c 5 /dev/urandom | hexdump -e '5/1 "%02x"')"
+		ULA_BASE="fd$(printf '%s' "$HEX" | cut -c1-2):$(printf '%s' "$HEX" | cut -c3-6):$(printf '%s' "$HEX" | cut -c7-10)"
+		echo "Note: no usable ULA prefix in network.globals — generated $ULA_BASE::/48 for this AP."
+	fi
+	# 64000 = 0xfa00 — high subnet IDs keep clear of br-lan's low
+	# ip6assign allocations from the same ULA prefix.
+	AP_ADDR="$ULA_BASE:$(printf '%04x' $((64000 + IDX)))::1/64"
+	;;
+esac
+
+AP_ADDR4="10.21.$IDX.1"
+
+uci -q delete "network.$SECTION"
+uci set "network.$SECTION=interface"
+uci set "network.$SECTION.proto=static"
+uci set "network.$SECTION.ipaddr=$AP_ADDR4"
+uci set "network.$SECTION.netmask=255.255.255.0"
+uci set "network.$SECTION.ip6addr=$AP_ADDR"
+
+# ---------------------------------------------------------------------------
+# DHCP/RA: dnsmasq DHCPv4 leases out of 10.21.<IDX>.0/24, plus router
+# advertisements for the ULA (stateless SLAAC, no DHCPv6). ra_default '2'
+# announces a default router even without an upstream default route:
+# Android's provisioning wants address + route + DNS, and its validation
+# probe then fails by design (no internet), so the phone keeps cellular as
+# the default route. 'dhcpv4 server' is read by BOTH dnsmasq (the default
+# DHCPv4 server) and odhcpd (serves v4 only when odhcpd.maindhcp is set),
+# so either arrangement hands out leases.
+# ---------------------------------------------------------------------------
+
+uci -q delete "dhcp.$SECTION"
+uci set "dhcp.$SECTION=dhcp"
+uci set "dhcp.$SECTION.interface=$SECTION"
+uci set "dhcp.$SECTION.ra=server"
+uci set "dhcp.$SECTION.ra_default=2"
+uci set "dhcp.$SECTION.dhcpv6=disabled"
+uci set "dhcp.$SECTION.dhcpv4=server"
+uci set "dhcp.$SECTION.start=10"
+uci set "dhcp.$SECTION.limit=200"
+
+# Authoritative is the OpenWrt default, but roaming correctness depends on
+# it (a foreign router must ACK a lease it never issued), so pin it.
+[ -n "$(uci -q get dhcp.@dnsmasq[0])" ] && uci set dhcp.@dnsmasq[0].authoritative=1
+
+# ---------------------------------------------------------------------------
+# Firewall: one shared 'fips_ap' zone for all instances. Everything is
+# rejected except what a FIPS client needs — DHCPv4 (addressing), ICMPv6
+# (SLAAC itself), mDNS (discovery), and the FIPS UDP/TCP transports (the
+# handshake surface).
+# The raw-Ethernet transport (EtherType 0x2121) is not IP and never
+# traverses the firewall. No forwardings exist, so there is no path to
+# br-lan or the WAN.
+# ---------------------------------------------------------------------------
+
+if [ "$(uci -q get firewall.fips_ap)" != "zone" ]; then
+	uci set firewall.fips_ap=zone
+fi
+uci set firewall.fips_ap.name=fips_ap
+uci set firewall.fips_ap.input=REJECT
+uci set firewall.fips_ap.output=ACCEPT
+uci set firewall.fips_ap.forward=REJECT
+uci -q del_list "firewall.fips_ap.network=$SECTION"
+uci add_list "firewall.fips_ap.network=$SECTION"
+
+# ap_rule <section-suffix> <name> <proto> [dest_port]
+ap_rule() {
+	rule="firewall.fips_ap_$1"
+	uci -q delete "$rule"
+	uci set "$rule=rule"
+	uci set "$rule.name=$2"
+	uci set "$rule.src=fips_ap"
+	uci set "$rule.proto=$3"
+	uci set "$rule.target=ACCEPT"
+	[ -z "${4:-}" ] || uci set "$rule.dest_port=$4"
+}
+
+ap_rule icmpv6 "FIPS-AP-ICMPv6" icmp
+uci set firewall.fips_ap_icmpv6.family=ipv6
+ap_rule dhcpv4 "FIPS-AP-DHCPv4" udp 67
+uci set firewall.fips_ap_dhcpv4.family=ipv4
+ap_rule mdns "FIPS-AP-mDNS" udp 5353
+ap_rule fips_udp "FIPS-AP-FIPS-UDP" udp 2121
+ap_rule fips_tcp "FIPS-AP-FIPS-TCP" tcp 8443
+
+uci commit wireless
+uci commit network
+uci commit dhcp
+uci commit firewall
+wifi reload
+/etc/init.d/dnsmasq reload
+/etc/init.d/odhcpd reload
+/etc/init.d/firewall reload
+
+# Enable the matching ap<N> transport in the shipped fips.yaml (it ships
+# commented out). Tailor the restart hint to what we could do.
+ap_config_enable "$IDX"
+case $? in
+	0) TRANSPORT_NOTE="The ap$IDX transport in $CONFIG that binds '$AP_IFNAME' is
+     now uncommented and enabled." ;;
+	1) TRANSPORT_NOTE="No $CONFIG found — add a transports.ethernet entry binding
+     interface '$AP_IFNAME' by hand." ;;
+	*) TRANSPORT_NOTE="No 'ap$IDX' entry in $CONFIG — add a transports.ethernet
+     entry binding interface '$AP_IFNAME' by hand (copy the ap0 block)." ;;
+esac
+
+# Phones discover the daemon via mDNS, not raw-Ethernet beacons — make sure
+# the daemon-wide mDNS rendezvous is on.
+if lan_rendezvous_enable; then
+	MDNS_NOTE="node.rendezvous.lan (mDNS) is enabled — phone FIPS apps
+     discover this router via DNS-SD."
+else
+	MDNS_NOTE="Could not enable mDNS in $CONFIG — set
+     'node.rendezvous.lan.enabled: true' by hand; phone FIPS apps rely
+     on it to discover this router."
+fi
+
+cat <<EOF
+Created open access SSID '$SSID' as $AP_IFNAME on $RADIO \
+(band ${BAND:-?}, channel ${CHANNEL:-auto}).
+DHCPv4 on $AP_ADDR4/24 and RA IPv6 on $AP_ADDR — no internet,
+isolated from br-lan and the WAN.
+
+ALL FIPS routers must broadcast this SSID with the same security type
+(open) — phones then save it once and roam between routers as one
+network. The 10.21.$IDX.0/24 subnet is the same on every router on
+purpose: leases survive roaming. Unlike the mesh backhaul, channels
+are free per router. On a dual-band router, run fips-ap-setup for the
+other radio too so clients can pick either band.
+
+On first connect a phone warns that the network has no internet —
+choose "stay connected" and "don't ask again". That choice is stored
+per SSID, so it covers every FIPS router.
+
+Next steps:
+  1. $TRANSPORT_NOTE
+  2. $MDNS_NOTE
+     Restart the daemon AFTER the interface is up — a transport whose
+     interface is missing at startup is skipped, not retried:
+       /etc/init.d/fips restart
+  3. Associate a phone or laptop running FIPS and verify:
+       iw dev $AP_IFNAME station dump
+     and the FIPS link on top of it:
+       fipsctl show peers
+
+Run 'fips-ap-setup remove' to undo all instances, or
+'fips-ap-setup remove $RADIO' for just this one.
+EOF
