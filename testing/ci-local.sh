@@ -1059,6 +1059,16 @@ run_ci_parity() {
     record "ci-parity" $rc
 }
 
+# Every daemon log string a test matches on must still be emitted by src/.
+# A stale one does not fail — it stops observing, and an expect-zero assertion
+# built on it then passes for the wrong reason.
+run_log_strings() {
+    local rc=0
+    info "[log-strings] Checking test log matchers against the strings src/ emits"
+    python3 "$SCRIPT_DIR/check-log-strings.py" || rc=$?
+    record "log-strings" $rc
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 main() {
@@ -1071,6 +1081,7 @@ main() {
     # --build-only are gated too: a divergence invalidates any claim that a
     # local run means what a GitHub run means, whichever subset was asked for.
     run_ci_parity
+    run_log_strings
 
     if [[ "$TEST_ONLY" == true ]]; then
         run_tests

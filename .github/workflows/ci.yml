@@ -61,6 +61,8 @@ jobs:
         run: pip3 install --quiet pyyaml
       - name: Check local and GitHub runners cover the same work
         run: bash testing/check-ci-parity.sh
+      - name: Check test log matchers against the strings src/ emits
+        run: python3 testing/check-log-strings.py
 
   fmt:
     name: Format check
