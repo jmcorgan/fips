@@ -410,10 +410,26 @@ docker exec "$GATEWAY" conntrack -F 2>/dev/null || true
 echo "  Waiting 25s for TTL + grace period to expire (two tick cycles)..."
 sleep 25
 
-# Query gateway control socket for mapping count
+# Query gateway control socket for mapping count.
+#
+# The expected value here is zero, so the reader must not be able to
+# produce a zero from a failed query: an error response carries no `data`
+# field, and `r.get('data',{}).get('mappings',[])` would report that as
+# zero mappings and pass this check without the gateway having answered.
+# The same hazard is documented at the show_mappings poll above, which is
+# safe only because it waits for a positive "2". Require the key to exist
+# and exit non-zero if it does not, so the `|| echo "error"` fallback
+# fires and the check reds.
 MAPPING_COUNT=$(docker exec "$GATEWAY" bash -c \
     'echo "{\"command\":\"show_mappings\"}" | nc -U -w1 /run/fips/gateway.sock 2>/dev/null' \
-    | python3 -c "import sys,json; r=json.load(sys.stdin); print(len(r.get('data',{}).get('mappings',[])))" 2>/dev/null || echo "error")
+    | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+data = r.get('data')
+if not isinstance(data, dict) or not isinstance(data.get('mappings'), list):
+    sys.exit(1)
+print(len(data['mappings']))
+" 2>/dev/null || echo "error")
 if [ "$MAPPING_COUNT" = "0" ]; then
     check "Mapping reclaimed after TTL+grace" 0
 else

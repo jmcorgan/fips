@@ -124,8 +124,20 @@ assert_baseline_loaded() {
     listing="$(docker exec "$container" nft list table inet fips)"
     # Default-deny is achieved via the trailing `counter drop` (chain
     # policy is `accept` for return-on-non-fips0 to work safely).
-    if ! printf '%s' "$listing" | grep -q 'counter packets'; then
-        fail "$container: counter drop rule missing from inet fips"
+    # Require the verdict, not just the counter: `counter packets` alone
+    # matches a counter rule with any verdict, including one that accepts.
+    # nft renders the rule as `counter packets N bytes M drop`.
+    #
+    # This checks that a counted drop rule exists somewhere in the table,
+    # not that it is the baseline's trailing one. A drop-in under
+    # /etc/fips/fips.d/ contributing its own counted drop would satisfy
+    # this even with the baseline rule removed. Asserting the rule's
+    # position is a larger change than this finding calls for; the
+    # drop-counter check at the end of the run is the one that reads the
+    # trailing rule specifically.
+    if ! printf '%s' "$listing" \
+        | grep -qE 'counter packets [0-9]+ bytes [0-9]+ drop'; then
+        fail "$container: trailing 'counter drop' rule missing from inet fips"
     fi
     if ! printf '%s' "$listing" | grep -q 'iifname != "fips0" return'; then
         fail "$container: non-fips0 early return rule missing"
@@ -191,7 +203,15 @@ fi
 # ── (a) Unallowed inbound is dropped ───────────────────────────────────
 log "Case (a): unallowed inbound TCP/${UNALLOWED_PORT} from node-a → node-b"
 # python3 http.server is already listening on :: per entrypoint default mode.
-# Use curl --max-time 5 — must time out (exit 28) or otherwise fail.
+#
+# The rule is a DROP, so the SYN is discarded with no RST and curl must
+# hit --max-time and exit 28. Assert exactly that rather than "any
+# non-zero rc": a REJECT, a closed port, an unroutable address or a
+# missing listener all fail too, with rc 7 or similar, and accepting
+# those would let the suite report a blocked connection when nothing was
+# ever blocked. Only 28 distinguishes "silently dropped" from "failed for
+# some other reason".
+CURL_TIMEOUT_RC=28
 set +e
 docker exec "$CONTAINER_A" curl -6 --silent --output /dev/null \
     --max-time 5 "http://[${ADDR_B}]:${UNALLOWED_PORT}/"
@@ -200,7 +220,10 @@ set -e
 if [ "$RC" -eq 0 ]; then
     fail "(a) connection to ${UNALLOWED_PORT} succeeded but should have been DROP'd (rc=0)"
 fi
-pass "(a) inbound TCP/${UNALLOWED_PORT} blocked (curl rc=$RC)"
+if [ "$RC" -ne "$CURL_TIMEOUT_RC" ]; then
+    fail "(a) connection to ${UNALLOWED_PORT} failed with curl rc=$RC, expected $CURL_TIMEOUT_RC (timeout). A DROP produces no RST, so anything else means the connection failed for a reason other than the firewall dropping it"
+fi
+pass "(a) inbound TCP/${UNALLOWED_PORT} dropped (curl rc=$RC, timed out as expected)"
 
 # ── (b) Outbound-initiated flow + conntrack reply ──────────────────────
 log "Case (b): node-b initiates outbound TCP, expects reply via conntrack"
@@ -237,8 +260,28 @@ fi
 
 # ── Drop-counter sanity ────────────────────────────────────────────────
 log "Drop counter incremented (case a should have ticked it)"
+# Scope to a drop rule rather than any counter rule: `/counter packets/`
+# alone takes the first counter rule of whatever verdict.
+#
+# Extract the count by position within the matched text, not by field
+# number. `$3` assumes the line starts with `counter`, so on a rule like
+# `tcp dport 9 counter packets 42 bytes 3000 drop` it prints the port,
+# not the packet count -- a plausible shape, since fips.nft includes
+# /etc/fips/fips.d/*.nft ahead of the trailing drop and a drop-in may
+# legitimately add its own counted drop.
+#
+# Take the LAST match, not the first. Case (a) is an unallowed inbound
+# that matches no accept rule and falls through to the baseline
+# default-deny, which fips.nft emits as the final rule of the chain
+# (packaging/common/fips.nft, `counter drop` after the drop-in include).
+# A drop-in's own counted drop would otherwise be read instead, and it
+# has nothing to do with what case (a) exercised.
 DROP_PKTS="$(docker exec "$CONTAINER_B" nft list table inet fips \
-    | awk '/counter packets/ && !seen { print $3; seen=1 }')"
+    | awk 'match($0, /counter packets [0-9]+ bytes [0-9]+ drop/) {
+             line = substr($0, RSTART); sub(/^counter packets /, "", line);
+             split(line, f, " "); val = f[1]
+           }
+           END { if (val != "") print val }')"
 if [ -z "${DROP_PKTS:-}" ] || [ "$DROP_PKTS" -lt 1 ]; then
     fail "drop counter is $DROP_PKTS — case (a) should have produced drops"
 fi

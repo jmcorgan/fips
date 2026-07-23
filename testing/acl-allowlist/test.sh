@@ -116,27 +116,62 @@ wait_for_peers_exact() {
     exit 1
 }
 
-assert_log_contains() {
+# Assert that ONE log line in $container contains every one of the given
+# fixed strings.
+#
+# Single-line matching is the point. Independent whole-log greps for an
+# npub and for `decision=denylist match` are jointly satisfied by "this
+# npub appears somewhere" plus "somebody was rejected by denylist", which
+# is not the property this suite exists to prove. Node-a lists the denied
+# peers as auto_connect peers, so it logs their npubs on the outbound
+# connect path whether or not a rejection ever happened; the npub has to
+# be on the rejection line itself to mean anything.
+#
+# Strings match in any order, by chaining fixed-string greps over the
+# surviving lines, so the assertion does not depend on the order the
+# tracing formatter emits a message and its fields in. A grep over empty
+# input yields the empty string rather than a value that could satisfy
+# the caller, so a container that cannot be read times out and fails
+# rather than passing.
+#
+# Polls rather than reading once: under the XX handshake the
+# cross-connection tie-breaker decides which side reaches its ACL check
+# first, so an inbound-handshake rejection may not emit until a later
+# retry. Same wait-with-timeout shape as wait_for_peers_exact above.
+#
+# Deliberately NOT registered in check-log-strings.py's SHELL_HELPERS,
+# for two reasons, and note that registering it would in fact capture
+# nothing: that extractor reads only a helper's FIRST argument and only
+# when it is a quoted literal free of `$` (check-log-strings.py:116),
+# whereas the first argument here is the unquoted container name
+# carrying ${FIPS_CI_NAME_SUFFIX}. Verified by running the extractor
+# with this helper added: zero hits. The same is true of the
+# `assert_log_contains` this replaced, so nothing left the check's scope.
+#
+# It should stay out of scope regardless: that check exists for strings
+# whose disappearance from src/ would let an assertion silently pass,
+# and every string here is a positive requirement, so a missing one
+# exhausts the poll and exits 1, which is loud.
+assert_log_line_contains_all() {
     local container="$1"
-    local pattern="$2"
-    local timeout="${3:-15}"
-    local logs
+    local timeout="$2"
+    shift 2
 
-    # Poll docker logs instead of one-shot reading: under XX handshake,
-    # the cross-connection tie-breaker determines which side reaches
-    # its ACL-check point first, so the inbound-handshake-context
-    # rejection may not emit until a later retry. Same wait-with-timeout
-    # shape as wait_for_peers_exact above.
+    local logs surviving pattern
     for _ in $(seq 1 "$timeout"); do
         logs="$(docker logs "$container" 2>&1 | python3 -c 'import re,sys; print(re.sub(r"\x1b\[[0-9;]*m", "", sys.stdin.read()), end="")' || true)"
-        if printf '%s' "$logs" | grep -F "$pattern" >/dev/null; then
-            echo "PASS: $container logs contain expected ACL rejection"
+        surviving="$logs"
+        for pattern in "$@"; do
+            surviving="$(printf '%s' "$surviving" | grep -F -- "$pattern" || true)"
+        done
+        if [ -n "$surviving" ]; then
+            echo "PASS: $container has a log line matching all of: $*"
             return 0
         fi
         sleep 1
     done
 
-    echo "FAIL: missing log pattern in $container: $pattern (waited ${timeout}s)" >&2
+    echo "FAIL: no single log line in $container contains all of: $* (waited ${timeout}s)" >&2
     exit 1
 }
 
@@ -175,9 +210,39 @@ assert_acl_field fips-acl-container-c${FIPS_CI_NAME_SUFFIX:-} allow_file_entries
 assert_acl_field fips-acl-container-c${FIPS_CI_NAME_SUFFIX:-} allow_entries "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6 npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le npub1x5z9rwzzm26q9verutx4aajhf2zw2pyp34c6whhde2zduxqav40qgq36l6 npub1ytrut7gjncn2zfnhn56c0zgftf0w6p99gf6fu8j73hzw5603zglqc9av6c"
 
 log "Checking ACL rejection logs"
-assert_log_contains fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6"
-assert_log_contains fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl"
-assert_log_contains fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} "context=inbound_handshake"
-assert_log_contains fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} "decision=denylist match"
+# One assertion per denied peer, each requiring the real message, that
+# peer's npub and the denylist decision on the SAME line. The npub being
+# on the rejection line is what carries the weight here: node-a rejected
+# THIS peer. The `decision=` conjunct adds no discrimination, since
+# PeerAclDecision::allowed() returns early for AllowList and DefaultAllow
+# (src/node/acl.rs:44-46), so DenyList is the only value that can reach
+# that warn! and every rejection line carries it. It is kept because the
+# remediation prescribes it and it documents the expected decision.
+#
+# Residual, recorded rather than hidden: node-a has auto_connect stanzas
+# for both denied peers and authorizes before dialing, so it emits a
+# fully-formed rejection line for each on the outbound_connect path.
+# These two assertions are therefore satisfiable without the inbound ACL
+# check running at all. The suite still catches that, because the denied
+# peer would then connect and the peer-count assertions above would time
+# out; but these two lines alone do not prove the inbound path.
+assert_log_line_contains_all fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} 15 \
+    "Rejected peer by ACL" \
+    "npub1cld9yay0u24davpu6c35l4vldrhzvaq66pcqtg9a0j2cnjrn9rtsxx2pe6" \
+    "decision=denylist match"
+assert_log_line_contains_all fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} 15 \
+    "Rejected peer by ACL" \
+    "npub1n9lpnv0592cc2ps6nm0ca3qls642vx7yjsv35rkxqzj2vgds52sqgpverl" \
+    "decision=denylist match"
+# The outsider-initiated path specifically, asserted separately and not
+# per-npub. Node-a carries static stanzas for both denied peers, so each
+# can be rejected on the outbound_connect path as well and which context
+# a given npub lands in is not deterministic (see README). Requiring an
+# inbound rejection of a *named* peer would red on scheduling rather than
+# on a regression; requiring that one exists at all does not.
+assert_log_line_contains_all fips-acl-container-a${FIPS_CI_NAME_SUFFIX:-} 15 \
+    "Rejected peer by ACL" \
+    "context=inbound_handshake" \
+    "decision=denylist match"
 
 log "ACL allowlist integration test passed"

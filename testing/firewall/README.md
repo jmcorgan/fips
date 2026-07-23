@@ -84,7 +84,7 @@ PASS: fips-fw-container-b: fips.nft baseline + drop-in loaded
 === Case (c): ICMPv6 echo-request to firewalled node
 PASS: (c) ICMPv6 ping node-a → node-b accepted
 === Case (a): unallowed inbound TCP/8000 from node-a → node-b
-PASS: (a) inbound TCP/8000 blocked (curl rc=28)
+PASS: (a) inbound TCP/8000 dropped (curl rc=28, timed out as expected)
 === Case (b): node-b initiates outbound TCP, expects reply via conntrack
 PASS: (b) outbound from node-b got HTTP 200 via conntrack reply path
 === Case (d): drop-in allowlisted TCP/22 from node-a → node-b
