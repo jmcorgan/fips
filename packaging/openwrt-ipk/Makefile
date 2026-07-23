@@ -99,6 +99,9 @@ define Package/fips/install
 	# 802.11s mesh backhaul setup helper
 	$(INSTALL_BIN) $(CURDIR)/files/usr/bin/fips-mesh-setup $(1)/usr/bin/fips-mesh-setup
 
+	# Open "FIPS" access SSID setup helper
+	$(INSTALL_BIN) $(CURDIR)/files/usr/bin/fips-ap-setup $(1)/usr/bin/fips-ap-setup
+
 	# procd init script
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/etc/init.d/fips $(1)/etc/init.d/fips

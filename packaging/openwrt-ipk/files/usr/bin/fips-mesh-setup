@@ -14,8 +14,10 @@
 #   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
 #     handshake authenticates and encrypts every peer link, so SAE would
 #     only duplicate that (and on ath10k it forces the slower raw Tx/Rx
-#     firmware mode). A stranger can form an 802.11s peering but cannot
-#     pass the FIPS handshake.
+#     firmware mode). A stranger can form an 802.11s peering AND a FIPS
+#     peer link — the Noise handshake authenticates each link (no
+#     impersonation of another identity, no MITM), it does not gate who
+#     may peer. Admission is open up to the daemon's max-peers cap.
 #   - mesh_fwding '0'    — disables 802.11s HWMP forwarding so each mesh
 #     link is a plain L2 neighbor link. FIPS is the routing layer; two
 #     routing layers would fight.
