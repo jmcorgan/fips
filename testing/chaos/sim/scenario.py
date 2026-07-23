@@ -204,11 +204,27 @@ class MinParentSwitchesAssertion:
 
 
 @dataclass
+class MaxParentSwitchesAssertion:
+    """Stability ceiling: fail if parent switches exceed ``max_total``.
+
+    ``node`` scopes the count to a single node id (e.g. ``n04``) instead
+    of the mesh-wide total. The distinction is not cosmetic: a criterion
+    written about one node's log is a different number from the sum over
+    every node, and checking the sum against a per-node threshold
+    silently tests something other than what was specified.
+    """
+
+    max_total: int = 0
+    node: str | None = None
+
+
+@dataclass
 class AssertionsConfig:
     """Optional post-run assertions evaluated against control-socket data."""
 
     bloom_send_rate: BloomSendRateAssertion | None = None
     min_parent_switches: MinParentSwitchesAssertion | None = None
+    max_parent_switches: MaxParentSwitchesAssertion | None = None
 
 
 @dataclass
@@ -283,12 +299,15 @@ _SECTION_KEYS = {
     "ingress": {"enabled", "tiers_kbps", "burst_bytes"},
     "link_swap": {"enabled", "interval_secs", "policies", "edges"},
     "link_swap.edges[]": {"edge", "policy"},
-    "assertions": {"bloom_send_rate", "min_parent_switches"},
+    "assertions": {
+        "bloom_send_rate", "min_parent_switches", "max_parent_switches",
+    },
     "logging": {"rust_log", "output_dir"},
 }
 _ASSERTION_KEYS = {
     "bloom_send_rate": {"window_secs", "max_per_node"},
     "min_parent_switches": {"min_total"},
+    "max_parent_switches": {"max_total", "node"},
 }
 _NETEM_POLICY_KEYS = {
     "delay_ms", "jitter_ms", "loss_pct", "duplicate_pct", "reorder_pct",
@@ -525,6 +544,51 @@ def load_scenario(path: str) -> Scenario:
         s.assertions.min_parent_switches = MinParentSwitchesAssertion(
             min_total=int(mps.get("min_total", 1)),
         )
+    if "max_parent_switches" in asrt:
+        xps = asrt["max_parent_switches"]
+        _reject_unknown(
+            xps, _ASSERTION_KEYS["max_parent_switches"],
+            "assertions.max_parent_switches",
+        )
+        if "max_total" not in xps:
+            raise ValueError(
+                "assertions.max_parent_switches: max_total is required "
+                "(a defaulted ceiling would assert an arbitrary number)"
+            )
+        max_total = xps["max_total"]
+        # bool is a subclass of int, and `max_total: yes` would coerce to 1
+        # -- a ceiling low enough to change the verdict, arrived at by typo.
+        if isinstance(max_total, bool) or not isinstance(max_total, int):
+            raise ValueError(
+                f"assertions.max_parent_switches: max_total must be a "
+                f"non-negative integer, got {max_total!r}"
+            )
+        if max_total < 0:
+            raise ValueError(
+                f"assertions.max_parent_switches: max_total must be "
+                f"non-negative, got {max_total}"
+            )
+        # Distinguish "key absent" from "key present but empty". Only the
+        # first means mesh-wide. YAML renders a bare `node:` as None, and
+        # treating that as absent would silently swap a per-node ceiling
+        # for a mesh-wide one -- the exact conflation this assertion was
+        # added to stop, and a live flake rather than a theoretical one:
+        # archived runs of this scenario reach 6 mesh-wide against an n04
+        # maximum of 2.
+        node = None
+        if "node" in xps:
+            node = xps["node"]
+            if not isinstance(node, str) or not node.strip():
+                raise ValueError(
+                    f"assertions.max_parent_switches: node must be a node id "
+                    f"string such as 'n04', got {node!r}. Omit the key "
+                    f"entirely for the mesh-wide total."
+                )
+            node = node.strip()
+        s.assertions.max_parent_switches = MaxParentSwitchesAssertion(
+            max_total=max_total,
+            node=node,
+        )
 
     # Logging section
     lg = raw.get("logging", {})
@@ -541,8 +605,43 @@ def load_scenario(path: str) -> Scenario:
     return s
 
 
+_SUPPRESSING_LOG_LEVELS = ("off", "error", "warn")
+
+
+def _validate_parent_switch_observability(s: Scenario):
+    """Refuse a parent-switch assertion the log level cannot observe.
+
+    The events these assertions count are emitted at ``info``. A scenario
+    that declares one while setting ``logging.rust_log`` to ``warn`` or
+    below counts zero switches: the minimum assertion then fails for the
+    wrong reason, and the maximum assertion passes without observing
+    anything, which is the failure mode the whole assertion effort exists
+    to remove. Catch it at load rather than after the run.
+
+    Deliberately conservative. It rejects only a default level that is
+    demonstrably too coarse, and says nothing about per-target directives
+    such as ``info,fips::node=debug``, which raise verbosity rather than
+    lower it.
+    """
+    if (
+        s.assertions.min_parent_switches is None
+        and s.assertions.max_parent_switches is None
+    ):
+        return
+    default_level = s.logging.rust_log.split(",")[0].strip().lower()
+    if default_level in _SUPPRESSING_LOG_LEVELS:
+        raise ValueError(
+            f"logging.rust_log is '{s.logging.rust_log}', whose default level "
+            f"'{default_level}' suppresses the info-level parent-switch events "
+            f"that a parent-switch assertion counts. The assertion would see "
+            f"zero switches regardless of what the tree did. Use 'info' or "
+            f"more verbose, or drop the assertion."
+        )
+
+
 def _validate(s: Scenario):
     """Validate scenario constraints."""
+    _validate_parent_switch_observability(s)
     if s.topology.num_nodes < 2:
         raise ValueError("topology.num_nodes must be >= 2")
     if s.topology.num_nodes > 250:

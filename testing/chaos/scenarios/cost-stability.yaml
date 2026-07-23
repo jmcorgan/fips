@@ -17,8 +17,32 @@
 # stay within the 20% hysteresis band. n04 should pick one parent
 # and mostly stick with it — flapping indicates insufficient hysteresis.
 #
-# Validation: count "Parent switched" in n04 logs, expect <= 5 switches
-# over the full 180s duration.
+# Validation: n04 should switch parent at most 5 times. This is now the
+# max_parent_switches assertion below, scoped to n04. It previously
+# existed only as this comment and was checked by nothing, so the
+# scenario could not fail on it.
+#
+# The threshold of 5 is the one this comment always named, kept
+# deliberately rather than re-derived. What the number is worth, from 11
+# completed archived runs of this scenario: n04 was 1 or 2 every time and
+# never reached 3, while the mesh-wide total ranged 3 to 6. Two
+# consequences worth knowing before trusting a green result here.
+#
+# First, 5 is a long way above anything observed, so this catches only
+# near-pathological reparenting. The daemon's own 30s parent hold-down
+# caps non-mandatory switches at roughly 6 per 180s run, so the band
+# where this can fail is narrow. A hysteresis regression that added two
+# or three switches would pass.
+#
+# Second, the count spans the container's whole life, not just the
+# mutation phase: in the archived runs nearly every n04 switch lands in
+# the first 100ms during initial tree formation, before the first netem
+# mutation fires. So this number is dominated by convergence transients
+# rather than by the hysteresis behaviour the scenario is named for.
+#
+# Tightening to 3 would make it a real detector against the observed
+# distribution. That is a change to the stated criterion rather than a
+# fix, so it is left as a decision rather than taken here.
 
 scenario:
   name: "cost-stability"
@@ -66,6 +90,11 @@ traffic:
   interval_secs: {min: 15, max: 30}
   duration_secs: {min: 5, max: 15}
   parallel_streams: 2
+
+assertions:
+  max_parent_switches:
+    node: n04
+    max_total: 5
 
 logging:
   rust_log: "info"

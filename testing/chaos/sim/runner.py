@@ -12,7 +12,12 @@ import sys
 import time
 from datetime import datetime
 
-from .assertions import AssertionOutcome, BloomSendRateMonitor, evaluate_min_parent_switches
+from .assertions import (
+    AssertionOutcome,
+    BloomSendRateMonitor,
+    evaluate_max_parent_switches,
+    evaluate_min_parent_switches,
+)
 from .compose import generate_compose
 from .config_gen import write_configs
 from .control import snapshot_all_congestion, snapshot_all_mmp, snapshot_all_trees
@@ -69,6 +74,46 @@ class SimRunner:
         # Post-run assertion monitors (sampled near end of run).
         self.bloom_rate_monitor: BloomSendRateMonitor | None = None
         self.assertion_outcomes: list[AssertionOutcome] = []
+
+    def _evaluate_max_parent_switches(
+        self, cfg, parent_switches: list[tuple[str, str]]
+    ) -> AssertionOutcome:
+        """Count parent switches in the configured scope and apply the ceiling.
+
+        A per-node scope is resolved through the topology and fails
+        explicitly if the node id is not in it. That is the whole reason
+        this lives here rather than in assertions.py: filtering log lines
+        by an unknown container name yields zero matches, and zero
+        trivially satisfies a ceiling, so a typo in ``node:`` would turn
+        the assertion into an unconditional pass.
+
+        Note the limit of that guard. It covers an unresolvable node id
+        and nothing else. A node that is in the topology but whose log is
+        empty, or whose log level suppressed the event, still counts zero
+        and still passes. Only the misspelling is caught here; the log
+        level is guarded at load time, and an empty log for a live node
+        is not guarded at all.
+        """
+        if cfg.node is None:
+            return evaluate_max_parent_switches(
+                cfg, len(parent_switches), "mesh-wide"
+            )
+
+        if cfg.node not in self.topology.nodes:
+            known = ", ".join(sorted(self.topology.nodes))
+            return AssertionOutcome(
+                name="max_parent_switches",
+                passed=False,
+                detail=(
+                    f"FAIL max_parent_switches: node '{cfg.node}' is not in "
+                    f"this topology (nodes: {known}). Nothing was counted, so "
+                    f"the ceiling was never actually tested."
+                ),
+            )
+
+        source = self.topology.container_name(cfg.node)
+        count = sum(1 for src, _ in parent_switches if src == source)
+        return evaluate_max_parent_switches(cfg, count, f"node {cfg.node}")
 
     @staticmethod
     def _resolve_output_dir(scenario: Scenario) -> str:
@@ -533,11 +578,25 @@ class SimRunner:
             print(result.summary())
 
             # Log-derived assertions (evaluated after analyze_logs so
-            # parent_switches and similar are populated).
+            # parent_switches and similar are populated). See
+            # _evaluate_max_parent_switches for why the per-node variant
+            # resolves its node against the topology rather than filtering
+            # optimistically.
             mps_cfg = self.scenario.assertions.min_parent_switches
             if mps_cfg is not None:
                 outcome = evaluate_min_parent_switches(
                     mps_cfg, len(result.parent_switches)
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            xps_cfg = self.scenario.assertions.max_parent_switches
+            if xps_cfg is not None:
+                outcome = self._evaluate_max_parent_switches(
+                    xps_cfg, result.parent_switches
                 )
                 self.assertion_outcomes.append(outcome)
                 if outcome.passed:

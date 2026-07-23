@@ -18,7 +18,11 @@ import logging
 from dataclasses import dataclass
 
 from .control import snapshot_all_bloom
-from .scenario import BloomSendRateAssertion, MinParentSwitchesAssertion
+from .scenario import (
+    BloomSendRateAssertion,
+    MaxParentSwitchesAssertion,
+    MinParentSwitchesAssertion,
+)
 from .topology import SimTopology
 
 log = logging.getLogger(__name__)
@@ -131,6 +135,41 @@ class BloomSendRateMonitor:
         )
 
 
+def evaluate_max_parent_switches(
+    cfg: MaxParentSwitchesAssertion,
+    parent_switch_count: int,
+    scope: str,
+) -> AssertionOutcome:
+    """Stability ceiling on parent switches over the run.
+
+    ``scope`` describes what was counted and appears in the message, so a
+    reader can tell a per-node result from a mesh-wide one. Resolving a
+    per-node scope to a real node is the caller's job, and so is failing
+    loudly when it cannot: an unresolvable node would count zero switches
+    and sail under any ceiling without having observed anything.
+    """
+    if parent_switch_count <= cfg.max_total:
+        return AssertionOutcome(
+            name="max_parent_switches",
+            passed=True,
+            detail=(
+                f"PASS max_parent_switches: {parent_switch_count} switches "
+                f"({scope}) <= ceiling {cfg.max_total}"
+            ),
+        )
+    return AssertionOutcome(
+        name="max_parent_switches",
+        passed=False,
+        detail=(
+            f"FAIL max_parent_switches: {parent_switch_count} switches "
+            f"({scope}) > ceiling {cfg.max_total} — the tree is reparenting "
+            f"more than the hysteresis band should allow. Check whether a "
+            f"cost change smaller than the hysteresis margin is still "
+            f"triggering a switch."
+        ),
+    )
+
+
 def evaluate_min_parent_switches(
     cfg: MinParentSwitchesAssertion,
     parent_switch_count: int,
@@ -147,7 +186,7 @@ def evaluate_min_parent_switches(
             passed=True,
             detail=(
                 f"PASS min_parent_switches: {parent_switch_count} switches "
-                f">= floor {cfg.min_total}"
+                f"(mesh-wide) >= floor {cfg.min_total}"
             ),
         )
     return AssertionOutcome(
@@ -155,7 +194,8 @@ def evaluate_min_parent_switches(
         passed=False,
         detail=(
             f"FAIL min_parent_switches: {parent_switch_count} switches "
-            f"< floor {cfg.min_total} — harness did not induce sufficient "
+            f"(mesh-wide) < floor {cfg.min_total} — harness did not induce "
+            f"sufficient "
             f"parent flapping; bloom-rate assertion would be trivially "
             f"true. Check tree-snapshot-warmup.json: did the expected "
             f"node win the root election?"
