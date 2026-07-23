@@ -27,7 +27,7 @@ FAILED=0
 
 # Node identities (from generated env file)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/../generated-configs/npubs.env"
+ENV_FILE="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo "Error: $ENV_FILE not found. Run generate-configs.sh first." >&2
     exit 1

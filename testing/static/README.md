@@ -122,7 +122,7 @@ testing/static/
 │       ├── mesh-public.yaml            # Mesh + external public node
 │       ├── tcp-chain.yaml             # TCP chain (3 nodes, port 8443)
 │       └── rekey.yaml                 # Rekey integration test (5 nodes)
-├── generated-configs/                  # Auto-generated (gitignored)
+├── generated-configs/                  # Auto-generated, run-scoped (gitignored)
 │   ├── npubs.env                       # NPUB_A=..., NPUB_B=..., etc.
 │   ├── mesh/
 │   │   ├── node-a.yaml ... node-e.yaml
@@ -151,6 +151,16 @@ Each topology file in `configs/topologies/` defines:
 - **Addresses**: `docker_ip` for Docker-managed nodes, `external_ip` for
   remote nodes not managed by Docker
 - **Peer connections**: which nodes peer with each other
+- **`docker_host`** (optional): the compose `hostname:` this node answers to,
+  when that is not `node-<id>`. Only the gateway topology needs it
+
+Generated peer addresses use the **docker hostname**, not `docker_ip`.
+`fips-net` requests no subnet, so docker assigns one from its own pool and two
+concurrent CI runs can bring the topology up at the same time instead of one
+of them failing with `Pool overlaps`. `docker_ip` is retained as documentation
+of the topology's shape and as the internal/external discriminator; an
+external node keeps its `external_ip` in peer blocks, its address not being
+ours to assign.
 
 Example entry:
 
@@ -177,6 +187,11 @@ This reads the topology definition and generates:
 
 1. Per-node YAML config files in `generated-configs/<topology>/`
 2. `generated-configs/npubs.env` with all node npubs as environment variables
+
+Under `ci-local.sh` the directory is `generated-configs-<run-id>`, so
+concurrent runs cannot overwrite each other's node configs; the compose file
+and every test script read the same `FIPS_CI_NAME_SUFFIX` and follow it. A
+bare invocation leaves the suffix unset and writes the plain path.
 
 The `npubs.env` file is sourced by the test scripts and injected into
 Docker containers via `env_file` in `docker-compose.yml`.

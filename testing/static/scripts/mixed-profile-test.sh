@@ -27,7 +27,7 @@ if [ "${1:-}" = "inject-config" ]; then
     echo "Injecting mixed-profile config overrides..."
 
     # Node C: non-routing
-    cfg="$SCRIPT_DIR/../generated-configs/$TOPOLOGY/node-c.yaml"
+    cfg="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/$TOPOLOGY/node-c.yaml"
     if [ ! -f "$cfg" ]; then
         echo "  Error: $cfg not found" >&2
         exit 1
@@ -43,7 +43,7 @@ with open('$cfg', 'w') as f:
     echo "  ✓ node-c (disable_routing: true)"
 
     # Node D: leaf
-    cfg="$SCRIPT_DIR/../generated-configs/$TOPOLOGY/node-d.yaml"
+    cfg="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/$TOPOLOGY/node-d.yaml"
     if [ ! -f "$cfg" ]; then
         echo "  Error: $cfg not found" >&2
         exit 1
@@ -64,7 +64,7 @@ fi
 
 # ── Full test ─────────────────────────────────────────────────────────
 source "$SCRIPT_DIR/../../lib/wait-converge.sh"
-ENV_FILE="$SCRIPT_DIR/../generated-configs/npubs.env"
+ENV_FILE="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo "Error: $ENV_FILE not found. Run generate-configs.sh first." >&2
     exit 1
@@ -102,10 +102,10 @@ echo "Phase 1: Link convergence"
 # B: peers with A, C → 2 links
 # C (NonRouting): peers with A, B → 2 links
 # D (Leaf): peers with A → 1 link
-wait_for_peers fips-node-a 3 30 || true
-wait_for_peers fips-node-b 2 30 || true
-wait_for_peers fips-node-c 2 30 || true
-wait_for_peers fips-node-d 1 30 || true
+wait_for_peers fips-node-a${FIPS_CI_NAME_SUFFIX:-} 3 30 || true
+wait_for_peers fips-node-b${FIPS_CI_NAME_SUFFIX:-} 2 30 || true
+wait_for_peers fips-node-c${FIPS_CI_NAME_SUFFIX:-} 2 30 || true
+wait_for_peers fips-node-d${FIPS_CI_NAME_SUFFIX:-} 1 30 || true
 
 # Phase 2: Verify link counts (already validated by wait_for_peers above)
 echo ""

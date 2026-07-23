@@ -35,7 +35,7 @@
 
   <!-- Docker network boundary -->
   <rect x="40" y="62" width="620" height="310" class="net-box"/>
-  <text x="52" y="78" class="net-label">172.20.0.0/24  (docker: fips-net)</text>
+  <text x="52" y="78" class="net-label">auto-assigned subnet  (docker: fips-net)</text>
 
   <!--
     Pentagon layout (centered at 350,225):

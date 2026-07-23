@@ -39,7 +39,7 @@ TOPO_FILE="$SCRIPT_DIR/../configs/topologies/$TOPOLOGY.yaml"
 # before building Docker images.
 if [ "${1:-}" = "inject-config" ]; then
     echo "Injecting node.limits.max_peers: $MAX_PEERS into node-$CAP_NODE ($TOPOLOGY topology)..."
-    cfg="$SCRIPT_DIR/../generated-configs/$TOPOLOGY/node-$CAP_NODE.yaml"
+    cfg="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/$TOPOLOGY/node-$CAP_NODE.yaml"
     if [ ! -f "$cfg" ]; then
         echo "  Error: $cfg not found (run generate-configs.sh $TOPOLOGY first)" >&2
         exit 1
@@ -67,11 +67,22 @@ info() { echo "[$(stamp)] $*"; }
 fail() { echo "[$(stamp)] FAIL: $*"; exit 1; }
 pass() { echo "[$(stamp)] PASS: $*"; }
 
-# Extract docker_ip for a node from the topology file
+# A node's docker address, read from the running container.
+#
+# NOT from the topology file's docker_ip: fips-net requests no subnet, so that
+# two concurrent CI runs cannot collide on one fixed range, and docker assigns
+# the addresses at `up`. A topology literal would no longer match anything on
+# the wire, and the phase-3 tcpdump assertions are built from these addresses
+# — a stale one turns "no Msg2 leaked" into a check that cannot fail.
+# Takes the first attachment only: these nodes have one, and concatenating two
+# would yield a string that is not an address at all. The `|| true` keeps a
+# missing container from killing the script under `set -e` before the caller
+# can say which container it was.
 node_ip() {
-    grep -A 5 "^  $1:" "$TOPO_FILE" \
-        | grep -m1 'docker_ip:' \
-        | sed 's/.*: *"*\([^"]*\)".*/\1/'
+    docker inspect \
+        -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \
+        "fips-node-${1}${FIPS_CI_NAME_SUFFIX:-}" 2>/dev/null \
+        | awk '{print $1}' || true
 }
 
 # Extract npub for a node from the topology file
@@ -91,7 +102,7 @@ node_peers() {
 }
 
 CAP_IP=$(node_ip "$CAP_NODE")
-[ -n "$CAP_IP" ] || fail "could not resolve docker_ip for node-$CAP_NODE in $TOPO_FILE"
+[ -n "$CAP_IP" ] || fail "could not read the docker address of container fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}"
 info "cap'd node: node-$CAP_NODE (ip $CAP_IP, max_peers=$MAX_PEERS)"
 
 # Read the cap'd node's peer_count, or the empty string if it did not answer.
@@ -138,6 +149,32 @@ info "denied (sustained-retry): ${DENIED:-<none>}"
 [ -n "$DENIED" ] \
     || fail "no denied peers — test setup wrong (cap=$MAX_PEERS too high vs configured peers)"
 
+# Every address a denied peer holds during the capture, one "node ip" line per
+# observation.
+#
+# It is not one address per node. `fips-net` requests no subnet so that
+# concurrent CI runs cannot collide on one, and the load driver below restarts
+# these containers repeatedly — docker frees the address on stop and may hand
+# back a different one, which was impossible while the compose pinned
+# ipv4_address. Observed live: node-d went 10.128.2.4 → 10.128.2.6 mid-window.
+# Phase 3 matches against the union, because an address that held for only part
+# of the window under-counts Msg1 and, worse, satisfies the expect-zero Msg2
+# assertion for the wrong reason.
+ADDR_FILE=$(mktemp /tmp/admission-cap-addrs.XXXXXX)
+record_denied_addrs() {
+    local n n_ip
+    for n in $DENIED; do
+        n_ip=$(node_ip "$n")
+        [ -n "$n_ip" ] || continue
+        grep -qxF "$n $n_ip" "$ADDR_FILE" 2>/dev/null || echo "$n $n_ip" >> "$ADDR_FILE"
+    done
+}
+record_denied_addrs
+for n in $DENIED; do
+    grep -q "^$n " "$ADDR_FILE" \
+        || fail "could not read the docker address of denied peer node-$n"
+done
+
 # ── Phase 2: capture wire traffic for CAPTURE_SECS seconds ───────────
 # Drives sustained load by restarting denied peer containers on a cadence
 # during the capture window. Each restart resets the auto-reconnect
@@ -156,10 +193,18 @@ HELPER_IMAGE=$(docker inspect -f '{{.Config.Image}}' "fips-node-${CAP_NODE}${FIP
     while [ $elapsed -lt $((CAPTURE_SECS - 5)) ]; do
         sleep 15
         elapsed=$((elapsed + 15))
+        # ONE AT A TIME, deliberately. Restarting them together frees both
+        # addresses at once and docker reallocates in completion order, so the
+        # two peers SWAP — observed live, and it destroys per-peer attribution
+        # because both then match the same address set. Restarted singly, a
+        # container frees its address and immediately reclaims it as the
+        # lowest free one, so each keeps its own.
         for n in $DENIED; do
-            docker restart "fips-node-${n}${FIPS_CI_NAME_SUFFIX:-}" >/dev/null 2>&1 &
+            docker restart "fips-node-${n}${FIPS_CI_NAME_SUFFIX:-}" >/dev/null 2>&1 || true
         done
-        wait
+        # Belt and braces: a restart may still move an address, so re-read
+        # rather than assuming the pre-capture snapshot still holds.
+        record_denied_addrs
         info "  [load-driver] restarted denied peers ($DENIED) at t+${elapsed}s"
     done
 ) &
@@ -185,17 +230,44 @@ info "captured $captured tcpdump lines → $CAP_FILE"
 info "phase 3: per-denied-peer assertion (sustained inbound retries > 0, not promoted)"
 OVERALL=0
 TOTAL_IN=0
+# One last observation: the final restart round may have moved an address after
+# the driver's own record.
+record_denied_addrs
+
+# The cap'd node is never restarted, so its address must not have moved. If it
+# did, every pattern below covers only part of the window and the counts mean
+# nothing — that is a harness failure, not a cap regression.
+cap_ip_now=$(node_ip "$CAP_NODE")
+[ "$cap_ip_now" = "$CAP_IP" ] \
+    || fail "cap'd node address moved during the capture ($CAP_IP → ${cap_ip_now:-<unreadable>}) though it was never restarted"
+cap_re=$(printf '%s' "$CAP_IP" | sed 's/\./\\./g')
+
+# Two denied peers must never have held the same address, or the per-peer
+# counts below are not per-peer: each would match the other's traffic and the
+# "this peer is sustained-retrying" assertion could be satisfied entirely by
+# its neighbour. Serialized restarts above are what prevent it; this is the
+# check that says so out loud if they ever stop working.
+dup=$(awk '{ if (seen[$2] != "" && seen[$2] != $1) print $2; seen[$2] = $1 }' "$ADDR_FILE" | sort -u)
+[ -z "$dup" ] \
+    || fail "denied peers shared an address during the capture ($(echo "$dup" | paste -sd, -)); per-peer attribution is not possible"
+
 FINAL_PEERS=$(docker exec "fips-node-${CAP_NODE}${FIPS_CI_NAME_SUFFIX:-}" fipsctl show peers 2>/dev/null \
     | grep -oE 'npub1[a-z0-9]+' | sort -u || true)
 for n in $DENIED; do
-    n_ip=$(node_ip "$n")
+    # Match every address this peer held during the window, not just its last:
+    # a restart can move it, and grepping for one of several under-counts the
+    # inbound evidence this assertion rests on.
+    n_re=$(awk -v n="$n" '$1 == n { gsub(/\./, "\\.", $2); printf "%s%s", (c++ ? "|" : ""), $2 }' "$ADDR_FILE")
+    [ -n "$n_re" ] \
+        || fail "no docker address was ever recorded for denied peer node-$n"
+    n_seen=$(awk -v n="$n" '$1 == n {print $2}' "$ADDR_FILE" | paste -sd, -)
     n_npub=$(node_npub "$n")
     # Sustained retry: any inbound UDP from the denied peer to the cap'd
     # node, regardless of handshake message size.
-    in_count=$(grep -cE "IP $n_ip\.[0-9]+ > $CAP_IP\.2121:" "$CAP_FILE" || true)
+    in_count=$(grep -cE "IP ($n_re)\.[0-9]+ > $cap_re\.2121:" "$CAP_FILE" || true)
     promoted="no"
     if echo "$FINAL_PEERS" | grep -q "$n_npub"; then promoted="yes"; fi
-    info "  node-$n ($n_ip): inbound packets = $in_count, promoted = $promoted"
+    info "  node-$n ($n_seen): inbound packets = $in_count, promoted = $promoted"
     TOTAL_IN=$((TOTAL_IN + in_count))
     if [ "$in_count" -eq 0 ]; then
         info "    FAIL: no inbound from denied peer (peer not sustained-retrying?)"
