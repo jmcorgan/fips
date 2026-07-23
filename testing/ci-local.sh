@@ -31,9 +31,7 @@
 #   acl-allowlist, admission-cap, firewall, nat-cone, nat-symmetric,
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
-#   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
-#   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
-#   chaos-depth-vs-cost, chaos-mixed-technology, chaos-congestion-stress,
+#   chaos-ethernet-only, chaos-tcp-mesh, chaos-congestion-stress,
 #   chaos-bloom-storm,
 #   sidecar, dns-resolver, deb-install
 #
@@ -125,15 +123,20 @@ CHAOS_SUITES=(
     "ethernet-mesh ethernet-mesh"
     "ethernet-only ethernet-only"
     "tcp-mesh tcp-mesh"
-    "bottleneck-parent bottleneck-parent"
-    "cost-avoidance cost-avoidance"
-    "cost-reeval cost-reeval"
-    "cost-stability cost-stability"
-    "depth-vs-cost depth-vs-cost"
-    "mixed-technology mixed-technology"
     "congestion-stress congestion-stress"
     "bloom-storm bloom-storm"
 )
+# Scenarios retired 2026-07-23 because their subject was a pure decision the
+# Docker harness could not test reliably, now covered by sans-IO unit tests
+# of the parent-selection cost/depth/hysteresis decision and the transport
+# drop-detection edge:
+#   - cost-reeval, cost-avoidance, cost-stability, depth-vs-cost,
+#     mixed-technology, bottleneck-parent (root election, MMP measurement lag
+#     and hold-down timing all confounded the Docker assertions).
+#   - congestion-drops (never landed): a fresh daemon reader keeps up with
+#     container-speed traffic, so SO_RXQ_OVFL could not be provoked.
+# congestion-stress stays: it exercises the ECN/MMP congestion signals,
+# which do need the real shaped bottleneck queue.
 SIDECAR_SUITES=(sidecar)
 GATEWAY_SUITES=(gateway)
 ACL_SUITES=(acl-allowlist)

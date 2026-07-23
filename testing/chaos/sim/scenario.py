@@ -46,11 +46,11 @@ class TopologyConfig:
     transport_mix: dict[str, float] | None = None
     # Assign derived identities in NodeAddr order so n01 holds the smallest and
     # is therefore the root every scenario diagram draws. Default on: without it
-    # the root is effectively arbitrary, which left `cost-reeval` rooted at its
-    # own designated test subject — so the parent switch it exists to observe
-    # could not occur — and made `mixed-technology`'s parent criteria
-    # unreachable. Set false where election from an arbitrary key distribution
-    # is itself the subject.
+    # the root is whichever node happens to hold the smallest key, which is
+    # effectively arbitrary and leaves any scenario that reasons about a
+    # specific root (e.g. bloom-storm's diamond, or a baseline max_roots check)
+    # describing a tree that does not form. Set false where election from an
+    # arbitrary key distribution is itself the subject.
     pin_root: bool = True
     # Set by --subnet to opt out of claiming a free range. Not a scenario-file
     # key: a scenario that hardcoded its range would reintroduce the collision

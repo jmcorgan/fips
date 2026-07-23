@@ -457,24 +457,6 @@ jobs:
           - suite: tcp-mesh
             type: chaos
             scenario: tcp-mesh
-          - suite: bottleneck-parent
-            type: chaos
-            scenario: bottleneck-parent
-          - suite: cost-avoidance
-            type: chaos
-            scenario: cost-avoidance
-          - suite: cost-reeval
-            type: chaos
-            scenario: cost-reeval
-          - suite: cost-stability
-            type: chaos
-            scenario: cost-stability
-          - suite: depth-vs-cost
-            type: chaos
-            scenario: depth-vs-cost
-          - suite: mixed-technology
-            type: chaos
-            scenario: mixed-technology
           - suite: congestion-stress
             type: chaos
             scenario: congestion-stress

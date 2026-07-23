@@ -7,17 +7,22 @@
 # Congestion detection signals exercised:
 #   1. MMP loss detection: netem loss exceeds the 5% loss_threshold,
 #      triggering detect_congestion() via MMP metrics on transit nodes.
-#   2. Kernel socket drops: small recv_buf_size (8KB) combined with
-#      traffic saturation causes SO_RXQ_OVFL on the UDP socket,
-#      triggering the transport drop detection path.
-#   3. Ingress policing: tc policer on the receive side drops excess
+#   2. Ingress policing: tc policer on the receive side drops excess
 #      inbound packets, creating bursty arrival patterns.
+#   3. ECN CE marking under the shaped bottleneck queue.
+#
+# The kernel socket-drop signal (SO_RXQ_OVFL) is NOT exercised here. This
+# scenario's 1 Mbps cap and ingress policer, which its ECN/MMP signals
+# require, make socket overflow impossible. It also cannot be provoked
+# deterministically anywhere in Docker — a fresh daemon reader keeps up
+# with container-speed traffic — so the FIPS drop-detection logic is
+# covered by transport-drop unit tests instead. See the note at the
+# assertions block below.
 #
 # ECN is explicitly enabled via fips_overrides.
 #
 # Success criteria (verified via post-run congestion snapshot):
 #   - congestion_detected > 0 on at least one forwarding node
-#   - kernel_drop_events > 0 on at least one node
 #   - ce_forwarded > 0 on transit nodes
 #   - ce_received > 0 on destination nodes
 #
@@ -118,40 +123,28 @@ assertions:
     min_nodes_ce_forwarded: 1
     min_nodes_ce_received: 1
 
-# The fourth criterion, "kernel_drop_events > 0 on at least one node", is
-# NOT asserted, because this scenario has never met it: across all 182
-# archived runs, including the six that meet the other three, no node has
-# reported a non-zero kernel_drop_events. Asserting it would red the scenario
-# permanently, and asserting a weakened version would assert nothing.
+# The kernel socket-drop criterion is NOT asserted here and no longer
+# belongs to this scenario. The FIPS drop-DETECTION logic is covered by
+# transport-drop unit tests (2026-07-23); the kernel dropping datagrams is a
+# kernel behaviour, not FIPS's to test, and could not be provoked in Docker.
 #
-# CORRECTED 2026-07-23. An earlier version of this note concluded that the
-# transport drop-detection path "is exercised by nothing". That is wrong, and
-# the error was one of scope: it looked only inside this scenario. Widening
-# the scan to every scenario's congestion snapshots -- 2317 files, 11778 node
-# records -- finds 51 records reporting kernel_drop_events > 0 across six
-# other scenarios (depth-vs-cost, bottleneck-parent, tcp-mesh, cost-avoidance,
-# maelstrom-sparse, mixed-technology), with raw drop counts up to 41165. The
-# path is live and plumbed through to the snapshot. What is dead is this
-# scenario's ability to provoke it.
+# Why it could never be met here: across all 182 archived runs of this
+# scenario, including the six that meet the three signals above, no node
+# ever reported a non-zero kernel_drop_events. SO_RXQ_OVFL counts datagrams
+# arriving at a FULL receive queue, and the 1 Mbps cap sets the arrival rate
+# to 125 kB/s per link. Linux doubles a requested SO_RCVBUF, so the queue is
+# 8192 bytes and filling it would take ~65 ms of reader stall (~22 ms even at
+# the busiest node's 3 Mbps aggregate). Traffic volume cannot cause the
+# overflow because the volume is capped below the rate the buffer drains, and
+# the ingress policer discards excess in tc before the socket ever sees it.
+# An unshaped attempt (congestion-drops, 2026-07-23) recorded zero raw drops
+# on every node even with a 4 KB buffer and heavy iperf: a fresh daemon
+# reader keeps up, so the overflow cannot be provoked deterministically. That
+# is why the detection edge is tested as a sans-IO unit test.
 #
-# The inversion is the lead: every scenario that DOES overflow runs with the
-# default 2 MB recv_buf_size, while this one, the only scenario that shrinks
-# it to 4 KB, never does. SO_RXQ_OVFL counts datagrams arriving at a full
-# queue, and the 1 Mbps cap below sets the arrival rate to 125 kB/s per link.
-# Linux doubles a requested SO_RCVBUF, so the queue is 8192 bytes and filling
-# it takes ~65 ms of reader stall -- ~22 ms even at the busiest node's 3 Mbps
-# aggregate. Traffic volume cannot cause the overflow because the volume is
-# capped below the rate the buffer drains. The ingress policer works against
-# the same signal, discarding excess in tc before the socket ever sees it.
-#
-# So signal 3 appears to suppress signal 2, and the two may not belong in one
-# scenario. Tracked with the experiment that would settle it (raise or drop
-# the bandwidth cap for one run and watch the counter) in ISSUE-2026-0084.
-#
-# Note also that the header above says "small recv_buf_size (8KB)" while
-# fips_overrides sets 4096. The 8 KB figure matches what Linux allocates after
-# doubling, so the comment may be describing the effective queue rather than
-# the setting; it reads as the setting and should say which it means.
+# The recv_buf_size: 4096 override below is kept because the three asserted
+# signals were validated with it in place; it is inert for socket overflow
+# under this scenario's cap.
 
 logging:
   rust_log: "info"

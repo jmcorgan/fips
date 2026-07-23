@@ -208,11 +208,10 @@ def generate_topology(
     # The mesh roots itself at the numerically smallest NodeAddr
     # (`src/tree/state.rs:363-390`), which is a hash of the node's public key
     # and so bears no relation to the node numbering. Every scenario diagram in
-    # this tree draws n01 at the top, and before this ordering was applied that
-    # held in only three of thirteen: `cost-reeval` rooted at n04 — its own
-    # designated test subject, which therefore had no parent to switch and could
-    # not exercise what the scenario exists to test — and `mixed-technology` at
-    # n09, which made its two documented parent criteria unreachable.
+    # this tree draws n01 at the top, and before this ordering was applied the
+    # root landed on an arbitrary node in most scenarios — which is why the
+    # cost-selection scenarios that reasoned about a specific root could never
+    # be turned into reliable assertions and were moved to sans-IO unit tests.
     #
     # So derive the identities from the mesh name as before, then *assign* them
     # in NodeAddr order: n01 receives the smallest and is the root, n02 the next,

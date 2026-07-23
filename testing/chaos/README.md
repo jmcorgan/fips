@@ -44,41 +44,22 @@ Random topologies with increasing stressor intensity.
   simultaneously, bandwidth tiers (1/10/100/1000 Mbps), `protect_connectivity`
   disabled (partitions allowed).
 
-### Cost-based parent selection
+### Cost-based parent selection — retired, now sans-IO unit tests
 
-Explicit topologies with heterogeneous link types (fiber, Bluetooth, WiFi) to
-test that the spanning tree selects optimal parents based on link cost.
+The cost-selection scenarios (cost-avoidance, depth-vs-cost, bottleneck-parent,
+cost-reeval, cost-stability, mixed-technology) were retired on 2026-07-23.
+Their subject was the pure `TreeState::evaluate_parent` decision — which parent
+wins on `effective_depth = depth + link_cost`, when periodic re-evaluation
+switches, and when hysteresis suppresses a flap. A Docker mesh could not test
+that reliably: the root is whichever node holds the smallest `NodeAddr`, MMP
+costs take several measurement windows to settle, and hold-down plus hysteresis
+timing all confound the outcome (a deterministic `link_swap` attempt still
+produced zero periodic switches in a full run).
 
-| Scenario          | Nodes | Shape           | Link types               | Duration | What it tests                                                       |
-| ----------------- | ----- | --------------- | ------------------------ | -------- | ------------------------------------------------------------------- |
-| cost-avoidance    | 4     | Diamond         | Fiber + Bluetooth        | 120s     | n04 picks fiber parent (n03) over Bluetooth parent (n02)            |
-| depth-vs-cost     | 4     | Linear tree     | Fiber + Bluetooth        | 120s     | Cost tradeoff: depth vs. Bluetooth link quality                     |
-| bottleneck-parent | 10    | Tree with BT    | Fiber + Bluetooth        | 120s     | n06 avoids Bluetooth bottleneck via n02, picks fiber via n03        |
-| cost-mixed-7node  | 7     | Multi-type tree | Fiber + Bluetooth + WiFi | 180s     | n06 prefers fiber (n03) over WiFi (n04)                             |
-| cost-reeval       | 4     | Diamond         | Fiber (mutated)          | 180s     | Periodic re-evaluation triggers parent switch (reeval_interval=15s) |
-| cost-stability    | 4     | Diamond         | WiFi (all)               | 180s     | Hysteresis prevents flapping when costs vary within 20% band        |
-
-- **cost-avoidance**, **depth-vs-cost**: Minimal scenarios validating the core
-  cost formula. Bluetooth (L2CAP) links use 15-40ms delay and 2-8% loss;
-  fiber uses 1-5ms delay and 0-1% loss.
-- **bottleneck-parent**: Larger topology where some nodes have both fiber and
-  Bluetooth paths to choose from, and one node (n09) is stuck with Bluetooth
-  (no alternative).
-- **cost-mixed-7node**: Three link technologies in one mesh. Traffic enabled.
-- **cost-reeval**: Netem mutation (50% fraction, every 12-18s) degrades random
-  links. FIPS override sets `reeval_interval_secs=15` so periodic re-evaluation
-  catches cost asymmetry. Look for `trigger=periodic` in logs.
-- **cost-stability**: All links are WiFi. Mutation swings costs between
-  `slightly_better` and `slightly_worse` — within the hysteresis band. Expect
-  ≤ 5 parent switches over 180s.
-
-### Mixed-technology
-
-Larger explicit topologies combining multiple link technologies.
-
-| Scenario         | Nodes | Link types               | Duration | Netem mutation | What it tests                                    |
-| ---------------- | ----- | ------------------------ | -------- | -------------- | ------------------------------------------------ |
-| mixed-technology | 10    | Fiber + Bluetooth + WiFi | 180s     | 20%/30-60s     | Tree convergence across heterogeneous link types |
+That logic is now covered by deterministic sans-IO unit tests in
+`src/tree/tests.rs` (`test_evaluate_parent_cost_*`, `..._hysteresis_*`,
+`..._effective_depth_*`), which run in the cargo quartet on every commit and
+can each be shown to fail by breaking the cost or hysteresis logic.
 
 ### Transport-specific
 
