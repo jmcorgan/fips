@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::net::UdpSocket;
@@ -197,25 +197,35 @@ pub(super) fn nonce() -> String {
     format!("{}-{:016x}", now_ms(), rand::random::<u64>())
 }
 
+/// Current Unix time in milliseconds, read from the wall clock on every call.
+///
+/// This deliberately does not cache a start-of-process anchor and advance it
+/// with a monotonic `Instant`. A monotonic clock does not advance while the host
+/// is suspended, so an anchored value trails real time by the suspend duration
+/// for the remaining life of the process. Every expiry computed from it is then
+/// published already in the past, the relay drops the event as expired, and
+/// traversal signalling fails until the daemon is restarted.
+///
+/// About half the consumers publish or serialize the value as an absolute
+/// timestamp: the NIP-40 expiration tags on adverts and traversal signals, and
+/// the `issuedAt`/`expiresAt` fields of offers and answers. The rest compare it
+/// against timestamps on the same basis, including the peer-authored, signed
+/// `created_at` of a received advert, so they need it to track real time too.
+///
+/// The interval-shaped consumers survive a step in the wall clock. A forward
+/// step, which is what a resume produces, saturates the punch start delay to
+/// zero so punching begins immediately; the attempt's own bounds are monotonic
+/// `Instant` deadlines, so its length is unaffected. A backward step lengthens
+/// that delay instead and can cost a single punch attempt, which retries. Early
+/// eviction from the replay window cannot admit a replay under the shipped
+/// defaults, because the freshness window a replayed offer would also have to
+/// satisfy (`signal_ttl_secs` plus `FRESHNESS_SKEW_TOLERANCE_MS`, 180s) is
+/// strictly narrower than the replay window itself (`replay_window_secs`, 300s).
 pub(super) fn now_ms() -> u64 {
-    struct ClockAnchor {
-        started_at: Instant,
-        started_unix_ms: u64,
-    }
-
-    static ANCHOR: OnceLock<ClockAnchor> = OnceLock::new();
-
-    let anchor = ANCHOR.get_or_init(|| ClockAnchor {
-        started_at: Instant::now(),
-        started_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or(0),
-    });
-
-    anchor
-        .started_unix_ms
-        .saturating_add(anchor.started_at.elapsed().as_millis() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub(super) fn session_hash(session_id: &str) -> [u8; 16] {
