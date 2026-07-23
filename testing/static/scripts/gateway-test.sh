@@ -17,7 +17,7 @@ trap 'echo ""; echo "Test interrupted"; exit 130' INT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../lib/wait-converge.sh"
 
-GENERATED_DIR="$SCRIPT_DIR/../generated-configs"
+GENERATED_DIR="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 ENV_FILE="$GENERATED_DIR/npubs.env"
 
 GATEWAY="fips-gw-gateway${FIPS_CI_NAME_SUFFIX:-}"

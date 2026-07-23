@@ -1,11 +1,13 @@
 networks:
+  # No subnet is requested: docker assigns one from the daemon's address pool,
+  # which is what lets two concurrent CI runs bring this topology up at the
+  # same time. A fixed request is honoured verbatim, so two runs asking for the
+  # same range collide on "Pool overlaps" — the whole reason mesh nodes now
+  # peer by docker hostname rather than by address.
   fips-net:
     driver: bridge
     labels:
       - "com.corganlabs.fips-ci=1"
-    ipam:
-      config:
-        - subnet: 172.20.0.0/24
   gateway-lan:
     driver: bridge
     labels:
@@ -26,7 +28,7 @@ x-fips-common: &fips-common
     - net.ipv6.conf.all.disable_ipv6=0
   restart: "no"
   env_file:
-    - ./generated-configs/npubs.env
+    - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env
   environment:
     - RUST_LOG=info
     # Passthrough for A/B benchmarking — set on the host shell before
@@ -45,10 +47,9 @@ services:
     hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   node-b:
     <<: *fips-common
@@ -57,10 +58,9 @@ services:
     hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   node-c:
     <<: *fips-common
@@ -69,10 +69,9 @@ services:
     hostname: node-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   node-d:
     <<: *fips-common
@@ -81,10 +80,9 @@ services:
     hostname: node-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.13
 
   node-e:
     <<: *fips-common
@@ -93,10 +91,9 @@ services:
     hostname: node-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.14
 
   # ── Mesh-public topology (mesh + external public node) ────────
   pub-a:
@@ -106,10 +103,9 @@ services:
     hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh-public/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh-public/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   pub-b:
     <<: *fips-common
@@ -118,10 +114,9 @@ services:
     hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh-public/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh-public/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   pub-c:
     <<: *fips-common
@@ -130,10 +125,9 @@ services:
     hostname: node-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh-public/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh-public/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   pub-d:
     <<: *fips-common
@@ -142,10 +136,9 @@ services:
     hostname: node-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh-public/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh-public/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.13
 
   pub-e:
     <<: *fips-common
@@ -154,10 +147,9 @@ services:
     hostname: node-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/mesh-public/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/mesh-public/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.14
 
   # ── Chain topology (A-B-C-D-E) ────────────────────────────────
   chain-a:
@@ -167,10 +159,9 @@ services:
     hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/chain/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/chain/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   chain-b:
     <<: *fips-common
@@ -179,10 +170,9 @@ services:
     hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/chain/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/chain/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   chain-c:
     <<: *fips-common
@@ -191,10 +181,9 @@ services:
     hostname: node-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/chain/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/chain/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   chain-d:
     <<: *fips-common
@@ -203,10 +192,9 @@ services:
     hostname: node-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/chain/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/chain/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.13
 
   chain-e:
     <<: *fips-common
@@ -215,10 +203,9 @@ services:
     hostname: node-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/chain/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/chain/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.14
 
   # ── Rekey integration test (mesh + aggressive rekey timers) ──
   rekey-a:
@@ -230,10 +217,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   rekey-b:
     <<: *fips-common
@@ -244,10 +230,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   rekey-c:
     <<: *fips-common
@@ -258,10 +243,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   rekey-d:
     <<: *fips-common
@@ -272,10 +256,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.13
 
   rekey-e:
     <<: *fips-common
@@ -286,10 +269,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.14
 
   # ── Rekey + accept_connections=false on node b ──────────────────
   # Exercises the auto_connect-initiator-with-accept-off regression
@@ -305,10 +287,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-accept-off/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-accept-off/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   rekey-accept-off-b:
     <<: *fips-common
@@ -319,10 +300,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-accept-off/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-accept-off/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   rekey-accept-off-c:
     <<: *fips-common
@@ -333,10 +313,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-accept-off/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-accept-off/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   rekey-accept-off-d:
     <<: *fips-common
@@ -347,10 +326,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-accept-off/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-accept-off/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.13
 
   rekey-accept-off-e:
     <<: *fips-common
@@ -361,10 +339,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-accept-off/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-accept-off/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.14
 
   # ── Rekey topology with udp.outbound_only=true on node b ────
   # Exercises the udp.outbound_only rekey-msg1 admission regression
@@ -385,10 +362,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-outbound-only/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-outbound-only/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   rekey-outbound-only-b:
     <<: *fips-common
@@ -399,10 +375,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-outbound-only/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-outbound-only/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   rekey-outbound-only-c:
     <<: *fips-common
@@ -413,10 +388,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-outbound-only/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-outbound-only/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   rekey-outbound-only-d:
     <<: *fips-common
@@ -427,10 +401,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-outbound-only/node-d.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-outbound-only/node-d.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.13
 
   rekey-outbound-only-e:
     <<: *fips-common
@@ -441,10 +414,9 @@ services:
       - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/rekey-outbound-only/node-e.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/rekey-outbound-only/node-e.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.14
 
   # ── TCP chain topology (A-B-C) ───────────────────────────────
   tcp-a:
@@ -454,10 +426,9 @@ services:
     hostname: node-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/tcp-chain/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/tcp-chain/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
 
   tcp-b:
     <<: *fips-common
@@ -466,10 +437,9 @@ services:
     hostname: node-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/tcp-chain/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/tcp-chain/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   tcp-c:
     <<: *fips-common
@@ -478,10 +448,9 @@ services:
     hostname: node-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/tcp-chain/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/tcp-chain/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   # ── Gateway integration test (gateway + server + non-FIPS client) ─
   gw-gateway:
@@ -502,10 +471,9 @@ services:
       - net.ipv6.conf.all.proxy_ndp=1
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/gateway/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/gateway/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.10
       gateway-lan:
         ipv4_address: 172.20.1.10
         ipv6_address: fd02::10
@@ -517,10 +485,9 @@ services:
     hostname: gw-server
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/gateway/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/gateway/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.11
 
   # Second mesh destination — gives gw-client-2 a distinct npub to target
   # so the gateway allocates a separate virtual-IP mapping per LAN client.
@@ -532,10 +499,9 @@ services:
     hostname: gw-server-2
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/gateway/node-c.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/gateway/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
-        ipv4_address: 172.20.0.12
 
   gw-client:
     image: ${FIPS_TEST_APP_IMAGE:-fips-test-app:latest}
@@ -554,7 +520,7 @@ services:
         ipv6_address: fd02::20
     restart: "no"
     env_file:
-      - ./generated-configs/npubs.env
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env
 
   # Second LAN client — exercises concurrent multi-client mappings.
   # Same image and gateway-lan attachment as
@@ -576,4 +542,4 @@ services:
         ipv6_address: fd02::21
     restart: "no"
     env_file:
-      - ./generated-configs/npubs.env
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env

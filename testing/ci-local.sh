@@ -302,9 +302,12 @@ CI_CLEANED=0
 
 # Best-effort, BOUNDED teardown of every docker resource THIS run may have
 # created. Idempotent (guarded), so the signal and EXIT paths don't double-run.
+# Takes the run's exit status; defaults to non-zero, which is the conservative
+# reading for the signal path.
 ci_teardown() {
     [[ $CI_CLEANED -eq 1 ]] && return 0
     CI_CLEANED=1
+    local run_status="${1:-1}"
 
     # 1. Propagate to parallel chaos children and reap them (bounded).
     if [[ ${#CI_CHAOS_PIDS[@]} -gt 0 ]]; then
@@ -339,6 +342,17 @@ ci_teardown() {
         --project-prefix "$CI_PROJECT_PREFIX" \
         --images "$CI_IMAGE_TEST $CI_IMAGE_APP" \
         --veth-suffixes "${_suffixes[*]}" >/dev/null || true
+
+    # 3. The static suite's generated configs are per-run (a shared directory
+    #    would let concurrent runs overwrite each other's node configs), so
+    #    they are this run's to remove. Only on a green run: after a failure
+    #    they are the evidence of what the failing nodes were actually
+    #    configured with. Guarded on a non-empty suffix too, since without one
+    #    the path is the unscoped working directory a developer uses by hand,
+    #    which is not ours to delete.
+    if [[ $run_status -eq 0 && -n "${CI_RUN_NAME_SUFFIX:-}" ]]; then
+        rm -rf "$SCRIPT_DIR/static/generated-configs${CI_RUN_NAME_SUFFIX}"
+    fi
 }
 
 on_signal() {
@@ -355,7 +369,7 @@ on_signal() {
 on_exit() {
     local code=$?
     trap '' TERM INT EXIT
-    ci_teardown
+    ci_teardown "$code"
     exit "$code"
 }
 

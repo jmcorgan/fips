@@ -10,9 +10,29 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$SCRIPT_DIR/../configs"
-GENERATED_DIR="$SCRIPT_DIR/../generated-configs"
+# Scoped by the CI run suffix so two concurrent runs cannot overwrite each
+# other's generated configs or npubs.env. Unset (a bare invocation) renders
+# the historical unscoped path.
+GENERATED_DIR="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 TEMPLATE_FILE="$CONFIG_DIR/node.template.yaml"
 DERIVE_KEYS="$SCRIPT_DIR/../../lib/derive_keys.py"
+
+# Every line belonging to one node, from its key to the next node key.
+#
+# Bounded by the block rather than by a fixed number of lines: a node that
+# omits an attribute would otherwise read the NEXT node's value for it, which
+# is silent and wrong in both directions — an external node followed by an
+# internal one would be classified as internal, and a node without docker_host
+# would dial the following node's container.
+node_block() {
+    local topology_file="$1"
+    local node_id="$2"
+    awk -v id="$node_id" '
+        $0 ~ "^  " id ":" { inblock = 1; next }
+        inblock && /^  [a-zA-Z]/ { exit }
+        inblock { print }
+    ' "$topology_file"
+}
 
 # Parse topology YAML to extract node attributes
 # Usage: get_node_attr <topology_file> <node_id> <attr_name>
@@ -20,15 +40,17 @@ get_node_attr() {
     local topology_file="$1"
     local node_id="$2"
     local attr="$3"
+    local block
+    block=$(node_block "$topology_file" "$node_id")
     # Handle both docker_ip and external_ip as "address"
     if [ "$attr" = "address" ]; then
-        local ip=$(grep -A 10 "^  $node_id:" "$topology_file" | grep "docker_ip:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/')
+        local ip=$(echo "$block" | grep "docker_ip:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/')
         if [ -z "$ip" ]; then
-            ip=$(grep -A 10 "^  $node_id:" "$topology_file" | grep "external_ip:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/')
+            ip=$(echo "$block" | grep "external_ip:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/')
         fi
         echo "$ip"
     else
-        grep -A 10 "^  $node_id:" "$topology_file" | grep "${attr}:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/'
+        echo "$block" | grep "${attr}:" | head -1 | sed 's/.*: *"*\([^"]*\)".*/\1/'
     fi
 }
 
@@ -36,8 +58,22 @@ get_node_attr() {
 is_external_node() {
     local topology_file="$1"
     local node_id="$2"
-    local docker_ip=$(grep -A 10 "^  $node_id:" "$topology_file" | grep "docker_ip:" | head -1)
+    local docker_ip
+    docker_ip=$(node_block "$topology_file" "$node_id" | grep "docker_ip:" | head -1)
     [ -z "$docker_ip" ]
+}
+
+# Docker hostname of an internal node. Peers address each other by name so the
+# compose network can be auto-assigned, which is what makes two concurrent runs
+# safe: with no fixed subnet requested there is nothing for them to contend
+# for. Defaults to node-<id>, the compose `hostname:` every static profile
+# uses; a topology whose services are named otherwise declares docker_host.
+docker_host_name() {
+    local topology_file="$1"
+    local node_id="$2"
+    local host
+    host=$(get_node_attr "$topology_file" "$node_id" "docker_host")
+    echo "${host:-node-$node_id}"
 }
 
 # Get peers list from topology
@@ -98,7 +134,14 @@ generate_peer_block() {
     local peer_id="$2"
 
     local peer_npub="$(get_key RESOLVED_NPUB "$peer_id")"
-    local peer_ip=$(get_node_attr "$topology_file" "$peer_id" "address")
+    local peer_addr
+    if is_external_node "$topology_file" "$peer_id"; then
+        # An external peer is not ours to name — use the address the
+        # topology gives it.
+        peer_addr=$(get_node_attr "$topology_file" "$peer_id" "address")
+    else
+        peer_addr=$(docker_host_name "$topology_file" "$peer_id")
+    fi
     local transport=$(get_default_transport "$topology_file")
     local port=$(transport_port "$transport")
 
@@ -107,7 +150,7 @@ generate_peer_block() {
     alias: "node-$peer_id"
     addresses:
       - transport: $transport
-        addr: "$peer_ip:$port"
+        addr: "$peer_addr:$port"
     connect_policy: auto_connect
 EOF
 }

@@ -33,7 +33,7 @@
 
   <!-- Docker network boundary -->
   <rect x="30" y="65" width="640" height="175" class="net-box"/>
-  <text x="40" y="82" class="net-label">172.20.0.0/24  (docker: fips-net)</text>
+  <text x="40" y="82" class="net-label">auto-assigned subnet  (docker: fips-net)</text>
 
   <!--
     Horizontal chain layout:
