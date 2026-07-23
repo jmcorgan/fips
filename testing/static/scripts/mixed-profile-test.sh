@@ -90,7 +90,7 @@ check() {
 ping_fips() {
     local from="$1"
     local to_npub="$2"
-    docker exec "fips-$from" ping6 -c 1 -W 5 "${to_npub}.fips"
+    docker exec "fips-${from}${FIPS_CI_NAME_SUFFIX:-}" ping6 -c 1 -W 5 "${to_npub}.fips"
 }
 
 echo "=== Mixed-Profile Integration Test ==="
@@ -126,7 +126,7 @@ while (( SECONDS - CONV_START < CONV_TIMEOUT )); do
                 "node-d:$NPUB_A" "node-d:$NPUB_B"; do
         from="${pair%%:*}"
         to="${pair##*:}"
-        if ! docker exec "fips-$from" ping6 -c 1 -W 1 "${to}.fips" >/dev/null 2>&1; then
+        if ! docker exec "fips-${from}${FIPS_CI_NAME_SUFFIX:-}" ping6 -c 1 -W 1 "${to}.fips" >/dev/null 2>&1; then
             ALL_GOOD=false
             break
         fi
