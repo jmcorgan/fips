@@ -1,0 +1,15 @@
+# Override: attach gateway-lan to a pre-created external network instead of
+# letting compose create it from the base file's fd02::/64 pin.
+#
+# Applied only by ci-local.sh's run_gateway, which claims a free /64 per run
+# (claim_gateway_lan6) and exports FIPS_GW_LAN_NET / FIPS_GW_LAN6_PREFIX before
+# `up`. This is what makes two concurrent local gateway runs collision-safe:
+# each claims a distinct /64, so neither requests a fixed range the other holds.
+#
+# The GitHub matrix and any standalone `docker compose up` do NOT apply this
+# overlay; they use the base file's normal gateway-lan network unchanged. This
+# mirrors sidecar/docker-compose.external-net.yml.
+networks:
+  gateway-lan:
+    external: true
+    name: ${FIPS_GW_LAN_NET:-fips-gateway-lan}

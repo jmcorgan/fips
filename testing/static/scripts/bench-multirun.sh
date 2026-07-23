@@ -120,6 +120,7 @@ ping_path() {
         return
     fi
     echo "${rtt//\// } ${loss:-N/A}"
+    return 0
 }
 
 # ── Path definitions ───────────────────────────────────────────────────────

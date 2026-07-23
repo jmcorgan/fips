@@ -285,15 +285,31 @@ phase_result() {
     fi
 }
 
-# Count occurrences of a pattern across all node logs
+# Count occurrences of a pattern across all node logs.
+#
+# A node whose logs cannot be read makes the whole count unusable rather than
+# contributing 0. The previous form ended each read `| grep -c "$pat" || true`,
+# so a failed `docker logs` yielded 0 for that node and the six assert_zero_count
+# callers below read a clean result from a node that was never consulted — one
+# unreadable node silently weakened the assertion instead of voiding it.
+#
+# Returns non-zero and prints a sentinel naming the container. Every caller must
+# split the declaration from the assignment (`local c` then `c=$(...)`), because
+# `local c=$(...)` takes `local`'s exit status and discards this one.
 count_log_pattern() {
     local pattern="$1"
     local total=0
+    local node logs count
     for node in $NODES; do
-        local count=$(docker logs "fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}" 2>&1 | grep -c "$pattern" || true)
+        if ! logs=$(docker logs "fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}" 2>&1); then
+            echo "unreadable:fips-node-${node}${FIPS_CI_NAME_SUFFIX:-}"
+            return 1
+        fi
+        count=$(grep -c "$pattern" <<<"$logs" || true)
         total=$((total + count))
     done
     echo "$total"
+    return 0
 }
 
 wait_for_log_pattern_count() {
@@ -325,7 +341,12 @@ assert_min_count() {
     local pattern="$1"
     local min_count="$2"
     local description="$3"
-    local count=$(count_log_pattern "$pattern")
+    local count
+    count=$(count_log_pattern "$pattern") || {
+        echo "  ✗ $description: node logs unreadable ($count), count not established"
+        FAILED=$((FAILED + 1))
+        return
+    }
     if [ "$count" -ge "$min_count" ]; then
         echo "  ✓ $description: $count (>= $min_count)"
         PASSED=$((PASSED + 1))
@@ -339,7 +360,12 @@ assert_min_count() {
 assert_zero_count() {
     local pattern="$1"
     local description="$2"
-    local count=$(count_log_pattern "$pattern")
+    local count
+    count=$(count_log_pattern "$pattern") || {
+        echo "  ✗ $description: node logs unreadable ($count), zero not established"
+        FAILED=$((FAILED + 1))
+        return
+    }
     if [ "$count" -eq 0 ]; then
         echo "  ✓ $description: 0"
         PASSED=$((PASSED + 1))

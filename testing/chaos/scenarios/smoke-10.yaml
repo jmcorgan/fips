@@ -11,6 +11,16 @@ topology:
   ensure_connected: true
   subnet: "172.20.0.0/24"
   ip_start: 10
+  # The one scenario that deliberately does NOT pin the root. Every other
+  # scenario assigns identities in NodeAddr order so that n01 is root and its
+  # diagram describes the tree that actually forms. That is right for them,
+  # because they test parent selection and were silently testing it under a
+  # root they did not intend, but applying it everywhere would leave root
+  # election itself exercised nowhere. This is the generic 10-node convergence
+  # baseline and its `baseline` assertion is root-agnostic, so it is the
+  # cheapest place to keep election under test.
+  # Do not "fix" this to true for consistency with the others.
+  pin_root: false
 
 # Phase 2+ features (disabled for MVP)
 netem:

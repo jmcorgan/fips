@@ -8,4 +8,4 @@ _TESTING_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
 if _TESTING_DIR not in sys.path:
     sys.path.insert(0, _TESTING_DIR)
 
-from lib.derive_keys import derive  # noqa: E402
+from lib.derive_keys import derive, derive_full  # noqa: E402,F401

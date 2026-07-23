@@ -7,7 +7,7 @@ import random
 from collections import deque
 from dataclasses import dataclass, field
 
-from .keys import derive
+from .keys import derive_full
 from .naming import name_suffix, veth_token
 from .scenario import TopologyConfig
 
@@ -203,12 +203,31 @@ def generate_topology(
     n = config.num_nodes
     subnet_base = config.subnet.rsplit(".", 1)[0]  # "172.20.0"
 
-    # Create nodes with IPs and keys
+    # Create nodes with IPs and keys.
+    #
+    # The mesh roots itself at the numerically smallest NodeAddr
+    # (`src/tree/state.rs:363-390`), which is a hash of the node's public key
+    # and so bears no relation to the node numbering. Every scenario diagram in
+    # this tree draws n01 at the top, and before this ordering was applied that
+    # held in only three of thirteen: `cost-reeval` rooted at n04 — its own
+    # designated test subject, which therefore had no parent to switch and could
+    # not exercise what the scenario exists to test — and `mixed-technology` at
+    # n09, which made its two documented parent criteria unreachable.
+    #
+    # So derive the identities from the mesh name as before, then *assign* them
+    # in NodeAddr order: n01 receives the smallest and is the root, n02 the next,
+    # and so on. The keys are unchanged and still deterministic; only which node
+    # id holds which one changes. Scenarios that want an arbitrary root set
+    # `pin_root: false` and keep exercising election.
+    node_ids_ordered = [f"n{i + 1:02d}" for i in range(n)]
+    identities = [derive_full(mesh_name, nid) for nid in node_ids_ordered]
+    if config.pin_root:
+        identities.sort(key=lambda t: t[2])
+
     nodes: dict[str, SimNode] = {}
-    for i in range(n):
-        node_id = f"n{i + 1:02d}"
+    for i, node_id in enumerate(node_ids_ordered):
         docker_ip = f"{subnet_base}.{config.ip_start + i}"
-        nsec, npub = derive(mesh_name, node_id)
+        nsec, npub, _ = identities[i]
         nodes[node_id] = SimNode(
             node_id=node_id,
             docker_ip=docker_ip,

@@ -93,13 +93,28 @@ def _convertbits(data, frombits, tobits):
 # --- public API ---
 
 def derive(mesh_name, node_name):
+    nsec_hex, npub, _ = derive_full(mesh_name, node_name)
+    return nsec_hex, npub
+
+
+def derive_full(mesh_name, node_name):
+    """As `derive`, plus the NodeAddr the daemon will compute for this key.
+
+    NodeAddr is the first 16 bytes of SHA-256 over the serialized x-only
+    public key (`src/identity/node_addr.rs:36-43`), and the mesh elects the
+    numerically smallest one as root (`src/tree/state.rs:363-390`). Callers
+    that need the tree's root to be predictable derive it from here rather
+    than assuming it follows the node numbering.
+    """
     nsec_hex = hashlib.sha256(f"{mesh_name}|{node_name}".encode()).hexdigest()
     k = int(nsec_hex, 16)
     pub = _scalar_mult(k, (Gx, Gy))
     x_hex = format(pub[0], "064x")
-    data_5bit = _convertbits(list(bytes.fromhex(x_hex)), 8, 5)
+    x_bytes = bytes.fromhex(x_hex)
+    data_5bit = _convertbits(list(x_bytes), 8, 5)
     npub = _bech32_encode("npub", data_5bit)
-    return nsec_hex, npub
+    node_addr = hashlib.sha256(x_bytes).hexdigest()[:32]
+    return nsec_hex, npub, node_addr
 
 
 if __name__ == "__main__":

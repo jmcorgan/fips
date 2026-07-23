@@ -32,7 +32,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CACHE_DIR="$SCRIPT_DIR/.cache"
 DEB_CACHE_DIR="$CACHE_DIR/deb"
 
-# Timeouts
+# Timeouts. Each wait loop below exits as soon as its condition is met.
 BOOT_TIMEOUT=30
 SERVICE_TIMEOUT=20
 DAEMON_TIMEOUT=15
@@ -75,15 +75,26 @@ start_systemd_container_with_tun() {
 }
 
 wait_for_systemd() {
-    local name="$1"
+    local name="$1" state
     for _i in $(seq 1 "$BOOT_TIMEOUT"); do
-        if docker exec "$name" systemctl is-system-running --wait 2>/dev/null | grep -qE 'running|degraded'; then
-            return 0
-        fi
+        # `is-system-running` exits non-zero for `degraded` (a unit failed to
+        # start -- e.g. systemd-modules-load, which cannot load kernel modules
+        # inside a container -- even though the system did finish booting). This
+        # script runs `set -o pipefail`, so a piped `grep` would inherit that
+        # non-zero exit and reject an acceptable state, which timed out the
+        # newest distros (they reach `degraded`, older ones reach `running`).
+        # Capture the state string and test it directly instead of the pipe.
+        state=$(docker exec "$name" systemctl is-system-running --wait 2>/dev/null || true)
+        case "$state" in
+            running | degraded) return 0 ;;
+        esac
         sleep 1
     done
-    echo "  WARNING: systemd did not reach running state in ${BOOT_TIMEOUT}s (may still work)"
-    return 0
+    # A boot that never reached `running` or `degraded` is not a warning: every
+    # check after this point reads a system that may not have started its units,
+    # and returning 0 here made the timeout indistinguishable from a clean boot.
+    echo "  ERROR: systemd did not reach running state in ${BOOT_TIMEOUT}s" >&2
+    return 1
 }
 
 wait_for_service_active() {
@@ -229,18 +240,32 @@ DOCKERFILE
     rm -f "$CACHE_DIR/deb-for-image"
 
     start_systemd_container_with_tun "$name" "$image"
-    wait_for_systemd "$name"
+    wait_for_systemd "$name" || {
+        fail "systemd did not boot in $name; the install checks below would read an unstarted system"
+        cleanup_container "$name"
+        return
+    }
 
     # Install the .deb. apt handles dependencies (libc6, systemd,
     # libdbus-1-3) and runs the maintainer scripts (postinst →
     # systemctl enable fips.service; fips-dns.service starts and
     # runs fips-dns-setup).
     log "Installing .deb (apt install /opt/fips-deb/${deb_basename})"
-    local install_output
+    # `|| true` here used to discard apt's exit status, and an empty capture (a
+    # failed `docker exec`) matches neither error pattern below, so a install
+    # that never ran reached `pass "apt install completed"`. Keep the capture on
+    # failure so the diagnostics below can print it, but remember the status.
+    local install_output install_rc=0
     install_output=$(docker exec "$name" bash -c "
         apt-get update >/dev/null 2>&1
         cd /opt/fips-deb && apt-get install -y --no-install-recommends ./${deb_basename} 2>&1
-    ") || true
+    ") || install_rc=$?
+    if [ "$install_rc" -ne 0 ]; then
+        fail "apt install exited $install_rc"
+        echo "$install_output" | tail -20
+        cleanup_container "$name"
+        return
+    fi
     if echo "$install_output" | grep -qE "^E:|errors? were encountered"; then
         fail "apt install reported errors"
         echo "$install_output" | tail -20

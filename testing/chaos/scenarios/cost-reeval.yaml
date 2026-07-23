@@ -32,6 +32,37 @@
 # re-evaluation" (trigger=periodic). If mutation never creates enough
 # asymmetry in a particular seed, the test still validates that periodic
 # re-eval runs without interference.
+#
+# THIS SCENARIO COULD NOT EXERCISE ITS SUBJECT AT ALL until 2026-07-23, and
+# the reason is worth keeping because nothing about it was visible from here.
+# The mesh roots at the numerically smallest NodeAddr, a hash of the node's
+# key (src/tree/state.rs:363-390), and that turned out to be **n04** — this
+# scenario's own designated test subject. A root has no parent, and
+# evaluate_parent returns early for the smallest address, so the parent switch
+# described above could never happen. The tree was inverted: n04 at depth 0,
+# n01 a leaf at depth 2, in all five recent runs.
+#
+# The archived logs show exactly that shape. The live info! string above
+# appears in 14 of 105 historical runs, on n04 in 13 of them, back when keys
+# were regenerated per run and the root wandered. In the five runs before this
+# fix it appears only on **n01** — the node that actually had a parent choice.
+#
+# `topology.pin_root` (default true) now assigns identities in NodeAddr order
+# so n01 is root and n04 is the depth-1 subject this file describes.
+#
+# MEASURED after the fix, 2026-07-23: the periodic switch now happens, in 2 of
+# 3 runs on n04 (0, 1, 1 occurrences). Before the fix it was 0 in 5 of 5, and
+# structurally impossible rather than merely rare. So the subject is exercised
+# for the first time.
+#
+# STILL NOT ASSERTED, deliberately. A "at least one periodic switch" assertion
+# would red roughly one run in three on this evidence, and a single run reading
+# zero is an argument against asserting rather than for it. Two ways forward,
+# neither taken here: gather enough runs to know whether 2-in-3 is the real
+# rate, or reduce the variance -- the mutation is stochastic with fraction=0.5,
+# so a deterministic link-degradation schedule would make the asymmetry this
+# scenario needs occur every run and the outcome assertable.
+# Tracked in ISSUE-2026-0085.
 
 scenario:
   name: "cost-reeval"

@@ -30,6 +30,7 @@ from .link_swap import LinkSwapManager
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
 from .naming import name_suffix
+from .netclaim import claim_network, remove_network
 from .netem import NetemManager
 from .nodes import NodeManager
 from .peer_churn import PeerChurnManager
@@ -47,6 +48,9 @@ class SimRunner:
         self.rng = random.Random(scenario.seed)
         self.topology: SimTopology | None = None
         self.compose_file: str | None = None
+        # Claimed in _setup; the compose file refers to it as external, so
+        # `compose down` does not remove it and teardown must.
+        self.network_name: str | None = None
         self.output_dir: str = self._resolve_output_dir(scenario)
         self._interrupted = False
 
@@ -185,6 +189,28 @@ class SimRunner:
         logging.getLogger().addHandler(fh)
         log.info("Runner log: %s", runner_log_path)
 
+        # 0. Claim this run's network range, before anything derives from it.
+        #
+        # The ordering is not obvious and it matters: node IPs are computed
+        # from the subnet inside generate_topology, and traffic shaping keys
+        # its filters on those addresses. Claiming after the topology exists
+        # would give a network on one range and `tc` filters on another, which
+        # does not fail at bring-up — it silently leaves the shaping matching
+        # nothing.
+        self.network_name = f"fips-sim{name_suffix()}-net"
+        s.topology.subnet = claim_network(
+            self.network_name,
+            labels={
+                "com.corganlabs.fips-ci": "1",
+                "com.corganlabs.fips-ci.run": os.environ.get(
+                    "FIPS_CI_RUN_ID", "manual"
+                ),
+            },
+            candidates=(
+                [s.topology.pinned_subnet] if s.topology.pinned_subnet else None
+            ),
+        )
+
         # 1. Generate topology
         log.info(
             "Generating %d-node %s topology (seed=%d)...",
@@ -237,7 +263,9 @@ class SimRunner:
         log.info("Wrote node configs to %s", config_dir)
 
         # 3. Generate docker-compose.yml
-        self.compose_file = generate_compose(self.topology, self.scenario, config_dir)
+        self.compose_file = generate_compose(
+            self.topology, self.scenario, config_dir, self.network_name
+        )
         log.info("Wrote %s", self.compose_file)
 
         # 4. Build the test image once (avoids per-service build at scale)
@@ -521,6 +549,17 @@ class SimRunner:
         except Exception:
             log.exception("Could not write status file")
 
+    def _release_network(self) -> None:
+        """Give this run's claimed /24 back.
+
+        The compose file declares the network `external:`, so `compose down`
+        leaves it alone and nothing else reclaims the range. Called from both
+        teardown paths, including the setup-failed one, because a run that
+        fell over after claiming still holds a range.
+        """
+        if self.network_name:
+            remove_network(self.network_name)
+
     def _teardown(self) -> AnalysisResult | None:
         """Stop dynamic elements, collect logs, analyze, stop containers."""
         if not self._containers_started:
@@ -536,6 +575,7 @@ class SimRunner:
                 # containers or a network even with no mesh to speak of.
                 log.info("Stopping containers...")
                 docker_compose(self.compose_file, ["down"], check=False)
+            self._release_network()
             return None
 
         result = None
@@ -701,6 +741,7 @@ class SimRunner:
                 ["down"],
                 check=False,
             )
+            self._release_network()
 
         return result
 

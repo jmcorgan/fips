@@ -26,6 +26,16 @@ SERVER2="fips-gw-server-2${FIPS_CI_NAME_SUFFIX:-}"
 CLIENT="fips-gw-client${FIPS_CI_NAME_SUFFIX:-}"
 CLIENT2="fips-gw-client-2${FIPS_CI_NAME_SUFFIX:-}"
 
+# LAN-side IPv6 addressing. run_gateway claims a per-run /64 and exports
+# FIPS_GW_LAN6_PREFIX; unset (standalone / GitHub) these render the base
+# compose's fd02:: addresses, byte-identical to before. GW_DNS is the gateway's
+# LAN address (nameserver + route next-hop); GW_CLIENT_LAN is gw-client's LAN
+# address (inbound port-forward target). fd01::/112 (the virtual pool) is NOT
+# claimed and stays literal below.
+GW_LAN6_PREFIX="${FIPS_GW_LAN6_PREFIX:-fd02}"
+GW_DNS="${GW_LAN6_PREFIX}::10"
+GW_CLIENT_LAN="${GW_LAN6_PREFIX}::20"
+
 # ── inject-config subcommand ─────────────────────────────────────────────
 
 inject_gateway_config() {
@@ -58,21 +68,21 @@ cfg['gateway'] = {
         {
             'listen_port': 18080,
             'proto': 'tcp',
-            'target': '[fd02::20]:8080',
+            'target': '[${GW_CLIENT_LAN}]:8080',
         },
         # 6B: second TCP forward — exercises multiple simultaneous TCP
         # rules sharing the same LAN backend on a different listen port.
         {
             'listen_port': 18082,
             'proto': 'tcp',
-            'target': '[fd02::20]:8081',
+            'target': '[${GW_CLIENT_LAN}]:8081',
         },
         # 6A: UDP forward — exercises the runtime UDP DNAT path (rule
         # shape + conntrack handling) end-to-end.
         {
             'listen_port': 18081,
             'proto': 'udp',
-            'target': '[fd02::20]:8081',
+            'target': '[${GW_CLIENT_LAN}]:8081',
         },
     ],
 }
@@ -130,7 +140,7 @@ for i in $(seq 1 30); do
     # Try resolving the server's npub via the gateway DNS from the client.
     # Match fd01:: specifically (the pool prefix) to avoid false-positive
     # matches on error messages containing fd02::10.
-    local_result=$(docker exec "$CLIENT" dig +short AAAA "${NPUB_B}.fips" @fd02::10 2>/dev/null || true)
+    local_result=$(docker exec "$CLIENT" dig +short AAAA "${NPUB_B}.fips" @${GW_DNS} 2>/dev/null || true)
     if echo "$local_result" | grep -q "^fd01::"; then
         echo "  Gateway DNS responding after ${i}s"
         DNS_READY=true
@@ -146,23 +156,23 @@ fi
 # Phase 3: Client network setup — route virtual IP pool via gateway
 echo ""
 echo "Phase 3: Client network setup"
-docker exec "$CLIENT" ip -6 route add fd01::/112 via fd02::10 2>/dev/null || true
-echo "  Added route fd01::/112 via fd02::10 on $CLIENT"
-docker exec "$CLIENT2" ip -6 route add fd01::/112 via fd02::10 2>/dev/null || true
-echo "  Added route fd01::/112 via fd02::10 on $CLIENT2"
+docker exec "$CLIENT" ip -6 route add fd01::/112 via ${GW_DNS} 2>/dev/null || true
+echo "  Added route fd01::/112 via ${GW_DNS} on $CLIENT"
+docker exec "$CLIENT2" ip -6 route add fd01::/112 via ${GW_DNS} 2>/dev/null || true
+echo "  Added route fd01::/112 via ${GW_DNS} on $CLIENT2"
 
 # Phase 4: DNS resolution test — resolve server npub from both clients,
 # exercising concurrent multi-client mappings.
 echo ""
 echo "Phase 4: DNS resolution"
-VIRTUAL_IP=$(docker exec "$CLIENT" dig +short AAAA "${NPUB_B}.fips" @fd02::10 2>/dev/null | head -1)
+VIRTUAL_IP=$(docker exec "$CLIENT" dig +short AAAA "${NPUB_B}.fips" @${GW_DNS} 2>/dev/null | head -1)
 if [ -n "$VIRTUAL_IP" ] && echo "$VIRTUAL_IP" | grep -q "fd01"; then
     check "Resolve ${NPUB_B:0:20}...fips on $CLIENT → $VIRTUAL_IP" 0
 else
     check "Resolve ${NPUB_B:0:20}...fips on $CLIENT (got: '$VIRTUAL_IP')" 1
 fi
 
-VIRTUAL_IP_2=$(docker exec "$CLIENT2" dig +short AAAA "${NPUB_C}.fips" @fd02::10 2>/dev/null | head -1)
+VIRTUAL_IP_2=$(docker exec "$CLIENT2" dig +short AAAA "${NPUB_C}.fips" @${GW_DNS} 2>/dev/null | head -1)
 if [ -n "$VIRTUAL_IP_2" ] && echo "$VIRTUAL_IP_2" | grep -q "fd01"; then
     check "Resolve ${NPUB_C:0:20}...fips on $CLIENT2 → $VIRTUAL_IP_2" 0
 else
@@ -357,7 +367,7 @@ else
     # 8080 backend serves "inbound-forward-ok" (no -2 suffix) — distinct
     # from the 8081 backend so a misrouted response would be detectable.
     if echo "$FWD_RESPONSE" | grep -qE '^inbound-forward-ok$'; then
-        check "Inbound HTTP via TCP forward 18080 → [fd02::20]:8080" 0
+        check "Inbound HTTP via TCP forward 18080 → [${GW_CLIENT_LAN}]:8080" 0
     else
         check "Inbound HTTP via TCP forward 18080 (response: '${FWD_RESPONSE:0:80}')" 1
     fi
@@ -365,7 +375,7 @@ else
     FWD_RESPONSE_2=$(docker exec "$SERVER" curl -6 -s --max-time 10 \
         "http://[${GW_MESH_IP}]:18082/" 2>&1) || true
     if echo "$FWD_RESPONSE_2" | grep -q "inbound-forward-ok-2"; then
-        check "Inbound HTTP via TCP forward 18082 → [fd02::20]:8081 (6B)" 0
+        check "Inbound HTTP via TCP forward 18082 → [${GW_CLIENT_LAN}]:8081 (6B)" 0
     else
         check "Inbound HTTP via TCP forward 18082 (response: '${FWD_RESPONSE_2:0:80}')" 1
     fi
@@ -384,7 +394,7 @@ except Exception as e:
     sys.stdout.write('ERR: ' + str(e))
 " 2>&1) || true
     if echo "$UDP_RESPONSE" | grep -q "udp-forward-ok:ping-via-udp-fwd"; then
-        check "Inbound UDP via forward 18081 → [fd02::20]:8081 (6A)" 0
+        check "Inbound UDP via forward 18081 → [${GW_CLIENT_LAN}]:8081 (6A)" 0
     else
         check "Inbound UDP via forward 18081 (response: '${UDP_RESPONSE:0:80}')" 1
     fi
@@ -444,8 +454,8 @@ docker exec "$GATEWAY" pkill -f "^fips --config" 2>/dev/null || true
 sleep 2
 
 # Gateway upstream timeout is 5s, so dig must wait longer than that.
-SERVFAIL_RESULT=$(docker exec "$CLIENT" dig +short +tries=1 +time=8 AAAA "test-servfail.fips" @fd02::10 2>&1 || true)
-SERVFAIL_STATUS=$(docker exec "$CLIENT" dig +tries=1 +time=8 AAAA "test-servfail.fips" @fd02::10 2>&1 | grep -c "SERVFAIL" || true)
+SERVFAIL_RESULT=$(docker exec "$CLIENT" dig +short +tries=1 +time=8 AAAA "test-servfail.fips" @${GW_DNS} 2>&1 || true)
+SERVFAIL_STATUS=$(docker exec "$CLIENT" dig +tries=1 +time=8 AAAA "test-servfail.fips" @${GW_DNS} 2>&1 | grep -c "SERVFAIL" || true)
 if [ "$SERVFAIL_STATUS" -ge 1 ]; then
     check "SERVFAIL when daemon DNS is down" 0
 else

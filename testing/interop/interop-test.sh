@@ -476,13 +476,24 @@ phase_result() {
 }
 
 # Count a pattern across all node logs.
+#
+# A node whose logs cannot be read makes the whole count unusable rather than
+# contributing 0. The previous form ended each read `| grep -cE … || true`, so a
+# failed `docker logs` yielded 0 for that node and the eight expect-zero
+# assertions in the GLOBAL_PATTERNS loop read a clean result from a node that was
+# never consulted. Same defect and same fix as rekey-test.sh.
 count_log_pattern() {
-    local pattern="$1" total=0 n count
+    local pattern="$1" total=0 n logs count
     for n in "${NODES[@]}"; do
-        count=$(docker logs "${CONTAINER[$n]}" 2>&1 | grep -cE "$pattern" || true)
+        if ! logs=$(docker logs "${CONTAINER[$n]}" 2>&1); then
+            echo "unreadable:${CONTAINER[$n]}"
+            return 1
+        fi
+        count=$(grep -cE "$pattern" <<<"$logs" || true)
         total=$((total + count))
     done
     echo "$total"
+    return 0
 }
 
 # Per-node count of a pattern.
@@ -854,7 +865,12 @@ declare -A GLOBAL_PATTERNS=(
 
 for pat in "${!GLOBAL_PATTERNS[@]}"; do
     desc="${GLOBAL_PATTERNS[$pat]}"
-    total="$(count_log_pattern "$pat")"
+    if ! total="$(count_log_pattern "$pat")"; then
+        echo "    FAIL  $desc: node logs unreadable ($total), zero not established"
+        FAILED=$((FAILED + 1))
+        INTEROP_FAILURES+=("[log] $desc: node logs unreadable ($total)")
+        continue
+    fi
     if [ "$total" -eq 0 ]; then
         echo "    PASS  $desc: 0"
         PASSED=$((PASSED + 1))

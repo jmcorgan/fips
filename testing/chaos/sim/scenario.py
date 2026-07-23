@@ -44,6 +44,18 @@ class TopologyConfig:
     # When set, each edge is randomly assigned a transport based on weights.
     # Only valid for non-explicit algorithms (explicit uses per-edge syntax).
     transport_mix: dict[str, float] | None = None
+    # Assign derived identities in NodeAddr order so n01 holds the smallest and
+    # is therefore the root every scenario diagram draws. Default on: without it
+    # the root is effectively arbitrary, which left `cost-reeval` rooted at its
+    # own designated test subject — so the parent switch it exists to observe
+    # could not occur — and made `mixed-technology`'s parent criteria
+    # unreachable. Set false where election from an arbitrary key distribution
+    # is itself the subject.
+    pin_root: bool = True
+    # Set by --subnet to opt out of claiming a free range. Not a scenario-file
+    # key: a scenario that hardcoded its range would reintroduce the collision
+    # claiming exists to remove.
+    pinned_subnet: str | None = None
 
 
 @dataclass
@@ -61,6 +73,11 @@ class NetemMutationConfig:
     interval_secs: Range = field(default_factory=lambda: Range(15, 30))
     fraction: float = 0.3
     policies: dict[str, NetemPolicy] = field(default_factory=dict)
+    # Edges the periodic mutation must never touch, "nXX-nYY" strings. Use it
+    # to pin the links a tree_parents assertion depends on so a random
+    # degradation cannot flip the very comparison being asserted. Validated
+    # against the topology in NetemManager — an unknown edge is a hard error.
+    exclude_edges: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -372,11 +389,11 @@ _SECTION_KEYS = {
     "scenario": {"name", "seed", "duration_secs"},
     "topology": {
         "num_nodes", "algorithm", "params", "ensure_connected", "subnet",
-        "ip_start", "default_transport", "transport_mix",
+        "ip_start", "default_transport", "transport_mix", "pin_root",
     },
     "netem": {"enabled", "default_policy", "link_policies", "mutation"},
     "netem.link_policies[]": {"edges", "policy", "policy_name"},
-    "netem.mutation": {"interval_secs", "fraction", "policies"},
+    "netem.mutation": {"interval_secs", "fraction", "policies", "exclude_edges"},
     "link_flaps": {
         "enabled", "interval_secs", "max_down_links", "down_duration_secs",
         "protect_connectivity",
@@ -494,6 +511,13 @@ def load_scenario(path: str) -> Scenario:
     s.topology.subnet = tc.get("subnet", "172.20.0.0/24")
     s.topology.ip_start = int(tc.get("ip_start", 10))
     s.topology.default_transport = tc.get("default_transport", "udp")
+    if "pin_root" in tc:
+        pin = tc["pin_root"]
+        if not isinstance(pin, bool):
+            raise ValueError(
+                f"topology.pin_root must be a boolean, got {pin!r}"
+            )
+        s.topology.pin_root = pin
     if "transport_mix" in tc:
         mix = tc["transport_mix"]
         if not isinstance(mix, dict) or not mix:
@@ -530,6 +554,7 @@ def load_scenario(path: str) -> Scenario:
             mc.get("interval_secs", {"min": 15, "max": 30}), "netem.mutation.interval_secs"
         )
         s.netem.mutation.fraction = float(mc.get("fraction", 0.3))
+        s.netem.mutation.exclude_edges = list(mc.get("exclude_edges", []))
         if "policies" in mc:
             s.netem.mutation.policies = {
                 name: _parse_netem_policy(pdata, f"netem.mutation.policies.{name}")

@@ -646,29 +646,77 @@ run_chaos() {
     return $rc
 }
 
+# Claim a free /64 for this run's gateway-lan network (Mechanism B).
+#
+# gateway-lan cannot float like fips-net: the LAN clients' resolv.conf pins the
+# gateway's LAN address as their nameserver, which must be a literal known
+# before they start. So instead of a fixed fd02::/64 that two concurrent runs
+# both request (the second failing on "Pool overlaps"), claim-and-advance a
+# candidate /64 and let docker's create be the atomic arbiter. The claimed
+# prefix is threaded — via the exported FIPS_GW_LAN6_PREFIX — into the compose
+# ipv6_address pins, the generated resolv.conf, and gateway-test.sh, so every
+# LAN address moves with the claim. i=0 renders today's fd02::/64.
+#
+# Mirrors sidecar/scripts/test-sidecar.sh:alloc_network. Deliberately does NOT
+# discard stderr: only an address-pool conflict is worth advancing on; any other
+# failure is real and burning through 256 candidates would bury the reason.
+claim_gateway_lan6() {
+    local net="$1" i err
+    for (( i = 0; i < 256; i++ )); do
+        if err=$(docker network create --ipv6 \
+                --subnet "fd02:0:0:${i}::/64" \
+                --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
+                "$net" 2>&1); then
+            export FIPS_GW_LAN6_PREFIX="fd02:0:0:${i}"
+            info "[gateway] Claimed $net on fd02:0:0:${i}::/64"
+            return 0
+        fi
+        case "$err" in
+            *"Pool overlaps"*|*"pool overlaps"*) continue ;;
+            *) fail "[gateway] docker network create: $err"; return 1 ;;
+        esac
+    done
+    fail "[gateway] no free /64 in fd02:0:0:0-255::/64 after 256 attempts"
+    return 1
+}
+
 # Run gateway integration test
 run_gateway() {
     local compose="testing/static/docker-compose.yml"
+    local ext="testing/static/docker-compose.gateway-external-net.yml"
     local rc=0
     export COMPOSE_PROJECT_NAME="$(ci_project static)"
+    export FIPS_GW_LAN_NET="fips-gateway-lan${FIPS_CI_NAME_SUFFIX:-}"
 
-    info "[gateway] Generating configs"
-    bash testing/static/scripts/generate-configs.sh gateway gateway-test || { record "gateway" 1; return; }
-    bash testing/static/scripts/gateway-test.sh inject-config || { record "gateway" 1; return; }
-
-    info "[gateway] Starting containers"
-    docker compose -f "$compose" --profile gateway up -d || { record "gateway" 1; return; }
-
-    info "[gateway] Running gateway test"
-    if bash testing/static/scripts/gateway-test.sh; then
-        rc=0
-    else
-        rc=1
-        info "[gateway] Collecting failure logs"
-        docker compose -f "$compose" --profile gateway logs --no-color 2>&1 | tail -100
+    # Claim the LAN /64 first: generate-configs writes resolv.conf from the
+    # claimed prefix, and inject-config renders the port-forward targets from
+    # it, so both must see FIPS_GW_LAN6_PREFIX before they run.
+    info "[gateway] Claiming LAN network"
+    if ! claim_gateway_lan6 "$FIPS_GW_LAN_NET"; then
+        record "gateway" 1
+        return
     fi
 
-    docker compose -f "$compose" --profile gateway down --volumes --remove-orphans 2>/dev/null
+    info "[gateway] Generating configs"
+    if bash testing/static/scripts/generate-configs.sh gateway gateway-test \
+        && bash testing/static/scripts/gateway-test.sh inject-config \
+        && { info "[gateway] Starting containers"; \
+             docker compose -f "$compose" -f "$ext" --profile gateway up -d; }; then
+        info "[gateway] Running gateway test"
+        if bash testing/static/scripts/gateway-test.sh; then
+            rc=0
+        else
+            rc=1
+            info "[gateway] Collecting failure logs"
+            docker compose -f "$compose" -f "$ext" --profile gateway logs --no-color 2>&1 | tail -100
+        fi
+    else
+        rc=1
+    fi
+
+    # compose down does not remove an external network, so drop it explicitly.
+    docker compose -f "$compose" -f "$ext" --profile gateway down --volumes --remove-orphans 2>/dev/null
+    docker network rm "$FIPS_GW_LAN_NET" >/dev/null 2>&1 || true
     record "gateway" $rc
 }
 
@@ -939,7 +987,6 @@ run_integration() {
         local pids=()
         local suite_names=()
         local running=0
-        local chaos_idx=0
 
         for entry in "${CHAOS_SUITES[@]}"; do
             # Parse: "display-name scenario [flags...]"
@@ -947,14 +994,15 @@ run_integration() {
             local name="${parts[0]}"
             local args=("${parts[@]:1}")
 
-            # Give each chaos child a unique, non-overlapping /24 in 10.30.x so
-            # parallel children never collide with each other, and so a chaos
-            # net can never swallow a fixed-subnet suite (sidecar/static/nat in
-            # 172.x). 10.30.x sits outside docker's default-address-pool range
-            # (172.17-31 / 192.168), so auto-assigned nets can't land on it
-            # either. Node IPs derive from this subnet inside the sim.
-            args+=("--subnet" "10.30.${chaos_idx}.0/24")
-            chaos_idx=$((chaos_idx + 1))
+            # No --subnet: the sim claims a free /24 itself (sim/netclaim.py).
+            # This used to pass 10.30.${chaos_idx}.0/24, which uniquified the
+            # children of ONE run against each other and was byte-identical
+            # between runs -- so two concurrent ci-local runs both walked
+            # 10.30.0 through 10.30.12 and collided on every one. A claim makes
+            # the daemon the arbiter, so an overlap is impossible rather than
+            # merely unlikely. The range still sits in 10.30.0.0/16, clear of
+            # docker's default pool (172.17-31 / 192.168) and of the
+            # fixed-subnet suites in 172.x.
 
             # Throttle: wait for a slot
             while [[ $running -ge $PARALLEL_JOBS ]]; do

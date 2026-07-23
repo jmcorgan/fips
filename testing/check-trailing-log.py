@@ -133,6 +133,15 @@ def status_tested(name: str, all_text: str, defining_file: Path) -> list[str]:
         (rf"^\s*{re.escape(name)}\s+[^\n|&]*&&", "<fn> &&"),
         (rf"^\s*{re.escape(name)}\s*&&", "<fn> &&"),
         (rf"\bif\s+\S*\s*{re.escape(name)}\b.*;\s*then", "if ... <fn> ; then"),
+        # Command substitution. Found 2026-07-23 while fixing a function this
+        # check reported clean: `total=$(count_log_pattern "$p") || { ... }`
+        # consumes the status, but the line begins with the variable, so none
+        # of the patterns above match it. That is not an exotic form — it is
+        # how a shell function returns a *value*, and it is the shape of the
+        # `|| true`-swallowed-failure family this check exists to catch.
+        (rf"=\$\(\s*{re.escape(name)}\b", "<var>=$(<fn>)"),
+        (rf"\bif\s+!?\s*\S*=?\$\(\s*{re.escape(name)}\b", "if <var>=$(<fn>)"),
+        (rf"\[\s+\"?\$\(\s*{re.escape(name)}\b", "[ $(<fn>) ]"),
     ]
     hits = []
     for pat, label in patterns:
@@ -186,8 +195,8 @@ def main() -> int:
         print(f"    last statement: {stmt[:100]}")
         print(f"    status consumed by: {', '.join(callers)}")
         print(f"    fix: add an explicit `return 0` as the last statement. Its "
-              f"success value is currently whatever the log call returned, "
-              f"which is 0 whatever the function did.")
+              f"success value is currently the trailing command's, which is 0 "
+              f"whatever the function did.")
 
     print(f"trailing-log check: {scanned} function(s) scanned, "
           f"{shaped} end in a logging call, {len(ALLOWED)} allowed, "

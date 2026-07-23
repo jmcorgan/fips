@@ -8,6 +8,10 @@ networks:
     driver: bridge
     labels:
       - "com.corganlabs.fips-ci=1"
+  # IPv4 is dropped so docker auto-assigns it (nothing reads a LAN IPv4 — the
+  # whole gateway LAN path is IPv6). The fd02::/64 pin stays for the standalone /
+  # GitHub path; concurrent local runs replace this network with a per-run
+  # claimed /64 via docker-compose.gateway-external-net.yml (see run_gateway).
   gateway-lan:
     driver: bridge
     labels:
@@ -15,7 +19,6 @@ networks:
     enable_ipv6: true
     ipam:
       config:
-        - subnet: 172.20.1.0/24
         - subnet: fd02::/64
 
 x-fips-common: &fips-common
@@ -523,8 +526,7 @@ services:
     networks:
       fips-net:
       gateway-lan:
-        ipv4_address: 172.20.1.10
-        ipv6_address: fd02::10
+        ipv6_address: ${FIPS_GW_LAN6_PREFIX:-fd02}::10
 
   gw-server:
     <<: *fips-common
@@ -561,11 +563,10 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     volumes:
-      - ./configs/gateway-resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/gateway/resolv.conf:/etc/resolv.conf:ro
     networks:
       gateway-lan:
-        ipv4_address: 172.20.1.20
-        ipv6_address: fd02::20
+        ipv6_address: ${FIPS_GW_LAN6_PREFIX:-fd02}::20
     restart: "no"
     env_file:
       - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env
@@ -583,11 +584,10 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     volumes:
-      - ./configs/gateway-resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/gateway/resolv.conf:/etc/resolv.conf:ro
     networks:
       gateway-lan:
-        ipv4_address: 172.20.1.21
-        ipv6_address: fd02::21
+        ipv6_address: ${FIPS_GW_LAN6_PREFIX:-fd02}::21
     restart: "no"
     env_file:
       - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env

@@ -143,13 +143,21 @@ assert_process_alive() {
     return 0
 }
 
+# A container whose logs cannot be read has not been shown to be panic-free.
+# The previous form read `docker logs … || true`, so an unreadable container
+# yielded empty output, matched no panic pattern, and returned success — the
+# assertion's failure mode was indistinguishable from its success condition.
 assert_no_panic() {
     local logs
-    logs="$(docker logs "$NODE" 2>&1 || true)"
+    if ! logs="$(docker logs "$NODE" 2>&1)"; then
+        echo "could not read logs from $NODE; absence of panics is not established" >&2
+        return 1
+    fi
     if grep -Eq "panicked at|RUST_BACKTRACE|fatal runtime error" <<<"$logs"; then
         echo "panic detected in $NODE logs" >&2
         return 1
     fi
+    return 0
 }
 
 # Look for STUN-related fault evidence in the daemon's logs. The

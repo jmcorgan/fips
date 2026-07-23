@@ -144,6 +144,27 @@ class NetemManager:
                 len(self._edge_overrides),
             )
 
+        # Edges the periodic mutation must never touch (canonical "nXX-nYY").
+        # Unlike a link_policy typo, which merely fails to shape a link, a typo
+        # here would silently leave an asserted link unprotected and reintroduce
+        # the exact flakiness the exclusion exists to remove — so an unknown
+        # edge is a hard error, not a warning.
+        self._mutation_exclude: set[str] = set()
+        for edge_str in config.mutation.exclude_edges:
+            canonical = "-".join(sorted(edge_str.split("-")))
+            if canonical not in topo_edge_strs:
+                raise ValueError(
+                    f"netem.mutation.exclude_edges references {edge_str!r}, "
+                    "which is not an edge in the topology"
+                )
+            self._mutation_exclude.add(canonical)
+        if self._mutation_exclude:
+            log.info(
+                "Mutation excludes %d edge(s): %s",
+                len(self._mutation_exclude),
+                ", ".join(sorted(self._mutation_exclude)),
+            )
+
     def _htb_rate(self, node_id: str, peer_id: str) -> str:
         """Return the HTB rate string for a link direction."""
         rate = self._edge_rates.get((node_id, peer_id), 0)
@@ -370,10 +391,12 @@ class NetemManager:
         if not self.config.mutation.policies:
             return
 
-        # Only consider edges where both endpoints are up
+        # Only consider edges where both endpoints are up, and never the
+        # explicitly excluded ones (links an assertion depends on).
         live_edges = [
             (a, b) for a, b in self.topology.edges
             if a not in self.down_nodes and b not in self.down_nodes
+            and "-".join(sorted([a, b])) not in self._mutation_exclude
         ]
         if not live_edges:
             return

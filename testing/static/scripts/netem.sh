@@ -159,6 +159,7 @@ build_netem_params() {
     fi
 
     echo "$params"
+    return 0
 }
 
 # Check if a container is running

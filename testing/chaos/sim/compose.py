@@ -19,12 +19,12 @@ _COMPOSE_TEMPLATE = Template(
     """\
 networks:
   fips-net:
-    driver: bridge
-    labels:
-      - "com.corganlabs.fips-ci=1"
-    ipam:
-      config:
-        - subnet: {{ subnet }}
+    # External, and created by the sim rather than by compose. The range has to
+    # be *claimed* -- attempt-create, advance on docker's own overlap error --
+    # so that two concurrent runs cannot select the same one, and only the
+    # process that creates the network can do that. See sim/netclaim.py.
+    external: true
+    name: {{ network_name }}
 
 x-fips-common: &fips-common
   image: {{ image }}
@@ -64,8 +64,14 @@ def generate_compose(
     topology: SimTopology,
     scenario: Scenario,
     output_dir: str,
+    network_name: str,
 ) -> str:
-    """Render docker-compose.yml and write to output_dir. Returns the file path."""
+    """Render docker-compose.yml and write to output_dir. Returns the file path.
+
+    ``network_name`` is the docker network the sim has already claimed; the
+    compose file refers to it as external rather than declaring a subnet, so
+    that the claim and the creation are the same operation.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     nodes = [topology.nodes[nid] for nid in sorted(topology.nodes)]
@@ -77,7 +83,7 @@ def generate_compose(
     )
 
     content = _COMPOSE_TEMPLATE.render(
-        subnet=scenario.topology.subnet,
+        network_name=network_name,
         rust_log=scenario.logging.rust_log,
         image=FIPS_SIM_IMAGE,
         nodes=nodes,

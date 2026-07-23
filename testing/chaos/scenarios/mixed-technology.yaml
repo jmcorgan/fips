@@ -26,30 +26,53 @@
 #   Fiber:     n03-n08, n06-n10
 #
 # Test subjects:
-#   - n06 has fiber (n03) and Bluetooth (n02) parents — should pick n03
-#   - n08 has fiber (n03) and Bluetooth (n04) parents — should pick n03
+#   - n08 has fiber (n03) and Bluetooth (n04) parents — should pick n03.
+#     ASSERTED below. Holds in 4 of 4 runs under the pinned root.
+#   - n06 was documented as having "fiber (n03) and Bluetooth (n02) parents".
+#     CORRECTED 2026-07-23: that is wrong, and the netem block below is the
+#     evidence rather than the ASCII art above. `n03-n06` is a **WiFi** link
+#     (5-20ms, 1-3% loss) and `n02-n06` is Bluetooth (15-40ms, 2-8% loss), so
+#     n06 chooses between two impaired links, not between fiber and Bluetooth.
+#     n06's only fiber-grade link is `n06-n10`, and n10 sits at depth 3 so it
+#     is never a good parent. There is therefore no reason to expect n06 to
+#     prefer n03, and the mutation block (fraction 0.2, degraded 50-100ms)
+#     moves the two costs run to run: across four runs n06 took n03 twice and
+#     n02 twice. NOT asserted, and the observed split is the correct outcome
+#     rather than a defect — in the run checked, n03 measured a link cost of 3
+#     against n02's 1, so effective depth 1+3 beat by 1+1 and the daemon chose
+#     the cheaper path exactly as it should.
 #
 # Netem mutation shifts fiber-only links between normal and degraded.
 #
-# NEITHER TEST SUBJECT IS ASSERTED, because the implementation does not do
-# what the two lines above say. Across the five archived runs that carry a
-# status.txt and are therefore provably completed, n06's parent is n10 in
-# three and n03 in two, and n08's is n04 in four and n03 in one. Encoding
-# either as written would red the scenario most runs; encoding what it
-# actually does would pin behaviour nobody specified and would silently
-# bless it.
+# n08 IS now asserted (below); n06 is not, and both reasons trace to the root,
+# which was found and fixed rather than papered over here.
 #
-# So this is an open question rather than a missing assertion: either
-# cost-based selection is not preferring fiber here, or the criteria were
-# written for a topology this file no longer has. n06 taking n10 is the
-# more interesting half — n10 reaches n06 by fiber, so the choice may be
-# defensible and the comment simply stale. It needs someone to work out
-# which, and until then this scenario proves nothing about parent choice.
+# The diagram above puts n01 at the top, and both test subjects only make
+# sense in a tree rooted there. The mesh does not root by topology: it roots
+# at the numerically smallest NodeAddr (src/tree/state.rs:363-390), which is a
+# hash of the node's key and bears no relation to the numbering. Until
+# 2026-07-23 this scenario rooted at **n09** in every run, which put both
+# criteria out of reach. Under that root n08's two candidates were not at
+# equal depth, so its choice was settled by depth long before link technology
+# could matter, and n08 taking n04 was CORRECT behaviour that these comments
+# made look like a defect.
 #
-# That leaves this scenario asserting nothing about its own subject. The
-# baseline block further down holds it to forming a tree and carrying
-# traffic, which is a floor and not a substitute: nothing here checks that
-# the tree it forms is the one these comments describe.
+# What the archive shows, for anyone re-deriving this later: across the five
+# runs under the old root, n06's parent is n10 in three and n03 in two, and
+# n08's is n04 in four and n03 in one. Those numbers describe a tree rooted at
+# n09 and must not be used to calibrate anything now.
+#
+# `topology.pin_root` (default true) now assigns identities in NodeAddr order,
+# so n01 holds the smallest and the diagram describes the tree that forms.
+# Under that root n08 takes fiber n03 as its subject assertion (below) now
+# checks. n06 stays unasserted: its "fiber n03" was a WiFi link (see the
+# corrected note above), so it was never a founded criterion. Tracked in
+# ISSUE-2026-0085.
+#
+# The n08 assertion is made reliable, not merely reachable: the Bluetooth
+# contrast is widened (netem below) and the two links n08 chooses between are
+# excluded from the netem mutation, so neither host load nor a random
+# degradation can flip the asserted comparison.
 
 scenario:
   name: "mixed-technology"
@@ -84,11 +107,15 @@ netem:
     jitter_ms: [0, 1]
     loss_pct: [0, 0.5]
   link_policies:
-    # Bluetooth (L2CAP) links
+    # Bluetooth (L2CAP) links. Delay widened to 150-250ms so the
+    # fiber-vs-Bluetooth cost margin on n08's choice (fiber n03 vs Bluetooth
+    # n04) dwarfs any load-induced srtt spike on the fiber probe, matching
+    # cost-avoidance. Combined with excluding n03-n08/n04-n08 from the mutation
+    # (below), n08's asserted comparison is robust to both load and churn.
     - edges: ["n02-n06", "n04-n08"]
       policy:
-        delay_ms: [15, 40]
-        jitter_ms: [5, 15]
+        delay_ms: [150, 250]
+        jitter_ms: [15, 30]
         loss_pct: [2, 8]
     # WiFi links (moderate latency, low loss)
     - edges: ["n03-n06", "n08-n10"]
@@ -99,6 +126,12 @@ netem:
   mutation:
     interval_secs: {min: 30, max: 60}
     fraction: 0.2
+    # Never mutate the two links n08's tree_parents assertion depends on: the
+    # degraded policy (50-100ms) could otherwise slow the fiber n03-n08 link
+    # enough to flip n08 to n04 independently of the widened Bluetooth contrast,
+    # making the assertion a coin toss. The mutation still churns the other ten
+    # links, so the dynamic behaviour it exists to exercise is unchanged.
+    exclude_edges: ["n03-n08", "n04-n08"]
     policies:
       normal:
         delay_ms: [1, 10]
@@ -134,6 +167,19 @@ assertions:
     max_roots: 1
     min_nodes_parented: 9
     min_sessions: 3
+  # The scenario's own subject, assertable for the first time now that the
+  # root is pinned to n01 and the topology above describes the tree that
+  # forms. n08's two candidates sit at equal depth, so the choice is decided
+  # by link cost alone: n03 over fiber-grade default netem against n04 over
+  # Bluetooth. That is the fiber-versus-Bluetooth preference this scenario
+  # exists to test.
+  #
+  # The criterion is encoded as written rather than calibrated from runs:
+  # "should pick n03" is the spec, and four of four runs agree. n06 is
+  # deliberately absent — see the corrected note in the header for why its
+  # documented criterion was never founded on this topology.
+  tree_parents:
+    n08: n03
 
 logging:
   rust_log: "info"

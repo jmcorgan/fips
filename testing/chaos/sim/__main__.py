@@ -27,9 +27,10 @@ def main():
     )
     parser.add_argument(
         "--subnet", type=str, default=None,
-        help="Override topology subnet CIDR (e.g. 10.30.0.0/24); node IPs "
-             "derive from it. Used by CI to give each parallel run a "
-             "non-overlapping network.",
+        help="Pin the topology subnet CIDR (e.g. 10.30.0.0/24) instead of "
+             "claiming a free one. The sim normally claims a range so "
+             "concurrent runs cannot collide; pin only when you need a known "
+             "range, and expect a hard failure if it is already taken.",
     )
     args = parser.parse_args()
 
@@ -55,7 +56,10 @@ def main():
             sys.exit(1)
         scenario.duration_secs = args.duration
     if args.subnet is not None:
-        scenario.topology.subnet = args.subnet
+        # Pinning opts out of claiming. The runner still *creates* the network,
+        # so a range already in use fails loudly here rather than silently
+        # overlapping a concurrent run.
+        scenario.topology.pinned_subnet = args.subnet
 
     runner = SimRunner(scenario)
     result = runner.run()

@@ -291,14 +291,21 @@ assert_process_alive() {
     return 0
 }
 
+# A container whose logs cannot be read has not been shown to be panic-free.
+# See the companion note in stun-faults-test.sh: the previous `|| true` made
+# this assertion's failure mode indistinguishable from its success condition.
 assert_no_panic() {
     local container="$1"
     local logs
-    logs="$(docker logs "$container" 2>&1 || true)"
+    if ! logs="$(docker logs "$container" 2>&1)"; then
+        echo "could not read logs from $container; absence of panics is not established" >&2
+        return 1
+    fi
     if grep -Eq "panicked at|RUST_BACKTRACE|fatal runtime error" <<<"$logs"; then
         echo "panic detected in $container logs" >&2
         return 1
     fi
+    return 0
 }
 
 run_test() {

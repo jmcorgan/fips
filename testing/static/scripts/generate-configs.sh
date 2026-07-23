@@ -74,6 +74,7 @@ docker_host_name() {
     local host
     host=$(get_node_attr "$topology_file" "$node_id" "docker_host")
     echo "${host:-node-$node_id}"
+    return 0
 }
 
 # Get peers list from topology
@@ -118,6 +119,7 @@ get_default_transport() {
     local topology_file="$1"
     local transport=$(grep "^default_transport:" "$topology_file" | head -1 | sed 's/.*: *\([a-z]*\).*/\1/')
     echo "${transport:-udp}"
+    return 0
 }
 
 # Get the port for a given transport type
@@ -272,6 +274,16 @@ generate_topology() {
         echo "${var_name}=$(get_key RESOLVED_NPUB "$node_id")" >> "$env_file"
     done
     echo "  ✓ Generated $env_file"
+
+    # Phase 4 (gateway only): write the LAN-client resolv.conf. Its nameserver
+    # is the gateway's LAN address, which must be a literal known before the
+    # client starts. run_gateway claims a per-run /64 and exports
+    # FIPS_GW_LAN6_PREFIX before calling this; unset (standalone / GitHub) it
+    # renders the base compose's fd02::10.
+    if [ "$topology_name" = "gateway" ]; then
+        echo "nameserver ${FIPS_GW_LAN6_PREFIX:-fd02}::10" > "$output_dir/resolv.conf"
+        echo "  ✓ Generated $output_dir/resolv.conf"
+    fi
 }
 
 main() {
