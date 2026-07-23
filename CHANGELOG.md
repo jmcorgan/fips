@@ -163,6 +163,19 @@ with v0.4.x or earlier peers.
 
 ### Fixed
 
+- Nostr NAT traversal no longer breaks after the host suspends. The traversal
+  clock cached a Unix timestamp once at startup and advanced it with a
+  monotonic `Instant`, which does not tick while a machine is asleep, so after
+  a suspend the daemon's idea of the time trailed real time by the suspend
+  duration for the rest of the process lifetime. Every NIP-40 expiration it
+  computed was therefore published already in the past: relays dropped the
+  offers as expired, the initiator logged a signal timeout waiting for an
+  answer, and traversal stayed broken until the daemon was restarted. The
+  clock now reads the wall clock on every call. This is not macOS-specific,
+  though a laptop that sleeps is where it is easiest to hit; any host that
+  suspends or hibernates was affected. Reported in
+  [#128](https://github.com/jmcorgan/fips/issues/128).
+
 - XX FMP rekey no longer diverges under timer jitter, which unblocked
   re-enabling the rekey jitter on next (`REKEY_JITTER_SECS = 15`; see
   `### Changed`). With jitter the two directions of a link rekey close
