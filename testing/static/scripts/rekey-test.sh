@@ -33,13 +33,16 @@ NODES="a b c d e"
 REKEY_ACCEPT_OFF_NODES="${REKEY_ACCEPT_OFF_NODES:-}"
 
 # Comma-separated list of node IDs to set udp.outbound_only=true on
-# during inject-config. For each such node, peer addresses are also
-# rewritten from numeric docker IPs to docker hostnames (e.g.
-# 172.20.0.12:2121 → node-c:2121). This reproduces the production
-# scenario where peer configs carry hostnames so the `addr_to_link`
-# key is hostname-form while inbound packet source addrs are numeric,
-# making the should_admit_msg1 carve-out's `addr_to_link.contains_key`
-# check miss.
+# during inject-config.
+#
+# The other half of this scenario — peer addresses in hostname form
+# (`node-c:2121`) rather than numeric — is no longer injected here. The
+# generator now emits a docker hostname for every internal peer in every
+# static topology, so the condition holds for all nodes unconditionally and a
+# rewrite step here would match nothing. What it reproduces is unchanged: the
+# `addr_to_link` key is hostname-form while inbound packet source addrs are
+# numeric, so the should_admit_msg1 carve-out's `addr_to_link.contains_key`
+# check misses.
 REKEY_OUTBOUND_ONLY_NODES="${REKEY_OUTBOUND_ONLY_NODES:-}"
 
 # Rekey timing configuration
@@ -54,10 +57,10 @@ if [ "${1:-}" = "inject-config" ]; then
         echo "  Setting udp.accept_connections=false on nodes: $REKEY_ACCEPT_OFF_NODES"
     fi
     if [ -n "$REKEY_OUTBOUND_ONLY_NODES" ]; then
-        echo "  Setting udp.outbound_only=true + rewriting peer addrs to docker hostnames on nodes: $REKEY_OUTBOUND_ONLY_NODES"
+        echo "  Setting udp.outbound_only=true (peer addrs already hostname-form) on nodes: $REKEY_OUTBOUND_ONLY_NODES"
     fi
     for node in $NODES; do
-        cfg="$SCRIPT_DIR/../generated-configs/$TOPOLOGY/node-$node.yaml"
+        cfg="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/$TOPOLOGY/node-$node.yaml"
         if [ ! -f "$cfg" ]; then
             echo "  Error: $cfg not found" >&2
             exit 1
@@ -79,6 +82,7 @@ if [ "${1:-}" = "inject-config" ]; then
             done
         fi
         python3 -c "
+import re
 import yaml
 with open('$cfg') as f:
     cfg = yaml.safe_load(f)
@@ -103,29 +107,26 @@ if '$outbound_only' == 'true':
         transports['udp'] = udp
     if isinstance(udp, dict):
         udp['outbound_only'] = True
-    # Rewrite peer addrs to docker hostnames so the addr_to_link key
-    # is hostname-form (mirroring production peer configs that carry
-    # hostnames). Without this, peer addrs are numeric and the
-    # carve-out's addr_to_link lookup matches inbound numeric source
-    # addrs, masking the bug.
-    ip_to_host = {
-        '172.20.0.10': 'node-a',
-        '172.20.0.11': 'node-b',
-        '172.20.0.12': 'node-c',
-        '172.20.0.13': 'node-d',
-        '172.20.0.14': 'node-e',
-    }
+    # Assert, rather than create, the hostname-form peer addrs this
+    # scenario depends on: the addr_to_link key must be a name so the
+    # carve-out's lookup misses the numeric inbound source addr. The
+    # generator emits hostnames for every internal peer, so a numeric addr
+    # here means the generator regressed and the suite would otherwise go
+    # on passing while testing nothing.
     for peer in cfg.get('peers', []) or []:
         for addr in peer.get('addresses', []) or []:
             t = addr.get('transport')
             if t is not None and t != 'udp':
                 continue
             a = addr.get('addr', '')
-            for ip, host in ip_to_host.items():
-                if a.startswith(ip + ':'):
-                    port = a.split(':', 1)[1]
-                    addr['addr'] = f'{host}:{port}'
-                    break
+            host = a.rsplit(':', 1)[0]
+            # A bracketed IPv6 literal is numeric too, and rsplit leaves the
+            # brackets on, so it would not match the v4 pattern.
+            if host.startswith('[') or re.fullmatch(r'[0-9.]+', host):
+                raise SystemExit(
+                    'outbound_only premise broken on node-$node: peer addr '
+                    + a + ' is numeric, expected a docker hostname'
+                )
 with open('$cfg', 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 "
@@ -134,7 +135,7 @@ with open('$cfg', 'w') as f:
             suffix=" (accept_connections=false)"
         fi
         if [ "$outbound_only" = "true" ]; then
-            suffix=" (outbound_only=true, hostname peer addrs)"
+            suffix=" (outbound_only=true, hostname peer addrs verified)"
         fi
         echo "  ✓ node-$node$suffix"
     done
@@ -197,7 +198,7 @@ TOTAL_PASSED=0
 TOTAL_FAILED=0
 
 # Node identities
-ENV_FILE="$SCRIPT_DIR/../generated-configs/npubs.env"
+ENV_FILE="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo "Error: $ENV_FILE not found. Run generate-configs.sh first." >&2
     exit 1
