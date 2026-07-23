@@ -149,7 +149,7 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         if "Session established" in line:
             result.sessions_established.append((source, line))
         # Peer promotion
-        if "Inbound peer promoted" in line or "Outbound handshake completed" in line:
+        if "Peer promoted to active" in line or "Outbound handshake completed" in line:
             result.peers_promoted.append((source, line))
         # Peer removal
         if "Peer removed" in line:
@@ -174,7 +174,7 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         if "Rekey cutover complete" in line or "FSP rekey cutover complete" in line:
             result.rekey_cutovers.append((source, line))
         # Discovery
-        if "Initiating LookupRequest" in line or "Discovery lookup initiated" in line:
+        if "Discovery lookup initiated" in line:
             result.discovery_initiated.append((source, line))
         if "proof verified, route cached" in line:
             result.discovery_succeeded.append((source, line))
@@ -197,8 +197,18 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
 
 
 def collect_docker_logs(containers: list[str]) -> dict[str, str]:
-    """Collect logs from Docker containers, stripping ANSI codes."""
+    """Collect logs from Docker containers, stripping ANSI codes.
+
+    Raises RuntimeError if any container's log could not be read. `docker
+    logs` reports a missing container on stderr and exits non-zero, so
+    without the returncode check that reply was stored as though it were the
+    node's own log and analysed as a mesh with no panics, no errors and no
+    sessions — which reads exactly like a clean run. Substituting "" on the
+    exception path has the same effect. Mirrors the fix already landed in
+    chaos/sim/logs.py's collect_logs.
+    """
     logs = {}
+    failed = []
     for name in containers:
         try:
             result = subprocess.run(
@@ -207,10 +217,26 @@ def collect_docker_logs(containers: list[str]) -> dict[str, str]:
                 text=True,
                 timeout=30,
             )
-            raw = result.stdout + result.stderr
-            logs[name] = strip_ansi(raw)
-        except (subprocess.TimeoutExpired, Exception):
-            logs[name] = ""
+        except Exception as e:
+            print(f"failed to collect logs from {name}: {e}", file=sys.stderr)
+            failed.append(name)
+            continue
+
+        if result.returncode != 0:
+            print(
+                f"docker logs {name} exited {result.returncode}: "
+                f"{result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            failed.append(name)
+            continue
+
+        # A container's own stderr arrives on our stderr, so on the success
+        # path both streams are log content.
+        logs[name] = strip_ansi(result.stdout + result.stderr)
+
+    if failed:
+        raise RuntimeError("could not read logs from: " + ", ".join(failed))
     return logs
 
 

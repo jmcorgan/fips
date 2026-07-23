@@ -75,22 +75,43 @@ assert_acl_field() {
     echo "PASS: $container ACL field $field matches expected value"
 }
 
+# Connected-peer count for a container, or the empty string if it did not
+# answer.
+#
+# Empty is deliberately distinct from a real 0, and here the distinction is
+# the whole point: the ACL denial checks below expect exactly 0, so an
+# `|| echo 0` fallback lets an unreachable container satisfy them on the first
+# iteration and the security property is never observed. Same shape as
+# admission-cap-test.sh's read_peer_count.
+read_connected_peers() {
+    local container="$1"
+    docker exec "$container" fipsctl show peers 2>/dev/null \
+        | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(1 for p in data.get("peers", []) if p.get("connectivity") == "connected"))' 2>/dev/null \
+        || true
+}
+
 wait_for_peers_exact() {
     local container="$1"
     local expected_count="$2"
     local timeout="${3:-30}"
 
+    local count="" answered=false
     for _ in $(seq 1 "$timeout"); do
-        local count
-        count=$(docker exec "$container" fipsctl show peers 2>/dev/null \
-            | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(1 for p in data.get("peers", []) if p.get("connectivity") == "connected"))' 2>/dev/null || echo 0)
-        if [ "$count" -eq "$expected_count" ]; then
-            return 0
+        count=$(read_connected_peers "$container")
+        if [ -n "$count" ]; then
+            answered=true
+            if [ "$count" -eq "$expected_count" ]; then
+                return 0
+            fi
         fi
         sleep 1
     done
 
-    echo "FAIL: $container did not reach $expected_count connected peers in ${timeout}s" >&2
+    if [ "$answered" = false ]; then
+        echo "FAIL: $container never answered a peer query in ${timeout}s, so a count of $expected_count was never actually observed" >&2
+    else
+        echo "FAIL: $container did not reach $expected_count connected peers in ${timeout}s (last answer: $count)" >&2
+    fi
     docker exec "$container" fipsctl show peers >&2 || true
     exit 1
 }
