@@ -87,6 +87,21 @@ traffic:
   duration_secs: {min: 5, max: 10}
   parallel_streams: 2
 
+# The two test subjects named at the top of this file, encoded. Both
+# existed only as comments and were checked by nothing.
+#
+# n06 has a Bluetooth parent (n02) and a fiber one (n03) at the same depth
+# and should take the fiber. n09 has only Bluetooth, so asserting it keeps
+# n05 is asserting that the absence of an alternative is handled without
+# thrashing, not that Bluetooth was preferred.
+#
+# From the archived corpus: across the six provably-completed runs, n06's
+# parent is n03 in all six and n09's is n05 in all six.
+assertions:
+  tree_parents:
+    n06: n03
+    n09: n05
+
 logging:
   rust_log: "info"
   output_dir: "./sim-results"

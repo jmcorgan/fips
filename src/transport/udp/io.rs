@@ -1079,7 +1079,7 @@ mod tests {
     /// find N packets already buffered, and one syscall reaps the burst.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore]
+    #[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
     async fn bench_udp_recv_amortization() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};

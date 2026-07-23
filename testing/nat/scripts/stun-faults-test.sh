@@ -126,6 +126,7 @@ apply_delay() {
     docker exec "$SHIM" tc qdisc add dev "$DEV" root netem delay 5000ms 2>/dev/null \
         || { echo "  delay: tc netem unavailable, skipping" >&2; return 1; }
     echo "  delay: tc netem 5000ms applied"
+    return 0
 }
 
 clear_delay() {
@@ -139,6 +140,7 @@ assert_process_alive() {
         return 1
     fi
     echo "  $NODE: fips daemon alive"
+    return 0
 }
 
 assert_no_panic() {
@@ -211,6 +213,11 @@ preflight_assert_stun_active() {
     docker logs "$PEER" 2>&1 | tail -40 >&2 || true
     return 1
 }
+
+# Phases that did not run, with the reason. Surfaced in the final verdict:
+# the suite reports a pass per phase-level assertion, so a phase that never
+# ran otherwise leaves a clean "passed" standing for work not done.
+SKIPPED_PHASES=()
 
 run_test() {
     echo "=== stun-faults-test: setup ==="
@@ -293,6 +300,7 @@ run_test() {
         sleep 10
     else
         echo "  Phase 2 skipped (no tc netem available); proceeding to Phase 3"
+        SKIPPED_PHASES+=("2 (delay): tc netem unavailable")
     fi
 
     assert_process_alive || { dump_diagnostics; return 1; }
@@ -321,7 +329,23 @@ run_test() {
     }
 
     cleanup
-    echo "stun-faults-test passed"
+    if [ ${#SKIPPED_PHASES[@]} -eq 0 ]; then
+        echo "stun-faults-test passed (3/3 phases ran)"
+        return 0
+    fi
+    # A phase that did not run is not a phase that passed. Say so in the line
+    # a reader takes the verdict from, rather than leaving it in scrollback
+    # several hundred lines up where the skip was announced.
+    local ran=$(( 3 - ${#SKIPPED_PHASES[@]} ))
+    echo "stun-faults-test passed ($ran/3 phases ran, ${#SKIPPED_PHASES[@]} skipped)"
+    local phase
+    for phase in "${SKIPPED_PHASES[@]}"; do
+        echo "  SKIPPED phase $phase"
+    done
+    if [ "$ran" -eq 0 ]; then
+        echo "stun-faults-test: every phase was skipped, so nothing was tested" >&2
+        return 1
+    fi
 }
 
 main() {

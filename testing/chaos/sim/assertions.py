@@ -19,9 +19,13 @@ from dataclasses import dataclass
 
 from .control import snapshot_all_bloom
 from .scenario import (
+    BaselineAssertion,
     BloomSendRateAssertion,
+    CongestionSignalsAssertion,
+    MaxErrorsAssertion,
     MaxParentSwitchesAssertion,
     MinParentSwitchesAssertion,
+    TreeParentsAssertion,
 )
 from .topology import SimTopology
 
@@ -166,6 +170,243 @@ def evaluate_max_parent_switches(
             f"more than the hysteresis band should allow. Check whether a "
             f"cost change smaller than the hysteresis margin is still "
             f"triggering a switch."
+        ),
+    )
+
+
+def evaluate_baseline(
+    cfg: BaselineAssertion,
+    snapshot: dict | None,
+    sessions: int,
+) -> AssertionOutcome:
+    """Floor on the mesh having formed: nodes answered, agreed a root, took parents."""
+    if not snapshot:
+        return AssertionOutcome(
+            name="baseline",
+            passed=False,
+            detail=(
+                "FAIL baseline: no final tree snapshot was taken, so nothing "
+                "about the mesh was observed. This is a harness failure."
+            ),
+        )
+
+    reporting = len(snapshot)
+    roots = {v.get("root") for v in snapshot.values() if v.get("root")}
+    parented = sum(
+        1 for v in snapshot.values()
+        if v.get("parent") and v.get("parent") != v.get("my_node_addr")
+    )
+
+    parts, failures = [], []
+
+    def note(ok, text):
+        parts.append(text)
+        if not ok:
+            failures.append(text)
+
+    if cfg.min_nodes_reporting is not None:
+        note(reporting >= cfg.min_nodes_reporting,
+             f"{reporting} node(s) answered (need {cfg.min_nodes_reporting})")
+    if cfg.max_roots is not None:
+        note(len(roots) <= cfg.max_roots and len(roots) >= 1,
+             f"{len(roots)} distinct root(s) (allowed {cfg.max_roots})")
+    if cfg.min_nodes_parented is not None:
+        note(parented >= cfg.min_nodes_parented,
+             f"{parented} node(s) have a parent (need {cfg.min_nodes_parented})")
+    if cfg.min_sessions is not None:
+        note(sessions >= cfg.min_sessions,
+             f"{sessions} session(s) established (need {cfg.min_sessions})")
+
+    summary = "; ".join(parts)
+    if failures:
+        return AssertionOutcome(
+            name="baseline",
+            passed=False,
+            detail=(
+                f"FAIL baseline: {'; '.join(failures)}. Full: {summary}"
+            ),
+        )
+    return AssertionOutcome(
+        name="baseline", passed=True, detail=f"PASS baseline: {summary}"
+    )
+
+
+def evaluate_tree_parents(
+    cfg: TreeParentsAssertion,
+    snapshot: dict | None,
+) -> AssertionOutcome:
+    """Check each node's parent in the final tree snapshot.
+
+    Parents are compared by node address, resolved from the snapshot's own
+    ``my_node_addr`` fields, so the check does not depend on the display
+    name a node happened to publish.
+
+    Every way of not knowing the answer is a failure: no snapshot, the
+    node absent from it, the expected parent absent from it, or the node
+    still claiming to be its own root. Each of those produces the same
+    "no match" that a genuinely wrong parent does, and only saying so
+    separately keeps a harness problem from reading as a routing verdict.
+    """
+    if not snapshot:
+        return AssertionOutcome(
+            name="tree_parents",
+            passed=False,
+            detail=(
+                "FAIL tree_parents: no final tree snapshot was taken, so no "
+                "node's parent was observed. This is a harness failure, not "
+                "a statement about the tree."
+            ),
+        )
+
+    addr_of = {
+        nid: data.get("my_node_addr")
+        for nid, data in snapshot.items()
+        if data.get("my_node_addr")
+    }
+    id_of = {addr: nid for nid, addr in addr_of.items()}
+
+    good, bad = [], []
+    for child, want_parent in sorted(cfg.expected.items()):
+        entry = snapshot.get(child)
+        if entry is None:
+            bad.append(
+                f"{child} is absent from the snapshot ({len(snapshot)} node(s) "
+                f"present: {', '.join(sorted(snapshot))})"
+            )
+            continue
+        want_addr = addr_of.get(want_parent)
+        if want_addr is None:
+            bad.append(
+                f"{child}: expected parent {want_parent} is absent from the "
+                f"snapshot, so its address cannot be resolved"
+            )
+            continue
+        got_addr = entry.get("parent")
+        if got_addr == entry.get("my_node_addr"):
+            bad.append(
+                f"{child} is its own parent — it still believes it is root, "
+                f"so the tree never converged around it (wanted {want_parent})"
+            )
+            continue
+        if got_addr == want_addr:
+            good.append(f"{child}->{want_parent}")
+            continue
+        got_id = id_of.get(got_addr) or entry.get("parent_display_name") or got_addr
+        bad.append(f"{child} chose {got_id}, wanted {want_parent}")
+
+    if bad:
+        detail = f"FAIL tree_parents: {'; '.join(bad)}"
+        if good:
+            detail += f". Correct: {', '.join(good)}"
+        return AssertionOutcome(name="tree_parents", passed=False, detail=detail)
+    return AssertionOutcome(
+        name="tree_parents",
+        passed=True,
+        detail=f"PASS tree_parents: {', '.join(good)}",
+    )
+
+
+_CONGESTION_FLOORS = (
+    ("min_nodes_detected", "congestion_detected"),
+    ("min_nodes_ce_forwarded", "ce_forwarded"),
+    ("min_nodes_ce_received", "ce_received"),
+)
+
+
+def evaluate_congestion_signals(
+    cfg: CongestionSignalsAssertion,
+    snapshot: dict | None,
+) -> AssertionOutcome:
+    """Floors on how many nodes observed each congestion counter.
+
+    ``snapshot`` is the final congestion snapshot keyed by node id. None
+    means the snapshot never ran, which fails: a missing snapshot and a
+    mesh that observed no congestion produce the same zero counts, and
+    treating them alike is how an assertion comes to pass on an absence
+    of evidence.
+    """
+    if not snapshot:
+        return AssertionOutcome(
+            name="congestion_signals",
+            passed=False,
+            detail=(
+                "FAIL congestion_signals: no final congestion snapshot was "
+                "taken, so no node was observed at all. This is a harness "
+                "failure, not a statement about congestion."
+            ),
+        )
+
+    parts, failures = [], []
+    for attr, counter in _CONGESTION_FLOORS:
+        floor = getattr(cfg, attr)
+        if floor is None:
+            continue
+        hits = sorted(
+            nid for nid, data in snapshot.items()
+            if (data.get("congestion") or {}).get(counter, 0) > 0
+        )
+        parts.append(f"{counter}: {len(hits)} node(s) >0 (floor {floor})")
+        if len(hits) < floor:
+            failures.append(
+                f"{counter} non-zero on {len(hits)} node(s), need {floor}"
+            )
+        else:
+            parts[-1] += f" [{', '.join(hits)}]"
+
+    summary = "; ".join(parts)
+    if failures:
+        return AssertionOutcome(
+            name="congestion_signals",
+            passed=False,
+            detail=(
+                f"FAIL congestion_signals: {'; '.join(failures)} — across "
+                f"{len(snapshot)} node(s) sampled. Full counts: {summary}"
+            ),
+        )
+    return AssertionOutcome(
+        name="congestion_signals",
+        passed=True,
+        detail=f"PASS congestion_signals: {summary}",
+    )
+
+
+def evaluate_max_errors(
+    cfg: MaxErrorsAssertion,
+    errors: list[tuple[str, str]],
+) -> AssertionOutcome:
+    """Ceiling on ERROR-level log lines across the whole mesh.
+
+    ``errors`` is the ``AnalysisResult.errors`` list of ``(source, line)``
+    pairs rather than a bare count, so a failure can name the nodes and
+    quote the lines. A ceiling breach that only reports a number sends the
+    reader back to the logs it was supposed to save them reading.
+    """
+    count = len(errors)
+    if count <= cfg.max_total:
+        return AssertionOutcome(
+            name="max_errors",
+            passed=True,
+            detail=(
+                f"PASS max_errors: {count} ERROR line(s) mesh-wide <= "
+                f"ceiling {cfg.max_total}"
+            ),
+        )
+
+    per_node: dict[str, int] = {}
+    for source, _line in errors:
+        per_node[source] = per_node.get(source, 0) + 1
+    worst = sorted(per_node.items(), key=lambda kv: -kv[1])
+    breakdown = ", ".join(f"{src}={n}" for src, n in worst)
+    samples = "\n".join(
+        f"    [{src}] {line.strip()}" for src, line in errors[:5]
+    )
+    return AssertionOutcome(
+        name="max_errors",
+        passed=False,
+        detail=(
+            f"FAIL max_errors: {count} ERROR line(s) mesh-wide > ceiling "
+            f"{cfg.max_total} — per node: {breakdown}. First "
+            f"{min(5, count)}:\n{samples}"
         ),
     )
 

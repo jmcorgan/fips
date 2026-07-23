@@ -22,6 +22,20 @@ link_flaps:
 traffic:
   enabled: false
 
+# Baseline: the mesh came up, agreed on a root, and took parents. This
+# asserts nothing about any particular subsystem; it exists so that a
+# run in which the mesh never formed cannot report success, which until
+# now it could, because this scenario carried no assertions at all.
+#
+# Ten nodes, one root, nine parented in all six provably-completed
+# archived runs. As the smoke test this is the scenario whose silent
+# success was least defensible.
+assertions:
+  baseline:
+    min_nodes_reporting: 10
+    max_roots: 1
+    min_nodes_parented: 9
+
 logging:
   rust_log: "info"
   output_dir: "./sim-results"

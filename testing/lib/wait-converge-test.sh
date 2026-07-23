@@ -4,8 +4,12 @@
 # These tests drive the convergence gate with synthetic connectivity
 # checks (ping_fn stand-ins) that report scripted PASSED/FAILED counts
 # keyed off the same SECONDS clock the gate uses. No containers or
-# network are involved, so the whole suite runs in a few seconds and is
-# safe to run in CI.
+# network are involved, so the suite is hermetic and safe to run in CI.
+#
+# It is not fast, though: it drives real timeouts against the real clock
+# and takes about 45 seconds, measured 2026-07-23. The header claimed "a
+# few seconds" from the day it was written until then, which nothing had
+# contradicted because no runner had ever invoked it.
 #
 # Run:
 #   ./wait-converge-test.sh

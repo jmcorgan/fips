@@ -61,6 +61,21 @@ traffic:
   duration_secs: {min: 5, max: 10}
   parallel_streams: 2
 
+# The validation line at the top of this file, encoded. It existed only as
+# that comment and was checked by nothing, so the scenario could not fail
+# on the one thing it was built to test.
+#
+# From the archived corpus: of the six runs that carry a status.txt and are
+# therefore provably completed, n04's parent is n03 in all six. Among the
+# 176 older runs the picture is quite different -- n04 is absent from the
+# snapshot in 107 of them and is its own root in 49 -- but those are runs
+# whose tree had not converged when the snapshot was taken rather than runs
+# that chose the wrong parent, which is why the assertion fails an absent
+# or self-parented node explicitly instead of skipping it.
+assertions:
+  tree_parents:
+    n04: n03
+
 logging:
   rust_log: "info"
   output_dir: "./sim-results"

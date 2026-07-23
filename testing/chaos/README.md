@@ -124,8 +124,14 @@ detection.
 - **ecn-ab-on / ecn-ab-off**: Paired scenarios with identical conditions
   (6-node tree, 10 Mbps egress, 1000 kbps ingress policing, 10ms link
   delay, 8 KB recv buffer) differing only in `ecn.enabled`.
-  `ecn-ab-test.sh` runs both and compares throughput and congestion
-  counters. Initial results: +10.2% recv throughput with ECN enabled.
+  `ecn-ab-compare.sh` runs both and prints a side-by-side of throughput
+  and congestion counters. It is a manual tool, not a test: it asserts
+  nothing and no runner invokes it. The "+10.2% recv throughput with ECN
+  enabled" figure once recorded here is not reproducible from anything on
+  disk — the script read a fixed `sim-results/ecn-ab-on/` path while the
+  runner has written timestamped directories since 2026-03-20, and no
+  ecn-ab result directory survives. The path bug is fixed; the figure is
+  left out until a run produces one.
 
 ### Ingress Traffic Control
 

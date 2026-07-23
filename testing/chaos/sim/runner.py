@@ -15,8 +15,12 @@ from datetime import datetime
 from .assertions import (
     AssertionOutcome,
     BloomSendRateMonitor,
+    evaluate_baseline,
+    evaluate_congestion_signals,
+    evaluate_max_errors,
     evaluate_max_parent_switches,
     evaluate_min_parent_switches,
+    evaluate_tree_parents,
 )
 from .compose import generate_compose
 from .config_gen import write_configs
@@ -74,6 +78,11 @@ class SimRunner:
         # Post-run assertion monitors (sampled near end of run).
         self.bloom_rate_monitor: BloomSendRateMonitor | None = None
         self.assertion_outcomes: list[AssertionOutcome] = []
+        # Set by the final snapshot. None means the snapshot never ran,
+        # which the congestion assertion must treat as a failure rather
+        # than as an absence of congestion.
+        self.final_congestion: dict | None = None
+        self.final_tree: dict | None = None
 
     def _evaluate_max_parent_switches(
         self, cfg, parent_switches: list[tuple[str, str]]
@@ -604,6 +613,49 @@ class SimRunner:
                 else:
                     log.error("%s", outcome.detail)
 
+            # Applied to every scenario by default, so this is the one
+            # assertion that is present even when the YAML declares no
+            # assertions block at all.
+            err_cfg = self.scenario.assertions.max_errors
+            if err_cfg is not None:
+                outcome = evaluate_max_errors(err_cfg, result.errors)
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            bl_cfg = self.scenario.assertions.baseline
+            if bl_cfg is not None:
+                outcome = evaluate_baseline(
+                    bl_cfg, self.final_tree, len(result.sessions_established)
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            tp_cfg = self.scenario.assertions.tree_parents
+            if tp_cfg is not None:
+                outcome = evaluate_tree_parents(tp_cfg, self.final_tree)
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            cong_cfg = self.scenario.assertions.congestion_signals
+            if cong_cfg is not None:
+                outcome = evaluate_congestion_signals(
+                    cong_cfg, self.final_congestion
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
             # Write assertion outcomes
             if self.assertion_outcomes:
                 assertions_path = os.path.join(self.output_dir, "assertions.txt")
@@ -664,6 +716,12 @@ class SimRunner:
         tree_path = os.path.join(self.output_dir, f"tree-snapshot-{label}.json")
         mmp_path = os.path.join(self.output_dir, f"mmp-snapshot-{label}.json")
         congestion_path = os.path.join(self.output_dir, f"congestion-snapshot-{label}.json")
+        # Retained for the congestion assertion, which needs the same
+        # responses the file gets. Reading the file back would let a write
+        # failure present as an assertion that saw nothing.
+        if label == "final":
+            self.final_congestion = congestion_snap
+            self.final_tree = tree_snap
         os.makedirs(self.output_dir, exist_ok=True)
         with open(tree_path, "w") as f:
             json.dump(tree_snap, f, indent=2)

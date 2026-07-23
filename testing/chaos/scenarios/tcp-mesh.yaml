@@ -61,6 +61,19 @@ link_flaps:
 traffic:
   enabled: false
 
+# Baseline: the mesh came up, agreed on a root, and took parents. This
+# asserts nothing about TCP transport specifically; it exists so that a
+# run in which the mesh never formed cannot report success, which until
+# now it could, because this scenario carried no assertions at all.
+#
+# Six nodes, one root, five parented in all six provably-completed
+# archived runs.
+assertions:
+  baseline:
+    min_nodes_reporting: 6
+    max_roots: 1
+    min_nodes_parented: 5
+
 logging:
   rust_log: "info"
   output_dir: "./sim-results"

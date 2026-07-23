@@ -23,6 +23,23 @@
 #
 # Validation: tree snapshot shows n04's parent selection reflects the
 # actual cost tradeoff between depth and link quality.
+#
+# NO PARENT IS ASSERTED HERE, and unlike the other cost scenarios that is
+# not because the implementation disagrees with the comment. It is because
+# the validation line above does not name an outcome: "reflects the actual
+# cost tradeoff" is satisfied by either answer, so there is nothing to
+# encode. The comment above even says n04 "may still pick n01".
+#
+# The corpus agrees that both answers occur. Across the five provably
+# completed archived runs, n04's parent is n01 in three and n03 in two,
+# with the same seed each time, so the choice is not deterministic under
+# this configuration.
+#
+# Pinning whichever answer is more common would convert an unspecified
+# behaviour into a regression guard for something nobody decided, and
+# would go red roughly two runs in five besides. What this scenario needs
+# first is a decision about which parent is correct given the stated
+# effective depths, and that is a protocol question, not a harness one.
 
 scenario:
   name: "depth-vs-cost"
@@ -65,6 +82,21 @@ traffic:
   interval_secs: {min: 15, max: 30}
   duration_secs: {min: 5, max: 10}
   parallel_streams: 2
+
+# Baseline: the mesh came up, agreed on a root, and took parents. This
+# asserts nothing about which parent n04 chooses, which is unspecified;
+# it exists so that a run in which the mesh never formed cannot report
+# success, which until now it could,
+# because this scenario carried no assertions at all.
+#
+# Four nodes, one root, three parented and four sessions in all five
+# provably-completed archived runs.
+assertions:
+  baseline:
+    min_nodes_reporting: 4
+    max_roots: 1
+    min_nodes_parented: 3
+    min_sessions: 2
 
 logging:
   rust_log: "info"

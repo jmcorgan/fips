@@ -1189,6 +1189,15 @@ fn mmp_focused_pane_indicator() {
     });
     // The focused Session MMP title is cyan; the unfocused Link MMP title is not.
     assert_eq!(testkit::fg_at(&buf, "Session MMP"), Some(Color::Cyan));
+    // Presence before colour. `fg_at` is `find(..)?` mapped to the cell's fg, so
+    // it returns None for a title that was never drawn, and None != Some(Cyan) --
+    // meaning the assertion below passed when the Link MMP pane was missing
+    // entirely. Asserting it is on screen first is what makes the next line read
+    // "not highlighted" rather than "not there".
+    assert!(
+        testkit::find(&buf, "Link MMP").is_some(),
+        "the unfocused Link MMP title should still be rendered"
+    );
     assert_ne!(testkit::fg_at(&buf, "Link MMP"), Some(Color::Cyan));
 }
 

@@ -41,6 +41,25 @@ link_flaps:
 traffic:
   enabled: false
 
+# Baseline: the mesh came up, agreed on a root, and took parents. This
+# asserts nothing about what Ethernet transport does; it exists so that
+# a run in which the mesh never formed cannot report success, which
+# until now it could, because this scenario carried no assertions at
+# all.
+#
+# A 4-node mesh forms a spanning tree: one root and three nodes
+# with a parent. All six provably-completed archived runs show exactly
+# that, so these are the shape of a converged mesh rather than a
+# tolerance fitted to observations. This is currently the only
+# assertion covering Ethernet transport anywhere in CI: the three
+# tests in src/node/tests/ethernet.rs are #[ignore]d for requiring
+# CAP_NET_RAW and neither runner passes --ignored.
+assertions:
+  baseline:
+    min_nodes_reporting: 4
+    max_roots: 1
+    min_nodes_parented: 3
+
 logging:
   rust_log: "info"
   output_dir: "./sim-results"

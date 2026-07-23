@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
-# ECN A/B Throughput Test
+# ECN A/B Throughput Comparison  (a manual tool, NOT a test)
 #
 # Runs two identical chaos scenarios — one with ECN enabled, one disabled —
-# and compares iperf3 throughput and congestion counter results.
+# and prints a side-by-side of iperf3 throughput and congestion counters.
 #
-# Usage: ./ecn-ab-test.sh [--seed N] [--duration N]
+# Renamed from ecn-ab-test.sh on 2026-07-23. The old name claimed a verdict
+# this has never produced: it asserts nothing, applies no threshold, and no
+# runner invokes it. Naming it a test made it look like coverage.
+#
+# It also could not have worked. It read sim-results/ecn-ab-on/... while the
+# runner has written sim-results/<timestamp>-<scenario>/ since 2026-03-20, so
+# it has found neither input for at least four months, and there is not one
+# archived ecn-ab result directory on disk. That path bug is fixed below.
+#
+# WHAT IS STILL MISSING, and why it was not added: turning this into a real
+# test needs a threshold — how much throughput ECN should buy, or how much
+# lower the congestion counters should run — and there is no corpus to derive
+# one from, precisely because the tool has never produced a kept result. A
+# number invented here would assert the author's guess. The prerequisite is a
+# calibration run set, and that is a protocol question about what ECN is
+# expected to deliver, not a harness one.
+#
+# Usage: ./ecn-ab-compare.sh [--seed N] [--duration N]
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -24,12 +41,12 @@ echo ""
 
 # --- Run A: ECN ON ---
 echo "--- Phase A: ECN ENABLED ---"
-sudo python3 -m sim scenarios/ecn-ab-on.yaml "${EXTRA_ARGS[@]}" || true
+sudo python3 -m sim scenarios/ecn-ab-on.yaml "${EXTRA_ARGS[@]}"
 echo ""
 
 # --- Run B: ECN OFF ---
 echo "--- Phase B: ECN DISABLED ---"
-sudo python3 -m sim scenarios/ecn-ab-off.yaml "${EXTRA_ARGS[@]}" || true
+sudo python3 -m sim scenarios/ecn-ab-off.yaml "${EXTRA_ARGS[@]}"
 echo ""
 
 # --- Compare results ---
@@ -37,7 +54,27 @@ echo "=== Results ==="
 echo ""
 
 python3 - <<'PYEOF'
+import glob
 import json
+
+
+def latest(scenario, filename):
+    """Newest run directory for a scenario, or None.
+
+    The runner writes sim-results/<timestamp>-<scenario>/, so a fixed path
+    such as sim-results/ecn-ab-on/ has never matched anything. Sorting the
+    glob works because the timestamp is the leading, fixed-width component.
+    """
+    dirs = sorted(glob.glob(f"sim-results/*-{scenario}"))
+    if not dirs:
+        print(f"  no run directory found for {scenario}")
+        return None
+    path = f"{dirs[-1]}/{filename}"
+    if not glob.glob(path):
+        print(f"  {scenario}: {filename} missing from {dirs[-1]}")
+        return None
+    return path
+
 import os
 import sys
 
@@ -92,8 +129,10 @@ def print_sessions(label, sessions):
     print(f"    {'':>14}  completed={n}  incomplete={incomplete}")
     return total_recv / n
 
-on_results = load_results("sim-results/ecn-ab-on/iperf3-results.json")
-off_results = load_results("sim-results/ecn-ab-off/iperf3-results.json")
+on_path = latest("ecn-ab-on", "iperf3-results.json")
+off_path = latest("ecn-ab-off", "iperf3-results.json")
+on_results = load_results(on_path) if on_path else []
+off_results = load_results(off_path) if off_path else []
 
 on_sessions = extract_throughput(on_results)
 off_sessions = extract_throughput(off_results)
@@ -111,8 +150,10 @@ if avg_on and avg_off:
 
 # Congestion counters
 print("Congestion Counters (final snapshot):")
-for label, path in [("ECN ON", "sim-results/ecn-ab-on/congestion-snapshot-final.json"),
-                     ("ECN OFF", "sim-results/ecn-ab-off/congestion-snapshot-final.json")]:
+for label, scenario in [("ECN ON", "ecn-ab-on"), ("ECN OFF", "ecn-ab-off")]:
+    path = latest(scenario, "congestion-snapshot-final.json")
+    if path is None:
+        continue
     snap = load_congestion(path)
     if not snap:
         print(f"  {label}: no snapshot")

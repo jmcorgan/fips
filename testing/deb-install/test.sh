@@ -490,4 +490,15 @@ echo "════════════════════════�
 echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
 echo "═══════════════════════════════════════"
 
-[ "$FAIL" -eq 0 ]
+# A skip must not read as a pass. Nothing calls skip() today, so SKIP is
+# always 0 and this changes no current outcome -- which is exactly why it is
+# worth adding now: the helper and the counter already existed and were
+# reported, so a later skip path would have printed "N skipped" next to a
+# zero exit and looked like coverage. Gate on it before that happens.
+if [ "$SKIP" -ne 0 ]; then
+    echo "FAIL: $SKIP check(s) skipped; a skipped check is not a passed one." >&2
+    echo "      Either make the check run here, or remove it and record the" >&2
+    echo "      gap deliberately rather than skipping it at runtime." >&2
+fi
+
+[ "$FAIL" -eq 0 ] && [ "$SKIP" -eq 0 ]

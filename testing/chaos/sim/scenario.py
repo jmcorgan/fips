@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 import yaml
+
+# Node ids are rendered nNN by the topology generator, zero-padded to two
+# digits. Matching the shape here keeps a typo such as "no4" or "n4x" from
+# reaching an assertion as a node that simply never appears.
+_NODE_ID_RE = re.compile(r"n\d+")
 
 
 @dataclass
@@ -219,12 +225,98 @@ class MaxParentSwitchesAssertion:
 
 
 @dataclass
+class BaselineAssertion:
+    """Floor on the mesh having formed at all.
+
+    Deliberately weak and deliberately universal. It does not describe any
+    scenario's subject; it says the nodes came up, agreed on a root, and
+    took parents. Its value is that a scenario with no other assertion
+    still cannot pass while the mesh is dead, which is the state twelve of
+    thirteen scenarios were previously unable to distinguish from success.
+
+    ``max_roots`` is how many distinct root values the snapshot may carry.
+    One means the whole mesh agreed; a churn scenario that partitions on
+    purpose needs a higher number, and setting it above one is a statement
+    that partition is expected rather than an oversight.
+    """
+
+    min_nodes_reporting: int | None = None
+    max_roots: int | None = None
+    min_nodes_parented: int | None = None
+    min_sessions: int | None = None
+
+
+@dataclass
+class TreeParentsAssertion:
+    """Expected parent per node in the final tree snapshot.
+
+    ``expected`` maps a node id to the node id its parent must be, e.g.
+    ``{"n04": "n03"}``. Both sides are node ids rather than node
+    addresses: an address is a per-run key derived from the generated
+    identity, so a scenario could not name one ahead of time.
+
+    A node absent from the snapshot fails rather than being skipped. That
+    case is not hypothetical — more than half the archived runs of these
+    scenarios have no entry for the node under test, and a skip would
+    have reported those as satisfied.
+    """
+
+    expected: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CongestionSignalsAssertion:
+    """Floors on how many nodes observed each congestion signal.
+
+    Each floor is the number of nodes whose final congestion snapshot
+    reports a non-zero counter, not the counter's own magnitude: the
+    scenario's written criteria are about *whether* a signal reached a
+    class of node, and a single node with a huge count would satisfy a
+    magnitude test while proving the signal never propagated.
+
+    A floor left unset is not asserted. At least one must be set, since a
+    block that asserts nothing is the failure this assertion exists to
+    remove.
+    """
+
+    min_nodes_detected: int | None = None
+    min_nodes_ce_forwarded: int | None = None
+    min_nodes_ce_received: int | None = None
+
+
+@dataclass
+class MaxErrorsAssertion:
+    """Ceiling on ERROR-level lines across every node's log.
+
+    Unlike the other assertions this one is applied to every scenario
+    whether or not the YAML asks for it, because it is a floor on what a
+    green run means rather than a property of one scenario: without it a
+    run in which every node errors on every line still exits 0.
+
+    ``max_total`` defaults to 0, which is what the archived corpus
+    supports. Across 2416 archived run directories no node log contains a
+    single ERROR-level line, while the sibling WARN counter extracted by
+    the same code path ranges from 0 to 1135 — so 0 is an observed value
+    and not an aspiration, and the counter is known to discriminate.
+
+    A scenario that legitimately induces errors raises the ceiling in its
+    own YAML and must say at that site why the errors are expected.
+    """
+
+    max_total: int = 0
+
+
+@dataclass
 class AssertionsConfig:
     """Optional post-run assertions evaluated against control-socket data."""
 
     bloom_send_rate: BloomSendRateAssertion | None = None
     min_parent_switches: MinParentSwitchesAssertion | None = None
     max_parent_switches: MaxParentSwitchesAssertion | None = None
+    max_errors: MaxErrorsAssertion | None = None
+    congestion_signals: CongestionSignalsAssertion | None = None
+    tree_parents: TreeParentsAssertion | None = None
+    baseline: BaselineAssertion | None = None
 
 
 @dataclass
@@ -260,10 +352,13 @@ class Scenario:
 # YAML still looks correct — a mistyped "assertion:" disarms a scenario's only
 # assertions, a mistyped "link_flap:" turns off the chaos it was meant to inject.
 #
-# Three mappings are deliberately NOT listed, because their keys are names the
+# Four mappings are deliberately NOT listed, because their keys are names the
 # scenario author chooses rather than a schema: netem.mutation.policies,
-# link_swap.policies and topology.transport_mix. Two sub-trees are passed through
-# whole and are likewise not checked: fips_overrides and topology.params.
+# link_swap.policies, topology.transport_mix and assertions.tree_parents (whose
+# keys are node ids). Two sub-trees are passed through whole and are likewise
+# not checked: fips_overrides and topology.params. tree_parents is not thereby
+# unchecked -- both sides of every entry are validated as node ids that exist in
+# this scenario's topology, which is the check that matters for it.
 #
 # NOTE: adding a new assertion type means registering it in TWO places below —
 # _SECTION_KEYS["assertions"] (so the block accepts its name) and _ASSERTION_KEYS
@@ -301,6 +396,7 @@ _SECTION_KEYS = {
     "link_swap.edges[]": {"edge", "policy"},
     "assertions": {
         "bloom_send_rate", "min_parent_switches", "max_parent_switches",
+        "max_errors", "congestion_signals", "tree_parents", "baseline",
     },
     "logging": {"rust_log", "output_dir"},
 }
@@ -308,6 +404,13 @@ _ASSERTION_KEYS = {
     "bloom_send_rate": {"window_secs", "max_per_node"},
     "min_parent_switches": {"min_total"},
     "max_parent_switches": {"max_total", "node"},
+    "max_errors": {"max_total"},
+    "congestion_signals": {
+        "min_nodes_detected", "min_nodes_ce_forwarded", "min_nodes_ce_received",
+    },
+    "baseline": {
+        "min_nodes_reporting", "max_roots", "min_nodes_parented", "min_sessions",
+    },
 }
 _NETEM_POLICY_KEYS = {
     "delay_ms", "jitter_ms", "loss_pct", "duplicate_pct", "reorder_pct",
@@ -589,6 +692,134 @@ def load_scenario(path: str) -> Scenario:
             max_total=max_total,
             node=node,
         )
+    if "max_errors" in asrt:
+        mev = asrt["max_errors"]
+        _reject_unknown(
+            mev, _ASSERTION_KEYS["max_errors"], "assertions.max_errors",
+        )
+        if "max_total" not in mev:
+            raise ValueError(
+                "assertions.max_errors: max_total is required (the point of "
+                "overriding the default ceiling is to name the new number)"
+            )
+        err_total = mev["max_total"]
+        if isinstance(err_total, bool) or not isinstance(err_total, int):
+            raise ValueError(
+                f"assertions.max_errors: max_total must be a non-negative "
+                f"integer, got {err_total!r}"
+            )
+        if err_total < 0:
+            raise ValueError(
+                f"assertions.max_errors: max_total must be non-negative, "
+                f"got {err_total}"
+            )
+        s.assertions.max_errors = MaxErrorsAssertion(max_total=err_total)
+    else:
+        # Default-on. See MaxErrorsAssertion for why this one assertion is
+        # applied without being asked for: it is the floor on what a green
+        # run means, and a scenario that has to opt in is a scenario that
+        # can forget to.
+        s.assertions.max_errors = MaxErrorsAssertion()
+    if "congestion_signals" in asrt:
+        cs = asrt["congestion_signals"]
+        _reject_unknown(
+            cs, _ASSERTION_KEYS["congestion_signals"],
+            "assertions.congestion_signals",
+        )
+        floors = {}
+        for key in _ASSERTION_KEYS["congestion_signals"]:
+            if key not in cs:
+                continue
+            val = cs[key]
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ValueError(
+                    f"assertions.congestion_signals.{key}: must be a positive "
+                    f"integer number of nodes, got {val!r}"
+                )
+            if val < 1:
+                raise ValueError(
+                    f"assertions.congestion_signals.{key}: must be at least 1, "
+                    f"got {val}. A floor of 0 is satisfied by a mesh that "
+                    f"observed nothing, which is the case this assertion exists "
+                    f"to catch; omit the key instead."
+                )
+            floors[key] = val
+        if not floors:
+            raise ValueError(
+                "assertions.congestion_signals: set at least one floor "
+                "(min_nodes_detected, min_nodes_ce_forwarded, "
+                "min_nodes_ce_received); a block with none asserts nothing"
+            )
+        s.assertions.congestion_signals = CongestionSignalsAssertion(**floors)
+    if "tree_parents" in asrt:
+        tp = asrt["tree_parents"]
+        if not isinstance(tp, dict) or not tp:
+            raise ValueError(
+                "assertions.tree_parents: give it at least one "
+                "'<node>: <expected parent>' entry; an empty block asserts "
+                "nothing"
+            )
+        expected = {}
+        for child, parent in tp.items():
+            for role, val in (("node", child), ("parent", parent)):
+                if not isinstance(val, str) or not _NODE_ID_RE.fullmatch(val):
+                    raise ValueError(
+                        f"assertions.tree_parents: {role} {val!r} is not a node "
+                        f"id of the form 'n04'"
+                    )
+                idx = int(val[1:])
+                if idx < 1 or idx > s.topology.num_nodes:
+                    raise ValueError(
+                        f"assertions.tree_parents: {role} '{val}' is outside "
+                        f"this scenario's {s.topology.num_nodes} nodes. An "
+                        f"assertion about a node that cannot exist would fail "
+                        f"for the wrong reason every run."
+                    )
+            if child == parent:
+                raise ValueError(
+                    f"assertions.tree_parents: '{child}' is given itself as "
+                    f"its parent. A node is its own parent only when it "
+                    f"believes it is root, which is what an unconverged tree "
+                    f"looks like; assert that some other way."
+                )
+            expected[child] = parent
+        s.assertions.tree_parents = TreeParentsAssertion(expected=expected)
+    if "baseline" in asrt:
+        bl = asrt["baseline"]
+        _reject_unknown(bl, _ASSERTION_KEYS["baseline"], "assertions.baseline")
+        vals = {}
+        for key in _ASSERTION_KEYS["baseline"]:
+            if key not in bl:
+                continue
+            val = bl[key]
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ValueError(
+                    f"assertions.baseline.{key}: must be an integer, "
+                    f"got {val!r}"
+                )
+            floor = 1 if key == "max_roots" else 0
+            if val < floor:
+                raise ValueError(
+                    f"assertions.baseline.{key}: must be at least {floor}, "
+                    f"got {val}"
+                )
+            vals[key] = val
+        if not vals:
+            raise ValueError(
+                "assertions.baseline: set at least one of "
+                + ", ".join(sorted(_ASSERTION_KEYS["baseline"]))
+                + "; a block with none asserts nothing"
+            )
+        if vals.get("min_nodes_parented", 0) > 0 or vals.get("max_roots"):
+            n = s.topology.num_nodes
+            if vals.get("min_nodes_parented", 0) > n - 1:
+                raise ValueError(
+                    f"assertions.baseline.min_nodes_parented: "
+                    f"{vals['min_nodes_parented']} exceeds {n - 1}, the most a "
+                    f"{n}-node mesh can reach — the root is its own parent, so "
+                    f"this could never pass"
+                )
+        s.assertions.baseline = BaselineAssertion(**vals)
 
     # Logging section
     lg = raw.get("logging", {})
@@ -639,9 +870,31 @@ def _validate_parent_switch_observability(s: Scenario):
         )
 
 
+def _validate_error_observability(s: Scenario):
+    """Refuse an error ceiling the log level cannot observe.
+
+    Narrower than the parent-switch guard on purpose: ERROR lines survive
+    every level except ``off``, so ``off`` is the only setting that turns
+    this assertion into one that counts zero whatever the mesh did. Since
+    the ceiling is applied by default, a scenario silencing its logs would
+    otherwise acquire an assertion that cannot fail.
+    """
+    if s.assertions.max_errors is None:
+        return
+    default_level = s.logging.rust_log.split(",")[0].strip().lower()
+    if default_level == "off":
+        raise ValueError(
+            "logging.rust_log is 'off', which suppresses the ERROR-level "
+            "lines the max_errors assertion counts. The assertion would see "
+            "zero errors regardless of what the mesh did. Raise the level, "
+            "or state a deliberate override in assertions.max_errors."
+        )
+
+
 def _validate(s: Scenario):
     """Validate scenario constraints."""
     _validate_parent_switch_observability(s)
+    _validate_error_observability(s)
     if s.topology.num_nodes < 2:
         raise ValueError("topology.num_nodes must be >= 2")
     if s.topology.num_nodes > 250:

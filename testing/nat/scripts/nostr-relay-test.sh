@@ -288,6 +288,7 @@ assert_process_alive() {
         return 1
     fi
     echo "  $container: fips daemon still alive after malformed advert"
+    return 0
 }
 
 assert_no_panic() {

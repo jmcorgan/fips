@@ -5,6 +5,23 @@ junit = { path = "junit.xml" }
 # occasional msg1 under burst load even with the per-edge repair loop.
 # Allow a retry rather than failing the whole CI run on a single
 # dropped packet.
+#
+# Deliberately scoped to [profile.ci] and NOT applied locally, which makes
+# the two gates disagree: the hosted runner retries a flaky test twice, the
+# local sweep fails on the first failure. The asymmetry is intended and this
+# is the record of why, since an undocumented one is indistinguishable from
+# an oversight.
+#
+# It is here for shared-runner packet loss, a property of the hosted
+# environment and not of the code. Applying it locally would suppress a real
+# local flake, and a failure that only reproduces under load is a robustness
+# bug to fix rather than to retry past. Keeping the local sweep strict is
+# what makes it the sharper of the two gates.
+#
+# The cost, stated rather than hidden: a test that fails once and passes on
+# retry is reported green here with no separate signal, so a genuine
+# intermittent failure can be absorbed. If that starts mattering, the fix is
+# to surface retried-but-passed tests, not to drop the retries.
 retries = 2
 
 [test-groups]

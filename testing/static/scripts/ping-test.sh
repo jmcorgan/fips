@@ -75,6 +75,16 @@ echo "=== FIPS Ping Test ($PROFILE topology) ==="
 echo ""
 
 # Wait for nodes to converge — all nodes must reach expected peer counts.
+#
+# Every wait below is `|| true` on purpose, for the same reason the
+# wait_until_connected call further down is: these are settling delays, not
+# assertions. A node that has not reached its configured peer count by the
+# deadline may still be reachable, and the directed-pair pings are what
+# actually decide the run. Letting a wait fail the script here would turn a
+# slow convergence into a failure the pings would have passed.
+#
+# The converse is what makes it safe: because these cannot fail, they also
+# cannot pass, so nothing about the run's verdict rests on them.
 echo "Waiting for mesh convergence..."
 if [ "$PROFILE" = "chain" ]; then
     # Chain: A-B-C-D-E, each interior node has 2 peers, endpoints have 1
@@ -90,6 +100,13 @@ elif [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
     wait_for_peers fips-node-c${FIPS_CI_NAME_SUFFIX:-} 3 20 || true
     wait_for_peers fips-node-d${FIPS_CI_NAME_SUFFIX:-} 3 20 || true
     wait_for_peers fips-node-e${FIPS_CI_NAME_SUFFIX:-} 3 20 || true
+else
+    # An unrecognised profile used to fall straight through, and every
+    # section below is guarded by these same profile names, so the script
+    # ran no assertion at all and exited 0. A typo in the caller's profile
+    # argument produced a green run that tested nothing.
+    echo "ERROR: unknown profile '$PROFILE' (expected: chain, mesh, mesh-public)" >&2
+    exit 2
 fi
 # Wait for full pairwise connectivity, progress-aware: the actual pings
 # are the convergence signal, the deadline extends while more pairs come

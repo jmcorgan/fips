@@ -67,6 +67,41 @@ bandwidth:
   enabled: true
   tiers_mbps: [1, 10, 100, 1000]
 
+# Baseline: the mesh came up, agreed on a root, and took parents. This
+# asserts nothing about which nodes survive the churn; it exists so that
+# a run in which the mesh never formed cannot report success, which
+# until now it could, because this scenario carried no assertions at
+# all.
+#
+# This one is calibrated rather than derived, because a scenario that
+# stops and starts nodes on purpose does not hold a single spanning
+# tree. The six provably-completed archived runs end with two or three
+# distinct roots, seven or eight of ten nodes parented, and fifteen to
+# twenty sessions. The floors below sit one step outside those ranges
+# so an unlucky run does not go red, which leaves them catching a mesh
+# that collapsed rather than one that churned. Tighten them only
+# against a larger sample than six runs.
+#
+# READ THIS BEFORE RETUNING: the numbers above describe the invocation CI
+# gates on, which is not this file's own defaults. ci-local runs it as
+# "churn-mixed --nodes 10 --duration 120", and --nodes sed-patches
+# num_nodes in a copy of this file before the scenario is loaded, so the
+# gating run is a 10-node 120-second one while a bare `chaos.sh
+# churn-mixed` runs the 20-node 600-second scenario written here. This is
+# the only scenario CI overrides that way.
+#
+# The floors hold for both but are calibrated for the smaller. A bare
+# 20-node run clears them easily: 20 answering, 1 root, 19 parented, 69
+# sessions, measured 2026-07-23. Retuning against numbers like those would
+# put them past what the 10-node gating run can reach, and CI would go red
+# while a manual run stayed green.
+assertions:
+  baseline:
+    min_nodes_reporting: 10
+    max_roots: 4
+    min_nodes_parented: 6
+    min_sessions: 10
+
 logging:
   rust_log: "debug"
   output_dir: "./sim-results"

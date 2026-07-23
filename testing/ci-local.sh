@@ -28,8 +28,8 @@
 # Integration suites (default coverage):
 #   static-mesh, static-chain, rekey, rekey-accept-off,
 #   rekey-outbound-only, mixed-profile, gateway,
-#   acl-allowlist, firewall, nat-cone, nat-symmetric, nat-lan,
-#   nostr-publish-consume, stun-faults,
+#   acl-allowlist, admission-cap, firewall, nat-cone, nat-symmetric,
+#   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
 #   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
@@ -39,6 +39,29 @@
 #
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
+#
+# Deliberately not run by either runner, with the reason for each. Recorded
+# here so that "not in the suite list" stops being indistinguishable from
+# "forgotten", which is what it was until 2026-07-23:
+#   interop/         Manual. Driven by interop-stress.sh, which runs N
+#                    repetitions serially under netem and takes far longer
+#                    than a CI slot. No CI-sized entry point exists yet;
+#                    writing one is the work, not adding a line here.
+#   boringtun/       Comparative benchmark against a non-FIPS implementation.
+#                    Measures rather than asserts, and needs a boringtun
+#                    build CI does not have.
+#   iperf-test.sh    Bandwidth measurement, no pass/fail. Driven manually by
+#                    iperf-compare-refs.sh.
+#   ecn-ab-compare.sh  Manual A/B comparison, renamed from ecn-ab-test.sh
+#                    because it asserts nothing. Making it gateable needs a
+#                    calibration corpus that does not exist; see its header.
+#   mesh-lab/        Long-running multi-host lab, not a suite.
+#   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse
+#                    Chaos scenarios excluded from CHAOS_SUITES. The two
+#                    ecn-ab ones are halves of the manual comparison above.
+#                    The two maelstrom ones are 600 s stress runs kept for
+#                    manual investigation. All four still load-check and
+#                    carry the default max_errors ceiling if run by hand.
 #
 # Exit codes:
 #   0   — all stages passed
@@ -1105,6 +1128,35 @@ run_log_strings() {
     record "log-strings" $rc
 }
 
+# A shell function's exit status is its last command's. One ending in a log
+# call returns 0 whatever it did, so a caller testing that status has a dead
+# gate — the run_chaos and build_fips_for_e2e defects, one of which certified
+# unbuilt code as green. This enforces an explicit terminal return wherever a
+# caller consumes the status, which makes the class unreachable rather than
+# repairing instances of it.
+run_trailing_log() {
+    local rc=0
+    info "[trailing-log] Checking for functions whose status is a log call's"
+    python3 "$SCRIPT_DIR/check-trailing-log.py" || rc=$?
+    record "trailing-log" $rc
+}
+
+# Unit tests for the convergence gate every static suite waits on. Hermetic —
+# synthetic ping functions against the same SECONDS clock, no containers — but
+# it drives real timeouts, so it costs about 45 seconds rather than the "few
+# seconds" its own header used to claim.
+#
+# It is here with the other two rather than in the integration stage because it
+# needs nothing built. Note what that buys: wait_until_connected decides whether
+# every static suite proceeds or gives up, so a regression in it turns those
+# suites' verdicts into noise, and until now nothing ran this at all.
+run_wait_converge() {
+    local rc=0
+    info "[wait-converge] Running convergence-gate unit tests"
+    bash "$SCRIPT_DIR/lib/wait-converge-test.sh" || rc=$?
+    record "wait-converge" $rc
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 main() {
@@ -1118,6 +1170,8 @@ main() {
     # local run means what a GitHub run means, whichever subset was asked for.
     run_ci_parity
     run_log_strings
+    run_trailing_log
+    run_wait_converge
 
     if [[ "$TEST_ONLY" == true ]]; then
         run_tests

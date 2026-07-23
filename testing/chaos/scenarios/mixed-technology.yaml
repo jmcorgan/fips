@@ -30,6 +30,26 @@
 #   - n08 has fiber (n03) and Bluetooth (n04) parents — should pick n03
 #
 # Netem mutation shifts fiber-only links between normal and degraded.
+#
+# NEITHER TEST SUBJECT IS ASSERTED, because the implementation does not do
+# what the two lines above say. Across the five archived runs that carry a
+# status.txt and are therefore provably completed, n06's parent is n10 in
+# three and n03 in two, and n08's is n04 in four and n03 in one. Encoding
+# either as written would red the scenario most runs; encoding what it
+# actually does would pin behaviour nobody specified and would silently
+# bless it.
+#
+# So this is an open question rather than a missing assertion: either
+# cost-based selection is not preferring fiber here, or the criteria were
+# written for a topology this file no longer has. n06 taking n10 is the
+# more interesting half — n10 reaches n06 by fiber, so the choice may be
+# defensible and the comment simply stale. It needs someone to work out
+# which, and until then this scenario proves nothing about parent choice.
+#
+# That leaves this scenario asserting nothing about its own subject. The
+# baseline block further down holds it to forming a tree and carrying
+# traffic, which is a floor and not a substitute: nothing here checks that
+# the tree it forms is the one these comments describe.
 
 scenario:
   name: "mixed-technology"
@@ -97,6 +117,23 @@ traffic:
   interval_secs: {min: 10, max: 30}
   duration_secs: {min: 5, max: 15}
   parallel_streams: 4
+
+# Baseline: the mesh came up, agreed on a root, and took parents. This
+# asserts nothing about parent choice, which this scenario cannot
+# currently assert; it exists so that a run in which the mesh never formed
+# cannot report success, which until now it could,
+# because this scenario carried no assertions at all.
+#
+# Ten nodes, one root, nine parented and six to eight sessions across
+# the five provably-completed archived runs. The session floor is set
+# below the observed minimum deliberately: it is here to catch a mesh
+# that carries no traffic at all, not to pin a throughput.
+assertions:
+  baseline:
+    min_nodes_reporting: 10
+    max_roots: 1
+    min_nodes_parented: 9
+    min_sessions: 3
 
 logging:
   rust_log: "info"

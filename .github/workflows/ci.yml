@@ -63,6 +63,15 @@ jobs:
         run: bash testing/check-ci-parity.sh
       - name: Check test log matchers against the strings src/ emits
         run: python3 testing/check-log-strings.py
+      - name: Check no tested function's exit status is a log call's
+        run: python3 testing/check-trailing-log.py
+      # Hermetic: synthetic ping functions, no containers, ~45s. Lives beside
+      # the other two so both runners gate on it identically — putting it in
+      # only one would create exactly the drift check-ci-parity.sh exists to
+      # catch, and it is invisible to that checker either way since it is not
+      # a matrix suite.
+      - name: Run convergence-gate unit tests
+        run: bash testing/lib/wait-converge-test.sh
 
   fmt:
     name: Format check

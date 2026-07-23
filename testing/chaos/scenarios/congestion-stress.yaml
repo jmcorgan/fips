@@ -91,6 +91,44 @@ traffic:
 node_churn:
   enabled: false
 
+# Three of the four success criteria above, encoded. Until now all four
+# existed only as that comment and were checked by nothing, so the scenario
+# could not fail on any of them.
+#
+# The floors are 1 node each because that is what the criteria say ("on at
+# least one forwarding node", "on transit nodes", "on destination nodes").
+# They are deliberately not tightened to the observed counts: the criterion
+# is the spec, and a floor invented from six runs would assert something
+# nobody wrote down.
+#
+# What the floors are worth, from the archived corpus. The six runs that
+# carry a status.txt -- the only ones provably completed, all between
+# 2026-07-22 22:14 and 2026-07-23 02:02 -- meet all three with 5 to 9 nodes
+# reporting each signal, so the margin over a floor of 1 is comfortable.
+# The 176 older runs meet none of them. Those older runs did reach teardown
+# (each wrote an analysis.txt), and ECN landed 2026-03-05, before all but
+# one of them, so they are valid runs that observed no congestion rather
+# than runs that died early. What changed on 2026-07-22 is not established:
+# this file has not been touched since it was created, and neither have
+# netem.py, traffic.py or control.py. Worth knowing before trusting a green
+# result here, and worth its own investigation.
+assertions:
+  congestion_signals:
+    min_nodes_detected: 1
+    min_nodes_ce_forwarded: 1
+    min_nodes_ce_received: 1
+
+# The fourth criterion, "kernel_drop_events > 0 on at least one node", is
+# NOT asserted, because the implementation does not meet it: across all 182
+# archived runs of this scenario, including the six that meet the other
+# three, no node has ever reported a non-zero kernel_drop_events. Asserting
+# it would red the scenario permanently, and asserting a weakened version
+# would assert nothing. It stands here as an unmet criterion: either the
+# 4 KB recv_buf_size no longer provokes SO_RXQ_OVFL under this traffic, or
+# the counter does not reach the snapshot. Until that is settled it is a
+# coverage gap, because the transport drop-detection path this scenario
+# names as signal 2 is exercised by nothing.
+
 logging:
   rust_log: "info"
   output_dir: "./sim-results"
