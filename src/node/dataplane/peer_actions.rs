@@ -611,6 +611,24 @@ impl Node {
                                 return;
                             }
                         };
+                        // A rekey of ours in flight is now stale: the session it
+                        // was negotiated against is about to be replaced, and
+                        // `replace_session` rewrites the session and both indices
+                        // while touching no rekey state. Abandoning here is what
+                        // lets the classifier take this arm unconditionally —
+                        // declining the swap instead would desynchronize us from
+                        // the peer's outbound half, which cannot see our rekey.
+                        // Same clearing the rekey-responder arm does on its
+                        // `abandon_first` path.
+                        if let Some(peer_ref) = self.peers.get_mut(&peer)
+                            && let Some(idx) = peer_ref.abandon_rekey()
+                        {
+                            if let Some(tid) = peer_ref.transport_id() {
+                                self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                self.pending_outbound.remove(&(tid, idx.as_u32()));
+                            }
+                            let _ = self.index_allocator.free(idx);
+                        }
                         if let Some(peer_ref) = self.peers.get_mut(&peer) {
                             let old_our_index =
                                 peer_ref.replace_session(inbound_session, our_index, their_index);

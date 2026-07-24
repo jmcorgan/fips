@@ -44,9 +44,11 @@ use self::reloadable::Reloadable;
 /// caught by the initial-handshake cross-connection tie-breaker in
 /// `handle_msg3` and, on the "our outbound wins" side, the peer's rekey
 /// session was discarded with no `pending` slot — yet the peer cut over to it
-/// regardless, starving the discarding node until the 30s dead-timer. Fixed by
-/// bounding that cross-connection branch below the rekey age floor so a
-/// rekey-aged msg3 falls through to the rekey-responder path. See CHANGELOG.
+/// regardless, starving the discarding node until the 30s dead-timer. First
+/// bounded by an age floor on that cross-connection branch; the floor is gone
+/// now, and a rekey msg3 reaches the rekey-responder path because its sender
+/// declares it there (`TLV_REKEY_OF`), which no amount of jitter on the
+/// session-age clock can perturb. See CHANGELOG.
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
 use crate::cache::CoordCache;
 use crate::node::session::SessionEntry;

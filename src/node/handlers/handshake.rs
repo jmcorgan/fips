@@ -1300,8 +1300,16 @@ impl Node {
                     Ok(claim) => claim,
                     Err(e) => {
                         warn!(link_id = %link_id, error = %e, "Malformed rekey marker in msg3");
+                        // The msg1-allocated index rides the machine, so capture
+                        // it before disposal or it is orphaned. This arm is
+                        // reachable before the ACL gate, so leaving it to leak
+                        // would let any peer that can complete a msg3 grow the
+                        // allocator set one entry per malformed marker.
                         self.remove_link(&link_id);
                         self.remove_peer_machine(link_id);
+                        if let Some(idx) = our_index {
+                            let _ = self.index_allocator.free(idx);
+                        }
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;

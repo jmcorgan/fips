@@ -1,10 +1,11 @@
 //! Tests for the FMP wire codec: XX handshake framing, orderly disconnect,
 //! and the negotiation payload.
 
-use super::super::wire::NEGOTIATION_HEADER_SIZE;
+use super::super::wire::{NEGOTIATION_HEADER_SIZE, TLV_REKEY_OF};
 use crate::proto::fmp::{
     Disconnect, DisconnectReason, HandshakeMessageType, NegotiationPayload, NodeProfile,
 };
+use crate::utils::index::SessionIndex;
 
 // ===== HandshakeMessageType Tests =====
 
@@ -206,6 +207,74 @@ fn test_truncated_tlv() {
     let mut partial = NegotiationPayload::new(0, 1, 0).encode();
     partial.extend_from_slice(&[0x01, 0x00]); // Only field_num, no length
     assert!(NegotiationPayload::decode(&partial).is_err());
+}
+
+// ===== Rekey marker Tests =====
+
+#[test]
+fn test_rekey_marker_roundtrip() {
+    let index = SessionIndex::new(0xDEADBEEF);
+    let payload = NegotiationPayload::fmp(1, 1, NodeProfile::Full).with_rekey_of(index);
+
+    let decoded = NegotiationPayload::decode(&payload.encode()).unwrap();
+    assert_eq!(decoded.rekey_of().unwrap(), Some(index));
+}
+
+#[test]
+fn test_rekey_marker_absent_is_none() {
+    let payload = NegotiationPayload::fmp(1, 1, NodeProfile::Full);
+    let decoded = NegotiationPayload::decode(&payload.encode()).unwrap();
+    assert_eq!(decoded.rekey_of().unwrap(), None);
+}
+
+/// The forward-compatibility property the marker's rolling upgrade rests on: a
+/// peer that adds TLV fields we do not know must not disturb our reading of the
+/// one we do. Both directions matter — an unknown field alone still reads as
+/// "no rekey declared", and an unknown field alongside the marker still yields
+/// the marker.
+#[test]
+fn test_rekey_marker_unaffected_by_unknown_tlv() {
+    let unknown_only = NegotiationPayload::fmp(1, 1, NodeProfile::Full)
+        .with_tlv(9999, vec![0xFF, 0xFE, 0xFD])
+        .encode();
+    let decoded = NegotiationPayload::decode(&unknown_only).unwrap();
+    assert_eq!(decoded.rekey_of().unwrap(), None);
+
+    let index = SessionIndex::new(7);
+    let with_both = NegotiationPayload::fmp(1, 1, NodeProfile::Full)
+        .with_tlv(9999, vec![0xFF, 0xFE, 0xFD])
+        .with_rekey_of(index)
+        .with_tlv(4242, vec![0x01])
+        .encode();
+    let decoded = NegotiationPayload::decode(&with_both).unwrap();
+    assert_eq!(decoded.rekey_of().unwrap(), Some(index));
+}
+
+/// A marker whose value is the wrong length is an error, never an absence.
+///
+/// This is the case the container codec cannot catch and the accessor exists
+/// for: the TLV is well formed — correct field number, length matching its own
+/// value — so `decode` accepts it, and only the accessor can tell that four
+/// bytes were expected. Reading it as "no rekey declared" would put a real rekey
+/// back on the cross-connection path, which is the defect the marker removes.
+#[test]
+fn test_rekey_marker_wrong_length_is_error() {
+    for value in [
+        vec![],
+        vec![0x01, 0x02, 0x03],
+        vec![0x01, 0x02, 0x03, 0x04, 0x05],
+    ] {
+        let len = value.len();
+        let encoded = NegotiationPayload::fmp(1, 1, NodeProfile::Full)
+            .with_tlv(TLV_REKEY_OF, value)
+            .encode();
+        let decoded = NegotiationPayload::decode(&encoded)
+            .unwrap_or_else(|e| panic!("{len}-byte marker should decode as a TLV: {e}"));
+        assert!(
+            decoded.rekey_of().is_err(),
+            "{len}-byte marker must be an error, not an absence"
+        );
+    }
 }
 
 #[test]

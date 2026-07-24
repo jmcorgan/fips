@@ -71,8 +71,8 @@ pub(super) fn resend_snapshot(link: LinkId, resend_count: u32, msg1: Vec<u8>) ->
 }
 
 /// Build an `EstablishSnapshot` describing an existing, healthy, same-epoch peer
-/// with a rekey-enabled config and a rekey age floor of 100s, owned by node
-/// `our_byte`. The default is a quiescent session on the same link with no
+/// with a rekey-enabled config, owned by node `our_byte`.
+/// The default is a quiescent session on the same link with no
 /// in-flight rekey / pending and no rekey declared by the sender. Tests override
 /// only the fields their branch exercises. `existing_peer_epoch` defaults to
 /// `[0x01; 8]`.

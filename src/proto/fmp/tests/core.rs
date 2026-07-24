@@ -545,29 +545,39 @@ fn establish_mismatched_marker_resends_rather_than_rejecting() {
     ));
 }
 
-/// A fresh dial arriving while our own rekey is in flight must not swap. The
-/// swap rewrites the session and both indices and touches nothing else, so it
-/// would leave the pending rekey and its K-bit state pointing at a session the
-/// counterpart no longer holds. The age floor excluded this case incidentally;
-/// the declaration does not, so the guard is explicit.
+/// A fresh dial crossing our own in-flight rekey still resolves by the
+/// cross-connection tie-break, unchanged by the rekey.
+///
+/// This decision is one half of a two-sided tie-break: the peer's outbound half
+/// (`establish_outbound`) reads only whether it has an existing peer and the
+/// address ordering, and cannot see our rekey. Declining the swap here on
+/// account of our own state therefore desynchronizes the pair — the peer swaps,
+/// we do not, and neither end holds the other's session. Measured on both trees:
+/// declining leaves all four indices distinct with no pending session anywhere.
+///
+/// The orphaned-rekey hazard is real and is handled where the swap happens, by
+/// abandoning the rekey as part of it, rather than by refusing to swap.
 #[test]
-fn establish_undeclared_during_our_rekey_does_not_swap() {
+fn establish_undeclared_during_our_rekey_still_cross_connects() {
     let fmp = Fmp::new();
     let wire = wire_outcome(0x02, SAME_EPOCH);
 
-    for (in_progress, pending) in [(true, false), (false, true)] {
-        let mut snap = establish_snapshot(0x09);
+    for (in_progress, pending) in [(true, false), (false, true), (false, false)] {
+        let mut snap = establish_snapshot(0x09); // our 0x09 > peer 0x02
         snap.different_link = true;
         snap.rekey_claim = RekeyClaim::None;
         snap.rekey_in_progress = in_progress;
         snap.pending_new_session = pending;
-        assert!(
-            matches!(
-                fmp.establish_inbound(&snap, &wire),
-                InboundDecision::ResendMsg2 { .. }
+        match fmp.establish_inbound(&snap, &wire) {
+            InboundDecision::CrossConnect {
+                our_inbound_wins, ..
+            } => assert!(
+                our_inbound_wins,
+                "the larger node's inbound wins regardless of our rekey state \
+                 (in_progress={in_progress} pending={pending})"
             ),
-            "in_progress={in_progress} pending={pending}"
-        );
+            other => panic!("in_progress={in_progress} pending={pending}: got {other:?}"),
+        }
     }
 }
 

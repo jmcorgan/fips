@@ -1024,10 +1024,14 @@ impl ActivePeer {
 
     /// Test-only seam: backdate the session-established instant so a test can
     /// make `session_established_at().elapsed()` read as `age`-old (needed to
-    /// drive the inbound establish paths that gate on session age past the
-    /// rekey age floor). This only shifts the private timestamp field; it
-    /// changes no decision logic, no threshold, and is compiled out of release
-    /// builds.
+    /// fire the age half of the rekey trigger without waiting for it). This only
+    /// shifts the private timestamp field; it changes no decision logic, no
+    /// threshold, and is compiled out of release builds.
+    ///
+    /// Backdate past the whole jitter band, not the nominal `after_secs`: the
+    /// effective trigger is `after_secs + jitter` with jitter drawn from
+    /// `[-REKEY_JITTER_SECS, +REKEY_JITTER_SECS]`, so a smaller margin makes the
+    /// test depend on the draw.
     #[cfg(test)]
     pub(crate) fn test_backdate_session_established(&mut self, age: std::time::Duration) {
         self.session_established_at = self
@@ -1326,13 +1330,29 @@ impl ActivePeer {
         // link — and every attempt to infer that from local state has a failure
         // band. The pre-rekey session is still installed at this point; the
         // pending one is not set until the caller drives it.
+        //
+        // An absent `their_index` would silently omit the marker and put this
+        // rekey back on the cross-connection path — the defect verbatim. It is
+        // unreachable today (the rekey cadence filters on `has_session`, and
+        // every production peer is built by `with_session`, which sets the
+        // index), so it is asserted rather than handled: a silent `if let` is
+        // the wrong shape for a value whose absence reintroduces the bug.
         let mut msg3 = hs.write_message_3()?;
-        if let Some(their_index) = self.their_index() {
-            let marker = NegotiationPayload::fmp(1, 1, our_profile)
-                .with_rekey_of(their_index)
-                .encode();
-            let encrypted = hs.encrypt_payload(&marker)?;
-            msg3.extend_from_slice(&encrypted);
+        match self.their_index() {
+            Some(their_index) => {
+                let marker = NegotiationPayload::fmp(1, 1, our_profile)
+                    .with_rekey_of(their_index)
+                    .encode();
+                let encrypted = hs.encrypt_payload(&marker)?;
+                msg3.extend_from_slice(&encrypted);
+            }
+            None => {
+                debug_assert!(false, "rekeying peer has no their_index to declare");
+                tracing::warn!(
+                    "Rekey msg3 built with no session index to declare; \
+                     the peer will read it as a fresh dial"
+                );
+            }
         }
         let session = hs.into_session()?;
 

@@ -707,6 +707,32 @@ async fn test_cross_connection_both_initiate() {
     assert!(peer_b_on_a.can_send(), "Peer B on A should be sendable");
     assert!(peer_a_on_b.can_send(), "Peer A on B should be sendable");
 
+    // The property the tie-break exists to produce: both ends kept the SAME
+    // session, not merely a session each. The index pair is what makes that
+    // checkable — A sends to B on the index B receives on, and vice versa.
+    //
+    // Every per-end predicate above holds when the two ends resolve onto
+    // different sessions, because each end does have a healthy session; the
+    // link then decrypts one direction and silently drops the other. So the
+    // pairing has to be asserted across the two nodes or it is not asserted at
+    // all. Kept as a standing guard on the tie-break rather than as a
+    // reproduction of any particular defect: it passes on the pre-marker tree
+    // as well, where this ordering was already resolved correctly.
+    assert_eq!(
+        peer_b_on_a.their_index(),
+        peer_a_on_b.our_index(),
+        "A sends to B on an index B does not receive on: the ends diverged"
+    );
+    assert_eq!(
+        peer_a_on_b.their_index(),
+        peer_b_on_a.our_index(),
+        "B sends to A on an index A does not receive on: the ends diverged"
+    );
+    assert!(
+        peer_b_on_a.our_index().is_some() && peer_b_on_a.their_index().is_some(),
+        "both indices must be set, or the equality above passes on None == None"
+    );
+
     // Clean up transports
     for (_, t) in node_a.transports.iter_mut() {
         t.stop().await.ok();
@@ -1693,15 +1719,22 @@ async fn test_msg3_dual_rekey_won_frees_index() {
 
 #[tokio::test]
 async fn test_msg3_resend_msg2_frees_index() {
-    // Rekey disabled so an aged-session inbound msg3 classifies as a duplicate
-    // handshake (ResendMsg2), not a rekey; the tiny interval keeps the
-    // cross-connection age bound (the rekey floor) at its 5s minimum so the
-    // aged session skips the cross-connection arm too.
+    // A declared rekey into a responder that has rekey DISABLED. The marker
+    // matches, so this is unambiguously a rekey and not a crossing dial, and the
+    // responder's `rekey_enabled` gate sends it to the duplicate arm.
+    //
+    // A bare second handshake will not reach this arm: it declares no rekey, and
+    // an undeclared msg3 on a different link is a cross-connection, which
+    // `rekey_enabled` does not gate. That is what this test used to do, and every
+    // assertion below holds on the cross-connection arm too, so it passed while
+    // exercising something else entirely.
+    let mut init_config = Config::new();
+    init_config.node.rekey.enabled = true;
+    init_config.node.rekey.after_secs = 1;
     let mut config = Config::new();
     config.node.rekey.enabled = false;
-    config.node.rekey.after_secs = 1;
 
-    let mut initiator = make_hs_node(Config::new()).await;
+    let mut initiator = make_hs_node(init_config).await;
     let mut responder = make_hs_node(config).await;
 
     // First handshake establishes the active peer.
@@ -1711,23 +1744,28 @@ async fn test_msg3_resend_msg2_frees_index() {
     let baseline = responder.node.index_allocator.count();
     assert_eq!(baseline, 1, "responder holds exactly the peer's index");
 
-    // Age the session past the cross-connection bound so the duplicate inbound
-    // msg3 resolves to ResendMsg2 rather than CrossConnect.
     let peer_addr =
         *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    responder
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+    // Age the initiator's session past the whole jitter band so its own rekey
+    // trigger fires and the msg3 that arrives carries a matching marker.
+    initiator
         .node
-        .get_peer_mut(&peer_addr)
+        .get_peer_mut(&responder_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
 
-    // Second (duplicate) handshake: fresh index allocated at msg1, then freed
-    // on the ResendMsg2 arm.
-    let msg3b = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
+    let before = responder.node.get_peer(&peer_addr).unwrap();
+    let session_before = (before.our_index(), before.their_index());
+
+    // The rekey's msg1 allocates a fresh index; its msg3 then frees it on the
+    // duplicate arm, because this responder does not do rekeys.
+    let msg3b = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
     assert_eq!(
         responder.node.index_allocator.count(),
         baseline + 1,
-        "second msg1 allocated a fresh index"
+        "the rekey msg1 allocated a fresh index"
     );
     responder.node.handle_msg3(msg3b).await;
 
@@ -1737,6 +1775,13 @@ async fn test_msg3_resend_msg2_frees_index() {
         "ResendMsg2 must free the msg1-allocated index"
     );
     assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
+    let after = responder.node.get_peer(&peer_addr).unwrap();
+    assert_eq!(
+        (after.our_index(), after.their_index()),
+        session_before,
+        "the duplicate arm must leave the session alone; changed indices mean \
+         the cross-connection arm ran instead"
+    );
     // The duplicate leg's msg1-born machine goes with the leg; only the
     // established peer's machine remains.
     let peer_link = responder.node.get_peer(&peer_addr).unwrap().link_id();
@@ -1927,6 +1972,194 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
     );
     assert!(responder.node.peer_machines.contains_key(&peer_link));
     responder.node.debug_assert_peer_maps_coherent();
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// A rekey triggered by message count on a *young* session is still a rekey,
+/// and both ends must come out of it holding the same session.
+///
+/// This is the defect the marker exists to remove. The rekey trigger is
+/// `elapsed >= after_secs || counter >= after_messages`, so the count disjunct
+/// fires on a session of any age — while the discriminator it replaced asked
+/// only how old the session was, and read anything young as a fresh
+/// cross-connection. The two ends then resolved onto different sessions, and a
+/// link whose ends disagree decrypts one direction and drops the other.
+///
+/// Driven entirely off the count disjunct: `after_secs` is set far out of reach,
+/// so nothing here depends on the rekey jitter draw.
+#[tokio::test]
+async fn test_count_triggered_rekey_on_young_session_converges() {
+    let make_config = || {
+        let mut c = Config::new();
+        c.node.rekey.enabled = true;
+        // Unreachable by age, so only the message counter can fire the trigger.
+        c.node.rekey.after_secs = 3600;
+        c.node.rekey.after_messages = 4;
+        c
+    };
+
+    let mut initiator = make_hs_node(make_config()).await;
+    let mut responder = make_hs_node(make_config()).await;
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+
+    let initiator_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    // Carry the session past the message threshold, leaving its age at zero.
+    // Encrypting on the session is what the trigger actually counts, so this
+    // moves the real counter rather than a stand-in for it.
+    for _ in 0..5 {
+        initiator
+            .node
+            .get_peer_mut(&responder_addr)
+            .unwrap()
+            .noise_session_mut()
+            .unwrap()
+            .encrypt(b"traffic")
+            .expect("encrypt under the established session");
+    }
+
+    let rekey_msg3 = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
+    responder.node.handle_msg3(rekey_msg3).await;
+
+    assert!(
+        responder
+            .node
+            .get_peer(&initiator_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some(),
+        "the responder read a real rekey as something else: no pending session"
+    );
+
+    // Both ends cut over to the session they just negotiated.
+    initiator.node.check_rekey().await;
+    responder.node.check_rekey().await;
+
+    let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
+    let on_responder = responder.node.get_peer(&initiator_addr).unwrap();
+    assert_eq!(
+        on_initiator.their_index(),
+        on_responder.our_index(),
+        "after the rekey the ends hold different sessions: traffic drops one way"
+    );
+    assert_eq!(
+        on_responder.their_index(),
+        on_initiator.our_index(),
+        "after the rekey the ends hold different sessions: traffic drops one way"
+    );
+    assert!(
+        on_initiator.our_index().is_some() && on_initiator.their_index().is_some(),
+        "both indices must be set, or the equality above passes on None == None"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// A fresh dial crossing our own in-flight rekey leaves BOTH ends on the same
+/// session, and leaks nothing on the way.
+///
+/// The two events cross: we send a rekey msg1 and, before it completes, the peer
+/// dials us anew on a different link. Its msg3 declares no rekey, correctly, so
+/// it is a genuine cross-connection and resolves by the address tie-break.
+///
+/// The earlier version of this test asserted only the responder's state and so
+/// passed on an outcome where the two ends had diverged onto four distinct
+/// indices — the initiator's half of the tie-break cannot see our rekey and
+/// swaps regardless, so a responder that declines desynchronizes the pair. Any
+/// assertion here has to span both nodes; a one-sided check is the failure mode
+/// this whole change exists to remove.
+#[tokio::test]
+async fn test_fresh_dial_crossing_our_rekey_converges() {
+    let make_config = || {
+        let mut c = Config::new();
+        c.node.rekey.enabled = true;
+        c.node.rekey.after_secs = 1;
+        c
+    };
+
+    let mut initiator = make_hs_node(make_config()).await;
+    // Pin the responder as the LARGER node addr: that is the ordering in which
+    // its inbound wins the tie-break and it performs the swap, which is the side
+    // that has to clean up the rekey it is abandoning. With a smaller responder
+    // it keeps its outbound and the interesting path is never taken.
+    let mut responder = loop {
+        let cand = make_hs_node(make_config()).await;
+        if cand.node.node_addr() > initiator.node.node_addr() {
+            break cand;
+        }
+    };
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    // Start the responder's OWN rekey and leave it in flight. Driven from the
+    // real trigger rather than poking the flag, so the peer carries whatever
+    // state a live rekey actually leaves behind. Backdate well past the jitter
+    // band ([-15, +15] around `after_secs`) or firing depends on the draw.
+    responder
+        .node
+        .get_peer_mut(&peer_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
+    responder.node.check_rekey().await;
+
+    assert!(
+        responder
+            .node
+            .get_peer(&peer_addr)
+            .unwrap()
+            .rekey_in_progress(),
+        "the responder's own rekey must be in flight, or this tests nothing"
+    );
+
+    // The peer now dials fresh on a NEW link, unaware of our rekey. A bare
+    // handshake declares no rekey, because it is not one.
+    let fresh_msg3 = drive_to_msg3(&mut initiator, &mut responder, 5000).await;
+    responder.node.handle_msg3(fresh_msg3).await;
+
+    let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
+    let on_responder = responder.node.get_peer(&peer_addr).unwrap();
+    assert_eq!(
+        on_initiator.their_index(),
+        on_responder.our_index(),
+        "ends diverged: the initiator sends on an index the responder does not receive on"
+    );
+    assert_eq!(
+        on_responder.their_index(),
+        on_initiator.our_index(),
+        "ends diverged: the responder sends on an index the initiator does not receive on"
+    );
+    assert!(
+        on_responder.our_index().is_some() && on_responder.their_index().is_some(),
+        "both indices must be set, or the equalities above pass on None == None"
+    );
+
+    // The rekey the swap displaced is gone rather than left dangling at a
+    // session nobody holds, and its index went back to the allocator with it.
+    assert!(
+        !on_responder.rekey_in_progress(),
+        "the displaced rekey must be abandoned by the swap, not left in flight"
+    );
+    assert!(
+        on_responder.pending_new_session().is_none(),
+        "the displaced rekey must leave no pending session behind"
+    );
+    assert!(on_responder.has_session());
+    responder.node.debug_assert_peer_maps_coherent();
+    initiator.node.debug_assert_peer_maps_coherent();
 
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;
