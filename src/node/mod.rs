@@ -593,6 +593,7 @@ impl Node {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let mut tree_state = TreeState::new(node_addr, tree_now_secs);
+        tree_state.set_self_is_leaf(node_profile == NodeProfile::Leaf);
         tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
         tree_state.set_hold_down(config.node.tree.hold_down_secs);
         tree_state.set_flap_dampening(
@@ -743,6 +744,7 @@ impl Node {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let mut tree_state = TreeState::new(node_addr, tree_now_secs);
+        tree_state.set_self_is_leaf(config.node_profile() == NodeProfile::Leaf);
         tree_state.set_parent_hysteresis(config.node.tree.parent_hysteresis);
         tree_state.set_hold_down(config.node.tree.hold_down_secs);
         tree_state.set_flap_dampening(
@@ -753,7 +755,11 @@ impl Node {
         tree::sign_declaration(tree_state.my_declaration_mut(), &identity)
             .expect("signing own declaration should never fail");
 
-        let mut bloom_state = BloomState::new(node_addr);
+        let mut bloom_state = if config.is_leaf_only() {
+            BloomState::leaf_only(node_addr)
+        } else {
+            BloomState::new(node_addr)
+        };
         bloom_state.set_update_debounce_ms(config.node.bloom.update_debounce_ms);
 
         let coord_cache = CoordCache::new(
@@ -792,8 +798,8 @@ impl Node {
             identity.clone(),
             startup_epoch,
             started_at,
-            false,
-            NodeProfile::Full,
+            config.is_leaf_only(),
+            config.node_profile(),
             max_connections,
             max_peers,
             max_links,
@@ -875,6 +881,7 @@ impl Node {
             ctx.is_leaf_only = true;
             ctx.node_profile = NodeProfile::Leaf;
         });
+        node.tree_state.set_self_is_leaf(true);
         Ok(node)
     }
 

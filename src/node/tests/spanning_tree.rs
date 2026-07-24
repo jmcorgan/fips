@@ -98,9 +98,40 @@ pub(super) async fn make_test_node_with_profile(
     make_test_node_inner(config, 1280).await
 }
 
+/// Create a test node with a specific profile AND a caller-chosen identity, so
+/// a test can pin which node holds the smallest NodeAddr (e.g. force a Leaf to
+/// be the numerically smallest node and reproduce the root-election partition
+/// deterministically).
+pub(super) async fn make_test_node_with_profile_and_identity(
+    profile: crate::proto::fmp::NodeProfile,
+    identity: Identity,
+) -> TestNode {
+    use crate::proto::fmp::NodeProfile;
+    let mut config = Config::new();
+    match profile {
+        NodeProfile::Leaf => config.node.leaf_only = true,
+        NodeProfile::NonRouting => config.node.disable_routing = true,
+        NodeProfile::Full => {}
+    }
+    make_test_node_inner_with_identity(config, 1280, Some(identity)).await
+}
+
 /// Shared builder: a test node from an explicit `Config` and transport MTU.
 async fn make_test_node_inner(config: Config, mtu: u16) -> TestNode {
-    let mut node = make_node_with(config);
+    make_test_node_inner_with_identity(config, mtu, None).await
+}
+
+/// Shared builder with an optional caller-chosen identity. `None` generates a
+/// fresh random identity (the default); `Some` pins it via `Node::with_identity`.
+async fn make_test_node_inner_with_identity(
+    config: Config,
+    mtu: u16,
+    identity: Option<Identity>,
+) -> TestNode {
+    let mut node = match identity {
+        Some(id) => Node::with_identity(id, config).expect("build node with identity"),
+        None => make_node_with(config),
+    };
     let transport_id = TransportId::new(1);
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
@@ -812,6 +843,42 @@ pub(super) async fn run_tree_test_with_profiles(
         );
     }
 
+    nodes
+}
+
+/// Like `run_tree_test_with_profiles`, but pins node identities so the node at
+/// `leaf_idx` holds the strictly smallest NodeAddr in the mesh.
+///
+/// This makes the root-election partition deterministic: a Leaf (or any non-Full
+/// node) that holds the smallest NodeAddr is the one that would self-elect as a
+/// second root. Without the leaf gate the resulting mesh partitions; with it the
+/// Leaf attaches under its Full upstream and the tree stays connected.
+pub(super) async fn run_tree_test_with_profiles_leaf_smallest(
+    profiles: &[crate::proto::fmp::NodeProfile],
+    leaf_idx: usize,
+    edges: &[(usize, usize)],
+) -> Vec<TestNode> {
+    // One identity per node; move the smallest-addr identity into the leaf slot.
+    let mut ids: Vec<Identity> = (0..profiles.len()).map(|_| Identity::generate()).collect();
+    let smallest = (0..ids.len())
+        .min_by(|&a, &b| ids[a].node_addr().cmp(ids[b].node_addr()))
+        .expect("non-empty");
+    ids.swap(leaf_idx, smallest);
+    assert!(
+        (0..ids.len()).all(|i| i == leaf_idx || ids[leaf_idx].node_addr() < ids[i].node_addr()),
+        "leaf must hold the unique smallest NodeAddr"
+    );
+
+    let mut nodes = Vec::with_capacity(profiles.len());
+    for (i, &profile) in profiles.iter().enumerate() {
+        nodes.push(make_test_node_with_profile_and_identity(profile, ids[i].clone()).await);
+    }
+    for &(i, j) in edges {
+        initiate_handshake(&mut nodes, i, j).await;
+    }
+    let total = drain_all_packets(&mut nodes, false).await;
+    assert!(total > 0, "Should have processed at least some packets");
+    repair_missing_edge_handshakes(&mut nodes, edges, false).await;
     nodes
 }
 

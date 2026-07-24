@@ -30,6 +30,20 @@ pub struct TreeState {
     parent_hysteresis: f64,
     /// Flap-dampening / hold-down state machine.
     flap: FlapDampener,
+    /// Whether this node is a Leaf-profile node.
+    ///
+    /// A Leaf holds a single upstream Full peer, sends no tree announces, and
+    /// must never self-elect as tree root: peers refuse a non-Full node as a
+    /// parent (`non_full_peers()` skip), so a Leaf that self-elected would form
+    /// an isolated second root and partition the mesh. When `true`, the node is
+    /// excluded from root self-election and attaches under its upstream instead,
+    /// holding that subtree's coordinate for its own routing (never announced, so
+    /// the coordinate's `self < root` is safe). Defaults to `false`
+    /// (tree-participating); the shell sets it from the node profile. NonRouting
+    /// nodes keep `false` — they announce, so the same relaxation would emit a
+    /// wire-invalid coordinate; a global-min NonRouting node is a separate open
+    /// problem for the leaf/non-routing tree-participation model.
+    self_is_leaf: bool,
 }
 
 impl TreeState {
@@ -52,6 +66,7 @@ impl TreeState {
             peer_ancestry: BTreeMap::new(),
             parent_hysteresis: 0.0,
             flap: FlapDampener::new(),
+            self_is_leaf: false,
         }
     }
 
@@ -187,10 +202,18 @@ impl TreeState {
         let parent_id = self.my_declaration.parent_id();
         if let Some(parent_coords) = self.peer_ancestry.get(parent_id) {
             let parent_root = *parent_coords.root_id();
-            if self.my_node_addr <= parent_root {
+            if !self.self_is_leaf && self.my_node_addr <= parent_root {
                 // Prepending self would put a smaller-or-equal node at depth 0,
                 // breaking the "advertised root = min path entry" invariant.
                 // Demote to self-root rather than emit a path peers will reject.
+                //
+                // A Leaf is exempt: it keeps the `[self, parent, …, root]`
+                // coordinate even when `self <= parent_root`, so it lives as a
+                // depth-N member of its upstream's tree rather than demoting to
+                // an isolated self-root (which would partition the mesh). Safe
+                // because a Leaf never announces this coordinate; it reaches
+                // peers only via session-carried coords, which are not subject
+                // to the root-min `validate_semantics`.
                 let seq = self.my_declaration.sequence();
                 let ts = self.my_declaration.timestamp();
                 self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, seq, ts);
@@ -218,9 +241,14 @@ impl TreeState {
 
     /// Whether this node should be the tree root: either there are no peers,
     /// or our NodeAddr is `<=` every visible root.
+    ///
+    /// A Leaf never self-elects as root while it has a peer to attach under: it
+    /// cannot forward transit, peers refuse it as a parent, and a Leaf-root
+    /// would partition the mesh. An isolated Leaf (no visible root) is still its
+    /// own root, which is harmless.
     pub fn should_be_root(&self) -> bool {
         match self.smallest_visible_root() {
-            Some(sr) => self.my_node_addr <= sr,
+            Some(sr) => !self.self_is_leaf && self.my_node_addr <= sr,
             None => true,
         }
     }
@@ -293,6 +321,14 @@ impl TreeState {
             Some((peer_id, distance)) if distance < my_distance => Some(peer_id),
             _ => None,
         }
+    }
+
+    /// Mark this node as a Leaf (or not), gating it out of root self-election.
+    ///
+    /// A Leaf attaches under its upstream Full peer and never becomes root; see
+    /// the `self_is_leaf` field docs. Set from the node profile at construction.
+    pub fn set_self_is_leaf(&mut self, is_leaf: bool) {
+        self.self_is_leaf = is_leaf;
     }
 
     /// Set the parent hysteresis factor (0.0-1.0).
@@ -379,7 +415,15 @@ impl TreeState {
         // `self` to that peer's ancestry would put `self` at depth 0 and the
         // peer's larger root at the tail — violating "advertised root = min path
         // entry" and getting rejected by recipients' `validate_semantics`.
-        if self.my_node_addr <= smallest_root {
+        //
+        // A Leaf is exempt: it must not self-elect as root (peers refuse it as a
+        // parent, so it would partition the mesh). It falls through to select its
+        // upstream Full peer as parent. The resulting
+        // `self < root` coordinate is invalid on the wire, but a Leaf never
+        // announces it (`send_tree_announce_to_peer` is Leaf-gated); it is used
+        // only for the Leaf's own routing and propagates to peers via the
+        // coords carried on its session frames, which are not root-validated.
+        if !self.self_is_leaf && self.my_node_addr <= smallest_root {
             return ParentEval::None;
         }
 

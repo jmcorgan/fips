@@ -5,7 +5,7 @@ use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, generate_random_edges, lock_large_network_test,
     process_available_packets, run_tree_test, run_tree_test_with_mtus, run_tree_test_with_profiles,
-    verify_tree_convergence,
+    run_tree_test_with_profiles_leaf_smallest, verify_tree_convergence,
 };
 use crate::proto::fsp::SessionAck;
 use crate::proto::link::SessionDatagram;
@@ -672,6 +672,86 @@ async fn mixed_profile_nodes_converge_and_forward() {
             "datagram {src}->{dst} must be delivered to node {dst}'s TUN"
         );
     }
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Regression: a Leaf holding the smallest NodeAddr must not self-elect as root
+/// and partition the mesh, so a multi-hop session from the Leaf to a
+/// non-adjacent Full node still establishes and delivers.
+///
+/// Topology A(Full) — B(Full), with D(Leaf) hanging off A. D is pinned to the
+/// strictly smallest NodeAddr — the condition that made D self-elect as a second
+/// root, partitioning A/B's tree from D's and leaving B unable to route its
+/// handshake reply back to D. The multi-hop pair D->B (routed through A) is the
+/// one the Docker `mixed-profile` suite covered.
+///
+/// Only Full and Leaf profiles appear here so the elected root is always the
+/// smaller of the two Full nodes: the separate global-min-NonRouting partition
+/// (a distinct open problem for the leaf/non-routing tree-participation model) is
+/// deliberately kept out so this test isolates the Leaf fix.
+///
+/// Without the leaf gate D self-roots every run and D->B fails; with it, D
+/// attaches under A and the session establishes.
+#[tokio::test]
+async fn leaf_smallest_addr_does_not_partition_multihop() {
+    use crate::proto::fmp::NodeProfile;
+
+    // 0=A Full, 1=B Full, 2=D Leaf (pinned smallest).
+    let profiles = [NodeProfile::Full, NodeProfile::Full, NodeProfile::Leaf];
+    // A-B, A-D (D is a single-upstream leaf hanging off A).
+    let edges = [(0, 1), (0, 2)];
+    let mut nodes = run_tree_test_with_profiles_leaf_smallest(&profiles, 2, &edges).await;
+
+    // The mesh must be a single tree rooted at a Full node: D (the smallest
+    // addr) must NOT be its own root. A partition shows up as D self-rooted.
+    assert!(
+        !nodes[2].node.tree_state().is_root(),
+        "the Leaf (smallest addr) must not self-elect as root"
+    );
+    let roots: Vec<_> = nodes.iter().map(|n| *n.node.tree_state().root()).collect();
+    assert!(
+        roots.iter().all(|r| *r == roots[0]),
+        "all nodes must share one root (no partition); got {roots:?}"
+    );
+
+    populate_all_coord_caches(&mut nodes);
+
+    // TUN receiver on B so delivered plaintext can be observed.
+    let (tx, b_rx) = std::sync::mpsc::channel();
+    nodes[1].node.supervisor.tun_tx = Some(tx);
+
+    let d_addr = *nodes[2].node.node_addr();
+    let (b_addr, b_pubkey) = (
+        *nodes[1].node.node_addr(),
+        nodes[1].node.identity().pubkey_full(),
+    );
+
+    // D -> B: the multi-hop pair routed through A.
+    nodes[2]
+        .node
+        .initiate_session(b_addr, b_pubkey)
+        .await
+        .expect("D->B initiate_session must succeed (no partition)");
+    drain_to_quiescence(&mut nodes).await;
+
+    let payload = b"leaf-multihop".to_vec();
+    let d_fips = crate::FipsAddress::from_node_addr(&d_addr);
+    let b_fips = crate::FipsAddress::from_node_addr(&b_addr);
+    let ipv6 = build_ipv6_packet(&d_fips, &b_fips, &payload);
+    nodes[2]
+        .node
+        .send_ipv6_packet(&b_addr, &ipv6)
+        .await
+        .expect("D->B send must succeed");
+    drain_to_quiescence(&mut nodes).await;
+
+    let found = std::iter::from_fn(|| b_rx.try_recv().ok())
+        .any(|pkt| pkt.len() >= 40 && pkt[40..] == payload[..]);
+    assert!(
+        found,
+        "D->B multi-hop datagram must be delivered to B's TUN"
+    );
 
     cleanup_nodes(&mut nodes).await;
 }

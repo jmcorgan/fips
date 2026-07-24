@@ -514,6 +514,86 @@ fn test_recompute_coords_demotes_when_self_smaller_than_parent_root() {
 }
 
 #[test]
+fn test_leaf_does_not_self_elect_and_selects_full_upstream() {
+    // A Leaf holding the smallest NodeAddr must NOT self-elect as root. Peers
+    // refuse a non-Full node as a parent (non_full_peers skip), so a self-elected
+    // Leaf becomes an isolated second root and partitions the mesh. With the leaf
+    // gate it instead selects its Full upstream as parent.
+    let leaf = make_node_addr(1); // smallest addr in the mesh
+    let upstream = make_node_addr(3); // Full upstream, a depth-1 member of B's tree
+    let real_root = make_node_addr(2); // the upstream is rooted here
+
+    let mut state = TreeState::new(leaf, 1000);
+    state.set_self_is_leaf(true);
+    state.update_peer(
+        ParentDeclaration::new(upstream, real_root, 1, 1000),
+        make_coords(&[3, 2]),
+    );
+
+    let eval = state.evaluate_parent(&BTreeMap::new(), &BTreeSet::new());
+    assert_eq!(
+        eval.switch_target(),
+        Some(upstream),
+        "leaf must attach under its Full upstream, not self-elect"
+    );
+    assert!(
+        !state.should_be_root(),
+        "leaf must not claim root even as the smallest NodeAddr"
+    );
+
+    // Break-test: the identical topology on a NON-leaf (Full) self reproduces
+    // the self-election the gate suppresses — proving the gate is what fires.
+    let mut full = TreeState::new(leaf, 1000);
+    full.update_peer(
+        ParentDeclaration::new(upstream, real_root, 1, 1000),
+        make_coords(&[3, 2]),
+    );
+    assert_eq!(
+        full.evaluate_parent(&BTreeMap::new(), &BTreeSet::new())
+            .switch_target(),
+        None,
+        "a Full smallest-addr node self-elects (evaluate_parent returns None)"
+    );
+    assert!(
+        full.should_be_root(),
+        "a Full smallest-addr node claims root"
+    );
+}
+
+#[test]
+fn test_leaf_keeps_coord_under_larger_rooted_parent() {
+    // A Leaf attaching under a larger-rooted Full parent keeps the
+    // [self, parent, root] coordinate rather than demoting to self-root, so
+    // it lives as a depth-N member of the single tree. The coordinate's
+    // self < root is safe because a Leaf never announces it (it reaches peers
+    // only via the coords carried on its session frames, which are not
+    // root-min validated). Contrast with
+    // test_recompute_coords_demotes_when_self_smaller_than_parent_root, where a
+    // Full self in the same position (default self_is_leaf=false) demotes.
+    let leaf = make_node_addr(1);
+    let upstream = make_node_addr(3);
+    let real_root = make_node_addr(2);
+
+    let mut state = TreeState::new(leaf, 1000);
+    state.set_self_is_leaf(true);
+    state.update_peer(
+        ParentDeclaration::new(upstream, real_root, 1, 1000),
+        make_coords(&[3, 2]),
+    );
+
+    state.set_parent(upstream, 2, 2000, 2000);
+    state.recompute_coords();
+
+    assert!(!state.is_root(), "leaf must not demote to self-root");
+    assert_eq!(state.root(), &real_root, "leaf adopts its upstream's root");
+    assert_eq!(
+        state.my_coords().entries().len(),
+        3,
+        "coordinate is [leaf, upstream, root]"
+    );
+}
+
+#[test]
 fn test_handle_parent_lost_becomes_root() {
     let my_node = make_node_addr(5);
     let mut state = TreeState::new(my_node, 1000);
