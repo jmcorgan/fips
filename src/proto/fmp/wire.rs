@@ -193,6 +193,12 @@ pub const NEGOTIATION_HEADER_SIZE: usize = 10;
 /// Format byte value for the initial negotiation format.
 pub(crate) const NEGOTIATION_FORMAT_V0: u8 = 0;
 
+/// TLV field number for the rekey marker.
+///
+/// Its value is the session index the *receiver* allocated for the session this
+/// handshake replaces. Absence means the handshake is not a rekey.
+pub const TLV_REKEY_OF: u16 = 1;
+
 // --- FMP feature bitfield constants ---
 
 /// Mask for the 3-bit node profile enum (bits 0-2).
@@ -294,6 +300,38 @@ impl NegotiationPayload {
     pub fn with_tlv(mut self, field_num: u16, value: Vec<u8>) -> Self {
         self.tlv_entries.push(TlvEntry { field_num, value });
         self
+    }
+
+    /// Declare this handshake a rekey of the session the receiver indexes as
+    /// `their_index`.
+    ///
+    /// The marker names the *receiver's* index, not the sender's, because the
+    /// receiver matches it against its own `our_index`. Absence means the
+    /// handshake is not a rekey — a responder cannot otherwise tell a rekey from
+    /// a fresh dial, since both arrive as a new msg1 on a new link.
+    pub fn with_rekey_of(self, their_index: SessionIndex) -> Self {
+        self.with_tlv(TLV_REKEY_OF, their_index.to_le_bytes().to_vec())
+    }
+
+    /// The session index this handshake declares it replaces, if any.
+    ///
+    /// A present-but-malformed marker is an **error**, not an absence. Reading a
+    /// truncated marker as "not a rekey" would reintroduce the silent
+    /// fall-through this field exists to remove.
+    pub fn rekey_of(&self) -> Result<Option<SessionIndex>, Error> {
+        let Some(entry) = self
+            .tlv_entries
+            .iter()
+            .find(|e| e.field_num == TLV_REKEY_OF)
+        else {
+            return Ok(None);
+        };
+        let bytes: [u8; 4] = entry
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Malformed("rekey marker is not 4 bytes"))?;
+        Ok(Some(SessionIndex::from_le_bytes(bytes)))
     }
 
     /// Encode to wire format.

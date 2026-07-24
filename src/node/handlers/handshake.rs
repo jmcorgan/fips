@@ -19,8 +19,8 @@ use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, bu
 use crate::proto::fmp::{
     DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
     EstablishSnapshot, InboundDecision, InboundReject, NegotiationPayload, OutboundSnapshot,
-    PromotionResult, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot, WireOutcome,
-    cross_connection_winner, decide_fmp_negotiation,
+    PromotionResult, RekeyClaim, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot,
+    WireOutcome, cross_connection_winner, decide_fmp_negotiation,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use crate::utils::index::SessionIndex;
@@ -478,8 +478,9 @@ impl Node {
                 let msg3_now_ms = Self::now_ms();
 
                 let mut rekey_completed = false;
+                let our_profile = self.node_profile();
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                    match peer.complete_rekey_msg2(noise_msg2) {
+                    match peer.complete_rekey_msg2(noise_msg2, our_profile) {
                         Ok((msg3_bytes, session, remote_epoch, learned_peer)) => {
                             // Static-key continuity gate. The rekey msg2 was
                             // matched to this peer by the session index WE
@@ -1215,7 +1216,7 @@ impl Node {
         };
 
         let our_profile = self.node_profile();
-        let (peer_identity, our_index, remote_epoch) = {
+        let (peer_identity, our_index, remote_epoch, declared_rekey_of) = {
             // Get the pending connection
             let machine = match self.peer_machines.get_mut(&link_id) {
                 Some(m) => m,
@@ -1289,7 +1290,27 @@ impl Node {
             let our_index = machine.our_index();
             let remote_epoch = machine.conn_remote_epoch();
 
-            (peer_identity, our_index, remote_epoch)
+            // The sender's rekey declaration. Decoded again here rather than
+            // threaded out of `process_fmp_negotiation` so the msg2 path is
+            // untouched; the payload is a few bytes. A present-but-malformed
+            // marker is a hard failure: reading it as "not a rekey" would be
+            // exactly the silent fall-through this field exists to remove.
+            let declared_rekey_of = match &received_negotiation {
+                Some(bytes) => match NegotiationPayload::decode(bytes).and_then(|p| p.rekey_of()) {
+                    Ok(claim) => claim,
+                    Err(e) => {
+                        warn!(link_id = %link_id, error = %e, "Malformed rekey marker in msg3");
+                        self.remove_link(&link_id);
+                        self.remove_peer_machine(link_id);
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                        return;
+                    }
+                },
+                None => None,
+            };
+
+            (peer_identity, our_index, remote_epoch, declared_rekey_of)
         };
 
         let peer_node_addr = *peer_identity.node_addr();
@@ -1372,24 +1393,28 @@ impl Node {
         // running the actions through the executor and owning only the residual
         // shell bookkeeping (link/map removal, reject records, the duplicate-msg2
         // resend). The snapshot resolves the one clock read (session age) and the
-        // config-derived rekey floor up front.
+        // sender's rekey declaration up front.
         //
-        // The rekey age floor sits BELOW the minimum possible rekey interval, or
-        // jittered rekeys are wrongly rejected. It bounds both the
-        // cross-connection branch (`< floor` -> initial cross-connection) and the
-        // rekey-responder branch (`>= floor` -> rekey), so the two partition
-        // cleanly; see the pre-refactor commentary retained on the decision.
+        // The declaration replaces a session-age floor that used to partition
+        // "too young to be a rekey" from "old enough to be one". That floor was
+        // never sound: a message-count-triggered rekey fires on a young session,
+        // so a real rekey could land below it and be resolved as a
+        // cross-connection, leaving the two ends on different session indices.
         let our_node_addr = *self.identity().node_addr();
         let rekey_enabled = self.config().node.rekey.enabled;
-        let rekey_age_floor_secs = {
-            let min_interval = self
-                .config()
-                .node
-                .rekey
-                .after_secs
-                .saturating_sub(crate::node::REKEY_JITTER_SECS.unsigned_abs());
-            min_interval.saturating_sub(5).max(5)
+
+        // Resolve the sender's declaration against the session we hold. Matched
+        // ONLY against the peer this handshake authenticated as, never through a
+        // global index map — otherwise one peer could name another's index and
+        // steer a decision about that peer's session.
+        let rekey_claim = match declared_rekey_of {
+            None => RekeyClaim::None,
+            Some(declared) => match self.peers.get(&peer_node_addr).and_then(|p| p.our_index()) {
+                Some(ours) if ours == declared => RekeyClaim::Matches,
+                _ => RekeyClaim::Mismatch,
+            },
         };
+
         let wire = WireOutcome {
             peer_node_addr,
             remote_epoch,
@@ -1398,10 +1423,6 @@ impl Node {
             Some(existing_peer) => EstablishSnapshot {
                 has_existing_peer: true,
                 existing_peer_epoch: existing_peer.remote_epoch(),
-                existing_session_age_secs: existing_peer
-                    .session_established_at()
-                    .elapsed()
-                    .as_secs(),
                 has_session: existing_peer.has_session(),
                 is_healthy: existing_peer.is_healthy(),
                 pending_new_session: existing_peer.pending_new_session().is_some(),
@@ -1409,13 +1430,12 @@ impl Node {
                 existing_msg2: existing_peer.handshake_msg2().map(|m| m.to_vec()),
                 different_link: existing_peer.link_id() != link_id,
                 rekey_enabled,
-                rekey_age_floor_secs,
+                rekey_claim,
                 our_node_addr,
             },
             None => EstablishSnapshot {
                 has_existing_peer: false,
                 existing_peer_epoch: None,
-                existing_session_age_secs: 0,
                 has_session: false,
                 is_healthy: false,
                 pending_new_session: false,
@@ -1423,7 +1443,7 @@ impl Node {
                 existing_msg2: None,
                 different_link: false,
                 rekey_enabled,
-                rekey_age_floor_secs,
+                rekey_claim,
                 our_node_addr,
             },
         };

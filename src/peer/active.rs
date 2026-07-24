@@ -1289,6 +1289,7 @@ impl ActivePeer {
     pub fn complete_rekey_msg2(
         &mut self,
         msg2_bytes: &[u8],
+        our_profile: NodeProfile,
     ) -> Result<RekeyMsg2Completion, NoiseError> {
         let mut hs = self
             .rekey_handshake
@@ -1318,7 +1319,21 @@ impl ActivePeer {
             let _ = hs.decrypt_payload(encrypted_neg)?;
         }
 
-        let msg3 = hs.write_message_3()?;
+        // Declare this handshake a rekey of the session already installed, naming
+        // the index the RESPONDER receives on (our `their_index`) so it can match
+        // the marker against its own `our_index`. Without it the responder cannot
+        // tell a rekey from a fresh dial — both arrive as a new msg1 on a new
+        // link — and every attempt to infer that from local state has a failure
+        // band. The pre-rekey session is still installed at this point; the
+        // pending one is not set until the caller drives it.
+        let mut msg3 = hs.write_message_3()?;
+        if let Some(their_index) = self.their_index() {
+            let marker = NegotiationPayload::fmp(1, 1, our_profile)
+                .with_rekey_of(their_index)
+                .encode();
+            let encrypted = hs.encrypt_payload(&marker)?;
+            msg3.extend_from_slice(&encrypted);
+        }
         let session = hs.into_session()?;
 
         // Derive the learned identity from the session rather than the consumed

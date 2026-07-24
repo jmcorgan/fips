@@ -1582,10 +1582,34 @@ async fn drive_to_msg3(
     recv_phase(&mut responder.packet_rx, 3, "msg3").await
 }
 
+/// Drive a **real** rekey: the initiator's own `check_rekey` builds the rekey
+/// msg1, and the msg3 that returns carries the rekey marker.
+///
+/// A bare second handshake will not substitute. It declares no rekey — because
+/// it is not one — so the responder reads it as a fresh dial. Reaching the rekey
+/// arm by backdating a session and re-handshaking tested the age proxy that the
+/// marker replaces, not the rekey path.
+///
+/// Both ends' sessions must be aged past the trigger before calling this. Age
+/// them well past it: the trigger is `after_secs + jitter` with jitter drawn from
+/// [-15, +15], so a margin under 15s makes firing depend on the draw and the test
+/// flaky.
+async fn drive_rekey_to_msg3(initiator: &mut HsNode, responder: &mut HsNode) -> ReceivedPacket {
+    initiator.node.check_rekey().await;
+
+    let msg1_pkt = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
+    responder.node.handle_msg1(msg1_pkt).await;
+
+    let msg2_pkt = recv_phase(&mut initiator.packet_rx, 2, "rekey msg2").await;
+    initiator.node.handle_msg2(msg2_pkt).await;
+
+    recv_phase(&mut responder.packet_rx, 3, "rekey msg3").await
+}
+
 #[tokio::test]
 async fn test_msg3_dual_rekey_won_frees_index() {
-    // Rekey enabled with a tiny interval so the rekey age floor collapses to
-    // its 5s minimum; the peer session is then backdated past it.
+    // Both ends carry the rekey config: the initiator to fire its own trigger,
+    // the responder for the `rekey_enabled` gate in the classifier.
     let make_config = || {
         let mut c = Config::new();
         c.node.rekey.enabled = true;
@@ -1593,7 +1617,7 @@ async fn test_msg3_dual_rekey_won_frees_index() {
         c
     };
 
-    let mut initiator = make_hs_node(Config::new()).await;
+    let mut initiator = make_hs_node(make_config()).await;
     // The DualRekeyWon tie-break is won by the numerically smaller node addr,
     // so the responder (whose handle_msg3 we exercise) must be the smaller.
     let mut responder = loop {
@@ -1611,19 +1635,28 @@ async fn test_msg3_dual_rekey_won_frees_index() {
     let baseline = responder.node.index_allocator.count();
     assert_eq!(baseline, 1, "responder holds exactly the peer's index");
 
-    // Age the session past the rekey floor and mark a rekey in progress so a
-    // fresh inbound msg3 classifies as the dual-init rekey we win.
+    // Mark a rekey of our own in progress so the peer's declared rekey meets it
+    // as a dual initiation, which the smaller node addr wins. Age both ends so
+    // the initiator's own trigger fires and produces a real, marked rekey msg3 —
+    // a bare handshake declares no rekey and would never reach this arm.
     let peer_addr =
         *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+    initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
     {
         let peer = responder.node.get_peer_mut(&peer_addr).unwrap();
-        peer.test_backdate_session_established(std::time::Duration::from_secs(6));
+        peer.test_backdate_session_established(std::time::Duration::from_secs(120));
         peer.set_rekey_in_progress();
     }
 
-    // Second handshake: the new inbound msg1 allocates a fresh index, then the
-    // msg3 lands on the DualRekeyWon reject arm.
-    let msg3b = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
+    // The rekey's msg1 allocates a fresh index on the responder, then its msg3
+    // lands on the DualRekeyWon reject arm.
+    let msg3b = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
     assert_eq!(
         responder.node.index_allocator.count(),
         baseline + 1,
@@ -1686,7 +1719,7 @@ async fn test_msg3_resend_msg2_frees_index() {
         .node
         .get_peer_mut(&peer_addr)
         .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(6));
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
 
     // Second (duplicate) handshake: fresh index allocated at msg1, then freed
     // on the ResendMsg2 arm.
@@ -1842,14 +1875,17 @@ async fn test_msg3_crypto_fail_disposes_leg_machine() {
 
 #[tokio::test]
 async fn test_msg3_rekey_respond_disposes_leg_machine() {
-    // Rekey enabled with a tiny interval so the rekey age floor collapses to
-    // its 5s minimum; with the session backdated past it and NO rekey of our
-    // own in flight, a fresh inbound msg3 classifies as rekey-responder.
+    // A REAL rekey, driven from the initiator's own trigger so its msg3 carries
+    // the rekey marker. Both ends need the rekey config: the initiator to fire
+    // the trigger, the responder for the `rekey_enabled` gate in the classifier.
+    let mut init_config = Config::new();
+    init_config.node.rekey.enabled = true;
+    init_config.node.rekey.after_secs = 1;
     let mut config = Config::new();
     config.node.rekey.enabled = true;
     config.node.rekey.after_secs = 1;
 
-    let mut initiator = make_hs_node(Config::new()).await;
+    let mut initiator = make_hs_node(init_config).await;
     let mut responder = make_hs_node(config).await;
 
     // First handshake establishes the active peer (and its machine).
@@ -1859,16 +1895,23 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
 
     let peer_addr =
         *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    responder
-        .node
-        .get_peer_mut(&peer_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(6));
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+    // Age BOTH ends: the initiator so its rekey trigger fires, the responder so
+    // its own state matches what the rekey replaces.
+    for (node, addr) in [
+        (&mut initiator.node, responder_addr),
+        (&mut responder.node, peer_addr),
+    ] {
+        node.get_peer_mut(&addr)
+            .unwrap()
+            .test_backdate_session_established(std::time::Duration::from_secs(120));
+    }
 
-    // Second handshake lands on the rekey-responder arm: the pending session
+    // The rekey's msg3 lands on the rekey-responder arm: the pending session
     // moves onto the established peer; the window leg and its msg1-born
     // machine are consumed.
-    let msg3b = drive_to_msg3(&mut initiator, &mut responder, 2000).await;
+    let msg3b = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
     responder.node.handle_msg3(msg3b).await;
 
     let peer = responder.node.get_peer(&peer_addr).unwrap();

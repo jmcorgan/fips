@@ -231,10 +231,6 @@ pub(crate) struct EstablishSnapshot {
     pub has_existing_peer: bool,
     /// The existing active peer's captured remote startup epoch, if any.
     pub existing_peer_epoch: Option<[u8; 8]>,
-    /// Monotonic age in seconds of the existing peer's session
-    /// (`session_established_at().elapsed()`), resolved shell-side. `0` when
-    /// there is no existing peer.
-    pub existing_session_age_secs: u64,
     /// The existing peer has an established Noise session.
     pub has_session: bool,
     /// The existing peer's session is healthy.
@@ -255,17 +251,33 @@ pub(crate) struct EstablishSnapshot {
     /// cross-connection branch: a `msg3` on the same link is never a
     /// cross-connection.
     pub different_link: bool,
-    /// The local rekey trigger is enabled in config (gates treating an aged
-    /// same-epoch `msg3` as a rekey rather than a duplicate).
+    /// The local rekey trigger is enabled in config (gates treating a declared
+    /// rekey as a rekey rather than a duplicate).
     pub rekey_enabled: bool,
-    /// The config-derived minimum session age (seconds) that partitions an aged
-    /// rekey from a fresh cross-connection: `< floor` → initial
-    /// cross-connection, `>= floor` → rekey responder. Derived shell-side from
-    /// `rekey.after_secs` and the rekey jitter so it tracks the real minimum
-    /// rekey spacing.
-    pub rekey_age_floor_secs: u64,
+    /// What the sender's `msg3` declares about replacing an existing session,
+    /// resolved shell-side against the peer at `wire.peer_node_addr`.
+    pub rekey_claim: RekeyClaim,
     /// This node's own address, for both tie-breaks (the smaller NodeAddr wins).
     pub our_node_addr: NodeAddr,
+}
+
+/// What an inbound `msg3` declares about replacing a session we already hold.
+///
+/// The sender knows whether it is rekeying; the responder cannot infer it, since
+/// a rekey and a fresh dial both arrive as a new `msg1` on a new link. The msg3
+/// negotiation TLV carries the sender's answer and the shell resolves it into
+/// this three-valued input — resolved shell-side because matching the declared
+/// index against the session we hold is a registry read, and because it must be
+/// matched only against the peer the handshake authenticated as, never resolved
+/// through a global index map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RekeyClaim {
+    /// No marker: the sender says this handshake is not a rekey.
+    None,
+    /// The marker names the session we hold for this peer.
+    Matches,
+    /// The marker names a session that is not the one we hold.
+    Mismatch,
 }
 
 /// A snapshot of the registry state the *outbound* establish decision reads
@@ -731,11 +743,41 @@ impl Fmp {
             _ => {
                 // Same epoch (or no epoch captured on either side).
 
-                // Inline cross-connection (msg2-then-msg3 ordering): a
-                // still-fresh session receiving a concurrent msg3 on a different
-                // link. The upper age bound sits below the rekey floor so any
-                // rekey-aged msg3 falls through to the rekey responder path.
-                if snap.different_link && snap.existing_session_age_secs < snap.rekey_age_floor_secs
+                // A rekey and a fresh dial both arrive as a new msg1 on a new
+                // link, so the sender declares which it is: the msg3 negotiation
+                // TLV names the session it replaces and the shell resolves that
+                // against the session we hold. Session age used to stand in for
+                // this and could not — a message-count-triggered rekey fires on a
+                // young session and was misread as a cross-connection, which is
+                // the defect this replaces.
+                if snap.rekey_claim == RekeyClaim::Mismatch {
+                    // The sender is replacing a session that is not the one we
+                    // hold. Resend rather than reject: the initiator installed its
+                    // pending session at msg2 completion and will cut over on its
+                    // own timer, and the reject path sends nothing back, so
+                    // tearing down here strands the link in exactly the way this
+                    // defect does. Resending leaves both current sessions intact
+                    // and lets the initiator's resend/abandon machinery converge.
+                    return InboundDecision::ResendMsg2 {
+                        msg2: snap.existing_msg2.clone(),
+                    };
+                }
+
+                // The sender declares no rekey, so a msg3 on a different link is
+                // a fresh dial crossing ours.
+                //
+                // A rekey of ours in flight suppresses the swap. `replace_session`
+                // rewrites the session and both indices and touches nothing else,
+                // so swapping while a pending rekey exists leaves that rekey and
+                // its K-bit state pointing at a session the counterpart no longer
+                // holds. The age floor excluded this case incidentally; the marker
+                // does not, so it is stated.
+                if snap.rekey_claim == RekeyClaim::None
+                    && snap.different_link
+                    && snap.has_session
+                    && snap.is_healthy
+                    && !snap.rekey_in_progress
+                    && !snap.pending_new_session
                 {
                     // `cross_connection_winner(our, peer, this_is_outbound=false)`:
                     // the smaller node prefers its outbound, so our *inbound*
@@ -748,11 +790,11 @@ impl Fmp {
                     };
                 }
 
-                // Rekey responder gate: aged, healthy session with rekey enabled.
-                if snap.rekey_enabled
+                // Rekey responder gate: the sender named the session we hold.
+                if snap.rekey_claim == RekeyClaim::Matches
+                    && snap.rekey_enabled
                     && snap.has_session
                     && snap.is_healthy
-                    && snap.existing_session_age_secs >= snap.rekey_age_floor_secs
                 {
                     // Widened dual-init tie-break: both the still-in-progress and
                     // the already-pending states resolve by the smaller NodeAddr.

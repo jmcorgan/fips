@@ -7,7 +7,7 @@ use super::util::{
 use crate::proto::fmp::{
     ConnAction, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot, Fmp, InboundDecision,
     InboundReject, NegotiationPayload, NodeProfile, OutboundDecision, OutboundSnapshot, RekeyCfg,
-    RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot, cross_connection_winner,
+    RekeyClaim, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot, cross_connection_winner,
 };
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
@@ -352,7 +352,7 @@ fn establish_cross_connection_larger_node_inbound_wins() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x09); // our addr 0x09
     snap.different_link = true;
-    snap.existing_session_age_secs = 0; // < floor
+    snap.rekey_claim = RekeyClaim::None; // sender declares no rekey
     let wire = wire_outcome(0x02, SAME_EPOCH); // peer 0x02 < our 0x09
     match fmp.establish_inbound(&snap, &wire) {
         InboundDecision::CrossConnect {
@@ -373,7 +373,7 @@ fn establish_cross_connection_smaller_node_inbound_loses() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x02); // our addr 0x02
     snap.different_link = true;
-    snap.existing_session_age_secs = 0;
+    snap.rekey_claim = RekeyClaim::None;
     let wire = wire_outcome(0x09, SAME_EPOCH); // peer 0x09 > our 0x02
     match fmp.establish_inbound(&snap, &wire) {
         InboundDecision::CrossConnect {
@@ -390,7 +390,7 @@ fn establish_same_link_fresh_is_duplicate() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x05);
     snap.different_link = false;
-    snap.existing_session_age_secs = 0;
+    snap.rekey_claim = RekeyClaim::None;
     snap.existing_msg2 = Some(vec![0xaa, 0xbb]);
     let wire = wire_outcome(0x02, SAME_EPOCH);
     match fmp.establish_inbound(&snap, &wire) {
@@ -406,7 +406,7 @@ fn establish_aged_rekey_disabled_is_duplicate() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x05);
     snap.rekey_enabled = false;
-    snap.existing_session_age_secs = 300; // >= floor, but rekey disabled
+    snap.rekey_claim = RekeyClaim::Matches; // declared, but rekey disabled
     let wire = wire_outcome(0x02, SAME_EPOCH);
     assert!(matches!(
         fmp.establish_inbound(&snap, &wire),
@@ -420,7 +420,7 @@ fn establish_aged_rekey_disabled_is_duplicate() {
 fn establish_aged_rekey_responds_without_abandon() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x05);
-    snap.existing_session_age_secs = 300; // >= floor
+    snap.rekey_claim = RekeyClaim::Matches;
     let wire = wire_outcome(0x02, SAME_EPOCH);
     match fmp.establish_inbound(&snap, &wire) {
         InboundDecision::RekeyRespond {
@@ -440,7 +440,7 @@ fn establish_aged_rekey_responds_without_abandon() {
 fn establish_dual_init_in_progress_smaller_wins() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x02); // our addr 0x02 (smaller)
-    snap.existing_session_age_secs = 300;
+    snap.rekey_claim = RekeyClaim::Matches;
     snap.rekey_in_progress = true;
     let wire = wire_outcome(0x09, SAME_EPOCH); // peer 0x09
     assert!(matches!(
@@ -457,7 +457,7 @@ fn establish_dual_init_in_progress_smaller_wins() {
 fn establish_dual_init_in_progress_larger_loses() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x09); // our addr 0x09 (larger)
-    snap.existing_session_age_secs = 300;
+    snap.rekey_claim = RekeyClaim::Matches;
     snap.rekey_in_progress = true;
     let wire = wire_outcome(0x02, SAME_EPOCH); // peer 0x02
     match fmp.establish_inbound(&snap, &wire) {
@@ -473,7 +473,7 @@ fn establish_dual_init_in_progress_larger_loses() {
 fn establish_dual_init_pending_state_larger_loses() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x09); // our addr 0x09 (larger)
-    snap.existing_session_age_secs = 300;
+    snap.rekey_claim = RekeyClaim::Matches;
     snap.rekey_in_progress = false;
     snap.pending_new_session = true; // the widened window
     let wire = wire_outcome(0x02, SAME_EPOCH);
@@ -489,7 +489,7 @@ fn establish_dual_init_pending_state_larger_loses() {
 fn establish_dual_init_pending_state_smaller_wins() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x02); // our addr 0x02 (smaller)
-    snap.existing_session_age_secs = 300;
+    snap.rekey_claim = RekeyClaim::Matches;
     snap.pending_new_session = true;
     let wire = wire_outcome(0x09, SAME_EPOCH);
     assert!(matches!(
@@ -500,30 +500,75 @@ fn establish_dual_init_pending_state_smaller_wins() {
     ));
 }
 
-/// The rekey floor partitions cross-connection from rekey exactly at the
-/// boundary: one second below is a cross-connection, at the floor is a rekey.
+/// The sender's declaration partitions cross-connection from rekey, and it does
+/// so independently of session age. This is the property the age floor could not
+/// provide: a message-count-triggered rekey fires on a young session, so an
+/// age-based partition classified a real rekey as a cross-connection and left the
+/// two ends on different session indices.
 #[test]
-fn establish_rekey_floor_partitions_cross_connection_and_rekey() {
+fn establish_declaration_partitions_cross_connection_and_rekey() {
     let fmp = Fmp::new();
     let wire = wire_outcome(0x02, SAME_EPOCH);
 
-    let mut below = establish_snapshot(0x09);
-    below.different_link = true;
-    below.rekey_age_floor_secs = 100;
-    below.existing_session_age_secs = 99;
+    let mut undeclared = establish_snapshot(0x09);
+    undeclared.different_link = true;
+    undeclared.rekey_claim = RekeyClaim::None;
     assert!(matches!(
-        fmp.establish_inbound(&below, &wire),
+        fmp.establish_inbound(&undeclared, &wire),
         InboundDecision::CrossConnect { .. }
     ));
 
-    let mut at = establish_snapshot(0x09);
-    at.different_link = true;
-    at.rekey_age_floor_secs = 100;
-    at.existing_session_age_secs = 100;
+    let mut declared = establish_snapshot(0x09);
+    declared.different_link = true;
+    declared.rekey_claim = RekeyClaim::Matches;
     assert!(matches!(
-        fmp.establish_inbound(&at, &wire),
+        fmp.establish_inbound(&declared, &wire),
         InboundDecision::RekeyRespond { .. }
     ));
+}
+
+/// A marker naming a session we do not hold resends msg2 rather than rejecting.
+/// The initiator has already installed its pending session and will cut over on
+/// its own timer; the reject path sends nothing back, so tearing down here would
+/// strand the link in exactly the way this defect does.
+#[test]
+fn establish_mismatched_marker_resends_rather_than_rejecting() {
+    let fmp = Fmp::new();
+    let wire = wire_outcome(0x02, SAME_EPOCH);
+
+    let mut snap = establish_snapshot(0x09);
+    snap.different_link = true;
+    snap.rekey_claim = RekeyClaim::Mismatch;
+    assert!(matches!(
+        fmp.establish_inbound(&snap, &wire),
+        InboundDecision::ResendMsg2 { .. }
+    ));
+}
+
+/// A fresh dial arriving while our own rekey is in flight must not swap. The
+/// swap rewrites the session and both indices and touches nothing else, so it
+/// would leave the pending rekey and its K-bit state pointing at a session the
+/// counterpart no longer holds. The age floor excluded this case incidentally;
+/// the declaration does not, so the guard is explicit.
+#[test]
+fn establish_undeclared_during_our_rekey_does_not_swap() {
+    let fmp = Fmp::new();
+    let wire = wire_outcome(0x02, SAME_EPOCH);
+
+    for (in_progress, pending) in [(true, false), (false, true)] {
+        let mut snap = establish_snapshot(0x09);
+        snap.different_link = true;
+        snap.rekey_claim = RekeyClaim::None;
+        snap.rekey_in_progress = in_progress;
+        snap.pending_new_session = pending;
+        assert!(
+            matches!(
+                fmp.establish_inbound(&snap, &wire),
+                InboundDecision::ResendMsg2 { .. }
+            ),
+            "in_progress={in_progress} pending={pending}"
+        );
+    }
 }
 
 /// An unhealthy or session-less aged peer is not a rekey candidate -> duplicate.
@@ -531,7 +576,7 @@ fn establish_rekey_floor_partitions_cross_connection_and_rekey() {
 fn establish_aged_unhealthy_is_duplicate() {
     let fmp = Fmp::new();
     let mut snap = establish_snapshot(0x05);
-    snap.existing_session_age_secs = 300;
+    snap.rekey_claim = RekeyClaim::Matches;
     snap.is_healthy = false;
     let wire = wire_outcome(0x02, SAME_EPOCH);
     assert!(matches!(

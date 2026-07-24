@@ -2230,7 +2230,7 @@ fn disconnect_frame(reason: CloseReason) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::fmp::PromotionResult;
+    use crate::proto::fmp::{PromotionResult, RekeyClaim};
     use crate::{Identity, PeerIdentity};
 
     fn peer_identity() -> PeerIdentity {
@@ -2265,7 +2265,6 @@ mod tests {
         EstablishSnapshot {
             has_existing_peer: false,
             existing_peer_epoch: None,
-            existing_session_age_secs: 0,
             has_session: false,
             is_healthy: false,
             pending_new_session: false,
@@ -2273,7 +2272,7 @@ mod tests {
             existing_msg2: None,
             different_link: false,
             rekey_enabled: true,
-            rekey_age_floor_secs: 60,
+            rekey_claim: RekeyClaim::None,
             our_node_addr: our,
         }
     }
@@ -2700,7 +2699,7 @@ mod tests {
             est.existing_peer_epoch = Some([1u8; 8]);
             est.has_session = true;
             est.is_healthy = true;
-            est.existing_session_age_secs = 120; // >= floor -> rekey path
+            est.rekey_claim = RekeyClaim::Matches; // declared rekey of our session
             est.rekey_in_progress = true;
             let wire = wire_outcome(peer_addr, Some([1u8; 8]));
 
@@ -2747,7 +2746,7 @@ mod tests {
             est.existing_peer_epoch = Some([1u8; 8]);
             est.has_session = true;
             est.is_healthy = true;
-            est.existing_session_age_secs = 120;
+            est.rekey_claim = RekeyClaim::Matches;
             est.rekey_in_progress = true;
             let wire = wire_outcome(peer_addr, Some([1u8; 8]));
 
@@ -3069,7 +3068,7 @@ mod tests {
         est.has_session = true;
         est.is_healthy = true;
         est.different_link = true;
-        est.existing_session_age_secs = 10; // < floor(60) -> cross-connection
+        est.rekey_claim = RekeyClaim::None; // no rekey declared -> cross-connection
         let wire = wire_outcome(peer_addr, Some([5u8; 8]));
 
         let actions = m.step(
@@ -3116,7 +3115,7 @@ mod tests {
         est.has_session = true;
         est.is_healthy = true;
         est.different_link = true;
-        est.existing_session_age_secs = 10; // < floor(60) -> cross-connection
+        est.rekey_claim = RekeyClaim::None; // no rekey declared -> cross-connection
         let wire = wire_outcome(peer_addr, Some([5u8; 8]));
 
         let actions = m.step(
@@ -3161,7 +3160,7 @@ mod tests {
         est.existing_peer_epoch = Some([7u8; 8]);
         est.has_session = true;
         est.is_healthy = true;
-        est.existing_session_age_secs = 120; // >= floor -> rekey path
+        est.rekey_claim = RekeyClaim::Matches; // declared rekey of our session
         let wire = wire_outcome(peer_addr, Some([7u8; 8]));
 
         let actions = m.step(

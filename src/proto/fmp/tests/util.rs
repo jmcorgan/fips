@@ -1,7 +1,7 @@
 //! Shared test helpers for the FMP connection-lifecycle unit tests.
 
 use crate::proto::fmp::{
-    ConnSnapshot, EstablishSnapshot, PeerSnapshot, RekeyResendSnapshot, WireOutcome,
+    ConnSnapshot, EstablishSnapshot, PeerSnapshot, RekeyClaim, RekeyResendSnapshot, WireOutcome,
 };
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
@@ -72,14 +72,14 @@ pub(super) fn resend_snapshot(link: LinkId, resend_count: u32, msg1: Vec<u8>) ->
 
 /// Build an `EstablishSnapshot` describing an existing, healthy, same-epoch peer
 /// with a rekey-enabled config and a rekey age floor of 100s, owned by node
-/// `our_byte`. The default is a quiescent, still-fresh session (age 0, same
-/// link, no in-flight rekey / pending). Tests override only the fields their
-/// branch exercises. `existing_peer_epoch` defaults to `[0x01; 8]`.
+/// `our_byte`. The default is a quiescent session on the same link with no
+/// in-flight rekey / pending and no rekey declared by the sender. Tests override
+/// only the fields their branch exercises. `existing_peer_epoch` defaults to
+/// `[0x01; 8]`.
 pub(super) fn establish_snapshot(our_byte: u8) -> EstablishSnapshot {
     EstablishSnapshot {
         has_existing_peer: true,
         existing_peer_epoch: Some([0x01; 8]),
-        existing_session_age_secs: 0,
         has_session: true,
         is_healthy: true,
         pending_new_session: false,
@@ -87,7 +87,7 @@ pub(super) fn establish_snapshot(our_byte: u8) -> EstablishSnapshot {
         existing_msg2: None,
         different_link: false,
         rekey_enabled: true,
-        rekey_age_floor_secs: 100,
+        rekey_claim: RekeyClaim::None,
         our_node_addr: make_node_addr(our_byte),
     }
 }
