@@ -774,6 +774,47 @@ pub(super) async fn run_tree_test(
     nodes
 }
 
+/// Like `run_tree_test` but with a per-node `NodeProfile`.
+///
+/// `profiles` must have one entry per node. Builds each node with the
+/// matching profile (Full / NonRouting / Leaf) over loopback, wires the
+/// edges, drains to convergence and asserts every edge established a
+/// bidirectional peer. Used by mixed-profile lifecycle tests where the
+/// node roles, not the topology shape, are the subject.
+pub(super) async fn run_tree_test_with_profiles(
+    profiles: &[crate::proto::fmp::NodeProfile],
+    edges: &[(usize, usize)],
+    verbose: bool,
+) -> Vec<TestNode> {
+    let mut nodes = Vec::with_capacity(profiles.len());
+    for &profile in profiles {
+        nodes.push(make_test_node_with_profile(profile).await);
+    }
+
+    for &(i, j) in edges {
+        initiate_handshake(&mut nodes, i, j).await;
+    }
+
+    let total = drain_all_packets(&mut nodes, verbose).await;
+    assert!(total > 0, "Should have processed at least some packets");
+    repair_missing_edge_handshakes(&mut nodes, edges, verbose).await;
+
+    for &(i, j) in edges {
+        let j_addr = *nodes[j].node.node_addr();
+        let i_addr = *nodes[i].node.node_addr();
+        assert!(
+            nodes[i].node.get_peer(&j_addr).is_some(),
+            "Node {i} should have peer {j_addr} (node {j})"
+        );
+        assert!(
+            nodes[j].node.get_peer(&i_addr).is_some(),
+            "Node {j} should have peer {i_addr} (node {i})"
+        );
+    }
+
+    nodes
+}
+
 /// Like `run_tree_test` but with per-node transport MTUs.
 ///
 /// `mtus` must have one entry per node. Used for heterogeneous-MTU tests
