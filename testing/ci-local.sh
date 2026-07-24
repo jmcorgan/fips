@@ -28,9 +28,9 @@
 # Integration suites (default coverage):
 #   static-mesh, static-chain, rekey, rekey-accept-off,
 #   rekey-outbound-only, mixed-profile, gateway,
-#   acl-allowlist, admission-cap, firewall, nat-cone, nat-symmetric,
+#   firewall, nat-cone, nat-symmetric,
 #   nat-lan, nostr-publish-consume, stun-faults,
-#   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
+#   chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-congestion-stress,
 #   chaos-bloom-storm,
 #   sidecar, dns-resolver, deb-install
@@ -54,6 +54,26 @@
 #                    because it asserts nothing. Making it gateable needs a
 #                    calibration corpus that does not exist; see its header.
 #   mesh-lab/        Long-running multi-host lab, not a suite.
+#   acl-allowlist/   Retired from CI 2026-07-24 as redundant, not unrunnable.
+#                    The ACL decision is exhaustively unit-tested per npub over
+#                    real loaded allow/deny files (src/node/acl.rs mod tests:
+#                    allow-wins, allowlist-miss, deny-only, deny-all,
+#                    allow_all-override), and the inbound/outbound handshake-
+#                    admission path is covered in-process over loopback
+#                    (src/node/tests/acl.rs). The Docker suite's only unique
+#                    coverage was real-UDP admission, exercised by every other
+#                    real-transport suite. Still runnable by hand:
+#                    bash testing/acl-allowlist/test.sh
+#   admission-cap    Retired from CI 2026-07-24 as redundant, not unrunnable.
+#                    The inbound max_peers cap on the XX FMP handshake is
+#                    enforced at msg3 and unit-tested by
+#                    handle_msg3_silent_drops_at_cap_for_new_peer in
+#                    src/node/tests/unit.rs: it pumps an over-cap handshake
+#                    from a fresh identity into a saturated node and asserts
+#                    the path-agnostic invariant — no promotion over cap, peer
+#                    count unchanged — plus handle_msg3_admits_existing_peer_at_cap
+#                    for the known-peer bypass. Still runnable by hand:
+#                    bash testing/static/scripts/admission-cap-test.sh
 #   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse
 #                    Chaos scenarios excluded from CHAOS_SUITES. The two
 #                    ecn-ab ones are halves of the manual comparison above.
@@ -115,10 +135,8 @@ ONLY_SUITE=""
 STATIC_SUITES=(static-mesh static-chain)
 REKEY_SUITES=(rekey rekey-accept-off rekey-outbound-only)
 MIXED_PROFILE_SUITES=(mixed-profile)
-ADMISSION_SUITES=(admission-cap)
 # Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
-    "smoke-10 smoke-10"
     "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
     "ethernet-mesh ethernet-mesh"
     "ethernet-only ethernet-only"
@@ -137,9 +155,17 @@ CHAOS_SUITES=(
 #     container-speed traffic, so SO_RXQ_OVFL could not be provoked.
 # congestion-stress stays: it exercises the ECN/MMP congestion signals,
 # which do need the real shaped bottleneck queue.
-SIDECAR_SUITES=(sidecar)
+#
+# Retired 2026-07-24 for a different reason — redundant, not unreliable:
+#   - smoke-10: a no-stressor 10-node tree-convergence sanity check (netem
+#     off, no ping). The convergence logic it exercised is covered in-process,
+#     faster and deterministically, by the loopback spanning-tree harness
+#     (src/node/tests/spanning_tree.rs: ring/star/chain/100-node/disconnected)
+#     plus end-to-end datagram delivery (src/node/tests/forwarding.rs). Real-
+#     UDP convergence smoke still runs via static-mesh and the other chaos
+#     scenarios' baseline assertions, so no Docker coverage is lost.
 GATEWAY_SUITES=(gateway)
-ACL_SUITES=(acl-allowlist)
+SIDECAR_SUITES=(sidecar)
 FIREWALL_SUITES=(firewall)
 NAT_SUITES=(cone symmetric lan)
 NOSTR_RELAY_SUITES=(nostr-publish-consume)
@@ -178,14 +204,8 @@ list_suites() {
     echo "  Mixed profile:"
     for s in "${MIXED_PROFILE_SUITES[@]}"; do echo "    $s"; done
     echo ""
-    echo "  Admission cap:"
-    for s in "${ADMISSION_SUITES[@]}"; do echo "    $s"; done
-    echo ""
     echo "  Gateway:"
     for s in "${GATEWAY_SUITES[@]}"; do echo "    $s"; done
-    echo ""
-    echo "  ACL allowlist:"
-    for s in "${ACL_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Firewall baseline:"
     for s in "${FIREWALL_SUITES[@]}"; do echo "    $s"; done
@@ -582,35 +602,6 @@ run_mixed_profile() {
     record "mixed-profile" $rc
 }
 
-# Run the admission-cap integration test
-# Verifies the inbound max_peers early-gate silent-drops at scale by
-# lowering node.max_peers on one mesh node and asserting via tcpdump
-# that no Msg2 responses go to the sustained-retrying denied peers.
-run_admission_cap() {
-    local compose="testing/static/docker-compose.yml"
-    local rc=0
-    export COMPOSE_PROJECT_NAME="$(ci_project static)"
-
-    info "[admission-cap] Generating configs"
-    bash testing/static/scripts/generate-configs.sh mesh || { record "admission-cap" 1; return; }
-    bash testing/static/scripts/admission-cap-test.sh inject-config || { record "admission-cap" 1; return; }
-
-    info "[admission-cap] Starting containers (mesh profile)"
-    docker compose -f "$compose" --profile mesh up -d || { record "admission-cap" 1; return; }
-
-    info "[admission-cap] Running admission-cap test"
-    if bash testing/static/scripts/admission-cap-test.sh; then
-        rc=0
-    else
-        rc=1
-        info "[admission-cap] Collecting failure logs"
-        docker compose -f "$compose" --profile mesh logs --no-color 2>&1 | tail -100
-    fi
-
-    docker compose -f "$compose" --profile mesh down --volumes --remove-orphans 2>/dev/null
-    record "admission-cap" $rc
-}
-
 # Run a chaos scenario
 run_chaos() {
     local name="$1"
@@ -805,17 +796,6 @@ run_rekey_outbound_only() {
     record "rekey-outbound-only" $rc
 }
 
-# Run ACL allowlist integration test
-run_acl_allowlist() {
-    export COMPOSE_PROJECT_NAME="$(ci_project acl)"
-    info "[acl-allowlist] Running integration test"
-    if bash testing/acl-allowlist/test.sh --skip-build 2>&1; then
-        record "acl-allowlist" 0
-    else
-        record "acl-allowlist" 1
-    fi
-}
-
 # Run firewall baseline integration test
 run_firewall() {
     export COMPOSE_PROJECT_NAME="$(ci_project firewall)"
@@ -955,16 +935,8 @@ run_integration() {
         run_mixed_profile
     done
 
-    # Admission cap (mesh profile, max_peers=1 on one node)
-    for _suite in "${ADMISSION_SUITES[@]}"; do
-        run_admission_cap
-    done
-
     # Gateway
     run_gateway
-
-    # ACL allowlist
-    run_acl_allowlist
 
     # Firewall baseline
     run_firewall
@@ -1078,12 +1050,8 @@ run_suite() {
             run_rekey_outbound_only ;;
         mixed-profile)
             run_mixed_profile ;;
-        admission-cap)
-            run_admission_cap ;;
         gateway)
             run_gateway ;;
-        acl-allowlist)
-            run_acl_allowlist ;;
         firewall)
             run_firewall ;;
         nat-cone|nat-symmetric|nat-lan)

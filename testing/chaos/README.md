@@ -18,7 +18,7 @@ Ethernet). Logs are collected and analyzed automatically.
 
 ```bash
 ./testing/chaos/scripts/build.sh
-./testing/chaos/scripts/chaos.sh smoke-10
+./testing/chaos/scripts/chaos.sh churn-mixed
 ```
 
 ## Available Scenarios
@@ -29,12 +29,10 @@ Random topologies with increasing stressor intensity.
 
 | Scenario | Nodes | Topology         | Duration | Netem | Link Flaps | Traffic | Node Churn | Bandwidth |
 | -------- | ----- | ---------------- | -------- | ----- | ---------- | ------- | ---------- | --------- |
-| smoke-10 | 10    | random_geometric | 60s      | --    | --         | --      | --         | --        |
 | chaos-10 | 10    | random_geometric | 120s     | yes   | yes        | yes     | --         | --        |
 | churn-10 | 10    | random_geometric | 600s     | yes   | yes        | yes     | yes        | --        |
 | churn-20 | 20    | erdos_renyi      | 600s     | yes   | yes        | yes     | yes        | yes       |
 
-- **smoke-10**: Baseline sanity check. No stressors, just verify tree convergence.
 - **chaos-10**: Network degradation (5-50ms delay, 0-2% loss), link flaps (max 2
   down, 10-30s), and iperf traffic (max 3 concurrent). Netem mutates 30% of
   links every 15-30s between normal and degraded policies.

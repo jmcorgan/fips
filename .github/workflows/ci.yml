@@ -424,12 +424,6 @@ jobs:
           - suite: rekey-outbound-only
             type: rekey-outbound-only
             topology: rekey-outbound-only
-          # ── Inbound max_peers admission-cap test ───────────────────────
-          - suite: admission-cap
-            type: admission-cap
-            topology: mesh
-          - suite: acl-allowlist
-            type: acl-allowlist
           # ── Mixed-profile node-role integration test ─────────────────
           - suite: mixed-profile
             type: mixed-profile
@@ -441,9 +435,6 @@ jobs:
             type: gateway
             topology: gateway
           # ── Chaos / stochastic scenarios ───────────────────────────────────
-          - suite: chaos-smoke-10
-            type: chaos
-            scenario: smoke-10
           - suite: churn-mixed-10
             type: chaos
             scenario: churn-mixed
@@ -703,21 +694,6 @@ jobs:
           docker compose -f testing/static/docker-compose.yml \
             --profile mixed-profile down --volumes --remove-orphans
 
-      # ── ACL allowlist integration test ─────────────────────────────────────
-      - name: Run ACL allowlist integration test
-        if: matrix.type == 'acl-allowlist'
-        run: bash testing/acl-allowlist/test.sh --skip-build --keep-up
-
-      - name: Collect logs on failure (acl-allowlist)
-        if: matrix.type == 'acl-allowlist' && failure()
-        run: |
-          docker compose -f testing/acl-allowlist/docker-compose.yml logs --no-color
-
-      - name: Stop containers (acl-allowlist)
-        if: matrix.type == 'acl-allowlist' && always()
-        run: |
-          docker compose -f testing/acl-allowlist/docker-compose.yml down --volumes --remove-orphans
-
       # ── Firewall baseline integration test ─────────────────────────────────
       - name: Run firewall baseline integration test
         if: matrix.type == 'firewall'
@@ -847,42 +823,6 @@ jobs:
         run: |
           docker compose -f testing/static/docker-compose.yml \
             --profile gateway down --volumes --remove-orphans
-
-      # ── Inbound max_peers admission-cap integration test ────────────────
-      # Lowers node.max_peers on one mesh node and asserts the inbound cap
-      # holds under sustained retry pressure: denied peers keep retrying but
-      # are never promoted to an active session. The admission-cap-test.sh
-      # assertions are tailored per link-layer handshake variant; the leg
-      # itself is uniform. Static-style harness on the shared mesh profile.
-      - name: Generate configs (admission-cap)
-        if: matrix.type == 'admission-cap'
-        run: bash testing/static/scripts/generate-configs.sh mesh
-
-      - name: Inject admission-cap config (admission-cap)
-        if: matrix.type == 'admission-cap'
-        run: bash testing/static/scripts/admission-cap-test.sh inject-config
-
-      - name: Start containers (admission-cap)
-        if: matrix.type == 'admission-cap'
-        run: |
-          docker compose -f testing/static/docker-compose.yml \
-            --profile mesh up -d
-
-      - name: Run admission-cap test
-        if: matrix.type == 'admission-cap'
-        run: bash testing/static/scripts/admission-cap-test.sh
-
-      - name: Collect logs on failure (admission-cap)
-        if: matrix.type == 'admission-cap' && failure()
-        run: |
-          docker compose -f testing/static/docker-compose.yml \
-            --profile mesh logs --no-color | tail -300
-
-      - name: Stop containers (admission-cap)
-        if: matrix.type == 'admission-cap' && always()
-        run: |
-          docker compose -f testing/static/docker-compose.yml \
-            --profile mesh down --volumes --remove-orphans
 
       # ── Real-deb install integration ────────────────────────────────────
       # The deb-install harness builds its own .deb from source in a
