@@ -3,8 +3,9 @@
 use super::*;
 use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{
-    TestNode, cleanup_nodes, generate_random_edges, lock_large_network_test,
-    process_available_packets, run_tree_test, run_tree_test_with_mtus, run_tree_test_with_profiles,
+    TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
+    lock_large_network_test, make_test_node_with_config, process_available_packets, run_tree_test,
+    run_tree_test_with_mtus, run_tree_test_with_profiles,
     run_tree_test_with_profiles_leaf_smallest, verify_tree_convergence,
 };
 use crate::proto::fsp::SessionAck;
@@ -1274,6 +1275,153 @@ async fn test_tun_outbound_established_session() {
     assert_eq!(
         delivered[0], ipv6_packet,
         "Delivered packet should match original"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A completed rekey cutover must not break the data plane: an encrypted
+/// datagram sent after the K-bit cutover decodes on the new session, and the
+/// peer is not spuriously torn down.
+///
+/// This is the wire-continuity half of the rekey property the Docker `rekey`
+/// suites exercised. The rekey timing and choreography decision itself lives in
+/// the sans-IO cores and is covered exhaustively there
+/// (`proto/fsp/tests/core.rs`, `proto/fmp/tests/core.rs`); this drives a real
+/// XX rekey handshake over the loopback transport so the AEAD continuity across
+/// the cutover is asserted end to end.
+///
+/// Deterministic, no wall-clock wait and no clock read on the responder:
+/// `rekey.after_messages = 1` makes the first sent datagram cross the
+/// initiator's trigger, and the responder classifies the arrival from the rekey
+/// marker the initiator declares in its msg3 negotiation TLV.
+///
+/// The message-count arm is what carries this test's value. It is the arm the
+/// retired age-based discriminator got wrong, and suppressing the marker so the
+/// responder falls back to the cross-connection path reds the post-cutover
+/// assertion, which is what shows the test discriminates the two arms rather
+/// than merely observing a session index change.
+#[tokio::test]
+async fn rekey_cutover_preserves_data_plane() {
+    // node 0 rekeys on the message counter; time never triggers it.
+    let mut cfg0 = crate::config::Config::new();
+    cfg0.node.rekey.enabled = true;
+    cfg0.node.rekey.after_messages = 1;
+    cfg0.node.rekey.after_secs = u64::MAX;
+    let cfg1 = crate::config::Config::new();
+
+    let mut nodes = vec![
+        make_test_node_with_config(cfg0).await,
+        make_test_node_with_config(cfg1).await,
+    ];
+
+    // FMP peering + FSP session between the two loopback nodes.
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    assert!(nodes[0].node.get_peer(&node1_addr).is_some());
+    assert!(nodes[1].node.get_peer(&node0_addr).is_some());
+    populate_all_coord_caches(&mut nodes);
+
+    let node1_pubkey = nodes[1].node.identity().pubkey_full();
+    nodes[0]
+        .node
+        .initiate_session(node1_addr, node1_pubkey)
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established(),
+        "session established"
+    );
+
+    // node 1's TUN receiver observes decoded plaintext.
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[1].node.supervisor.tun_tx = Some(tun_tx);
+    let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
+
+    // Baseline: data decodes on the original session, and this send bumps the
+    // counter across the rekey trigger.
+    let pre = build_ipv6_packet(&src_fips, &dst_fips, b"pre-rekey-payload");
+    nodes[0].node.handle_tun_outbound(pre.clone()).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    process_available_packets(&mut nodes).await;
+    let pre_delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(
+        pre_delivered,
+        vec![pre.clone()],
+        "baseline datagram must decode before the rekey"
+    );
+
+    let idx_before = nodes[0].node.get_peer(&node1_addr).unwrap().our_index();
+
+    // No session backdating here, unlike the master-branch original: on this
+    // line the responder classifies the arrival from the sender's msg3
+    // declaration and `establish_inbound` reads no clock at all, so aging the
+    // session past a 30s acceptance gate would age it past nothing.
+
+    // Drive the real rekey handshake (msg1/msg2/msg3 over loopback) to cutover.
+    for _ in 0..6 {
+        nodes[0].node.check_rekey().await;
+        nodes[1].node.check_rekey().await;
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            process_available_packets(&mut nodes).await;
+        }
+    }
+
+    // The cutover actually happened: node 0's live session index changed and no
+    // rekey is left dangling. Guards against a vacuous pass where the rekey
+    // never fired.
+    let idx_after = nodes[0].node.get_peer(&node1_addr).unwrap().our_index();
+    assert_ne!(
+        idx_after, idx_before,
+        "rekey must cut the live session over to a new index"
+    );
+    assert!(
+        !nodes[0]
+            .node
+            .get_peer(&node1_addr)
+            .unwrap()
+            .rekey_in_progress(),
+        "rekey must have completed, not left in progress"
+    );
+
+    // Continuity: a datagram sent after the cutover decodes on the NEW session.
+    let post = build_ipv6_packet(&src_fips, &dst_fips, b"post-rekey-payload");
+    nodes[0].node.handle_tun_outbound(post.clone()).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    process_available_packets(&mut nodes).await;
+    let post_delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert_eq!(
+        post_delivered,
+        vec![post.clone()],
+        "datagram sent after the cutover must decode on the new session"
+    );
+
+    // No spurious teardown across the rekey.
+    assert!(
+        nodes[0].node.get_peer(&node1_addr).is_some(),
+        "peer must survive the rekey"
+    );
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established(),
+        "session must remain established after the rekey"
     );
 
     cleanup_nodes(&mut nodes).await;

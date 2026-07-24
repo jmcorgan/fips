@@ -152,6 +152,31 @@ async fn make_test_node_inner_with_identity(
     }
 }
 
+/// Create a loopback test node from an explicit `Config`, e.g. to set the
+/// `node.rekey` thresholds a rekey-behaviour test needs. Otherwise identical to
+/// [`make_test_node`] (default 1280 MTU, in-process loopback transport).
+pub(super) async fn make_test_node_with_config(config: crate::config::Config) -> TestNode {
+    let mut node = make_node_with(config);
+    let transport_id = TransportId::new(1);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
+    let addr = next_loopback_addr();
+
+    LOOPBACK_REGISTRY.lock().unwrap().insert(addr.clone(), tx);
+
+    let loopback =
+        LoopbackTransport::with_mtu(transport_id, addr.clone(), 1280, LOOPBACK_REGISTRY.clone());
+    node.transports
+        .insert(transport_id, TransportHandle::Loopback(loopback));
+
+    TestNode {
+        node,
+        transport_id,
+        packet_rx: rx,
+        addr,
+    }
+}
+
 /// Initiate a Noise handshake from nodes[i] to nodes[j].
 ///
 /// Sends msg1 over UDP. The drain loop will handle msg1 processing,

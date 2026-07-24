@@ -26,8 +26,7 @@
 #   -h, --help           Show this help
 #
 # Integration suites (default coverage):
-#   static-mesh, static-chain, rekey, rekey-accept-off,
-#   rekey-outbound-only, mixed-profile, gateway,
+#   static-mesh, static-chain, mixed-profile, gateway,
 #   firewall, nat-cone, nat-symmetric,
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
@@ -74,6 +73,21 @@
 #                    count unchanged — plus handle_msg3_admits_existing_peer_at_cap
 #                    for the known-peer bypass. Still runnable by hand:
 #                    bash testing/static/scripts/admission-cap-test.sh
+#   rekey, rekey-accept-off, rekey-outbound-only
+#                    Retired from CI 2026-07-24 as redundant, not unrunnable.
+#                    The rekey timing/choreography decision (trigger, K-bit
+#                    cutover, drain, jitter, guards) is covered by the sans-IO
+#                    poll_rekey tests (src/proto/fsp/tests/core.rs,
+#                    src/proto/fmp/tests/core.rs); the data-plane continuity
+#                    across a real cutover by rekey_cutover_preserves_data_plane
+#                    (src/node/tests/session.rs, a real XX rekey over loopback,
+#                    the responder classifying it from the msg3 rekey marker);
+#                    the accept-off dual-init regression and the
+#                    udp.outbound_only rekey loop by the should_admit_msg1 tests
+#                    (src/node/tests/handshake.rs) and the establish_inbound /
+#                    establish_outbound decision tests (src/proto/fmp/tests/core.rs,
+#                    src/peer/machine.rs). Still runnable by hand:
+#                    bash testing/static/scripts/rekey-test.sh
 #   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse
 #                    Chaos scenarios excluded from CHAOS_SUITES. The two
 #                    ecn-ab ones are halves of the manual comparison above.
@@ -133,7 +147,6 @@ ONLY_SUITE=""
 
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
-REKEY_SUITES=(rekey rekey-accept-off rekey-outbound-only)
 MIXED_PROFILE_SUITES=(mixed-profile)
 # Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
@@ -197,9 +210,6 @@ list_suites() {
     echo ""
     echo "  Static topologies:"
     for s in "${STATIC_SUITES[@]}"; do echo "    $s"; done
-    echo ""
-    echo "  Rekey:"
-    for s in "${REKEY_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Mixed profile:"
     for s in "${MIXED_PROFILE_SUITES[@]}"; do echo "    $s"; done
@@ -551,32 +561,6 @@ run_static() {
     record "static-$topology" $rc
 }
 
-# Run the rekey integration test
-run_rekey() {
-    local compose="testing/static/docker-compose.yml"
-    local rc=0
-    export COMPOSE_PROJECT_NAME="$(ci_project static)"
-
-    info "[rekey] Generating configs"
-    bash testing/static/scripts/generate-configs.sh rekey || { record "rekey" 1; return; }
-    bash testing/static/scripts/rekey-test.sh inject-config || { record "rekey" 1; return; }
-
-    info "[rekey] Starting containers"
-    docker compose -f "$compose" --profile rekey up -d || { record "rekey" 1; return; }
-
-    info "[rekey] Running rekey test"
-    if bash testing/static/scripts/rekey-test.sh; then
-        rc=0
-    else
-        rc=1
-        info "[rekey] Collecting failure logs"
-        docker compose -f "$compose" --profile rekey logs --no-color 2>&1 | tail -100
-    fi
-
-    docker compose -f "$compose" --profile rekey down --volumes --remove-orphans 2>/dev/null
-    record "rekey" $rc
-}
-
 # Run the mixed-profile integration test (Full + NonRouting + Leaf)
 run_mixed_profile() {
     local compose="testing/static/docker-compose.yml"
@@ -729,73 +713,6 @@ run_sidecar() {
     record "sidecar" $rc
 }
 
-# Run the rekey-accept-off integration variant. Same harness as run_rekey
-# but on a 2-node topology with udp.accept_connections=false on node-b.
-run_rekey_accept_off() {
-    local compose="testing/static/docker-compose.yml"
-    local rc=0
-    export COMPOSE_PROJECT_NAME="$(ci_project static)"
-
-    info "[rekey-accept-off] Generating configs"
-    bash testing/static/scripts/generate-configs.sh rekey-accept-off || \
-        { record "rekey-accept-off" 1; return; }
-    REKEY_TOPOLOGY=rekey-accept-off REKEY_ACCEPT_OFF_NODES=b \
-        bash testing/static/scripts/rekey-test.sh inject-config || \
-        { record "rekey-accept-off" 1; return; }
-
-    info "[rekey-accept-off] Starting containers"
-    docker compose -f "$compose" --profile rekey-accept-off up -d || \
-        { record "rekey-accept-off" 1; return; }
-
-    info "[rekey-accept-off] Running rekey test"
-    if REKEY_TOPOLOGY=rekey-accept-off REKEY_ACCEPT_OFF_NODES=b \
-        bash testing/static/scripts/rekey-test.sh; then
-        rc=0
-    else
-        rc=1
-        info "[rekey-accept-off] Collecting failure logs"
-        docker compose -f "$compose" --profile rekey-accept-off logs --no-color 2>&1 | tail -100
-    fi
-
-    docker compose -f "$compose" --profile rekey-accept-off down --volumes --remove-orphans 2>/dev/null
-    record "rekey-accept-off" $rc
-}
-
-# Run the rekey-outbound-only integration variant. Same harness as
-# run_rekey but with udp.outbound_only=true on node-b plus its peer
-# addrs rewritten from numeric docker IPs to docker hostnames so the
-# addr_to_link key form mismatches inbound packet source addrs (the
-# production trigger for the rekey-msg1 carve-out gap).
-run_rekey_outbound_only() {
-    local compose="testing/static/docker-compose.yml"
-    local rc=0
-    export COMPOSE_PROJECT_NAME="$(ci_project static)"
-
-    info "[rekey-outbound-only] Generating configs"
-    bash testing/static/scripts/generate-configs.sh rekey-outbound-only || \
-        { record "rekey-outbound-only" 1; return; }
-    REKEY_TOPOLOGY=rekey-outbound-only REKEY_OUTBOUND_ONLY_NODES=b \
-        bash testing/static/scripts/rekey-test.sh inject-config || \
-        { record "rekey-outbound-only" 1; return; }
-
-    info "[rekey-outbound-only] Starting containers"
-    docker compose -f "$compose" --profile rekey-outbound-only up -d || \
-        { record "rekey-outbound-only" 1; return; }
-
-    info "[rekey-outbound-only] Running rekey test"
-    if REKEY_TOPOLOGY=rekey-outbound-only REKEY_OUTBOUND_ONLY_NODES=b \
-        bash testing/static/scripts/rekey-test.sh; then
-        rc=0
-    else
-        rc=1
-        info "[rekey-outbound-only] Collecting failure logs"
-        docker compose -f "$compose" --profile rekey-outbound-only logs --no-color 2>&1 | tail -100
-    fi
-
-    docker compose -f "$compose" --profile rekey-outbound-only down --volumes --remove-orphans 2>/dev/null
-    record "rekey-outbound-only" $rc
-}
-
 # Run firewall baseline integration test
 run_firewall() {
     export COMPOSE_PROJECT_NAME="$(ci_project firewall)"
@@ -925,11 +842,6 @@ run_integration() {
         run_static "$topology"
     done
 
-    # Rekey + rekey-accept-off + rekey-outbound-only variants
-    run_rekey
-    run_rekey_accept_off
-    run_rekey_outbound_only
-
     # Mixed-profile (Full + NonRouting + Leaf)
     for _suite in "${MIXED_PROFILE_SUITES[@]}"; do
         run_mixed_profile
@@ -1042,12 +954,6 @@ run_suite() {
     case "$suite" in
         static-mesh|static-chain)
             run_static "${suite#static-}" ;;
-        rekey)
-            run_rekey ;;
-        rekey-accept-off)
-            run_rekey_accept_off ;;
-        rekey-outbound-only)
-            run_rekey_outbound_only ;;
         mixed-profile)
             run_mixed_profile ;;
         gateway)
