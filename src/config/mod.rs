@@ -24,6 +24,7 @@ mod node;
 mod peer;
 mod transport;
 
+use crate::node::REKEY_JITTER_SECS;
 use crate::upper::config::{DnsConfig, TunConfig};
 use crate::{Identity, IdentityError};
 use serde::{Deserialize, Serialize};
@@ -748,6 +749,32 @@ impl Config {
                     )));
                 }
             }
+        }
+
+        // Reject rekey triggers that fire immediately and forever. Both
+        // arms are checked regardless of `node.rekey.enabled` so that
+        // turning rekey on later cannot surface a config error at a
+        // surprising moment. There is deliberately no upper bound:
+        // u64::MAX is the idiom for disabling one arm of the trigger.
+        let rekey = &self.node.rekey;
+
+        if rekey.after_messages == 0 {
+            return Err(ConfigError::Validation(
+                "`node.rekey.after_messages` must be at least 1; 0 fires the message-count trigger on every poll instead of disabling it. \
+                 Use a very large value to effectively disable the message-count trigger."
+                    .to_string(),
+            ));
+        }
+
+        let jitter_secs = REKEY_JITTER_SECS.unsigned_abs();
+        if rekey.after_secs <= jitter_secs {
+            return Err(ConfigError::Validation(format!(
+                "`node.rekey.after_secs` is {}, but must be greater than the per-session rekey jitter of {jitter_secs}s; \
+                 each session offsets the interval by a random value in [-{jitter_secs}, +{jitter_secs}] seconds, so a smaller interval saturates to zero \
+                 and rekeys on sight for roughly half of sessions. \
+                 Use a very large value to effectively disable the timer trigger.",
+                rekey.after_secs
+            )));
         }
 
         Ok(())
@@ -1653,6 +1680,86 @@ node:
         config
             .validate()
             .expect("outbound_only should be exempt from the loopback check");
+    }
+
+    #[test]
+    fn test_validate_default_rekey_settings_ok() {
+        Config::default()
+            .validate()
+            .expect("shipped default rekey settings must validate");
+    }
+
+    #[test]
+    fn test_validate_rekey_after_messages_zero_rejected() {
+        let mut config = Config::default();
+        config.node.rekey.after_messages = 0;
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("after_messages"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_rekey_after_messages_one_accepted() {
+        let mut config = Config::default();
+        config.node.rekey.after_messages = 1;
+
+        config
+            .validate()
+            .expect("after_messages = 1 rekeys every message, which is wasteful but well defined");
+    }
+
+    #[test]
+    fn test_validate_rekey_after_secs_at_or_below_jitter_rejected() {
+        let jitter = REKEY_JITTER_SECS.unsigned_abs();
+
+        for after_secs in [0, 1, jitter - 1, jitter] {
+            let mut config = Config::default();
+            config.node.rekey.after_secs = after_secs;
+
+            match config.validate() {
+                Err(e) => assert!(e.to_string().contains("after_secs"), "got: {e}"),
+                Ok(()) => panic!("after_secs = {after_secs} should be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_rekey_after_secs_just_above_jitter_accepted() {
+        let mut config = Config::default();
+        config.node.rekey.after_secs = REKEY_JITTER_SECS.unsigned_abs() + 1;
+
+        config
+            .validate()
+            .expect("one second above the jitter bound leaves a non-zero effective interval");
+    }
+
+    #[test]
+    fn test_validate_rekey_unbounded_values_accepted() {
+        let mut config = Config::default();
+        config.node.rekey.after_secs = u64::MAX;
+        config.node.rekey.after_messages = u64::MAX;
+
+        config
+            .validate()
+            .expect("u64::MAX disables an arm of the trigger and must stay legal");
+    }
+
+    #[test]
+    fn test_validate_rekey_checked_even_when_disabled() {
+        let mut config = Config::default();
+        config.node.rekey.enabled = false;
+        config.node.rekey.after_messages = 0;
+
+        let err = config.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("after_messages"));
+
+        let mut config = Config::default();
+        config.node.rekey.enabled = false;
+        config.node.rekey.after_secs = REKEY_JITTER_SECS.unsigned_abs();
+
+        let err = config.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("after_secs"));
     }
 
     #[test]

@@ -148,6 +148,11 @@ with v0.4.x or earlier peers.
   folded into the new tables with a one-time deprecation warning; migrate your
   `fips.yaml` to the new keys.
 
+- `SessionDatagram::decrement_ttl` and `SessionDatagram::can_forward` now match
+  the forwarder's IP hop-limit semantics: `decrement_ttl` decrements first and
+  reports false when the result is zero, and `can_forward` is true only at a
+  TTL of 2 or more.
+
 ### Deprecated
 
 - The `discovery` metric-family key (control-socket JSON). It is dual-emitted

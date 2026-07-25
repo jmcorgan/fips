@@ -171,19 +171,27 @@ impl SessionDatagram {
         self
     }
 
-    /// Decrement TTL, returning false if exhausted.
+    /// Decrement the TTL for a transit hop, returning whether the result may
+    /// still be transmitted.
+    ///
+    /// Follows IP semantics: the decrement happens first, and a datagram that
+    /// would leave with a TTL of zero is not transmitted. `saturating_sub`
+    /// folds an already-exhausted arrival (TTL 0) into the same outcome as a
+    /// last-hop arrival (TTL 1); both leave `ttl` at 0 and return false.
+    ///
+    /// This governs forwarding only. Delivery to the addressed node is not
+    /// TTL-gated and must not consult this method.
     pub fn decrement_ttl(&mut self) -> bool {
-        if self.ttl > 0 {
-            self.ttl -= 1;
-            true
-        } else {
-            false
-        }
+        self.ttl = self.ttl.saturating_sub(1);
+        self.ttl > 0
     }
 
-    /// Check if the datagram can be forwarded.
+    /// Check whether this datagram would survive a transit hop.
+    ///
+    /// True only at TTL 2 or more: at TTL 1 the decrement leaves zero, so the
+    /// datagram is dropped rather than forwarded.
     pub fn can_forward(&self) -> bool {
-        self.ttl > 0
+        self.ttl > 1
     }
 
     /// Encode as link-layer message (msg_type + ttl + path_mtu + src_addr + dest_addr + payload).
@@ -398,5 +406,45 @@ mod tests {
             let decoded = SessionDatagram::decode(&encoded[1..]).unwrap();
             assert_eq!(decoded.ttl, hop);
         }
+    }
+
+    #[test]
+    fn test_session_datagram_can_forward() {
+        let dg = SessionDatagram::new(make_node_addr(1), make_node_addr(2), vec![0x42]);
+
+        assert!(!dg.clone().with_ttl(0).can_forward());
+        assert!(
+            !dg.clone().with_ttl(1).can_forward(),
+            "ttl=1 would leave at zero, so it is not forwardable"
+        );
+        assert!(
+            dg.clone().with_ttl(2).can_forward(),
+            "ttl=2 leaves at one, so it is forwardable"
+        );
+        assert!(dg.with_ttl(255).can_forward());
+    }
+
+    #[test]
+    fn test_session_datagram_decrement_ttl() {
+        let base = SessionDatagram::new(make_node_addr(1), make_node_addr(2), vec![0x42]);
+
+        let mut dg = base.clone().with_ttl(0);
+        assert!(!dg.decrement_ttl(), "ttl=0 is already exhausted");
+        assert_eq!(dg.ttl, 0, "decrement must saturate rather than wrap");
+
+        let mut dg = base.clone().with_ttl(1);
+        assert!(
+            !dg.decrement_ttl(),
+            "ttl=1 leaves at zero, so it is dropped"
+        );
+        assert_eq!(dg.ttl, 0);
+
+        let mut dg = base.clone().with_ttl(2);
+        assert!(dg.decrement_ttl());
+        assert_eq!(dg.ttl, 1);
+
+        let mut dg = base.with_ttl(64);
+        assert!(dg.decrement_ttl());
+        assert_eq!(dg.ttl, 63);
     }
 }

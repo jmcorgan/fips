@@ -232,7 +232,11 @@ pub enum ForwardingReject {
     /// `SessionDatagramRef::decode` returned an error. Tracked via
     /// [`ForwardingStats::decode_error_packets`](crate::node::stats::ForwardingStats).
     DecodeError,
-    /// Datagram arrived with TTL=0 — already exhausted, no forward.
+    /// Transit datagram whose TTL would reach zero on this hop, so it is
+    /// dropped rather than forwarded. Charged for an arrival at TTL 1 as
+    /// well as an already-exhausted arrival at TTL 0. Never charged for a
+    /// datagram addressed to this node, whose delivery is not TTL-gated and
+    /// is decided ahead of this test.
     /// Tracked via
     /// [`ForwardingStats::ttl_exhausted_packets`](crate::node::stats::ForwardingStats).
     TtlExhausted,
