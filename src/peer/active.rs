@@ -1040,6 +1040,18 @@ impl ActivePeer {
             .unwrap_or_else(Instant::now);
     }
 
+    /// Test-only seam: backdate the drain-start instant so a test can make
+    /// `drain_expired()` read true without waiting out the drain window. Only
+    /// shifts the private timestamp field, and is a no-op when no drain is in
+    /// progress, so it cannot manufacture a drain that did not happen. It changes
+    /// no decision logic, no threshold, and is compiled out of release builds.
+    #[cfg(test)]
+    pub(crate) fn test_backdate_drain_start(&mut self, age: std::time::Duration) {
+        if let Some(started) = self.send.drain_started {
+            self.send.drain_started = Some(started.checked_sub(age).unwrap_or_else(Instant::now));
+        }
+    }
+
     /// Per-session symmetric rekey-timer jitter offset (seconds).
     ///
     /// Drawn at session construction and at each rekey cutover; uniform

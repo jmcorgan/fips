@@ -186,8 +186,16 @@ pub(crate) struct RekeyResendSnapshot {
     pub msg1: Vec<u8>,
 }
 
-/// The rekey trigger thresholds, read shell-side from node config.
+/// The rekey cadence config, read shell-side from node config.
 pub(crate) struct RekeyCfg {
+    /// This node initiates rekeys (`node.rekey.enabled`).
+    ///
+    /// It governs the initiating half of the cadence only: the trigger, and the
+    /// polled cutover that follows an initiation. Finishing the drain of a rekey
+    /// already accepted as responder is housekeeping rather than initiation, and
+    /// runs whatever this says — a node that never initiates still has drains to
+    /// complete, because a peer's rekey it accepted demoted a live session.
+    pub initiate: bool,
     /// Rekey after this many seconds of session age (before jitter).
     pub after_secs: u64,
     /// Rekey after this many sent messages.
@@ -251,9 +259,6 @@ pub(crate) struct EstablishSnapshot {
     /// cross-connection branch: a `msg3` on the same link is never a
     /// cross-connection.
     pub different_link: bool,
-    /// The local rekey trigger is enabled in config (gates treating a declared
-    /// rekey as a rekey rather than a duplicate).
-    pub rekey_enabled: bool,
     /// What the sender's `msg3` declares about replacing an existing session,
     /// resolved shell-side against the peer at `wire.peer_node_addr`.
     pub rekey_claim: RekeyClaim,
@@ -631,22 +636,36 @@ impl Fmp {
     /// Actions are returned phase-grouped (all cutovers, then all drains, then
     /// all rekey initiations) to preserve the pre-refactor global execution
     /// order across peers, which the shared `index_allocator` observes.
+    ///
+    /// `cfg.initiate` splits the cadence in two. The trigger and the polled
+    /// cutover belong to initiation and are suppressed when it is off; the drain
+    /// arm is housekeeping for a demoted session and is not. A node that only
+    /// ever responds to rekeys still accumulates drains, and nothing else
+    /// completes one.
     pub(crate) fn poll_rekey(&self, peers: Vec<PeerSnapshot>, cfg: &RekeyCfg) -> Vec<ConnAction> {
         let mut cutovers = Vec::new();
         let mut drains = Vec::new();
         let mut rekeys = Vec::new();
         for p in peers {
-            // 1. Initiator-side cutover.
-            if p.has_pending && !p.rekey_in_progress {
+            // 1. Polled cutover.
+            //
+            // Gated on `initiate`, and the gate is doing real work: the snapshot
+            // carries no rekey role, so this arm fires for a pending session we
+            // stored as RESPONDER just as readily as for one we initiated. On a
+            // node that does not initiate, the responder's cutover is the peer's
+            // K-bit flip on the data path, and polling it here would move that
+            // cutover earlier — a behaviour change this arm must not make.
+            if cfg.initiate && p.has_pending && !p.rekey_in_progress {
                 cutovers.push(ConnAction::Cutover { peer: p.addr });
                 continue;
             }
             // 2. Drain window expiry (does not preclude a trigger below).
+            // Deliberately ungated: see `RekeyCfg::initiate`.
             if p.is_draining && p.drain_expired {
                 drains.push(ConnAction::Drain { peer: p.addr });
             }
             // 3. Rekey trigger.
-            if p.rekey_in_progress || p.is_dampened || p.rekey_msg3_pending {
+            if !cfg.initiate || p.rekey_in_progress || p.is_dampened || p.rekey_msg3_pending {
                 continue;
             }
             let effective_after = cfg.after_secs.saturating_add_signed(p.jitter_secs);
@@ -725,8 +744,11 @@ impl Fmp {
     ///    this tie-break cannot see that state, so declining here would diverge
     ///    the pair; the executor abandons the displaced rekey instead.
     /// 5. Same epoch, marker naming the session we hold
-    ///    ([`Matches`](RekeyClaim::Matches)), rekey enabled, healthy session →
-    ///    [`RekeyRespond`]. The widened dual-init tie-break fires when the peer
+    ///    ([`Matches`](RekeyClaim::Matches)), healthy session → [`RekeyRespond`],
+    ///    whatever the local `rekey.enabled` says: that flag governs whether we
+    ///    initiate rekeys, never whether we accept one, or an asymmetric setting
+    ///    would diverge the two ends of the link.
+    ///    The widened dual-init tie-break fires when the peer
     ///    is in *either* the `rekey_in_progress` or the `pending_new_session`
     ///    state: the smaller NodeAddr wins ([`Reject`] the peer's `msg3`), the
     ///    larger loses (`abandon_first`, then respond).
@@ -810,11 +832,16 @@ impl Fmp {
                 }
 
                 // Rekey responder gate: the sender named the session we hold.
-                if snap.rekey_claim == RekeyClaim::Matches
-                    && snap.rekey_enabled
-                    && snap.has_session
-                    && snap.is_healthy
-                {
+                //
+                // Nothing here consults the local rekey config. `rekey.enabled`
+                // means "initiate rekeys" and nothing else: reading it here made
+                // the responder decline a rekey the sender had already committed
+                // to, so an asymmetric setting left the two ends on different
+                // sessions with the link carrying nothing until the link-dead
+                // timer. The sender's declaration matching the session we hold is
+                // the authoritative signal, and it is a property of the wire, not
+                // of our config.
+                if snap.rekey_claim == RekeyClaim::Matches && snap.has_session && snap.is_healthy {
                     // Widened dual-init tie-break: both the still-in-progress and
                     // the already-pending states resolve by the smaller NodeAddr.
                     if snap.rekey_in_progress || snap.pending_new_session {

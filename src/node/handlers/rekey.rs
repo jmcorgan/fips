@@ -37,12 +37,17 @@ impl Node {
     /// - If the initiator has a pending session, perform K-bit cutover
     /// - If the drain window has expired, clean up the previous session
     /// - If the rekey timer/counter fires, initiate a new handshake
+    ///
+    /// Runs whatever `node.rekey.enabled` says, because the drain in the middle
+    /// of that list is not initiation: a node that never initiates still accepts
+    /// its peers' rekeys, and each acceptance demotes a live session that only
+    /// this path releases. The flag rides into the core as `RekeyCfg::initiate`
+    /// and suppresses the two initiating arms there, so which arms a disabled
+    /// node runs stays one decision in one place rather than an early return
+    /// here and a rule there.
     pub(in crate::node) async fn check_rekey(&mut self) {
-        if !self.config().node.rekey.enabled {
-            return;
-        }
-
         let cfg = RekeyCfg {
+            initiate: self.config().node.rekey.enabled,
             after_secs: self.config().node.rekey.after_secs,
             after_messages: self.config().node.rekey.after_messages,
         };

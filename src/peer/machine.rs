@@ -1829,6 +1829,9 @@ impl PeerMachine {
             None => return Vec::new(),
         };
         let cfg = RekeyCfg {
+            // The machine's shadow cadence sees no node config and has always run
+            // the full arm set, so it keeps initiating.
+            initiate: true,
             after_secs: REKEY_AFTER_SECS,
             after_messages: REKEY_AFTER_MESSAGES,
         };
@@ -2271,7 +2274,6 @@ mod tests {
             rekey_in_progress: false,
             existing_msg2: None,
             different_link: false,
-            rekey_enabled: true,
             rekey_claim: RekeyClaim::None,
             our_node_addr: our,
         }
@@ -3201,11 +3203,13 @@ mod tests {
         let seed = SessionIndex::new(0xEF);
         let stored_msg2 = vec![1u8, 2, 3, 4];
 
-        // Same epoch, same link, rekey disabled -> duplicate handshake.
+        // Same epoch, same link, no rekey declared -> duplicate handshake. The
+        // `est_new_peer` default of `RekeyClaim::None` plus `different_link =
+        // false` is what pins this arm: an undeclared msg3 on the peer's own
+        // link is neither a rekey nor a crossing dial.
         let mut est = est_new_peer(our);
         est.has_existing_peer = true;
         est.existing_peer_epoch = Some([9u8; 8]);
-        est.rekey_enabled = false;
         est.existing_msg2 = Some(stored_msg2.clone());
         let wire = wire_outcome(peer_addr, Some([9u8; 8]));
 

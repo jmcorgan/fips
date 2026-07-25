@@ -543,11 +543,14 @@ impl Node {
                     let _ = did_cutover;
                 }
                 PeerAction::CompleteDrain { peer: node_addr } => {
-                    // Initiator drain completion: the live authoritative
-                    // rekey-cadence path, routed here from `check_rekey` via
+                    // Drain completion: the live authoritative rekey-cadence
+                    // path, routed here from `check_rekey` via
                     // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the
                     // inline body survives only as `drain_peer_inline`, a
-                    // debug-assert release fallback. Extract the real previous
+                    // debug-assert release fallback. Reached in either rekey
+                    // role — a responder's cutover demotes a session the same
+                    // way an initiator's does — including on a node whose own
+                    // trigger is off. Extract the real previous
                     // index + transport_id under the peer borrow, drop the
                     // borrow, then run the cache_key cleanup (which takes
                     // &mut self for unregister_decrypt_worker_session).

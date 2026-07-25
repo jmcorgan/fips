@@ -15,12 +15,22 @@ use crate::transport::LinkId;
 /// Matching-epoch default used by `establish_snapshot`.
 const SAME_EPOCH: [u8; 8] = [0x01; 8];
 
-/// Threshold config used across the rekey decision tests: rekey at 100s of
-/// session age or 1000 sent messages.
+/// Threshold config used across the rekey decision tests: an initiating node
+/// that rekeys at 100s of session age or 1000 sent messages.
 fn cfg() -> RekeyCfg {
     RekeyCfg {
+        initiate: true,
         after_secs: 100,
         after_messages: 1_000,
+    }
+}
+
+/// The same thresholds on a node that does not initiate rekeys
+/// (`node.rekey.enabled = false`).
+fn cfg_no_initiate() -> RekeyCfg {
+    RekeyCfg {
+        initiate: false,
+        ..cfg()
     }
 }
 
@@ -158,6 +168,50 @@ fn rekey_expired_drain_and_trigger_both_fire() {
     assert!(matches!(actions[0], ConnAction::Drain { peer } if peer == make_node_addr(0x12)));
     assert!(
         matches!(actions[1], ConnAction::InitiateRekey { peer } if peer == make_node_addr(0x12))
+    );
+}
+
+/// A node that does not initiate rekeys still completes an expired drain, and
+/// still does nothing else.
+///
+/// The two halves are one property. A node with `rekey.enabled = false` accepts
+/// its peers' rekeys — the declaration on the wire decides that, not local
+/// config — and every acceptance demotes a live session into the drain slot.
+/// Nothing but this arm releases that session and its index, so suppressing the
+/// whole poll strands both for the life of the peer.
+///
+/// The other half is why the suppression cannot simply be dropped: this snapshot
+/// carries no rekey role, so `has_pending` is set by a responder-stored session
+/// exactly as by an initiated one. Letting the cutover arm run here would move a
+/// non-initiating node's cutover off the peer's K-bit flip and onto the poll.
+#[test]
+fn rekey_without_initiation_drains_but_does_not_cut_over_or_trigger() {
+    let fmp = Fmp::new();
+
+    let mut draining = peer_snapshot(0x14);
+    draining.is_draining = true;
+    draining.drain_expired = true;
+    // Also over both trigger thresholds, and holding a pending session as a
+    // responder would: neither may produce an action.
+    draining.has_pending = true;
+    draining.elapsed_secs = 10_000;
+    draining.counter = 10_000;
+    let actions = fmp.poll_rekey(vec![draining], &cfg_no_initiate());
+    assert_eq!(
+        actions.len(),
+        1,
+        "a non-initiating node must emit the drain and nothing else"
+    );
+    assert!(matches!(actions[0], ConnAction::Drain { peer } if peer == make_node_addr(0x14)));
+
+    // An unexpired drain window is still not due, so the arm is not simply
+    // firing on every poll.
+    let mut unexpired = peer_snapshot(0x14);
+    unexpired.is_draining = true;
+    assert!(
+        fmp.poll_rekey(vec![unexpired], &cfg_no_initiate())
+            .is_empty(),
+        "an unexpired drain window must not complete"
     );
 }
 
@@ -423,23 +477,15 @@ fn establish_same_link_fresh_is_duplicate() {
     }
 }
 
-/// Aged same-epoch session, rekey disabled: not a rekey -> duplicate resend
-/// (mirrors the rekey-disabled chartest).
-#[test]
-fn establish_aged_rekey_disabled_is_duplicate() {
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot(0x05);
-    snap.rekey_enabled = false;
-    snap.rekey_claim = RekeyClaim::Matches; // declared, but rekey disabled
-    let wire = wire_outcome(0x02, SAME_EPOCH);
-    assert!(matches!(
-        fmp.establish_inbound(&snap, &wire),
-        InboundDecision::ResendMsg2 { .. }
-    ));
-}
-
 /// Aged, healthy, same-epoch session with no dual-init in flight -> rekey
 /// responder, no prior abandon.
+///
+/// The snapshot carries no local rekey-trigger config, and deliberately: the
+/// sender's declaration is the whole input. A responder that consulted its own
+/// `rekey.enabled` here would decline a rekey the sender has already committed
+/// to, leaving the two ends on different sessions whenever the setting is
+/// asymmetric. The two-ended proof of that lives in `node/tests/handshake.rs`;
+/// this pins the decision itself.
 #[test]
 fn establish_aged_rekey_responds_without_abandon() {
     let fmp = Fmp::new();

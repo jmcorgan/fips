@@ -1634,8 +1634,8 @@ async fn drive_rekey_to_msg3(initiator: &mut HsNode, responder: &mut HsNode) -> 
 
 #[tokio::test]
 async fn test_msg3_dual_rekey_won_frees_index() {
-    // Both ends carry the rekey config: the initiator to fire its own trigger,
-    // the responder for the `rekey_enabled` gate in the classifier.
+    // Both ends carry the rekey config so each can fire its own trigger; the
+    // classifier itself reads no config, only the sender's declaration.
     let make_config = || {
         let mut c = Config::new();
         c.node.rekey.enabled = true;
@@ -1719,20 +1719,25 @@ async fn test_msg3_dual_rekey_won_frees_index() {
 
 #[tokio::test]
 async fn test_msg3_resend_msg2_frees_index() {
-    // A declared rekey into a responder that has rekey DISABLED. The marker
-    // matches, so this is unambiguously a rekey and not a crossing dial, and the
-    // responder's `rekey_enabled` gate sends it to the duplicate arm.
+    // A declared rekey landing on a peer whose link is no longer healthy. The
+    // marker matches, so this is unambiguously a rekey and not a crossing dial;
+    // the classifier's health conjunct is what sends it to the duplicate arm,
+    // and the shell must then free the msg1-allocated index and leave the
+    // existing session alone.
     //
     // A bare second handshake will not reach this arm: it declares no rekey, and
-    // an undeclared msg3 on a different link is a cross-connection, which
-    // `rekey_enabled` does not gate. That is what this test used to do, and every
-    // assertion below holds on the cross-connection arm too, so it passed while
-    // exercising something else entirely.
+    // an undeclared msg3 on a different link is a cross-connection, on which
+    // every assertion below also holds — so routing through it would exercise
+    // something else entirely while passing.
+    //
+    // The responder's own `rekey.enabled` is deliberately NOT the lever here.
+    // That flag governs whether this node initiates rekeys and has no say in
+    // whether it accepts one; using it to reach this arm is the divergence
+    // `test_asymmetric_rekey_config_converges` exists to forbid.
     let mut init_config = Config::new();
     init_config.node.rekey.enabled = true;
     init_config.node.rekey.after_secs = 1;
-    let mut config = Config::new();
-    config.node.rekey.enabled = false;
+    let config = Config::new();
 
     let mut initiator = make_hs_node(init_config).await;
     let mut responder = make_hs_node(config).await;
@@ -1760,13 +1765,29 @@ async fn test_msg3_resend_msg2_frees_index() {
     let session_before = (before.our_index(), before.their_index());
 
     // The rekey's msg1 allocates a fresh index; its msg3 then frees it on the
-    // duplicate arm, because this responder does not do rekeys.
+    // duplicate arm.
     let msg3b = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
     assert_eq!(
         responder.node.index_allocator.count(),
         baseline + 1,
         "the rekey msg1 allocated a fresh index"
     );
+
+    // The link goes quiet past the heartbeat threshold while the rekey is in
+    // flight, exactly as the tick loop would mark it. An unhealthy peer is not a
+    // rekey candidate, so the declared rekey falls through to the duplicate arm.
+    // Marked after the msg1/msg2 exchange, since nothing on the handshake path
+    // re-marks a peer connected but a later `touch` would.
+    responder
+        .node
+        .get_peer_mut(&peer_addr)
+        .unwrap()
+        .mark_stale();
+    assert!(
+        !responder.node.get_peer(&peer_addr).unwrap().is_healthy(),
+        "the peer must be unhealthy, or this reaches the rekey-responder arm"
+    );
+
     responder.node.handle_msg3(msg3b).await;
 
     assert_eq!(
@@ -1921,8 +1942,9 @@ async fn test_msg3_crypto_fail_disposes_leg_machine() {
 #[tokio::test]
 async fn test_msg3_rekey_respond_disposes_leg_machine() {
     // A REAL rekey, driven from the initiator's own trigger so its msg3 carries
-    // the rekey marker. Both ends need the rekey config: the initiator to fire
-    // the trigger, the responder for the `rekey_enabled` gate in the classifier.
+    // the rekey marker. The initiator needs the rekey config to fire the
+    // trigger; the responder's copy only lets it run its own cadence, since the
+    // classifier reads no config.
     let mut init_config = Config::new();
     init_config.node.rekey.enabled = true;
     init_config.node.rekey.after_secs = 1;
@@ -2058,6 +2080,269 @@ async fn test_count_triggered_rekey_on_young_session_converges() {
         on_initiator.our_index().is_some() && on_initiator.their_index().is_some(),
         "both indices must be set, or the equality above passes on None == None"
     );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// An asymmetric `rekey.enabled` must not split the link: the two ends still
+/// come out of the peer's rekey holding the same session.
+///
+/// `rekey.enabled` says whether this node INITIATES rekeys. It says nothing
+/// about whether it accepts one, and it cannot: by the time a rekey msg3
+/// arrives the sender has already committed to the new session, and the
+/// declaration on the wire is the only authoritative signal about what the msg3
+/// is. A responder that read its own trigger config as permission to decline
+/// would keep the old session while the peer sends on the new one, and the link
+/// would carry nothing in either direction until the link-dead timer.
+///
+/// Every assertion here spans BOTH nodes, comparing each end's send index
+/// against the index the other end receives on. The divergent outcome leaves
+/// each node internally consistent, so a one-sided check cannot see it — which
+/// is exactly how the defect survived: `test_msg3_resend_msg2_frees_index`
+/// drove a declared rekey into a rekey-disabled responder and asserted only the
+/// responder's own state, so it passed on full divergence.
+#[tokio::test]
+async fn test_asymmetric_rekey_config_converges() {
+    let mut init_config = Config::new();
+    init_config.node.rekey.enabled = true;
+    init_config.node.rekey.after_secs = 1;
+    // The responder never initiates a rekey of its own. It must still accept the
+    // peer's, and must still cut over to it.
+    let mut resp_config = Config::new();
+    resp_config.node.rekey.enabled = false;
+
+    let mut initiator = make_hs_node(init_config).await;
+    let mut responder = make_hs_node(resp_config).await;
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+
+    let initiator_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    // Age the initiator's session well past the jitter band ([-15, +15] around
+    // `after_secs`) so its own trigger fires and the msg3 that arrives carries a
+    // matching marker.
+    initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
+
+    let rekey_msg3 = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
+    responder.node.handle_msg3(rekey_msg3).await;
+
+    assert!(
+        responder
+            .node
+            .get_peer(&initiator_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some(),
+        "the responder declined the peer's rekey on account of its own trigger \
+         config: no pending session"
+    );
+
+    // The initiator cuts over on its own cadence and starts sending on the new
+    // session. Cross-node, before either cutover reaches the responder: the
+    // session the initiator now sends on has to be the one the responder is
+    // holding ready, and vice versa.
+    initiator.node.check_rekey().await;
+    {
+        let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
+        let on_responder = responder.node.get_peer(&initiator_addr).unwrap();
+        assert_eq!(
+            on_initiator.their_index(),
+            on_responder.pending_our_index(),
+            "the initiator sends on an index the responder is not standing by to \
+             receive on"
+        );
+        assert_eq!(
+            on_responder.pending_their_index(),
+            on_initiator.our_index(),
+            "the responder is standing by to send on an index the initiator does \
+             not receive on"
+        );
+        assert!(
+            on_initiator.our_index().is_some() && on_initiator.their_index().is_some(),
+            "both indices must be set, or the equalities above pass on None == None"
+        );
+    }
+
+    // The responder runs no rekey cadence at all here, so it cuts over the way a
+    // responder always does: on the peer's first frame carrying the flipped
+    // K-bit, which the data plane turns into exactly this call.
+    responder
+        .node
+        .get_peer_mut(&initiator_addr)
+        .unwrap()
+        .handle_peer_kbit_flip();
+
+    let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
+    let on_responder = responder.node.get_peer(&initiator_addr).unwrap();
+    assert_eq!(
+        on_initiator.their_index(),
+        on_responder.our_index(),
+        "after the rekey the ends hold different sessions: traffic drops one way"
+    );
+    assert_eq!(
+        on_responder.their_index(),
+        on_initiator.our_index(),
+        "after the rekey the ends hold different sessions: traffic drops one way"
+    );
+    assert!(
+        on_responder.our_index().is_some() && on_responder.their_index().is_some(),
+        "both indices must be set, or the equalities above pass on None == None"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// A node that never initiates a rekey still finishes the drain of one it
+/// accepted: the demoted session and its index come back.
+///
+/// Accepting a peer's rekey demotes our live session into the drain slot and
+/// keeps its index registered, so the frames still in flight on it decrypt. The
+/// drain arm of the rekey cadence is the only thing that ever releases either.
+/// Skipping the whole cadence on a node with `rekey.enabled = false` therefore
+/// pins one session and one index per accepted rekey, for the life of the peer —
+/// which is a leak that grows with every rekey the peer initiates.
+///
+/// Asserted against the peer's real state and the real allocator, not a log
+/// line: the previous session, the drain flag, the index-to-peer map and the
+/// allocator's live count all have to come back to where they started.
+#[tokio::test]
+async fn test_non_initiating_responder_completes_rekey_drain() {
+    let mut init_config = Config::new();
+    init_config.node.rekey.enabled = true;
+    init_config.node.rekey.after_secs = 1;
+    let mut resp_config = Config::new();
+    resp_config.node.rekey.enabled = false;
+
+    let mut initiator = make_hs_node(init_config).await;
+    let mut responder = make_hs_node(resp_config).await;
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(responder.node.peer_count(), 1);
+    let baseline = responder.node.index_allocator.count();
+    assert_eq!(baseline, 1, "responder holds exactly the peer's index");
+
+    let initiator_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
+
+    // The peer's rekey completes and the responder accepts it, exactly as
+    // `test_asymmetric_rekey_config_converges` establishes it must.
+    let rekey_msg3 = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
+    responder.node.handle_msg3(rekey_msg3).await;
+
+    let (old_index, transport) = {
+        let peer = responder.node.get_peer(&initiator_addr).unwrap();
+        assert!(
+            peer.pending_new_session().is_some(),
+            "the responder did not accept the rekey, so there is no drain to test"
+        );
+        (peer.our_index().unwrap(), peer.transport_id().unwrap())
+    };
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        baseline + 1,
+        "the accepted rekey holds a second index"
+    );
+
+    // The responder cuts over on the peer's first frame on the new epoch, which
+    // demotes the session it was using into the drain slot.
+    responder
+        .node
+        .get_peer_mut(&initiator_addr)
+        .unwrap()
+        .handle_peer_kbit_flip();
+
+    {
+        let peer = responder.node.get_peer(&initiator_addr).unwrap();
+        assert!(peer.is_draining(), "the cutover must start a drain window");
+        assert!(
+            peer.previous_session().is_some(),
+            "the demoted session is kept for in-flight frames"
+        );
+        assert_eq!(peer.previous_our_index(), Some(old_index));
+        assert_ne!(
+            peer.our_index(),
+            Some(old_index),
+            "the live session must have moved off the drained index"
+        );
+    }
+    assert!(
+        responder
+            .node
+            .peers_by_index
+            .contains_key(&(transport, old_index.as_u32())),
+        "the drained index stays routable while the window is open"
+    );
+
+    // Mid-window the cadence must leave it alone, or the assertion below would
+    // pass on an arm that fires unconditionally.
+    responder.node.check_rekey().await;
+    assert!(
+        responder
+            .node
+            .get_peer(&initiator_addr)
+            .unwrap()
+            .previous_session()
+            .is_some(),
+        "the drain completed before its window expired"
+    );
+
+    // Window expires. This is the only path that releases the demoted session,
+    // and a node that does not initiate rekeys still has to run it.
+    responder
+        .node
+        .get_peer_mut(&initiator_addr)
+        .unwrap()
+        .test_backdate_drain_start(std::time::Duration::from_secs(600));
+    responder.node.check_rekey().await;
+
+    let peer = responder.node.get_peer(&initiator_addr).unwrap();
+    assert!(
+        peer.previous_session().is_none(),
+        "the demoted session is pinned forever on a node that never initiates"
+    );
+    assert!(!peer.is_draining(), "the drain window must be closed");
+    assert_eq!(peer.previous_our_index(), None);
+    assert!(
+        !peer.rekey_in_progress(),
+        "a node that does not initiate must not have started a rekey of its own"
+    );
+    assert!(
+        peer.has_session() && peer.our_index().is_some(),
+        "the live session must survive the drain"
+    );
+    assert!(
+        !responder
+            .node
+            .peers_by_index
+            .contains_key(&(transport, old_index.as_u32())),
+        "the drained index is still routable, so it was never released"
+    );
+    assert_eq!(
+        responder.node.index_allocator.count(),
+        baseline,
+        "the drained index never came back to the allocator"
+    );
+    assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
 
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;

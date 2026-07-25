@@ -1409,7 +1409,6 @@ impl Node {
         // so a real rekey could land below it and be resolved as a
         // cross-connection, leaving the two ends on different session indices.
         let our_node_addr = *self.identity().node_addr();
-        let rekey_enabled = self.config().node.rekey.enabled;
 
         // Resolve the sender's declaration against the session we hold. Matched
         // ONLY against the peer this handshake authenticated as, never through a
@@ -1437,7 +1436,6 @@ impl Node {
                 rekey_in_progress: existing_peer.rekey_in_progress(),
                 existing_msg2: existing_peer.handshake_msg2().map(|m| m.to_vec()),
                 different_link: existing_peer.link_id() != link_id,
-                rekey_enabled,
                 rekey_claim,
                 our_node_addr,
             },
@@ -1450,7 +1448,6 @@ impl Node {
                 rekey_in_progress: false,
                 existing_msg2: None,
                 different_link: false,
-                rekey_enabled,
                 rekey_claim,
                 our_node_addr,
             },
