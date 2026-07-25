@@ -307,8 +307,9 @@ struct PendingConnect {
 /// link. It is **not** a packet-dispatch path, despite what this comment used
 /// to say: `find_link_by_addr` has no callers outside its own tests, and
 /// encrypted frames are dispatched by session index. Its live readers are the
-/// `should_admit_msg1` fast path and the duplicate-inbound-handshake check in
-/// `handle_msg1`.
+/// `should_admit_msg1` fast path, the duplicate-inbound-handshake check in
+/// `handle_msg1`, and the anonymous-beacon dial dedup in
+/// `poll_transport_discovery`.
 ///
 /// **Do not key a peer-identity question on it.** The address form is not
 /// canonical: an outbound dial registers the literal configured string, which
