@@ -1,11 +1,21 @@
 networks:
+  # No subnet is requested: docker assigns one from the daemon's address pool.
+  # A fixed request is honoured verbatim, so two runs asking for the same range
+  # collide on "Pool overlaps" — which is why the generated peer addresses are
+  # docker hostnames (host-a … host-f) rather than literal IPs. Docker's
+  # embedded DNS is per-network, so the same hostname in two concurrent runs
+  # resolves inside each run's own subnet.
+  #
+  # That removes one of the two obstacles to running this suite twice at once,
+  # not both. The compose project name is still fixed, so two runs that do not
+  # set COMPOSE_PROJECT_NAME share a project, and the second `up` recreates the
+  # first's containers while either `down` removes both. Nothing scopes it for
+  # this suite: it is run by hand only, so the caller has to. Do not read the
+  # floating subnet as making concurrent bare runs safe.
   acl-net:
     driver: bridge
     labels:
       - "com.corganlabs.fips-ci=1"
-    ipam:
-      config:
-        - subnet: 172.31.0.0/24
 
 x-fips-common: &fips-common
   build:
@@ -32,14 +42,13 @@ services:
     hostname: host-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-a/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-a/peers.allow:/etc/fips/peers.allow:ro
-      - ./generated-configs/node-a/peers.deny:/etc/fips/peers.deny:ro
-      - ./generated-configs/node-a/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-a/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/fips.key:/etc/fips/fips.key:ro
     networks:
-      acl-net:
-        ipv4_address: 172.31.0.10
+      - acl-net
 
   service-b:
     <<: *fips-common
@@ -47,14 +56,13 @@ services:
     hostname: host-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-b/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-b/peers.allow:/etc/fips/peers.allow:ro
-      - ./generated-configs/node-b/peers.deny:/etc/fips/peers.deny:ro
-      - ./generated-configs/node-b/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-b/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.key:/etc/fips/fips.key:ro
     networks:
-      acl-net:
-        ipv4_address: 172.31.0.11
+      - acl-net
 
   service-c:
     <<: *fips-common
@@ -62,14 +70,13 @@ services:
     hostname: host-c
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-c/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-c/peers.allow:/etc/fips/peers.allow:ro
-      - ./generated-configs/node-c/peers.deny:/etc/fips/peers.deny:ro
-      - ./generated-configs/node-c/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-c/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/fips.key:/etc/fips/fips.key:ro
     networks:
-      acl-net:
-        ipv4_address: 172.31.0.12
+      - acl-net
 
   service-d:
     <<: *fips-common
@@ -77,14 +84,13 @@ services:
     hostname: host-d
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-d/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-d/peers.allow:/etc/fips/peers.allow:ro
-      - ./generated-configs/node-d/peers.deny:/etc/fips/peers.deny:ro
-      - ./generated-configs/node-d/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-d/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-d/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-d/peers.allow:/etc/fips/peers.allow:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-d/peers.deny:/etc/fips/peers.deny:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-d/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-d/fips.key:/etc/fips/fips.key:ro
     networks:
-      acl-net:
-        ipv4_address: 172.31.0.13
+      - acl-net
 
   service-e:
     <<: *fips-common
@@ -92,12 +98,11 @@ services:
     hostname: host-e
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-e/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-e/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-e/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-e/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-e/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-e/fips.key:/etc/fips/fips.key:ro
     networks:
-      acl-net:
-        ipv4_address: 172.31.0.14
+      - acl-net
 
   service-f:
     <<: *fips-common
@@ -105,9 +110,8 @@ services:
     hostname: host-f
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-f/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-f/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-f/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-f/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-f/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-f/fips.key:/etc/fips/fips.key:ro
     networks:
-      acl-net:
-        ipv4_address: 172.31.0.15
+      - acl-net

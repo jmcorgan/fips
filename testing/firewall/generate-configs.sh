@@ -9,7 +9,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GENERATED_DIR="$SCRIPT_DIR/generated-configs"
+
+# Scoped by the per-run suffix because this directory is wiped and rewritten
+# below: two runs sharing one output directory would delete each other's
+# fixtures out from under running containers. Unset (a bare hand run, or the
+# GitHub-hosted path) it collapses to the historical "generated-configs".
+GENERATED_DIR="$SCRIPT_DIR/generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 
 # Deterministic test identities (mirrors the acl-allowlist style).
 NPUB_A="npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
@@ -32,6 +37,10 @@ node-b $NPUB_B
 EOF
 }
 
+# Peers are addressed by the docker hostname the compose file assigns (host-a,
+# host-b), not by IP. The network requests no subnet so that two concurrent
+# runs cannot collide on one address range, which means neither node's address
+# is knowable before `docker compose up`.
 echo "Generating firewall fixtures..."
 rm -rf "$GENERATED_DIR"
 
@@ -58,7 +67,7 @@ peers:
     alias: "node-b"
     addresses:
       - transport: udp
-        addr: "172.32.0.11:2121"
+        addr: "host-b:2121"
     connect_policy: auto_connect
 EOF
 
@@ -89,7 +98,7 @@ peers:
     alias: "node-a"
     addresses:
       - transport: udp
-        addr: "172.32.0.10:2121"
+        addr: "host-a:2121"
     connect_policy: auto_connect
 EOF
 

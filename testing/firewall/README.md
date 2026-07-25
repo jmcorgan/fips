@@ -24,10 +24,18 @@ actively DROP'd by the fips chain (not silently unrouted).
 
 Two FIPS nodes peered over UDP on a Docker bridge network:
 
-| Container               | Hostname | docker IPv4   | Firewall |
-|-------------------------|----------|---------------|----------|
-| `fips-fw-container-a`   | `host-a` | 172.32.0.10   | none (probe) |
-| `fips-fw-container-b`   | `host-b` | 172.32.0.11   | `fips.nft` + drop-in |
+| Container               | Hostname | Firewall |
+|-------------------------|----------|----------|
+| `fips-fw-container-a`   | `host-a` | none (probe) |
+| `fips-fw-container-b`   | `host-b` | `fips.nft` + drop-in |
+
+The bridge network requests no subnet, so docker assigns one from its own
+address pool and two concurrent runs never contend for a fixed range. No
+node's IPv4 address is therefore known before startup, and the generated peer
+stanzas address each other by docker hostname, resolved through the
+container's dnsmasq to docker's embedded DNS. The firewall assertions
+themselves are unaffected: they run over the fips0 overlay, whose addresses
+are derived from the node npubs.
 
 `node-b` mounts the production `packaging/common/fips.nft` read-only at
 `/etc/fips/fips.nft`, plus a drop-in at `/etc/fips/fips.d/services.nft`
@@ -108,4 +116,6 @@ docker compose -f testing/firewall/docker-compose.yml down
 
 ## Generated fixture location
 
-`testing/firewall/generated-configs/` (gitignored).
+`testing/firewall/generated-configs/` (gitignored), or
+`generated-configs<suffix>/` when `FIPS_CI_NAME_SUFFIX` is set, which is how
+concurrent runs keep their fixtures apart.

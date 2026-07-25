@@ -79,6 +79,12 @@ Docker service/container/hostname identifiers in this harness intentionally use
 `node-a` through `node-f`. For data-plane checks and operator examples, use the
 explicit FIPS names such as `node-a.fips` and `node-d.fips`.
 
+The bridge network requests no subnet, so docker assigns one from its own
+address pool and two concurrent runs of this harness never contend for a fixed
+range. Consequently no node's IPv4 address is known before startup, and the
+generated peer stanzas address each other by docker hostname (`host-a` …
+`host-f`), resolved through the container's dnsmasq to docker's embedded DNS.
+
 ACL paths are fixed in this branch:
 
 - `/etc/fips/peers.allow`
@@ -93,7 +99,9 @@ Mounted ACL files in this harness:
 
 Generated fixture location:
 
-- `testing/acl-allowlist/generated-configs/`
+- `testing/acl-allowlist/generated-configs/`, or
+  `generated-configs<suffix>/` when `FIPS_CI_NAME_SUFFIX` is set, which is how
+  concurrent runs keep their fixtures apart
 
 Inspect peer state:
 

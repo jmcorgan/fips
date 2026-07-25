@@ -1,43 +1,46 @@
 #!/bin/bash
 # Shared convergence wait helpers for FIPS integration tests.
 #
-# Source this file to get wait_for_links(), wait_for_peers(), and
-# wait_until_connected().
+# Source this file to get wait_for_peers() and wait_until_connected().
 #
 # Usage:
 #   source "$(dirname "$0")/../../lib/wait-converge.sh"
-#   wait_for_links <container> <min_links> [timeout_secs]
 #   wait_for_peers <container> <min_peers> [timeout_secs]
 #   wait_until_connected <ping_fn> <max_secs> <stall_secs> [poll_secs] \
 #       [near_converged_slack]
-
-# Wait until a container has at least min_links active links.
-# Returns 0 on success, 1 on timeout.
-wait_for_links() {
-    local container="$1"
-    local min_links="$2"
-    local timeout="${3:-30}"
-
-    for i in $(seq 1 "$timeout"); do
-        local count
-        count=$(docker exec "$container" fipsctl show links 2>/dev/null \
-            | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('links',[])))" 2>/dev/null || echo 0)
-        if [ "$count" -ge "$min_links" ]; then
-            echo "  $container: $count link(s) after ${i}s"
-            return 0
-        fi
-        sleep 1
-    done
-    echo "  $container: TIMEOUT waiting for $min_links link(s) after ${timeout}s"
-    return 1
-}
+#
+# There was a wait_for_links() here. It was removed rather than kept for
+# symmetry: it had no caller anywhere in the tree on any branch, and its
+# reader carried the same failure-to-zero fallback wait_for_peers does. An
+# uncalled helper cannot be wrong today, so the risk was that the first
+# caller to appear would inherit the hazard below without the reasoning
+# that goes with it. `git log` has the implementation if one is needed.
 
 # Wait until a container has at least min_peers connected peers.
 # Returns 0 on success, 1 on timeout.
+#
+# The read below falls back to 0 when the container does not answer, which
+# is safe ONLY because this is a floor: a fallback of 0 reads as "not
+# converged yet", the loop keeps polling, and a container that never answers
+# times out and returns 1. That safety is a property of the comparison, not
+# of the reader.
+#
+# A minimum of 0 inverts it. `[ 0 -ge 0 ]` is true, so the first read from a
+# dead container would satisfy the wait immediately and the caller would
+# proceed as though convergence had been observed. No caller passes 0, and
+# rejecting it here means none can start to — which is cheaper than auditing
+# every future caller, and is why this is a hard error rather than a warning.
+# A caller that genuinely wants to assert "exactly zero peers" needs a reader
+# that distinguishes no-answer from zero, not this floor.
 wait_for_peers() {
     local container="$1"
     local min_peers="$2"
     local timeout="${3:-30}"
+
+    if [ "$min_peers" -lt 1 ]; then
+        echo "  wait_for_peers: refusing a minimum of $min_peers for $container — a floor of 0 is satisfied by a container that never answered" >&2
+        return 2
+    fi
 
     for i in $(seq 1 "$timeout"); do
         local count

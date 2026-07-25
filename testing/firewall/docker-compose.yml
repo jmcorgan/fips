@@ -1,11 +1,21 @@
 networks:
+  # No subnet is requested: docker assigns one from the daemon's address pool.
+  # A fixed request is honoured verbatim, so two runs asking for the same range
+  # collide on "Pool overlaps" — which is why the generated peer addresses are
+  # docker hostnames (host-a, host-b) rather than literal IPs. Docker's embedded
+  # DNS is per-network, so the same hostname in two concurrent runs resolves
+  # inside each run's own subnet.
+  #
+  # That removes one of the two obstacles to running this suite twice at once,
+  # not both. The compose project name is still fixed, so two runs that do not
+  # set COMPOSE_PROJECT_NAME share a project, and the second `up` recreates the
+  # first's containers while either `down` removes both. The local CI runner
+  # scopes it externally (run_firewall in ci-local.sh); a bare hand run does
+  # not. Do not read the floating subnet as making concurrent bare runs safe.
   fw-net:
     driver: bridge
     labels:
       - "com.corganlabs.fips-ci=1"
-    ipam:
-      config:
-        - subnet: 172.32.0.0/24
 
 x-fips-common: &fips-common
   build:
@@ -31,12 +41,11 @@ services:
     hostname: host-a
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-a/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-a/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-a/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/fips.key:/etc/fips/fips.key:ro
     networks:
-      fw-net:
-        ipv4_address: 172.32.0.10
+      - fw-net
 
   service-b:
     <<: *fips-common
@@ -44,11 +53,10 @@ services:
     hostname: host-b
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/node-b/hosts:/etc/fips/hosts:ro
-      - ./generated-configs/node-b/fips.yaml:/etc/fips/fips.yaml:ro
-      - ./generated-configs/node-b/fips.key:/etc/fips/fips.key:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/hosts:/etc/fips/hosts:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.key:/etc/fips/fips.key:ro
       - ../../packaging/common/fips.nft:/etc/fips/fips.nft:ro
-      - ./generated-configs/node-b/fips.d:/etc/fips/fips.d:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.d:/etc/fips/fips.d:ro
     networks:
-      fw-net:
-        ipv4_address: 172.32.0.11
+      - fw-net

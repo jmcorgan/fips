@@ -180,6 +180,47 @@ check "case4: returns 0 with 4 args" "$c4_rc_ok" "rc=$rc"
 c4_hold_ok=1; echo "$out" | grep -q "$HOLD_MSG" && c4_hold_ok=0
 check "case4: default slack triggered near-converged hold" "$c4_hold_ok"
 
+# --- Case 5: wait_for_peers refuses a floor of zero -------------------
+#
+# The reader inside wait_for_peers falls back to 0 when a container does
+# not answer. That is safe against a floor of 1 or more, where 0 reads as
+# "not converged yet", and unsafe against a floor of 0, where the first
+# read from a dead container satisfies the wait immediately. This case is
+# the break-what-it-guards check for the rejection: drive the guard with a
+# floor of 0 and confirm it refuses, then drive the same dead container
+# with a floor of 1 and confirm the refusal is specific to the dangerous
+# input rather than a blanket failure.
+#
+# `docker` is stubbed to fail, which is what an unreachable container looks
+# like to this reader, so no container or network is involved and the suite
+# stays hermetic.
+echo
+echo "== Case 5: wait_for_peers refuses a zero floor =="
+docker() { return 1; }
+
+out=$(wait_for_peers stub-container 0 2 2>&1); rc=$?
+echo "$out"
+c5_reject_ok=1; [ "$rc" -eq 2 ] && c5_reject_ok=0
+check "case5: floor of 0 is refused" "$c5_reject_ok" "rc=$rc"
+c5_msg_ok=1; echo "$out" | grep -q "refusing a minimum" && c5_msg_ok=0
+check "case5: refusal names the reason" "$c5_msg_ok"
+# The pre-guard behaviour, asserted so a regression is visible rather than
+# quiet: without the rejection this returned 0 on its first iteration
+# against a container that never answered.
+c5_notpass_ok=1; [ "$rc" -ne 0 ] && c5_notpass_ok=0
+check "case5: floor of 0 does not report success" "$c5_notpass_ok" "rc=$rc"
+
+start=$SECONDS
+out=$(wait_for_peers stub-container 1 2 2>&1); rc=$?
+elapsed=$((SECONDS - start))
+echo "$out"
+c5_floor1_ok=1; [ "$rc" -eq 1 ] && c5_floor1_ok=0
+check "case5: floor of 1 times out rather than being refused" "$c5_floor1_ok" "rc=$rc"
+c5_polled_ok=1; [ "$elapsed" -ge 2 ] && c5_polled_ok=0
+check "case5: floor of 1 polled its full budget" "$c5_polled_ok" "elapsed=${elapsed}s >= 2s"
+
+unset -f docker
+
 # --- Summary ----------------------------------------------------------
 echo
 echo "=============================================="

@@ -412,15 +412,20 @@ ci_teardown() {
         --images "$CI_IMAGE_TEST $CI_IMAGE_APP" \
         --veth-suffixes "${_suffixes[*]}" >/dev/null || true
 
-    # 3. The static suite's generated configs are per-run (a shared directory
-    #    would let concurrent runs overwrite each other's node configs), so
-    #    they are this run's to remove. Only on a green run: after a failure
-    #    they are the evidence of what the failing nodes were actually
+    # 3. The static and firewall suites' generated configs are per-run (a
+    #    shared directory would let concurrent runs overwrite each other's node
+    #    configs), so they are this run's to remove. Only on a green run: after
+    #    a failure they are the evidence of what the failing nodes were actually
     #    configured with. Guarded on a non-empty suffix too, since without one
     #    the path is the unscoped working directory a developer uses by hand,
     #    which is not ours to delete.
+    #
+    #    Every suite whose configs become per-run owes a line here. acl-allowlist
+    #    also generates per-run now but is not in this runner's suite list, so
+    #    this teardown never creates its directory and must not remove one.
     if [[ $run_status -eq 0 && -n "${CI_RUN_NAME_SUFFIX:-}" ]]; then
         rm -rf "$SCRIPT_DIR/static/generated-configs${CI_RUN_NAME_SUFFIX}"
+        rm -rf "$SCRIPT_DIR/firewall/generated-configs${CI_RUN_NAME_SUFFIX}"
     fi
 }
 
