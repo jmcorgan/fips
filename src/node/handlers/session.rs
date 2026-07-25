@@ -2140,6 +2140,15 @@ impl Node {
                 }
                 if let Err(e) = self.send_ipv6_packet(&dest_addr, &ipv6_packet).await {
                     debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
+                    // An established session can still have no route when its
+                    // coordinates were never learned or went stale — e.g. a
+                    // platform-pushed peer (Wi-Fi Aware / LAN) whose Noise session
+                    // came up before tree discovery. Unlike session initiation
+                    // (below), this path didn't trigger a lookup, so the route
+                    // never warmed and every packet was silently dropped. Kick
+                    // discovery (rate-limited internally); the app's retransmit
+                    // then succeeds once coordinates arrive.
+                    self.maybe_initiate_lookup(&dest_addr).await;
                 }
                 return;
             }

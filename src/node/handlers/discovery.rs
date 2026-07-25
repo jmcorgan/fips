@@ -439,13 +439,29 @@ impl Node {
         let origin_coords = self.tree_state().my_coords().clone();
         let request = LookupRequest::generate(*target, origin, origin_coords, ttl, 0);
 
-        // Send only to tree peers whose bloom filter contains the target
-        let peer_addrs: Vec<NodeAddr> = self
+        // Prefer tree peers whose bloom filter contains the target.
+        let mut peer_addrs: Vec<NodeAddr> = self
             .peers
             .iter()
             .filter(|(addr, peer)| self.is_tree_peer(addr) && peer.may_reach(target))
             .map(|(addr, _)| *addr)
             .collect();
+
+        // Edge fallback: if no tree peer advertises the target — always the case
+        // for a *directly connected* target, since a neighbour is never in another
+        // peer's bloom — flood the request to EVERY peer we can send to, not just
+        // tree peers. Crucially this includes the target itself when it's a direct
+        // (non-tree) neighbour: a node answers a lookup for its own address, so the
+        // querier learns its coordinates and can route to it. Without this a
+        // mesh-edge node can't reach its own neighbours.
+        if peer_addrs.is_empty() {
+            peer_addrs = self
+                .peers
+                .iter()
+                .filter(|(_, peer)| peer.can_send())
+                .map(|(addr, _)| *addr)
+                .collect();
+        }
 
         let peer_count = peer_addrs.len();
 
@@ -509,14 +525,22 @@ impl Node {
             return;
         }
 
-        // Bloom filter pre-check: if no peer's filter contains the target,
-        // it's not in the mesh — skip the lookup and record as failure.
+        // Bloom filter pre-check: normally, if no peer's filter contains the
+        // target we skip. But a *directly connected* peer is never in any other
+        // peer's bloom (you reach it directly, not through them), so a mesh-edge
+        // node — one whose only peers are direct links (BLE / Wi-Fi Aware / LAN),
+        // with sparse blooms — could never discover coordinates for its own
+        // neighbours and would fail to route to them. Only suppress on a bloom
+        // miss when we have several peers whose blooms we can actually trust;
+        // otherwise fall through and flood the lookup (bounded by TTL + the
+        // `sent == 0` guard below).
         let reachable = self.peers.values().any(|peer| peer.may_reach(dest));
-        if !reachable {
+        if !reachable && self.peers.len() > 2 {
             self.metrics().discovery.req_bloom_miss.inc();
             self.discovery_backoff.record_failure(dest);
             debug!(
                 target_node = %self.peer_display_name(dest),
+                peers = self.peers.len(),
                 "Discovery skipped, target not in any peer bloom filter"
             );
             return;

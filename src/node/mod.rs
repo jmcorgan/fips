@@ -2910,6 +2910,26 @@ impl Node {
         (outbound_tx, tun_rx)
     }
 
+    /// Set up an **app-owned DNS resolver**: an embedder that answers `.fips`
+    /// queries itself (e.g. the Android VpnService packet pump, which has no
+    /// system DNS socket) returns each resolved identity through the sender this
+    /// returns. The `run_rx_loop` consumes them and calls
+    /// [`Self::register_identity`] — the same identity-cache population (and hence
+    /// route warming) the built-in [`crate::upper::dns::run_dns_responder`] does.
+    ///
+    /// Without this the embedder's answers resolve the AAAA but leave the node's
+    /// identity cache empty, so the first outbound packet to a freshly-resolved
+    /// `<npub>.fips` has no cached pubkey to open a session with and is dropped.
+    ///
+    /// Call after [`Node::new`] and **before** [`Self::start`], like
+    /// [`Self::enable_app_owned_tun`].
+    pub fn enable_app_owned_dns(&mut self) -> crate::upper::dns::DnsIdentityTx {
+        let size = self.config().node.buffers.tun_channel.max(1);
+        let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(size);
+        self.dns_identity_rx = Some(identity_rx);
+        identity_tx
+    }
+
     // === Sending ===
 
     /// Encrypt and send a link-layer message to an authenticated peer.
