@@ -42,6 +42,28 @@ fn populate_all_coord_caches(nodes: &mut [TestNode]) {
     }
 }
 
+/// Render each node's address and elected tree root.
+///
+/// Attached to mixed-profile failure messages: the failures worth diagnosing
+/// there are root-election partitions, which are keyed on the random per-node
+/// address ordering and so are invisible without the addresses that produced
+/// them.
+fn mesh_state(nodes: &[TestNode]) -> String {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, tn)| {
+            format!(
+                "node[{i}] addr={} root={} self_rooted={}",
+                tn.node.node_addr(),
+                tn.node.tree_state().root(),
+                tn.node.tree_state().is_root()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 // ============================================================================
 // Unit tests: SessionEntry data structure
 // ============================================================================
@@ -624,14 +646,14 @@ async fn mixed_profile_nodes_converge_and_forward() {
         .map(|tn| (*tn.node.node_addr(), tn.node.identity().pubkey_full()))
         .collect();
 
-    // Direct reachability the Docker suite asserted: F<->F, F<->N, F<->L
-    // between adjacent nodes, each checked end to end.
+    // Reachability the Docker suite asserted: F<->F, F<->N and F<->L between
+    // adjacent nodes, plus the Leaf<->Full multi-hop pair D<->B routed through
+    // the Full node A between them. Each is checked end to end.
     //
-    // The Docker suite also asserted a Leaf->Full multi-hop (D->B via A). That
-    // pair is deliberately NOT covered here: on the XX line a Leaf node's
-    // multi-hop session initiation is not yet reliable, so the Docker
-    // mixed-profile suite is kept in place for that path rather than retired
-    // against a flaky in-process assertion.
+    // Unlike `leaf_smallest_addr_does_not_partition_multihop`, which pins the
+    // Leaf to the smallest NodeAddr to make one partition mode deterministic,
+    // this mesh draws its identities at random, so the multi-hop pair here is
+    // exercised against whatever root election the address ordering produces.
     let reach: &[(usize, usize)] = &[
         (0, 1), // A -> B  Full <-> Full
         (1, 0), // B -> A
@@ -641,37 +663,42 @@ async fn mixed_profile_nodes_converge_and_forward() {
         (2, 1), // C -> B
         (0, 3), // A -> D  Full <-> Leaf
         (3, 0), // D -> A
+        (3, 1), // D -> B  Leaf -> Full, two hops via A
+        (1, 3), // B -> D  Full -> Leaf, two hops via A
     ];
 
     for &(src, dst) in reach {
         let (dst_addr, dst_pubkey) = info[dst];
         let src_addr = info[src].0;
-        nodes[src]
-            .node
-            .initiate_session(dst_addr, dst_pubkey)
-            .await
-            .unwrap_or_else(|e| panic!("initiate_session {src}->{dst} failed: {e:?}"));
+        let initiated = nodes[src].node.initiate_session(dst_addr, dst_pubkey).await;
+        if let Err(e) = initiated {
+            panic!(
+                "initiate_session {src}->{dst} failed: {e:?}; {}",
+                mesh_state(&nodes)
+            );
+        }
         drain_to_quiescence(&mut nodes).await;
 
         let payload = format!("mp-{src}-{dst}").into_bytes();
         let src_fips = crate::FipsAddress::from_node_addr(&src_addr);
         let dst_fips = crate::FipsAddress::from_node_addr(&dst_addr);
         let ipv6 = build_ipv6_packet(&src_fips, &dst_fips, &payload);
-        nodes[src]
-            .node
-            .send_ipv6_packet(&dst_addr, &ipv6)
-            .await
-            .unwrap_or_else(|e| panic!("send {src}->{dst} failed: {e:?}"));
+        let sent = nodes[src].node.send_ipv6_packet(&dst_addr, &ipv6).await;
+        if let Err(e) = sent {
+            panic!("send {src}->{dst} failed: {e:?}; {}", mesh_state(&nodes));
+        }
         drain_to_quiescence(&mut nodes).await;
 
         // TUN receives the decompressed IPv6 packet; match the upper-layer
         // payload after the 40-byte header, as the other forwarding tests do.
         let found = std::iter::from_fn(|| tun_rx[dst].try_recv().ok())
             .any(|pkt| pkt.len() >= 40 && pkt[40..] == payload[..]);
-        assert!(
-            found,
-            "datagram {src}->{dst} must be delivered to node {dst}'s TUN"
-        );
+        if !found {
+            panic!(
+                "datagram {src}->{dst} must be delivered to node {dst}'s TUN; {}",
+                mesh_state(&nodes)
+            );
+        }
     }
 
     cleanup_nodes(&mut nodes).await;
