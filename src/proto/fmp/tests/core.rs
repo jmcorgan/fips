@@ -161,13 +161,37 @@ fn rekey_expired_drain_and_trigger_both_fire() {
     );
 }
 
+/// The send-counter arm of the rekey trigger, pinned at its boundary through
+/// the real `poll_rekey` rather than a reimplementation of its predicate.
+///
+/// Firing at the threshold catches the arm being deleted, its comparison
+/// narrowed to `>`, or its comparison inverted. The silence-below half is what
+/// this test adds over that: it catches the arm being *widened* below its
+/// configured bound. Measured rather than assumed — replacing the bound with
+/// `p.counter >= 1` reds exactly one test in the whole library suite, this one,
+/// while a bound removed altogether is already caught by the time arm's own
+/// negative tests.
+///
+/// The time arm is held off in both halves — `elapsed_secs` stays 0 against a
+/// 100 s threshold with no jitter — so the counter is provably what decides.
 #[test]
-fn rekey_triggers_on_counter() {
+fn rekey_counter_arm_fires_at_threshold_and_is_silent_below() {
     let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x13);
-    p.counter = 1_000; // == after_messages
-    let actions = fmp.poll_rekey(vec![p], &cfg());
-    assert!(matches!(actions[0], ConnAction::InitiateRekey { .. }));
+
+    let mut below = peer_snapshot(0x13);
+    below.counter = 999; // one below after_messages
+    assert!(
+        fmp.poll_rekey(vec![below], &cfg()).is_empty(),
+        "a send counter one below the threshold must not trigger a rekey"
+    );
+
+    let mut at = peer_snapshot(0x13);
+    at.counter = 1_000; // == after_messages
+    let actions = fmp.poll_rekey(vec![at], &cfg());
+    assert!(
+        matches!(actions[0], ConnAction::InitiateRekey { .. }),
+        "a send counter at the threshold must trigger a rekey"
+    );
 }
 
 #[test]

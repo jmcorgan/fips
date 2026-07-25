@@ -1314,36 +1314,14 @@ mod overlapping_epoch_tests {
         );
     }
 
-    // Rekey-trigger threshold: elapsed time (with symmetric jitter applied)
-    // OR the send counter crossing its configured bound.
-    #[test]
-    fn rekey_trigger_threshold_arithmetic() {
-        let after_secs = 100u64;
-        let after_messages = 1_000u64;
-
-        // Jitter is always within [-REKEY_JITTER_SECS, +REKEY_JITTER_SECS].
-        let (_s, recv) = xk_pair(1, 2);
-        let entry = entry_with_current(recv);
-        let jitter = entry.rekey_jitter_secs();
-        assert!(
-            jitter.abs() <= REKEY_JITTER_SECS,
-            "jitter within configured bound"
-        );
-
-        // Effective time threshold applies the symmetric jitter.
-        let effective_after = after_secs.saturating_add_signed(jitter);
-
-        // Reproduce the policy's OR predicate directly.
-        let triggers =
-            |elapsed: u64, counter: u64| elapsed >= effective_after || counter >= after_messages;
-
-        // Time arm: fires at/after the effective threshold, not below it.
-        assert!(!triggers(effective_after - 1, 0), "below time threshold");
-        assert!(triggers(effective_after, 0), "at time threshold");
-        // Counter arm: fires independently of elapsed time.
-        assert!(!triggers(0, after_messages - 1), "below counter threshold");
-        assert!(triggers(0, after_messages), "at counter threshold");
-    }
+    // The rekey trigger's own threshold arithmetic is tested against the real
+    // predicate in src/proto/fmp/tests/core.rs, which drives poll_rekey. A test
+    // here previously reproduced that OR predicate as a local closure and
+    // asserted against its own copy, so it could not fail for the reason it
+    // existed: deleting the counter arm from the trigger left it green. Its one
+    // assertion over real code, that a fresh entry's jitter lies within the
+    // symmetric bound, is covered over 100 samples by
+    // test_session_entry_rekey_jitter_in_range in src/node/tests/session.rs.
 
     // Dampening boundary: within `dampening_ms` of the peer's rekey msg1, local
     // initiation is suppressed; at/after the window it is not.
