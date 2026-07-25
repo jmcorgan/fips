@@ -26,7 +26,7 @@
 #   -h, --help           Show this help
 #
 # Integration suites (default coverage):
-#   static-mesh, static-chain, mixed-profile, gateway,
+#   static-mesh, static-chain, gateway,
 #   firewall, nat-cone, nat-symmetric,
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
@@ -88,6 +88,19 @@
 #                    establish_outbound decision tests (src/proto/fmp/tests/core.rs,
 #                    src/peer/machine.rs). Still runnable by hand:
 #                    bash testing/static/scripts/rekey-test.sh
+#   mixed-profile    Retired from CI 2026-07-25 as redundant, not unrunnable.
+#                    Mixed Full/NonRouting/Leaf convergence, peer degrees and
+#                    every reachability pair it asserted, including the
+#                    Leaf-to-Full multi-hop pair through the Full node between
+#                    them, are covered in-process over loopback by
+#                    mixed_profile_nodes_converge_and_forward
+#                    (src/node/tests/session.rs). The in-process test covers a
+#                    superset: it asserts the multi-hop path in BOTH directions
+#                    where this suite covered one. Retired only after the
+#                    multi-hop assertion was shown to discriminate — reverting
+#                    the leaf root-election gate reds it in roughly a third of
+#                    runs — rather than on a green run alone. Still runnable by
+#                    hand: bash testing/static/scripts/mixed-profile-test.sh
 #   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse
 #                    Chaos scenarios excluded from CHAOS_SUITES. The two
 #                    ecn-ab ones are halves of the manual comparison above.
@@ -147,7 +160,6 @@ ONLY_SUITE=""
 
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
-MIXED_PROFILE_SUITES=(mixed-profile)
 # Each entry: "display-name scenario [--flag value ...]"
 CHAOS_SUITES=(
     "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
@@ -210,9 +222,6 @@ list_suites() {
     echo ""
     echo "  Static topologies:"
     for s in "${STATIC_SUITES[@]}"; do echo "    $s"; done
-    echo ""
-    echo "  Mixed profile:"
-    for s in "${MIXED_PROFILE_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Gateway:"
     for s in "${GATEWAY_SUITES[@]}"; do echo "    $s"; done
@@ -561,31 +570,6 @@ run_static() {
     record "static-$topology" $rc
 }
 
-# Run the mixed-profile integration test (Full + NonRouting + Leaf)
-run_mixed_profile() {
-    local compose="testing/static/docker-compose.yml"
-    local rc=0
-
-    info "[mixed-profile] Generating configs"
-    bash testing/static/scripts/generate-configs.sh mixed-profile || { record "mixed-profile" 1; return; }
-    bash testing/static/scripts/mixed-profile-test.sh inject-config || { record "mixed-profile" 1; return; }
-
-    info "[mixed-profile] Starting containers"
-    docker compose -f "$compose" --profile mixed-profile up -d || { record "mixed-profile" 1; return; }
-
-    info "[mixed-profile] Running mixed-profile test"
-    if bash testing/static/scripts/mixed-profile-test.sh; then
-        rc=0
-    else
-        rc=1
-        info "[mixed-profile] Collecting failure logs"
-        docker compose -f "$compose" --profile mixed-profile logs --no-color 2>&1 | tail -100
-    fi
-
-    docker compose -f "$compose" --profile mixed-profile down --volumes --remove-orphans 2>/dev/null
-    record "mixed-profile" $rc
-}
-
 # Run a chaos scenario
 run_chaos() {
     local name="$1"
@@ -842,11 +826,6 @@ run_integration() {
         run_static "$topology"
     done
 
-    # Mixed-profile (Full + NonRouting + Leaf)
-    for _suite in "${MIXED_PROFILE_SUITES[@]}"; do
-        run_mixed_profile
-    done
-
     # Gateway
     run_gateway
 
@@ -954,8 +933,6 @@ run_suite() {
     case "$suite" in
         static-mesh|static-chain)
             run_static "${suite#static-}" ;;
-        mixed-profile)
-            run_mixed_profile ;;
         gateway)
             run_gateway ;;
         firewall)
