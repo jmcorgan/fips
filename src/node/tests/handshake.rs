@@ -1620,6 +1620,13 @@ async fn drive_to_msg3(
 /// them well past it: the trigger is `after_secs + jitter` with jitter drawn from
 /// [-15, +15], so a margin under 15s makes firing depend on the draw and the test
 /// flaky.
+///
+/// The callers configure `after_secs = 30` rather than something smaller. Config
+/// validation rejects any interval at or below the jitter bound, since such a
+/// value saturates to zero on a negative draw and rekeys on sight for roughly
+/// half of sessions, so a test cannot ask for one either — the node would fail to
+/// build. Thirty clears the bound and still leaves the 120s backdate these tests
+/// use a margin of 75s against the worst draw.
 async fn drive_rekey_to_msg3(initiator: &mut HsNode, responder: &mut HsNode) -> ReceivedPacket {
     initiator.node.check_rekey().await;
 
@@ -1639,7 +1646,7 @@ async fn test_msg3_dual_rekey_won_frees_index() {
     let make_config = || {
         let mut c = Config::new();
         c.node.rekey.enabled = true;
-        c.node.rekey.after_secs = 1;
+        c.node.rekey.after_secs = 30;
         c
     };
 
@@ -1736,7 +1743,7 @@ async fn test_msg3_resend_msg2_frees_index() {
     // `test_asymmetric_rekey_config_converges` exists to forbid.
     let mut init_config = Config::new();
     init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 1;
+    init_config.node.rekey.after_secs = 30;
     let config = Config::new();
 
     let mut initiator = make_hs_node(init_config).await;
@@ -1947,10 +1954,10 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
     // classifier reads no config.
     let mut init_config = Config::new();
     init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 1;
+    init_config.node.rekey.after_secs = 30;
     let mut config = Config::new();
     config.node.rekey.enabled = true;
-    config.node.rekey.after_secs = 1;
+    config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(init_config).await;
     let mut responder = make_hs_node(config).await;
@@ -2106,7 +2113,7 @@ async fn test_count_triggered_rekey_on_young_session_converges() {
 async fn test_asymmetric_rekey_config_converges() {
     let mut init_config = Config::new();
     init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 1;
+    init_config.node.rekey.after_secs = 30;
     // The responder never initiates a rekey of its own. It must still accept the
     // peer's, and must still cut over to it.
     let mut resp_config = Config::new();
@@ -2220,7 +2227,7 @@ async fn test_asymmetric_rekey_config_converges() {
 async fn test_non_initiating_responder_completes_rekey_drain() {
     let mut init_config = Config::new();
     init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 1;
+    init_config.node.rekey.after_secs = 30;
     let mut resp_config = Config::new();
     resp_config.node.rekey.enabled = false;
 
@@ -2366,7 +2373,7 @@ async fn test_fresh_dial_crossing_our_rekey_converges() {
     let make_config = || {
         let mut c = Config::new();
         c.node.rekey.enabled = true;
-        c.node.rekey.after_secs = 1;
+        c.node.rekey.after_secs = 30;
         c
     };
 
@@ -2611,7 +2618,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
 async fn test_rekey_msg2_foreign_static_rejected() {
     let mut rekey_config = Config::new();
     rekey_config.node.rekey.enabled = true;
-    rekey_config.node.rekey.after_secs = 1;
+    rekey_config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(rekey_config).await;
     let mut responder = make_hs_node(Config::new()).await;
@@ -2754,7 +2761,7 @@ async fn test_rekey_msg2_foreign_static_rejected() {
 async fn test_rekey_msg2_matching_static_installs() {
     let mut rekey_config = Config::new();
     rekey_config.node.rekey.enabled = true;
-    rekey_config.node.rekey.after_secs = 1;
+    rekey_config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(rekey_config).await;
     let mut responder = make_hs_node(Config::new()).await;
