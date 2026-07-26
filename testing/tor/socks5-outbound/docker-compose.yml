@@ -24,7 +24,7 @@ services:
       tor-test:
 
   fips-a:
-    image: fips-test:latest
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
     cap_add:
       - NET_ADMIN
     devices:
@@ -45,7 +45,7 @@ services:
       tor-test:
 
   fips-b:
-    image: fips-test:latest
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
     cap_add:
       - NET_ADMIN
     devices:

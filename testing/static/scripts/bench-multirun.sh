@@ -137,7 +137,7 @@ ping_path() {
 # steady state, which is what real-world FIPS deployments see. To
 # force on-wire multihop, isolate nodes on distinct docker networks.
 case "$PROFILE" in
-    mesh|mesh-public)
+    mesh)
         # Static-peer paths only — without mDNS / a Nostr relay in the
         # test container set, non-adjacent pairs (A↔B, A↔C) can't
         # establish direct UDP and the bench would either fail

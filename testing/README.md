@@ -16,8 +16,6 @@ configurations.
 | ----------- | ----- | --------- | -------------------------------- |
 | mesh        | 5     | UDP       | Sparse mesh, 6 links, multi-hop  |
 | chain       | 5     | UDP       | Linear chain, max 4-hop paths    |
-| mesh-public | 5+1   | UDP       | Mesh with external public node   |
-| tcp-chain   | 3     | TCP       | Linear chain over TCP (port 8443) |
 | rekey       | 5     | UDP       | Rekey integration test topology  |
 
 ### [tor/](tor/) -- Tor Transport Integration
@@ -95,8 +93,21 @@ flight) never collide:
 - **Compose projects** are named `fipsci_<run-id>_<suite>`, so
   container, network, and volume names are all prefixed per run.
 - **Build images** are tagged `fips-test:<run-id>` and
-  `fips-test-app:<run-id>` (exported as `FIPS_TEST_IMAGE` /
-  `FIPS_TEST_APP_IMAGE` for the compose consumers).
+  `fips-test-app:<run-id>`, exported as `FIPS_TEST_IMAGE` /
+  `FIPS_TEST_APP_IMAGE`, and **every** compose file and suite script reads
+  those. The run does not write `fips-test:latest` at all: a bridge back to
+  that shared mutable name would let a consumer that had been missed keep
+  working while resolving whichever concurrent run wrote the tag last.
+  `:latest` stays the hand-build name, produced by
+  `testing/scripts/build.sh`, and remains the default every consumer falls
+  back to when the variables are unset.
+- **The build context** is a per-run copy at `testing/docker-<run-id>/`,
+  exported as `FIPS_BUILD_CONTEXT`. It is absolute because compose resolves
+  a relative build context against the compose file's own directory rather
+  than the working directory. `testing/docker/` is the hand-run context and
+  a CI run does not write to it. Without this, two runs race on the contents
+  of one directory and either can build a correctly-per-run-tagged image
+  from the other's binaries.
 - Each parallel chaos child gets a unique, non-overlapping `/24` in
   `10.30.x` (via the sim `--subnet` override). `10.30.x` sits outside
   Docker's default address pool and the fixed-subnet suites' `172.x`

@@ -125,7 +125,11 @@ if ! docker info &> /dev/null; then
     exit 1
 fi
 
-DOCKER_DIR="$CHAOS_DIR/../docker"
+# A harness that scopes its build context per run passes it in
+# FIPS_BUILD_CONTEXT and stops writing to the shared directory, so checking the
+# shared one would either fail on a clean checkout or, worse, pass while
+# reading a stale binary that is not the one under test.
+DOCKER_DIR="${FIPS_BUILD_CONTEXT:-$CHAOS_DIR/../docker}"
 if [ ! -f "$DOCKER_DIR/fips" ]; then
     echo "Error: FIPS binary not found at $DOCKER_DIR/fips" >&2
     echo "Run testing/scripts/build.sh first" >&2

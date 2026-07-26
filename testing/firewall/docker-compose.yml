@@ -19,8 +19,12 @@ networks:
 
 x-fips-common: &fips-common
   build:
-    context: ../docker
-  image: fips-test:latest
+    # The harness scopes its build context per run and passes it here; the
+    # shared directory is the hand-run default. Compose resolves a relative
+    # value against THIS file's directory, so the harness must export an
+    # absolute path.
+    context: ${FIPS_BUILD_CONTEXT:-../docker}
+  image: ${FIPS_TEST_IMAGE:-fips-test:latest}
   entrypoint: ["/usr/local/bin/entrypoint.sh"]
   cap_add:
     - NET_ADMIN

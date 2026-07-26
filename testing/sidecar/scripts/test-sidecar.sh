@@ -115,7 +115,7 @@ trap cleanup EXIT
 
 if [[ "${1:-}" != "--skip-build" ]]; then
     log "Building test images..."
-    DOCKER_DIR="$(cd "$SIDECAR_DIR/../docker" && pwd)"
+    DOCKER_DIR="${FIPS_BUILD_CONTEXT:-$(cd "$SIDECAR_DIR/../docker" && pwd)}"
     docker build -t fips-test:latest "$DOCKER_DIR"
     docker build -t fips-test-app:latest -f "$DOCKER_DIR/Dockerfile.app" "$DOCKER_DIR"
 fi

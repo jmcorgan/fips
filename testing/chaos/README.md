@@ -67,19 +67,12 @@ Explicit topologies exercising non-UDP transports.
 | ------------- | ----- | -------------- | ----- | -------- | ----- | ---------- | ------------------------------------------ |
 | ethernet-only | 4     | Ethernet       | Ring  | 90s      | yes   | --         | AF_PACKET transport with beacon discovery  |
 | ethernet-mesh | 6     | UDP + Ethernet | Mesh  | 120s     | yes   | yes        | Mixed UDP/Ethernet, netem mutation + flaps |
-| tcp-only      | 4     | TCP            | Ring  | 90s      | yes   | --         | TCP transport with static peer config      |
-| tcp-chain     | 4     | TCP            | Chain | 90s      | yes   | --         | TCP multi-hop routing through chain        |
 | tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps      |
 
 - **ethernet-only**: 4-node ring on raw Ethernet (AF_PACKET). Peers discovered
   via beacons, not static config. Minimal netem (1-5ms delay).
 - **ethernet-mesh**: Mirrors `tcp-mesh` topology but with Ethernet instead of
   TCP. UDP edges use static config; Ethernet edges use beacon discovery.
-- **tcp-only**: 4-node ring using TCP on port 8443. Tests connect-on-send,
-  FMP framing over TCP, and reconnection. Netem enabled (1-10ms delay, 0-1%
-  loss).
-- **tcp-chain**: 4-node linear chain, all TCP. Tests multi-hop routing over
-  TCP-only mesh.
 - **tcp-mesh**: 6-node mesh with 4 UDP and 3 TCP edges. Both transports use
   static peer config. Netem mutation (30% fraction, every 20-40s) and link
   flaps (1 link max, 10-20s down).

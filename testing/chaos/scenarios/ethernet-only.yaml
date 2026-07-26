@@ -50,10 +50,11 @@ traffic:
 # A 4-node mesh forms a spanning tree: one root and three nodes
 # with a parent. All six provably-completed archived runs show exactly
 # that, so these are the shape of a converged mesh rather than a
-# tolerance fitted to observations. This is currently the only
-# assertion covering Ethernet transport anywhere in CI: the three
-# tests in src/node/tests/ethernet.rs are #[ignore]d for requiring
-# CAP_NET_RAW and neither runner passes --ignored.
+# tolerance fitted to observations. This is the only assertion covering
+# Ethernet transport anywhere in CI, and it covers the control plane
+# only: traffic is disabled above, so no datagram crosses an Ethernet
+# link in any test. Framing, the length field that trims NIC minimum-
+# frame padding, and AEAD over Ethernet are all unexercised as a result.
 assertions:
   baseline:
     min_nodes_reporting: 4

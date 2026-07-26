@@ -135,9 +135,10 @@ require_docker() {
 }
 
 require_test_image() {
-    if ! docker image inspect fips-test:latest >/dev/null 2>&1; then
-        echo "ERROR: fips-test:latest not present" >&2
-        echo "Build it once with:  bash testing/ci-local.sh --build-only" >&2
+    local img="${FIPS_TEST_IMAGE:-fips-test:latest}"
+    if ! docker image inspect "$img" >/dev/null 2>&1; then
+        echo "ERROR: $img not present" >&2
+        echo "Build it once with:  bash testing/scripts/build.sh" >&2
         exit 2
     fi
 }

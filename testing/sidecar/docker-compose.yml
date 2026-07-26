@@ -14,7 +14,7 @@ networks:
 
 services:
   fips:
-    image: fips-test:latest
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
     hostname: fips-sidecar
     labels:
       - "com.corganlabs.fips-ci=1"
@@ -40,7 +40,7 @@ services:
         ipv4_address: ${FIPS_IPV4:-172.20.1.20}
 
   app:
-    image: fips-test-app:latest
+    image: ${FIPS_TEST_APP_IMAGE:-fips-test-app:latest}
     labels:
       - "com.corganlabs.fips-ci=1"
     network_mode: "service:fips"

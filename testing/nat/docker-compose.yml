@@ -18,7 +18,7 @@ volumes:
   relay-data:
 
 x-fips-common: &fips-common
-  image: fips-test:latest
+  image: ${FIPS_TEST_IMAGE:-fips-test:latest}
   cap_add:
     - NET_ADMIN
   devices:
@@ -325,7 +325,7 @@ services:
         ipv4_address: 172.31.10.51
 
   stun-fault-shim:
-    image: fips-test:latest
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
     profiles: ["stun-faults"]
     container_name: fips-nat-stun-fault-shim${FIPS_CI_NAME_SUFFIX:-}
     depends_on:

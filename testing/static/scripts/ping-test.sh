@@ -93,7 +93,7 @@ if [ "$PROFILE" = "chain" ]; then
     wait_for_peers fips-node-c${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
     wait_for_peers fips-node-d${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
     wait_for_peers fips-node-e${FIPS_CI_NAME_SUFFIX:-} 1 20 || true
-elif [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
+elif [ "$PROFILE" = "mesh" ]; then
     # Mesh: check all nodes reach their configured peer counts
     wait_for_peers fips-node-a${FIPS_CI_NAME_SUFFIX:-} 2 20 || true
     wait_for_peers fips-node-b${FIPS_CI_NAME_SUFFIX:-} 1 20 || true
@@ -105,7 +105,7 @@ else
     # section below is guarded by these same profile names, so the script
     # ran no assertion at all and exited 0. A typo in the caller's profile
     # argument produced a green run that tested nothing.
-    echo "ERROR: unknown profile '$PROFILE' (expected: chain, mesh, mesh-public)" >&2
+    echo "ERROR: unknown profile '$PROFILE' (expected: chain, mesh)" >&2
     exit 2
 fi
 # Wait for full pairwise connectivity, progress-aware: the actual pings
@@ -119,7 +119,7 @@ wait_until_connected ping_all_quiet 45 15 || true
 PASSED=0
 FAILED=0
 
-if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
+if [ "$PROFILE" = "mesh" ]; then
     # Sparse mesh topology: A-B, B-C, C-D, D-E, E-A, A-D
     # Test all 20 directed pairs (5 nodes × 4 targets each)
     echo ""

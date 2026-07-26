@@ -2,7 +2,7 @@
 # Generate FIPS node configuration files from template and topology definition.
 #
 # Usage: ./generate-configs.sh <topology> [mesh-name]
-#   topology:  mesh, mesh-public, chain, etc.
+#   topology:  mesh, chain, etc.
 #   mesh-name: optional; when given, docker node identities are derived
 #              deterministically via sha256(mesh-name|node-id)
 

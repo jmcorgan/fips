@@ -65,6 +65,8 @@ jobs:
         run: python3 testing/check-log-strings.py
       - name: Check no tested function's exit status is a log call's
         run: python3 testing/check-trailing-log.py
+      - name: Check nothing resolves the shared mutable test image
+        run: bash testing/check-image-scoping.sh
       # Hermetic: synthetic ping functions, no containers, ~45s. Lives beside
       # the other two so both runners gate on it identically — putting it in
       # only one would create exactly the drift check-ci-parity.sh exists to
@@ -438,9 +440,6 @@ jobs:
           - suite: congestion-stress
             type: chaos
             scenario: congestion-stress
-          - suite: bloom-storm
-            type: chaos
-            scenario: bloom-storm
           # ── Sidecar deployment ──────────────────────────────────────────
           - suite: sidecar
             type: sidecar

@@ -75,12 +75,37 @@ bandwidth:
 #
 # This one is calibrated rather than derived, because a scenario that
 # stops and starts nodes on purpose does not hold a single spanning
-# tree. The six provably-completed archived runs end with two or three
-# distinct roots, seven or eight of ten nodes parented, and fifteen to
-# twenty sessions. The floors below sit one step outside those ranges
-# so an unlucky run does not go red, which leaves them catching a mesh
-# that collapsed rather than one that churned. Tighten them only
-# against a larger sample than six runs.
+# tree.
+#
+# Calibrated 2026-07-26 against fourteen runs that recorded a baseline
+# verdict, read from their assertions.txt files. Every one used this
+# file's fixed seed 42 and therefore an identical chaos schedule, so the
+# spread below is container timing rather than differing scenarios:
+#
+#   distinct roots   1 2 3 4 5   -> 2 3 5 3 1 runs
+#   nodes parented   9 8 7 6 5   -> the exact complement, in all 14
+#   sessions         12 to 20, minimum 12
+#
+# The previous ceiling of 4 roots sat at roughly the 93rd percentile of
+# that distribution: one run in fourteen exceeded it and four sat at or
+# above it, so it reddened a share of runs whatever the daemon did. It
+# was set from six runs whose observed maximum was 3, which is how a
+# threshold one step outside a small sample ends up inside the real one.
+#
+# The ceiling is now 6, one step beyond the observed maximum of 5, and
+# the parented floor is its complement at 4. That still fails a mesh
+# that collapsed — seven or more of ten nodes islanded — which is the
+# only thing this assertion was ever meant to catch. Do not read a pass
+# as convergence: four of the six gating scenarios assert a floor of
+# this kind, and it means the mesh formed and nobody errored.
+#
+# min_sessions stays at 10 against an observed minimum of 12. It has
+# never fired and there is no evidence it is mis-set, but the margin is
+# thin and a future failure there should be read as calibration before
+# it is read as a defect.
+#
+# Tighten any of these only against a larger sample, and against one
+# gathered at the invocation CI actually runs.
 #
 # READ THIS BEFORE RETUNING: the numbers above describe the invocation CI
 # gates on, which is not this file's own defaults. ci-local runs it as
@@ -98,8 +123,8 @@ bandwidth:
 assertions:
   baseline:
     min_nodes_reporting: 10
-    max_roots: 4
-    min_nodes_parented: 6
+    max_roots: 6
+    min_nodes_parented: 4
     min_sessions: 10
 
 logging:

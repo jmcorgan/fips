@@ -148,8 +148,11 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         # Session establishment
         if "Session established" in line:
             result.sessions_established.append((source, line))
-        # Peer promotion
-        if "Peer promoted to active" in line or "Outbound handshake completed" in line:
+        # Peer promotion. Match only the info-level string. "Outbound handshake
+        # completed" is emitted from handle_msg2 on the same call path for the
+        # same promotion, so matching it too double-counted every outbound
+        # promotion in any run at debug level.
+        if "Peer promoted to active" in line:
             result.peers_promoted.append((source, line))
         # Peer removal
         if "Peer removed" in line:

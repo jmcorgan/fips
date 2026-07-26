@@ -60,10 +60,21 @@ require_docker_daemon() {
 }
 
 require_test_image() {
-    if ! docker image inspect fips-test:latest >/dev/null 2>&1; then
-        echo "fips-test:latest not found; building test image"
-        "$BUILD_SCRIPT"
+    local img="${FIPS_TEST_IMAGE:-fips-test:latest}"
+    if docker image inspect "$img" >/dev/null 2>&1; then
+        return 0
     fi
+    # Building here is right for a hand run and wrong under a harness. When
+    # FIPS_TEST_IMAGE is set the caller has already built the image it named, so
+    # a miss means something upstream is broken; building a substitute would
+    # hide that and run binaries nobody asked for.
+    if [ -n "${FIPS_TEST_IMAGE:-}" ]; then
+        echo "ERROR: $img not present, and FIPS_TEST_IMAGE names the caller's own image" >&2
+        echo "The harness that set it is expected to have built it." >&2
+        exit 1
+    fi
+    echo "$img not found; building test image"
+    "$BUILD_SCRIPT"
 }
 
 dump_diagnostics() {

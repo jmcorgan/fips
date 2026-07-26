@@ -10,8 +10,13 @@ from .scenario import Scenario
 from .topology import SimTopology
 
 # Image name for the pre-built FIPS test image.
-# The runner builds this once before starting containers.
-FIPS_SIM_IMAGE = "fips-test:latest"
+#
+# A harness that has already built an image passes it in FIPS_TEST_IMAGE, and
+# it is then the caller's image: the runner uses it and must not rebuild it.
+# Unset means a bare run, where the shared tag is the right name and the runner
+# still builds it. Read at import, which is safe because the simulation always
+# starts as a child process with the environment already set.
+FIPS_SIM_IMAGE = os.environ.get("FIPS_TEST_IMAGE", "fips-test:latest")
 
 # Jinja2 template for the compose file.
 # Uses a pre-built image instead of per-service build to support large topologies.

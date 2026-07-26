@@ -89,7 +89,7 @@ echo ""
 # nodes — labels DO NOT encode hop count, since peer discovery
 # converges every same-subnet pair onto a direct UDP path within a
 # few ticks regardless of the static `peers:` list.
-if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
+if [ "$PROFILE" = "mesh" ]; then
     echo "Topology (static \`peers:\` from mesh.yaml):"
     echo "  A peers with: D, E"
     echo "  B peers with: C"
@@ -109,7 +109,7 @@ echo ""
 echo "Waiting ${SETTLE_SECONDS}s for mesh convergence..."
 sleep "$SETTLE_SECONDS"
 
-if [ "$PROFILE" = "mesh" ] || [ "$PROFILE" = "mesh-public" ]; then
+if [ "$PROFILE" = "mesh" ]; then
     echo ""
     echo "Testing mesh topology paths:"
     iperf_test node-d node-a "$NPUB_D" "A→D"

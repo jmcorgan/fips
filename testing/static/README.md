@@ -119,19 +119,13 @@ testing/static/
 │   └── topologies/
 │       ├── mesh.yaml                   # Mesh topology definition
 │       ├── chain.yaml                  # Chain topology definition
-│       ├── mesh-public.yaml            # Mesh + external public node
-│       ├── tcp-chain.yaml             # TCP chain (3 nodes, port 8443)
 │       └── rekey.yaml                 # Rekey integration test (5 nodes)
 ├── generated-configs/                  # Auto-generated, run-scoped (gitignored)
 │   ├── npubs.env                       # NPUB_A=..., NPUB_B=..., etc.
 │   ├── mesh/
 │   │   ├── node-a.yaml ... node-e.yaml
-│   ├── mesh-public/
-│   │   ├── node-a.yaml ... node-e.yaml
-│   ├── chain/
-│   │   ├── node-a.yaml ... node-e.yaml
-│   └── tcp-chain/
-│       ├── node-a.yaml ... node-c.yaml
+│   └── chain/
+│       ├── node-a.yaml ... node-e.yaml
 ├── scripts/
 │   ├── build.sh                        # Build binary + generate configs
 │   ├── generate-configs.sh             # Generate node configs from topology
@@ -219,7 +213,7 @@ each mesh needs unique node identities to avoid key conflicts. The optional
 
 # Or generate configs directly
 ./testing/static/scripts/generate-configs.sh mesh my-mesh-1
-./testing/static/scripts/generate-configs.sh mesh-public my-mesh-1
+./testing/static/scripts/generate-configs.sh chain my-mesh-1
 ```
 
 ### How It Works

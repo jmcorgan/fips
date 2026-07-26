@@ -33,6 +33,11 @@ __pycache__/
 *.egg-info/
 *.egg
 
+# Per-run build contexts created by testing/ci-local.sh. Its teardown normally
+# removes them, but the CI worker's SIGKILL runs no trap, so one can survive a
+# preempted run; ci-cleanup.sh sweeps the survivors.
+/testing/docker-*/
+
 # Runtime artifacts from running fips in-tree during local testing.
 # Root-anchored so legitimately-tracked fips.yaml under packaging/ and
 # examples/ stays included.

@@ -268,14 +268,34 @@ class SimRunner:
         )
         log.info("Wrote %s", self.compose_file)
 
-        # 4. Build the test image once (avoids per-service build at scale)
-        log.info("Building Docker image...")
+        # 4. Obtain the test image (once, rather than per-service at scale).
+        #
+        # Building it is right for a bare run and wrong under a harness. When
+        # FIPS_TEST_IMAGE is set the image belongs to the caller, and every
+        # scenario of a parallel run would otherwise rebuild it into one shared
+        # name from one shared context — so assert it exists and fail loudly if
+        # it does not, rather than manufacture a substitute nobody asked for.
         from .compose import FIPS_SIM_IMAGE
-        docker_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docker")
-        subprocess.run(
-            ["docker", "build", "-t", FIPS_SIM_IMAGE, docker_dir],
-            check=True,
-        )
+        if os.environ.get("FIPS_TEST_IMAGE"):
+            log.info("Using caller-supplied image %s", FIPS_SIM_IMAGE)
+            probe = subprocess.run(
+                ["docker", "image", "inspect", FIPS_SIM_IMAGE],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if probe.returncode != 0:
+                raise RuntimeError(
+                    f"FIPS_TEST_IMAGE names {FIPS_SIM_IMAGE}, which is not present. "
+                    "The harness that set it is expected to have built it."
+                )
+        else:
+            log.info("Building Docker image...")
+            docker_dir = os.environ.get("FIPS_BUILD_CONTEXT") or os.path.join(
+                os.path.dirname(__file__), "..", "..", "docker"
+            )
+            subprocess.run(
+                ["docker", "build", "-t", FIPS_SIM_IMAGE, docker_dir],
+                check=True,
+            )
 
         # 5. Start containers
         log.info("Starting %d containers...", len(self.topology.nodes))

@@ -191,7 +191,15 @@ log "Generating firewall fixtures"
 
 log "Starting firewall harness"
 docker compose -f "$COMPOSE_FILE" down >/dev/null 2>&1 || true
-docker compose -f "$COMPOSE_FILE" up -d --build
+# --build only on the hand path. Under a harness, --skip-build means the caller
+# has already built the image this compose file names, and rebuilding it here
+# would overwrite that image from whatever the shared build context happens to
+# hold — which is how a suite ends up certifying binaries it was never given.
+if [ "$SKIP_BUILD" = false ]; then
+    docker compose -f "$COMPOSE_FILE" up -d --build
+else
+    docker compose -f "$COMPOSE_FILE" up -d
+fi
 
 log "Waiting for fips0 on both nodes"
 wait_for_fips0 "$CONTAINER_A" 40

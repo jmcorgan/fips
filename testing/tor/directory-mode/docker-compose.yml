@@ -16,7 +16,7 @@ networks:
 
 services:
   fips-a:
-    image: fips-test:latest
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
     cap_add:
       - NET_ADMIN
     devices:
@@ -36,7 +36,7 @@ services:
       dir-test:
 
   fips-b:
-    image: fips-test:latest
+    image: ${FIPS_TEST_IMAGE:-fips-test:latest}
     cap_add:
       - NET_ADMIN
     devices:
