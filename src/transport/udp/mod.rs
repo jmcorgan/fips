@@ -89,6 +89,17 @@ impl UdpTransport {
         self.local_addr
     }
 
+    /// Raw fd of the bound socket, so an embedder can apply socket options
+    /// this transport does not manage itself — notably binding it to one of
+    /// several networks a host OS offers, when destination-based routing alone
+    /// does not reach a peer (see [`crate::Node::enable_app_owned_udp_fd`]).
+    /// `None` before start.
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        use std::os::unix::io::AsRawFd;
+        self.socket.as_ref().map(|s| s.as_raw_fd())
+    }
+
     /// Configured recv buffer size — used when opening per-peer
     /// `ConnectedPeerSocket`s so they get the same buffer ceiling as
     /// the wildcard listen socket.

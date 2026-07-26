@@ -1242,6 +1242,12 @@ impl Node {
 
             match handle.start().await {
                 Ok(()) => {
+                    #[cfg(unix)]
+                    if transport_type == "udp"
+                        && let (Some(tx), Some(fd)) = (&self.udp_bind_tx, handle.raw_fd())
+                    {
+                        let _ = tx.send(fd);
+                    }
                     self.transports.insert(transport_id, handle);
                 }
                 Err(e) => {

@@ -1095,6 +1095,24 @@ impl TransportHandle {
         }
     }
 
+    /// Raw fd of the bound socket (UDP only, returns None for other
+    /// transports). See [`crate::transport::udp::UdpTransport::raw_fd`].
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        match self {
+            TransportHandle::Udp(t) => t.raw_fd(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => None,
+            TransportHandle::Tcp(_) => None,
+            TransportHandle::Tor(_) => None,
+            TransportHandle::Nym(_) => None,
+            #[cfg(ble_available)]
+            TransportHandle::Ble(_) => None,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => None,
+        }
+    }
+
     /// Get the interface name (Ethernet only, returns None for other transports).
     pub fn interface_name(&self) -> Option<&str> {
         match self {

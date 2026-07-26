@@ -440,6 +440,13 @@ pub struct Node {
     /// DNS responder task handle.
     dns_task: Option<tokio::task::JoinHandle<()>>,
 
+    // === App-owned UDP socket binding ===
+    /// Fires once with the UDP transport's raw fd right after it starts, so an
+    /// embedder can apply host-specific socket options (e.g. pinning it to one
+    /// of several OS networks). See [`Self::enable_app_owned_udp_fd`].
+    #[cfg(unix)]
+    udp_bind_tx: Option<std::sync::mpsc::Sender<std::os::unix::io::RawFd>>,
+
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
@@ -699,6 +706,8 @@ impl Node {
             tun_shutdown_fd: None,
             dns_identity_rx: None,
             dns_task: None,
+            #[cfg(unix)]
+            udp_bind_tx: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -860,6 +869,8 @@ impl Node {
             tun_shutdown_fd: None,
             dns_identity_rx: None,
             dns_task: None,
+            #[cfg(unix)]
+            udp_bind_tx: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -2928,6 +2939,34 @@ impl Node {
         let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(size);
         self.dns_identity_rx = Some(identity_rx);
         identity_tx
+    }
+
+    /// Set up an **app-owned UDP socket binding**: the returned receiver gets
+    /// the UDP transport's raw socket fd once, right after the transport opens
+    /// inside [`Self::start`], so an embedder can apply a socket option FIPS
+    /// itself has no way to choose — in particular pinning the socket to one
+    /// of several networks the host OS offers.
+    ///
+    /// FIPS opens a single wildcard UDP socket and picks the egress path per
+    /// destination address, which assumes the OS routes by destination alone.
+    /// Some hosts don't: where the OS binds each socket to one "network" and
+    /// steers replies by that association, a peer reachable only over a
+    /// secondary network (a link-local address on an interface that is not
+    /// the default route) can receive our handshake and have its reply
+    /// discarded before it reaches the socket. The fd is the only handle that
+    /// lets the embedder correct this, and it is otherwise private to the
+    /// transport.
+    ///
+    /// Call after [`Node::new`] and before [`Self::start`], like
+    /// [`Self::enable_app_owned_tun`]. Nothing is ever sent if no UDP
+    /// transport is configured or it fails to start.
+    #[cfg(unix)]
+    pub fn enable_app_owned_udp_fd(
+        &mut self,
+    ) -> std::sync::mpsc::Receiver<std::os::unix::io::RawFd> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.udp_bind_tx = Some(tx);
+        rx
     }
 
     // === Sending ===
