@@ -1008,6 +1008,26 @@ impl ActivePeer {
         ));
     }
 
+    /// Shift `instant` back by `age`, panicking rather than falling back.
+    ///
+    /// `Instant::checked_sub` returns `None` when the result would precede the
+    /// monotonic clock's epoch, which on a freshly booted machine means any
+    /// backdate larger than the uptime. The fallback these seams used to share
+    /// was `unwrap_or_else(Instant::now)`, which moved the timestamp *forward*
+    /// to now — the opposite of every caller's intent — so the caller's
+    /// assertion then failed for a reason its message did not describe. Failing
+    /// loudly keeps a machine-dependent limit from reading as a logic bug.
+    #[cfg(test)]
+    fn backdate(instant: Instant, age: std::time::Duration, what: &str) -> Instant {
+        instant.checked_sub(age).unwrap_or_else(|| {
+            panic!(
+                "cannot backdate {what} by {age:?}: the monotonic clock's epoch is more \
+                 recent than that, so the result is unrepresentable. This machine has been \
+                 up for less than the requested age — use a smaller backdate."
+            )
+        })
+    }
+
     /// Test-only seam: backdate the session-start instant so a test can make
     /// `session_elapsed_ms()` read as `age`-old (needed to synthesize a
     /// positive RTT sample from a crafted ReceiverReport). This only shifts the
@@ -1015,11 +1035,7 @@ impl ActivePeer {
     /// is compiled out of release builds.
     #[cfg(test)]
     pub(crate) fn test_backdate_session_start(&mut self, age: std::time::Duration) {
-        self.send.session_start = self
-            .send
-            .session_start
-            .checked_sub(age)
-            .unwrap_or_else(Instant::now);
+        self.send.session_start = Self::backdate(self.send.session_start, age, "session_start");
     }
 
     /// Test-only seam: backdate the session-established instant so a test can
@@ -1034,10 +1050,8 @@ impl ActivePeer {
     /// test depend on the draw.
     #[cfg(test)]
     pub(crate) fn test_backdate_session_established(&mut self, age: std::time::Duration) {
-        self.session_established_at = self
-            .session_established_at
-            .checked_sub(age)
-            .unwrap_or_else(Instant::now);
+        self.session_established_at =
+            Self::backdate(self.session_established_at, age, "session_established_at");
     }
 
     /// Test-only seam: backdate the drain-start instant so a test can make
@@ -1048,7 +1062,7 @@ impl ActivePeer {
     #[cfg(test)]
     pub(crate) fn test_backdate_drain_start(&mut self, age: std::time::Duration) {
         if let Some(started) = self.send.drain_started {
-            self.send.drain_started = Some(started.checked_sub(age).unwrap_or_else(Instant::now));
+            self.send.drain_started = Some(Self::backdate(started, age, "drain_started"));
         }
     }
 

@@ -2315,11 +2315,16 @@ async fn test_non_initiating_responder_completes_rekey_drain() {
 
     // Window expires. This is the only path that releases the demoted session,
     // and a node that does not initiate rekeys still has to run it.
+    //
+    // Backdate by three times the 10s drain window rather than by minutes: the
+    // backdate cannot reach past the monotonic clock's epoch, so a margin larger
+    // than the machine's uptime is unrepresentable, and a freshly booted CI
+    // runner is exactly that machine.
     responder
         .node
         .get_peer_mut(&initiator_addr)
         .unwrap()
-        .test_backdate_drain_start(std::time::Duration::from_secs(600));
+        .test_backdate_drain_start(std::time::Duration::from_secs(30));
     responder.node.check_rekey().await;
 
     let peer = responder.node.get_peer(&initiator_addr).unwrap();
