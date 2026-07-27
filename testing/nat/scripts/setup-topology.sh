@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$NAT_DIR/../.." && pwd)"
 
 SCENARIO="${1:?usage: setup-topology.sh <cone|symmetric>}"
 
@@ -24,6 +25,29 @@ esac
 
 router_a="fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}"
 router_b="fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-}"
+
+# Host interface names live in one global namespace and are capped at
+# IFNAMSIZ-1 = 15 characters — far short of the run suffix, which is 20-plus at
+# the default run-id length. Two concurrent runs both creating `vna0` damage
+# each other: setup_pair deletes, adds and moves the interface in three
+# separate `docker run`s, so B's re-add inside A's window sends B's interface
+# into A's namespace and fails B's own move.
+#
+# Scope the names with the same four-hex token the chaos simulation uses, and
+# derive it by calling sim.naming rather than re-implementing sha1 here, so
+# ci-cleanup.sh's reaper (which calls the same module) cannot end up matching a
+# different width. Empty suffix yields an empty token and today's exact names.
+#
+# No fallback on a derivation failure: silently reverting to `vna0` would
+# reinstate the collision this exists to remove, so let it fail loudly.
+veth_token() {
+    local suffix="${FIPS_CI_NAME_SUFFIX:-}"
+    if [ -z "$suffix" ]; then
+        echo ""
+        return 0
+    fi
+    PYTHONPATH="$ROOT_DIR/testing/chaos" python3 -m sim.naming "$suffix"
+}
 
 helper_image() {
     if [ -n "${IP_HELPER_IMAGE:-}" ]; then
@@ -122,11 +146,14 @@ setup_pair() {
 main() {
     cd "$NAT_DIR"
 
-    local image
+    local image token
     image="$(helper_image)"
+    token="$(veth_token)"
 
-    setup_pair "$image" "$node_a" "$router_a" vna0 vna1 172.31.1.10/24 172.31.1.254/24
-    setup_pair "$image" "$node_b" "$router_b" vnb0 vnb1 172.31.2.10/24 172.31.2.254/24
+    setup_pair "$image" "$node_a" "$router_a" \
+        "vna${token}0" "vna${token}1" 172.31.1.10/24 172.31.1.254/24
+    setup_pair "$image" "$node_b" "$router_b" \
+        "vnb${token}0" "vnb${token}1" 172.31.2.10/24 172.31.2.254/24
 }
 
 main "$@"

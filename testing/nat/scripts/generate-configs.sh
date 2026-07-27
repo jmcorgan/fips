@@ -6,7 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$NAT_DIR/../.." && pwd)"
 DERIVE_KEYS="$ROOT_DIR/testing/lib/derive_keys.py"
-OUTPUT_DIR="$NAT_DIR/generated-configs"
+# Per-run, for the same reason static's and firewall's generators are: this
+# directory is bind-mounted by compose and read back by the suite scripts
+# AFTER the containers are up, so a shared path lets a second run's generator
+# overwrite the npubs a first run is about to ping. Empty suffix renders
+# today's plain path, so a bare invocation is unchanged.
+OUTPUT_DIR="$NAT_DIR/generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 SCENARIO="${1:?usage: generate-configs.sh <cone|symmetric|lan> [mesh-name]}"
 MESH_NAME="${2:-nat-lab-$(date +%s)-$$}"
 
@@ -28,12 +33,18 @@ npub_a="$(echo "$keys_a" | awk -F= '/^npub=/{print $2}')"
 nsec_b="$(echo "$keys_b" | awk -F= '/^nsec=/{print $2}')"
 npub_b="$(echo "$keys_b" | awk -F= '/^npub=/{print $2}')"
 
-relay_addr="ws://172.31.254.30:7777"
-stun_addr="stun:172.31.254.40:3478"
+# The two lab bridges. ci-local.sh claims a free /24 for each per run and
+# exports these; unset renders the addresses the lab has always used, so a
+# bare invocation and the GitHub matrix are unaffected.
+wan="${NAT_WAN_PREFIX:-172.31.254}"
+lan="${NAT_LAN_PREFIX:-172.31.10}"
+
+relay_addr="ws://${wan}.30:7777"
+stun_addr="stun:${wan}.40:3478"
 if [ "$SCENARIO" = "lan" ] || [ "$SCENARIO" = "nostr-publish-consume" ] \
         || [ "$SCENARIO" = "stun-faults" ]; then
-    relay_addr="ws://172.31.10.30:7777"
-    stun_addr="stun:172.31.10.40:3478"
+    relay_addr="ws://${lan}.30:7777"
+    stun_addr="stun:${lan}.40:3478"
 fi
 
 peer_block_a=$(cat <<EOF
@@ -58,10 +69,10 @@ EOF
 
 if [ "$SCENARIO" = "symmetric" ]; then
     peer_block_a="$peer_block_a"$'\n'"      - transport: tcp
-        addr: \"172.31.254.11:8443\"
+        addr: \"${wan}.11:8443\"
         priority: 20"
     peer_block_b="$peer_block_b"$'\n'"      - transport: tcp
-        addr: \"172.31.254.10:8443\"
+        addr: \"${wan}.10:8443\"
         priority: 20"
 fi
 

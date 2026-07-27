@@ -174,6 +174,14 @@ VETH_NODE_ID='(0[0-9]|[1-9][0-9]+)'
 # which carry a different token — cannot match. The token derivation is read
 # from the simulation itself rather than repeated here, so widening it cannot
 # leave this matching the old width. Empty output means "reap nothing".
+#
+# Two producers, two shapes. The chaos simulation makes vh{token}{NN}{MM}{a,b};
+# the NAT lab (nat/scripts/setup-topology.sh) makes vn{a,b}{token}{0,1}, using
+# the RUN-wide suffix rather than any chaos scenario's. Widening this regex is
+# only half the fix: the token set is derived separately below, so a suffix
+# list carrying no NAT suffix leaves the NAT half matching nothing while
+# looking correct. ci-local.sh's ci_teardown therefore appends the run-wide
+# suffix to --veth-suffixes.
 veth_pattern() {
     # vh{token}{NN}{MM}{a,b}: the token is 4 hex or wholly absent — never a
     # part of one — and the two node ids follow. Anchored and shaped this
@@ -182,7 +190,8 @@ veth_pattern() {
     # single run, no missing or empty suffix list may widen this back out to
     # every run.
     if [[ -z "$RUN_ID" && -z "$VETH_SUFFIXES" ]]; then
-        printf '^vh([0-9a-f]{4})?%s%s[ab]$' "$VETH_NODE_ID" "$VETH_NODE_ID"
+        printf '^vh([0-9a-f]{4})?%s%s[ab]$|^vn[ab]([0-9a-f]{4})?[01]$' \
+            "$VETH_NODE_ID" "$VETH_NODE_ID"
         return 0
     fi
     if [[ -z "$VETH_SUFFIXES" ]]; then
@@ -215,7 +224,8 @@ veth_pattern() {
         veth_warn "no interface tokens derived from: ${sfx[*]}"
         return 0
     fi
-    printf '^vh(%s)%s%s[ab]$' "$alt" "$VETH_NODE_ID" "$VETH_NODE_ID"
+    printf '^vh(%s)%s%s[ab]$|^vn[ab](%s)[01]$' \
+        "$alt" "$VETH_NODE_ID" "$VETH_NODE_ID" "$alt"
 }
 
 # ip(8) in a privileged --net=host container, matching how the simulation

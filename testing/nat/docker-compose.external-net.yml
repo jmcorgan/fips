@@ -1,0 +1,26 @@
+# Override: attach the NAT lab's two bridges to pre-created external networks
+# instead of letting compose create them from the base file's fixed pins.
+#
+# Applied only by ci-local.sh's run_nat / run_nostr_publish_consume /
+# run_stun_faults, which claim a free /24 per network per suite invocation
+# (ci_claim_nat_networks) and export FIPS_NAT_WAN_NET / FIPS_NAT_LAN_NET and
+# NAT_WAN_PREFIX / NAT_LAN_PREFIX before `up`. That is what makes two
+# concurrent local NAT runs collision-safe: each claims distinct ranges, so
+# neither requests address space the other holds.
+#
+# The GitHub matrix, testing/mesh-lab/run-loop.sh, the README invocation and
+# any standalone `docker compose up` do NOT apply this overlay; they use the
+# base file's normal networks with the `:-` defaults, which render today's
+# exact addresses. This mirrors static/docker-compose.gateway-external-net.yml
+# and sidecar/docker-compose.external-net.yml.
+#
+# One file carries both networks: they are claimed and released together, and
+# splitting them would let a suite attach to one claimed and one compose-made
+# bridge.
+networks:
+  wan:
+    external: true
+    name: ${FIPS_NAT_WAN_NET:-fips-nat-wan}
+  shared-lan:
+    external: true
+    name: ${FIPS_NAT_LAN_NET:-fips-nat-shared-lan}

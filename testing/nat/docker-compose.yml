@@ -5,14 +5,14 @@ networks:
       - "com.corganlabs.fips-ci=1"
     ipam:
       config:
-        - subnet: 172.31.254.0/24
+        - subnet: ${NAT_WAN_PREFIX:-172.31.254}.0/24
   shared-lan:
     driver: bridge
     labels:
       - "com.corganlabs.fips-ci=1"
     ipam:
       config:
-        - subnet: 172.31.10.0/24
+        - subnet: ${NAT_LAN_PREFIX:-172.31.10}.0/24
 
 volumes:
   relay-data:
@@ -42,9 +42,9 @@ services:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
     networks:
       wan:
-        ipv4_address: 172.31.254.30
+        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.30
       shared-lan:
-        ipv4_address: 172.31.10.30
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.30
 
   stun:
     build:
@@ -53,9 +53,9 @@ services:
     restart: "no"
     networks:
       wan:
-        ipv4_address: 172.31.254.40
+        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.40
       shared-lan:
-        ipv4_address: 172.31.10.40
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.40
 
   nat-a:
     build:
@@ -74,11 +74,11 @@ services:
       - WAN_IF=eth0
       - LAN_HOST=172.31.1.10
       - LAN_SUBNET=172.31.1.0/24
-      - WAN_SUBNET=172.31.254.0/24
-      - WAN_GATEWAY=172.31.254.1
+      - WAN_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
+      - WAN_GATEWAY=${NAT_WAN_PREFIX:-172.31.254}.1
     networks:
       wan:
-        ipv4_address: 172.31.254.10
+        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.10
 
   nat-b:
     build:
@@ -97,11 +97,11 @@ services:
       - WAN_IF=eth0
       - LAN_HOST=172.31.2.10
       - LAN_SUBNET=172.31.2.0/24
-      - WAN_SUBNET=172.31.254.0/24
-      - WAN_GATEWAY=172.31.254.1
+      - WAN_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
+      - WAN_GATEWAY=${NAT_WAN_PREFIX:-172.31.254}.1
     networks:
       wan:
-        ipv4_address: 172.31.254.11
+        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.11
 
   cone-a:
     <<: *fips-common
@@ -117,16 +117,16 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
       - ROUTE_VIA=172.31.1.254
-      - RELAY_HOST=172.31.254.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=172.31.254.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
-      - ./generated-configs/cone/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/cone/node-a.yaml:/etc/fips/fips.yaml:ro
     network_mode: none
 
   cone-b:
@@ -143,16 +143,16 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
       - ROUTE_VIA=172.31.2.254
-      - RELAY_HOST=172.31.254.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=172.31.254.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
-      - ./generated-configs/cone/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/cone/node-b.yaml:/etc/fips/fips.yaml:ro
     network_mode: none
 
   symmetric-a:
@@ -169,16 +169,16 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
       - ROUTE_VIA=172.31.1.254
-      - RELAY_HOST=172.31.254.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=172.31.254.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
-      - ./generated-configs/symmetric/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/symmetric/node-a.yaml:/etc/fips/fips.yaml:ro
     network_mode: none
 
   symmetric-b:
@@ -195,16 +195,16 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=172.31.254.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
       - ROUTE_VIA=172.31.2.254
-      - RELAY_HOST=172.31.254.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=172.31.254.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./node/entrypoint.sh:/usr/local/bin/nat-node-entrypoint.sh:ro
-      - ./generated-configs/symmetric/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/symmetric/node-b.yaml:/etc/fips/fips.yaml:ro
     network_mode: none
 
   lan-a:
@@ -217,10 +217,10 @@ services:
       - stun
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/lan/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/lan/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       shared-lan:
-        ipv4_address: 172.31.10.10
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.10
 
   lan-b:
     <<: *fips-common
@@ -232,10 +232,10 @@ services:
       - stun
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/lan/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/lan/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       shared-lan:
-        ipv4_address: 172.31.10.11
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.11
 
   # ── Nostr publish/consume profile ──────────────────────────────────────
   # Two FIPS daemons + the existing strfry relay, exercising the overlay
@@ -254,10 +254,10 @@ services:
       - stun
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/nostr-publish-consume/node-a.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/nostr-publish-consume/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       shared-lan:
-        ipv4_address: 172.31.10.20
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.20
 
   nostr-pub-b:
     <<: *fips-common
@@ -269,10 +269,10 @@ services:
       - stun
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/nostr-publish-consume/node-b.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/nostr-publish-consume/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       shared-lan:
-        ipv4_address: 172.31.10.21
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.21
 
   # ── STUN fault-injection profile ───────────────────────────────────────
   # One FIPS daemon + a netns-sharing shim that injects tc/iptables faults
@@ -298,10 +298,10 @@ services:
       - stun
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/stun-faults/stun-fault-node.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/stun-faults/stun-fault-node.yaml:/etc/fips/fips.yaml:ro
     networks:
       shared-lan:
-        ipv4_address: 172.31.10.50
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.50
 
   # Fault-free peer that publishes a valid overlay advert, so the
   # fault-node's NAT-traversal attempt actually reaches
@@ -319,10 +319,10 @@ services:
       - stun
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/stun-faults/stun-fault-peer.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/stun-faults/stun-fault-peer.yaml:/etc/fips/fips.yaml:ro
     networks:
       shared-lan:
-        ipv4_address: 172.31.10.51
+        ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.51
 
   stun-fault-shim:
     image: ${FIPS_TEST_IMAGE:-fips-test:latest}

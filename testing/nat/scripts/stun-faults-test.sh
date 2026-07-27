@@ -33,11 +33,28 @@ GENERATE_SCRIPT="$SCRIPT_DIR/generate-configs.sh"
 PROFILE="stun-faults"
 SCENARIO="$PROFILE"
 COMPOSE=(docker compose -f "$NAT_DIR/docker-compose.yml")
+
+# Optional extra compose-file overlay chain (colon-separated paths), matching
+# nat-test.sh. ci-local.sh appends testing/nat/docker-compose.external-net.yml
+# here so this suite attaches to the networks the run already claimed; without
+# the hook compose would create its own from the base file's subnet and collide
+# with the run's own claim. Paths are relative to ROOT_DIR unless absolute.
+if [ -n "${FIPS_NAT_EXTRA_COMPOSE:-}" ]; then
+    IFS=':' read -ra _NAT_EXTRA <<< "${FIPS_NAT_EXTRA_COMPOSE}"
+    for _f in "${_NAT_EXTRA[@]}"; do
+        case "$_f" in
+            /*) COMPOSE+=(-f "$_f") ;;
+            *)  COMPOSE+=(-f "$ROOT_DIR/$_f") ;;
+        esac
+    done
+fi
+
 NODE="fips-nat-stun-fault-node${FIPS_CI_NAME_SUFFIX:-}"
 PEER="fips-nat-stun-fault-peer${FIPS_CI_NAME_SUFFIX:-}"
 SHIM="fips-nat-stun-fault-shim${FIPS_CI_NAME_SUFFIX:-}"
 STUN_CONTAINER="fips-nat-stun${FIPS_CI_NAME_SUFFIX:-}"
-STUN_HOST="172.31.10.40"
+# Claimed per run by ci-local.sh; unset renders the lab's historical address.
+STUN_HOST="${NAT_LAN_PREFIX:-172.31.10}.40"
 STUN_PORT=3478
 DEV="eth0"
 

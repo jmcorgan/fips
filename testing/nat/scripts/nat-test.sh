@@ -9,6 +9,19 @@ BUILD_SCRIPT="$ROOT_DIR/testing/scripts/build.sh"
 GENERATE_SCRIPT="$SCRIPT_DIR/generate-configs.sh"
 TOPOLOGY_SCRIPT="$SCRIPT_DIR/setup-topology.sh"
 WAIT_LIB="$ROOT_DIR/testing/lib/wait-converge.sh"
+# Must track generate-configs.sh's OUTPUT_DIR and the compose bind-mounts: the
+# npubs are read back here after the containers are up, so reading a different
+# directory than the one the generator wrote pings an npub no node owns.
+CONFIG_DIR="$NAT_DIR/generated-configs${FIPS_CI_NAME_SUFFIX:-}"
+
+# The two lab bridges. ci-local.sh claims a free /24 for each per run and
+# exports these; unset renders the addresses the lab has always used, so the
+# GitHub matrix, mesh-lab/run-loop.sh and a bare run are unaffected. The
+# router-side LANs (172.31.1.x / 172.31.2.x) are deliberately NOT parameterized:
+# they live inside per-container network namespaces, never become docker
+# networks, and so cannot collide across runs.
+NAT_WAN="${NAT_WAN_PREFIX:-172.31.254}"
+NAT_LAN="${NAT_LAN_PREFIX:-172.31.10}"
 
 SCENARIO="${1:-all}"
 COMPOSE=(docker compose -f "$NAT_DIR/docker-compose.yml")
@@ -87,9 +100,9 @@ PY
 
 dump_fips_state() {
     local container="$1"
-    local relay_host="${2:-172.31.254.30}"
+    local relay_host="${2:-${NAT_WAN}.30}"
     local relay_port="${3:-7777}"
-    local stun_host="${4:-172.31.254.40}"
+    local stun_host="${4:-${NAT_WAN}.40}"
     local stun_port="${5:-3478}"
     dump_container_state "$container"
     echo ""
@@ -114,7 +127,7 @@ dump_fips_state() {
 
 dump_node_udp_probe() {
     local node="$1"
-    local stun_host="${2:-172.31.254.40}"
+    local stun_host="${2:-${NAT_WAN}.40}"
     local stun_port="${3:-3478}"
 
     echo ""
@@ -122,7 +135,12 @@ dump_node_udp_probe() {
     docker exec "$node" sh -lc 'ss -H -uanp 2>/dev/null || ss -H -uan 2>/dev/null || netstat -anu 2>/dev/null' 2>&1 || true
     echo ""
     echo "--- $node: UDP routes to STUN and peer WANs ---"
-    docker exec "$node" sh -lc 'for ip in 172.31.254.40 172.31.254.10 172.31.254.11; do ip route get "$ip"; done' 2>&1 || true
+    # Double-quoted so THIS shell expands NAT_WAN; the loop variable is escaped
+    # so the container's shell still expands that one. Left single-quoted, the
+    # literal string ${NAT_WAN}.40 would reach `ip route get` and the probe
+    # would stop probing without anything going red — these are diagnostic
+    # paths, so the loss would only surface during a failure investigation.
+    docker exec "$node" sh -lc "for ip in ${NAT_WAN}.40 ${NAT_WAN}.10 ${NAT_WAN}.11; do ip route get \"\$ip\"; done" 2>&1 || true
 
     local capture_file
     capture_file="$(mktemp)"
@@ -151,7 +169,7 @@ dump_node_udp_probe() {
 dump_router_udp_probe() {
     local router="$1"
     local source_node="$2"
-    local stun_host="${3:-172.31.254.40}"
+    local stun_host="${3:-${NAT_WAN}.40}"
     local stun_port="${4:-3478}"
 
     echo ""
@@ -163,7 +181,9 @@ dump_router_udp_probe() {
     docker exec "$router" sh -lc 'iptables -vnL FORWARD; echo; iptables -t nat -vnL POSTROUTING' 2>&1 || true
     echo ""
     echo "--- $router: UDP routes to STUN and peer WANs ---"
-    docker exec "$router" sh -lc 'for ip in 172.31.254.40 172.31.254.10 172.31.254.11; do ip route get "$ip"; done' 2>&1 || true
+    # See the note in dump_node_udp_probe: outer shell expands NAT_WAN, inner
+    # shell expands the loop variable.
+    docker exec "$router" sh -lc "for ip in ${NAT_WAN}.40 ${NAT_WAN}.10 ${NAT_WAN}.11; do ip route get \"\$ip\"; done" 2>&1 || true
 
     local capture_file
     capture_file="$(mktemp)"
@@ -195,7 +215,7 @@ dump_router_udp_probe() {
 
 dump_stun_udp_probe() {
     local source_node="$1"
-    local stun_host="${2:-172.31.254.40}"
+    local stun_host="${2:-${NAT_WAN}.40}"
     local stun_port="${3:-3478}"
     local helper_image
     helper_image="$(helper_tcpdump_image)"
@@ -225,9 +245,9 @@ dump_stun_udp_probe() {
 dump_cone_diagnostics() {
     echo ""
     echo "=== cone diagnostics ==="
-    dump_fips_state fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_fips_state fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.30 7777 ${NAT_WAN}.40 3478
     dump_node_udp_probe fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}
-    dump_fips_state fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_fips_state fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.30 7777 ${NAT_WAN}.40 3478
     dump_node_udp_probe fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-}
     dump_container_state fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}
     dump_router_udp_probe fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-} fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-}
@@ -242,8 +262,8 @@ dump_cone_diagnostics() {
 dump_symmetric_diagnostics() {
     echo ""
     echo "=== symmetric diagnostics ==="
-    dump_fips_state fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
-    dump_fips_state fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.30 7777 172.31.254.40 3478
+    dump_fips_state fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.30 7777 ${NAT_WAN}.40 3478
+    dump_fips_state fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.30 7777 ${NAT_WAN}.40 3478
     dump_container_state fips-nat-router-a${FIPS_CI_NAME_SUFFIX:-}
     dump_container_state fips-nat-router-b${FIPS_CI_NAME_SUFFIX:-}
     dump_container_state fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}
@@ -253,8 +273,8 @@ dump_symmetric_diagnostics() {
 dump_lan_diagnostics() {
     echo ""
     echo "=== lan diagnostics ==="
-    dump_fips_state fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} 172.31.10.30 7777 172.31.10.40 3478
-    dump_fips_state fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} 172.31.10.30 7777 172.31.10.40 3478
+    dump_fips_state fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}.30 7777 ${NAT_LAN}.40 3478
+    dump_fips_state fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}.30 7777 ${NAT_LAN}.40 3478
     dump_container_state fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}
     dump_container_state fips-nat-stun${FIPS_CI_NAME_SUFFIX:-}
 }
@@ -353,12 +373,12 @@ run_cone() {
         dump_cone_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} udp 172.31.254.
-    assert_peer_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} udp 172.31.254.
-    assert_link_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.
-    assert_link_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.
+    assert_peer_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_WAN}.
+    assert_peer_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_WAN}.
+    assert_link_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.
+    assert_link_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.
     # shellcheck disable=SC1090
-    source "$NAT_DIR/generated-configs/cone/npubs.env"
+    source "$CONFIG_DIR/cone/npubs.env"
     ping_peer fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
     ping_peer fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A"
     cleanup
@@ -378,14 +398,14 @@ run_symmetric() {
         dump_symmetric_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} tcp 172.31.254.11:
-    assert_peer_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} tcp 172.31.254.10:
-    assert_link_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} 172.31.254.11:
-    assert_link_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} 172.31.254.10:
+    assert_peer_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} tcp ${NAT_WAN}.11:
+    assert_peer_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} tcp ${NAT_WAN}.10:
+    assert_link_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.11:
+    assert_link_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.10:
     require_bootstrap_activity fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-}
     require_bootstrap_activity fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-}
     # shellcheck disable=SC1090
-    source "$NAT_DIR/generated-configs/symmetric/npubs.env"
+    source "$CONFIG_DIR/symmetric/npubs.env"
     ping_peer fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
     ping_peer fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A"
     cleanup
@@ -404,12 +424,12 @@ run_lan() {
         dump_lan_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} udp 172.31.10.
-    assert_peer_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} udp 172.31.10.
-    assert_link_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} 172.31.10.
-    assert_link_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} 172.31.10.
+    assert_peer_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_LAN}.
+    assert_peer_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_LAN}.
+    assert_link_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}.
+    assert_link_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}.
     # shellcheck disable=SC1090
-    source "$NAT_DIR/generated-configs/lan/npubs.env"
+    source "$CONFIG_DIR/lan/npubs.env"
     ping_peer fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
     ping_peer fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} "$NPUB_A"
     # Skip the final teardown when the mesh-lab harness wraps this

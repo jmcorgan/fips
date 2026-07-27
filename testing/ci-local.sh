@@ -430,6 +430,12 @@ ci_teardown() {
     for _entry in "${CHAOS_SUITES[@]}"; do
         _suffixes+=("$(ci_chaos_suffix "${_entry%% *}")")
     done
+    #    The NAT lab's host veths (vn{a,b}{token}{0,1}) carry the RUN-wide
+    #    suffix, not any chaos scenario's, so its token appears in no suffix
+    #    above and the reaper's NAT shape would match nothing at all. This is
+    #    the half of that fix that fails silently: widening the regex in
+    #    ci-cleanup.sh without this line looks correct and reaps nothing.
+    _suffixes+=("$CI_RUN_NAME_SUFFIX")
     timeout 150 bash "$SCRIPT_DIR/ci-cleanup.sh" \
         --label "$CI_LABEL" \
         --run-id "$CI_RUN_ID" \
@@ -437,7 +443,7 @@ ci_teardown() {
         --images "$CI_IMAGE_TEST $CI_IMAGE_APP" \
         --veth-suffixes "${_suffixes[*]}" >/dev/null || true
 
-    # 3. The static and firewall suites' generated configs are per-run (a
+    # 3. The static, firewall and nat suites' generated configs are per-run (a
     #    shared directory would let concurrent runs overwrite each other's node
     #    configs), so they are this run's to remove. Only on a green run: after
     #    a failure they are the evidence of what the failing nodes were actually
@@ -451,6 +457,7 @@ ci_teardown() {
     if [[ $run_status -eq 0 && -n "${CI_RUN_NAME_SUFFIX:-}" ]]; then
         rm -rf "$SCRIPT_DIR/static/generated-configs${CI_RUN_NAME_SUFFIX}"
         rm -rf "$SCRIPT_DIR/firewall/generated-configs${CI_RUN_NAME_SUFFIX}"
+        rm -rf "$SCRIPT_DIR/nat/generated-configs${CI_RUN_NAME_SUFFIX}"
     fi
 
     # 4. This run's build context. Unlike the generated configs it is removed
@@ -747,16 +754,138 @@ run_firewall() {
     fi
 }
 
+# ── NAT lab: per-run network claim ─────────────────────────────────────────
+#
+# The lab's two bridges pinned 172.31.254.0/24 (wan) and 172.31.10.0/24
+# (shared-lan), so two concurrent runs asked the daemon for the same address
+# space and the second died with `Pool overlaps`. Claim a free /24 for each
+# instead and let docker's own create be the atomic arbiter, exactly as
+# claim_gateway_lan6 and sidecar's alloc_network do. The run-id-derived offset
+# this task considered earlier stays rejected: it makes a collision unlikely
+# rather than impossible, and a collision is the failure being removed.
+#
+# 10.41.0.0/16 is unclaimed in-tree, sits below this host's docker pool
+# (10.128.0.0/9, per /etc/docker/daemon.json), and is also outside docker's
+# stock 172.17-31 / 192.168 default, so the choice holds either way.
+#
+# The claim lives here rather than in the suite scripts because
+# .github/workflows/ci.yml invokes nat-test.sh, nostr-relay-test.sh and
+# stun-faults-test.sh directly and testing/mesh-lab/run-loop.sh invokes
+# `nat-test.sh lan`; none of those want a claim, and all tear down with the
+# base compose file only.
+#
+# One claim per SUITE invocation, not per run — matching run_gateway. Both
+# labels are stamped so ci-cleanup.sh's label sweep can recover the networks
+# when a run is SIGKILLed, which no inline removal can cover.
+CI_NAT_NET_BASE="10.41"
+CI_NAT_NET_CANDIDATES=256
+CI_NAT_CLAIMED_PREFIX=""
+
+# Deliberately does NOT discard stderr: only an address-pool conflict is worth
+# advancing on. Any other failure is real, and burning through 256 candidates
+# would bury the reason.
+ci_claim_nat_net() {
+    local net="$1" i err
+    CI_NAT_CLAIMED_PREFIX=""
+    for (( i = 0; i < CI_NAT_NET_CANDIDATES; i++ )); do
+        if err=$(docker network create \
+                --subnet "${CI_NAT_NET_BASE}.${i}.0/24" \
+                --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
+                "$net" 2>&1); then
+            CI_NAT_CLAIMED_PREFIX="${CI_NAT_NET_BASE}.${i}"
+            info "[nat] Claimed $net on ${CI_NAT_CLAIMED_PREFIX}.0/24"
+            return 0
+        fi
+        case "$err" in
+            *"Pool overlaps"*|*"pool overlaps"*) continue ;;
+            *) fail "[nat] docker network create: $err"; return 1 ;;
+        esac
+    done
+    fail "[nat] no free /24 in ${CI_NAT_NET_BASE}.0.0/16 after ${CI_NAT_NET_CANDIDATES} attempts"
+    return 1
+}
+
+# Claim both lab networks and export the prefixes every lab address derives
+# from. A partial claim is rolled back here, because nothing downstream will
+# run to release it.
+ci_claim_nat_networks() {
+    unset NAT_WAN_PREFIX NAT_LAN_PREFIX
+    export FIPS_NAT_WAN_NET="fips-nat-wan${FIPS_CI_NAME_SUFFIX:-}"
+    export FIPS_NAT_LAN_NET="fips-nat-shared-lan${FIPS_CI_NAME_SUFFIX:-}"
+
+    ci_claim_nat_net "$FIPS_NAT_WAN_NET" || return 1
+    local wan="$CI_NAT_CLAIMED_PREFIX"
+    if ! ci_claim_nat_net "$FIPS_NAT_LAN_NET"; then
+        docker network rm "$FIPS_NAT_WAN_NET" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    export NAT_WAN_PREFIX="$wan"
+    export NAT_LAN_PREFIX="$CI_NAT_CLAIMED_PREFIX"
+}
+
+# Release both claimed networks. A complete claim left behind would not merely
+# leak: the next nat-family suite in this run would hit `network with name ...
+# already exists`, which is not a pool overlap, so the allocator correctly
+# refuses to advance and fails. One suite failure would cascade into four.
+#
+# Both halves of run_gateway's shape are needed, and the second alone is a trap.
+# `docker network rm` refuses a network that still has endpoints attached, and
+# the nat suites deliberately leave their containers UP on a failure path so the
+# diagnostics they just dumped can be inspected — which is precisely the path
+# this release exists for. Without the `down` the removal silently no-ops
+# exactly when it matters and reports success. Nothing is lost by tearing down
+# here: the diagnostics are already in the run log, and ci_teardown reaps the
+# containers at the end of the run regardless.
+ci_release_nat_networks() {
+    docker compose \
+        -f testing/nat/docker-compose.yml \
+        -f testing/nat/docker-compose.external-net.yml \
+        --profile cone --profile symmetric --profile lan \
+        --profile nostr-publish-consume --profile stun-faults \
+        down --volumes --remove-orphans >/dev/null 2>&1 || true
+    [[ -n "${FIPS_NAT_WAN_NET:-}" ]] && \
+        { docker network rm "$FIPS_NAT_WAN_NET" >/dev/null 2>&1 || true; }
+    [[ -n "${FIPS_NAT_LAN_NET:-}" ]] && \
+        { docker network rm "$FIPS_NAT_LAN_NET" >/dev/null 2>&1 || true; }
+    return 0
+}
+
+# The overlay pointing compose at the claimed networks. APPENDED to any
+# caller-supplied chain rather than replacing it: mesh-lab/run-loop.sh sets
+# FIPS_NAT_EXTRA_COMPOSE for its trace overlay, and overwriting would silently
+# drop that.
+ci_nat_extra_compose() {
+    printf '%s' \
+        "${FIPS_NAT_EXTRA_COMPOSE:+${FIPS_NAT_EXTRA_COMPOSE}:}testing/nat/docker-compose.external-net.yml"
+}
+
 # Run a NAT scenario (cone, symmetric, lan)
 run_nat() {
     local scenario="$1"
+    local rc=0
     export COMPOSE_PROJECT_NAME="$(ci_project nat)"
-    info "[nat-$scenario] Running NAT lab"
-    if bash testing/nat/scripts/nat-test.sh "$scenario" 2>&1; then
-        record "nat-$scenario" 0
-    else
+
+    # Early return only BEFORE the claim succeeds, so nothing can leak. Every
+    # path after it falls through to the single release below — run_gateway's
+    # shape. Not a trap: bash traps are not function-scoped, so a `trap ... EXIT`
+    # here would replace the script-level on_exit handler for the rest of the
+    # run and disable ci_teardown entirely.
+    info "[nat-$scenario] Claiming lab networks"
+    if ! ci_claim_nat_networks; then
         record "nat-$scenario" 1
+        return
     fi
+
+    local _extra
+    _extra="$(ci_nat_extra_compose)"
+    local -x FIPS_NAT_EXTRA_COMPOSE="$_extra"
+
+    info "[nat-$scenario] Running NAT lab"
+    bash testing/nat/scripts/nat-test.sh "$scenario" 2>&1 || rc=1
+
+    ci_release_nat_networks
+    record "nat-$scenario" $rc
 }
 
 # Run the Nostr overlay advert publish/consume integration test.
@@ -764,13 +893,24 @@ run_nat() {
 # (A→B publish/consume), Phase 2 (B→A reverse), and Phase 3 (malformed
 # advert injected directly to the relay; consumer-liveness assertion).
 run_nostr_publish_consume() {
+    local rc=0
     export COMPOSE_PROJECT_NAME="$(ci_project nat)"
-    info "[nostr-publish-consume] Running Nostr publish/consume test"
-    if bash testing/nat/scripts/nostr-relay-test.sh 2>&1; then
-        record "nostr-publish-consume" 0
-    else
+
+    info "[nostr-publish-consume] Claiming lab networks"
+    if ! ci_claim_nat_networks; then
         record "nostr-publish-consume" 1
+        return
     fi
+
+    local _extra
+    _extra="$(ci_nat_extra_compose)"
+    local -x FIPS_NAT_EXTRA_COMPOSE="$_extra"
+
+    info "[nostr-publish-consume] Running Nostr publish/consume test"
+    bash testing/nat/scripts/nostr-relay-test.sh 2>&1 || rc=1
+
+    ci_release_nat_networks
+    record "nostr-publish-consume" $rc
 }
 
 # Run the STUN fault-injection integration test.
@@ -779,13 +919,24 @@ run_nostr_publish_consume() {
 # kill. Asserts the daemon detects each fault, recovers from delay, and
 # never panics.
 run_stun_faults() {
+    local rc=0
     export COMPOSE_PROJECT_NAME="$(ci_project nat)"
-    info "[stun-faults] Running STUN fault-injection test"
-    if bash testing/nat/scripts/stun-faults-test.sh 2>&1; then
-        record "stun-faults" 0
-    else
+
+    info "[stun-faults] Claiming lab networks"
+    if ! ci_claim_nat_networks; then
         record "stun-faults" 1
+        return
     fi
+
+    local _extra
+    _extra="$(ci_nat_extra_compose)"
+    local -x FIPS_NAT_EXTRA_COMPOSE="$_extra"
+
+    info "[stun-faults] Running STUN fault-injection test"
+    bash testing/nat/scripts/stun-faults-test.sh 2>&1 || rc=1
+
+    ci_release_nat_networks
+    record "stun-faults" $rc
 }
 
 # Run dns-resolver harness (multi-distro + e2e scenarios)
