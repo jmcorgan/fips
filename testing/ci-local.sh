@@ -535,6 +535,30 @@ run_build() {
         return 1
     fi
 
+    # An optional feature means two source trees, and --all-features lints only
+    # one of them. The default build is what ships, so lint it explicitly:
+    # without this stage, code that compiles only with `profiling` enabled would
+    # pass CI while breaking every release build.
+    info "cargo clippy --all-targets -- -D warnings (default features)"
+    if cargo clippy --all-targets -- -D warnings 2>&1; then
+        record "clippy-default-features" 0
+    else
+        record "clippy-default-features" 1
+        return 1
+    fi
+
+    # Tick-body profiler: the feature-on tree must build too. Added alongside
+    # the default-feature stages rather than replacing them. Mirrored in
+    # .github/workflows/ci.yml — check-ci-parity.sh compares integration suites
+    # only and will not catch a stage added to one runner and not the other.
+    info "cargo build --workspace --features profiling"
+    if cargo build --workspace --features profiling 2>&1; then
+        record "build-profiling" 0
+    else
+        record "build-profiling" 1
+        return 1
+    fi
+
     # Guard: the effectively-immutable state lives solely in NodeContext. The
     # Node struct must not re-declare a bundled field (config/identity/
     # startup_epoch/started_at/is_leaf_only/node_profile/max_*) — a shadow field
@@ -573,6 +597,17 @@ run_tests() {
         else
             record "unit-tests" 1
         fi
+    fi
+
+    # The `profiling` feature adds a module, a recorder and a writer thread that
+    # the default-feature run above never compiles. Run the library tests once
+    # more with it on so its own tests execute at all. Mirrored in
+    # .github/workflows/ci.yml.
+    info "cargo test --lib --features profiling"
+    if cargo test --lib --features profiling 2>&1; then
+        record "unit-tests-profiling" 0
+    else
+        record "unit-tests-profiling" 1
     fi
 }
 

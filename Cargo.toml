@@ -11,6 +11,14 @@ readme = "README.md"
 keywords = ["mesh", "p2p", "decentralized", "overlay-network", "nostr"]
 categories = ["network-programming", "command-line-utilities", "cryptography"]
 
+[features]
+default = []
+# Tick-body profiler (`src/instr`). Off by default: enabling it edits 26 call
+# sites in the rx loop's hot tick arm, and only a compile-time gate makes the
+# default build's neutrality a property of the generated code rather than of a
+# runtime check. Build with `--features profiling` for a measurement run.
+profiling = []
+
 [dependencies]
 ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }

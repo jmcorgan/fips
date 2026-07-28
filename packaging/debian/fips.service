@@ -19,6 +19,11 @@ RestartSec=5
 RuntimeDirectory=fips
 RuntimeDirectoryMode=0750
 
+# Log directory (/var/log/fips/), where the built-in tick-body profiler writes
+# its capture files. Declared so systemd creates it on start and removes it on
+# purge; the daemon runs as root and already has access without it.
+LogsDirectory=fips
+
 # Security hardening (daemon runs as root for TUN and raw sockets)
 ProtectHome=yes
 PrivateTmp=yes

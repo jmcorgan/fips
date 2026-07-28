@@ -118,10 +118,41 @@ impl ControlReadHandle {
 /// Cutover queries (R1) read only `NodeContext` / `MetricsRegistry` (the state
 /// the read handle already bundles) plus host-OS facts (`/proc`, nftables), so
 /// they render entirely in the control task without touching `Node`.
+///
+/// **It now also carries mutating commands**, namely the `profile_tick_*`
+/// family under the `profiling` feature. They are served here rather than on
+/// the rx_loop deliberately: all of their state is process statics, they need
+/// no `&mut Node`, and routing them through the loop would make the toggle
+/// queue behind the very behavior it exists to measure.
 pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -> Option<Response> {
     use crate::control::queries;
 
     match request.command.as_str() {
+        // Tick-body profiler toggle. Present only in a `--features profiling`
+        // build; otherwise these fall through to the rx_loop dispatch, which
+        // reports them as unknown commands.
+        #[cfg(feature = "profiling")]
+        "profile_tick_on" => {
+            let dir = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("dir"))
+                .and_then(|v| v.as_str());
+            let context = handle.context();
+            let npub = context.identity.npub();
+            let period = context.config.node.tick_interval_secs;
+            Some(match crate::instr::capture::start(dir, &npub, period) {
+                Ok(value) => Response::ok(value),
+                Err(e) => Response::error(e),
+            })
+        }
+        #[cfg(feature = "profiling")]
+        "profile_tick_off" => Some(match crate::instr::capture::stop() {
+            Ok(value) => Response::ok(value),
+            Err(e) => Response::error(e),
+        }),
+        #[cfg(feature = "profiling")]
+        "profile_tick_status" => Some(Response::ok(crate::instr::capture::status())),
         "show_listening_sockets" => Some(Response::ok(
             queries::show_listening_sockets_from_handle(handle),
         )),

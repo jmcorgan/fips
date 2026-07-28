@@ -159,6 +159,21 @@ not reproduced here to avoid duplicating the source.
 Both commands run on the daemon's main task and may block briefly
 while the node mutates its state.
 
+#### Profiler toggle (`--features profiling` builds only)
+
+| Command | Params | Behaviour |
+| ------- | ------ | --------- |
+| `profile_tick_on` | `dir` (optional directory path; default `/var/log/fips`) | Creates the capture file, publishes its path, and starts the writer thread. `data`: `state`, `path`, `interval_secs`, `byte_cap`. Errors if a capture is already running (naming the active file) or the directory is unwritable. |
+| `profile_tick_off` | — | Stops the capture, drains once more, joins the writer. `data`: `state`, `stopped`, `stopped_by_cap`, `stopped_by_error`, `path`, `bytes`. |
+| `profile_tick_status` | — | `data`: `state` (`idle` / `running` / `stopped_by_cap` / `stopped_by_error`), `path`, `bytes`, `byte_cap`, `interval_secs`. |
+
+Unlike `connect` and `disconnect`, these three are served in the
+control accept task rather than on the daemon's main task. All of their
+state is process statics and none of them needs `&mut Node`, so
+routing them through the main loop would only make the toggle queue
+behind the tick body it exists to measure. They are absent from a
+default build, where the daemon answers them as unknown commands.
+
 ## Gateway Command Catalog
 
 `fips-gateway` exposes a separate control socket with its own command

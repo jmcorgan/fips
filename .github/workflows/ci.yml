@@ -110,6 +110,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # An optional feature means two source trees, and --all-features lints
+      # only one of them. The default build is what ships, so lint it
+      # explicitly: without this stage, code that compiles only with
+      # `profiling` enabled would pass CI while breaking every release build.
+      # Mirrored in testing/ci-local.sh — check-ci-parity.sh compares
+      # integration suites only and will not catch a stage added to one runner
+      # and not the other.
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build with the tick-body profiler enabled
+        run: cargo build --workspace --features profiling
 
   # ───────────────────────────────────────────────────────────────────────────
   # Android cross-check
@@ -292,6 +303,12 @@ jobs:
           report_paths: target/nextest/ci/junit.xml
           check_name: Unit Tests Summary
           fail_on_failure: false
+
+      # The `profiling` feature adds a module, a recorder and a writer thread
+      # that the default-feature run above never compiles, so its own tests do
+      # not execute there. Mirrored in testing/ci-local.sh.
+      - name: Run library tests with the tick-body profiler enabled
+        run: cargo test --lib --features profiling
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 2b – Unit tests (macOS)

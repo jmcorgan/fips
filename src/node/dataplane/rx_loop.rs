@@ -109,8 +109,8 @@ impl Node {
             }
         };
 
-        let mut tick =
-            tokio::time::interval(Duration::from_secs(self.config().node.tick_interval_secs));
+        let tick_period = Duration::from_secs(self.config().node.tick_interval_secs);
+        let mut tick = tokio::time::interval(tick_period);
 
         // Set up control socket channel
         let (control_tx, mut control_rx) =
@@ -321,47 +321,95 @@ impl Node {
                     ).await;
                     let _ = response_tx.send(response);
                 }
-                _ = tick.tick() => {
-                    self.check_timeouts();
-                    let now_ms = Self::now_ms();
-                    self.reload_peer_acl().await;
-                    // The host map hot-reloads on the same tick as the ACL. It
-                    // is polled separately from `reload_peer_acl` because the
-                    // ACL's embedded alias reloader and this snapshot are
-                    // distinct resources; the `path_mtu_lookup` cache and the
-                    // `nostr_rendezvous` subsystem are deliberately excluded
-                    // from `Reloadable` since neither reloads from a backing
-                    // file (see `node::reloadable`).
-                    self.reload_host_map().await;
-                    self.poll_pending_connects().await;
-                    self.poll_nostr_rendezvous().await;
-                    self.poll_lan_rendezvous().await;
-                    self.drive_peer_timers(now_ms).await;
-                    self.resend_pending_rekeys(now_ms).await;
-                    self.resend_pending_fmp_rekey_msg3(now_ms).await;
-                    self.resend_pending_session_handshakes(now_ms).await;
-                    self.resend_pending_session_msg3(now_ms).await;
-                    self.purge_idle_sessions(now_ms);
-                    self.process_pending_retries(now_ms).await;
-                    self.check_tree_state().await;
-                    self.check_bloom_state().await;
-                    self.compute_mesh_size();
-                    self.record_stats_history();
-                    self.check_mmp_reports().await;
-                    self.check_session_mmp_reports().await;
-                    self.check_link_heartbeats().await;
-                    self.check_rekey().await;
-                    self.check_session_rekey().await;
-                    self.check_pending_lookups(now_ms).await;
-                    self.poll_transport_discovery().await;
-                    self.sample_transport_congestion();
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    self.activate_connected_udp_sessions().await;
-                    // Debug-build sweep of the peer-lifecycle map invariant
-                    // (leaked machines / machine-less legs); two map scans,
-                    // compiled out of release builds.
-                    #[cfg(debug_assertions)]
-                    self.debug_assert_peer_maps_coherent();
+                deadline = tick.tick() => {
+                    // Tick-body instrumentation. The gate is read ONCE per tick
+                    // into `instr_on`, which is then passed explicitly to every
+                    // `instr_step!` invocation — macro hygiene makes a call-site
+                    // local invisible inside the macro body. With the
+                    // `profiling` feature off, `gate()` is a `const fn`
+                    // returning false and the macro is a pure pass-through, so
+                    // the whole arm compiles to the uninstrumented sequence.
+                    //
+                    // `tick_entry` records how late this entry is against the
+                    // deadline the interval scheduled it for. That is the
+                    // measurement this instrumentation exists for: the arm is
+                    // polled LAST under `biased;`, so the
+                    // lateness IS the time it spent waiting behind the packet,
+                    // TUN and control arms. `tick()` hands back its scheduled
+                    // deadline, so this is a subtraction rather than a model.
+                    // The whole-tick span below measures the body alone.
+                    let instr_on = crate::instr::gate();
+                    crate::instr::tick_entry(instr_on, deadline.into_std(), std::time::Instant::now());
+                    instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::WholeTick, {
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTimeouts,
+                        self.check_timeouts());
+                        let now_ms = Self::now_ms();
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadPeerAcl,
+                        self.reload_peer_acl().await);
+                        // The host map hot-reloads on the same tick as the ACL. It
+                        // is polled separately from `reload_peer_acl` because the
+                        // ACL's embedded alias reloader and this snapshot are
+                        // distinct resources; the `path_mtu_lookup` cache and the
+                        // `nostr_rendezvous` subsystem are deliberately excluded
+                        // from `Reloadable` since neither reloads from a backing
+                        // file (see `node::reloadable`).
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadHostMap,
+                        self.reload_host_map().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollPendingConnects,
+                        self.poll_pending_connects().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollNostrRendezvous,
+                        self.poll_nostr_rendezvous().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollLanRendezvous,
+                        self.poll_lan_rendezvous().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DrivePeerTimers,
+                        self.drive_peer_timers(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingRekeys,
+                        self.resend_pending_rekeys(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingFmpRekeyMsg3,
+                        self.resend_pending_fmp_rekey_msg3(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingSessionHandshakes,
+                        self.resend_pending_session_handshakes(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingSessionMsg3,
+                        self.resend_pending_session_msg3(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeIdleSessions,
+                        self.purge_idle_sessions(now_ms));
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ProcessPendingRetries,
+                        self.process_pending_retries(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTreeState,
+                        self.check_tree_state().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckBloomState,
+                        self.check_bloom_state().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ComputeMeshSize,
+                        self.compute_mesh_size());
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::RecordStatsHistory,
+                        self.record_stats_history());
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckMmpReports,
+                        self.check_mmp_reports().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckSessionMmpReports,
+                        self.check_session_mmp_reports().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckLinkHeartbeats,
+                        self.check_link_heartbeats().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckRekey,
+                        self.check_rekey().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckSessionRekey,
+                        self.check_session_rekey().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckPendingLookups,
+                        self.check_pending_lookups(now_ms).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollTransportDiscovery,
+                        self.poll_transport_discovery().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::SampleTransportCongestion,
+                        self.sample_transport_congestion());
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ActivateConnectedUdpSessions,
+                        self.activate_connected_udp_sessions().await);
+                        // Debug-build sweep of the peer-lifecycle map invariant
+                        // (leaked machines / machine-less legs); two map scans,
+                        // compiled out of release builds.
+                        #[cfg(debug_assertions)]
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DebugAssertPeerMapsCoherent,
+                        self.debug_assert_peer_maps_coherent());
+                    });
+                    crate::instr::tick_gauges(instr_on, self.peers.len() as u64);
                 }
                 // Shutdown signal → enter the bounded drain in place, ONCE.
                 // Gated on `is_none()` so it only fires while serving; after

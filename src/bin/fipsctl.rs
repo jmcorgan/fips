@@ -76,6 +76,37 @@ enum Commands {
         #[command(subcommand)]
         what: StatsCommands,
     },
+    /// Control the built-in profiler (requires a `--features profiling` build)
+    #[cfg(feature = "profiling")]
+    Profile {
+        #[command(subcommand)]
+        what: ProfileCommands,
+    },
+}
+
+#[cfg(feature = "profiling")]
+#[derive(Subcommand, Debug)]
+enum ProfileCommands {
+    /// Profile the rx-loop tick body
+    Tick {
+        #[command(subcommand)]
+        action: ProfileTickAction,
+    },
+}
+
+#[cfg(feature = "profiling")]
+#[derive(Subcommand, Debug)]
+enum ProfileTickAction {
+    /// Start a capture
+    On {
+        /// Directory for the capture file (default /var/log/fips)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Stop the running capture
+    Off,
+    /// Report capture state
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -470,6 +501,20 @@ fn main() {
                 }
                 build_command("show_stats_history", params)
             }
+        },
+        #[cfg(feature = "profiling")]
+        Commands::Profile { what } => match what {
+            ProfileCommands::Tick { action } => match action {
+                ProfileTickAction::On { dir } => match dir {
+                    Some(dir) => build_command(
+                        "profile_tick_on",
+                        serde_json::json!({"dir": dir.display().to_string()}),
+                    ),
+                    None => build_query("profile_tick_on"),
+                },
+                ProfileTickAction::Off => build_query("profile_tick_off"),
+                ProfileTickAction::Status => build_query("profile_tick_status"),
+            },
         },
         Commands::Keygen { .. } => unreachable!(),
     };

@@ -115,6 +115,58 @@ Tell the daemon to drop a peer link.
 | -------- | ----------- |
 | `peer` | npub (bech32) or hostname from `/etc/fips/hosts`. |
 
+### `profile tick <on|off|status>`
+
+> **Reading the output.** Step durations are wall clock measured across `await`
+> points, not CPU time: a step that waits on I/O accrues that wait, and other
+> tasks may run inside the span. That is the intended measure for head-of-line
+> delay, and it means a large step is not necessarily an expensive one.
+> `arm_starvation` is measured directly as the entry time minus the deadline
+> the interval scheduled that tick for. It is not derived from
+> `tick_entry_gap`, which carries no starvation signal on its own: under a
+> steady delay every gap is exactly one tick period.
+
+Start, stop and inspect a capture of the rx-loop tick body. **Present
+only when both `fipsctl` and the daemon are built with
+`--features profiling`**; the feature is off by default, so a stock
+package does not carry this subcommand and a stock daemon reports
+`profile_tick_*` as an unknown command.
+
+| Subcommand | Control-socket command | Description |
+| ---------- | ---------------------- | ----------- |
+| `profile tick on` | `profile_tick_on` | Create the capture file and start recording. Fails if a capture is already running (naming the active file) or if the directory cannot be written. |
+| `profile tick off` | `profile_tick_off` | Stop the capture. The writer is woken immediately, drains once more and is joined, so the command returns promptly. Succeeds, reporting nothing active, when no capture is running. |
+| `profile tick status` | `profile_tick_status` | Report `idle`, `running`, `stopped_by_cap` or `stopped_by_error`, plus the active path, bytes written, flush interval and byte cap. |
+
+`profile tick on` options:
+
+| Flag | Argument | Default | Description |
+| ---- | -------- | ------- | ----------- |
+| `--dir` | directory path | `/var/log/fips` | Where to write the capture. Created if absent. Use it to profile a non-root `cargo run`, or on a platform whose log root differs. |
+
+One file is written per capture, named `profile-<UTC timestamp>.tsv`.
+It opens with a `#`-prefixed header block (node npub, build version,
+platform, configured tick period, flush interval, byte cap, start
+time), then a tab-separated column header, then one row per measured
+step per flush interval:
+
+```text
+ts_unix  kind  domain  name  count  max  total  unit
+```
+
+`kind` is `step` for a timed span and `gauge` for a sampled scalar, so
+a gauge value never lands under a duration column; `unit` names the
+unit of `max` and `total` for that row. Every step present in the build
+gets a row every interval, including zero-count rows. Gauges cover
+ticks per interval, peer count, the wall gap between successive
+tick-arm entries, and the arm-starvation delay, which is measured
+against the deadline the tick was scheduled for rather than derived
+from the gap.
+
+A capture stops itself on reaching 32 MB, appending a `#` line saying
+so; `profile tick status` then reports `stopped_by_cap` until the next
+`on` or `off` clears it.
+
 ## Exit Codes
 
 | Code | Meaning |

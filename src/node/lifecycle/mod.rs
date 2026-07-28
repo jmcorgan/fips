@@ -2221,6 +2221,10 @@ impl Node {
         // which the helper emits at the Dns→rest seam.
         self.execute_teardown(actions, true).await;
 
+        // Stop and join the profile writer thread if a capture is armed.
+        // Idempotent, and compiled away in a default build.
+        crate::instr::shutdown();
+
         self.supervisor.state = NodeState::Stopped;
         info!(state = %self.supervisor.state, "Node stopped");
         Ok(())
@@ -2475,6 +2479,7 @@ impl Node {
             info!(state = %self.supervisor.state, "Node stopping (drain complete)");
             let stop_actions = self.supervisor.fsm.step(Event::DrainDeadlineElapsed);
             self.execute_teardown(stop_actions, false).await;
+            crate::instr::shutdown();
             self.supervisor.state = NodeState::Stopped;
             info!(state = %self.supervisor.state, "Node stopped");
         } else if let Err(e) = self.stop().await {
