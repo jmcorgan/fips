@@ -1065,29 +1065,33 @@ impl Node {
                 .iter()
                 .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
                 .collect();
-            match crate::transport::ble::android_io::android_ble_bridge() {
-                Some(bridge) => {
-                    for (name, ble_config) in ble_instances {
-                        let transport_id = self.allocate_transport_id();
-                        let io = crate::transport::ble::android_io::AndroidIo::new(
-                            std::sync::Arc::clone(&bridge),
-                        );
-                        let mut ble = crate::transport::ble::BleTransport::new(
-                            transport_id,
-                            name,
-                            ble_config,
-                            io,
-                            packet_tx.clone(),
-                        );
-                        ble.set_local_pubkey(self.identity().pubkey().serialize());
-                        transports.push(TransportHandle::Ble(ble));
-                    }
-                }
-                None => {
-                    if !ble_instances.is_empty() {
-                        tracing::warn!("BLE configured but no Android radio bridge injected");
-                    }
-                }
+            // Built whether or not a radio bridge exists yet, and without
+            // capturing the one that does: `AndroidIo` resolves the process-wide
+            // bridge per operation. The radio is owned by an Android foreground
+            // service whose lifetime is independent of the node's — it can start
+            // after the node, and it mints a fresh bridge every time it starts.
+            // Binding either fact into the transport at construction meant the
+            // only way to pick up a radio was to stop and rebuild the node,
+            // which drops every peer and session. Operations attempted while no
+            // radio is present fail as transport errors and recover on their own
+            // once one appears.
+            if !ble_instances.is_empty()
+                && crate::transport::ble::android_io::android_ble_bridge().is_none()
+            {
+                tracing::info!("BLE configured; waiting for the Android radio bridge");
+            }
+            for (name, ble_config) in ble_instances {
+                let transport_id = self.allocate_transport_id();
+                let io = crate::transport::ble::android_io::AndroidIo::from_global();
+                let mut ble = crate::transport::ble::BleTransport::new(
+                    transport_id,
+                    name,
+                    ble_config,
+                    io,
+                    packet_tx.clone(),
+                );
+                ble.set_local_pubkey(self.identity().pubkey().serialize());
+                transports.push(TransportHandle::Ble(ble));
             }
         }
 

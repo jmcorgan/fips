@@ -387,12 +387,44 @@ pub fn android_ble_bridge() -> Option<Arc<AndroidBleBridge>> {
 
 /// macOS/Android-style external-radio backend over [`AndroidBleBridge`].
 pub struct AndroidIo {
-    bridge: Arc<AndroidBleBridge>,
+    /// Bridge to use when one was supplied explicitly (tests). In the app this
+    /// is `None` and every operation resolves [`android_ble_bridge`] instead.
+    ///
+    /// Resolving per call is what lets the radio be replaced without rebuilding
+    /// the node. The Android service mints a fresh bridge each time it starts
+    /// (a new `BleRadio`, a new JNI handle); if this type captured that `Arc` at
+    /// construction, a running node would keep driving the dead one, and the
+    /// only way to adopt the new radio would be to stop and restart the node —
+    /// dropping every peer and every session with it.
+    bridge: Option<Arc<AndroidBleBridge>>,
 }
 
 impl AndroidIo {
+    /// Resolve the bridge from the process-wide slot on each operation.
+    pub fn from_global() -> Self {
+        Self { bridge: None }
+    }
+
+    /// Pin a specific bridge, for tests that drive one directly.
     pub fn new(bridge: Arc<AndroidBleBridge>) -> Self {
-        Self { bridge }
+        Self {
+            bridge: Some(bridge),
+        }
+    }
+
+    /// The bridge for this operation. `None` once the radio has gone away —
+    /// callers surface that as a transport error rather than panicking, since
+    /// it is reachable simply by toggling Bluetooth off mid-operation.
+    fn bridge(&self) -> Option<Arc<AndroidBleBridge>> {
+        match &self.bridge {
+            Some(b) => Some(Arc::clone(b)),
+            None => android_ble_bridge(),
+        }
+    }
+
+    fn require_bridge(&self) -> Result<Arc<AndroidBleBridge>, TransportError> {
+        self.bridge()
+            .ok_or_else(|| TransportError::Io(std::io::Error::other("BLE radio not available")))
     }
 }
 
@@ -533,42 +565,40 @@ impl BleIo for AndroidIo {
     type Scanner = AndroidScanner;
 
     async fn listen(&self, _psm: u16) -> Result<AndroidAcceptor, TransportError> {
+        let bridge = self.require_bridge()?;
         // Android assigns the listener PSM; the `psm` arg from FIPS is ignored.
-        let os_psm = self.bridge.radio.listen();
+        let os_psm = bridge.radio.listen();
         if os_psm != 0 {
-            self.bridge.local_psm.store(os_psm, Ordering::Relaxed);
+            bridge.local_psm.store(os_psm, Ordering::Relaxed);
         }
-        let rx = self
-            .bridge
+        let rx = bridge
             .accept_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
         Ok(AndroidAcceptor {
             rx,
-            radio: Arc::clone(&self.bridge.radio),
+            radio: Arc::clone(&bridge.radio),
         })
     }
 
     async fn connect(&self, addr: &BleAddr, psm: u16) -> Result<AndroidStream, TransportError> {
+        let bridge = self.require_bridge()?;
         // Substitute the learned per-peer PSM for this address, if known.
-        let dial_psm = self.bridge.psm_map.resolve(addr, psm);
-        let connect_id = self.bridge.next_id.fetch_add(1, Ordering::Relaxed);
+        let dial_psm = bridge.psm_map.resolve(addr, psm);
+        let connect_id = bridge.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.bridge
+        bridge
             .connects
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(connect_id, tx);
-        self.bridge.radio.connect(connect_id, addr, dial_psm);
+        bridge.radio.connect(connect_id, addr, dial_psm);
         // FIPS already wraps connect() in a timeout, so we just await the result.
         match rx.await {
-            Ok(ep) => Ok(AndroidStream::from_endpoints(
-                ep,
-                Arc::clone(&self.bridge.radio),
-            )),
+            Ok(ep) => Ok(AndroidStream::from_endpoints(ep, Arc::clone(&bridge.radio))),
             Err(_) => {
-                self.bridge
+                bridge
                     .connects
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -581,24 +611,26 @@ impl BleIo for AndroidIo {
     }
 
     async fn start_advertising(&self) -> Result<(), TransportError> {
-        self.bridge
+        let bridge = self.require_bridge()?;
+        bridge
             .radio
-            .start_advertising(self.bridge.local_psm.load(Ordering::Relaxed));
+            .start_advertising(bridge.local_psm.load(Ordering::Relaxed));
         Ok(())
     }
 
     async fn stop_advertising(&self) -> Result<(), TransportError> {
-        self.bridge.radio.stop_advertising();
+        let bridge = self.require_bridge()?;
+        bridge.radio.stop_advertising();
         Ok(())
     }
 
     async fn start_scanning(&self) -> Result<AndroidScanner, TransportError> {
+        let bridge = self.require_bridge()?;
         // Re-learn PSMs / adverts each scan cycle (addresses rotate with MAC).
-        self.bridge.psm_map.clear();
-        self.bridge.clear_adverts();
-        self.bridge.radio.start_scanning();
-        let rx = self
-            .bridge
+        bridge.psm_map.clear();
+        bridge.clear_adverts();
+        bridge.radio.start_scanning();
+        let rx = bridge
             .scan_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
