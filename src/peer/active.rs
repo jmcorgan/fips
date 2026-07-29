@@ -214,6 +214,16 @@ pub struct ActivePeer {
     // === Identity (Verified) ===
     /// Cryptographic identity (verified via handshake).
     identity: PeerIdentity,
+    /// Bech32 npub, derived once at construction.
+    ///
+    /// The npub is a pure function of `identity`'s public key, and
+    /// `identity` is never mutated after construction, so this can never
+    /// go stale. Deriving it costs a bech32 encode, which the per-tick
+    /// stats snapshot was paying once per peer per tick.
+    npub: String,
+    /// Shortened npub for log/UI display, derived once at construction.
+    /// Immutable for the same reason as [`ActivePeer::npub`].
+    short_npub: String,
 
     // === Connection ===
     /// Current connectivity state.
@@ -325,6 +335,8 @@ impl ActivePeer {
     pub fn new(identity: PeerIdentity, link_id: LinkId, authenticated_at: u64) -> Self {
         let now = Instant::now();
         Self {
+            npub: identity.npub(),
+            short_npub: identity.short_npub(),
             identity,
             connectivity: ConnectivityState::Connected,
             declaration: None,
@@ -417,6 +429,8 @@ impl ActivePeer {
             mmp_config.owd_window_size,
         ));
         Self {
+            npub: identity.npub(),
+            short_npub: identity.short_npub(),
             identity,
             connectivity: ConnectivityState::Connected,
             declaration: None,
@@ -516,8 +530,21 @@ impl ActivePeer {
     }
 
     /// Get the peer's npub string.
+    ///
+    /// Returns a clone of the value cached at construction; the bech32
+    /// encode is not repeated.
     pub fn npub(&self) -> String {
-        self.identity.npub()
+        self.npub.clone()
+    }
+
+    /// Borrow the peer's cached npub without allocating.
+    pub fn npub_str(&self) -> &str {
+        &self.npub
+    }
+
+    /// Borrow the peer's cached shortened npub (e.g. `npub1abcd...wxyz`).
+    pub fn short_npub(&self) -> &str {
+        &self.short_npub
     }
 
     // === Connection Accessors ===
@@ -1534,10 +1561,35 @@ impl ActivePeer {
 mod tests {
     use super::*;
     use crate::Identity;
+    use crate::noise::HandshakeState;
 
     fn make_peer_identity() -> PeerIdentity {
         let identity = Identity::generate();
         PeerIdentity::from_pubkey(identity.pubkey())
+    }
+
+    /// A completed XX handshake, returning the initiator's session. Only the
+    /// session's existence matters here: this test is about `with_session`
+    /// populating the npub cache from the identity it is handed.
+    fn xx_session_pair() -> (NoiseSession, NoiseSession) {
+        let initiator_id = Identity::generate();
+        let responder_id = Identity::generate();
+        let mut initiator = HandshakeState::new_initiator(initiator_id.keypair());
+        initiator.set_local_epoch([0xA1, 0xB2, 0xC3, 0xD4, 0x11, 0x22, 0x33, 0x44]);
+        let mut responder = HandshakeState::new_responder(responder_id.keypair());
+        responder.set_local_epoch([0xD4, 0xC3, 0xB2, 0xA1, 0x44, 0x33, 0x22, 0x11]);
+
+        let msg1 = initiator.write_message_1().unwrap();
+        responder.read_message_1(&msg1).unwrap();
+        let msg2 = responder.write_message_2().unwrap();
+        initiator.read_message_2(&msg2).unwrap();
+        let msg3 = initiator.write_message_3().unwrap();
+        responder.read_message_3(&msg3).unwrap();
+
+        (
+            initiator.into_session().unwrap(),
+            responder.into_session().unwrap(),
+        )
     }
 
     fn make_node_addr(val: u8) -> NodeAddr {
@@ -1575,6 +1627,62 @@ mod tests {
         assert!(peer.can_send());
         assert_eq!(peer.authenticated_at(), 1000);
         assert!(peer.needs_filter_update()); // New peers need filter
+    }
+
+    #[test]
+    fn test_npub_cache_matches_identity() {
+        let identity = make_peer_identity();
+        let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+
+        assert_eq!(peer.npub(), identity.npub());
+        assert_eq!(peer.npub_str(), identity.npub());
+        assert_eq!(peer.short_npub(), identity.short_npub());
+    }
+
+    #[test]
+    fn test_npub_cache_matches_identity_with_session() {
+        // `with_session` builds its own struct literal, so it needs its
+        // own check that the cache is populated from the same identity.
+        let identity = make_peer_identity();
+        let (session, _peer_session) = xx_session_pair();
+
+        let peer = ActivePeer::with_session(
+            identity,
+            LinkId::new(1),
+            1000,
+            session,
+            SessionIndex::new(1),
+            SessionIndex::new(2),
+            TransportId::new(1),
+            TransportAddr::from_string("127.0.0.1:9000"),
+            LinkStats::new(),
+            true,
+            &MmpConfig::default(),
+            None,
+            NodeProfile::Full,
+            NodeProfile::Full,
+        );
+
+        assert_eq!(peer.npub(), identity.npub());
+        assert_eq!(peer.short_npub(), identity.short_npub());
+    }
+
+    #[test]
+    fn test_npub_is_memoized_not_rederived() {
+        // The whole point of the fix: the strings are stored on the peer,
+        // not recomputed per call. A stored string keeps one heap buffer,
+        // so repeated borrows have a stable address. A per-call bech32
+        // encode would hand back a fresh allocation each time.
+        let identity = make_peer_identity();
+        let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+
+        let first = peer.npub_str().as_ptr();
+        let second = peer.npub_str().as_ptr();
+        assert_eq!(first, second);
+
+        let short_first = peer.short_npub().as_ptr();
+        let short_second = peer.short_npub().as_ptr();
+        assert_eq!(short_first, short_second);
     }
 
     #[test]

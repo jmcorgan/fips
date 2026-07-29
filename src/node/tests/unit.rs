@@ -1997,6 +1997,101 @@ async fn process_pending_retries_gated_at_capacity() {
     );
 }
 
+/// A TCP listener that accepts connections and then never speaks. A relay
+/// URL pointed at it makes the nostr client's websocket handshake hang, so
+/// `refetch_advert_for_stale_check` burns its full 2s fetch timeout without
+/// any network egress.
+fn spawn_blackhole_relay() -> String {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind blackhole listener");
+    let port = listener.local_addr().expect("blackhole local addr").port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            held.push(stream);
+        }
+    });
+    format!("ws://127.0.0.1:{port}")
+}
+
+/// The per-tick retry loop must not await the pre-dial advert refetch.
+///
+/// `process_pending_retries` runs inline on the node's 1s rx-loop tick. Each
+/// due peer's refetch carries a 2s relay-fetch timeout, so awaiting it stalls
+/// the whole tick by 2s per peer — up to `MAX_RETRY_CONNECTIONS_PER_TICK`
+/// times in one tick body. The refresh is fire-and-forget: it exists to make
+/// the *next* retry dial a fresh endpoint, and retries are backoff-paced.
+///
+/// Discriminator: wall-clock duration of one `process_pending_retries` call
+/// with several due peers whose refetches all hang. Awaited, the call takes
+/// `2s * peers`; spawned, it returns without waiting on any of them.
+#[tokio::test]
+async fn process_pending_retries_does_not_await_advert_refetch() {
+    use std::time::Instant;
+
+    const DUE_PEERS: usize = 4;
+    // Awaited: >= 8s (4 x 2s). Spawned: milliseconds. A 3s bound sits far
+    // from both, so neither machine load nor the 2s timeout's own slack can
+    // flip the verdict.
+    const MAX_TICK_MS: u128 = 3_000;
+
+    let mut node = make_node_with_max_peers(64);
+
+    let mut bootstrap = crate::nostr::NostrRendezvous::new_for_test();
+    bootstrap
+        .set_advert_relays_for_test(vec![spawn_blackhole_relay()])
+        .await;
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(Arc::new(bootstrap));
+    // Running gate, so the admission short-circuit is not what suppresses the
+    // dial — same fingerprint the capacity-gate test relies on.
+    node.supervisor.state = crate::node::NodeState::Running;
+
+    let mut queued = Vec::new();
+    for _ in 0..DUE_PEERS {
+        let peer_npub = Identity::generate().npub();
+        let peer_node_addr = *PeerIdentity::from_npub(&peer_npub).unwrap().node_addr();
+        let mut state = super::super::peering::retry::RetryState::new(
+            crate::config::PeerConfig::new(peer_npub, "udp", "127.0.0.1:9"),
+        );
+        state.retry_after_ms = 0;
+        state.reconnect = true;
+        node.peering
+            .reconciler
+            .retry_pending
+            .insert(peer_node_addr, state);
+        queued.push(peer_node_addr);
+    }
+
+    let started = Instant::now();
+    node.process_pending_retries(1_000).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed.as_millis() < MAX_TICK_MS,
+        "retry tick must not block on the advert refetch: took {}ms for {} due peers \
+         (a per-peer 2s relay-fetch timeout awaited inline is the fingerprint)",
+        elapsed.as_millis(),
+        DUE_PEERS
+    );
+
+    // The rest of the loop body is unchanged: every due peer was still
+    // attempted, failed for want of a transport, and was rescheduled.
+    for addr in &queued {
+        let state = node
+            .peering
+            .reconciler
+            .retry_pending
+            .get(addr)
+            .expect("due peer must remain queued after a failed attempt");
+        assert_eq!(
+            state.retry_count, 1,
+            "each due peer must still have been attempted and rescheduled"
+        );
+    }
+}
+
 #[tokio::test]
 async fn poll_nostr_rendezvous_established_gated_at_capacity() {
     use crate::nostr::EstablishedTraversal;
@@ -2775,4 +2870,50 @@ async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
         "the sender's address must reach the surviving carrier"
     );
     assert_eq!(machine.link_id(), *link);
+}
+
+#[test]
+fn test_peer_display_name_uses_cached_short_npub() {
+    // Path 3 of `peer_display_name` (no host entry, no alias) reads the
+    // per-peer cached short npub; it must still equal the value derived
+    // from the peer's identity.
+    let mut node = make_node();
+    let peer_identity_full = Identity::generate();
+    let peer_addr = *peer_identity_full.node_addr();
+    let peer_identity = PeerIdentity::from_pubkey(peer_identity_full.pubkey());
+    node.peers
+        .insert(peer_addr, ActivePeer::new(peer_identity, LinkId::new(1), 0));
+
+    assert_eq!(
+        node.peer_display_name(&peer_addr),
+        peer_identity.short_npub()
+    );
+}
+
+#[test]
+fn test_peer_display_name_tracks_alias_change() {
+    // The display name is NOT cached on the peer: `peer_aliases` is a
+    // runtime-mutable map (`update_peers` inserts and removes entries), so
+    // a cached name would go stale. Caching only the immutable short npub
+    // must leave that tracking intact.
+    let mut node = make_node();
+    let peer_identity_full = Identity::generate();
+    let peer_addr = *peer_identity_full.node_addr();
+    let peer_identity = PeerIdentity::from_pubkey(peer_identity_full.pubkey());
+    node.peers
+        .insert(peer_addr, ActivePeer::new(peer_identity, LinkId::new(1), 0));
+
+    assert_eq!(
+        node.peer_display_name(&peer_addr),
+        peer_identity.short_npub()
+    );
+
+    node.peer_aliases.insert(peer_addr, "gateway".to_string());
+    assert_eq!(node.peer_display_name(&peer_addr), "gateway");
+
+    node.peer_aliases.remove(&peer_addr);
+    assert_eq!(
+        node.peer_display_name(&peer_addr),
+        peer_identity.short_npub()
+    );
 }

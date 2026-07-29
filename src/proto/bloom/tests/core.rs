@@ -1,5 +1,9 @@
 //! Tests for the `BloomFilter` data structure.
 
+use alloc::collections::BTreeMap;
+
+use crate::NodeAddr;
+use crate::proto::bloom::state::BloomState;
 use crate::proto::bloom::{BloomError, BloomFilter, DEFAULT_FILTER_SIZE_BITS, DEFAULT_HASH_COUNT};
 use crate::testutil::make_node_addr;
 
@@ -364,4 +368,71 @@ fn test_bloom_filter_bit_indices_match_double_hashing_formula() {
     // Spot-check a definitely-absent item is reported absent.
     let absent = make_node_addr(200);
     assert!(!filter.contains(&absent));
+}
+
+#[test]
+fn test_compute_outgoing_filters_matches_per_peer() {
+    let node = make_node_addr(0);
+    let mut state = BloomState::new(node);
+    state.add_leaf_dependent(make_node_addr(200));
+    state.add_leaf_dependent(make_node_addr(201));
+
+    // Six contributing peers with overlapping content, plus one whose
+    // filter is a different size and must be skipped by both paths.
+    let mut peer_filters = BTreeMap::new();
+    for i in 1u8..=6 {
+        let mut filter = BloomFilter::new();
+        for j in 0..5u8 {
+            filter.insert(&make_node_addr(i.wrapping_mul(7).wrapping_add(j)));
+        }
+        peer_filters.insert(make_node_addr(i), filter);
+    }
+    let odd_peer = make_node_addr(7);
+    let mut odd = BloomFilter::with_params(4096, DEFAULT_HASH_COUNT).unwrap();
+    odd.insert(&make_node_addr(99));
+    peer_filters.insert(odd_peer, odd);
+
+    // Targets: every contributing peer, the odd-sized one, and two peers
+    // that contribute nothing (non-tree peers get announces too).
+    let mut targets: Vec<NodeAddr> = (1u8..=7).map(make_node_addr).collect();
+    targets.push(make_node_addr(120));
+    targets.push(make_node_addr(121));
+
+    let batch = state.compute_outgoing_filters(&targets, &peer_filters);
+
+    assert_eq!(batch.len(), targets.len());
+    for target in &targets {
+        let expected = state.compute_outgoing_filter(target, &peer_filters);
+        assert_eq!(
+            batch.get(target),
+            Some(&expected),
+            "batch filter for {:?} differs from per-peer computation",
+            target
+        );
+    }
+
+    // Split horizon is real, not vacuous: a contributing peer's own
+    // entries must be absent from its own outgoing filter, and present
+    // in another peer's.
+    let peer3 = make_node_addr(3);
+    let own_entry = make_node_addr(3u8.wrapping_mul(7));
+    assert!(!batch[&peer3].contains(&own_entry));
+    assert!(batch[&make_node_addr(1)].contains(&own_entry));
+}
+
+#[test]
+fn test_compute_outgoing_filters_empty_inputs() {
+    let node = make_node_addr(0);
+    let state = BloomState::new(node);
+    let peer_filters = BTreeMap::new();
+
+    assert!(
+        state
+            .compute_outgoing_filters(&[], &peer_filters)
+            .is_empty()
+    );
+
+    let target = make_node_addr(1);
+    let batch = state.compute_outgoing_filters(&[target], &peer_filters);
+    assert_eq!(batch[&target], state.base_filter());
 }

@@ -104,16 +104,24 @@ impl Node {
                 continue;
             };
 
-            // Refresh the peer's overlay advert before retrying. The cache is
+            // Kick off a refresh of the peer's overlay advert. The cache is
             // read-only on hit, so a retry without a refetch dials the same
             // cached endpoint — and the most common reason a peer landed in the
             // retry schedule is that endpoint just stopped working (NAT rebind,
-            // port change, peer restart). Cheap (one Filter fetch, bounded by
-            // the retry backoff cadence).
+            // port change, peer restart).
+            //
+            // Fire-and-forget, NOT awaited: this runs inline on the 1s rx-loop
+            // tick, and the fetch carries a 2s relay timeout that would stall
+            // the tick — and every other rx-loop arm with it — by up to 2s per
+            // due peer. So the dial below uses whatever advert is cached now
+            // and the refreshed one lands for the *next* retry of this peer.
+            // Retries are backoff-paced, so that defers the benefit by one
+            // backoff interval rather than losing it.
             if let Some(bootstrap) = self.supervisor.nostr_rendezvous.engine_arc() {
-                let _ = bootstrap
-                    .refetch_advert_for_stale_check(&peer_config.npub)
-                    .await;
+                let npub = peer_config.npub.clone();
+                tokio::spawn(async move {
+                    let _ = bootstrap.refetch_advert_for_stale_check(&npub).await;
+                });
             }
 
             match self.initiate_peer_connection(&peer_config).await {

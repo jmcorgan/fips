@@ -29,27 +29,19 @@ impl Node {
         filters
     }
 
-    /// Build a FilterAnnounce for a specific peer.
-    ///
-    /// The outgoing filter excludes the destination peer's own filter
-    /// to prevent routing loops (don't tell a peer about destinations
-    /// reachable only through them).
-    fn build_filter_announce(&mut self, exclude_peer: &NodeAddr) -> FilterAnnounce {
-        let peer_filters = self.peer_inbound_filters();
-        let filter = self
-            .bloom_state
-            .compute_outgoing_filter(exclude_peer, &peer_filters);
-        let sequence = self.bloom_state.next_sequence();
-        FilterAnnounce::new(filter, sequence)
-    }
-
     /// Send a FilterAnnounce to a specific peer, respecting debounce.
+    ///
+    /// `filter` is the outgoing filter for this peer, already computed
+    /// with the destination peer's own contribution excluded to prevent
+    /// routing loops (don't tell a peer about destinations reachable
+    /// only through them).
     ///
     /// If the peer is rate-limited, the update stays pending for
     /// delivery on the next tick cycle.
     pub(super) async fn send_filter_announce_to_peer(
         &mut self,
         peer_addr: &NodeAddr,
+        filter: BloomFilter,
     ) -> Result<(), NodeError> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -64,7 +56,7 @@ impl Node {
         }
 
         // Build and encode
-        let announce = self.build_filter_announce(peer_addr);
+        let announce = FilterAnnounce::new(filter, self.bloom_state.next_sequence());
         let sent_filter = announce.filter.clone();
         let encoded = announce.encode().map_err(|e| NodeError::SendFailed {
             node_addr: *peer_addr,
@@ -142,8 +134,24 @@ impl Node {
             .copied()
             .collect();
 
+        if ready.is_empty() {
+            return;
+        }
+
+        // One snapshot and one union pass for the whole ready set. The
+        // send path never mutates peer inbound filters or the tree state,
+        // and the rx loop holds `&mut self` across the awaits, so the
+        // snapshot cannot go stale mid-loop.
+        let peer_filters = self.peer_inbound_filters();
+        let mut outgoing = self
+            .bloom_state
+            .compute_outgoing_filters(&ready, &peer_filters);
+
         for peer_addr in ready {
-            if let Err(e) = self.send_filter_announce_to_peer(&peer_addr).await {
+            let Some(filter) = outgoing.remove(&peer_addr) else {
+                continue;
+            };
+            if let Err(e) = self.send_filter_announce_to_peer(&peer_addr, filter).await {
                 debug!(
                     peer = %self.peer_display_name(&peer_addr),
                     error = %e,

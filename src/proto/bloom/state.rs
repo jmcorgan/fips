@@ -172,19 +172,77 @@ impl BloomState {
         peer_addrs: &[NodeAddr],
         peer_filters: &BTreeMap<NodeAddr, BloomFilter>,
     ) {
-        for peer_addr in peer_addrs {
-            if peer_addr == exclude_from {
-                continue;
-            }
-            let new_filter = self.compute_outgoing_filter(peer_addr, peer_filters);
-            let changed = match self.last_sent_filters.get(peer_addr) {
+        let targets: Vec<NodeAddr> = peer_addrs
+            .iter()
+            .filter(|addr| *addr != exclude_from)
+            .copied()
+            .collect();
+
+        for (peer_addr, new_filter) in self.compute_outgoing_filters(&targets, peer_filters) {
+            let changed = match self.last_sent_filters.get(&peer_addr) {
                 Some(last) => *last != new_filter,
                 None => true, // never sent → must send
             };
             if changed {
-                self.pending_updates.insert(*peer_addr);
+                self.pending_updates.insert(peer_addr);
             }
         }
+    }
+
+    /// Compute the outgoing filter for many peers in one pass.
+    ///
+    /// Equivalent to calling [`compute_outgoing_filter`](Self::compute_outgoing_filter)
+    /// once per target, but linear in the number of contributing peer
+    /// filters instead of quadratic. The per-peer call rebuilds the whole
+    /// union from scratch, so computing it for every peer costs
+    /// O(targets × filters) 1 KB merges; announce fan-out on a
+    /// large node does exactly that, once per tick and again on every
+    /// inbound announce.
+    ///
+    /// The split-horizon exclusion is the only thing that differs between
+    /// targets, so the union of "everything except peer i" is assembled
+    /// from a running prefix union and a precomputed suffix union. Merging
+    /// is a bytewise OR, which is commutative and associative, so the
+    /// result is bit-identical to the per-peer computation.
+    pub fn compute_outgoing_filters(
+        &self,
+        targets: &[NodeAddr],
+        peer_filters: &BTreeMap<NodeAddr, BloomFilter>,
+    ) -> BTreeMap<NodeAddr, BloomFilter> {
+        let base = self.base_filter();
+        let keys: Vec<NodeAddr> = peer_filters.keys().copied().collect();
+        let n = keys.len();
+
+        // suffix[i] = union of peer_filters[keys[i..]]; suffix[n] is empty.
+        let mut suffix = vec![BloomFilter::new(); n + 1];
+        for i in (0..n).rev() {
+            let mut acc = suffix[i + 1].clone();
+            // Size mismatches are skipped, exactly as in the per-peer path.
+            let _ = acc.merge(&peer_filters[&keys[i]]);
+            suffix[i] = acc;
+        }
+
+        // Filter for a target that contributes nothing: everything merged.
+        let mut all = base.clone();
+        let _ = all.merge(&suffix[0]);
+
+        let mut per_key: BTreeMap<NodeAddr, BloomFilter> = BTreeMap::new();
+        let mut prefix = BloomFilter::new();
+        for i in 0..n {
+            let mut outgoing = base.clone();
+            let _ = outgoing.merge(&prefix);
+            let _ = outgoing.merge(&suffix[i + 1]);
+            per_key.insert(keys[i], outgoing);
+            let _ = prefix.merge(&peer_filters[&keys[i]]);
+        }
+
+        targets
+            .iter()
+            .map(|target| {
+                let filter = per_key.get(target).cloned().unwrap_or_else(|| all.clone());
+                (*target, filter)
+            })
+            .collect()
     }
 
     /// Compute the outgoing filter for a specific peer.

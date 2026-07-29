@@ -1176,7 +1176,7 @@ impl Node {
             return name.clone();
         }
         if let Some(peer) = self.peers.get(addr) {
-            return peer.identity().short_npub();
+            return peer.short_npub().to_string();
         }
         if let Some(entry) = self.sessions.get(addr) {
             let (xonly, _) = entry.remote_pubkey().x_only_public_key();

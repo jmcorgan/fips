@@ -176,21 +176,51 @@ pub struct NostrRendezvous {
 }
 
 impl NostrRendezvous {
-    /// Whether the primary Nostr connection task has exited (runtime liveness).
+    /// Whether the Nostr subsystem has stopped being able to do its job
+    /// (runtime liveness).
     ///
-    /// "Nostr exited" is defined as the primary `connect_task` having finished.
-    /// It is `Some` for the engine's whole running life (installed in `start`);
-    /// `shutdown` takes it, leaving `None` — a taken handle means the engine has
-    /// been shut down, which counts as finished, so a `None` inner maps to
-    /// `true` (this lets the liveness poll monitor terminate after a stop rather
-    /// than spinning forever). `connect_task` is a `tokio::sync::Mutex`, so this
-    /// sync accessor uses the non-blocking `try_lock`: a momentarily-contended
-    /// lock (only start/stop hold it, briefly) reports "not finished", the safe
-    /// direction — the 2s liveness poll re-checks next tick and never spuriously
-    /// degrades a healthy node.
+    /// "Nostr exited" is defined as *any* of the three service loops that never
+    /// return by design having finished:
+    ///
+    /// - `notify_task` — the inbound receive loop. Without it no advert and no
+    ///   traversal signal is ever observed again.
+    /// - `publish_task` — the advert publisher. Without it this node stops being
+    ///   discoverable.
+    /// - `advertise_task` — the refresh ticker that drives the publisher.
+    ///
+    /// Each of these is an unconditional `loop` (the notify loop's only `break`
+    /// is the relay-pool broadcast channel closing, i.e. the pool itself is
+    /// gone), so a finished handle means the task panicked or was aborted:
+    /// unrecoverable, which matches the one-way `ChildExited` → `Degraded`
+    /// latch in the supervisor FSM.
+    ///
+    /// Deliberately *not* watched: `connect_task` and `relay_startup_task`.
+    /// `Client::connect()` only spawns a per-relay background connection task
+    /// and returns, so `connect_task` finishes moments after start on a
+    /// perfectly healthy node; `relay_startup_task` breaks out of its retry loop
+    /// on the first successful subscribe. Watching either reports Degraded on
+    /// every node forever.
+    ///
+    /// Each handle is `Some` for the engine's whole running life (installed in
+    /// `start`); `shutdown` takes them all, leaving `None` — a taken handle
+    /// means the engine has been shut down, which counts as finished, so a
+    /// `None` inner maps to `true` (this lets the liveness poll monitor
+    /// terminate after a stop rather than spinning forever). The slots are
+    /// `tokio::sync::Mutex`es, so this sync accessor uses the non-blocking
+    /// `try_lock`: a momentarily-contended lock (only start/stop hold it,
+    /// briefly) reports "not finished", the safe direction — the 2s liveness
+    /// poll re-checks next tick and never spuriously degrades a healthy node.
     pub fn is_finished(&self) -> bool {
-        self.connect_task
-            .try_lock()
+        Self::task_finished(&self.notify_task)
+            || Self::task_finished(&self.publish_task)
+            || Self::task_finished(&self.advertise_task)
+    }
+
+    /// Liveness of one task slot: finished if the handle is gone (shut down) or
+    /// the task has completed; "not finished" when the slot is momentarily
+    /// locked by start/stop.
+    fn task_finished(slot: &Mutex<Option<JoinHandle<()>>>) -> bool {
+        slot.try_lock()
             .map(|g| g.as_ref().is_none_or(|h| h.is_finished()))
             .unwrap_or(false)
     }
@@ -1714,6 +1744,24 @@ impl NostrRendezvous {
         }
     }
 
+    /// Install the five background-task handles that `start` would install, so
+    /// liveness tests can drive `is_finished()` without live relays. Each
+    /// argument is the handle to place in the matching slot.
+    pub(crate) async fn install_tasks_for_test(
+        &self,
+        connect: JoinHandle<()>,
+        relay_startup: JoinHandle<()>,
+        notify: JoinHandle<()>,
+        publish: JoinHandle<()>,
+        advertise: JoinHandle<()>,
+    ) {
+        *self.connect_task.lock().await = Some(connect);
+        *self.relay_startup_task.lock().await = Some(relay_startup);
+        *self.notify_task.lock().await = Some(notify);
+        *self.publish_task.lock().await = Some(publish);
+        *self.advertise_task.lock().await = Some(advertise);
+    }
+
     /// Build a `CachedOverlayAdvert` for tests with a single endpoint and
     /// a generous validity window (one hour from `now_ms()`).
     pub(crate) fn cached_advert_for_test(
@@ -1733,6 +1781,18 @@ impl NostrRendezvous {
             created_at: created_at_secs,
             valid_until_ms: now_ms().saturating_add(3_600_000),
         }
+    }
+
+    /// Point the test instance's advert relays at explicit URLs. Unit tests
+    /// that exercise `refetch_advert_for_stale_check` use this to replace the
+    /// default public relay list with a local blackhole, so the refetch runs
+    /// its full 2s timeout without touching the network.
+    pub(crate) async fn set_advert_relays_for_test(&mut self, relays: Vec<String>) {
+        for url in &relays {
+            let _ = self.client.add_relay(url.as_str()).await;
+        }
+        self.client.connect().await;
+        self.config.advert_relays = relays;
     }
 
     /// Insert a cached advert directly into the in-memory cache. Used by

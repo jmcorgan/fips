@@ -857,3 +857,106 @@ fn signal_relays_without_an_advert_still_resolves() {
         "the responder path passes no advert and must still produce a target set"
     );
 }
+
+/// A `JoinHandle` for a task that has definitely completed. Yields until the
+/// runtime has polled the no-op task to completion, so `is_finished()` is
+/// deterministically `true` on return.
+async fn finished_handle() -> tokio::task::JoinHandle<()> {
+    let handle = tokio::spawn(async {});
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    handle
+}
+
+/// A `JoinHandle` for a task that never completes.
+fn live_handle() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(std::future::pending::<()>())
+}
+
+/// The regression case: `connect_task` and `relay_startup_task` both return by
+/// design (`Client::connect()` only kicks off per-relay connection tasks;
+/// the startup loop breaks on the first successful subscribe), so a healthy
+/// node has two finished handles and must still report live.
+#[tokio::test]
+async fn nostr_liveness_ignores_the_tasks_that_return_by_design() {
+    let runtime = NostrRendezvous::new_for_test();
+    runtime
+        .install_tasks_for_test(
+            finished_handle().await,
+            finished_handle().await,
+            live_handle(),
+            live_handle(),
+            live_handle(),
+        )
+        .await;
+    assert!(
+        !runtime.is_finished(),
+        "a node whose connect/relay-startup tasks have returned normally is healthy"
+    );
+}
+
+#[tokio::test]
+async fn nostr_liveness_fires_when_the_notify_loop_dies() {
+    let runtime = NostrRendezvous::new_for_test();
+    runtime
+        .install_tasks_for_test(
+            live_handle(),
+            live_handle(),
+            finished_handle().await,
+            live_handle(),
+            live_handle(),
+        )
+        .await;
+    assert!(
+        runtime.is_finished(),
+        "a dead inbound notify loop means no advert or signal is ever received again"
+    );
+}
+
+#[tokio::test]
+async fn nostr_liveness_fires_when_the_publish_loop_dies() {
+    let runtime = NostrRendezvous::new_for_test();
+    runtime
+        .install_tasks_for_test(
+            live_handle(),
+            live_handle(),
+            live_handle(),
+            finished_handle().await,
+            live_handle(),
+        )
+        .await;
+    assert!(
+        runtime.is_finished(),
+        "a dead publish loop means this node stops being discoverable"
+    );
+}
+
+#[tokio::test]
+async fn nostr_liveness_fires_when_the_advertise_loop_dies() {
+    let runtime = NostrRendezvous::new_for_test();
+    runtime
+        .install_tasks_for_test(
+            live_handle(),
+            live_handle(),
+            live_handle(),
+            live_handle(),
+            finished_handle().await,
+        )
+        .await;
+    assert!(
+        runtime.is_finished(),
+        "a dead advertise ticker means the advert is never refreshed"
+    );
+}
+
+/// `shutdown` takes every handle, leaving `None`. That must read as finished so
+/// the 2s liveness poll monitor terminates instead of spinning after a stop.
+#[tokio::test]
+async fn nostr_liveness_reports_finished_once_the_handles_are_taken() {
+    let runtime = NostrRendezvous::new_for_test();
+    assert!(
+        runtime.is_finished(),
+        "no installed handles (post-shutdown) reads as finished"
+    );
+}
