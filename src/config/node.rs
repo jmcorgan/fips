@@ -78,6 +78,19 @@ pub struct RateLimitConfig {
     /// Max handshake resends per attempt (`node.rate_limit.handshake_max_resends`).
     #[serde(default = "RateLimitConfig::default_handshake_max_resends")]
     pub handshake_max_resends: u32,
+    /// Burst capacity of the established-link msg1 bucket
+    /// (`node.rate_limit.established_handshake_burst`).
+    ///
+    /// Absent (the normal case) derives it from `node.limits.max_peers`.
+    #[serde(default)]
+    pub established_handshake_burst: Option<u32>,
+    /// Tokens/sec refill rate of the established-link msg1 bucket
+    /// (`node.rate_limit.established_handshake_rate`).
+    ///
+    /// Absent (the normal case) derives it from `node.limits.max_peers`,
+    /// `node.rekey.after_secs` and `handshake_max_resends`.
+    #[serde(default)]
+    pub established_handshake_rate: Option<f64>,
 }
 
 impl Default for RateLimitConfig {
@@ -89,6 +102,8 @@ impl Default for RateLimitConfig {
             handshake_resend_interval_ms: 1000,
             handshake_resend_backoff: 2.0,
             handshake_max_resends: 5,
+            established_handshake_burst: None,
+            established_handshake_rate: None,
         }
     }
 }

@@ -101,6 +101,15 @@ with v0.4.x or earlier peers.
 
 ### Added
 
+- `node.rate_limit.established_handshake_burst` and
+  `node.rate_limit.established_handshake_rate`, the parameters of the new
+  established-link msg1 token bucket. Both are optional; omitting them (the
+  normal case) derives the bucket from `node.limits.max_peers`,
+  `node.rekey.after_secs` and `node.rate_limit.handshake_max_resends`, so
+  raising the peer limit sizes the bucket automatically. An explicit zero
+  burst or a non-positive rate is rejected at config validation rather than
+  silently refusing all rekey traffic.
+
 - The receive-path `RejectReason` classification (shipped in 0.4.0) is
   additionally wired into the Noise XX handshake cluster
   (msg1/msg2/msg3) and the rekey-initiator outbound sites on `next`.
@@ -129,6 +138,21 @@ with v0.4.x or earlier peers.
   the features never reached.
 
 ### Changed
+
+- Inbound msg1 is classified before it is rate limited, and rekey or restart
+  msg1 arriving on a link belonging to a promoted peer now draws on its own
+  token bucket instead of competing with stranger admission for a single
+  shared one. On a node with many peers the shared bucket refused a large
+  share of ordinary rekey traffic: a field node at roughly 245 peers refused
+  8753 msg1 in 25 minutes, and 159 of the 201 distinct sources were peers it
+  already held sessions with. On the XX handshake path the classifier keys on
+  promotion state rather than on the presence of an address-map entry, because
+  msg1 creates such an entry for a still-pending inbound connection before any
+  identity is known; a still-handshaking stranger therefore stays in the
+  stranger class for its whole lifetime, retransmits included. Nodes upgrade
+  with no config change. The `Msg1 rate limited` log line now reports which
+  limb refused, the pending count or the token bucket, which it previously did
+  not distinguish.
 
 - Rekey timer jitter is enabled on next's XX FMP rekey path
   (`REKEY_JITTER_SECS = 15` at `src/node/mod.rs`), matching the

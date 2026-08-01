@@ -580,6 +580,32 @@ pub struct Node {
         tokio::sync::mpsc::UnboundedSender<decrypt_worker::DecryptWorkerEvent>,
 }
 
+/// Build the msg1 limiter's two buckets and shared pending ceiling.
+///
+/// The established-link bucket's size is derived from `max_peers`, the
+/// rekey period and the resend budget unless the operator overrode it, so
+/// raising the peer count moves it automatically. Nothing re-derives on a
+/// config reload; that matches how `handshake_burst` already behaves,
+/// since both are read once here at construction.
+fn build_msg1_rate_limiter(config: &Config) -> HandshakeRateLimiter {
+    let rl = &config.node.rate_limit;
+    let (derived_burst, derived_rate) = rate_limit::derive_established_bucket(
+        config.node.limits.max_peers,
+        config.node.rekey.after_secs,
+        rl.handshake_max_resends,
+        rl.handshake_burst,
+        rl.handshake_rate,
+    );
+    HandshakeRateLimiter::with_params(
+        rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
+        rate_limit::TokenBucket::with_params(
+            rl.established_handshake_burst.unwrap_or(derived_burst),
+            rl.established_handshake_rate.unwrap_or(derived_rate),
+        ),
+        config.node.limits.max_pending_inbound,
+    )
+}
+
 impl Node {
     /// Create a new node from configuration.
     pub fn new(config: Config) -> Result<Self, NodeError> {
@@ -626,11 +652,7 @@ impl Node {
             config.node.cache.coord_size,
             config.node.cache.coord_ttl_secs * 1000,
         );
-        let rl = &config.node.rate_limit;
-        let msg1_rate_limiter = HandshakeRateLimiter::with_params(
-            rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
-            config.node.limits.max_pending_inbound,
-        );
+        let msg1_rate_limiter = build_msg1_rate_limiter(&config);
 
         let max_connections = config.node.limits.max_connections;
         let max_peers = config.node.limits.max_peers;
@@ -784,11 +806,7 @@ impl Node {
             config.node.cache.coord_size,
             config.node.cache.coord_ttl_secs * 1000,
         );
-        let rl = &config.node.rate_limit;
-        let msg1_rate_limiter = HandshakeRateLimiter::with_params(
-            rate_limit::TokenBucket::with_params(rl.handshake_burst, rl.handshake_rate),
-            config.node.limits.max_pending_inbound,
-        );
+        let msg1_rate_limiter = build_msg1_rate_limiter(&config);
 
         let max_connections = config.node.limits.max_connections;
         let max_peers = config.node.limits.max_peers;

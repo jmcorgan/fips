@@ -777,6 +777,32 @@ impl Config {
             )));
         }
 
+        // The established-link msg1 bucket. Both keys are `Option`, and
+        // absent means "derive from max_peers", which is the intended path.
+        // An explicit zero is the dangerous state: it does not disable the
+        // bucket, it refuses every rekey and restart msg1 from an already
+        // established peer, which is a worse failure than the shared-bucket
+        // starvation the second bucket exists to prevent.
+        let rl = &self.node.rate_limit;
+
+        if rl.established_handshake_burst == Some(0) {
+            return Err(ConfigError::Validation(
+                "`node.rate_limit.established_handshake_burst` is 0, which refuses every rekey and restart msg1 from an established peer rather than disabling the limit. \
+                 Omit the key to derive it from `node.limits.max_peers`, or set a positive burst."
+                    .to_string(),
+            ));
+        }
+
+        if let Some(rate) = rl.established_handshake_rate
+            && !(rate.is_finite() && rate > 0.0)
+        {
+            return Err(ConfigError::Validation(format!(
+                "`node.rate_limit.established_handshake_rate` is {rate}, but must be a finite value greater than 0; \
+                 a non-positive or non-finite refill rate never replenishes the established-link bucket, so rekey msg1 stops being admitted once the initial burst is spent. \
+                 Omit the key to derive it from `node.limits.max_peers` and `node.rekey.after_secs`."
+            )));
+        }
+
         Ok(())
     }
 
@@ -1687,6 +1713,48 @@ node:
         Config::default()
             .validate()
             .expect("shipped default rekey settings must validate");
+    }
+
+    #[test]
+    fn test_validate_established_burst_zero_rejected() {
+        let mut config = Config::default();
+        config.node.rate_limit.established_handshake_burst = Some(0);
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("established_handshake_burst"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_established_rate_non_positive_rejected() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut config = Config::default();
+            config.node.rate_limit.established_handshake_rate = Some(bad);
+
+            let err = config
+                .validate()
+                .expect_err(&format!("validation should fail for {bad}"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("established_handshake_rate"),
+                "for {bad}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_established_bucket_absent_and_positive_accepted() {
+        // Absent is the normal path (derived from max_peers) and must validate.
+        Config::default()
+            .validate()
+            .expect("omitted established-bucket keys must validate");
+
+        let mut config = Config::default();
+        config.node.rate_limit.established_handshake_burst = Some(1);
+        config.node.rate_limit.established_handshake_rate = Some(0.5);
+        config
+            .validate()
+            .expect("positive established-bucket values must validate");
     }
 
     #[test]

@@ -15,7 +15,30 @@
 //! - Burst capacity: 100 tokens (max concurrent handshakes)
 //! - Refill rate: 10 tokens/second (sustained handshake rate)
 //! - This allows handling burst traffic while limiting sustained attack impact
+//!
+//! ## Two buckets, and what the aggregate is
+//!
+//! Msg1 whose source matches an established link (rekey and restart
+//! maintenance traffic) draws on its own bucket rather than competing with
+//! stranger admission. It is *metered*, not exempted: an established-peer
+//! carve-out is by construction keyed on source address, and the sentence
+//! above about spoofable UDP sources is still true, so an off-path attacker
+//! who can forge a live peer's `(transport_id, addr)` tuple reaches the
+//! second bucket. Metering keeps that exposure bounded.
+//!
+//! The consequence, stated rather than left implicit: the node's total
+//! admitted msg1 rate is the **sum** of the two buckets, not the stranger
+//! bucket alone. At shipped defaults that is burst `100 + 128 = 228` and
+//! `10.0 + 6.4 = 16.4` msg1/sec, of which the established half is only
+//! reachable by a source that already matches a live link. Operators sizing
+//! the handshake-crypto ceiling against a host should size against the sum.
+//!
+//! The concurrency limb (`max_pending`) is deliberately *not* split, so no
+//! equivalent inflation happens there: one counter bounds simultaneous
+//! in-flight handshake state whoever holds the slot.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Default burst capacity (max tokens).
@@ -156,84 +179,222 @@ impl Default for TokenBucket {
     }
 }
 
+/// Floor on the derived established-link refill rate, in tokens/second.
+///
+/// Covers the degenerate case of a very long (or effectively disabled)
+/// rekey period, where a node must still admit restart msg1 at some rate.
+pub const ESTABLISHED_RATE_FLOOR: f64 = 1.0;
+
+/// Which bucket an inbound msg1 draws on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Msg1Class {
+    /// No established link matches the source `(transport_id, addr)`.
+    Stranger,
+    /// The source matches an established link: rekey or restart traffic.
+    EstablishedLink,
+}
+
+/// Why an inbound msg1 was refused by the limiter.
+///
+/// `start_handshake` refuses on either limb and the caller's log line is
+/// blind to which without this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Msg1Refusal {
+    /// The shared in-flight handshake count is at `max_pending`.
+    PendingLimit,
+    /// The class's token bucket is empty.
+    RateLimit,
+}
+
+impl Msg1Refusal {
+    /// Stable field value for structured logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Msg1Refusal::PendingLimit => "pending_limit",
+            Msg1Refusal::RateLimit => "rate_limit",
+        }
+    }
+}
+
+impl std::fmt::Display for Msg1Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// An in-flight handshake's pending slot, released on drop.
+///
+/// The slot is the limiter's concurrency limb. Releasing it by hand from
+/// every exit path of a long handler is the shape that lets one path free
+/// a slot belonging to a *different* handshake, silently lifting effective
+/// concurrency above `max_pending` with no counter moving and no log
+/// firing. Holding the release in `Drop` makes that structurally
+/// impossible.
+///
+/// Worth knowing when reading `max_pending`: today the count cannot
+/// exceed 1 in production. `start_handshake` is reached only from
+/// `handle_msg1`, whose sole production caller awaits it to completion
+/// inside `process_packet(&mut self)`, itself awaited serially in the rx
+/// loop, so no two msg1 handlers are ever in flight at once. The
+/// concurrency limb is therefore a structural invariant rather than a
+/// limiter that currently binds, and `Msg1Refusal::PendingLimit` does not
+/// fire in the field. The guard is what keeps that invariant true as the
+/// handler grows exit paths, and what makes it safe for different msg1
+/// classes to take slots on different terms.
+///
+/// The atomic is for `Send`-ness, not cross-thread coordination: the guard
+/// is held across `.await` points inside `handle_msg1`, and a
+/// `Rc<Cell<usize>>` would make every future containing it non-`Send`.
+#[must_use = "binding the slot to a named local is what holds it; \
+              dropping it immediately releases it straight away"]
+#[derive(Debug)]
+pub struct PendingHandshake {
+    pending: Arc<AtomicUsize>,
+}
+
+impl Drop for PendingHandshake {
+    fn drop(&mut self) {
+        let _ = self
+            .pending
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+}
+
+/// Derive the established-link bucket's parameters from configuration.
+///
+/// Every input is a value the operator already sets, so raising `max_peers`
+/// moves this automatically rather than leaving a bare constant that nobody
+/// revisits.
+///
+/// - **burst = `max_peers`.** The worst *legitimate* burst on this bucket is
+///   every established peer re-handshaking at once (local restart, partition
+///   heal), and that population is bounded by `max_peers` by construction, at
+///   one token per msg1.
+/// - **rate = `(max_peers / max(rekey_after_secs, 1)) * (1 + max_resends)`,**
+///   floored at [`ESTABLISHED_RATE_FLOOR`]. The first factor is the
+///   steady-state inbound rekey rate; the second is the worst case where
+///   every attempt consumes its full retransmission budget.
+///
+/// `max_peers == 0` means unlimited, for which no peer-count-derived size
+/// exists; the stranger bucket's own parameters are returned so an
+/// unlimited-peers node gets a second bucket the same size as its first
+/// rather than a bucket of one token.
+///
+/// `rekey.enabled` is deliberately ignored: restart and reconnect msg1 exist
+/// regardless, and branching on it would make the disabled-rekey
+/// configuration the under-provisioned one.
+pub fn derive_established_bucket(
+    max_peers: usize,
+    rekey_after_secs: u64,
+    max_resends: u32,
+    stranger_burst: u32,
+    stranger_rate: f64,
+) -> (u32, f64) {
+    if max_peers == 0 {
+        return (stranger_burst, stranger_rate);
+    }
+    let burst = u32::try_from(max_peers).unwrap_or(u32::MAX);
+    let period = rekey_after_secs.max(1) as f64;
+    let rate = (max_peers as f64 / period) * (1.0 + f64::from(max_resends));
+    (burst, rate.max(ESTABLISHED_RATE_FLOOR))
+}
+
 /// Rate limiter for handshake message 1 processing.
 ///
 /// Combines token bucket rate limiting with connection counting to
-/// protect against DoS attacks on the handshake path.
+/// protect against DoS attacks on the handshake path. The rate limb is
+/// split by [`Msg1Class`]; the concurrency limb is shared (see the module
+/// doc for why, and for what the aggregate rate becomes).
 #[derive(Debug)]
 pub struct HandshakeRateLimiter {
-    /// Token bucket for rate limiting.
+    /// Token bucket for stranger msg1.
     bucket: TokenBucket,
-    /// Current count of pending inbound connections.
-    pending_count: usize,
+    /// Token bucket for established-link msg1 (rekey / restart).
+    established: TokenBucket,
+    /// Current count of pending inbound connections, shared with the
+    /// outstanding [`PendingHandshake`] guards.
+    pending: Arc<AtomicUsize>,
     /// Maximum pending inbound connections.
     max_pending: usize,
 }
 
 impl HandshakeRateLimiter {
     /// Create a handshake rate limiter with the given parameters.
-    pub fn with_params(bucket: TokenBucket, max_pending: usize) -> Self {
+    pub fn with_params(bucket: TokenBucket, established: TokenBucket, max_pending: usize) -> Self {
         Self {
             bucket,
-            pending_count: 0,
+            established,
+            pending: Arc::new(AtomicUsize::new(0)),
             max_pending,
         }
     }
 
-    /// Check if a new handshake can be started.
+    /// Check if a new handshake of `class` can be started.
     ///
     /// Returns `true` if:
-    /// - Token bucket has available tokens (rate limit not exceeded)
+    /// - The class's token bucket has available tokens (rate limit not exceeded)
     /// - Pending connection count is below maximum
     ///
     /// Does NOT consume a token - call `start_handshake` for that.
     #[cfg(test)]
-    pub fn can_start_handshake(&mut self) -> bool {
-        self.bucket.available() && self.pending_count < self.max_pending
+    pub fn can_start_handshake(&mut self, class: Msg1Class) -> bool {
+        self.bucket_for(class).available()
+            && self.pending.load(Ordering::Relaxed) < self.max_pending
     }
 
-    /// Start a new handshake, consuming a token and incrementing pending count.
+    /// Start a new handshake, consuming a token and taking a pending slot.
     ///
-    /// Returns `true` if the handshake was allowed, `false` if rate limited.
-    pub fn start_handshake(&mut self) -> bool {
-        if self.pending_count >= self.max_pending {
-            return false;
+    /// The returned guard releases the slot when it drops. On refusal the
+    /// [`Msg1Refusal`] says which limb refused.
+    pub fn start_handshake(&mut self, class: Msg1Class) -> Result<PendingHandshake, Msg1Refusal> {
+        if self.pending.load(Ordering::Relaxed) >= self.max_pending {
+            return Err(Msg1Refusal::PendingLimit);
         }
 
-        if self.bucket.try_acquire() {
-            self.pending_count += 1;
-            true
-        } else {
-            false
+        if !self.bucket_for(class).try_acquire() {
+            return Err(Msg1Refusal::RateLimit);
         }
+
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        Ok(PendingHandshake {
+            pending: Arc::clone(&self.pending),
+        })
     }
 
-    /// Mark a handshake as complete (successful or failed).
-    ///
-    /// Decrements the pending connection count.
-    pub fn complete_handshake(&mut self) {
-        if self.pending_count > 0 {
-            self.pending_count -= 1;
+    fn bucket_for(&mut self, class: Msg1Class) -> &mut TokenBucket {
+        match class {
+            Msg1Class::Stranger => &mut self.bucket,
+            Msg1Class::EstablishedLink => &mut self.established,
         }
     }
 
     /// Get the current pending connection count.
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
-        self.pending_count
+        self.pending.load(Ordering::Relaxed)
     }
 
-    /// Get a reference to the token bucket.
+    /// Get a reference to the stranger token bucket.
     #[cfg(test)]
     pub fn bucket(&self) -> &TokenBucket {
         &self.bucket
     }
 
+    /// Get a reference to the established-link token bucket.
+    #[cfg(test)]
+    pub fn established_bucket(&self) -> &TokenBucket {
+        &self.established
+    }
+
     /// Reset the rate limiter.
+    ///
+    /// Does not affect slots held by live [`PendingHandshake`] guards; they
+    /// still decrement on drop, saturating at zero.
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.bucket.reset();
-        self.pending_count = 0;
+        self.established.reset();
+        self.pending.store(0, Ordering::Relaxed);
     }
 }
 
@@ -342,71 +503,82 @@ mod tests {
         assert!(wait.as_millis() >= 90 && wait.as_millis() <= 110);
     }
 
+    fn test_limiter(bucket: TokenBucket, max_pending: usize) -> HandshakeRateLimiter {
+        HandshakeRateLimiter::with_params(
+            bucket,
+            TokenBucket::with_params(1000, 100.0),
+            max_pending,
+        )
+    }
+
     #[test]
     fn test_handshake_rate_limiter_basic() {
-        let mut limiter = HandshakeRateLimiter::with_params(TokenBucket::new(), 100);
+        let mut limiter = test_limiter(TokenBucket::new(), 100);
 
-        assert!(limiter.can_start_handshake());
+        assert!(limiter.can_start_handshake(Msg1Class::Stranger));
         assert_eq!(limiter.pending_count(), 0);
 
         // Start a handshake
-        assert!(limiter.start_handshake());
+        let slot = limiter.start_handshake(Msg1Class::Stranger).unwrap();
         assert_eq!(limiter.pending_count(), 1);
 
         // Complete it
-        limiter.complete_handshake();
+        drop(slot);
         assert_eq!(limiter.pending_count(), 0);
     }
 
     #[test]
     fn test_handshake_rate_limiter_max_pending() {
         let bucket = TokenBucket::with_params(1000, 100.0);
-        let mut limiter = HandshakeRateLimiter::with_params(bucket, 3);
+        let mut limiter = test_limiter(bucket, 3);
 
         // Start 3 handshakes
-        assert!(limiter.start_handshake());
-        assert!(limiter.start_handshake());
-        assert!(limiter.start_handshake());
+        let a = limiter.start_handshake(Msg1Class::Stranger).unwrap();
+        let _b = limiter.start_handshake(Msg1Class::Stranger).unwrap();
+        let _c = limiter.start_handshake(Msg1Class::Stranger).unwrap();
 
         // Fourth should fail (max pending)
-        assert!(!limiter.can_start_handshake());
-        assert!(!limiter.start_handshake());
+        assert!(!limiter.can_start_handshake(Msg1Class::Stranger));
+        assert_eq!(
+            limiter.start_handshake(Msg1Class::Stranger).unwrap_err(),
+            Msg1Refusal::PendingLimit
+        );
 
         // Complete one
-        limiter.complete_handshake();
+        drop(a);
 
         // Now should be able to start another
-        assert!(limiter.can_start_handshake());
-        assert!(limiter.start_handshake());
+        assert!(limiter.can_start_handshake(Msg1Class::Stranger));
+        assert!(limiter.start_handshake(Msg1Class::Stranger).is_ok());
     }
 
     #[test]
     fn test_handshake_rate_limiter_token_exhaustion() {
         let bucket = TokenBucket::with_params(5, 0.0); // No refill
-        let mut limiter = HandshakeRateLimiter::with_params(bucket, 100);
+        let mut limiter = test_limiter(bucket, 100);
 
-        // Start 5 handshakes (exhausts tokens)
+        // Start 5 handshakes (exhausts tokens), releasing each immediately
         for _ in 0..5 {
-            assert!(limiter.start_handshake());
-        }
-
-        // Complete them all
-        for _ in 0..5 {
-            limiter.complete_handshake();
+            let slot = limiter.start_handshake(Msg1Class::Stranger).unwrap();
+            drop(slot);
         }
 
         // Tokens exhausted, even though pending is 0
-        assert!(!limiter.can_start_handshake());
-        assert!(!limiter.start_handshake());
+        assert_eq!(limiter.pending_count(), 0);
+        assert!(!limiter.can_start_handshake(Msg1Class::Stranger));
+        assert_eq!(
+            limiter.start_handshake(Msg1Class::Stranger).unwrap_err(),
+            Msg1Refusal::RateLimit
+        );
     }
 
     #[test]
     fn test_handshake_rate_limiter_reset() {
-        let mut limiter = HandshakeRateLimiter::with_params(TokenBucket::new(), 100);
+        let mut limiter = test_limiter(TokenBucket::new(), 100);
 
         // Start some handshakes
-        limiter.start_handshake();
-        limiter.start_handshake();
+        let _a = limiter.start_handshake(Msg1Class::Stranger).unwrap();
+        let _b = limiter.start_handshake(Msg1Class::Stranger).unwrap();
         assert_eq!(limiter.pending_count(), 2);
 
         // Reset
@@ -414,5 +586,142 @@ mod tests {
 
         assert_eq!(limiter.pending_count(), 0);
         assert!(limiter.bucket().tokens >= DEFAULT_BURST_CAPACITY as f64 - 0.1);
+    }
+
+    /// The pending slot is released by `Drop`, not by any reachable manual
+    /// call, and the release saturates at zero rather than underflowing.
+    #[test]
+    fn pending_slot_releases_on_drop_and_saturates() {
+        let mut limiter = test_limiter(TokenBucket::with_params(100, 100.0), 100);
+
+        let outer = limiter.start_handshake(Msg1Class::Stranger).unwrap();
+        {
+            let _inner = limiter.start_handshake(Msg1Class::Stranger).unwrap();
+            assert_eq!(limiter.pending_count(), 2);
+        }
+        assert_eq!(
+            limiter.pending_count(),
+            1,
+            "inner guard released its own slot"
+        );
+
+        // A reset zeroes the counter while a guard is still live; the
+        // guard's later drop must not underflow it.
+        limiter.reset();
+        assert_eq!(limiter.pending_count(), 0);
+        drop(outer);
+        assert_eq!(limiter.pending_count(), 0, "release saturates at zero");
+    }
+
+    /// The refusal reason discriminates the two limbs. This is what the
+    /// `refused_by` log field in `handle_msg1` carries; the log line itself
+    /// is not asserted here.
+    #[test]
+    fn refusal_reason_names_the_limb() {
+        // Pending limb: max_pending 1, one live guard, tokens plentiful.
+        let mut pending_bound = test_limiter(TokenBucket::with_params(1000, 100.0), 1);
+        let _held = pending_bound.start_handshake(Msg1Class::Stranger).unwrap();
+        assert_eq!(
+            pending_bound
+                .start_handshake(Msg1Class::Stranger)
+                .unwrap_err(),
+            Msg1Refusal::PendingLimit
+        );
+
+        // Rate limb: pending headroom, zero-capacity/zero-refill bucket.
+        let mut rate_bound = test_limiter(TokenBucket::with_params(0, 0.0), 1000);
+        assert_eq!(
+            rate_bound.start_handshake(Msg1Class::Stranger).unwrap_err(),
+            Msg1Refusal::RateLimit
+        );
+
+        assert_eq!(Msg1Refusal::PendingLimit.to_string(), "pending_limit");
+        assert_eq!(Msg1Refusal::RateLimit.to_string(), "rate_limit");
+    }
+
+    /// The two classes draw on separate buckets: draining one leaves the
+    /// other untouched.
+    #[test]
+    fn msg1_classes_draw_on_separate_buckets() {
+        let mut limiter = HandshakeRateLimiter::with_params(
+            TokenBucket::with_params(1, 0.0),
+            TokenBucket::with_params(3, 0.0),
+            1000,
+        );
+
+        drop(limiter.start_handshake(Msg1Class::Stranger).unwrap());
+        assert_eq!(
+            limiter.start_handshake(Msg1Class::Stranger).unwrap_err(),
+            Msg1Refusal::RateLimit,
+            "stranger bucket drained"
+        );
+
+        for _ in 0..3 {
+            drop(
+                limiter
+                    .start_handshake(Msg1Class::EstablishedLink)
+                    .expect("established bucket is independent of the stranger bucket"),
+            );
+        }
+        assert_eq!(
+            limiter
+                .start_handshake(Msg1Class::EstablishedLink)
+                .unwrap_err(),
+            Msg1Refusal::RateLimit,
+            "established bucket drains on its own terms"
+        );
+    }
+
+    #[test]
+    fn derive_established_bucket_from_shipped_defaults() {
+        // max_peers 128, rekey.after_secs 120, handshake_max_resends 5.
+        let (burst, rate) = derive_established_bucket(128, 120, 5, 100, 10.0);
+        assert_eq!(burst, 128);
+        assert!(
+            (rate - 6.4).abs() < 1e-9,
+            "expected 6.4 tokens/sec, got {rate}"
+        );
+
+        // Scales with max_peers rather than needing a revisit.
+        let (burst, rate) = derive_established_bucket(512, 120, 5, 100, 10.0);
+        assert_eq!(burst, 512);
+        assert!(
+            (rate - 25.6).abs() < 1e-9,
+            "expected 25.6 tokens/sec, got {rate}"
+        );
+    }
+
+    /// `after_secs = 0` must not divide by zero. It is clamped to 1s, which
+    /// yields a *large* rate, not the floor — the floor binds at the other
+    /// end, for a very long rekey period. Both ends are asserted here
+    /// because the two are easy to conflate.
+    #[test]
+    fn derive_established_bucket_degenerate_rekey_periods() {
+        let (burst, rate) = derive_established_bucket(128, 0, 5, 100, 10.0);
+        assert_eq!(burst, 128);
+        assert!(rate.is_finite(), "after_secs = 0 must not divide by zero");
+        assert_eq!(
+            rate,
+            derive_established_bucket(128, 1, 5, 100, 10.0).1,
+            "after_secs = 0 is clamped to 1s"
+        );
+        assert!(
+            rate > ESTABLISHED_RATE_FLOOR,
+            "a zero rekey period is the high end, not the floor"
+        );
+
+        // The floor binds for a very long / effectively disabled period.
+        let (_, rate) = derive_established_bucket(1, 100_000, 5, 100, 10.0);
+        assert_eq!(rate, ESTABLISHED_RATE_FLOOR);
+    }
+
+    /// `max_peers == 0` means unlimited. Deriving a burst from it would
+    /// yield a zero- or one-token bucket, which is worse than the bug this
+    /// second bucket exists to fix; the stranger parameters are reused.
+    #[test]
+    fn derive_established_bucket_unlimited_peers_reuses_stranger_params() {
+        let (burst, rate) = derive_established_bucket(0, 120, 5, 100, 10.0);
+        assert_eq!(burst, 100);
+        assert_eq!(rate, 10.0);
     }
 }

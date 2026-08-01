@@ -1461,6 +1461,181 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
     );
 }
 
+/// `is_established_link_msg1` and `should_admit_msg1` are deliberately
+/// independent on this branch, and this asserts the three cases where they
+/// must disagree.
+///
+/// The `master` lineage defines `should_admit_msg1` as
+/// `is_established_link_msg1() || accept_connections()`, which is sound at IK
+/// but not at XX: here a bare `addr_to_link` hit also covers a *pending*
+/// inbound connection and an outbound dial still in flight. The gate needs
+/// that breadth (it is what breaks the dual-init deadlock), and the metering
+/// classifier must not have it, or an unpromoted stranger draws on the
+/// established-link bucket.
+///
+/// Every case below registers a transport whose `accept_connections()` is
+/// false. That is not incidental: with no transport registered the gate's
+/// fallback admits unconditionally, and a collapsed `should_admit_msg1` would
+/// still read true, so the disagreement this test exists to pin would vanish.
+#[tokio::test]
+async fn established_predicate_is_independent_of_should_admit_msg1() {
+    use crate::config::UdpConfig;
+    use crate::peer::ActivePeer;
+    use crate::transport::Link;
+    use crate::transport::udp::UdpTransport;
+    use std::time::Duration;
+
+    let transport_id = TransportId::new(1);
+
+    // --- Case 1: no transport registered at all. --------------------------
+    // Documentation only, NOT a discriminator: under the collapsed-predicate
+    // break this case still passes, because the gate's no-transport fallback
+    // admits regardless of what the classifier says.
+    {
+        let node = make_node();
+        let addr = TransportAddr::from_string("10.0.0.2:2121");
+        assert!(
+            node.should_admit_msg1(transport_id, &addr),
+            "no registered transport means no gate to apply"
+        );
+        assert!(
+            !node.is_established_link_msg1(transport_id, &addr),
+            "an address with no peer behind it is never established-link"
+        );
+    }
+
+    // --- Case 2: pending INBOUND link, no promoted peer. ------------------
+    // This is the state `handle_msg1` leaves behind between msg1 and msg3.
+    {
+        let mut node = make_node();
+        let cfg = UdpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            accept_connections: Some(false),
+            ..Default::default()
+        };
+        let (tx, _rx) = packet_channel(64);
+        let udp = UdpTransport::new(transport_id, None, cfg, tx);
+        node.transports
+            .insert(transport_id, TransportHandle::Udp(udp));
+
+        let addr = TransportAddr::from_string("10.0.0.2:2121");
+        let link_id = node.allocate_link_id();
+        node.links.insert(
+            link_id,
+            Link::connectionless(
+                link_id,
+                transport_id,
+                addr.clone(),
+                LinkDirection::Inbound,
+                Duration::from_millis(100),
+            ),
+        );
+        node.addr_to_link
+            .insert((transport_id, addr.clone()), link_id);
+
+        assert!(
+            node.peers.is_empty(),
+            "precondition: the link is pending, nothing is promoted"
+        );
+        assert!(
+            node.should_admit_msg1(transport_id, &addr),
+            "the gate admits on a bare addr_to_link hit"
+        );
+        assert!(
+            !node.is_established_link_msg1(transport_id, &addr),
+            "a pending inbound handshake is a stranger's, and must keep \
+             drawing on the stranger bucket for its whole lifetime"
+        );
+    }
+
+    // --- Case 3: pending OUTBOUND dial, no promoted peer. -----------------
+    // This is the dual-init carve-out. The assertion is what stops a later
+    // "simplification" collapsing the two predicates.
+    {
+        let mut node = make_node();
+        let cfg = UdpConfig {
+            outbound_only: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = packet_channel(64);
+        let udp = UdpTransport::new(transport_id, None, cfg, tx);
+        node.transports
+            .insert(transport_id, TransportHandle::Udp(udp));
+
+        let addr = TransportAddr::from_string("10.0.0.3:2121");
+        let link_id = node.allocate_link_id();
+        node.links.insert(
+            link_id,
+            Link::connectionless(
+                link_id,
+                transport_id,
+                addr.clone(),
+                LinkDirection::Outbound,
+                Duration::from_millis(100),
+            ),
+        );
+        node.addr_to_link
+            .insert((transport_id, addr.clone()), link_id);
+
+        assert!(
+            node.should_admit_msg1(transport_id, &addr),
+            "an outbound dial in flight must admit the peer's inbound msg1, \
+             or the dual-init tie-breaker deadlocks"
+        );
+        assert!(
+            !node.is_established_link_msg1(transport_id, &addr),
+            "an outbound dial is not a promoted peer"
+        );
+    }
+
+    // --- Agreement case: a genuinely promoted peer, both addr forms. ------
+    {
+        let mut node = make_node();
+        let cfg = UdpConfig {
+            outbound_only: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = packet_channel(64);
+        let udp = UdpTransport::new(transport_id, None, cfg, tx);
+        node.transports
+            .insert(transport_id, TransportHandle::Udp(udp));
+
+        let hostname_addr = TransportAddr::from_string("core-vm.example:2121");
+        let link_id = node.allocate_link_id();
+        node.addr_to_link
+            .insert((transport_id, hostname_addr.clone()), link_id);
+
+        let peer_full = crate::Identity::generate();
+        let peer_identity = PeerIdentity::from_pubkey(peer_full.pubkey());
+        let peer_node_addr = *peer_identity.node_addr();
+        let mut peer = ActivePeer::new(peer_identity, link_id, 1000);
+        let numeric_addr = TransportAddr::from_string("100.64.0.5:2121");
+        peer.set_current_addr(transport_id, numeric_addr.clone());
+        node.peers.insert(peer_node_addr, peer);
+
+        // Limb 1: addr_to_link maps the hostname form to a link a peer owns.
+        assert!(node.should_admit_msg1(transport_id, &hostname_addr));
+        assert!(
+            node.is_established_link_msg1(transport_id, &hostname_addr),
+            "hostname-keyed promoted peer must class as established-link"
+        );
+
+        // Limb 2: the numeric form matches the peer's current_addr.
+        assert!(node.should_admit_msg1(transport_id, &numeric_addr));
+        assert!(
+            node.is_established_link_msg1(transport_id, &numeric_addr),
+            "rekey msg1 arriving in numeric form from a promoted peer must \
+             class as established-link even though addr_to_link is keyed on \
+             the hostname form"
+        );
+
+        // Negative: a stranger elsewhere is neither admitted nor established.
+        let stranger_addr = TransportAddr::from_string("198.51.100.1:2121");
+        assert!(!node.should_admit_msg1(transport_id, &stranger_addr));
+        assert!(!node.is_established_link_msg1(transport_id, &stranger_addr));
+    }
+}
+
 // ===========================================================================
 // Regression: `handle_msg3` must return the msg1-allocated session index to
 // the allocator on the two inbound-establish arms that abandon the pending

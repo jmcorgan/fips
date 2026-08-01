@@ -1,8 +1,9 @@
 use super::*;
+use crate::node::rate_limit::{Msg1Class, Msg1Refusal};
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
 use crate::proto::fmp::PromotionResult;
 use crate::transport::udp::UdpTransport;
-use crate::transport::{TransportHandle, packet_channel};
+use crate::transport::{Link, TransportHandle, packet_channel};
 use std::sync::Arc;
 
 #[test]
@@ -761,14 +762,20 @@ fn test_rate_limiter_initialized() {
     let mut node = make_node();
 
     // Rate limiter should allow handshakes initially
-    assert!(node.msg1_rate_limiter.can_start_handshake());
+    assert!(
+        node.msg1_rate_limiter
+            .can_start_handshake(Msg1Class::Stranger)
+    );
 
     // Start a handshake
-    assert!(node.msg1_rate_limiter.start_handshake());
+    let slot = node
+        .msg1_rate_limiter
+        .start_handshake(Msg1Class::Stranger)
+        .expect("a fresh limiter admits the first stranger msg1");
     assert_eq!(node.msg1_rate_limiter.pending_count(), 1);
 
-    // Complete it
-    node.msg1_rate_limiter.complete_handshake();
+    // Complete it (the guard releases the slot on drop)
+    drop(slot);
     assert_eq!(node.msg1_rate_limiter.pending_count(), 0);
 }
 
@@ -2915,5 +2922,498 @@ fn test_peer_display_name_tracks_alias_change() {
     assert_eq!(
         node.peer_display_name(&peer_addr),
         peer_identity.short_npub()
+    );
+}
+
+// ===========================================================================
+// msg1 rate-limiter metering: established-link traffic vs stranger admission
+// ===========================================================================
+
+/// Drive exactly one msg1 from `node_a` into `node_b` and stop there.
+///
+/// This is the first leg of [`drive_xx_handshake`] on its own. Metering tests
+/// need a *single* msg1 rather than a completed three-message handshake, and
+/// it has to carry a real Noise payload: the `build_msg1`-with-garbage idiom
+/// used elsewhere in this file lands in the processing-failure arm, which
+/// returns before the `addr_to_link` insert that the pending-inbound state
+/// depends on.
+///
+/// The msg1 goes out over `node_a`'s registered transport, so `node_b`
+/// observes `node_a`'s real socket address as the source. That matters: the
+/// classifier keys on the source address, so a synthetic sender socket would
+/// not exercise the same lookup.
+async fn pump_one_msg1(
+    node_a: &mut Node,
+    node_b: &mut Node,
+    transport_id: TransportId,
+    addr_b: std::net::SocketAddr,
+    packet_rx_b: &mut crate::transport::PacketRx,
+) {
+    use crate::proto::fmp::wire::build_msg1;
+    use tokio::time::{Duration, timeout};
+
+    let remote_addr_b = TransportAddr::from_string(&addr_b.to_string());
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
+
+    let link_id_a = node_a.allocate_link_id();
+    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    node_a
+        .seed_handshake_machine(
+            HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
+                .with_our_index(our_index_a)
+                .with_transport_id(transport_id)
+                .with_source_addr(remote_addr_b.clone()),
+        )
+        .unwrap();
+    let our_keypair_a = node_a.identity().keypair();
+    let startup_epoch_a = node_a.startup_epoch();
+    let noise_msg1 = node_a
+        .peer_machines
+        .get_mut(&link_id_a)
+        .unwrap()
+        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .unwrap();
+    let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
+
+    node_a
+        .transports
+        .get(&transport_id)
+        .unwrap()
+        .send(&remote_addr_b, &wire_msg1)
+        .await
+        .expect("Failed to send msg1");
+
+    let packet_b = timeout(Duration::from_secs(1), packet_rx_b.recv())
+        .await
+        .expect("Timeout waiting for msg1")
+        .expect("Channel closed");
+    node_b.handle_msg1(packet_b).await;
+}
+
+/// Drain a packet channel to empty, returning how many packets were taken,
+/// and assert that none of them was handshake traffic.
+///
+/// `drive_xx_handshake` does not leave the channels empty: the
+/// `PromoteToActive` executor arm sends a tree announce for *both*
+/// directions, after each channel's last read, so on return both channels
+/// hold a queued encrypted `TreeAnnounce`. A metering test that reads a
+/// channel expecting a msg2 would otherwise match that announce and pass
+/// under its own break-check.
+///
+/// `try_recv` cannot be used: the transport's reader task fills the channel
+/// asynchronously, so an empty `try_recv` proves nothing about what is still
+/// in flight. The inner assertion is what keeps this from becoming a blanket
+/// swallow.
+async fn drain_handshake_free(rx: &mut crate::transport::PacketRx) -> usize {
+    use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header};
+    use tokio::time::{Duration, timeout};
+
+    let mut n = 0;
+    while let Ok(Some(p)) = timeout(Duration::from_millis(200), rx.recv()).await {
+        assert!(
+            Msg1Header::parse(&p.data).is_none()
+                && Msg2Header::parse(&p.data).is_none()
+                && Msg3Header::parse(&p.data).is_none(),
+            "handshake traffic left queued after drive_xx_handshake; the \
+             helper's read sequence changed and this test's observation \
+             point is no longer clean"
+        );
+        n += 1;
+    }
+    n
+}
+
+/// The acceptance criterion: the two msg1 classes are metered separately.
+///
+/// With the stranger bucket drained to empty and never refilling, a msg1
+/// from a genuinely promoted peer must still be admitted and answered with
+/// msg2, because it draws on the established-link bucket instead.
+#[tokio::test]
+async fn established_link_msg1_admitted_when_stranger_bucket_drained() {
+    let transport_id = TransportId::new(1);
+
+    let mut config_b = Config::new();
+    // Stranger bucket never refills. The burst must be greater than 1: the
+    // setup's own promotion runs a msg1 through the limiter at a moment when
+    // node_b holds no promoted peer at node_a's address, so that msg1 is
+    // correctly classed Stranger and spends a token itself.
+    config_b.node.rate_limit.handshake_burst = 4;
+    config_b.node.rate_limit.handshake_rate = 0.0;
+    let mut node_b = make_node_with(config_b);
+    let mut node_a = make_node();
+
+    let (addr_a, mut packet_rx_a) = register_udp_transport(&mut node_a).await;
+    let (addr_b, mut packet_rx_b) = register_udp_transport(&mut node_b).await;
+
+    drive_xx_handshake(
+        &mut node_a,
+        &mut node_b,
+        transport_id,
+        addr_b,
+        &mut packet_rx_a,
+        &mut packet_rx_b,
+    )
+    .await;
+
+    assert_eq!(
+        node_b.peer_count(),
+        1,
+        "setup precondition: node_b promoted node_a"
+    );
+
+    // Both channels hold a post-promotion tree announce. Take them out, or
+    // the msg2 assertion below would match one of them.
+    drain_handshake_free(&mut packet_rx_a).await;
+    drain_handshake_free(&mut packet_rx_b).await;
+
+    // The classification precondition. Without this, a setup that promoted
+    // at some other address would send the second msg1 down the Stranger
+    // path for a reason that has nothing to do with the code under test.
+    let addr_a_transport = TransportAddr::from_string(&addr_a.to_string());
+    assert!(
+        node_b.is_established_link_msg1(transport_id, &addr_a_transport),
+        "setup did not produce a promoted peer at node_a's source address, \
+         so the second msg1 would be classed Stranger for the wrong reason"
+    );
+
+    // Drain the stranger bucket by counting, rather than assuming how many
+    // tokens the promotion above spent.
+    while let Ok(slot) = node_b
+        .msg1_rate_limiter
+        .start_handshake(Msg1Class::Stranger)
+    {
+        drop(slot);
+    }
+    // This probe is non-destructive: start_handshake checks pending first and
+    // takes the slot only after try_acquire succeeds, so a RateLimit refusal
+    // consumes no token and leaves no slot behind.
+    assert_eq!(
+        node_b
+            .msg1_rate_limiter
+            .start_handshake(Msg1Class::Stranger)
+            .unwrap_err(),
+        Msg1Refusal::RateLimit,
+        "the established-link msg1 below must be the only thing that could answer"
+    );
+
+    // A second msg1 from the promoted peer's own socket.
+    pump_one_msg1(
+        &mut node_a,
+        &mut node_b,
+        transport_id,
+        addr_b,
+        &mut packet_rx_b,
+    )
+    .await;
+
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(1), packet_rx_a.recv())
+        .await
+        .expect("established-link msg1 was refused: no reply at all")
+        .expect("channel closed");
+    assert!(
+        crate::proto::fmp::wire::Msg2Header::parse(&reply.data).is_some(),
+        "the reply to an established-link msg1 must be a msg2; the stranger \
+         bucket is empty, so answering at all requires the second bucket"
+    );
+}
+
+/// The test that distinguishes this port from a verbatim copy of the
+/// `master` predicate, and the one with no `master` equivalent.
+///
+/// A stranger's *pending* inbound handshake leaves an `addr_to_link` entry
+/// behind at XX, before any identity is known. A predicate that reads a bare
+/// `addr_to_link` hit as "established" would therefore let a stranger promote
+/// itself into the established-link bucket by sending one msg1 first, which
+/// is exactly the population that bucket exists to protect against.
+#[tokio::test]
+async fn pending_inbound_stranger_msg1_stays_stranger_class() {
+    let transport_id = TransportId::new(1);
+
+    let mut config_b = Config::new();
+    // Exactly one stranger token, never refilled.
+    config_b.node.rate_limit.handshake_burst = 1;
+    config_b.node.rate_limit.handshake_rate = 0.0;
+    // The established bucket set explicitly small so the drain count below is
+    // exact. The rate must be finite and strictly positive or validate()
+    // rejects it; at 0.001/s no whole token refills over this test's life.
+    config_b.node.rate_limit.established_handshake_burst = Some(2);
+    config_b.node.rate_limit.established_handshake_rate = Some(0.001);
+    let mut node_b = make_node_with(config_b);
+    let mut node_a = make_node();
+
+    let (_addr_a, mut packet_rx_a) = register_udp_transport(&mut node_a).await;
+    let (addr_b, mut packet_rx_b) = register_udp_transport(&mut node_b).await;
+
+    // First msg1: admitted on the single stranger token, msg2 sent, and an
+    // addr_to_link entry created for a still-pending inbound connection.
+    pump_one_msg1(
+        &mut node_a,
+        &mut node_b,
+        transport_id,
+        addr_b,
+        &mut packet_rx_b,
+    )
+    .await;
+
+    // Prove the contaminated state was actually reached, so the assertions
+    // below cannot pass vacuously.
+    assert_eq!(
+        node_b.peer_count(),
+        0,
+        "XX promotes nobody at msg1: the link must still be pending"
+    );
+    assert_eq!(
+        node_b.addr_to_link.len(),
+        1,
+        "msg1 must have left an addr_to_link entry for the pending link"
+    );
+
+    // The first msg1's msg2 is on the wire; take it out of the way.
+    let first_reply = tokio::time::timeout(std::time::Duration::from_secs(1), packet_rx_a.recv())
+        .await
+        .expect("first msg1 should have been admitted on the one stranger token")
+        .expect("channel closed");
+    assert!(
+        crate::proto::fmp::wire::Msg2Header::parse(&first_reply.data).is_some(),
+        "the first msg1 must be answered with msg2"
+    );
+
+    // Second msg1 from the same source address.
+    pump_one_msg1(
+        &mut node_a,
+        &mut node_b,
+        transport_id,
+        addr_b,
+        &mut packet_rx_b,
+    )
+    .await;
+
+    // Discriminator 1: the established bucket is untouched. Counted by
+    // draining rather than read directly — established_bucket() hands back a
+    // shared reference and TokenBucket::tokens() needs a mutable one.
+    let mut drained = 0;
+    while let Ok(slot) = node_b
+        .msg1_rate_limiter
+        .start_handshake(Msg1Class::EstablishedLink)
+    {
+        drop(slot);
+        drained += 1;
+    }
+    assert_eq!(
+        drained, 2,
+        "a pending inbound stranger's msg1 must not have drawn on the \
+         established bucket"
+    );
+
+    // Discriminator 2: no msg2 came back. Correct behaviour classes the
+    // second msg1 Stranger, finds that bucket empty, and refuses it at the
+    // limiter before any crypto.
+    let second_reply =
+        tokio::time::timeout(std::time::Duration::from_millis(300), packet_rx_a.recv()).await;
+    assert!(
+        second_reply.is_err(),
+        "the second msg1 from a still-pending stranger must be refused by \
+         the stranger bucket, not answered"
+    );
+}
+
+/// Every reject arm of `handle_msg1` must release its own pending slot and
+/// no one else's. A foreign slot is held for the whole test; if an arm
+/// released a slot it never took, the count would fall below 1.
+///
+/// Coverage gap, recorded rather than discharged: the index-allocation arm
+/// and the msg2-send-failure arm of `handle_msg1` are not driven here, so
+/// their slot release is unexercised. Both need the handler to get most of
+/// the way through a successful msg1 and then fail on a resource the test
+/// cannot withhold without contorting the setup.
+#[tokio::test]
+async fn msg1_reject_arms_do_not_release_another_handshakes_slot() {
+    use crate::config::UdpConfig;
+    use crate::transport::udp::UdpTransport;
+
+    let transport_id = TransportId::new(1);
+
+    // --- Arm: accept_connections gate ------------------------------------
+    {
+        let mut node = make_node();
+        let cfg = UdpConfig {
+            outbound_only: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = packet_channel(64);
+        node.transports.insert(
+            transport_id,
+            TransportHandle::Udp(UdpTransport::new(transport_id, None, cfg, tx)),
+        );
+
+        let seed = node
+            .msg1_rate_limiter
+            .start_handshake(Msg1Class::Stranger)
+            .expect("foreign slot");
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 1);
+
+        node.handle_msg1(ReceivedPacket::with_timestamp(
+            transport_id,
+            TransportAddr::from_string("198.51.100.7:2121"),
+            crate::proto::fmp::wire::build_msg1(
+                SessionIndex::new(7),
+                &[0u8; crate::noise::HANDSHAKE_MSG1_SIZE],
+            ),
+            1000,
+        ))
+        .await;
+
+        assert_eq!(
+            node.stats().handshake.bad_state,
+            1,
+            "setup must actually reach the accept_connections arm"
+        );
+        assert_eq!(
+            node.msg1_rate_limiter.pending_count(),
+            1,
+            "accept_connections arm must not release the foreign slot"
+        );
+        drop(seed);
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 0);
+    }
+
+    // --- Arm: invalid msg1 header ----------------------------------------
+    {
+        let mut node = make_node();
+        let seed = node
+            .msg1_rate_limiter
+            .start_handshake(Msg1Class::Stranger)
+            .expect("foreign slot");
+
+        node.handle_msg1(ReceivedPacket::with_timestamp(
+            transport_id,
+            TransportAddr::from_string("198.51.100.8:2121"),
+            vec![0u8; 4],
+            1000,
+        ))
+        .await;
+
+        assert_eq!(
+            node.stats().handshake.bad_state,
+            1,
+            "setup must actually reach the invalid-header arm"
+        );
+        assert_eq!(
+            node.msg1_rate_limiter.pending_count(),
+            1,
+            "invalid-header arm must not release the foreign slot"
+        );
+        drop(seed);
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 0);
+    }
+
+    // --- Arm: receive_handshake_init failure ------------------------------
+    {
+        let mut node = make_node();
+        let seed = node
+            .msg1_rate_limiter
+            .start_handshake(Msg1Class::Stranger)
+            .expect("foreign slot");
+
+        // Well-formed framing, garbage Noise payload.
+        node.handle_msg1(ReceivedPacket::with_timestamp(
+            transport_id,
+            TransportAddr::from_string("198.51.100.9:2121"),
+            crate::proto::fmp::wire::build_msg1(
+                SessionIndex::new(7),
+                &[0u8; crate::noise::HANDSHAKE_MSG1_SIZE],
+            ),
+            1000,
+        ))
+        .await;
+
+        assert_eq!(
+            node.stats().handshake.bad_state,
+            1,
+            "setup must actually reach the Noise-processing arm"
+        );
+        assert_eq!(
+            node.msg1_rate_limiter.pending_count(),
+            1,
+            "Noise-processing arm must not release the foreign slot"
+        );
+        drop(seed);
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 0);
+    }
+
+    // --- Arm: duplicate msg1 with no stored msg2 --------------------------
+    {
+        let mut node = make_node();
+        let addr = TransportAddr::from_string("198.51.100.10:2121");
+
+        // An inbound link at this address with no control machine behind it,
+        // so find_stored_msg2 misses and the arm fires.
+        let link_id = node.allocate_link_id();
+        node.links.insert(
+            link_id,
+            Link::connectionless(
+                link_id,
+                transport_id,
+                addr.clone(),
+                LinkDirection::Inbound,
+                Duration::from_millis(100),
+            ),
+        );
+        node.addr_to_link
+            .insert((transport_id, addr.clone()), link_id);
+
+        let seed = node
+            .msg1_rate_limiter
+            .start_handshake(Msg1Class::Stranger)
+            .expect("foreign slot");
+
+        node.handle_msg1(ReceivedPacket::with_timestamp(
+            transport_id,
+            addr,
+            crate::proto::fmp::wire::build_msg1(
+                SessionIndex::new(7),
+                &[0u8; crate::noise::HANDSHAKE_MSG1_SIZE],
+            ),
+            1000,
+        ))
+        .await;
+
+        assert_eq!(
+            node.stats().handshake.unknown_connection,
+            1,
+            "setup must actually reach the duplicate-msg1 arm"
+        );
+        assert_eq!(
+            node.msg1_rate_limiter.pending_count(),
+            1,
+            "duplicate-msg1 arm must not release the foreign slot"
+        );
+        drop(seed);
+        assert_eq!(node.msg1_rate_limiter.pending_count(), 0);
+    }
+}
+
+/// The established-link bucket is wired from config at construction:
+/// derived from `max_peers` by default, overridden when the operator sets
+/// the key. This is the only test covering the config → limiter path.
+#[test]
+fn node_established_bucket_is_derived_then_overridable() {
+    let mut config = Config::new();
+    config.node.limits.max_peers = 300;
+    let node = make_node_with(config);
+    assert_eq!(
+        node.msg1_rate_limiter.established_bucket().capacity(),
+        300,
+        "derived burst tracks max_peers"
+    );
+
+    let mut config = Config::new();
+    config.node.limits.max_peers = 300;
+    config.node.rate_limit.established_handshake_burst = Some(7);
+    let node = make_node_with(config);
+    assert_eq!(
+        node.msg1_rate_limiter.established_bucket().capacity(),
+        7,
+        "an explicit key wins over the derivation"
     );
 }

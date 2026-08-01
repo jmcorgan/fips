@@ -9,6 +9,7 @@ use crate::NodeAddr;
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
+use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
 use crate::peer::ActivePeer;
@@ -96,6 +97,54 @@ impl Node {
         }
     }
 
+    /// Returns true if an inbound msg1's source matches a link belonging to a
+    /// **promoted** peer, i.e. it is rekey/restart maintenance traffic rather
+    /// than a stranger's fresh handshake.
+    ///
+    /// Deliberately *not* expressed in terms of `should_admit_msg1`, and
+    /// deliberately not its building block, which is how the `master` lineage
+    /// arranges the same pair. On XX, `handle_msg1` inserts into
+    /// `addr_to_link` for a still-pending inbound connection before any
+    /// identity is known, and `initiate_connection` inserts for an outbound
+    /// dial in flight. A bare `addr_to_link` hit therefore does not mean
+    /// "established" here, and the two predicates answer different questions:
+    /// `should_admit_msg1` asks whether the `accept_connections` gate applies
+    /// (a pending outbound dial must bypass it, or the dual-init tie-breaker
+    /// deadlocks), while this asks whether the source is already a promoted
+    /// peer, which is the only safe basis for exempting traffic from
+    /// stranger-class metering.
+    ///
+    /// Two ways to be a promoted peer at this `(transport_id, addr)`:
+    ///
+    /// 1. `addr_to_link` maps the tuple to a link that some entry in `peers`
+    ///    owns. Catches the peer whose registered `TransportAddr` form matches
+    ///    the form inbound packets carry.
+    /// 2. A peer's `current_addr()` matches the tuple. `current_addr` is
+    ///    seeded at promotion from the handshake's source address and updated
+    ///    from inbound encrypted frames, so it is always numeric
+    ///    `SocketAddr`-form; this catches the peer whose `addr_to_link` key is
+    ///    hostname-form because `initiate_connection` populated it from a
+    ///    hostname-bearing peer config.
+    ///
+    /// Cost: one O(1) map lookup plus one O(peers) scan covering both limbs,
+    /// run on every inbound msg1 including those about to be refused. The scan
+    /// exists only because `addr_to_link` is keyed on the *unresolved* dial
+    /// address; correcting that keying reduces this to O(1).
+    pub(in crate::node) fn is_established_link_msg1(
+        &self,
+        transport_id: crate::transport::TransportId,
+        remote_addr: &crate::transport::TransportAddr,
+    ) -> bool {
+        let link_at_addr = self
+            .addr_to_link
+            .get(&(transport_id, remote_addr.clone()))
+            .copied();
+        self.peers.values().any(|p| {
+            Some(p.link_id()) == link_at_addr
+                || (p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr))
+        })
+    }
+
     /// Returns true if an inbound msg1 should be admitted past the
     /// `accept_connections` gate.
     ///
@@ -122,6 +171,18 @@ impl Node {
     ///
     /// Otherwise the transport's `accept_connections` config decides;
     /// absence of a registered transport admits (no gate to apply).
+    ///
+    /// Intentionally independent of `is_established_link_msg1` on this
+    /// branch, and not built from it. The two are deliberately allowed to
+    /// drift because they answer different questions: predicate 1 above
+    /// admits on a bare `addr_to_link` hit, which at XX also covers a
+    /// *pending* inbound connection and an outbound dial still in flight.
+    /// That breadth is required here — it is what admits the peer's inbound
+    /// msg1 when the larger-`NodeAddr` side has `accept_connections: false`,
+    /// without which the dual-init tie-breaker deadlocks — and is exactly
+    /// what disqualifies it as a metering classifier, since an unpromoted
+    /// stranger would then draw on the established-link bucket. Do not
+    /// collapse the two into one predicate.
     pub(in crate::node) fn should_admit_msg1(
         &self,
         transport_id: crate::transport::TransportId,
@@ -150,22 +211,48 @@ impl Node {
     /// (revealing its own identity), and stores the connection in
     /// pending_inbound to await msg3.
     pub(in crate::node) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
-        // === RATE LIMITING (before any processing) ===
-        if !self.msg1_rate_limiter.start_handshake() {
-            debug!(
-                transport_id = %packet.transport_id,
-                remote_addr = %packet.remote_addr,
-                "Msg1 rate limited"
-            );
-            return;
-        }
+        // === CLASSIFY, THEN RATE LIMIT (both before any crypto) ===
+        // Classification is one map lookup plus an O(peers) scan, and now runs
+        // on every inbound msg1 including refused ones. See
+        // `is_established_link_msg1` for why the scan is still needed.
+        //
+        // `_slot` is an RAII guard: it releases the limiter's pending slot on
+        // drop, which is every return path below and the end of the function.
+        // The binding name matters. Renaming it to a bare `_` drops the guard
+        // right here instead, releasing the slot at acquire time — silently,
+        // with no test and no clippy lint catching the difference. Do not
+        // "tidy" this binding.
+        //
+        // Known coverage gap: `handle_msg1`'s slot is held across its `.await`
+        // points by binding alone, and an early drop is unobserved by any
+        // test. It is structurally unobservable at node level — `handle_msg1`
+        // takes `&mut self`, so no second msg1 can be in flight to notice the
+        // slot missing while this one awaits, and the pending count at return
+        // is identical either way. The `#[must_use]` on `PendingHandshake` and
+        // this comment are the only defences.
+        let class = if self.is_established_link_msg1(packet.transport_id, &packet.remote_addr) {
+            Msg1Class::EstablishedLink
+        } else {
+            Msg1Class::Stranger
+        };
+        let _slot = match self.msg1_rate_limiter.start_handshake(class) {
+            Ok(slot) => slot,
+            Err(reason) => {
+                debug!(
+                    transport_id = %packet.transport_id,
+                    remote_addr = %packet.remote_addr,
+                    refused_by = %reason,
+                    "Msg1 rate limited"
+                );
+                return;
+            }
+        };
 
         // accept_connections gate. Rekey/restart msg1 on an existing link
         // is always admitted; the gate only filters truly-fresh connections
         // from strangers. Without this carve-out, the dual-init tie-breaker
         // deadlocks when the larger-NodeAddr side has accept_connections=false.
         if !self.should_admit_msg1(packet.transport_id, &packet.remote_addr) {
-            self.msg1_rate_limiter.complete_handshake();
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -175,7 +262,6 @@ impl Node {
         let header = match Msg1Header::parse(&packet.data) {
             Some(h) => h,
             None => {
-                self.msg1_rate_limiter.complete_handshake();
                 debug!("Invalid msg1 header");
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -225,7 +311,6 @@ impl Node {
                             HandshakeReject::UnknownConnection,
                         ));
                     }
-                    self.msg1_rate_limiter.complete_handshake();
                     return;
                 }
                 // Active peer on this address — allow the new handshake.
@@ -276,7 +361,6 @@ impl Node {
         ) {
             Ok(m) => m,
             Err(e) => {
-                self.msg1_rate_limiter.complete_handshake();
                 debug!(
                     error = %e,
                     "Failed to process msg1"
@@ -301,7 +385,6 @@ impl Node {
         let our_index = match self.index_allocator.allocate() {
             Ok(idx) => idx,
             Err(e) => {
-                self.msg1_rate_limiter.complete_handshake();
                 warn!(error = %e, "Failed to allocate session index for inbound");
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -363,7 +446,6 @@ impl Node {
                         .remove(&(packet.transport_id, packet.remote_addr));
                     let _ = self.index_allocator.free(our_index);
                     self.remove_peer_machine(link_id);
-                    self.msg1_rate_limiter.complete_handshake();
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -375,8 +457,6 @@ impl Node {
         // Store in pending_inbound for msg3 dispatch.
         self.pending_inbound
             .insert((packet.transport_id, our_index.as_u32()), link_id);
-
-        self.msg1_rate_limiter.complete_handshake();
     }
 
     /// Find stored msg2 bytes for a given link (pre- or post-promotion).
