@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- macOS: `peers.allow`, `peers.deny`, and the `hosts` file are now read
+  from `/usr/local/etc/fips/`, matching the install layout the macOS
+  packaging ships (`packaging/macos/`). The default-path constants were
+  hardcoded to `/etc/fips/...` with only a `#[cfg(unix)]` / `#[cfg(windows)]`
+  split, so on macOS the daemon looked in a directory that does not exist:
+  `load_file` / `load_hosts_file` hit their `NotFound` no-op arm and silently
+  returned an empty ACL / empty host map. A populated `peers.deny` therefore
+  reported `effective_mode: "default_open"` and `enforcement_active: false`
+  via `fipsctl acl show`, and host-file aliases went unloaded, with no error
+  or warning. The constants now follow the platform's packaging —
+  `/usr/local/etc/fips/` on macOS, `/etc/fips/` on Linux and other Unix,
+  `%ProgramData%\fips\` on Windows — and are pinned by platform-gated unit
+  tests so the layout cannot silently drift again. Linux and Windows
+  behavior is unchanged.
+
 - Nostr NAT traversal no longer breaks after the host suspends. The traversal
   clock cached a Unix timestamp once at startup and advanced it with a
   monotonic `Instant`, which does not tick while a machine is asleep, so after

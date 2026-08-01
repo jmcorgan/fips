@@ -23,9 +23,23 @@ use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
 /// Default path for the peer allow list.
+///
+/// On macOS the install layout (see `packaging/macos/`) ships config under
+/// `/usr/local/etc/fips/` rather than `/etc/fips/`; the default follows the
+/// platform's packaging so the daemon reads the file the operator was told
+/// to edit. Linux and other Unix keep the historic `/etc/fips/` location.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/usr/local/etc/fips/peers.allow";
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/etc/fips/peers.allow";
 
 /// Default path for the peer deny list.
+///
+/// See [`DEFAULT_PEERS_ALLOW_PATH`] for the macOS `/usr/local/etc/fips/`
+/// rationale.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_PEERS_DENY_PATH: &str = "/usr/local/etc/fips/peers.deny";
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_PEERS_DENY_PATH: &str = "/etc/fips/peers.deny";
 
 /// Result of evaluating a peer against the ACL.
@@ -451,6 +465,16 @@ impl Node {
             decision
         )))
     }
+
+    /// Test-only: replace the peer-ACL reloader with one that reads from
+    /// the given paths, isolating the node from the host's real
+    /// `peers.allow` / `peers.deny` / `hosts` files. Used by snapshot tests
+    /// that must be deterministic regardless of whether an operator has
+    /// edited the system ACL files on the dev/CI machine.
+    #[cfg(test)]
+    pub(crate) fn isolate_peer_acl_for_test(&mut self, allow: PathBuf, deny: PathBuf) {
+        self.peer_acl = PeerAclReloader::with_paths(allow, deny);
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +509,27 @@ mod tests {
         acl.allow_all = allow_all;
         acl.deny_all = deny_all;
         acl
+    }
+
+    // Guard against the macOS path regression: the install layout
+    // (`packaging/macos/`) ships config under `/usr/local/etc/fips/`, so the
+    // default ACL paths must follow it, or `peers.allow`/`peers.deny` are
+    // silently unread on macOS (see the `NotFound` no-op in `load_file`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_default_acl_paths_follow_macos_packaging_layout() {
+        assert_eq!(DEFAULT_PEERS_ALLOW_PATH, "/usr/local/etc/fips/peers.allow");
+        assert_eq!(DEFAULT_PEERS_DENY_PATH, "/usr/local/etc/fips/peers.deny");
+    }
+
+    // Non-macOS Unix/Linux keeps the historic `/etc/fips/` location; this
+    // runs on the Linux CI matrix and pins the value so a future refactor
+    // can't silently drift it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn test_default_acl_paths_keep_etc_fips_layout() {
+        assert_eq!(DEFAULT_PEERS_ALLOW_PATH, "/etc/fips/peers.allow");
+        assert_eq!(DEFAULT_PEERS_DENY_PATH, "/etc/fips/peers.deny");
     }
 
     #[test]
