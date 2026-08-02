@@ -297,13 +297,9 @@ fn print_response(value: &serde_json::Value) {
 /// Must match the platform's config dir, since the daemon derives key
 /// paths from the config file's location.
 fn default_key_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
-        PathBuf::from("/usr/local/etc/fips")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        PathBuf::from("/etc/fips")
+        PathBuf::from(fips::config::SYSTEM_CONFIG_DIR)
     }
     #[cfg(windows)]
     {

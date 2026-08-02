@@ -62,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep `/etc/fips`, Windows is unchanged, and the values are pinned by
   platform-gated unit tests.
 
+- macOS: the system-wide config search path is now
+  `/usr/local/etc/fips/fips.yaml`, matching the install layout the macOS
+  packaging ships. It was hardcoded to `/etc/fips/fips.yaml`, so a bare
+  `fips` run without `--config` probed a directory that does not exist and
+  derived identity key paths from it. The search path and `fipsctl keygen`
+  now share one platform constant for the config dir, so the two cannot
+  drift apart again. The launchd-installed daemon was unaffected (it always
+  passes `--config`). Linux and Windows behavior is unchanged.
+
 - Nostr NAT traversal no longer breaks after the host suspends. The traversal
   clock cached a Unix timestamp once at startup and advanced it with a
   monotonic `Instant`, which does not tick while a machine is asleep, so after

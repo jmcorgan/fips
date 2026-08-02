@@ -468,7 +468,7 @@ impl Node {
 
     /// Test-only: replace the peer-ACL reloader with one that reads from
     /// the given paths, isolating the node from the host's real
-    /// `peers.allow` / `peers.deny` / `hosts` files. Used by snapshot tests
+    /// `peers.allow` / `peers.deny` files. Used by snapshot tests
     /// that must be deterministic regardless of whether an operator has
     /// edited the system ACL files on the dev/CI machine.
     #[cfg(test)]
