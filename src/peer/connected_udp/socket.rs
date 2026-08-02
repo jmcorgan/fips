@@ -3,7 +3,6 @@
 //! Adopts an fd produced by `crate::transport::udp::open_connected_fd`
 //! and closes it on drop. See that function's docs for why established
 //! peers get their own connected socket.
-#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};

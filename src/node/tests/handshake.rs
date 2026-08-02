@@ -1280,11 +1280,22 @@ async fn test_xx_duplicate_msg1_resends_msg2() {
 
 /// `should_admit_msg1` admits when no transport is registered for the id.
 /// (No gate to apply — the caller's other checks decide the outcome.)
+///
+/// This node is also the discriminator for the extraction of
+/// `is_established_link_msg1`: with no transport registered the
+/// `accept_connections` fallback admits, so the two predicates disagree
+/// here and nowhere else. An extraction that dragged the fallback into
+/// `is_established_link_msg1` fails the second assertion.
 #[test]
 fn test_should_admit_msg1_no_transport() {
     let node = make_node();
     let addr = TransportAddr::from_string("10.0.0.2:2121");
     assert!(node.should_admit_msg1(TransportId::new(1), &addr));
+    assert!(
+        !node.is_established_link_msg1(TransportId::new(1), &addr),
+        "the accept_connections fallback must not be part of the \
+         established-link predicate"
+    );
 }
 
 /// `should_admit_msg1` rejects a fresh msg1 (no addr_to_link entry) when
@@ -1459,6 +1470,12 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
         !node.should_admit_msg1(transport_id, &stranger_addr),
         "fresh msg1 from unknown source must still be rejected"
     );
+
+    // The same two predicates read directly: both addr-forms of the
+    // established peer are established links, the stranger is not.
+    assert!(node.is_established_link_msg1(transport_id, &hostname_addr));
+    assert!(node.is_established_link_msg1(transport_id, &numeric_addr));
+    assert!(!node.is_established_link_msg1(transport_id, &stranger_addr));
 }
 
 /// `is_established_link_msg1` and `should_admit_msg1` are deliberately

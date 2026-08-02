@@ -1153,8 +1153,20 @@ impl Node {
                         }
                     }
                     match self.adopt_established_traversal(traversal).await {
-                        Ok(_) => {
-                            info!(peer_npub = %peer_npub, "Adopted NAT traversal socket");
+                        Ok(handoff) => {
+                            // `local_addr` lets an operator join a host socket
+                            // table (ss/netstat) against our adoption events.
+                            // `transport_id` separates several peers sharing one
+                            // adopted transport from several adopted transports:
+                            // an adopted transport inherits `accept_connections`,
+                            // so it can admit peers beyond the one it was punched
+                            // for, and the two cases are otherwise identical here.
+                            info!(
+                                peer_npub = %peer_npub,
+                                transport_id = %handoff.transport_id,
+                                local_addr = %handoff.local_addr,
+                                "Adopted NAT traversal socket"
+                            );
                         }
                         Err(err) => {
                             warn!(peer_npub = %peer_npub, error = %err, "Failed to adopt NAT traversal");

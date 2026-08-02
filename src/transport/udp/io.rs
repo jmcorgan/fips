@@ -803,11 +803,6 @@ pub use platform::{AsyncUdpSocket, UdpRawSocket};
 /// is libc-syscall + `sockopts_macos` specific.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod connected {
-    // The connected-UDP fast path is infra-ready but not yet wired into
-    // the encrypt-worker dispatch site (a follow-up PR will refcount-clone
-    // the socket into each FmpSendJob). Keep the API surface in tree.
-    #![allow(dead_code)]
-
     use std::io;
     use std::net::SocketAddr;
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -900,7 +895,7 @@ mod connected {
             )
         };
         if bind_r < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(syscall_err("bind", local_addr));
         }
 
         // Connect to the peer — locks in the per-packet kernel route.
@@ -913,10 +908,15 @@ mod connected {
             )
         };
         if conn_r < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(syscall_err("connect", peer_addr));
         }
 
         Ok(owned)
+    }
+
+    fn syscall_err(syscall: &str, addr: SocketAddr) -> io::Error {
+        let err = io::Error::last_os_error();
+        io::Error::new(err.kind(), format!("{syscall} {addr}: {err}"))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1004,6 +1004,50 @@ mod connected {
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             )
         };
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod tests {
+        use super::*;
+        use std::net::UdpSocket;
+
+        const BUF: usize = 1 << 20;
+
+        #[test]
+        fn bind_failure_names_bind_and_local_addr() {
+            // A plain socket without SO_REUSEPORT holds the address, so the
+            // SO_REUSEPORT bind below is refused with EADDRINUSE.
+            let holder = UdpSocket::bind("127.0.0.1:0").expect("holder bind");
+            let holder_addr = holder.local_addr().expect("holder addr");
+
+            let err = open_connected_fd(holder_addr, "127.0.0.1:9".parse().unwrap(), BUF, BUF)
+                .expect_err("bind must fail against a non-reuseport holder");
+
+            assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "{err}");
+            let msg = err.to_string();
+            assert!(msg.starts_with("bind "), "{msg}");
+            assert!(msg.contains(&holder_addr.to_string()), "{msg}");
+            assert!(!msg.contains("connect"), "{msg}");
+        }
+
+        #[test]
+        fn connect_failure_names_connect_and_peer_addr() {
+            // connect(2) to the broadcast address without SO_BROADCAST fails
+            // synchronously with EACCES; the bind before it succeeds.
+            let err = open_connected_fd(
+                "127.0.0.1:0".parse().unwrap(),
+                "255.255.255.255:9999".parse().unwrap(),
+                BUF,
+                BUF,
+            )
+            .expect_err("connect to broadcast without SO_BROADCAST must fail");
+
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+            let msg = err.to_string();
+            assert!(msg.starts_with("connect "), "{msg}");
+            assert!(msg.contains("255.255.255.255:9999"), "{msg}");
+            assert!(!msg.contains("bind"), "{msg}");
+        }
     }
 }
 

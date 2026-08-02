@@ -1,8 +1,3 @@
-// Paired with the connected-socket opener (`io::open_connected_fd`):
-// dormant in this PR until the activation handler is wired into the
-// node tick (follow-up).
-#![allow(dead_code)]
-
 //! Recv-side drain thread for a per-peer connected UDP socket.
 //!
 //! Once a UDP socket is `connect()`-ed to a peer, Linux and Darwin

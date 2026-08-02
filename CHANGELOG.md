@@ -125,6 +125,15 @@ with v0.4.x or earlier peers.
   `LogsDirectory=fips` was added to the packaged systemd units so the capture
   directory is created and cleaned up declaratively.
 
+- `node.rate_limit.established_handshake_burst` and
+  `node.rate_limit.established_handshake_rate`, the parameters of the new
+  established-link msg1 token bucket. Both are optional; omitting them (the
+  normal case) derives the bucket from `node.limits.max_peers`,
+  `node.rekey.after_secs` and `node.rate_limit.handshake_max_resends`, so
+  raising the peer limit sizes the bucket automatically. An explicit zero
+  burst or a non-positive rate is rejected at config validation rather than
+  silently refusing all rekey traffic.
+
 - `packaging/debian/build-deb.sh --features <list>` builds the `.deb` with a
   Cargo feature list, which is how an instrumented package is produced for a
   measurement run. The auto-derived dev Version gains a matching `+<features>`
@@ -194,6 +203,16 @@ with v0.4.x or earlier peers.
   `nostr.*`, `lan.*`). A deployed `node.discovery:` block still loads and is
   folded into the new tables with a one-time deprecation warning; migrate your
   `fips.yaml` to the new keys.
+
+- Inbound msg1 is classified before it is rate limited, and rekey or restart
+  msg1 arriving on an established link now draws on its own token bucket
+  instead of competing with stranger admission for a single shared one. On a
+  node with many peers the shared bucket refused a large share of ordinary
+  rekey traffic: a field node at roughly 245 peers refused 8753 msg1 in 25
+  minutes, and 159 of the 201 distinct sources were peers it already held
+  sessions with. Nodes upgrade with no config change. The `Msg1 rate limited`
+  log line now reports which limb refused, the pending count or the token
+  bucket, which it previously did not distinguish.
 
 - `SessionDatagram::decrement_ttl` and `SessionDatagram::can_forward` now match
   the forwarder's IP hop-limit semantics: `decrement_ttl` decrements first and

@@ -1,5 +1,6 @@
-// Applied inside `io::open_connected_fd` (see `io.rs`), dormant until
-// the connected-UDP fast path is wired into dispatch — hence the allow.
+// Applied inside `io::open_connected_fd` (see `io.rs`). The full
+// `NET_SERVICE_TYPE_*` table is kept for reference although only `OAM` is
+// selected, so most of these constants are deliberately unreferenced.
 #![allow(dead_code)]
 
 //! Darwin UDP socket tuning.
