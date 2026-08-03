@@ -17,8 +17,12 @@ use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
 /// Default path for the FIPS hosts file.
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
 pub const DEFAULT_HOSTS_PATH: &str = "/etc/fips/hosts";
+// macOS and FreeBSD keep local configuration under /usr/local/etc; both
+// pkgs install the hosts file there, matching the config search path.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const DEFAULT_HOSTS_PATH: &str = "/usr/local/etc/fips/hosts";
 #[cfg(windows)]
 pub const DEFAULT_HOSTS_PATH: &str = r"C:\ProgramData\fips\hosts";
 

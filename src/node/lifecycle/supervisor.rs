@@ -682,9 +682,10 @@ pub(crate) struct Supervisor {
     pub(in crate::node) tun_reader_handle: Option<JoinHandle<()>>,
     /// TUN writer thread handle.
     pub(in crate::node) tun_writer_handle: Option<JoinHandle<()>>,
-    /// Shutdown pipe: writing to this fd unblocks the TUN reader thread on macOS.
-    /// On Linux, deleting the interface via netlink serves the same purpose.
-    #[cfg(target_os = "macos")]
+    /// Shutdown pipe: writing to this fd unblocks the TUN reader thread on
+    /// macOS and FreeBSD. On Linux, deleting the interface via netlink
+    /// serves the same purpose.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     pub(in crate::node) tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
 
     /// Receiver for resolved identities from the DNS responder.
@@ -732,7 +733,7 @@ impl Supervisor {
             tun_outbound_rx: None,
             tun_reader_handle: None,
             tun_writer_handle: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             tun_shutdown_fd: None,
             dns_identity_rx: None,
             dns_task: None,

@@ -325,9 +325,13 @@ fn print_response(value: &serde_json::Value) {
 
 /// Default directory for keygen output.
 fn default_key_dir() -> PathBuf {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
     {
         PathBuf::from("/etc/fips")
+    }
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    {
+        PathBuf::from("/usr/local/etc/fips")
     }
     #[cfg(windows)]
     {
@@ -421,6 +425,17 @@ fn main() {
 
         let key_path = dir.join("fips.key");
         let pub_path = dir.join("fips.pub");
+
+        // The default key directory on macOS/FreeBSD moved from /etc/fips
+        // to /usr/local/etc/fips; point at keys stranded at the old path.
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        if std::path::Path::new("/etc/fips/fips.key").exists() && !key_path.exists() {
+            eprintln!("note: /etc/fips/fips.key exists but the default key directory");
+            eprintln!(
+                "      is now {}; that key is no longer used by default.",
+                dir.display()
+            );
+        }
 
         if key_path.exists() && !force {
             eprintln!("error: key file already exists: {}", key_path.display());

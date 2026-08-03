@@ -1,0 +1,50 @@
+#!/bin/sh
+# fips-dns-teardown — Remove .fips DNS routing configured by fips-dns-setup.
+
+set -eu
+
+STATE_FILE="/var/run/fips/dns-backend"
+
+LOCAL_UNBOUND_DROPIN="/var/unbound/conf.d/fips.conf"
+PKG_UNBOUND_DROPIN="/usr/local/etc/unbound/conf.d/fips.conf"
+DNSMASQ_DROPIN="/usr/local/etc/dnsmasq.d/fips.conf"
+
+log() { echo "fips-dns: $*"; }
+
+backend=""
+[ -f "$STATE_FILE" ] && backend="$(cat "$STATE_FILE")"
+
+case "$backend" in
+    local_unbound)
+        log "Removing local_unbound drop-in"
+        rm -f "$LOCAL_UNBOUND_DROPIN"
+        service local_unbound reload >/dev/null 2>&1 \
+            || service local_unbound onerestart >/dev/null 2>&1 \
+            || log "WARNING: local_unbound reload failed"
+        ;;
+    pkg-unbound)
+        log "Removing unbound drop-in"
+        rm -f "$PKG_UNBOUND_DROPIN"
+        service unbound reload >/dev/null 2>&1 \
+            || service unbound onerestart >/dev/null 2>&1 \
+            || log "WARNING: unbound reload failed"
+        ;;
+    dnsmasq)
+        log "Removing dnsmasq drop-in"
+        rm -f "$DNSMASQ_DROPIN"
+        service dnsmasq reload >/dev/null 2>&1 \
+            || service dnsmasq onerestart >/dev/null 2>&1 \
+            || log "WARNING: dnsmasq reload failed"
+        ;;
+    none)
+        log "No backend was configured; nothing to remove"
+        ;;
+    *)
+        # Unknown or missing state — clean up any drop-in we may own.
+        log "No recorded backend; removing any FIPS drop-ins"
+        rm -f "$LOCAL_UNBOUND_DROPIN" "$PKG_UNBOUND_DROPIN" "$DNSMASQ_DROPIN"
+        ;;
+esac
+
+rm -f "$STATE_FILE"
+exit 0

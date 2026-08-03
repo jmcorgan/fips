@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# PROVIDE: fips
+# REQUIRE: NETWORKING FILESYSTEMS
+# KEYWORD: shutdown
+
+# rc.conf knobs:
+#   fips_enable (bool):  Set YES to run the FIPS daemon. Default NO.
+#   fips_config (path):  Config file. Default /usr/local/etc/fips/fips.yaml.
+#   fips_flags (str):    Extra arguments passed to the fips daemon.
+#   fips_logfile (path): Daemon stdout/stderr log. Default /var/log/fips.log.
+
+. /etc/rc.subr
+
+name="fips"
+rcvar="fips_enable"
+desc="FIPS mesh networking daemon"
+
+load_rc_config $name
+
+: ${fips_enable:="NO"}
+: ${fips_config:="/usr/local/etc/fips/fips.yaml"}
+: ${fips_logfile:="/var/log/fips.log"}
+
+runtime_dir="/var/run/fips"
+pidfile="${runtime_dir}/fips.pid"
+procname="/usr/local/bin/fips"
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -t fips -o ${fips_logfile} ${procname} --config ${fips_config} ${fips_flags}"
+start_precmd="fips_precmd"
+
+# The daemon resolves its control socket to /var/run/fips when the
+# directory exists, so it must be there before the daemon starts.
+# root:fips 0750 (matching the Debian tmpfiles entry) lets members of
+# the fips group use fipsctl/fipstop without root; the group is created
+# by the package post-install. Fall back to 0755 for source builds
+# where the group does not exist.
+fips_precmd() {
+    if pw groupshow fips >/dev/null 2>&1; then
+        install -d -m 0750 -o root -g fips "$runtime_dir"
+    else
+        install -d -m 0755 "$runtime_dir"
+    fi
+}
+
+run_rc_command "$1"
