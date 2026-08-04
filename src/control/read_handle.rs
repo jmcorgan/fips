@@ -32,7 +32,7 @@ use crate::node::context::NodeContext;
 use crate::node::metrics::MetricsRegistry;
 
 use super::protocol::{Request, Response};
-use super::snapshot::{EntitySnapshot, RoutingSnapshot, StatsSnapshot};
+use super::snapshot::{EntitySnapshot, PeerRow, RoutingSnapshot, StatsSnapshot};
 
 /// Cloneable read-only view of node state for off-loop control serving.
 ///
@@ -110,6 +110,11 @@ impl ControlReadHandle {
 
 /// A minimal, public view of one peer for embedders (e.g. an app UI), read
 /// lock-free from the tick-published snapshot. See [`ControlReadHandle::peer_views`].
+///
+/// `last_seen_ms`, `transport` and `display_name` are additive fields, joined
+/// in from the tick-published `EntitySnapshot`'s peer rows by `node_addr`;
+/// they default to `0` / `""` / `""` when no entity row exists yet for a given
+/// address (e.g. a peer known only from stats, not yet in the live table).
 #[derive(Debug, Clone)]
 pub struct PeerView {
     /// The peer's `node_addr`, hex-encoded.
@@ -118,25 +123,61 @@ pub struct PeerView {
     pub npub: String,
     /// Whether the peer is currently in the live authenticated-peer table.
     pub connected: bool,
+    /// Milliseconds-since-epoch this peer was last heard from, as captured in
+    /// the entity snapshot at publish time. `0` when no entity row exists yet.
+    pub last_seen_ms: u64,
+    /// Transport type currently carrying this peer's resolved link (e.g.
+    /// `"ble"`, `"udp"`, `"tcp"`). Empty when no entity row or no resolved
+    /// link exists yet.
+    pub transport: String,
+    /// Display name resolved for this peer at publish time. Empty when no
+    /// entity row exists yet.
+    pub display_name: String,
 }
 
 impl ControlReadHandle {
-    /// A lock-free snapshot of known peers (node_addr / npub / connected),
-    /// read from the tick-published stats snapshot.
+    /// A lock-free snapshot of known peers (node_addr / npub / connected /
+    /// last_seen_ms / transport / display_name), read from the
+    /// tick-published stats and entity snapshots.
     ///
     /// Intended for embedders that run [`crate::Node::run_rx_loop`] on a
     /// background task (so the node is exclusively borrowed there) and poll peer
-    /// state from a clone of this handle — the read touches only an `ArcSwap`
-    /// load, never the `Node`. See the Myco app for the reference embedding.
+    /// state from a clone of this handle — the read touches only `ArcSwap`
+    /// loads, never the `Node`. See the reference Android app embedding for
+    /// the intended usage.
     pub fn peer_views(&self) -> Vec<PeerView> {
+        let entities = self.entities.load();
+        let entity_by_addr: std::collections::HashMap<crate::identity::NodeAddr, &PeerRow> =
+            entities
+                .peers
+                .iter()
+                .map(|row| (row.node_addr, row.as_ref()))
+                .collect();
+
         self.stats
             .load()
             .peer_meta
             .iter()
-            .map(|(addr, meta)| PeerView {
-                node_addr_hex: addr.to_string(),
-                npub: meta.npub.clone(),
-                connected: meta.is_active,
+            .map(|(addr, meta)| {
+                let (last_seen_ms, transport, display_name) = match entity_by_addr.get(addr) {
+                    Some(row) => (
+                        row.last_seen_ms,
+                        row.link_info
+                            .as_ref()
+                            .and_then(|link| link.transport_type.clone())
+                            .unwrap_or_default(),
+                        row.display_name.clone(),
+                    ),
+                    None => (0, String::new(), String::new()),
+                };
+                PeerView {
+                    node_addr_hex: addr.to_string(),
+                    npub: meta.npub.clone(),
+                    connected: meta.is_active,
+                    last_seen_ms,
+                    transport,
+                    display_name,
+                }
             })
             .collect()
     }
