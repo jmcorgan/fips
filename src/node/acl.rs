@@ -42,6 +42,33 @@ pub const DEFAULT_PEERS_DENY_PATH: &str = "/usr/local/etc/fips/peers.deny";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_PEERS_DENY_PATH: &str = "/etc/fips/peers.deny";
 
+/// Warn about config files stranded at the pre-move default location.
+///
+/// The macOS defaults for `hosts`, `peers.allow` and `peers.deny` moved
+/// from `/etc/fips` to `/usr/local/etc/fips`, the directory the macOS
+/// packaging actually populates. The old location is no longer read by
+/// the default path constants, and a `peers.deny` silently left behind
+/// there would fail open (a missing deny list is not an error), so surface
+/// the situation loudly once at startup.
+#[cfg(target_os = "macos")]
+pub fn warn_on_legacy_config_paths() {
+    for (current, name) in [
+        (crate::upper::hosts::DEFAULT_HOSTS_PATH, "hosts"),
+        (DEFAULT_PEERS_ALLOW_PATH, "peers.allow"),
+        (DEFAULT_PEERS_DENY_PATH, "peers.deny"),
+    ] {
+        let legacy = format!("/etc/fips/{name}");
+        if std::path::Path::new(&legacy).exists() && !std::path::Path::new(current).exists() {
+            warn!(
+                legacy = %legacy,
+                current = %current,
+                "Config file found at legacy path but not at the current default; \
+                 it is no longer read — move it to the current path"
+            );
+        }
+    }
+}
+
 /// Result of evaluating a peer against the ACL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerAclDecision {

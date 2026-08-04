@@ -111,6 +111,11 @@ async fn run_daemon(
         }
     }
 
+    // The hosts/ACL defaults on macOS moved from /etc/fips to
+    // /usr/local/etc/fips; flag files stranded at the old location.
+    #[cfg(target_os = "macos")]
+    fips::node::warn_on_legacy_config_paths();
+
     // Identity provisioning: config nsec > key file > generate ephemeral
     let resolved = match resolve_identity(&config, &loaded_paths) {
         Ok(r) => r,
