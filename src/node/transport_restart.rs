@@ -268,10 +268,12 @@ mod node_integration_tests {
         let io = MockBleIo::new("hci0", test_addr(1));
         io.fail_next_listens(1);
 
-        let mut config = BleConfig::default();
-        config.accept_connections = Some(true);
-        config.scan = Some(false);
-        config.advertise = Some(false);
+        let config = BleConfig {
+            accept_connections: Some(true),
+            scan: Some(false),
+            advertise: Some(false),
+            ..Default::default()
+        };
 
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
@@ -309,8 +311,10 @@ mod node_integration_tests {
         // errors out on bind-address parsing — reproduce that exact shape
         // with an unparseable bind address, then feed the failed handle to
         // `quarantine_transport` and confirm it is dropped, not retained.
-        let mut udp_config = crate::config::UdpConfig::default();
-        udp_config.bind_addr = Some("not-an-address".to_string());
+        let udp_config = crate::config::UdpConfig {
+            bind_addr: Some("not-an-address".to_string()),
+            ..Default::default()
+        };
         let (packet_tx, _packet_rx) = crate::transport::packet_channel(64);
         let mut udp = crate::transport::udp::UdpTransport::new(
             TransportId::new(3),

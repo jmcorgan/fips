@@ -177,6 +177,17 @@ impl<I: BleIo> BleTransport<I> {
 
     /// Start the transport asynchronously.
     pub async fn start_async(&mut self) -> Result<(), TransportError> {
+        // Limitations: only a failure to begin listening marks the transport
+        // `Failed` and returns `Err` — that is the one case restart
+        // supervision (`node::transport_restart`) can recover. A failure to
+        // begin advertising or scanning, below, is logged and swallowed, and
+        // the transport still proceeds to the operational state — so a
+        // transport can report itself operational while neither advertising
+        // nor scanning is actually running underneath it. Closing this gap
+        // would mean re-running the advertise/scan calls on a transport that
+        // already owns a live acceptor and a spawned accept loop, which is a
+        // larger change than this fix covers, so it is deferred rather than
+        // attempted here.
         if !self.state.can_start() {
             return Err(TransportError::AlreadyStarted);
         }
@@ -1161,6 +1172,24 @@ mod tests {
 
         transport.stop_async().await.unwrap();
         assert_eq!(transport.state(), TransportState::Down);
+    }
+
+    #[tokio::test]
+    async fn test_start_async_is_reentrant_after_listen_failure() {
+        // The whole restart supervisor rests on this: `can_start()`
+        // permitting a retry is worthless if `start_async` cannot actually
+        // run twice on the same transport.
+        let io = MockBleIo::new("hci0", test_addr(1));
+        io.fail_next_listens(1);
+        let (mut transport, _rx) = make_transport(io);
+
+        assert!(transport.start_async().await.is_err());
+        assert_eq!(transport.state(), TransportState::Failed);
+
+        // The injected failure was one-shot — the second call is a real
+        // retry, not a repeat of the same failure.
+        transport.start_async().await.unwrap();
+        assert_eq!(transport.state(), TransportState::Up);
     }
 
     #[tokio::test(start_paused = true)]
