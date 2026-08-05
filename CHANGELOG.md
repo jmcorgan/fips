@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests so the layout cannot silently drift again. Linux and Windows
   behavior is unchanged.
 
+- macOS: `fipsctl keygen` now writes `fips.key` / `fips.pub` to
+  `/usr/local/etc/fips/` by default, matching the install layout the macOS
+  packaging ships. The default output directory was hardcoded to
+  `/etc/fips` for all Unix, but the daemon derives its identity key paths
+  from the config file's directory — `/usr/local/etc/fips/fips.yaml` on
+  macOS — so a generated identity landed where the daemon never reads it
+  and the node silently kept an ephemeral identity. Linux and other Unix
+  keep `/etc/fips`, Windows is unchanged, and the values are pinned by
+  platform-gated unit tests.
+
 - Nostr NAT traversal no longer breaks after the host suspends. The traversal
   clock cached a Unix timestamp once at startup and advanced it with a
   monotonic `Instant`, which does not tick while a machine is asleep, so after
