@@ -601,6 +601,9 @@ pub struct MockBleIo {
     scan_tx: tokio::sync::mpsc::Sender<BleAddr>,
     scan_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<BleAddr>>>,
     connect_handler: std::sync::Mutex<Option<ConnectHandler>>,
+    /// Remaining forced `listen()` failures, modelling a radio that is not
+    /// available yet (e.g. a bridge injected after the transport starts).
+    listen_failures: std::sync::atomic::AtomicUsize,
 }
 
 impl MockBleIo {
@@ -616,7 +619,15 @@ impl MockBleIo {
             scan_tx,
             scan_rx: std::sync::Mutex::new(Some(scan_rx)),
             connect_handler: std::sync::Mutex::new(None),
+            listen_failures: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Force the next `n` calls to `listen()` to fail, modelling a radio
+    /// that is not available yet.
+    pub fn fail_next_listens(&self, n: usize) {
+        self.listen_failures
+            .store(n, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Inject an inbound connection (simulates a remote device connecting).
@@ -647,6 +658,20 @@ impl BleIo for MockBleIo {
     type Scanner = MockBleScanner;
 
     async fn listen(&self, _psm: u16) -> Result<Self::Acceptor, TransportError> {
+        if self
+            .listen_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |v| v.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(TransportError::Io(std::io::Error::other(
+                "BLE radio not available",
+            )));
+        }
+
         let rx = self
             .accept_rx
             .lock()

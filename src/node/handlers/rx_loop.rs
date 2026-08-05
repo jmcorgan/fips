@@ -262,6 +262,7 @@ impl Node {
                     // file (see `node::reloadable`).
                     self.reload_host_map().await;
                     self.poll_pending_connects().await;
+                    self.retry_pending_transports(now_ms).await;
                     self.poll_nostr_discovery().await;
                     self.poll_lan_discovery().await;
                     self.poll_platform_discovery().await;

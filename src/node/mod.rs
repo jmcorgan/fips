@@ -26,6 +26,7 @@ pub(crate) mod stats;
 pub(crate) mod stats_history;
 #[cfg(test)]
 mod tests;
+mod transport_restart;
 mod tree;
 pub(crate) mod wire;
 
@@ -336,6 +337,12 @@ pub struct Node {
     // === Transports & Links ===
     /// Active transports (owned by Node).
     transports: HashMap<TransportId, TransportHandle>,
+    /// Transport handles that failed to start and are awaiting a retry
+    /// on the maintenance tick (see `transport_restart`).
+    ///
+    /// Invisible to every data-plane path until a retry succeeds — only
+    /// promoted into `transports` once `start()` returns `Ok`.
+    pending_transports: Vec<transport_restart::PendingTransport>,
     /// Per-transport kernel drop tracking for congestion detection.
     transport_drops: HashMap<TransportId, TransportDropState>,
     /// Active links.
@@ -671,6 +678,7 @@ impl Node {
             coord_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
+            pending_transports: Vec::new(),
             transport_drops: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
@@ -834,6 +842,7 @@ impl Node {
             coord_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
+            pending_transports: Vec::new(),
             transport_drops: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),

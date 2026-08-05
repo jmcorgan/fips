@@ -1236,19 +1236,12 @@ impl Node {
         let transport_handles = self.create_transports(&packet_tx).await;
 
         for mut handle in transport_handles {
-            let transport_id = handle.transport_id();
             let transport_type = handle.transport_type().name;
             let name = handle.name().map(|s| s.to_string());
 
             match handle.start().await {
                 Ok(()) => {
-                    #[cfg(unix)]
-                    if transport_type == "udp"
-                        && let (Some(tx), Some(fd)) = (&self.udp_bind_tx, handle.raw_fd())
-                    {
-                        let _ = tx.send(fd);
-                    }
-                    self.transports.insert(transport_id, handle);
+                    self.adopt_started_transport(handle);
                 }
                 Err(e) => {
                     if let Some(ref n) = name {
@@ -1256,6 +1249,7 @@ impl Node {
                     } else {
                         warn!(transport_type, error = %e, "Transport failed to start");
                     }
+                    self.quarantine_transport(handle, Self::now_ms());
                 }
             }
         }
@@ -1683,6 +1677,9 @@ impl Node {
                 }
             }
         }
+
+        // Handles that never started have nothing to stop — only to drop.
+        self.pending_transports.clear();
 
         // Drop packet channels
         self.packet_tx.take();
