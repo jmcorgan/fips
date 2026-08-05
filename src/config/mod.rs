@@ -3,7 +3,8 @@
 //! Loads configuration from YAML files with a cascading priority system:
 //! 1. `./fips.yaml` (current directory - highest priority)
 //! 2. `~/.config/fips/fips.yaml` (user config directory)
-//! 3. `/etc/fips/fips.yaml` (system - lowest priority)
+//! 3. `/etc/fips/fips.yaml` (system - lowest priority; on macOS
+//!    `/usr/local/etc/fips/fips.yaml` is also probed, after `/etc/fips/`)
 //!
 //! Values from higher priority files override those from lower priority files.
 //!
@@ -46,6 +47,15 @@ pub use transport::{
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";
+
+/// System-wide config directory, following the platform's packaging layout
+/// (`/usr/local/etc/fips` on macOS, `/etc/fips` otherwise). The daemon
+/// derives identity key paths from the config file's location, so anything
+/// that reads or writes config-adjacent files should use this one constant.
+#[cfg(target_os = "macos")]
+pub const SYSTEM_CONFIG_DIR: &str = "/usr/local/etc/fips";
+#[cfg(not(target_os = "macos"))]
+pub const SYSTEM_CONFIG_DIR: &str = "/etc/fips";
 
 /// Default key filename, placed alongside the config file.
 const KEY_FILENAME: &str = "fips.key";
@@ -454,7 +464,8 @@ impl Config {
     /// Load configuration from the standard search paths.
     ///
     /// Files are loaded in reverse priority order and merged:
-    /// 1. `/etc/fips/fips.yaml` (loaded first, lowest priority)
+    /// 1. `/etc/fips/fips.yaml` (and `/usr/local/etc/fips/fips.yaml` on macOS;
+    ///    loaded first, lowest priority)
     /// 2. `~/.config/fips/fips.yaml` (user config)
     /// 3. `./fips.yaml` (loaded last, highest priority)
     ///
@@ -500,8 +511,15 @@ impl Config {
     pub fn search_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // System config (lowest priority)
+        // System config — /etc/fips is always probed so existing installs
+        // keep working after an upgrade.
         paths.push(PathBuf::from("/etc/fips").join(CONFIG_FILENAME));
+
+        // macOS packaging installs config under /usr/local/etc/fips
+        // (Homebrew-style prefix); probe it after /etc/fips so the
+        // packaged file wins over a stale /etc/fips leftover.
+        #[cfg(target_os = "macos")]
+        paths.push(PathBuf::from("/usr/local/etc/fips").join(CONFIG_FILENAME));
 
         // User config directory
         if let Some(config_dir) = dirs::config_dir() {
@@ -930,12 +948,19 @@ node:
         // Should include current directory
         assert!(paths.iter().any(|p| p.ends_with("fips.yaml")));
 
-        // Should include /etc/fips on Unix
-        #[cfg(unix)]
+        // Should always include /etc/fips as a system config path
         assert!(
             paths
                 .iter()
                 .any(|p| p.starts_with("/etc/fips") && p.ends_with("fips.yaml"))
+        );
+
+        // macOS should also include /usr/local/etc/fips
+        #[cfg(target_os = "macos")]
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with("/usr/local/etc/fips") && p.ends_with("fips.yaml"))
         );
     }
 

@@ -72,6 +72,37 @@ present after the first successful daemon start. If the daemon never
 came up cleanly (config error, permission problem), the key files
 will be missing.
 
+### macOS note
+
+The macOS package (`.pkg`) installs config and keys under
+`/usr/local/etc/fips/` instead of `/etc/fips/`. The paths above become:
+
+| Linux / other Unix | macOS |
+| --- | --- |
+| `/etc/fips/fips.yaml` | `/usr/local/etc/fips/fips.yaml` |
+| `/etc/fips/fips.key` | `/usr/local/etc/fips/fips.key` |
+| `/etc/fips/fips.pub` | `/usr/local/etc/fips/fips.pub` |
+
+`fipsctl keygen` writes to `/usr/local/etc/fips/` by default on macOS.
+The daemon still probes `/etc/fips/fips.yaml` as a fallback (so an
+existing install is not broken by an upgrade), but the macOS packaging
+only installs files under `/usr/local/etc/fips/`.
+
+If you have files in `/etc/fips/` from a manual install, move them:
+
+```sh
+sudo mv /etc/fips/fips.yaml /usr/local/etc/fips/fips.yaml
+sudo mv /etc/fips/fips.key /usr/local/etc/fips/fips.key
+sudo mv /etc/fips/fips.pub /usr/local/etc/fips/fips.pub
+sudo mv /etc/fips/peers.allow /usr/local/etc/fips/peers.allow 2>/dev/null || true
+sudo mv /etc/fips/peers.deny /usr/local/etc/fips/peers.deny 2>/dev/null || true
+sudo mv /etc/fips/hosts /usr/local/etc/fips/hosts 2>/dev/null || true
+```
+
+The daemon logs a warning at startup if any of `fips.yaml`, `peers.allow`,
+`peers.deny`, or `hosts` exist at the old `/etc/fips/` path but not at
+`/usr/local/etc/fips/`.
+
 ### File layout and permissions
 
 | Path | Mode | Owner | Contents |

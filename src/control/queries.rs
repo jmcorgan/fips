@@ -2435,11 +2435,26 @@ mod tests {
     /// runtime state (no peers, links, sessions, transports, or cache
     /// entries). This keeps every per-element list empty and every
     /// scalar deterministic modulo `VOLATILE_KEYS`.
+    ///
+    /// The peer ACL is isolated from the host filesystem: the reloader is
+    /// repointed at non-existent paths under the process temp dir, so the
+    /// snapshot is stable regardless of whether an operator has edited the
+    /// real `peers.allow` / `peers.deny` on the dev/CI machine. Without this,
+    /// `show_acl` would reflect the host's live ACL state (e.g. a populated
+    /// `peers.deny` flips `effective_mode` from `default_open` to
+    /// `denylist`), making the snapshot machine-dependent.
     fn build_test_node() -> Node {
         let identity =
             Identity::from_secret_bytes(&TEST_SEED).expect("test seed is a valid secret key");
         let config = Config::new();
-        Node::with_identity(identity, config).expect("default config is valid")
+        let mut node = Node::with_identity(identity, config).expect("default config is valid");
+        let nonce = std::process::id();
+        let tmp = std::env::temp_dir();
+        node.isolate_peer_acl_for_test(
+            tmp.join(format!("fips-snapshot-test-{nonce}.allow")),
+            tmp.join(format!("fips-snapshot-test-{nonce}.deny")),
+        );
+        node
     }
 
     /// Recursively walk a JSON value, replacing the value of any key
