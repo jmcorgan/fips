@@ -9,13 +9,13 @@
 //!
 //! ## Layering
 //!
-//! FIPS cannot depend on the app crate (`myco-core`), so the split is:
+//! FIPS cannot depend on the app crate, so the split is:
 //!
 //! - [`AndroidRadio`] — an object-safe trait for the few **commands** the radio
-//!   must run (listen/connect/advertise/scan/close). `myco-core` implements it
+//!   must run (listen/connect/advertise/scan/close). The app crate implements it
 //!   via JNI calls into the Kotlin radio object.
 //! - [`AndroidBleBridge`] — the channel machinery shared by this backend and the
-//!   JNI layer. `myco-core` constructs it, injects it via
+//!   JNI layer. The app crate constructs it, injects it via
 //!   [`set_android_ble_bridge`], and drives its `deliver_*` / `next_send`
 //!   methods from its `Java_..._NativeCore_*` exports.
 //! - [`AndroidIo`] / [`AndroidStream`] / [`AndroidAcceptor`] / [`AndroidScanner`]
@@ -32,7 +32,7 @@
 //!   the byte hot path never blocks a tokio worker on a JNI upcall.
 //!
 //! This module is platform-agnostic Rust (no JNI here — that lives in
-//! `myco-core`), so it compiles and unit-tests on the host with a mock radio.
+//! the app crate), so it compiles and unit-tests on the host with a mock radio.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
@@ -81,7 +81,7 @@ const DEFAULT_BLE_MTU: u16 = 2048;
 // AndroidRadio — the Kotlin-implemented command surface
 // ============================================================================
 
-/// The radio commands the bridge issues to the platform. `myco-core` implements
+/// The radio commands the bridge issues to the platform. The app crate implements
 /// this via JNI `call_method` on the Kotlin `BleRadio` object. Object-safe so the
 /// bridge can hold `Arc<dyn AndroidRadio>`.
 ///
@@ -143,9 +143,9 @@ struct StreamEndpoints {
     closed: Arc<AtomicBool>,
 }
 
-/// Channel machinery shared between [`AndroidIo`] and the JNI layer in `myco-core`.
+/// Channel machinery shared between [`AndroidIo`] and the app crate's JNI layer.
 ///
-/// Constructed by `myco-core` with a concrete [`AndroidRadio`], injected via
+/// Constructed by the app crate with a concrete [`AndroidRadio`], injected via
 /// [`set_android_ble_bridge`], and driven by its `deliver_*` / `next_send`
 /// methods from the JNI exports.
 pub struct AndroidBleBridge {
@@ -167,6 +167,12 @@ pub struct AndroidBleBridge {
     /// Scan fan-in; the scanner takes the receiver once.
     scan_tx: mpsc::Sender<BleAddr>,
     scan_rx: Mutex<Option<mpsc::Receiver<BleAddr>>>,
+    /// Observed radio state, pushed by Kotlin from the scan callback lifecycle.
+    /// For the developer diagnostics UI only — never read by the transport logic.
+    scanning: AtomicBool,
+    /// Observed radio state, pushed by Kotlin from the advertise callback
+    /// lifecycle. For the developer diagnostics UI only.
+    advertising: AtomicBool,
 }
 
 impl AndroidBleBridge {
@@ -186,6 +192,8 @@ impl AndroidBleBridge {
             accept_rx: Mutex::new(Some(accept_rx)),
             scan_tx,
             scan_rx: Mutex::new(Some(scan_rx)),
+            scanning: AtomicBool::new(false),
+            advertising: AtomicBool::new(false),
         })
     }
 
@@ -227,7 +235,7 @@ impl AndroidBleBridge {
         }
     }
 
-    // --- JNI-facing push/pull surface (called by myco-core's exports) ---
+    // --- JNI-facing push/pull surface (called by the app crate's exports) ---
 
     /// Kotlin accepted a new inbound L2CAP channel. Returns the allocated `ch_id`.
     pub fn deliver_inbound(&self, remote: BleAddr, send_mtu: u16, recv_mtu: u16) -> i64 {
@@ -305,6 +313,32 @@ impl AndroidBleBridge {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+    }
+
+    /// Record whether the Kotlin scan loop is live right now, pushed from the
+    /// scan callback's own start/stop/retry-failure sites. The observed radio
+    /// state for the developer UI — never read by the transport logic.
+    pub fn set_scanning(&self, on: bool) {
+        self.scanning.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the scan loop was last reported live. The observed radio state
+    /// for the developer UI.
+    pub fn is_scanning(&self) -> bool {
+        self.scanning.load(Ordering::Relaxed)
+    }
+
+    /// Record whether the Kotlin advertiser is live right now, pushed from the
+    /// advertise callback's own install/clear sites. The observed radio state
+    /// for the developer UI.
+    pub fn set_advertising(&self, on: bool) {
+        self.advertising.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the advertiser was last reported live. The observed radio state
+    /// for the developer UI.
+    pub fn is_advertising(&self) -> bool {
+        self.advertising.load(Ordering::Relaxed)
     }
 
     /// Kotlin read one L2CAP packet for `ch_id`. Returns false if the channel is
