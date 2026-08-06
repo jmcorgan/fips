@@ -175,6 +175,47 @@ impl BleAttemptLog {
     /// carries one.
     pub fn record(&self, attempt: BleAttempt) {
         let mut inner = self.lock();
+        Self::push_locked(&mut inner, attempt);
+    }
+
+    /// Record a resolved attempt for `ble_addr`, stamping the wall clock and the
+    /// elapsed discovery time internally.
+    ///
+    /// This is what the transport's outcome sites call. Preferred over building
+    /// a [`BleAttempt`] by hand beside a `discovery_elapsed_ms` call: it takes
+    /// the lock once where that takes it twice, and it keeps a recording site to
+    /// a single statement that cannot accidentally reorder around the trace it
+    /// sits beside. Pass an empty `node_addr_hex` when the attempt did not get
+    /// far enough to learn one — it is never guessed.
+    pub fn record_outcome(
+        &self,
+        ble_addr: &str,
+        node_addr_hex: &str,
+        role: BleRole,
+        outcome: BleAttemptOutcome,
+    ) {
+        let mut inner = self.lock();
+        let discovery_ms = inner
+            .in_flight
+            .get(ble_addr)
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        Self::push_locked(
+            &mut inner,
+            BleAttempt {
+                at_ms: now_ms(),
+                ble_addr: ble_addr.to_string(),
+                node_addr_hex: node_addr_hex.to_string(),
+                role,
+                discovery_ms,
+                outcome,
+            },
+        );
+    }
+
+    /// Shared body of [`Self::record`] and [`Self::record_outcome`], run with
+    /// the lock already held.
+    fn push_locked(inner: &mut Inner, attempt: BleAttempt) {
         let addr = attempt.ble_addr.clone();
         if !attempt.node_addr_hex.is_empty() {
             inner
@@ -364,6 +405,44 @@ mod tests {
         assert_eq!(snap[1].send_failures, 0);
         assert_eq!(snap[2].ble_addr, "ble0/CC");
         assert_eq!(snap[2].attempts.len(), 0);
+    }
+
+    #[test]
+    fn record_outcome_stamps_discovery_and_clears_the_in_flight_entry() {
+        let log = BleAttemptLog::new();
+        log.note_discovered("ble0/EE");
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        log.record_outcome(
+            "ble0/EE",
+            "cafe",
+            BleRole::Peripheral,
+            BleAttemptOutcome::LostTiebreaker,
+        );
+
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].node_addr_hex, "cafe");
+        let a = &snap[0].attempts[0];
+        assert_eq!(a.role, BleRole::Peripheral);
+        assert_eq!(a.outcome, BleAttemptOutcome::LostTiebreaker);
+        assert!(a.discovery_ms >= 10, "discovery_ms was {}", a.discovery_ms);
+        assert!(a.at_ms > 0);
+        // The stamp is consumed, so a second read reports "not measured".
+        assert_eq!(log.discovery_elapsed_ms("ble0/EE"), 0);
+    }
+
+    #[test]
+    fn record_outcome_without_a_node_addr_leaves_it_empty() {
+        let log = BleAttemptLog::new();
+        log.record_outcome(
+            "ble0/FF",
+            "",
+            BleRole::Central,
+            BleAttemptOutcome::ConnectTimeout,
+        );
+        let snap = log.snapshot();
+        assert_eq!(snap[0].node_addr_hex, "");
+        assert_eq!(snap[0].attempts[0].discovery_ms, 0);
     }
 
     #[test]

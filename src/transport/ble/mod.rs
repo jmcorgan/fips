@@ -357,6 +357,11 @@ impl<I: BleIo> BleTransport<I> {
                 let mut pool = self.pool.lock().await;
                 pool.remove(addr);
                 warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
+                // A link-level send failure against this peer. The MTU arm above
+                // deliberately does not record here: an oversized packet is a
+                // caller bug, not a property of the peer's link, and counting the
+                // two together would make this number useless as evidence.
+                attempts::ble_attempt_log().record_send_failure(&addr.to_string());
                 Err(e)
             }
         }
@@ -788,6 +793,10 @@ async fn accept_loop<A>(
                 let addr = stream.remote_addr().clone();
                 let ta = addr.to_transport_addr();
 
+                // An inbound connection is this side's first sight of the peer,
+                // so it starts the discovery clock the outcome records below read.
+                attempts::ble_attempt_log().note_discovered(&addr.to_string());
+
                 // Skip if already connected (outbound won the race)
                 {
                     let pool_guard = pool.lock().await;
@@ -803,12 +812,19 @@ async fn accept_loop<A>(
                 // Shared reader for pubkey exchange + receive loop.
                 let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
+                // The peer's node address, once the exchange below learns it, and
+                // the address string — both captured here because `addr` is moved
+                // into the connection before the pool outcome is recorded.
+                let addr_s = addr.to_string();
+                let mut peer_node_hex = String::new();
+
                 // Pre-handshake pubkey exchange (temporary, pre-XX)
                 if let Some(ref our_pubkey) = local_pubkey {
                     match pubkey_exchange(&mut reader, our_pubkey).await {
                         Ok(peer_pubkey) => {
                             debug!(addr = %ta, "BLE inbound pubkey exchange complete");
                             discovery_buffer.add_peer_with_pubkey(&addr, peer_pubkey);
+                            peer_node_hex = NodeAddr::from_pubkey(&peer_pubkey).to_string();
 
                             // Cross-probe tie-breaker: smaller NodeAddr's
                             // outbound wins. If we're smaller, our outbound
@@ -820,12 +836,28 @@ async fn accept_loop<A>(
                                         addr = %ta,
                                         "BLE inbound tie-breaker: dropping (our addr < peer, outbound wins)"
                                     );
+                                    // The peripheral side losing. Its counterpart
+                                    // is recorded in `scan_probe_loop`; two nodes
+                                    // that disagree at runtime therefore leave two
+                                    // recorded losses rather than none.
+                                    attempts::ble_attempt_log().record_outcome(
+                                        &addr.to_string(),
+                                        &peer_addr.to_string(),
+                                        attempts::BleRole::Peripheral,
+                                        attempts::BleAttemptOutcome::LostTiebreaker,
+                                    );
                                     continue;
                                 }
                             }
                         }
                         Err(e) => {
                             debug!(addr = %ta, error = %e, "BLE inbound pubkey exchange failed");
+                            attempts::ble_attempt_log().record_outcome(
+                                &addr.to_string(),
+                                "",
+                                attempts::BleRole::Peripheral,
+                                attempts::BleAttemptOutcome::PubkeyExchangeFailed,
+                            );
                             continue;
                         }
                     }
@@ -864,10 +896,26 @@ async fn accept_loop<A>(
                     Err(e) => {
                         warn!(addr = %ta, error = %e, "BLE pool full, inbound connection rejected");
                         stats.record_connection_rejected();
+                        drop(pool_guard);
+                        attempts::ble_attempt_log().record_outcome(
+                            &addr_s,
+                            &peer_node_hex,
+                            attempts::BleRole::Peripheral,
+                            attempts::BleAttemptOutcome::PoolRejected,
+                        );
                         continue;
                     }
                 }
+                drop(pool_guard);
                 stats.record_connection_accepted();
+                // Recorded after the pool lock is released, so the log never sits
+                // inside a critical section the transport holds.
+                attempts::ble_attempt_log().record_outcome(
+                    &addr_s,
+                    &peer_node_hex,
+                    attempts::BleRole::Peripheral,
+                    attempts::BleAttemptOutcome::Connected,
+                );
             }
             Err(e) => {
                 warn!(error = %e, "BLE accept error");
@@ -1034,11 +1082,23 @@ async fn scan_probe_loop<I: io::BleIo>(
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 debug!(addr = %addr, error = %e, "BLE probe connect failed");
+                attempts::ble_attempt_log().record_outcome(
+                    &addr.to_string(),
+                    "",
+                    attempts::BleRole::Central,
+                    attempts::BleAttemptOutcome::ConnectError,
+                );
                 continue;
             }
             Err(_) => {
                 debug!(addr = %addr, "BLE probe connect timeout");
                 stats.record_connect_timeout();
+                attempts::ble_attempt_log().record_outcome(
+                    &addr.to_string(),
+                    "",
+                    attempts::BleRole::Central,
+                    attempts::BleAttemptOutcome::ConnectTimeout,
+                );
                 continue;
             }
         };
@@ -1067,18 +1127,15 @@ async fn scan_probe_loop<I: io::BleIo>(
                         // records the peripheral-side counterpart, so a runtime
                         // disagreement between two nodes shows up as two
                         // recorded losses rather than being inferred.
-                        let log = attempts::ble_attempt_log();
-                        let addr_s = addr.to_string();
-                        log.record(attempts::BleAttempt {
-                            at_ms: attempts::now_ms(),
-                            ble_addr: addr_s.clone(),
-                            // Same rendering `PeerView.node_addr_hex` uses, so
-                            // the two join on equal strings downstream.
-                            node_addr_hex: peer_addr.to_string(),
-                            role: attempts::BleRole::Central,
-                            discovery_ms: log.discovery_elapsed_ms(&addr_s),
-                            outcome: attempts::BleAttemptOutcome::LostTiebreaker,
-                        });
+                        // `peer_addr.to_string()` is the same rendering
+                        // `PeerView.node_addr_hex` uses, so the two join on
+                        // equal strings downstream.
+                        attempts::ble_attempt_log().record_outcome(
+                            &addr.to_string(),
+                            &peer_addr.to_string(),
+                            attempts::BleRole::Central,
+                            attempts::BleAttemptOutcome::LostTiebreaker,
+                        );
                         buffer.add_peer_with_pubkey(&addr, peer_pubkey);
                         continue;
                     }
@@ -1106,20 +1163,35 @@ async fn scan_probe_loop<I: io::BleIo>(
                 };
 
                 let mut pool_guard = pool.lock().await;
-                match pool_guard.insert(ta.clone(), conn) {
+                let promoted = match pool_guard.insert(ta.clone(), conn) {
                     Ok(Some(evicted)) => {
                         stats.record_pool_eviction();
                         debug!(addr = %ta, evicted = %evicted, "BLE probe promoted (evicted peer)");
+                        true
                     }
                     Ok(None) => {
                         debug!(addr = %ta, "BLE probe promoted to pool");
+                        true
                     }
                     Err(e) => {
                         warn!(addr = %ta, error = %e, "BLE pool full, probe connection dropped");
                         stats.record_connection_rejected();
+                        false
                     }
-                }
+                };
                 drop(pool_guard);
+                // Recorded after the pool lock is released, so the log never
+                // sits inside a critical section the transport holds.
+                attempts::ble_attempt_log().record_outcome(
+                    &addr.to_string(),
+                    &NodeAddr::from_pubkey(&peer_pubkey).to_string(),
+                    attempts::BleRole::Central,
+                    if promoted {
+                        attempts::BleAttemptOutcome::Connected
+                    } else {
+                        attempts::BleAttemptOutcome::PoolRejected
+                    },
+                );
                 stats.record_connection_established();
                 pending_addrs.retain(|a| a != &addr);
 
@@ -1128,6 +1200,12 @@ async fn scan_probe_loop<I: io::BleIo>(
             }
             Err(e) => {
                 debug!(addr = %addr, error = %e, "BLE probe pubkey exchange failed");
+                attempts::ble_attempt_log().record_outcome(
+                    &addr.to_string(),
+                    "",
+                    attempts::BleRole::Central,
+                    attempts::BleAttemptOutcome::PubkeyExchangeFailed,
+                );
             }
         }
     }
