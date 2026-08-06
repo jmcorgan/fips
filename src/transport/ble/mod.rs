@@ -21,6 +21,7 @@
 //! static (configured) peers get priority over discovered peers.
 
 pub mod addr;
+pub mod attempts;
 pub mod discovery;
 pub mod io;
 pub mod pool;
@@ -1010,6 +1011,10 @@ async fn scan_probe_loop<I: io::BleIo>(
         // Record probe time (before attempt, so cooldown applies on failure too)
         last_probed.insert(addr.clone(), tokio::time::Instant::now());
 
+        // Start this address's discovery clock; the attempt log reads it when
+        // the attempt resolves below. Recording only — no branch, no delay.
+        attempts::ble_attempt_log().note_discovered(&addr.to_string());
+
         // Need pubkey for probe
         let our_pubkey = match local_pubkey {
             Some(pk) => pk,
@@ -1058,6 +1063,22 @@ async fn scan_probe_loop<I: io::BleIo>(
                             addr = %addr,
                             "BLE probe tie-breaker: yielding to peer's outbound"
                         );
+                        // The central side losing the tiebreaker. `accept_loop`
+                        // records the peripheral-side counterpart, so a runtime
+                        // disagreement between two nodes shows up as two
+                        // recorded losses rather than being inferred.
+                        let log = attempts::ble_attempt_log();
+                        let addr_s = addr.to_string();
+                        log.record(attempts::BleAttempt {
+                            at_ms: attempts::now_ms(),
+                            ble_addr: addr_s.clone(),
+                            // Same rendering `PeerView.node_addr_hex` uses, so
+                            // the two join on equal strings downstream.
+                            node_addr_hex: peer_addr.to_string(),
+                            role: attempts::BleRole::Central,
+                            discovery_ms: log.discovery_elapsed_ms(&addr_s),
+                            outcome: attempts::BleAttemptOutcome::LostTiebreaker,
+                        });
                         buffer.add_peer_with_pubkey(&addr, peer_pubkey);
                         continue;
                     }
