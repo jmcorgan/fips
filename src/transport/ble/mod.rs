@@ -406,10 +406,12 @@ impl<I: BleIo> BleTransport<I> {
         let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
         // Pre-handshake pubkey exchange (temporary, pre-XX)
+        let mut peer_node: Option<NodeAddr> = None;
         if let Some(ref our_pubkey) = self.local_pubkey {
             match pubkey_exchange(&mut reader, our_pubkey).await {
                 Ok(peer_pubkey) => {
                     debug!(addr = %addr, "BLE outbound pubkey exchange complete");
+                    peer_node = Some(NodeAddr::from_pubkey(&peer_pubkey));
                     self.discovery_buffer
                         .add_peer_with_pubkey(&ble_addr, peer_pubkey);
                 }
@@ -420,7 +422,7 @@ impl<I: BleIo> BleTransport<I> {
             }
         }
 
-        self.promote_connection(addr, &ble_addr, stream, reader)
+        self.promote_connection(addr, &ble_addr, stream, reader, peer_node)
             .await
     }
 
@@ -434,6 +436,7 @@ impl<I: BleIo> BleTransport<I> {
         ble_addr: &BleAddr,
         stream: Arc<I::Stream>,
         reader: BleStreamRead<I::Stream>,
+        node_addr: Option<NodeAddr>,
     ) -> Result<(), TransportError> {
         let send_mtu = stream.send_mtu();
         let recv_mtu = stream.recv_mtu();
@@ -456,6 +459,7 @@ impl<I: BleIo> BleTransport<I> {
             established_at: tokio::time::Instant::now(),
             is_static: false,
             addr: ble_addr.clone(),
+            node_addr,
         };
 
         let mut pool = self.pool.lock().await;
@@ -535,10 +539,12 @@ impl<I: BleIo> BleTransport<I> {
                     let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
                     // Pre-handshake pubkey exchange (temporary, pre-XX)
+                    let mut peer_node: Option<NodeAddr> = None;
                     if let Some(ref our_pubkey) = local_pubkey {
                         match pubkey_exchange(&mut reader, our_pubkey).await {
                             Ok(peer_pubkey) => {
                                 debug!(addr = %addr_clone, "BLE outbound pubkey exchange complete");
+                                peer_node = Some(NodeAddr::from_pubkey(&peer_pubkey));
                                 discovery_buffer.add_peer_with_pubkey(&ble_addr, peer_pubkey);
                             }
                             Err(e) => {
@@ -569,6 +575,7 @@ impl<I: BleIo> BleTransport<I> {
                         established_at: tokio::time::Instant::now(),
                         is_static: false,
                         addr: ble_addr,
+                        node_addr: peer_node,
                     };
 
                     let mut pool = pool.lock().await;
@@ -817,6 +824,7 @@ async fn accept_loop<A>(
                 // into the connection before the pool outcome is recorded.
                 let addr_s = addr.to_string();
                 let mut peer_node_hex = String::new();
+                let mut peer_node_addr: Option<NodeAddr> = None;
 
                 // Pre-handshake pubkey exchange (temporary, pre-XX)
                 if let Some(ref our_pubkey) = local_pubkey {
@@ -824,7 +832,38 @@ async fn accept_loop<A>(
                         Ok(peer_pubkey) => {
                             debug!(addr = %ta, "BLE inbound pubkey exchange complete");
                             discovery_buffer.add_peer_with_pubkey(&addr, peer_pubkey);
-                            peer_node_hex = NodeAddr::from_pubkey(&peer_pubkey).to_string();
+                            let peer_node = NodeAddr::from_pubkey(&peer_pubkey);
+                            peer_node_hex = peer_node.to_string();
+                            peer_node_addr = Some(peer_node);
+
+                            // Already linked to this peer on another address?
+                            // A peer using resolvable private addresses rotates
+                            // continually, and every rotation dials in looking
+                            // like a new device. Admitting those would put one
+                            // peer in several pool slots and evict real ones.
+                            // The incumbent link is kept: it is known-good, and
+                            // a genuinely dead one is already reaped by the
+                            // send-error and receive-loop paths.
+                            let dup = {
+                                let pool_guard = pool.lock().await;
+                                pool_guard.find_by_node(&peer_node)
+                            };
+                            if let Some(existing) = dup {
+                                if existing != ta {
+                                    debug!(
+                                        addr = %ta,
+                                        existing = %existing,
+                                        "BLE inbound: peer already connected on another address, dropping duplicate"
+                                    );
+                                    attempts::ble_attempt_log().record_outcome(
+                                        &addr_s,
+                                        &peer_node_hex,
+                                        attempts::BleRole::Peripheral,
+                                        attempts::BleAttemptOutcome::DuplicateNode,
+                                    );
+                                    continue;
+                                }
+                            }
 
                             // Cross-probe tie-breaker: smaller NodeAddr's
                             // outbound wins. If we're smaller, our outbound
@@ -882,6 +921,7 @@ async fn accept_loop<A>(
                     established_at: tokio::time::Instant::now(),
                     is_static: false,
                     addr,
+                    node_addr: peer_node_addr,
                 };
 
                 let mut pool_guard = pool.lock().await;
@@ -1141,6 +1181,36 @@ async fn scan_probe_loop<I: io::BleIo>(
                     }
                 }
 
+                // Same duplicate guard as the inbound path: a rotated address
+                // for a peer we already hold a link to must not become a second
+                // pool entry. Checked after the tiebreaker so the two decisions
+                // stay independent.
+                let peer_node = NodeAddr::from_pubkey(&peer_pubkey);
+                let dup = {
+                    let pool_guard = pool.lock().await;
+                    pool_guard.find_by_node(&peer_node)
+                };
+                if let Some(existing) = dup {
+                    if existing != ta {
+                        debug!(
+                            addr = %ta,
+                            existing = %existing,
+                            "BLE probe: peer already connected on another address, dropping duplicate"
+                        );
+                        attempts::ble_attempt_log().record_outcome(
+                            &addr.to_string(),
+                            &peer_node.to_string(),
+                            attempts::BleRole::Central,
+                            attempts::BleAttemptOutcome::DuplicateNode,
+                        );
+                        // Report the peer so the node layer still learns the
+                        // address maps to a peer it already knows.
+                        buffer.add_peer_with_pubkey(&addr, peer_pubkey);
+                        pending_addrs.retain(|a| a != &addr);
+                        continue;
+                    }
+                }
+
                 // Promote connection to pool — no second L2CAP connect needed
                 let recv_task = tokio::spawn(receive_loop(
                     reader,
@@ -1160,6 +1230,7 @@ async fn scan_probe_loop<I: io::BleIo>(
                     established_at: tokio::time::Instant::now(),
                     is_static: false,
                     addr: addr.clone(),
+                    node_addr: Some(peer_node),
                 };
 
                 let mut pool_guard = pool.lock().await;

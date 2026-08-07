@@ -70,6 +70,11 @@ pub enum BleAttemptOutcome {
     LostTiebreaker,
     /// The connection was usable but the pool had no room for it.
     PoolRejected,
+    /// The peer was already connected under a different link address, so this
+    /// duplicate was dropped. Expected traffic for a peer rotating resolvable
+    /// private addresses; a high count against one peer is that rotation being
+    /// absorbed rather than filling the pool.
+    DuplicateNode,
 }
 
 impl BleAttemptOutcome {
@@ -82,6 +87,7 @@ impl BleAttemptOutcome {
             BleAttemptOutcome::PubkeyExchangeFailed => "pubkey-exchange-failed",
             BleAttemptOutcome::LostTiebreaker => "lost-tiebreaker",
             BleAttemptOutcome::PoolRejected => "pool-rejected",
+            BleAttemptOutcome::DuplicateNode => "duplicate-node",
         }
     }
 }
