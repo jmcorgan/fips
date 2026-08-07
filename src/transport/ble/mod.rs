@@ -1041,6 +1041,13 @@ async fn scan_probe_loop<I: io::BleIo>(
     // Addresses discovered but not yet connected — retried after cooldown
     // even if the scanner doesn't fire again (BlueZ deduplicates).
     let mut pending_addrs: Vec<BleAddr> = Vec::new();
+    // Link addresses already resolved to a node identity by a completed pubkey
+    // exchange. Lets the loop skip an address it has *already* learned belongs
+    // to a peer it is connected to, instead of paying a full connect and
+    // exchange to rediscover that every cooldown. Rotation means this grows by
+    // one per rotation, so entries are dropped once their node is no longer in
+    // the pool — a peer that genuinely goes away is probed again normally.
+    let mut known_node_of: HashMap<BleAddr, NodeAddr> = HashMap::new();
     let cooldown = std::time::Duration::from_secs(cooldown_secs);
     let retry_interval = tokio::time::interval(std::time::Duration::from_secs(cooldown_secs));
     tokio::pin!(retry_interval);
@@ -1094,6 +1101,23 @@ async fn scan_probe_loop<I: io::BleIo>(
             .is_some_and(|last| last.elapsed() < cooldown)
         {
             continue;
+        }
+
+        // Skip an address already known to belong to a peer we are connected
+        // to. Without this the loop re-dials every rotated address of a live
+        // peer once per cooldown, forever: the duplicate is declined so it
+        // never enters the pool, so the pool-keyed guard above never sees it.
+        if let Some(node) = known_node_of.get(&addr) {
+            let still_connected = {
+                let pool_guard = pool.lock().await;
+                pool_guard.find_by_node(node).is_some()
+            };
+            if still_connected {
+                pending_addrs.retain(|a| a != &addr);
+                continue;
+            }
+            // That peer is gone — forget the mapping and probe normally.
+            known_node_of.remove(&addr);
         }
 
         // Record probe time (before attempt, so cooldown applies on failure too)
@@ -1203,6 +1227,10 @@ async fn scan_probe_loop<I: io::BleIo>(
                             attempts::BleRole::Central,
                             attempts::BleAttemptOutcome::DuplicateNode,
                         );
+                        // Remember what this address resolved to, so the next
+                        // cooldown skips it outright rather than paying another
+                        // connect and exchange to reach this same conclusion.
+                        known_node_of.insert(addr.clone(), peer_node);
                         // Report the peer so the node layer still learns the
                         // address maps to a peer it already knows.
                         buffer.add_peer_with_pubkey(&addr, peer_pubkey);
