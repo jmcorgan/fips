@@ -124,3 +124,8 @@ path = "src/bin/fipstop/main.rs"
 name = "routing_next_hop"
 path = "benches/routing_next_hop.rs"
 harness = false
+
+[[bench]]
+name = "transport_addr_clone"
+path = "benches/transport_addr_clone.rs"
+harness = false
