@@ -425,6 +425,17 @@ fn main() {
         let key_path = dir.join("fips.key");
         let pub_path = dir.join("fips.pub");
 
+        // The default key directory on macOS/FreeBSD moved from /etc/fips
+        // to /usr/local/etc/fips; point at keys stranded at the old path.
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        if std::path::Path::new("/etc/fips/fips.key").exists() && !key_path.exists() {
+            eprintln!("note: /etc/fips/fips.key exists but the default key directory");
+            eprintln!(
+                "      is now {}; that key is no longer used by default.",
+                dir.display()
+            );
+        }
+
         if key_path.exists() && !force {
             eprintln!("error: key file already exists: {}", key_path.display());
             eprintln!("Use --force to overwrite.");
@@ -655,15 +666,15 @@ fn sparkline(values: &[f64], min: f64, max: f64) -> String {
 mod tests {
     use super::*;
 
-    // macOS packaging ships config under /usr/local/etc/fips/.
-    #[cfg(target_os = "macos")]
+    // macOS and FreeBSD packaging ship config under /usr/local/etc/fips/.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     #[test]
-    fn test_default_key_dir_follows_macos_packaging_layout() {
+    fn test_default_key_dir_follows_packaging_layout() {
         assert_eq!(default_key_dir(), PathBuf::from("/usr/local/etc/fips"));
     }
 
-    // Non-macOS Unix keeps the historic /etc/fips/ location.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    // Other Unix keeps the historic /etc/fips/ location.
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
     #[test]
     fn test_default_key_dir_keeps_etc_fips_layout() {
         assert_eq!(default_key_dir(), PathBuf::from("/etc/fips"));

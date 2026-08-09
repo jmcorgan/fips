@@ -1857,10 +1857,13 @@ impl Node {
                             info!("effective MTU: {} bytes", effective_mtu);
                             debug!("   max TCP MSS: {} bytes", max_mss);
 
-                            // On macOS, create a shutdown pipe. Writing to it unblocks the
-                            // reader thread's select() loop without closing the TUN fd
-                            // (which would cause a double-close when TunDevice drops).
-                            #[cfg(target_os = "macos")]
+                            // On macOS and FreeBSD, create a shutdown pipe. Writing to it
+                            // unblocks the reader thread's select() loop without closing
+                            // the TUN fd (which would cause a double-close when TunDevice
+                            // drops). Linux instead unblocks the reader by deleting the
+                            // interface; on macOS/FreeBSD downing the interface does not
+                            // wake a blocked read.
+                            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
                             let (shutdown_read_fd, shutdown_write_fd) = {
                                 let mut fds = [0i32; 2];
                                 if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
@@ -1906,7 +1909,7 @@ impl Node {
                             let transport_mtu = self.transport_mtu();
                             let path_mtu_lookup = self.path_mtu_lookup.clone();
                             let reader_child_tx = self.child_exit_tx.clone();
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
                             let reader_handle = thread::spawn(move || {
                                 run_tun_reader(
                                     device,
@@ -1922,7 +1925,7 @@ impl Node {
                                     let _ = tx.blocking_send(Child::Tun);
                                 }
                             });
-                            #[cfg(not(target_os = "macos"))]
+                            #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
                             let reader_handle = thread::spawn(move || {
                                 run_tun_reader(
                                     device,
@@ -1944,7 +1947,7 @@ impl Node {
                             self.supervisor.tun_outbound_rx = Some(outbound_rx);
                             self.supervisor.tun_reader_handle = Some(reader_handle);
                             self.supervisor.tun_writer_handle = Some(writer_handle);
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
                             {
                                 self.supervisor.tun_shutdown_fd = Some(shutdown_write_fd);
                             }
@@ -2335,14 +2338,17 @@ impl Node {
                         // Drop the tun_tx to signal the writer to stop
                         self.supervisor.tun_tx.take();
 
-                        // Delete the interface (on Linux, causes reader to get EFAULT)
+                        // Delete the interface (on Linux, causes reader to get
+                        // EFAULT; on macOS/FreeBSD this downs it — the kernel
+                        // destroys the device once the reader closes the fd).
                         if let Err(e) = shutdown_tun_interface(&name).await {
                             warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
                         }
 
-                        // On macOS, signal the reader thread to exit by writing to the
-                        // shutdown pipe. The reader's select() will wake up and break.
-                        #[cfg(target_os = "macos")]
+                        // On macOS and FreeBSD, signal the reader thread to exit by
+                        // writing to the shutdown pipe. The reader's select() will
+                        // wake up and break.
+                        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
                         if let Some(fd) = self.supervisor.tun_shutdown_fd.take() {
                             unsafe {
                                 libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);

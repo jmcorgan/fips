@@ -1,0 +1,14 @@
+FIPS (Free Internetworking Peering System) is a self-organizing
+encrypted mesh network built on Nostr identities, operating over
+arbitrary transports (UDP, TCP, Ethernet, Tor) with no central
+infrastructure.
+
+A TUN interface maps each remote peer to an fd00::/8 address,
+so unmodified IPv6 applications work over the mesh, with a built-in
+DNS responder for <npub>.fips names. Peer discovery and NAT traversal
+are Nostr-mediated; traffic is encrypted hop-by-hop (Noise IK) and
+end-to-end (Noise XK) with periodic rekey.
+
+This package ships the fips daemon, the fipsctl control CLI, the
+fipstop live-status TUI, and rc.d services for the daemon (fips) and
+for system-wide .fips DNS resolution (fips_dns).

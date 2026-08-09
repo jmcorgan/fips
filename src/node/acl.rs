@@ -24,33 +24,34 @@ use tracing::{debug, info, warn};
 
 /// Default path for the peer allow list.
 ///
-/// On macOS the install layout (see `packaging/macos/`) ships config under
-/// `/usr/local/etc/fips/` rather than `/etc/fips/`; the default follows the
-/// platform's packaging so the daemon reads the file the operator was told
-/// to edit. Linux and other Unix keep the historic `/etc/fips/` location.
-#[cfg(target_os = "macos")]
-pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/usr/local/etc/fips/peers.allow";
-#[cfg(not(target_os = "macos"))]
+/// On macOS (`packaging/macos/`) and FreeBSD (`packaging/freebsd/`) the
+/// install layout ships config under `/usr/local/etc/fips/` rather than
+/// `/etc/fips/`; the default follows the platform's packaging so the daemon
+/// reads the file the operator was told to edit. Linux and other Unix keep
+/// the historic `/etc/fips/` location.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/etc/fips/peers.allow";
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/usr/local/etc/fips/peers.allow";
 
 /// Default path for the peer deny list.
 ///
-/// See [`DEFAULT_PEERS_ALLOW_PATH`] for the macOS `/usr/local/etc/fips/`
+/// See [`DEFAULT_PEERS_ALLOW_PATH`] for the `/usr/local/etc/fips/`
 /// rationale.
-#[cfg(target_os = "macos")]
-pub const DEFAULT_PEERS_DENY_PATH: &str = "/usr/local/etc/fips/peers.deny";
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 pub const DEFAULT_PEERS_DENY_PATH: &str = "/etc/fips/peers.deny";
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const DEFAULT_PEERS_DENY_PATH: &str = "/usr/local/etc/fips/peers.deny";
 
 /// Warn about config files stranded at the pre-move default location.
 ///
-/// The macOS defaults for `hosts`, `peers.allow` and `peers.deny` moved
-/// from `/etc/fips` to `/usr/local/etc/fips`, the directory the macOS
-/// packaging actually populates. The old location is no longer read by
-/// the default path constants, and a `peers.deny` silently left behind
-/// there would fail open (a missing deny list is not an error), so surface
-/// the situation loudly once at startup.
-#[cfg(target_os = "macos")]
+/// The macOS/FreeBSD defaults for `hosts`, `peers.allow` and `peers.deny`
+/// moved from `/etc/fips` to `/usr/local/etc/fips`, the directory both
+/// installers actually populate. The old location is no longer read, and
+/// a `peers.deny` silently left behind there would fail open (a missing
+/// deny list is not an error), so surface the situation loudly once at
+/// startup.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub fn warn_on_legacy_config_paths() {
     for (current, name) in [
         (crate::upper::hosts::DEFAULT_HOSTS_PATH, "hosts"),
@@ -538,21 +539,22 @@ mod tests {
         acl
     }
 
-    // Guard against the macOS path regression: the install layout
-    // (`packaging/macos/`) ships config under `/usr/local/etc/fips/`, so the
-    // default ACL paths must follow it, or `peers.allow`/`peers.deny` are
-    // silently unread on macOS (see the `NotFound` no-op in `load_file`).
-    #[cfg(target_os = "macos")]
+    // Guard against the path regression: the macOS and FreeBSD install
+    // layouts (`packaging/macos/`, `packaging/freebsd/`) ship config under
+    // `/usr/local/etc/fips/`, so the default ACL paths must follow it, or
+    // `peers.allow`/`peers.deny` are silently unread there (see the
+    // `NotFound` no-op in `load_file`).
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     #[test]
-    fn test_default_acl_paths_follow_macos_packaging_layout() {
+    fn test_default_acl_paths_follow_packaging_layout() {
         assert_eq!(DEFAULT_PEERS_ALLOW_PATH, "/usr/local/etc/fips/peers.allow");
         assert_eq!(DEFAULT_PEERS_DENY_PATH, "/usr/local/etc/fips/peers.deny");
     }
 
-    // Non-macOS Unix/Linux keeps the historic `/etc/fips/` location; this
+    // Other Unix/Linux keeps the historic `/etc/fips/` location; this
     // runs on the Linux CI matrix and pins the value so a future refactor
     // can't silently drift it.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
     #[test]
     fn test_default_acl_paths_keep_etc_fips_layout() {
         assert_eq!(DEFAULT_PEERS_ALLOW_PATH, "/etc/fips/peers.allow");

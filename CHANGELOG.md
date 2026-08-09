@@ -113,6 +113,23 @@ with v0.4.x or earlier peers.
 - The receive-path `RejectReason` classification (shipped in 0.4.0) is
   additionally wired into the Noise XX handshake cluster
   (msg1/msg2/msg3) and the rekey-initiator outbound sites on `next`.
+
+- FreeBSD support for the daemon, `fipsctl`, and `fipstop`: native TUN
+  datapath (TUNSIFHEAD address-family framing, kernel-assigned `tunN`
+  device name as with `utun` on macOS), clean service teardown,
+  `/usr/local/etc/fips` config search path, and `/var/run/fips`
+  control-socket default (both shared with macOS). The `hosts`,
+  `peers.allow` / `peers.deny` and `fipsctl keygen` defaults follow the
+  same `/usr/local/etc/fips` layout as macOS — see the corresponding
+  entry under Fixed, which describes that move and its startup warning.
+  `fips-gateway` remains Linux-only. Native `.pkg` packaging under
+  `packaging/freebsd/`
+  (`make freebsd`) with rc.d services, a `fips` control-socket group,
+  service stop/restart across `pkg upgrade`, and `.fips` DNS integration
+  for `local_unbound`/`unbound`/`dnsmasq`. mDNS LAN discovery works via
+  `mdns-sd` 0.20 (`socket-pktinfo` 0.4.1, the first release that builds
+  on FreeBSD). Daemon logs now disable ANSI color when stdout is not a
+  terminal (all platforms).
 - An optional tick-body profiler behind the new `profiling` Cargo feature,
   **off by default**. When enabled, `fipsctl profile tick on [--dir PATH]` /
   `off` / `status` starts and stops a capture at runtime with no restart. Each

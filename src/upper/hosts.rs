@@ -18,15 +18,15 @@ use tracing::{debug, info, warn};
 
 /// Default path for the FIPS hosts file.
 ///
-/// On macOS the install layout (see `packaging/macos/`) ships config under
-/// `/usr/local/etc/fips/`, not `/etc/fips/`; the default follows the
-/// platform's packaging so aliases edited by the operator are actually
-/// loaded. Linux and other Unix keep the historic `/etc/fips/` location;
-/// Windows uses `%ProgramData%`.
-#[cfg(target_os = "macos")]
-pub const DEFAULT_HOSTS_PATH: &str = "/usr/local/etc/fips/hosts";
-#[cfg(all(unix, not(target_os = "macos")))]
+/// On macOS (`packaging/macos/`) and FreeBSD (`packaging/freebsd/`) the
+/// install layout ships config under `/usr/local/etc/fips/`, not
+/// `/etc/fips/`; the default follows the platform's packaging so aliases
+/// edited by the operator are actually loaded. Linux and other Unix keep
+/// the historic `/etc/fips/` location; Windows uses `%ProgramData%`.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
 pub const DEFAULT_HOSTS_PATH: &str = "/etc/fips/hosts";
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub const DEFAULT_HOSTS_PATH: &str = "/usr/local/etc/fips/hosts";
 #[cfg(windows)]
 pub const DEFAULT_HOSTS_PATH: &str = r"C:\ProgramData\fips\hosts";
 
@@ -321,18 +321,18 @@ mod tests {
 
     // --- default path tests ---
 
-    // Guard against the macOS path regression: the install layout
-    // (`packaging/macos/`) ships config under `/usr/local/etc/fips/`, so the
-    // default hosts path must follow it, or host-file aliases are silently
-    // unloaded on macOS (see the `NotFound` no-op in `load_hosts_file`).
-    #[cfg(target_os = "macos")]
+    // Guard against the path regression: the macOS and FreeBSD install
+    // layouts ship config under `/usr/local/etc/fips/`, so the default hosts
+    // path must follow it, or host-file aliases are silently unloaded there
+    // (see the `NotFound` no-op in `load_hosts_file`).
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     #[test]
-    fn test_default_hosts_path_follows_macos_packaging_layout() {
+    fn test_default_hosts_path_follows_packaging_layout() {
         assert_eq!(DEFAULT_HOSTS_PATH, "/usr/local/etc/fips/hosts");
     }
 
-    // Non-macOS Unix/Linux keeps the historic `/etc/fips/` location.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    // Other Unix/Linux keeps the historic `/etc/fips/` location.
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
     #[test]
     fn test_default_hosts_path_keeps_etc_fips_layout() {
         assert_eq!(DEFAULT_HOSTS_PATH, "/etc/fips/hosts");

@@ -12,6 +12,7 @@ make ipk        # OpenWrt .ipk (opkg, OpenWrt 24.x and earlier)
 make apk        # OpenWrt .apk (apk-tools, mandatory on OpenWrt 25+)
 make aur        # Arch Linux AUR package (fips-git, local build + namcap)
 make pkg        # macOS .pkg installer
+make freebsd    # FreeBSD .pkg package (on FreeBSD; use gmake)
 make zip        # Windows .zip package
 make all        # deb + tarball (default)
 ```
@@ -45,6 +46,7 @@ packaging/
   aur/            Arch Linux AUR packaging (PKGBUILD, supporting files)
   common/         Shared assets (default config, hosts file)
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
+  freebsd/        FreeBSD .pkg packaging via pkg-create(8)
   macos/          macOS .pkg installer via pkgbuild
   systemd/        Generic Linux systemd tarball packaging
   openwrt-ipk/    OpenWrt .ipk packaging via cargo-zigbuild (opkg)
@@ -157,6 +159,30 @@ sudo installer -pkg deploy/fips-<version>-macos-<arch>.pkg -target /
 # Remove
 sudo packaging/macos/uninstall.sh
 ```
+
+### FreeBSD (`.pkg`)
+
+Built natively on a FreeBSD host with `pkg create`. Ships `fips`,
+`fipsctl`, and `fipstop` (`fips-gateway` is excluded — its NAT backend
+is nftables, Linux-only), rc.d services, and `.fips` DNS integration
+for `local_unbound`, `unbound`, or `dnsmasq`. Config installs
+sample-style under `/usr/local/etc/fips/` (edits survive upgrades).
+
+```sh
+# Build (on FreeBSD; this Makefile needs GNU make — pkg install gmake)
+gmake freebsd
+# or directly, no gmake needed:
+./packaging/freebsd/build-pkg.sh
+
+# Install
+pkg add ./deploy/fips-<version>-freebsd-<arch>.pkg
+sysrc fips_enable=YES fips_dns_enable=YES
+service fips start
+service fips_dns start
+```
+
+See [freebsd/README.md](freebsd/README.md) for host resolver setup and
+field-tested caveats.
 
 ### Windows (`.zip`)
 

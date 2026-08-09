@@ -99,7 +99,13 @@ async fn run_daemon(
         _ => filter,
     };
 
-    fmt().with_env_filter(filter).with_target(true).init();
+    // ANSI color only when stdout is a terminal — under a supervisor
+    // (daemon(8), systemd) escape codes would litter the log file.
+    fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .init();
 
     info!("FIPS {} starting", version::short_version());
 
@@ -111,9 +117,9 @@ async fn run_daemon(
         }
     }
 
-    // The hosts/ACL defaults on macOS moved from /etc/fips to
+    // The hosts/ACL defaults on these platforms moved from /etc/fips to
     // /usr/local/etc/fips; flag files stranded at the old location.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     fips::node::warn_on_legacy_config_paths();
 
     // Identity provisioning: config nsec > key file > generate ephemeral

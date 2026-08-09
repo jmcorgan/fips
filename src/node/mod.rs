@@ -5,7 +5,7 @@
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
 pub(crate) mod acl;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub use acl::warn_on_legacy_config_paths;
 mod bloom;
 pub(crate) mod context;
@@ -960,6 +960,16 @@ impl Node {
                 let eth = EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
                 transports.push(TransportHandle::Ethernet(eth));
             }
+        }
+        // `EthernetConfig` always parses, so on platforms without the
+        // transport a configured `ethernet:` block would otherwise be
+        // dropped silently and the node would report healthy without it.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        for (name, _) in self.config().transports.ethernet.iter() {
+            tracing::warn!(
+                instance = name.unwrap_or("default"),
+                "Ethernet transport is not supported on this platform; ignoring configured instance"
+            );
         }
 
         // Create TCP transport instances

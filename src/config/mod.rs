@@ -49,12 +49,13 @@ pub use transport::{
 const CONFIG_FILENAME: &str = "fips.yaml";
 
 /// System-wide config directory, following the platform's packaging layout
-/// (`/usr/local/etc/fips` on macOS, `/etc/fips` otherwise). The daemon
-/// derives identity key paths from the config file's location, so anything
-/// that reads or writes config-adjacent files should use this one constant.
-#[cfg(target_os = "macos")]
+/// (`/usr/local/etc/fips` on macOS and FreeBSD, `/etc/fips` otherwise). The
+/// daemon derives identity key paths from the config file's location, so
+/// anything that reads or writes config-adjacent files should use this one
+/// constant.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub const SYSTEM_CONFIG_DIR: &str = "/usr/local/etc/fips";
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 pub const SYSTEM_CONFIG_DIR: &str = "/etc/fips";
 
 /// Default key filename, placed alongside the config file.
@@ -165,6 +166,13 @@ pub(crate) fn resolve_default_socket(filename: &str) -> String {
     // 1. /run/fips — preferred whenever the directory exists.
     if Path::new("/run/fips").is_dir() {
         return format!("/run/fips/{filename}");
+    }
+
+    // 1b. /var/run/fips — macOS and FreeBSD have no /run; the FreeBSD
+    //     rc.d script creates this directory at service start.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    if Path::new("/var/run/fips").is_dir() {
+        return format!("/var/run/fips/{filename}");
     }
 
     // 2. $XDG_RUNTIME_DIR/fips/ — only if the variable points at an existing
@@ -624,12 +632,12 @@ impl Config {
         // keep working after an upgrade.
         paths.push(PathBuf::from("/etc/fips").join(CONFIG_FILENAME));
 
-        // macOS packaging installs config under /usr/local/etc/fips
-        // (Homebrew-style prefix); probe it after /etc/fips so the
-        // packaged file wins over a stale /etc/fips leftover. Read from
-        // SYSTEM_CONFIG_DIR rather than a second literal, so this path and
-        // the directory `fipsctl keygen` writes into cannot drift apart.
-        #[cfg(target_os = "macos")]
+        // macOS and FreeBSD packaging install config under /usr/local/etc/fips;
+        // probe it after /etc/fips so the packaged file wins over a stale
+        // /etc/fips leftover. Read from SYSTEM_CONFIG_DIR rather than a second
+        // literal, so this path and the directory `fipsctl keygen` writes into
+        // cannot drift apart.
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
 
         // User config directory
@@ -1159,8 +1167,8 @@ node:
                 .any(|p| p.starts_with("/etc/fips") && p.ends_with("fips.yaml"))
         );
 
-        // macOS should also include /usr/local/etc/fips
-        #[cfg(target_os = "macos")]
+        // macOS and FreeBSD should also include /usr/local/etc/fips
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         assert!(
             paths
                 .iter()
@@ -2096,13 +2104,18 @@ node:
 
         // If /run/fips happens to be writable in the test environment (CI
         // running as root, for instance), the resolver legitimately picks
-        // /run/fips and skips XDG entirely. Accept either outcome but
-        // demand that one of the two canonical prefixes is chosen — never
-        // /tmp when XDG was valid.
+        // /run/fips and skips XDG entirely — likewise /var/run/fips on
+        // macOS/FreeBSD. Accept either outcome but demand that one of the
+        // canonical prefixes is chosen — never /tmp when XDG was valid.
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        let canonical_var_run = path.starts_with("/var/run/fips/");
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+        let canonical_var_run = false;
         assert!(
             path.starts_with("/run/fips/")
+                || canonical_var_run
                 || path.starts_with(&format!("{}/fips/", temp_dir.path().display())),
-            "expected /run/fips or XDG path, got: {path}"
+            "expected /run/fips, /var/run/fips, or XDG path, got: {path}"
         );
     }
 
@@ -2132,12 +2145,17 @@ node:
             }
         }
 
-        // Accept either /run/fips/ (test running as root with that dir
-        // writable) or /tmp/fips-... (the dev-machine fallback). Never
-        // accept the bogus XDG dir leaking through.
+        // Accept /run/fips/ (test running as root with that dir
+        // writable), /var/run/fips/ on macOS/FreeBSD, or /tmp/fips-...
+        // (the dev-machine fallback). Never accept the bogus XDG dir
+        // leaking through.
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        let canonical_var_run = path.starts_with("/var/run/fips/");
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+        let canonical_var_run = false;
         assert!(
-            path.starts_with("/run/fips/") || path == "/tmp/fips-gateway.sock",
-            "expected /run/fips or /tmp fallback, got: {path}"
+            path.starts_with("/run/fips/") || canonical_var_run || path == "/tmp/fips-gateway.sock",
+            "expected /run/fips, /var/run/fips, or /tmp fallback, got: {path}"
         );
         assert!(
             !path.starts_with(bogus),

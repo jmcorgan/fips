@@ -1,0 +1,32 @@
+#!/bin/sh
+
+# PROVIDE: fips_dns
+# REQUIRE: fips
+# KEYWORD: shutdown
+
+# One-shot service that points the system resolver's `fips.` zone at the
+# FIPS daemon's built-in DNS responder on [::1]:5354, so `<name>.fips`
+# hostnames resolve system-wide. Set fips_dns_enable=YES in rc.conf.
+
+. /etc/rc.subr
+
+name="fips_dns"
+rcvar="fips_dns_enable"
+desc="Route .fips DNS queries to the FIPS daemon"
+
+load_rc_config $name
+
+: ${fips_dns_enable:="NO"}
+
+start_cmd="fips_dns_start"
+stop_cmd="fips_dns_stop"
+
+fips_dns_start() {
+    /usr/local/libexec/fips/fips-dns-setup
+}
+
+fips_dns_stop() {
+    /usr/local/libexec/fips/fips-dns-teardown
+}
+
+run_rc_command "$1"

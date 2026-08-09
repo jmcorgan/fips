@@ -1,0 +1,287 @@
+name: FreeBSD Package
+on:
+  push:
+    branches:
+      - master
+      - maint
+      - next
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  determine-versioning:
+    runs-on: ubuntu-latest
+    outputs:
+      freebsd_package_version: ${{ steps.freebsd_version.outputs.freebsd_package_version }}
+      freebsd_pkg_file_version: ${{ steps.freebsd_version.outputs.freebsd_pkg_file_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Derive FreeBSD package version
+        id: freebsd_version
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+
+          BASE_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|[^A-Za-z0-9]|.|g; s/\.\{2,\}/./g; s/^\.//; s/\.$//')
+            HEIGHT=$(git rev-list --count HEAD)
+            HASH=$(git rev-parse --short HEAD)
+            if [[ -z "$BRANCH" ]]; then
+              BRANCH="ref"
+            fi
+            VERSION="${BASE_VERSION}+${BRANCH}.${HEIGHT}.${HASH}"
+          fi
+
+          # build-pkg.sh maps '-' and '+' to '.' (neither is allowed in a
+          # pkg version); derive the same mapping here so later steps can
+          # assert the exact artifact filename.
+          PKG_FILE_VERSION=$(printf '%s' "$VERSION" | tr -- '+-' '..')
+
+          echo "freebsd_package_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "freebsd_pkg_file_version=${PKG_FILE_VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build FreeBSD package (x86_64)
+    # No GitHub-hosted FreeBSD runners exist; build inside a KVM-accelerated
+    # FreeBSD VM on the Linux runner. The release must track the .pkg ABI
+    # major (FreeBSD:15:amd64) — pkg on other majors refuses the package.
+    runs-on: ubuntu-latest
+    needs: determine-versioning
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build and smoke-install in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        env:
+          FREEBSD_PACKAGE_VERSION: ${{ needs.determine-versioning.outputs.freebsd_package_version }}
+        with:
+          release: "15.1"
+          usesh: true
+          sync: rsync
+          copyback: true
+          mem: 6144
+          envs: "SOURCE_DATE_EPOCH CARGO_TERM_COLOR FREEBSD_PACKAGE_VERSION"
+          prepare: |
+            pkg install -y curl
+          run: |
+            set -e
+
+            # rustup rather than the ports rust: rust-toolchain.toml pins
+            # the toolchain, and rustup honors the pin on first cargo use.
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+
+            cargo build --release
+
+            # The only place the FreeBSD cfg arms' unit tests ever run in
+            # CI — the main CI matrix is Linux-only, and a release build
+            # compiles no #[cfg(test)] code (AF-prefix strip round-trips,
+            # platform module, config path gates).
+            cargo test
+
+            packaging/freebsd/build-pkg.sh \
+              --version "$FREEBSD_PACKAGE_VERSION" \
+              --no-build
+
+            # Smoke-install the package in the VM: files land where the
+            # rc.d scripts and DNS integration expect them, and the
+            # binaries link against this release's base libraries.
+            PKG=$(ls deploy/fips-*-freebsd-*.pkg)
+            pkg add "$PKG"
+            for bin in fips fipsctl fipstop; do
+              test -x "/usr/local/bin/$bin" || { echo "FAIL: missing /usr/local/bin/$bin"; exit 1; }
+              if ldd "/usr/local/bin/$bin" | grep "not found"; then
+                echo "FAIL: unresolved shared libraries in $bin"; exit 1
+              fi
+            done
+            test -x /usr/local/etc/rc.d/fips
+            test -x /usr/local/etc/rc.d/fips_dns
+            test -f /usr/local/etc/fips/fips.yaml.sample
+            test -f /usr/local/etc/fips/hosts.sample
+            # The manifest post-install script must have copied the
+            # samples into place (install-if-absent semantics).
+            test -f /usr/local/etc/fips/fips.yaml
+            test -f /usr/local/etc/fips/hosts
+            # fips.yaml may hold a node private key (nsec:); it must not
+            # be world-readable — Debian and macOS both install it 0600.
+            for f in /usr/local/etc/fips/fips.yaml /usr/local/etc/fips/fips.yaml.sample; do
+              mode=$(stat -f %Lp "$f")
+              if [ "$mode" != "600" ]; then
+                echo "FAIL: $f mode is $mode, expected 600"; exit 1
+              fi
+            done
+            # post-install must create the control-socket access group.
+            pw groupshow fips >/dev/null || { echo "FAIL: fips group missing"; exit 1; }
+            test -x /usr/local/libexec/fips/fips-dns-setup
+            pkg info fips
+            echo "==> pkg smoke-install PASSED"
+
+            # SHA-256 sidecar computed inside the VM; the host verifies the
+            # bytes again after the rsync copyback, so corruption across
+            # the VM handoff is detected before upload.
+            ( cd deploy && sha256 -q "$(basename "$PKG")" \
+                | { read -r h; printf '%s  %s\n' "$h" "$(basename "$PKG")"; } \
+                > "$(basename "$PKG").sha256" )
+
+            # The whole workspace is rsynced back to the host; drop the
+            # build tree so the copyback moves megabytes, not gigabytes.
+            rm -rf target
+
+      - name: Resolve FreeBSD asset path
+        id: freebsd-assets
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          set -euo pipefail
+
+          # build-pkg.sh names the package from the derived version and the
+          # pkg ABI arch; assert the exact name so a naming regression fails
+          # here instead of colliding on the release page.
+          EXPECTED="deploy/fips-${{ needs.determine-versioning.outputs.freebsd_pkg_file_version }}-freebsd-amd64.pkg"
+          if [[ ! -f "$EXPECTED" ]]; then
+            echo "Expected package $EXPECTED was not produced" >&2
+            echo "deploy/ contains:" >&2
+            ls -la deploy >&2 || true
+            exit 1
+          fi
+
+          echo "pkg=$EXPECTED" >> "$GITHUB_OUTPUT"
+
+      - name: Verify .pkg integrity across the VM handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="${{ steps.freebsd-assets.outputs.pkg }}"
+          sidecar="${PKG}.sha256"
+          if [[ ! -f "$sidecar" ]]; then
+            echo "FAIL: missing SHA-256 sidecar for $(basename "$PKG")" >&2
+            exit 1
+          fi
+          expected=$(awk '{print $1}' "$sidecar")
+          actual=$(sha256sum "$PKG" | awk '{print $1}')
+          if [[ "$expected" != "$actual" ]]; then
+            echo "FAIL: $(basename "$PKG") SHA-256 mismatch across the VM copyback" >&2
+            echo "  expected (FreeBSD VM): $expected" >&2
+            echo "  actual   (host):       $actual" >&2
+            exit 1
+          fi
+          echo "PASS: $(basename "$PKG") matches the in-VM SHA-256 ($actual)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fips_${{ needs.determine-versioning.outputs.freebsd_package_version }}_x86_64_freebsd
+          path: |
+            ${{ steps.freebsd-assets.outputs.pkg }}
+            ${{ steps.freebsd-assets.outputs.pkg }}.sha256
+          retention-days: 30
+
+      - name: Build summary
+        run: |
+          echo "Build Summary for freebsd/x86_64:"
+          echo "  Package: ${{ steps.freebsd-assets.outputs.pkg }}"
+
+  release:
+    name: Publish FreeBSD assets to GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download FreeBSD artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Validate .pkg bytes before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+
+          pkgs=$(find . -maxdepth 1 -type f -name '*.pkg' | LC_ALL=C sort)
+          if [[ -z "$pkgs" ]]; then
+            echo "FAIL: no .pkg artifacts were downloaded" >&2
+            exit 1
+          fi
+
+          fail=0
+          while IFS= read -r pkg; do
+            base=$(basename "$pkg")
+            sidecar="${pkg}.sha256"
+            if [[ ! -f "$sidecar" ]]; then
+              echo "FAIL: missing SHA-256 sidecar for $base" >&2
+              fail=1
+              continue
+            fi
+            expected=$(awk '{print $1}' "$sidecar")
+            actual=$(sha256sum "$pkg" | awk '{print $1}')
+            if [[ "$expected" != "$actual" ]]; then
+              echo "FAIL: $base SHA-256 mismatch on the bytes about to be published" >&2
+              echo "  expected (FreeBSD VM): $expected" >&2
+              echo "  actual   (downloaded): $actual" >&2
+              fail=1
+              continue
+            fi
+            echo "PASS: $base matches the in-VM SHA-256 ($actual)"
+          done <<<"$pkgs"
+
+          if [[ "$fail" -ne 0 ]]; then
+            echo "==> pre-publish .pkg verification FAILED; not publishing" >&2
+            exit 1
+          fi
+          echo "==> pre-publish .pkg verification PASSED"
+
+      - name: Generate FreeBSD release checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f -name '*.pkg' -printf '%P\n' \
+            | LC_ALL=C sort \
+            | xargs sha256sum \
+            > checksums-freebsd.txt
+
+      - name: Wait for tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 20); do
+            if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Release ${GITHUB_REF_NAME} not available yet; waiting..."
+            sleep 15
+          done
+
+          echo "Timed out waiting for release ${GITHUB_REF_NAME}" >&2
+          exit 1
+
+      - name: Upload FreeBSD assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/*.pkg \
+            dist/checksums-freebsd.txt \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"

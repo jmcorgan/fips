@@ -1,0 +1,221 @@
+#!/bin/sh
+# fips-dns-setup — Configure DNS routing for the .fips domain (FreeBSD).
+#
+# Detects the system's DNS resolver and configures it to forward .fips
+# queries to the FIPS DNS responder on [::1]:5354 (the daemon's default
+# IPv6 loopback bind).
+#
+# Backends (tried in order):
+#   1. local_unbound (base system) — drop-in /var/unbound/conf.d/fips.conf
+#   2. unbound (pkg)              — drop-in /usr/local/etc/unbound/conf.d/
+#   3. dnsmasq (pkg)              — drop-in include, if a conf-dir is used
+#   4. Warning with manual instructions
+#
+# Notes baked in from field debugging:
+#   - The daemon binds ::1 ONLY, so the resolver must forward over IPv6;
+#     local-unbound-setup often writes `do-ip6: no`, which fails silently.
+#     The drop-in forces `do-ip6: yes`.
+#   - `domain-insecure: "fips."` is required or DNSSEC validation rejects
+#     the unsigned zone.
+#   - A configured, running unbound is useless if /etc/resolv.conf does
+#     not point at it — warn loudly if it doesn't.
+
+set -eu
+
+FIPS_DNS_PORT="5354"
+FIPS_DNS_LOOPBACK_V6="::1"
+
+LOCAL_UNBOUND_DROPIN_DIR="/var/unbound/conf.d"
+LOCAL_UNBOUND_DROPIN="${LOCAL_UNBOUND_DROPIN_DIR}/fips.conf"
+PKG_UNBOUND_DROPIN_DIR="/usr/local/etc/unbound/conf.d"
+PKG_UNBOUND_DROPIN="${PKG_UNBOUND_DROPIN_DIR}/fips.conf"
+DNSMASQ_DROPIN_DIR="/usr/local/etc/dnsmasq.d"
+DNSMASQ_DROPIN="${DNSMASQ_DROPIN_DIR}/fips.conf"
+
+# Record which backend was configured, for teardown.
+STATE_DIR="/var/run/fips"
+STATE_FILE="${STATE_DIR}/dns-backend"
+
+log() { echo "fips-dns: $*"; }
+
+save_backend() {
+    mkdir -p "$STATE_DIR"
+    echo "$1" > "$STATE_FILE"
+}
+
+service_enabled_or_running() {
+    service "$1" enabled >/dev/null 2>&1 || service "$1" onestatus >/dev/null 2>&1
+}
+
+# Wait for the daemon's DNS responder to be listening (up to 30s). The
+# TUN interface name is kernel-assigned (tunN), so the responder socket
+# is the reliable readiness signal.
+wait_for_daemon() {
+    i=0
+    while [ "$i" -lt 30 ]; do
+        sockstat -6 -l -p "$FIPS_DNS_PORT" 2>/dev/null | grep -q ":$FIPS_DNS_PORT" && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    log "ERROR: nothing listening on [${FIPS_DNS_LOOPBACK_V6}]:$FIPS_DNS_PORT after 30s (is the fips service running?)"
+    return 1
+}
+
+# The forward-zone drop-in shared by both unbound backends.
+unbound_snippet() {
+    cat <<EOF
+# Managed by fips_dns (fips-dns-setup). Routes .fips queries to the
+# FIPS daemon's local DNS responder.
+server:
+    # The .fips zone is unsigned; skip DNSSEC validation for it.
+    domain-insecure: "fips."
+    # The daemon binds [::1] only — forwarding must go over IPv6.
+    # local-unbound-setup writes do-ip6: no by default, which would
+    # make this forward-zone fail silently.
+    do-ip6: yes
+    # unbound refuses to query loopback forwarders by default, which
+    # silently SERVFAILs every .fips query instead of asking the
+    # daemon on [::1]:5354.
+    do-not-query-localhost: no
+
+forward-zone:
+    name: "fips."
+    forward-addr: ${FIPS_DNS_LOOPBACK_V6}@${FIPS_DNS_PORT}
+    forward-first: no
+EOF
+}
+
+# A resolver can be perfectly configured and still unused: if
+# /etc/resolv.conf has no loopback nameserver, applications never query
+# it. This was the actual root cause of ".fips doesn't resolve" in the
+# field, so diagnose it here.
+warn_if_not_system_resolver() {
+    if ! grep -Eq '^[[:space:]]*nameserver[[:space:]]+(127\.0\.0\.1|::1)' /etc/resolv.conf 2>/dev/null; then
+        log "WARNING: /etc/resolv.conf has no 127.0.0.1/::1 nameserver —"
+        log "WARNING: the local resolver is configured but is NOT the system resolver,"
+        log "WARNING: so .fips names will not resolve. Fix (base local_unbound):"
+        log "WARNING:     service local_unbound enable && local-unbound-setup <upstream-ip ...>"
+        log "WARNING: (rewrites resolv.conf to 127.0.0.1 and keeps this drop-in)."
+    fi
+
+    # Field finding: `options edns0` in resolv.conf (written by
+    # local-unbound-setup via resolv_conf_options in /etc/resolvconf.conf)
+    # has broken public resolution on some setups.
+    if grep -Eq '^[[:space:]]*options.*\bedns0\b' /etc/resolv.conf 2>/dev/null; then
+        log "NOTE: /etc/resolv.conf sets 'options edns0'. If public DNS resolution"
+        log "NOTE: fails, remove that line and make it permanent by setting"
+        log "NOTE:     resolv_conf_options=\"\""
+        log "NOTE: in /etc/resolvconf.conf (else resolvconf(8) re-adds it)."
+    fi
+}
+
+# local-unbound-setup snapshots the nameservers it finds in
+# /etc/resolv.conf into /var/unbound/forward.conf. If it is (re-)run
+# AFTER resolv.conf already points at 127.0.0.1, unbound ends up
+# forwarding every public query to itself — and with unbound's
+# do-not-query-localhost default it refuses the loop, so all public
+# resolution dies with SERVFAIL. Detect and explain.
+warn_if_forward_loop() {
+    fwd="/var/unbound/forward.conf"
+    [ -f "$fwd" ] || return 0
+    if grep -Eq '^[[:space:]]*forward-addr:[[:space:]]*(127\.0\.0\.1|::1)([[:space:]]|$)' "$fwd"; then
+        log "WARNING: ${fwd} forwards public queries to localhost — unbound is"
+        log "WARNING: forwarding to itself, which breaks ALL public resolution."
+        log "WARNING: (Cause: local-unbound-setup was run while resolv.conf already"
+        log "WARNING: pointed at 127.0.0.1.) Fix by re-running it with explicit"
+        log "WARNING: upstream resolvers, e.g. your router or ISP resolver:"
+        log "WARNING:     local-unbound-setup 192.168.1.1"
+    fi
+}
+
+# Backend 1: base-system local_unbound
+try_local_unbound() {
+    service_enabled_or_running local_unbound || return 1
+    [ -d /var/unbound ] || return 1
+
+    log "Configuring via local_unbound (${LOCAL_UNBOUND_DROPIN})"
+    mkdir -p "$LOCAL_UNBOUND_DROPIN_DIR"
+    unbound_snippet > "$LOCAL_UNBOUND_DROPIN"
+
+    if command -v local-unbound-checkconf >/dev/null 2>&1 \
+        && ! local-unbound-checkconf >/dev/null 2>&1; then
+        log "ERROR: local-unbound-checkconf rejected the config; removing drop-in"
+        rm -f "$LOCAL_UNBOUND_DROPIN"
+        return 1
+    fi
+
+    service local_unbound reload >/dev/null 2>&1 \
+        || service local_unbound onerestart >/dev/null 2>&1 \
+        || log "WARNING: local_unbound reload failed (config written, may need manual restart)"
+    save_backend "local_unbound"
+    warn_if_not_system_resolver
+    warn_if_forward_loop
+    return 0
+}
+
+# Backend 2: pkg unbound
+try_pkg_unbound() {
+    service_enabled_or_running unbound || return 1
+    [ -d /usr/local/etc/unbound ] || return 1
+
+    log "Configuring via unbound (${PKG_UNBOUND_DROPIN})"
+    mkdir -p "$PKG_UNBOUND_DROPIN_DIR"
+    unbound_snippet > "$PKG_UNBOUND_DROPIN"
+
+    if ! grep -Erqs '^[[:space:]]*include(-toplevel)?:.*conf\.d' /usr/local/etc/unbound/unbound.conf; then
+        log "NOTE: ensure unbound.conf includes the drop-in directory, e.g.:"
+        log "NOTE:     include-toplevel: \"${PKG_UNBOUND_DROPIN_DIR}/*.conf\""
+    fi
+
+    service unbound reload >/dev/null 2>&1 \
+        || service unbound onerestart >/dev/null 2>&1 \
+        || log "WARNING: unbound reload failed (config written, may need manual restart)"
+    save_backend "pkg-unbound"
+    warn_if_not_system_resolver
+    return 0
+}
+
+# Backend 3: pkg dnsmasq
+#
+# dnsmasq's `server=/<domain>/<addr>#<port>` accepts a bare IPv6 literal.
+try_dnsmasq() {
+    service_enabled_or_running dnsmasq || return 1
+
+    log "Configuring via dnsmasq (${DNSMASQ_DROPIN})"
+    mkdir -p "$DNSMASQ_DROPIN_DIR"
+    cat > "$DNSMASQ_DROPIN" <<EOF
+# FIPS .fips domain forwarding (managed by fips_dns)
+server=/fips/${FIPS_DNS_LOOPBACK_V6}#${FIPS_DNS_PORT}
+EOF
+
+    if ! grep -Eqs "^[[:space:]]*conf-dir=.*dnsmasq\.d" /usr/local/etc/dnsmasq.conf; then
+        log "NOTE: ensure dnsmasq.conf reads the drop-in directory, e.g.:"
+        log "NOTE:     conf-dir=${DNSMASQ_DROPIN_DIR}/,*.conf"
+    fi
+
+    service dnsmasq reload >/dev/null 2>&1 \
+        || service dnsmasq onerestart >/dev/null 2>&1 \
+        || log "WARNING: dnsmasq reload failed (config written, may need manual restart)"
+    save_backend "dnsmasq"
+    warn_if_not_system_resolver
+    return 0
+}
+
+# --- Main ---
+
+wait_for_daemon || exit 1
+
+try_local_unbound && exit 0
+try_pkg_unbound && exit 0
+try_dnsmasq && exit 0
+
+log "WARNING: No supported DNS resolver detected."
+log "To resolve .fips domains, forward the fips. zone to"
+log "[${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT} (the daemon's default bind)."
+log ""
+log "Easiest path on FreeBSD (base local_unbound):"
+log "    sysrc local_unbound_enable=YES"
+log "    local-unbound-setup"
+log "    service fips_dns restart"
+save_backend "none"
+exit 0
