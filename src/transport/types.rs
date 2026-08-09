@@ -8,6 +8,7 @@
 //! via `pub use types::*`, so existing `crate::transport::{LinkId, ...}`
 //! imports are unaffected.
 
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::fmt;
 use core::time::Duration;
 
@@ -91,23 +92,25 @@ impl fmt::Display for LinkDirection {
 /// Each transport type interprets this differently:
 /// - UDP/TCP: "host:port" (IP address or DNS hostname)
 /// - Ethernet: MAC address (6 bytes)
+///
+/// The immutable bytes are shared across clones.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct TransportAddr(Vec<u8>);
+pub struct TransportAddr(Arc<[u8]>);
 
 impl TransportAddr {
     /// Create a transport address from raw bytes.
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(bytes.into())
     }
 
     /// Create a transport address from a byte slice.
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
+        Self(Arc::from(bytes))
     }
 
     /// Create a transport address from a string.
     pub fn from_string(s: &str) -> Self {
-        Self(s.as_bytes().to_vec())
+        Self(Arc::from(s.as_bytes()))
     }
 
     /// Get the raw bytes.
@@ -158,7 +161,7 @@ impl fmt::Display for TransportAddr {
                 Ok(())
             }
             None => {
-                for byte in &self.0 {
+                for byte in self.0.iter() {
                     write!(f, "{:02x}", byte)?;
                 }
                 Ok(())
@@ -175,7 +178,37 @@ impl From<&str> for TransportAddr {
 
 impl From<String> for TransportAddr {
     fn from(s: String) -> Self {
-        Self(s.into_bytes())
+        Self(s.into_bytes().into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::TransportAddr;
+
+    #[test]
+    fn transport_addr_clone_shares_immutable_bytes() {
+        let addr = TransportAddr::from_string("192.168.1.1:2121");
+        let cloned = addr.clone();
+
+        assert_eq!(addr, cloned);
+        assert!(Arc::ptr_eq(&addr.0, &cloned.0));
+    }
+
+    #[test]
+    fn transport_addr_equality_and_hash_use_byte_values() {
+        use std::collections::HashSet;
+
+        let original = TransportAddr::from_string("192.168.1.1:2121");
+        let same_value = TransportAddr::from_bytes(b"192.168.1.1:2121");
+        let mut addrs = HashSet::new();
+
+        assert!(!Arc::ptr_eq(&original.0, &same_value.0));
+        assert_eq!(original, same_value);
+        addrs.insert(original);
+        assert!(addrs.contains(&same_value));
     }
 }
 

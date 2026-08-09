@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `TransportAddr` clones now share immutable address bytes instead of
+  reallocating and copying them.
+
 - The Ethernet transport's per-interface `discovery` flag was renamed to
   `listen` (`transports.ethernet.*`) to match the symmetric `announce`
   (transmit) / `listen` (receive) neighbor-beacon vocabulary. The old
