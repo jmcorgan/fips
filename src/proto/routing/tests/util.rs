@@ -7,6 +7,7 @@ use crate::{NodeAddr, TreeCoordinate};
 
 /// A mock peer for the candidate-assembly seam: the set of destinations its
 /// bloom filter reaches, its send state, link cost, and tree coordinates.
+#[derive(Clone)]
 pub(super) struct MockPeer {
     pub(super) addr: NodeAddr,
     pub(super) reach: Vec<NodeAddr>,
@@ -31,13 +32,14 @@ impl MockRoutingView {
             peers: Vec::new(),
         }
     }
-
-    fn peer(&self, addr: &NodeAddr) -> Option<&MockPeer> {
-        self.peers.iter().find(|p| p.addr == *addr)
-    }
 }
 
 impl RoutingView for MockRoutingView {
+    type Peer<'a>
+        = &'a MockPeer
+    where
+        Self: 'a;
+
     fn is_congested(&self, _next_hop: &NodeAddr) -> bool {
         self.congested
     }
@@ -47,20 +49,25 @@ impl RoutingView for MockRoutingView {
             .find(|(addr, _)| addr == dest)
             .map(|(_, coords)| coords.clone())
     }
-    fn peer_addrs(&self) -> Vec<NodeAddr> {
-        self.peers.iter().map(|p| p.addr).collect()
+    fn for_each_peer<'a>(&'a self, mut visitor: impl FnMut(Self::Peer<'a>)) {
+        for peer in &self.peers {
+            visitor(peer);
+        }
     }
-    fn peer_may_reach(&self, peer: &NodeAddr, dest: &NodeAddr) -> bool {
-        self.peer(peer).is_some_and(|p| p.reach.contains(dest))
+    fn peer_addr<'a>(&'a self, peer: Self::Peer<'a>) -> NodeAddr {
+        peer.addr
     }
-    fn peer_can_send(&self, peer: &NodeAddr) -> bool {
-        self.peer(peer).is_some_and(|p| p.can_send)
+    fn peer_may_reach<'a>(&'a self, peer: Self::Peer<'a>, dest: &NodeAddr) -> bool {
+        peer.reach.contains(dest)
     }
-    fn peer_link_cost(&self, peer: &NodeAddr) -> f64 {
-        self.peer(peer).map_or(f64::INFINITY, |p| p.link_cost)
+    fn peer_can_send<'a>(&'a self, peer: Self::Peer<'a>) -> bool {
+        peer.can_send
     }
-    fn peer_coords(&self, peer: &NodeAddr) -> Option<TreeCoordinate> {
-        self.peer(peer).and_then(|p| p.coords.clone())
+    fn peer_link_cost<'a>(&'a self, peer: Self::Peer<'a>) -> f64 {
+        peer.link_cost
+    }
+    fn peer_coords<'a>(&'a self, peer: Self::Peer<'a>) -> Option<&'a TreeCoordinate> {
+        peer.coords.as_ref()
     }
 }
 

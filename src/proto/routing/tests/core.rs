@@ -1,18 +1,44 @@
 //! Tests for the sans-IO routing decision core.
 
 use super::util::{MockPeer, MockRoutingView, make_coords, make_datagram_ref, make_next_hop};
-use crate::TreeCoordinate;
 use crate::proto::link::SessionDatagramRef;
 use crate::proto::routing::RoutingSignalType;
 use crate::proto::routing::{
-    DropReason, RouteAction, RouteOutcome, Router, RoutingView, routing_candidates,
+    DropReason, RouteAction, RouteOutcome, Router, RoutingView, select_best_candidate,
 };
 use crate::testutil::make_node_addr;
+use crate::{NodeAddr, TreeCoordinate};
 
 /// Decode a forwarded byte buffer (which carries the leading msg_type byte)
 /// back into a borrowed view so tests can inspect the re-encoded header.
 fn decode_forward(bytes: &[u8]) -> SessionDatagramRef<'_> {
     SessionDatagramRef::decode(&bytes[1..]).expect("forwarded datagram re-decodes")
+}
+
+fn choose_candidate(
+    rv: &MockRoutingView,
+    dest: &NodeAddr,
+    dest_coords: &TreeCoordinate,
+    my_coords: &TreeCoordinate,
+) -> Option<NodeAddr> {
+    select_best_candidate(rv, dest, dest_coords, my_coords)
+}
+
+fn mock_peer(
+    addr: u8,
+    dest: NodeAddr,
+    may_reach: bool,
+    can_send: bool,
+    link_cost: f64,
+    coords: Option<&[u8]>,
+) -> MockPeer {
+    MockPeer {
+        addr: make_node_addr(addr),
+        reach: may_reach.then_some(dest).into_iter().collect(),
+        can_send,
+        link_cost,
+        coords: coords.map(make_coords),
+    }
 }
 
 /// A transit datagram that arrived already exhausted is dropped and charged
@@ -253,44 +279,98 @@ fn cached_coords_reads_the_view_table() {
 }
 
 #[test]
-fn routing_candidates_filters_by_may_reach_and_snapshots() {
+fn candidate_selection_is_independent_of_peer_enumeration_order() {
     let dest = make_node_addr(0x50);
-    let reacher = make_node_addr(0x60);
-    let non_reacher = make_node_addr(0x61);
-    let reacher_coords = make_coords(&[0x01, 0x60]);
+    let root = 0x00;
+    let my_coords = make_coords(&[0x10, root]);
+    let dest_coords = make_coords(&[0x50, root]);
+    let lower_addr = mock_peer(0x20, dest, true, true, 1.0, Some(&[root]));
+    let higher_addr = mock_peer(0x30, dest, true, true, 1.0, Some(&[root]));
+
+    let forward = MockRoutingView {
+        peers: vec![lower_addr.clone(), higher_addr.clone()],
+        ..MockRoutingView::new(false)
+    };
+    let reverse = MockRoutingView {
+        peers: vec![higher_addr, lower_addr],
+        ..MockRoutingView::new(false)
+    };
+
+    assert_eq!(
+        choose_candidate(&forward, &dest, &dest_coords, &my_coords),
+        Some(make_node_addr(0x20))
+    );
+    assert_eq!(
+        choose_candidate(&reverse, &dest, &dest_coords, &my_coords),
+        Some(make_node_addr(0x20))
+    );
+}
+
+#[test]
+fn candidate_selection_filters_bloom_unsendable_and_missing_coords() {
+    let dest = make_node_addr(0x50);
+    let root = 0x00;
+    let my_coords = make_coords(&[0x10, root]);
+    let dest_coords = make_coords(&[0x50, root]);
+    let eligible = make_node_addr(0x60);
     let rv = MockRoutingView {
         peers: vec![
-            MockPeer {
-                addr: reacher,
-                reach: vec![dest],
-                can_send: true,
-                link_cost: 2.5,
-                coords: Some(reacher_coords.clone()),
-            },
-            MockPeer {
-                // Bloom filter does not contain dest — narrowed out in core.
-                addr: non_reacher,
-                reach: Vec::new(),
-                can_send: true,
-                link_cost: 1.0,
-                coords: None,
-            },
+            mock_peer(0x01, dest, true, false, 0.0, Some(&[0x50, root])),
+            mock_peer(0x02, dest, true, true, 0.0, None),
+            mock_peer(0x03, dest, false, true, 0.0, Some(&[0x50, root])),
+            mock_peer(0x60, dest, true, true, 10.0, Some(&[root])),
         ],
         ..MockRoutingView::new(false)
     };
 
-    let candidates = routing_candidates(&rv, &dest);
+    assert_eq!(
+        choose_candidate(&rv, &dest, &dest_coords, &my_coords),
+        Some(eligible)
+    );
+}
+
+#[test]
+fn candidate_must_be_strictly_closer_than_self() {
+    let dest = make_node_addr(0x50);
+    let root = 0x00;
+    let my_coords = make_coords(&[0x10, root]);
+    let dest_coords = make_coords(&[0x50, root]);
+    let rv = MockRoutingView {
+        peers: vec![
+            // A sibling is exactly as far from dest as this node.
+            mock_peer(0x20, dest, true, true, 1.0, Some(&[0x20, root])),
+            // This descendant of a sibling is farther from dest.
+            mock_peer(0x21, dest, true, true, 0.5, Some(&[0x21, 0x20, root])),
+        ],
+        ..MockRoutingView::new(false)
+    };
+
+    assert_eq!(choose_candidate(&rv, &dest, &dest_coords, &my_coords), None);
+}
+
+#[test]
+fn candidate_ordering_is_cost_then_distance_then_address() {
+    let dest = make_node_addr(0x50);
+    let root = 0x00;
+    let my_coords = make_coords(&[0x10, 0x11, root]);
+    let dest_coords = make_coords(&[0x50, root]);
+    let rv = MockRoutingView {
+        peers: vec![
+            // Lowest address loses because distance precedes address.
+            mock_peer(0x01, dest, true, true, 1.0, Some(&[root])),
+            // Closest peer loses because cost is the primary key.
+            mock_peer(0x02, dest, true, true, 1.0, Some(&[0x50, root])),
+            mock_peer(0x04, dest, true, true, 0.5, Some(&[root])),
+            // Same cost and distance: lower address wins.
+            mock_peer(0x03, dest, true, true, 0.5, Some(&[root])),
+        ],
+        ..MockRoutingView::new(false)
+    };
 
     assert_eq!(
-        candidates.len(),
-        1,
-        "only peers whose bloom may_reach the dest survive assembly"
+        choose_candidate(&rv, &dest, &dest_coords, &my_coords),
+        Some(make_node_addr(0x03))
     );
-    let c = &candidates[0];
-    assert_eq!(c.addr, reacher);
-    assert!(c.can_send);
-    assert_eq!(c.link_cost, 2.5);
-    assert_eq!(c.coords, Some(reacher_coords));
 }
 
 /// Extract the error-PDU msg_type byte from an encoded routing-error action.
