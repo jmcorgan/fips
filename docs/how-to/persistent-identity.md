@@ -72,6 +72,49 @@ present after the first successful daemon start. If the daemon never
 came up cleanly (config error, permission problem), the key files
 will be missing.
 
+### macOS note
+
+The macOS package (`.pkg`) installs config and keys under
+`/usr/local/etc/fips/` instead of `/etc/fips/`. The paths above become:
+
+| Linux / other Unix | macOS |
+| --- | --- |
+| `/etc/fips/fips.yaml` | `/usr/local/etc/fips/fips.yaml` |
+| `/etc/fips/fips.key` | `/usr/local/etc/fips/fips.key` |
+| `/etc/fips/fips.pub` | `/usr/local/etc/fips/fips.pub` |
+
+`fipsctl keygen` writes to `/usr/local/etc/fips/` by default on macOS.
+The daemon still probes `/etc/fips/fips.yaml` as a fallback (so an
+existing install is not broken by an upgrade), but the macOS packaging
+only installs files under `/usr/local/etc/fips/`.
+
+If you have files in `/etc/fips/` from a manual install, move them:
+
+```sh
+sudo mv /etc/fips/fips.yaml /usr/local/etc/fips/fips.yaml
+sudo mv /etc/fips/fips.key /usr/local/etc/fips/fips.key
+sudo mv /etc/fips/fips.pub /usr/local/etc/fips/fips.pub
+sudo mv /etc/fips/peers.allow /usr/local/etc/fips/peers.allow 2>/dev/null || true
+sudo mv /etc/fips/peers.deny /usr/local/etc/fips/peers.deny 2>/dev/null || true
+sudo mv /etc/fips/hosts /usr/local/etc/fips/hosts 2>/dev/null || true
+```
+
+The daemon logs a warning at startup if any of `peers.allow`, `peers.deny`,
+or `hosts` exist at the old `/etc/fips/` path but not at
+`/usr/local/etc/fips/`. `fips.yaml` is deliberately not included: both
+directories stay on the config search path, so a config file left at
+`/etc/fips/` is still read and is not a stranded file.
+
+`fips.key` is handled differently again, because losing it is worse than
+not reading it. The daemon derives the key directory from whichever config
+file loaded last, so a host carrying `fips.yaml` at both locations resolves
+the key to `/usr/local/etc/fips/`. If no key is there and one exists at
+`/etc/fips/fips.key`, the daemon **uses the old key and warns**, rather than
+generating a new identity: a fresh keypair would change the node's npub,
+routing address and mesh IPv6 with no migration path. Move the key when you
+see that warning; the fallback exists to make the upgrade survivable, not
+to be relied on.
+
 ### File layout and permissions
 
 | Path | Mode | Owner | Contents |

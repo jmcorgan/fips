@@ -234,6 +234,55 @@ with v0.4.x or earlier peers.
 
 ### Fixed
 
+- macOS: `peers.allow`, `peers.deny`, and the `hosts` file are now read
+  from `/usr/local/etc/fips/`, matching the install layout the macOS
+  packaging ships (`packaging/macos/`). The default-path constants were
+  hardcoded to `/etc/fips/...` with only a `#[cfg(unix)]` / `#[cfg(windows)]`
+  split, so on macOS the daemon looked in a directory that does not exist:
+  `load_file` / `load_hosts_file` hit their `NotFound` no-op arm and silently
+  returned an empty ACL / empty host map. A populated `peers.deny` therefore
+  reported `effective_mode: "default_open"` and `enforcement_active: false`
+  via `fipsctl acl show`, and host-file aliases went unloaded, with no error
+  or warning. The default constants now follow the platform's packaging —
+  `/usr/local/etc/fips/` on macOS, `/etc/fips/` on Linux and other Unix
+  for the ACL files, and `/etc/fips/` on Linux and `%ProgramData%\fips\`
+  on Windows for the hosts file — and are pinned by platform-gated unit
+  tests so the layout cannot silently drift again. At startup the daemon
+  warns once if any of these files exist at the old `/etc/fips/` location
+  but not at the current default. Linux and Windows behavior is unchanged.
+  **macOS users with existing files in `/etc/fips/` should move them to
+  `/usr/local/etc/fips/`.**
+
+- macOS: `fipsctl keygen` now writes `fips.key` / `fips.pub` to
+  `/usr/local/etc/fips/` by default, matching the install layout the macOS
+  packaging ships. The default output directory was hardcoded to
+  `/etc/fips` for all Unix, but the daemon derives its identity key paths
+  from the config file's directory — `/usr/local/etc/fips/fips.yaml` on
+  macOS — so a generated identity landed where the daemon never reads it
+  and the node silently kept an ephemeral identity. Linux and other Unix
+  keep `/etc/fips`, Windows is unchanged, and the values are pinned by
+  platform-gated unit tests.
+
+- macOS: the system-wide config search path now includes
+  `/usr/local/etc/fips/fips.yaml` in addition to `/etc/fips/fips.yaml`,
+  matching the install layout the macOS packaging ships. Previously only
+  `/etc/fips/fips.yaml` was probed, so a bare `fips` run without `--config`
+  skipped the installed config and derived identity key paths from a
+  non-existent directory. `/etc/fips/fips.yaml` is still probed first so
+  existing installs keep working. Both the macOS entry in the search path
+  and the directory `fipsctl keygen` writes to read the shared
+  `SYSTEM_CONFIG_DIR` constant, so the two cannot drift apart. The
+  launchd-installed daemon was unaffected (it always passes `--config`).
+  Linux and Windows behavior is unchanged. Because the daemon derives the
+  identity key directory from whichever config file loaded last, a macOS host
+  carrying `fips.yaml` at both locations would have resolved `fips.key` to the
+  new directory, found none, and under `persistent` generated a fresh
+  identity — silently changing its npub, routing address and mesh IPv6. The
+  daemon now adopts a key stranded at `/etc/fips/fips.key` and warns to move
+  it, instead of generating one. The fallback is confined to keys resolved
+  from the system config directory, so a run using `./fips.yaml` or a user
+  config is never redirected to a system key.
+
 - Nostr NAT traversal no longer breaks after the host suspends. The traversal
   clock cached a Unix timestamp once at startup and advanced it with a
   monotonic `Instant`, which does not tick while a machine is asleep, so after

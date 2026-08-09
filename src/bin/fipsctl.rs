@@ -324,10 +324,13 @@ fn print_response(value: &serde_json::Value) {
 }
 
 /// Default directory for keygen output.
+///
+/// Must match the platform's config dir, since the daemon derives key
+/// paths from the config file's location.
 fn default_key_dir() -> PathBuf {
     #[cfg(unix)]
     {
-        PathBuf::from("/etc/fips")
+        PathBuf::from(fips::config::SYSTEM_CONFIG_DIR)
     }
     #[cfg(windows)]
     {
@@ -651,6 +654,20 @@ fn sparkline(values: &[f64], min: f64, max: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // macOS packaging ships config under /usr/local/etc/fips/.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_default_key_dir_follows_macos_packaging_layout() {
+        assert_eq!(default_key_dir(), PathBuf::from("/usr/local/etc/fips"));
+    }
+
+    // Non-macOS Unix keeps the historic /etc/fips/ location.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn test_default_key_dir_keeps_etc_fips_layout() {
+        assert_eq!(default_key_dir(), PathBuf::from("/etc/fips"));
+    }
 
     #[test]
     fn test_acl_show_command_name() {

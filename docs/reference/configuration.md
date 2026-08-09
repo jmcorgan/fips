@@ -13,7 +13,7 @@ locations, lowest to highest priority:
 
 | Priority | Path | Purpose |
 |----------|------|---------|
-| 1 (lowest) | `/etc/fips/fips.yaml` | System-wide defaults |
+| 1 (lowest) | `/usr/local/etc/fips/fips.yaml` (macOS), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
 | 2 | `~/.config/fips/fips.yaml` | User preferences |
 | 3 | `~/.fips.yaml` | Legacy user config |
 | 4 (highest) | `./fips.yaml` | Deployment-specific overrides |

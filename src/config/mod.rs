@@ -3,7 +3,8 @@
 //! Loads configuration from YAML files with a cascading priority system:
 //! 1. `./fips.yaml` (current directory - highest priority)
 //! 2. `~/.config/fips/fips.yaml` (user config directory)
-//! 3. `/etc/fips/fips.yaml` (system - lowest priority)
+//! 3. `/etc/fips/fips.yaml` (system - lowest priority; on macOS
+//!    `/usr/local/etc/fips/fips.yaml` is also probed, after `/etc/fips/`)
 //!
 //! Values from higher priority files override those from lower priority files.
 //!
@@ -47,6 +48,15 @@ pub use transport::{
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";
 
+/// System-wide config directory, following the platform's packaging layout
+/// (`/usr/local/etc/fips` on macOS, `/etc/fips` otherwise). The daemon
+/// derives identity key paths from the config file's location, so anything
+/// that reads or writes config-adjacent files should use this one constant.
+#[cfg(target_os = "macos")]
+pub const SYSTEM_CONFIG_DIR: &str = "/usr/local/etc/fips";
+#[cfg(not(target_os = "macos"))]
+pub const SYSTEM_CONFIG_DIR: &str = "/etc/fips";
+
 /// Default key filename, placed alongside the config file.
 const KEY_FILENAME: &str = "fips.key";
 
@@ -81,6 +91,42 @@ pub fn key_file_path(config_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or(Path::new("."))
         .join(KEY_FILENAME)
+}
+
+/// Legacy system config directory, from before the platform-packaging move.
+///
+/// Equal to [`SYSTEM_CONFIG_DIR`] everywhere except where packaging installs
+/// outside `/etc`, which makes [`legacy_key_fallback`] inert on those
+/// platforms without needing a `cfg` of its own.
+const LEGACY_SYSTEM_CONFIG_DIR: &str = "/etc/fips";
+
+/// Find an identity key stranded at the legacy system config directory.
+///
+/// Adding a second system config directory to the search path moves the
+/// directory `resolve_identity` derives the key path from, because that
+/// directory comes from whichever config file loaded last. A node that
+/// carries a config at both locations would otherwise find no key at the new
+/// one and, under `persistent`, generate a fresh identity — silently changing
+/// its npub, routing address and mesh IPv6, none of which has a migration
+/// path.
+///
+/// Returns the legacy key only when all of these hold, which confines the
+/// fallback to exactly that regression:
+///
+/// - the two directories actually differ, so this is inert on Linux
+/// - no key exists at `key_path`
+/// - `key_path` sits in `system_dir`, so an operator using `./fips.yaml` or a
+///   user config is never redirected to a system key
+/// - a key does exist at `legacy_dir`
+fn legacy_key_fallback(key_path: &Path, system_dir: &Path, legacy_dir: &Path) -> Option<PathBuf> {
+    if system_dir == legacy_dir || key_path.exists() {
+        return None;
+    }
+    if key_path.parent() != Some(system_dir) {
+        return None;
+    }
+    let legacy = legacy_dir.join(KEY_FILENAME);
+    legacy.exists().then_some(legacy)
 }
 
 /// Derive the public key file path from a config file path.
@@ -307,7 +353,31 @@ pub fn resolve_identity(
             });
         }
 
-        // No key file yet — generate and persist
+        // No key at the resolved location. Before generating a new identity,
+        // check whether one is stranded at the legacy system config directory:
+        // generating here would silently change the node's npub, routing
+        // address and mesh IPv6.
+        if let Some(legacy) = legacy_key_fallback(
+            &key_path,
+            Path::new(SYSTEM_CONFIG_DIR),
+            Path::new(LEGACY_SYSTEM_CONFIG_DIR),
+        ) {
+            let nsec = read_key_file(&legacy)?;
+            let identity = Identity::from_secret_str(&nsec)?;
+            tracing::warn!(
+                legacy = %legacy.display(),
+                current = %key_path.display(),
+                "Identity key found at the legacy path but not at the current default; \
+                 using it so the node keeps its identity — move it to the current path"
+            );
+            let _ = write_pub_file(&pub_path, &identity.npub());
+            return Ok(ResolvedIdentity {
+                nsec,
+                source: IdentitySource::KeyFile(legacy),
+            });
+        }
+
+        // No key file anywhere — generate and persist
         let identity = Identity::generate();
         let nsec = encode_nsec(&identity.keypair().secret_key());
         let npub = identity.npub();
@@ -454,7 +524,8 @@ impl Config {
     /// Load configuration from the standard search paths.
     ///
     /// Files are loaded in reverse priority order and merged:
-    /// 1. `/etc/fips/fips.yaml` (loaded first, lowest priority)
+    /// 1. `/etc/fips/fips.yaml` (and `/usr/local/etc/fips/fips.yaml` on macOS;
+    ///    loaded first, lowest priority)
     /// 2. `~/.config/fips/fips.yaml` (user config)
     /// 3. `./fips.yaml` (loaded last, highest priority)
     ///
@@ -549,8 +620,17 @@ impl Config {
     pub fn search_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // System config (lowest priority)
+        // System config — /etc/fips is always probed so existing installs
+        // keep working after an upgrade.
         paths.push(PathBuf::from("/etc/fips").join(CONFIG_FILENAME));
+
+        // macOS packaging installs config under /usr/local/etc/fips
+        // (Homebrew-style prefix); probe it after /etc/fips so the
+        // packaged file wins over a stale /etc/fips leftover. Read from
+        // SYSTEM_CONFIG_DIR rather than a second literal, so this path and
+        // the directory `fipsctl keygen` writes into cannot drift apart.
+        #[cfg(target_os = "macos")]
+        paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
 
         // User config directory
         if let Some(config_dir) = dirs::config_dir() {
@@ -1072,13 +1152,103 @@ node:
         // Should include current directory
         assert!(paths.iter().any(|p| p.ends_with("fips.yaml")));
 
-        // Should include /etc/fips on Unix
-        #[cfg(unix)]
+        // Should always include /etc/fips as a system config path
         assert!(
             paths
                 .iter()
                 .any(|p| p.starts_with("/etc/fips") && p.ends_with("fips.yaml"))
         );
+
+        // macOS should also include /usr/local/etc/fips
+        #[cfg(target_os = "macos")]
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with("/usr/local/etc/fips") && p.ends_with("fips.yaml"))
+        );
+    }
+
+    // --- legacy identity-key fallback ---
+    //
+    // Guards the regression the second system config directory introduces:
+    // the key directory follows whichever config file loaded last, so a node
+    // carrying config at both locations would find no key at the new one and
+    // generate a fresh identity. These drive `legacy_key_fallback` with real
+    // directories under a temp root rather than asserting on the constants,
+    // and they run on every platform because the function takes both
+    // directories as arguments.
+
+    fn write_stub_key(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join(KEY_FILENAME);
+        std::fs::write(&p, "nsec1stub\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn legacy_key_is_adopted_when_the_new_location_has_none() {
+        let root = TempDir::new().unwrap();
+        let legacy = root.path().join("etc/fips");
+        let system = root.path().join("usr/local/etc/fips");
+        std::fs::create_dir_all(&system).unwrap();
+        let legacy_key = write_stub_key(&legacy);
+
+        let key_path = system.join(KEY_FILENAME);
+        assert_eq!(
+            legacy_key_fallback(&key_path, &system, &legacy),
+            Some(legacy_key),
+            "a key stranded at the legacy path must be adopted, not regenerated"
+        );
+    }
+
+    #[test]
+    fn a_key_at_the_new_location_wins_over_the_legacy_one() {
+        let root = TempDir::new().unwrap();
+        let legacy = root.path().join("etc/fips");
+        let system = root.path().join("usr/local/etc/fips");
+        write_stub_key(&legacy);
+        let key_path = write_stub_key(&system);
+
+        assert_eq!(legacy_key_fallback(&key_path, &system, &legacy), None);
+    }
+
+    #[test]
+    fn no_fallback_when_the_two_directories_are_the_same() {
+        // The Linux case: nothing moved, so the fallback must be inert even
+        // though a key exists at that one directory.
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("etc/fips");
+        write_stub_key(&dir);
+        let absent = dir.join("nonexistent").join(KEY_FILENAME);
+
+        assert_eq!(legacy_key_fallback(&absent, &dir, &dir), None);
+    }
+
+    #[test]
+    fn no_fallback_for_a_config_outside_the_system_directory() {
+        // An operator running with ./fips.yaml or a user config must never be
+        // silently redirected to a system key.
+        let root = TempDir::new().unwrap();
+        let legacy = root.path().join("etc/fips");
+        let system = root.path().join("usr/local/etc/fips");
+        let elsewhere = root.path().join("home/someone");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        write_stub_key(&legacy);
+
+        let key_path = elsewhere.join(KEY_FILENAME);
+        assert_eq!(legacy_key_fallback(&key_path, &system, &legacy), None);
+    }
+
+    #[test]
+    fn no_fallback_when_the_legacy_location_is_empty_too() {
+        let root = TempDir::new().unwrap();
+        let legacy = root.path().join("etc/fips");
+        let system = root.path().join("usr/local/etc/fips");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&system).unwrap();
+
+        let key_path = system.join(KEY_FILENAME);
+        assert_eq!(legacy_key_fallback(&key_path, &system, &legacy), None);
     }
 
     #[test]

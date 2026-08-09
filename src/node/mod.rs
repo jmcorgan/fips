@@ -5,6 +5,8 @@
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
 pub(crate) mod acl;
+#[cfg(target_os = "macos")]
+pub use acl::warn_on_legacy_config_paths;
 mod bloom;
 pub(crate) mod context;
 mod dataplane;
