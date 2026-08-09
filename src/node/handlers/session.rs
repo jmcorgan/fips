@@ -917,6 +917,31 @@ impl Node {
                 return;
             }
 
+            // The rekey must come from the peer the session was established
+            // with. Compare x-only keys: the stored key's parity may be a
+            // synthesized even parity (npubs carry no parity), while the
+            // handshake learns the true point.
+            let rekey_pubkey = match handshake.remote_static() {
+                Some(pk) => *pk,
+                None => {
+                    debug!("No remote static key after processing rekey XX msg3");
+                    entry.abandon_rekey();
+                    self.sessions.insert(*src_addr, entry);
+                    return;
+                }
+            };
+            if rekey_pubkey.x_only_public_key().0 != entry.remote_pubkey().x_only_public_key().0 {
+                warn!(
+                    src = %self.peer_display_name(src_addr),
+                    "FSP rekey: initiator static key differs from the established peer key"
+                );
+                entry.abandon_rekey();
+                self.sessions.insert(*src_addr, entry);
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::RekeyKeyMismatch));
+                return;
+            }
+
             // Complete the handshake → store as pending new session
             let session = match handshake.into_session() {
                 Ok(s) => s,
@@ -990,6 +1015,21 @@ impl Node {
                 return;
             }
         };
+
+        // The claimed source address must be derivable from the key we just
+        // authenticated, or the peer is opening a session under another
+        // node's address.
+        let derived_addr = NodeAddr::from_pubkey(&remote_pubkey.x_only_public_key().0);
+        if derived_addr != *src_addr {
+            warn!(
+                src = %self.peer_display_name(src_addr),
+                derived = %derived_addr,
+                "SessionMsg3 source address does not match the authenticated static key"
+            );
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::AddrMismatch));
+            return; // Entry was already removed
+        }
 
         // Register the initiator's identity for future TUN → session routing
         self.register_identity(*src_addr, remote_pubkey);

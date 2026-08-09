@@ -177,7 +177,8 @@ pub enum HandshakeReject {
 /// FSP session rejection reasons.
 ///
 /// `UnknownSession` and `BadState` cover the session unknown-session
-/// and state-machine cluster.
+/// and state-machine cluster. `AddrMismatch` and `RekeyKeyMismatch`
+/// cover the peer-identity binding checks on the XK msg3 receive path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SessionReject {
@@ -196,6 +197,18 @@ pub enum SessionReject {
     /// is not `AwaitingMsg3`. Tracked via
     /// [`SessionStats::bad_state`](crate::node::stats::SessionStats).
     BadState,
+    /// Inbound XK msg3 completed the handshake, but the initiator's
+    /// static key does not derive the source address the datagram
+    /// claimed — the peer is opening a session under another node's
+    /// address. Tracked via
+    /// [`SessionStats::addr_mismatch`](crate::node::stats::SessionStats).
+    AddrMismatch,
+    /// Inbound XK msg3 completed a responder-side rekey, but the
+    /// initiator's static key differs from the key the session was
+    /// established with — the rekey is not from the established peer.
+    /// Tracked via
+    /// [`SessionStats::rekey_key_mismatch`](crate::node::stats::SessionStats).
+    RekeyKeyMismatch,
 }
 
 /// MMP rejection reasons.

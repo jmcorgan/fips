@@ -32,6 +32,14 @@ pub struct SessionStats {
     /// before Established; SessionAck outside Initiating; SessionMsg3
     /// outside AwaitingMsg3).
     pub bad_state: u64,
+    /// Inbound XK msg3 whose initiator static key does not derive the
+    /// source address the datagram claimed. The half-open session is
+    /// dropped and no identity is registered.
+    pub addr_mismatch: u64,
+    /// Inbound rekey XK msg3 whose initiator static key differs from
+    /// the key the session was established with. The rekey is
+    /// abandoned and the existing session is left intact.
+    pub rekey_key_mismatch: u64,
 }
 
 impl SessionStats {
@@ -39,6 +47,8 @@ impl SessionStats {
         SessionStatsSnapshot {
             unknown_session: self.unknown_session,
             bad_state: self.bad_state,
+            addr_mismatch: self.addr_mismatch,
+            rekey_key_mismatch: self.rekey_key_mismatch,
         }
     }
 
@@ -46,6 +56,8 @@ impl SessionStats {
         match reason {
             SessionReject::UnknownSession => self.unknown_session += 1,
             SessionReject::BadState => self.bad_state += 1,
+            SessionReject::AddrMismatch => self.addr_mismatch += 1,
+            SessionReject::RekeyKeyMismatch => self.rekey_key_mismatch += 1,
         }
     }
 }
@@ -310,6 +322,8 @@ pub struct BloomStatsSnapshot {
 pub struct SessionStatsSnapshot {
     pub unknown_session: u64,
     pub bad_state: u64,
+    pub addr_mismatch: u64,
+    pub rekey_key_mismatch: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -364,6 +378,35 @@ mod tests {
         stats.record_reject(SessionReject::BadState);
         assert_eq!(stats.bad_state, 2);
         assert_eq!(stats.unknown_session, 0);
+    }
+
+    #[test]
+    fn session_stats_record_reject_addr_mismatch() {
+        let mut stats = SessionStats::default();
+        stats.record_reject(SessionReject::AddrMismatch);
+        stats.record_reject(SessionReject::AddrMismatch);
+        assert_eq!(stats.addr_mismatch, 2);
+        assert_eq!(stats.rekey_key_mismatch, 0);
+        assert_eq!(stats.unknown_session, 0);
+    }
+
+    #[test]
+    fn session_stats_record_reject_rekey_key_mismatch() {
+        let mut stats = SessionStats::default();
+        stats.record_reject(SessionReject::RekeyKeyMismatch);
+        assert_eq!(stats.rekey_key_mismatch, 1);
+        assert_eq!(stats.addr_mismatch, 0);
+    }
+
+    #[test]
+    fn session_stats_snapshot_carries_identity_binding_counters() {
+        let mut stats = SessionStats::default();
+        stats.record_reject(SessionReject::AddrMismatch);
+        stats.record_reject(SessionReject::RekeyKeyMismatch);
+        stats.record_reject(SessionReject::RekeyKeyMismatch);
+        let snap = stats.snapshot();
+        assert_eq!(snap.addr_mismatch, 1);
+        assert_eq!(snap.rekey_key_mismatch, 2);
     }
 
     #[test]

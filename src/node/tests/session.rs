@@ -8,7 +8,7 @@ use crate::node::tests::spanning_tree::{
     run_tree_test_with_mtus, run_tree_test_with_profiles,
     run_tree_test_with_profiles_leaf_smallest, verify_tree_convergence,
 };
-use crate::proto::fsp::SessionAck;
+use crate::proto::fsp::{SessionAck, SessionMsg3};
 use crate::proto::link::SessionDatagram;
 
 /// Populate all nodes' coordinate caches with each other's coords.
@@ -2749,4 +2749,224 @@ fn test_handle_path_mtu_notification_no_session_no_op() {
         node.path_mtu_lookup_get(&remote_fips).is_none(),
         "PathMtuNotification with no session must not touch path_mtu_lookup"
     );
+}
+
+// ============================================================================
+// Session identity binding: XX msg3 source address / static key
+// ============================================================================
+
+/// Helper: drive a full XX exchange against `responder_identity` and return
+/// the responder's half-completed handshake plus the initiator's msg3.
+///
+/// The msg3 is cryptographically valid for the responder and carries
+/// `initiator_identity`'s static key, which is exactly the shape of the
+/// defect: a peer that completes a real handshake while the datagram claims
+/// somebody else's source address.
+fn drive_xx_to_msg3(
+    initiator_identity: &Identity,
+    responder_identity: &Identity,
+) -> (crate::noise::HandshakeState, Vec<u8>) {
+    use crate::noise::HandshakeState;
+
+    let mut initiator = HandshakeState::new_initiator(initiator_identity.keypair());
+    let mut responder = HandshakeState::new_responder(responder_identity.keypair());
+
+    let mut init_epoch = [0u8; 8];
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut init_epoch);
+    initiator.set_local_epoch(init_epoch);
+    let mut resp_epoch = [0u8; 8];
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
+    responder.set_local_epoch(resp_epoch);
+
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+    let msg3 = initiator.write_message_3().unwrap();
+
+    (responder, msg3)
+}
+
+/// Helper: generate an identity whose full public key has odd parity.
+fn generate_odd_parity_identity() -> Identity {
+    loop {
+        let id = Identity::generate();
+        if id.pubkey_full().serialize()[0] == 0x03 {
+            return id;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_session_msg3_rejects_spoofed_source_address() {
+    let mut node = make_node();
+    let attacker = Identity::generate();
+    let victim = Identity::generate();
+    let victim_addr = *victim.node_addr();
+
+    let (responder, msg3) = drive_xx_to_msg3(&attacker, node.identity());
+
+    // Half-open session recorded under the victim's address, as
+    // handle_session_setup would have done from the claimed source.
+    let entry = crate::node::session::SessionEntry::new(
+        victim_addr,
+        node.identity().pubkey_full(),
+        EndToEndState::AwaitingMsg3(responder),
+        1000,
+        false,
+    );
+    node.sessions.insert(victim_addr, entry);
+
+    node.handle_session_payload(&victim_addr, &SessionMsg3::new(msg3).encode(), 1280, false)
+        .await;
+
+    assert_eq!(
+        node.session_count(),
+        0,
+        "session must not be installed under an address the peer's key does not derive"
+    );
+    assert_eq!(
+        node.identity_cache_len(),
+        0,
+        "identity cache must not be poisoned with the spoofed address"
+    );
+    assert_eq!(node.stats().session.addr_mismatch, 1);
+}
+
+#[tokio::test]
+async fn test_session_msg3_accepts_matching_source_address() {
+    let mut node = make_node();
+    let peer = Identity::generate();
+    let peer_addr = *peer.node_addr();
+
+    let (responder, msg3) = drive_xx_to_msg3(&peer, node.identity());
+
+    let entry = crate::node::session::SessionEntry::new(
+        peer_addr,
+        node.identity().pubkey_full(),
+        EndToEndState::AwaitingMsg3(responder),
+        1000,
+        false,
+    );
+    node.sessions.insert(peer_addr, entry);
+
+    node.handle_session_payload(&peer_addr, &SessionMsg3::new(msg3).encode(), 1280, false)
+        .await;
+
+    assert!(
+        node.sessions
+            .get(&peer_addr)
+            .is_some_and(|e| e.is_established()),
+        "an honest initiator using its own address must still establish"
+    );
+    assert_eq!(node.identity_cache_len(), 1);
+    assert_eq!(node.stats().session.addr_mismatch, 0);
+}
+
+#[tokio::test]
+async fn test_rekey_msg3_rejects_different_static_key() {
+    let mut node = make_node();
+    let legit = Identity::generate();
+    let attacker = Identity::generate();
+    let peer_addr = *legit.node_addr();
+
+    let session = make_noise_session(node.identity(), &legit);
+    let mut entry = crate::node::session::SessionEntry::new(
+        peer_addr,
+        legit.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+        true,
+    );
+    entry.mark_established(1000);
+
+    // Responder-side rekey armed, but driven by a different identity.
+    let (responder, msg3) = drive_xx_to_msg3(&attacker, node.identity());
+    entry.set_rekey_state(responder, false);
+    node.sessions.insert(peer_addr, entry);
+
+    node.handle_session_payload(&peer_addr, &SessionMsg3::new(msg3).encode(), 1280, false)
+        .await;
+
+    let entry = node
+        .sessions
+        .get(&peer_addr)
+        .expect("existing session must survive a spoofed rekey");
+    assert!(entry.is_established());
+    assert!(
+        entry.pending_new_session().is_none(),
+        "a rekey from a different static key must not become the pending session"
+    );
+    assert!(!entry.has_rekey_in_progress());
+    assert_eq!(node.stats().session.rekey_key_mismatch, 1);
+}
+
+#[tokio::test]
+async fn test_rekey_msg3_accepts_established_peer_key() {
+    let mut node = make_node();
+    let legit = Identity::generate();
+    let peer_addr = *legit.node_addr();
+
+    let session = make_noise_session(node.identity(), &legit);
+    let mut entry = crate::node::session::SessionEntry::new(
+        peer_addr,
+        legit.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+        true,
+    );
+    entry.mark_established(1000);
+
+    let (responder, msg3) = drive_xx_to_msg3(&legit, node.identity());
+    entry.set_rekey_state(responder, false);
+    node.sessions.insert(peer_addr, entry);
+
+    node.handle_session_payload(&peer_addr, &SessionMsg3::new(msg3).encode(), 1280, false)
+        .await;
+
+    let entry = node.sessions.get(&peer_addr).expect("session present");
+    assert!(entry.pending_new_session().is_some());
+    assert_eq!(node.stats().session.rekey_key_mismatch, 0);
+}
+
+#[tokio::test]
+async fn test_rekey_msg3_accepts_odd_parity_peer_stored_as_even() {
+    let mut node = make_node();
+    let legit = generate_odd_parity_identity();
+    let peer_addr = *legit.node_addr();
+
+    // The stored key is the even-parity synthesis an npub-sourced peer
+    // identity produces; the peer's real key has odd parity. This must
+    // still be accepted, or every peer-initiated rekey against roughly
+    // half of all peers would be rejected.
+    let stored_pubkey = crate::identity::PeerIdentity::from_pubkey(legit.pubkey()).pubkey_full();
+    assert_ne!(
+        stored_pubkey,
+        legit.pubkey_full(),
+        "test fixture must actually differ in parity"
+    );
+
+    let session = make_noise_session(node.identity(), &legit);
+    let mut entry = crate::node::session::SessionEntry::new(
+        peer_addr,
+        stored_pubkey,
+        EndToEndState::Established(session),
+        1000,
+        true,
+    );
+    entry.mark_established(1000);
+
+    let (responder, msg3) = drive_xx_to_msg3(&legit, node.identity());
+    entry.set_rekey_state(responder, false);
+    node.sessions.insert(peer_addr, entry);
+
+    node.handle_session_payload(&peer_addr, &SessionMsg3::new(msg3).encode(), 1280, false)
+        .await;
+
+    let entry = node.sessions.get(&peer_addr).expect("session present");
+    assert!(
+        entry.pending_new_session().is_some(),
+        "a parity-normalized stored key must not reject a legitimate rekey"
+    );
+    assert_eq!(node.stats().session.rekey_key_mismatch, 0);
 }
