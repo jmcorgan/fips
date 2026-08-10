@@ -6,8 +6,6 @@
 //! 2. **ActivePeer** - Authenticated phase, after successful Noise handshake
 
 mod active;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) mod connected_udp;
 pub(crate) mod machine;
 
 pub use active::{ActivePeer, ConnectivityState};

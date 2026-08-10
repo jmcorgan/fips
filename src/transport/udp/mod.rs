@@ -7,10 +7,8 @@ use super::{
     TransportId, TransportState, TransportType,
 };
 pub(crate) mod io;
-#[cfg(target_os = "macos")]
-pub(crate) mod sockopts_macos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use io::open_connected_fd;
+pub(crate) use io::{ConnectedPeerSocket, PeerRecvDrain, open_connected_fd};
 mod stats;
 use super::resolve_socket_addr;
 use crate::config::UdpConfig;

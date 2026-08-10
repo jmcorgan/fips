@@ -9,7 +9,7 @@
 //!
 //! This module owns the drain side: spawn one OS thread per connected
 //! socket, drain into a fixed-size batch (`recvmmsg(2)` on Linux,
-//! repeated nonblocking `recv(2)` on Darwin), push each packet into
+//! `recvmsg_x(2)` on Darwin), push each packet into
 //! the existing `packet_tx` (the same channel that the wildcard listen
 //! socket feeds), and exit cleanly when the parent signals shutdown
 //! via a self-pipe.
@@ -334,9 +334,9 @@ fn drain_packets(fd: RawFd, backing: &mut [Vec<u8>], lens: &mut [usize]) -> io::
     recvmmsg_drain(fd, backing, lens)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn drain_packets(fd: RawFd, backing: &mut [Vec<u8>], lens: &mut [usize]) -> io::Result<usize> {
-    recv_drain(fd, backing, lens)
+    crate::transport::udp::io::recvmsg_x_drain(fd, backing, lens)
 }
 
 /// One-shot `recvmmsg(2)` on a non-blocking fd. Returns the number of
@@ -389,45 +389,66 @@ fn recvmmsg_drain(fd: RawFd, backing: &mut [Vec<u8>], lens: &mut [usize]) -> io:
     Ok(count)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn recv_drain(fd: RawFd, backing: &mut [Vec<u8>], lens: &mut [usize]) -> io::Result<usize> {
-    let n = backing.len().min(lens.len());
-    if n == 0 {
-        return Ok(0);
-    }
-
-    let mut count = 0usize;
-    while count < n {
-        let r = unsafe {
-            libc::recv(
-                fd,
-                backing[count].as_mut_ptr() as *mut libc::c_void,
-                backing[count].len(),
-                0,
-            )
-        };
-        if r < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            if err.kind() == io::ErrorKind::WouldBlock && count > 0 {
-                return Ok(count);
-            }
-            return Err(err);
-        }
-        lens[count] = r as usize;
-        count += 1;
-    }
-    Ok(count)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::UdpSocket;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recvmsg_x_drain_receives_connected_socket_burst() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        receiver
+            .connect(sender.local_addr().expect("sender address"))
+            .expect("connect receiver");
+        sender
+            .connect(receiver.local_addr().expect("receiver address"))
+            .expect("connect sender");
+        receiver
+            .set_nonblocking(true)
+            .expect("set receiver nonblocking");
+
+        const PACKETS: usize = 40;
+        for sequence in 0..PACKETS as u8 {
+            sender
+                .send(&[sequence, 0xAA, 0xBB, 0xCC])
+                .expect("send burst packet");
+        }
+
+        let mut backing: Vec<Vec<u8>> = (0..PACKETS).map(|_| vec![0u8; 64]).collect();
+        let mut lens = [0usize; PACKETS];
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut count = 0;
+        while count < PACKETS {
+            match crate::transport::udp::io::recvmsg_x_drain(
+                receiver.as_raw_fd(),
+                &mut backing[count..],
+                &mut lens[count..],
+            ) {
+                Ok(received) => count += received,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("recvmsg_x burst failed after {count} packets: {error}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline || count == PACKETS,
+                "timed out after receiving {count} of {PACKETS} packets"
+            );
+        }
+
+        assert_eq!(count, PACKETS);
+        for sequence in 0..PACKETS {
+            assert_eq!(lens[sequence], 4);
+            assert_eq!(backing[sequence][0], sequence as u8);
+        }
+    }
 
     /// End-to-end: open a ConnectedPeerSocket, spawn a drain thread
     /// on it, send packets at it from a remote, verify they land in

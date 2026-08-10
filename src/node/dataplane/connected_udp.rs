@@ -149,7 +149,7 @@ impl Node {
             send_buf,
         )
         .map_err(|e| format!("open_connected_fd: {e}"))?;
-        let socket = std::sync::Arc::new(crate::peer::connected_udp::ConnectedPeerSocket::from_fd(
+        let socket = std::sync::Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
             owned,
             peer_socket_addr,
             local_addr,
@@ -157,7 +157,7 @@ impl Node {
 
         // Spawn the drain thread. It feeds `packet_tx` exactly like
         // the wildcard listen socket — rx_loop dispatches identically.
-        let drain = crate::peer::connected_udp::PeerRecvDrain::spawn(
+        let drain = crate::transport::udp::PeerRecvDrain::spawn(
             socket.clone(),
             transport_id,
             peer_socket_addr,
