@@ -1,23 +1,18 @@
-//! Micro-benchmark quantifying the per-forwarded-packet heap-allocation cost
-//! of the routing next-hop candidate-assembly path.
+//! Micro-benchmark quantifying the per-forwarded-packet cost of routing
+//! next-hop selection before and after candidate assembly was fused.
 //!
-//! `find_next_hop` runs once per forwarded data packet. Its sans-IO core
-//! assembles a `Vec<Candidate>` by enumerating every peer through the
-//! `RoutingView` seam: `peer_addrs()` materializes a `Vec<NodeAddr>` of all
-//! peers, the survivors are snapshotted (each cloning its `TreeCoordinate`),
-//! and the result is collected into a second `Vec`. This bench measures that
-//! per-call allocation against a fused zero-alloc reference that iterates the
-//! peer map directly and borrows coordinates instead of cloning.
+//! `find_next_hop` runs once per forwarded data packet. The former path
+//! materialized a `Vec<NodeAddr>`, cloned each surviving `TreeCoordinate` into
+//! a second `Vec<Candidate>`, then selected from that snapshot. The current
+//! path visits borrowed peers, filters and selects inline, and borrows
+//! coordinates. This bench retains the former implementation as a baseline
+//! and measures both paths in the same process.
 //!
-//! Visibility caveat: the production `routing_candidates` / `select_best_candidate`
-//! / `RoutingView` / `Candidate` are `pub(crate)` (src/proto/routing/core.rs)
-//! and are not re-exported at the crate root, so an external bench crate cannot
-//! name them. Rather than change production visibility, this file reproduces
-//! that path verbatim over the real public `NodeAddr` / `TreeCoordinate` /
-//! `CoordEntry` / `BloomFilter` types with the same iterator chain and the same
-//! `HashMap`-backed view the shell uses (src/node/mod.rs NodeRoutingView). The
-//! allocation behavior is therefore identical to production by construction;
-//! only the symbol identity differs.
+//! Visibility caveat: the production selector and `RoutingView` are
+//! `pub(crate)` and are not re-exported at the crate root, so an external bench
+//! crate cannot name them. Rather than widen production visibility, this file
+//! mirrors both implementations over the real public routing value types and
+//! the same `HashMap`-backed shape used by `NodeRoutingView`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
@@ -65,9 +60,9 @@ const REACH_DENOMINATOR: usize = 2;
 const COORD_DEPTH: usize = 8;
 
 // ---------------------------------------------------------------------------
-// Reproduction of the pub(crate) routing seam (src/proto/routing/core.rs).
+// Former allocating routing seam, retained as the before baseline.
 // ---------------------------------------------------------------------------
-trait RoutingView {
+trait FormerRoutingView {
     fn peer_addrs(&self) -> Vec<NodeAddr>;
     fn peer_may_reach(&self, peer: &NodeAddr, dest: &NodeAddr) -> bool;
     fn peer_can_send(&self, peer: &NodeAddr) -> bool;
@@ -75,20 +70,20 @@ trait RoutingView {
     fn peer_coords(&self, peer: &NodeAddr) -> Option<TreeCoordinate>;
 }
 
-struct Candidate {
+struct FormerCandidate {
     addr: NodeAddr,
     can_send: bool,
     link_cost: f64,
     coords: Option<TreeCoordinate>,
 }
 
-/// Verbatim from `routing::routing_candidates` (core.rs). Allocates the
-/// `peer_addrs` Vec, clones each survivor's coords, and collects into a Vec.
-fn routing_candidates(rv: &impl RoutingView, dest: &NodeAddr) -> Vec<Candidate> {
+/// Former `routing::routing_candidates`. Allocates the `peer_addrs` Vec,
+/// clones each survivor's coords, and collects into a second Vec.
+fn former_routing_candidates(rv: &impl FormerRoutingView, dest: &NodeAddr) -> Vec<FormerCandidate> {
     rv.peer_addrs()
         .into_iter()
         .filter(|peer| rv.peer_may_reach(peer, dest))
-        .map(|peer| Candidate {
+        .map(|peer| FormerCandidate {
             can_send: rv.peer_can_send(&peer),
             link_cost: rv.peer_link_cost(&peer),
             coords: rv.peer_coords(&peer),
@@ -97,14 +92,14 @@ fn routing_candidates(rv: &impl RoutingView, dest: &NodeAddr) -> Vec<Candidate> 
         .collect()
 }
 
-/// Verbatim from `routing::select_best_candidate` (core.rs). Pure, no alloc.
-fn select_best_candidate(
-    candidates: &[Candidate],
+/// Former `routing::select_best_candidate`. Pure itself; consumes the snapshot.
+fn former_select_best_candidate(
+    candidates: &[FormerCandidate],
     dest_coords: &TreeCoordinate,
     my_coords: &TreeCoordinate,
 ) -> Option<NodeAddr> {
     let my_distance = my_coords.distance_to(dest_coords);
-    let mut best: Option<(&Candidate, f64, usize)> = None;
+    let mut best: Option<(&FormerCandidate, f64, usize)> = None;
     for candidate in candidates {
         if !candidate.can_send {
             continue;
@@ -149,7 +144,7 @@ struct BenchView {
     coords: HashMap<NodeAddr, TreeCoordinate>,
 }
 
-impl RoutingView for BenchView {
+impl FormerRoutingView for BenchView {
     fn peer_addrs(&self) -> Vec<NodeAddr> {
         self.peers.keys().copied().collect()
     }
@@ -167,10 +162,10 @@ impl RoutingView for BenchView {
     }
 }
 
-/// Zero-alloc reference: what an iterator/visitor seam would do. Iterates the
-/// peer map directly, fuses the may_reach + can_send filters, borrows coords
-/// instead of cloning, and tracks the best hop inline. No Vec, no coord clone.
-fn resolve_next_hop_zeroalloc(
+/// Current borrowed selector. Mirrors the production visitor seam after
+/// monomorphization: peer facts come from the map entry, coordinates are
+/// borrowed from the tree-state map, and the winner is tracked inline.
+fn select_best_candidate_current(
     view: &BenchView,
     dest: &NodeAddr,
     dest_coords: &TreeCoordinate,
@@ -310,19 +305,19 @@ fn report_allocs() {
     println!("\n=== allocations per call (heap alloc ops: alloc+alloc_zeroed+realloc) ===");
     println!(
         "{:>6} {:>10} {:>16} {:>16}",
-        "peers", "survivors", "current/call", "zero-alloc/call"
+        "peers", "survivors", "former/call", "current/call"
     );
     for &n in &PEER_COUNTS {
         let s = Scenario::new(n);
         let survivors = s.survivors();
+        let former = count_allocs(ITERS, || {
+            let candidates = former_routing_candidates(&s.view, &s.dest);
+            former_select_best_candidate(&candidates, &s.dest_coords, &s.my_coords)
+        });
         let current = count_allocs(ITERS, || {
-            let cands = routing_candidates(&s.view, &s.dest);
-            select_best_candidate(&cands, &s.dest_coords, &s.my_coords)
+            select_best_candidate_current(&s.view, &s.dest, &s.dest_coords, &s.my_coords)
         });
-        let zero = count_allocs(ITERS, || {
-            resolve_next_hop_zeroalloc(&s.view, &s.dest, &s.dest_coords, &s.my_coords)
-        });
-        println!("{n:>6} {survivors:>10} {current:>16.2} {zero:>16.2}");
+        println!("{n:>6} {survivors:>10} {former:>16.2} {current:>16.2}");
     }
     println!();
 }
@@ -333,19 +328,19 @@ fn bench_next_hop(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_next_hop");
     for &n in &PEER_COUNTS {
         let scenario = Scenario::new(n);
-        group.bench_with_input(BenchmarkId::new("current_alloc", n), &n, |b, _| {
+        group.bench_with_input(BenchmarkId::new("former_allocating", n), &n, |b, _| {
             b.iter(|| {
-                let cands = routing_candidates(&scenario.view, &scenario.dest);
-                black_box(select_best_candidate(
-                    &cands,
+                let candidates = former_routing_candidates(&scenario.view, &scenario.dest);
+                black_box(former_select_best_candidate(
+                    &candidates,
                     &scenario.dest_coords,
                     &scenario.my_coords,
                 ))
             });
         });
-        group.bench_with_input(BenchmarkId::new("zero_alloc_ref", n), &n, |b, _| {
+        group.bench_with_input(BenchmarkId::new("current_borrowed", n), &n, |b, _| {
             b.iter(|| {
-                black_box(resolve_next_hop_zeroalloc(
+                black_box(select_best_candidate_current(
                     &scenario.view,
                     &scenario.dest,
                     &scenario.dest_coords,

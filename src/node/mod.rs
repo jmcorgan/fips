@@ -2837,26 +2837,24 @@ impl Node {
 
         // 3. Bloom filter candidates — requires dest_coords for loop-free selection.
         //    If no candidate is strictly closer, fall through to tree routing.
-        //    The sans-IO core assembles the candidate snapshot over the
-        //    `RoutingView` seam (enumerate peers, apply the bloom `may_reach`
-        //    filter, snapshot each), then picks the winner; the shell supplies
-        //    only the raw per-peer reads.
-        let candidates = {
+        //    The sans-IO core enumerates borrowed peers over the `RoutingView`
+        //    seam, applies the bloom/send/progress filters, and tracks the
+        //    winner inline; the shell supplies only raw per-peer reads.
+        let next_hop = {
             let view = NodeRoutingView {
                 coord_cache: &self.coord_cache,
                 peers: &self.peers,
                 tree_state: &self.tree_state,
                 congested: false,
             };
-            routing::routing_candidates(&view, dest_node_addr)
-        };
-        if !candidates.is_empty()
-            && let Some(next_hop) = routing::select_best_candidate(
-                &candidates,
+            routing::select_best_candidate(
+                &view,
+                dest_node_addr,
                 &dest_coords,
                 self.tree_state.my_coords(),
             )
-        {
+        };
+        if let Some(next_hop) = next_hop {
             return self.peers.get(&next_hop);
         }
 
@@ -3224,17 +3222,16 @@ impl Node {
 
 /// Shell-side [`routing::RoutingView`] seam over live `Node` state — the sole
 /// routing read adapter the shell retains. It hands the sans-IO routing core
-/// raw per-peer reads (enumeration plus `may_reach` / `can_send` / `link_cost`
-/// / `coords`) so the candidate assembly, selection, and error synthesis all
-/// live in `proto::routing::core`; no routing decision or assembly logic
-/// remains here.
+/// borrowed peers plus raw `may_reach` / `can_send` / `link_cost` / `coords`
+/// reads so selection and error synthesis live in `proto::routing::core`; no
+/// routing decision logic remains here.
 ///
 /// Field-narrowed to `coord_cache` + `peers` + `tree_state` (never `&Node`
 /// whole) so it borrows disjointly from `&mut self.routing` on the
 /// forward/synth path, where the handler also holds the mutable `Router`.
 ///
 /// Two call sites:
-/// - `find_next_hop` builds it to assemble bloom candidates via the `peer_*`
+/// - `find_next_hop` builds it to select a bloom candidate via the `peer_*`
 ///   reads; it never queries `is_congested`, so it leaves `congested` false.
 /// - `handle_session_datagram` builds it for `Router::route` / `synth_*`,
 ///   which read `is_congested` (precomputed once for the resolved next hop)
@@ -3247,6 +3244,11 @@ pub(in crate::node) struct NodeRoutingView<'a> {
 }
 
 impl routing::RoutingView for NodeRoutingView<'_> {
+    type Peer<'a>
+        = (&'a NodeAddr, &'a ActivePeer)
+    where
+        Self: 'a;
+
     fn is_congested(&self, _next_hop: &NodeAddr) -> bool {
         self.congested
     }
@@ -3255,32 +3257,34 @@ impl routing::RoutingView for NodeRoutingView<'_> {
         self.coord_cache.get(dest, now_ms).cloned()
     }
 
-    fn peer_addrs(&self) -> Vec<NodeAddr> {
-        self.peers.keys().copied().collect()
+    fn for_each_peer<'a>(&'a self, mut visitor: impl FnMut(Self::Peer<'a>)) {
+        for peer in self.peers {
+            visitor(peer);
+        }
     }
 
-    fn peer_may_reach(&self, peer: &NodeAddr, dest: &NodeAddr) -> bool {
-        self.peers.get(peer).is_some_and(|p| p.may_reach(dest))
+    fn peer_addr<'a>(&'a self, peer: Self::Peer<'a>) -> NodeAddr {
+        *peer.0
     }
 
-    fn peer_can_send(&self, peer: &NodeAddr) -> bool {
-        self.peers.get(peer).is_some_and(|p| p.can_send())
+    fn peer_may_reach<'a>(&'a self, peer: Self::Peer<'a>, dest: &NodeAddr) -> bool {
+        peer.1.may_reach(dest)
     }
 
-    fn peer_link_cost(&self, peer: &NodeAddr) -> f64 {
-        self.peers
-            .get(peer)
-            .map_or(f64::INFINITY, |p| p.link_cost())
+    fn peer_can_send<'a>(&'a self, peer: Self::Peer<'a>) -> bool {
+        peer.1.can_send()
     }
 
-    fn peer_coords(&self, peer: &NodeAddr) -> Option<TreeCoordinate> {
-        self.tree_state.peer_coords(peer).cloned()
+    fn peer_link_cost<'a>(&'a self, peer: Self::Peer<'a>) -> f64 {
+        peer.1.link_cost()
     }
 
-    fn peer_is_full(&self, peer: &NodeAddr) -> bool {
-        self.peers
-            .get(peer)
-            .is_some_and(|p| p.peer_profile() == NodeProfile::Full)
+    fn peer_coords<'a>(&'a self, peer: Self::Peer<'a>) -> Option<&'a TreeCoordinate> {
+        self.tree_state.peer_coords(peer.0)
+    }
+
+    fn peer_is_full<'a>(&'a self, peer: Self::Peer<'a>) -> bool {
+        peer.1.peer_profile() == NodeProfile::Full
     }
 }
 

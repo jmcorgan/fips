@@ -7,14 +7,12 @@
 //! actual encrypted sends, metrics, and logging). No I/O, no clock, no
 //! metrics, no logging here.
 //!
-//! This module also holds the pure candidate assembly ([`routing_candidates`])
-//! and the hop-selection / route-classification helpers
-//! ([`select_best_candidate`], [`classify_forward`]). The assembly enumerates
-//! peers through the [`RoutingView`] seam, applies the bloom `may_reach`
-//! filter, and snapshots each survivor into a [`Candidate`]; the shell hands
-//! over only raw per-peer reads (enumeration plus `may_reach` / `can_send` /
-//! `link_cost` / `coords`). Selection and classification then consume the
-//! assembled set. All routing narrowing and decision logic lives here.
+//! This module also holds the pure hop-selection / route-classification helpers
+//! ([`select_best_candidate`], [`classify_forward`]). Selection enumerates
+//! borrowed peers through the [`RoutingView`] seam, applies the bloom
+//! `may_reach` and send/progress filters, and tracks the winner inline. The
+//! shell hands over only raw per-peer reads; all routing narrowing and decision
+//! logic lives here.
 
 use super::state::Router;
 use super::wire::{CoordsRequired, MtuExceeded, PathBroken};
@@ -28,6 +26,12 @@ use crate::{NodeAddr, TreeCoordinate};
 /// `proto` free of any dependency on `node` and lets the core be unit-tested
 /// with a mock.
 pub(crate) trait RoutingView {
+    /// Borrowed peer handle exposed while enumerating this view. The concrete
+    /// shell type stays opaque to the routing core.
+    type Peer<'a>: Copy
+    where
+        Self: 'a;
+
     /// Is the outgoing link toward `next_hop` congested (ECN local signal)?
     fn is_congested(&self, next_hop: &NodeAddr) -> bool;
     /// Cached destination coordinates for `dest`, if any (read-only lookup).
@@ -36,23 +40,23 @@ pub(crate) trait RoutingView {
     /// [`Router::synth_routing_error`].
     fn cached_coords(&self, dest: &NodeAddr, now_ms: u64) -> Option<TreeCoordinate>;
 
-    /// Node addresses of every currently-active peer — the raw enumeration the
-    /// candidate assembly iterates. No filtering or ordering is applied here;
-    /// [`routing_candidates`] applies the bloom `may_reach` narrowing in core.
-    fn peer_addrs(&self) -> Vec<NodeAddr>;
+    /// Visit every currently-active peer without filtering or ordering.
+    fn for_each_peer<'a>(&'a self, visitor: impl FnMut(Self::Peer<'a>));
+    /// Node address of a borrowed peer.
+    fn peer_addr<'a>(&'a self, peer: Self::Peer<'a>) -> NodeAddr;
     /// Does `peer`'s bloom filter indicate it may reach `dest`? The raw
-    /// per-peer predicate the core assembly filters candidates on.
-    fn peer_may_reach(&self, peer: &NodeAddr, dest: &NodeAddr) -> bool;
+    /// per-peer predicate the core filters candidates on.
+    fn peer_may_reach<'a>(&'a self, peer: Self::Peer<'a>, dest: &NodeAddr) -> bool;
     /// Can `peer`'s session currently carry a forward?
-    fn peer_can_send(&self, peer: &NodeAddr) -> bool;
+    fn peer_can_send<'a>(&'a self, peer: Self::Peer<'a>) -> bool;
     /// `peer`'s outgoing link cost (lower is preferred).
-    fn peer_link_cost(&self, peer: &NodeAddr) -> f64;
+    fn peer_link_cost<'a>(&'a self, peer: Self::Peer<'a>) -> f64;
     /// `peer`'s tree coordinates, if known.
-    fn peer_coords(&self, peer: &NodeAddr) -> Option<TreeCoordinate>;
+    fn peer_coords<'a>(&'a self, peer: Self::Peer<'a>) -> Option<&'a TreeCoordinate>;
     /// Does `peer` advertise the Full node profile? Only Full peers carry
-    /// transit bloom filters, so the candidate assembly narrows to them
-    /// alongside the `may_reach` filter.
-    fn peer_is_full(&self, peer: &NodeAddr) -> bool;
+    /// transit bloom filters, so routing narrows to them alongside the
+    /// `may_reach` filter.
+    fn peer_is_full<'a>(&'a self, peer: Self::Peer<'a>) -> bool;
 }
 
 /// A next hop the shell resolved for a transit forward: the peer address and
@@ -273,102 +277,61 @@ pub(crate) enum RouteClass {
     DirectPeer,
 }
 
-/// A bloom-filter routing candidate, snapshotted by [`routing_candidates`]
-/// from the per-peer reads the [`RoutingView`] seam exposes.
+/// Select the best next hop from the active peers that may reach `dest`.
 ///
-/// The assembly applies the bloom `may_reach` narrowing before building each
-/// snapshot, so [`select_best_candidate`] is a pure consumer of an
-/// already-narrowed set and names no shell peer type.
-pub(crate) struct Candidate {
-    /// The candidate peer's node address.
-    pub addr: NodeAddr,
-    /// Whether the peer's session can currently carry a forward.
-    pub can_send: bool,
-    /// The outgoing link cost (lower is preferred).
-    pub link_cost: f64,
-    /// The candidate's tree coordinates, if known.
-    pub coords: Option<TreeCoordinate>,
-}
-
-/// Assemble the bloom-filter routing candidates toward `dest`.
-///
-/// Enumerates every peer through the [`RoutingView`] seam, keeps only
-/// Full-profile peers whose bloom `may_reach` the destination, and snapshots
-/// each surviving peer's send-eligibility, link cost, and tree coordinates
-/// into a [`Candidate`]. Pure over the seam's
-/// primitive reads — the shell hands over raw per-peer data only, so all
-/// narrowing and snapshotting happens here and [`select_best_candidate`]
-/// consumes an already-assembled set. Candidate order follows the seam's
-/// enumeration, which the selection ordering renders immaterial (it breaks
-/// ties deterministically on `node_addr`).
-pub(crate) fn routing_candidates(rv: &impl RoutingView, dest: &NodeAddr) -> Vec<Candidate> {
-    rv.peer_addrs()
-        .into_iter()
-        .filter(|peer| rv.peer_may_reach(peer, dest) && rv.peer_is_full(peer))
-        .map(|peer| Candidate {
-            can_send: rv.peer_can_send(&peer),
-            link_cost: rv.peer_link_cost(&peer),
-            coords: rv.peer_coords(&peer),
-            addr: peer,
-        })
-        .collect()
-}
-
-/// Select the best next hop from a set of bloom-filter candidates.
-///
-/// Uses each candidate's tree-coordinate distance to the destination as the
-/// primary metric (after link cost). Only peers strictly closer to the
-/// destination than we are (`my_coords`) are eligible — the self-distance
-/// check that prevents routing loops.
+/// Enumerates borrowed peers through [`RoutingView`], applies the bloom and
+/// send-eligibility filters, and tracks the best hop inline without allocating
+/// candidate vectors or cloning coordinates. Only peers strictly closer to the
+/// destination than we are (`my_coords`) are eligible — the self-distance check
+/// that prevents routing loops.
 ///
 /// Ordering: `(link_cost, distance_to_dest, node_addr)`. Returns the winning
 /// peer's address, or `None` when no candidate is send-ready and strictly
 /// closer to the destination than us.
 pub(crate) fn select_best_candidate(
-    candidates: &[Candidate],
+    rv: &impl RoutingView,
+    dest: &NodeAddr,
     dest_coords: &TreeCoordinate,
     my_coords: &TreeCoordinate,
 ) -> Option<NodeAddr> {
     let my_distance = my_coords.distance_to(dest_coords);
 
-    let mut best: Option<(&Candidate, f64, usize)> = None;
+    let mut best: Option<(NodeAddr, f64, usize)> = None;
 
-    for candidate in candidates {
-        if !candidate.can_send {
-            continue;
+    rv.for_each_peer(|peer| {
+        if !rv.peer_may_reach(peer, dest) || !rv.peer_is_full(peer) || !rv.peer_can_send(peer) {
+            return;
         }
 
-        let cost = candidate.link_cost;
+        let addr = rv.peer_addr(peer);
+        let cost = rv.peer_link_cost(peer);
 
-        let dist = candidate
-            .coords
-            .as_ref()
+        let dist = rv
+            .peer_coords(peer)
             .map(|pc| pc.distance_to(dest_coords))
             .unwrap_or(usize::MAX);
 
         // Self-distance check: only consider peers strictly closer
         // to the destination than we are (prevents routing loops)
         if dist >= my_distance {
-            continue;
+            return;
         }
 
         let dominated = match &best {
             None => true,
-            Some((_, best_cost, best_dist)) => {
+            Some((best_addr, best_cost, best_dist)) => {
                 cost < *best_cost
                     || (cost == *best_cost && dist < *best_dist)
-                    || (cost == *best_cost
-                        && dist == *best_dist
-                        && candidate.addr < best.as_ref().unwrap().0.addr)
+                    || (cost == *best_cost && dist == *best_dist && addr < *best_addr)
             }
         };
 
         if dominated {
-            best = Some((candidate, cost, dist));
+            best = Some((addr, cost, dist));
         }
-    }
+    });
 
-    best.map(|(candidate, _, _)| candidate.addr)
+    best.map(|(addr, _, _)| addr)
 }
 
 /// Classify a transit forward by route class from tree coordinates.

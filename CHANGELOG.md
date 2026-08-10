@@ -168,6 +168,8 @@ with v0.4.x or earlier peers.
 - Connected UDP peer drains now batch macOS receives with `recvmsg_x(2)`,
   matching the wildcard UDP receive path instead of issuing one `recv(2)`
   syscall per queued datagram.
+- Routing next-hop selection now visits borrowed peers and coordinates instead
+  of allocating candidate snapshots for each forwarded packet.
 
 - Inbound msg1 is classified before it is rate limited, and rekey or restart
   msg1 arriving on a link belonging to a promoted peer now draws on its own

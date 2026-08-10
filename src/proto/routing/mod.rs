@@ -7,10 +7,10 @@
 //! - `core.rs` — the `RoutingView` read-seam trait, the `NextHop` /
 //!   `RouteOutcome` types, `Router::route`, the pure transit-forward
 //!   decision (local-vs-forward, transit TTL, path-MTU min-fold, ECN CE), and the
-//!   pure candidate assembly + hop-selection / route-classification helpers
-//!   (`Candidate`, `RouteClass`, `routing_candidates`, `select_best_candidate`,
-//!   `classify_forward`). The assembly reads raw per-peer data through the
-//!   `RoutingView` seam; the shell keeps only the seam impl.
+//!   pure hop-selection / route-classification helpers (`RouteClass`,
+//!   `select_best_candidate`, `classify_forward`). Selection reads borrowed
+//!   per-peer data through the `RoutingView` seam; the shell keeps only the seam
+//!   impl.
 //! - `state.rs` — `Router`, the routing-subsystem state owned by `Node`.
 //! - `limits.rs` — the routing error-signal rate limiter.
 //! - `wire.rs` — the routing error-signal PDUs (`CoordsRequired`,
@@ -27,7 +27,7 @@ mod tests;
 
 pub(crate) use core::{
     DropReason, NextHop, RouteAction, RouteClass, RouteOutcome, RoutingView, classify_forward,
-    routing_candidates, select_best_candidate,
+    select_best_candidate,
 };
 pub(crate) use limits::RoutingErrorRateLimiter;
 pub(crate) use state::Router;
