@@ -725,6 +725,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the tighter value, so repeated promotion does not reset discovery, and
   a destination with no prior seed is unchanged.
 
+- An inbound IPv6 source address no longer loses its scope. Converting a raw
+  `sockaddr` on receive dropped `sin6_scope_id`, and a link-local source
+  (`fe80::/10`) identifies a host only together with its interface scope,
+  because the same address may exist on several interfaces. The failure was
+  silent rather than loud: the address parsed, it looked correct in a log
+  line, and only the reply failed. On a link where every address is
+  link-local, a Wi-Fi Aware data path for instance, that stalled the Noise
+  handshake. msg1 was sent to a scoped address and arrived, the peer replied,
+  and msg2's source was recorded with scope 0 and could not be routed back, so
+  msg1 retried indefinitely with nothing reported. The conversion is shared by
+  all three Unix receive paths, the single-packet `recv_from`, the Linux
+  `recvmmsg` batch and the Darwin `recvmsg_x` batch, so one fix covers each.
+  Sources outside the link-local range carry scope 0, for which the scoped and
+  unscoped forms are identical, so nothing else changes.
+
 ### Security
 
 - The influence a remote party has over path MTU is now bounded, and the

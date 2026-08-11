@@ -377,11 +377,111 @@ pub(super) fn sockaddr_to_socket_addr(
                 unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
             let ip = std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr);
             let port = u16::from_be(addr.sin6_port);
-            Ok(SocketAddr::from((ip, port)))
+            // Carry `sin6_scope_id` through. A link-local source (fe80::/10)
+            // identifies a host only together with its interface scope — the
+            // same address can be present on several interfaces — so an
+            // address parsed without it cannot be replied to. Sources outside
+            // the link-local range carry scope 0, for which this is identical
+            // to the unscoped form.
+            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+                ip,
+                port,
+                0,
+                addr.sin6_scope_id,
+            )))
         }
         family => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("unsupported address family: {}", family),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sockaddr_to_socket_addr;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// Build an `AF_INET6` `sockaddr_storage` the way the kernel fills one in
+    /// on receive: network-order port, raw address bytes, host-order scope.
+    fn sockaddr_v6(ip: Ipv6Addr, port: u16, scope_id: u32) -> libc::sockaddr_storage {
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        // SAFETY: `sockaddr_storage` is defined to be large enough for, and
+        // aligned for, every concrete `sockaddr_*`; we write the `AF_INET6`
+        // variant and then tag `ss_family` to match.
+        let addr = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in6) };
+        addr.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        addr.sin6_port = port.to_be();
+        addr.sin6_addr = libc::in6_addr {
+            s6_addr: ip.octets(),
+        };
+        addr.sin6_scope_id = scope_id;
+        storage
+    }
+
+    fn sockaddr_v4(ip: Ipv4Addr, port: u16) -> libc::sockaddr_storage {
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        // SAFETY: as above, for the `AF_INET` variant.
+        let addr = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in) };
+        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+        addr.sin_port = port.to_be();
+        addr.sin_addr = libc::in_addr {
+            s_addr: u32::from(ip).to_be(),
+        };
+        storage
+    }
+
+    /// The regression this function exists to prevent: a link-local source is
+    /// routable only with its interface scope, so dropping `sin6_scope_id`
+    /// leaves an address that cannot be replied to. Every address on a Wi-Fi
+    /// Aware NDP interface is link-local, so losing it there stalls the Noise
+    /// handshake — msg1 arrives, msg2 has nowhere to go.
+    #[test]
+    fn link_local_source_keeps_its_scope_id() {
+        let ip: Ipv6Addr = "fe80::1".parse().unwrap();
+        let storage = sockaddr_v6(ip, 4871, 42);
+
+        match sockaddr_to_socket_addr(&storage).expect("AF_INET6 converts") {
+            SocketAddr::V6(addr) => {
+                assert_eq!(*addr.ip(), ip);
+                assert_eq!(addr.port(), 4871);
+                assert_eq!(addr.scope_id(), 42, "scope id must survive conversion");
+            }
+            other => panic!("expected V6, got {other:?}"),
+        }
+    }
+
+    /// A scoped address is not equal to its unscoped twin, which is precisely
+    /// why the bug was silent: both parse, both look right in a log line, and
+    /// only the reply fails.
+    #[test]
+    fn scoped_and_unscoped_addresses_are_distinct() {
+        let ip: Ipv6Addr = "fe80::1".parse().unwrap();
+        let scoped = sockaddr_to_socket_addr(&sockaddr_v6(ip, 4871, 42)).unwrap();
+        let unscoped = sockaddr_to_socket_addr(&sockaddr_v6(ip, 4871, 0)).unwrap();
+        assert_ne!(scoped, unscoped);
+    }
+
+    /// Sources outside the link-local range carry scope 0, and must convert
+    /// exactly as they did before.
+    #[test]
+    fn global_v6_source_is_unchanged() {
+        let ip: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let addr = sockaddr_to_socket_addr(&sockaddr_v6(ip, 4871, 0)).unwrap();
+        assert_eq!(addr, SocketAddr::from((ip, 4871)));
+    }
+
+    #[test]
+    fn v4_source_is_unchanged() {
+        let ip = Ipv4Addr::new(192, 168, 8, 238);
+        let addr = sockaddr_to_socket_addr(&sockaddr_v4(ip, 2121)).unwrap();
+        assert_eq!(addr, SocketAddr::from((ip, 2121)));
+    }
+
+    #[test]
+    fn unsupported_family_is_an_error() {
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        storage.ss_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(sockaddr_to_socket_addr(&storage).is_err());
     }
 }
