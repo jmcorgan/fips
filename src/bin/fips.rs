@@ -101,10 +101,17 @@ async fn run_daemon(
 
     // ANSI color only when stdout is a terminal — under a supervisor
     // (daemon(8), systemd) escape codes would litter the log file.
+    //
+    // Never let a failed log write panic the thread that logged. The default
+    // is to report a write failure with `eprintln!`, which itself panics when
+    // stderr fails too — and the shipped supervisor configs point stdout and
+    // stderr at the same place, so one full disk satisfies both. A worker
+    // thread killed that way takes its share of the peer space with it.
     fmt()
         .with_env_filter(filter)
         .with_target(true)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .log_internal_errors(false)
         .init();
 
     info!("FIPS {} starting", version::short_version());

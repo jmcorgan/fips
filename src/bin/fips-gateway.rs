@@ -67,7 +67,16 @@ async fn main() {
         )
         .from_env_lossy();
 
-    fmt().with_env_filter(filter).with_target(true).init();
+    // As in the daemon: a failed log write must not panic whoever logged. The
+    // default reports write failures with `eprintln!`, which panics when stderr
+    // fails too, and both units send stdout and stderr to journald. Here the
+    // casualty is a spawned task — the DNS resolver or the pool tick — whose
+    // handle nothing observes until shutdown.
+    fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .log_internal_errors(false)
+        .init();
 
     info!("fips-gateway {} starting", version::short_version());
 

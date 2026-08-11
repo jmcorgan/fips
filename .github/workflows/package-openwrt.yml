@@ -138,15 +138,92 @@ jobs:
         run: cargo install cargo-zigbuild --version 0.19.8 --locked
 
       - name: Install zig (required by cargo-zigbuild)
+        shell: bash
         run: |
+          set -euo pipefail
           ZIG_VERSION="0.13.0"
+          # Each arch carries the expected SHA-256 of its upstream tarball,
+          # taken from ziglang.org's own https://ziglang.org/download/index.json,
+          # field .["<version>"]["<arch>-linux"].shasum:
+          #   jq -r '.["0.13.0"]["x86_64-linux"].shasum' index.json
+          # Upstream publishes no .sha256 sidecar and no SHA256SUMS, so
+          # index.json is the only checksum document offered, and it lists only
+          # recent releases: once a version ages out of it the pin can no longer
+          # be re-derived upstream. Bumping ZIG_VERSION means replacing every
+          # hash below, and adding an arch means adding its hash here too.
           ARCH=$(uname -m)
           case "$ARCH" in
-            x86_64|amd64) ZIG_ARCH="x86_64" ;;
-            aarch64|arm64) ZIG_ARCH="aarch64" ;;
-            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+            x86_64|amd64)
+              ZIG_ARCH="x86_64"
+              ZIG_SHA256="d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea"
+              ;;
+            aarch64|arm64)
+              ZIG_ARCH="aarch64"
+              ZIG_SHA256="041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556"
+              ;;
+            *)
+              echo "Unsupported architecture: $ARCH"
+              exit 1
+              ;;
           esac
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar xJ -C /opt
+          if [ -z "${ZIG_SHA256:-}" ]; then
+            echo "No SHA-256 pinned for zig ${ZIG_VERSION} on ${ZIG_ARCH}."
+            echo "Add one to the case above, from https://ziglang.org/download/index.json:"
+            echo "  jq -r '.[\"${ZIG_VERSION}\"][\"${ZIG_ARCH}-linux\"].shasum'"
+            exit 1
+          fi
+
+          NAME="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
+          URL="https://ziglang.org/download/${ZIG_VERSION}/${NAME}"
+          # Stage outside the checkout so a failed attempt cannot leave a stray
+          # tarball in the working tree.
+          ZIG_TMP="$(mktemp -d)"
+          trap 'rm -rf "$ZIG_TMP"' EXIT
+          TARBALL="${ZIG_TMP}/${NAME}"
+
+          # Download to a file and check it before anything consumes it: piping
+          # curl straight into tar let a truncated transfer reach the extractor,
+          # which is how this step failed. curl's own --retry does not cover a
+          # short read (exit 18), and a checksum mismatch needs a fresh download
+          # anyway, so the retry is an explicit bounded loop.
+          verified=""
+          previous=""
+          for attempt in 1 2 3; do
+            rm -f "$TARBALL"
+            if curl -fsSL -o "$TARBALL" "$URL" && [ -s "$TARBALL" ]; then
+              actual="$(sha256sum < "$TARBALL" | cut -d' ' -f1)"
+              if [ "$actual" = "$ZIG_SHA256" ]; then
+                echo "zig tarball matches its pinned SHA-256 (${actual})"
+                verified=yes
+                break
+              fi
+              echo "zig tarball failed its checksum on attempt ${attempt}:"
+              echo "  expected ${ZIG_SHA256}"
+              echo "  actual   ${actual}"
+              echo "  size     $(wc -c < "$TARBALL") bytes"
+              if [ "$actual" = "$previous" ]; then
+                echo "Two attempts fetched byte-identical content, so retrying is not"
+                echo "going to help: the pin is stale, upstream re-published, or the"
+                echo "source is serving the same bad file every time."
+                break
+              fi
+              previous="$actual"
+            else
+              echo "zig tarball download failed on attempt ${attempt}"
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 10))
+            fi
+          done
+
+          if [ -z "$verified" ]; then
+            echo "zig ${ZIG_VERSION} (${ZIG_ARCH}) did not download with its pinned"
+            echo "SHA-256 after ${attempt} attempt(s). Refusing to extract a tarball"
+            echo "that does not match the pin; failing the build."
+            exit 1
+          fi
+
+          sudo tar xJ -C /opt -f "$TARBALL"
           sudo ln -sf /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
           zig version
 

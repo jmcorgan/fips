@@ -49,6 +49,10 @@ fn test_routing_unknown_destination() {
 
 // === Bloom filter priority ===
 
+/// Scope note: this covers the bloom *ordering* path, not the bloom predicate.
+/// The chosen peer here is also the greedy tree winner, so the assertion holds
+/// whichever branch produced it. See the `Seam: NodeRoutingView adapter`
+/// section at the end of this file for the discriminating tests.
 #[test]
 fn test_routing_bloom_filter_hit() {
     let mut node = make_node();
@@ -102,6 +106,9 @@ fn test_routing_bloom_filter_hit() {
     assert_ne!(result.unwrap().node_addr(), &peer2_addr);
 }
 
+/// Scope note: as above, this pins the tie-break ordering rather than the bloom
+/// predicate — the inline comment below already notes that the self-distance
+/// check is what does the filtering here.
 #[test]
 fn test_routing_bloom_filter_multiple_hits_tiebreak() {
     let mut node = make_node();
@@ -207,6 +214,13 @@ fn test_routing_tree_fallback() {
 ///
 /// Post-fix behavior: same scenario falls through to greedy tree routing
 /// and returns the tree-routing-selected next hop.
+///
+/// Scope note: despite the name, this does **not** discriminate the bloom
+/// predicate. Under a `NodeRoutingView::peer_may_reach` that returns `true`
+/// unconditionally the healthy and broken runs return the same peer by
+/// different branches, and `find_next_hop` exposes no branch information, so
+/// no assertion here can tell them apart. The test that does discriminate it
+/// is `test_seam_bloom_hit_overrides_tree_tiebreak`.
 #[test]
 fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
     let mut node = make_node();
@@ -908,6 +922,14 @@ async fn test_routing_stops_after_peer_removal() {
 ///
 /// Chain: 0 -- 1 -- 2 -- 3. Only node 0 has node 3's coords cached.
 /// Nodes 1 and 2 route using bloom filters only.
+///
+/// Scope note: despite the name, what this actually pins is that transit
+/// requires cached coordinates at each hop and that the last hop short-circuits
+/// on direct peering. It does not discriminate the bloom predicate: the node-1
+/// and node-2 assertions return from `find_next_hop` before the routing view is
+/// ever constructed, and node 0 has exactly one peer, so its assertion cannot
+/// separate any two candidates. See the `Seam: NodeRoutingView adapter` section
+/// at the end of this file for the tests that do.
 #[tokio::test]
 async fn test_routing_bloom_only_transit() {
     let edges = vec![(0, 1), (1, 2), (2, 3)];
@@ -1441,4 +1463,534 @@ fn test_parent_loss_selfroot_invalidates_coord_cache() {
         !node.coord_cache().contains(&foreign, now_ms),
         "stale old-root entry must be invalidated after self-root"
     );
+}
+
+// === Seam: NodeRoutingView adapter ===
+//
+// The tests above exercise the routing *decision*; the ones below exercise the
+// *adapter* that feeds it. `NodeRoutingView` (src/node/mod.rs) is the only
+// thing connecting the node's live peer map to the sans-IO routing core, and
+// the core's own tests in src/proto/routing/tests/ drive a mock view, so
+// nothing else in the suite observes the real adapter.
+//
+// Why no pre-existing test discriminates it: in every other fixture in this
+// file the bloom winner and the greedy-tree winner are the same peer, which
+// makes branch 3 and branch 4 of `find_next_hop` indistinguishable — the route
+// is unchanged whichever branch produced it. The fixtures below break that
+// collinearity deliberately, so the answer each one asserts is a peer the tree
+// fallback would *not* have chosen. A broken adapter changes the answer rather
+// than merely changing the path to it.
+//
+// Every assertion pins a peer identity rather than `is_some()`, and every route
+// goes through the real `Node::find_next_hop`, which constructs the real
+// `NodeRoutingView` internally and cannot be handed a mock.
+
+fn seam_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn seam_add_peer(node: &mut Node, link_num: u64, transport_id: TransportId) -> NodeAddr {
+    let link_id = LinkId::new(link_num);
+    let identity = seed_completed_connection(node, link_id, transport_id, 1000);
+    let addr = *identity.node_addr();
+    node.promote_connection(link_id, identity, 2000).unwrap();
+    addr
+}
+
+/// Put `dest` into `peer`'s inbound bloom filter.
+fn seam_set_filter(node: &mut Node, peer: &NodeAddr, dest: &NodeAddr) {
+    let mut filter = BloomFilter::new();
+    filter.insert(dest);
+    node.get_peer_mut(peer)
+        .unwrap()
+        .update_filter(filter, 1, 3000);
+}
+
+/// Set a peer's link cost inputs directly. `etx * (1.0 + srtt_ms / 100.0)`.
+fn seam_set_cost(node: &mut Node, peer: &NodeAddr, etx: f64, rtt_us: i64) {
+    let mmp = node.get_peer_mut(peer).unwrap().mmp_mut().unwrap();
+    mmp.metrics.etx = etx;
+    mmp.metrics.srtt.update(rtt_us);
+}
+
+/// Two peers *equidistant* from `dest`, both strictly closer than we are.
+///
+/// Tree (we are root):  my ── near ── dest ── far
+///
+/// `far` is also a direct peer of ours: a mesh link that is not a tree edge.
+/// Distances to dest are my = 2, near = 1, far = 1, so both peers clear the
+/// self-distance check at the same distance and the same link cost. The only
+/// thing separating them is the address tie-break, which is what lets a test
+/// make one of the adapter's predicates pick the peer the tree would have
+/// rejected — and then the two branches finally disagree.
+///
+/// Peer addresses come from `Identity::generate()` and are random, so callers
+/// assign roles at runtime with `near.min(far)` / `near.max(far)` rather than
+/// assuming which topological role drew the smaller key.
+///
+/// Returns `(near, far, dest)`.
+fn seam_two_equidistant_peers(node: &mut Node) -> (NodeAddr, NodeAddr, NodeAddr) {
+    let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
+
+    let near = seam_add_peer(node, 1, transport_id);
+    let far = seam_add_peer(node, 2, transport_id);
+    let dest = make_node_addr(99);
+
+    let near_coords = TreeCoordinate::from_addrs(vec![near, my_addr]).unwrap();
+    node.tree_state_mut()
+        .update_peer(ParentDeclaration::new(near, my_addr, 1, 1000), near_coords);
+
+    let far_coords = TreeCoordinate::from_addrs(vec![far, dest, near, my_addr]).unwrap();
+    node.tree_state_mut()
+        .update_peer(ParentDeclaration::new(far, dest, 3, 1000), far_coords);
+
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, near, my_addr]).unwrap();
+    node.coord_cache_mut()
+        .insert(dest, dest_coords, seam_now_ms());
+
+    (near, far, dest)
+}
+
+/// Three peers at *distinct* distances from `dest`, strung along one tree path.
+///
+/// Tree (we are root):  my ── rung3 ── rung2 ── rung1 ── dest
+///
+/// All three rungs are also direct peers of ours. Distances to dest are
+/// my = 4, rung1 = 1, rung2 = 2, rung3 = 3. Putting the bloom hits on
+/// `{rung2, rung3}` makes the winner depend on the coordinate *values* the
+/// adapter hands back rather than merely on whether it hands back any: rung2
+/// wins on distance from inside the bloom set, while the tree fallback would
+/// have answered rung1. Link costs are all 1.0 and the three distances differ,
+/// so the address tie-break never engages and the answer does not depend on
+/// which peer drew the smaller random key.
+///
+/// Returns `(rung1, rung2, rung3, dest)`.
+fn seam_distance_ladder(node: &mut Node) -> (NodeAddr, NodeAddr, NodeAddr, NodeAddr) {
+    let transport_id = TransportId::new(1);
+    let my_addr = *node.node_addr();
+
+    let rung1 = seam_add_peer(node, 1, transport_id);
+    let rung2 = seam_add_peer(node, 2, transport_id);
+    let rung3 = seam_add_peer(node, 3, transport_id);
+    let dest = make_node_addr(99);
+
+    let rung3_coords = TreeCoordinate::from_addrs(vec![rung3, my_addr]).unwrap();
+    node.tree_state_mut().update_peer(
+        ParentDeclaration::new(rung3, my_addr, 1, 1000),
+        rung3_coords,
+    );
+
+    let rung2_coords = TreeCoordinate::from_addrs(vec![rung2, rung3, my_addr]).unwrap();
+    node.tree_state_mut()
+        .update_peer(ParentDeclaration::new(rung2, rung3, 2, 1000), rung2_coords);
+
+    let rung1_coords = TreeCoordinate::from_addrs(vec![rung1, rung2, rung3, my_addr]).unwrap();
+    node.tree_state_mut()
+        .update_peer(ParentDeclaration::new(rung1, rung2, 3, 1000), rung1_coords);
+
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, rung1, rung2, rung3, my_addr]).unwrap();
+    node.coord_cache_mut()
+        .insert(dest, dest_coords, seam_now_ms());
+
+    (rung1, rung2, rung3, dest)
+}
+
+/// Guard on the two seam fixtures rather than on the seam itself.
+///
+/// Every seam test below asserts an answer that only holds while the fixture's
+/// distances are what its comment claims. If tree-coordinate or distance
+/// semantics ever change so that the fixtures stop discriminating, those tests
+/// would go on passing while observing nothing — the exact blindness they exist
+/// to remove. This one fails first and says which fixture collapsed.
+#[test]
+fn test_seam_fixture_distances_are_as_documented() {
+    let mut node = make_node();
+    let my_addr = *node.node_addr();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, near, my_addr]).unwrap();
+    let ts = node.tree_state();
+    assert_eq!(ts.my_coords().distance_to(&dest_coords), 2, "my distance");
+    assert_eq!(
+        ts.peer_coords(&near).unwrap().distance_to(&dest_coords),
+        1,
+        "near distance"
+    );
+    assert_eq!(
+        ts.peer_coords(&far).unwrap().distance_to(&dest_coords),
+        1,
+        "far distance"
+    );
+
+    // Both peers equidistant and equally cheap, so greedy tree routing resolves
+    // the tie on address. The equidistant-fixture tests below each assert the
+    // *other* peer; this is the answer they are contradicting.
+    let tree_pick = ts.find_next_hop(&dest_coords, &BTreeSet::new()).unwrap();
+    assert_eq!(
+        tree_pick,
+        near.min(far),
+        "greedy tree tie-break is min addr"
+    );
+
+    let mut node = make_node();
+    let my_addr = *node.node_addr();
+    let (rung1, rung2, rung3, dest) = seam_distance_ladder(&mut node);
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest, rung1, rung2, rung3, my_addr]).unwrap();
+    let ts = node.tree_state();
+    assert_eq!(ts.my_coords().distance_to(&dest_coords), 4, "my distance");
+    assert_eq!(
+        ts.peer_coords(&rung1).unwrap().distance_to(&dest_coords),
+        1,
+        "rung1 distance"
+    );
+    assert_eq!(
+        ts.peer_coords(&rung2).unwrap().distance_to(&dest_coords),
+        2,
+        "rung2 distance"
+    );
+    assert_eq!(
+        ts.peer_coords(&rung3).unwrap().distance_to(&dest_coords),
+        3,
+        "rung3 distance"
+    );
+    let tree_pick = ts.find_next_hop(&dest_coords, &BTreeSet::new()).unwrap();
+    assert_eq!(tree_pick, rung1, "greedy tree picks the nearest rung");
+}
+
+/// `NodeRoutingView::peer_may_reach` decides the bloom candidate set.
+///
+/// The bloom hit is placed on the peer the greedy tree tie-break would have
+/// *rejected*, so the only path to the asserted answer is branch 3 of
+/// `find_next_hop` selecting it on that hit. Widening `peer_may_reach` to
+/// `true` — bloom filtering off, the break that motivated this whole section —
+/// or inverting it collapses the answer back to the tree pick.
+#[test]
+fn test_seam_bloom_hit_overrides_tree_tiebreak() {
+    let mut node = make_node();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+    let tree_pick = near.min(far);
+    let bloom_pick = near.max(far);
+
+    // Fixture preconditions, so a red below reads as a seam regression rather
+    // than as the fixture having collapsed.
+    assert_eq!(node.peers.len(), 2, "fixture: two peers");
+    assert!(node.tree_state().peer_coords(&near).is_some());
+    assert!(node.tree_state().peer_coords(&far).is_some());
+
+    seam_set_filter(&mut node, &bloom_pick, &dest);
+    assert!(!node.get_peer(&tree_pick).unwrap().may_reach(&dest));
+
+    let hop = node.find_next_hop(&dest).expect("route exists");
+    assert_eq!(
+        hop.node_addr(),
+        &bloom_pick,
+        "the bloom candidate must beat the greedy tree tie-break winner {tree_pick:?}"
+    );
+}
+
+/// `NodeRoutingView::peer_can_send` keeps a down link out of the candidate set.
+///
+/// Both peers hold a bloom hit, so the address tie-break would hand the route
+/// to the low-address peer; that peer is the one marked reconnecting. Widening
+/// `peer_can_send` to `true` lets it back in and hands a down link to the
+/// forwarder.
+#[test]
+fn test_seam_unsendable_bloom_candidate_is_skipped() {
+    let mut node = make_node();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+    let low = near.min(far);
+    let high = near.max(far);
+
+    seam_set_filter(&mut node, &low, &dest);
+    seam_set_filter(&mut node, &high, &dest);
+    node.get_peer_mut(&low).unwrap().mark_reconnecting();
+
+    assert_eq!(node.peers.len(), 2, "fixture: two peers");
+    assert!(
+        !node.get_peer(&low).unwrap().can_send(),
+        "fixture: low is down"
+    );
+    assert!(
+        node.get_peer(&high).unwrap().can_send(),
+        "fixture: high is up"
+    );
+
+    let hop = node.find_next_hop(&dest).expect("route exists");
+    assert!(hop.can_send(), "a down link must never be returned");
+    assert_eq!(
+        hop.node_addr(),
+        &high,
+        "the sendable peer must win despite losing the address tie-break"
+    );
+}
+
+/// `NodeRoutingView::peer_link_cost` must carry the ETX factor.
+///
+/// SRTT is equal on both peers, so ETX is the only thing that can order them,
+/// and the cheap peer is the one that loses the address tie-break. This reds
+/// for a flattened cost, a negated cost, and — the shape a rewrite of the
+/// adapter actually produces — a cost that reads only the latency half of
+/// `etx * (1.0 + srtt_ms / 100.0)`.
+#[test]
+fn test_seam_link_cost_etx_orders_bloom_candidates() {
+    let mut node = make_node();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+    let low = near.min(far);
+    let high = near.max(far);
+
+    seam_set_filter(&mut node, &low, &dest);
+    seam_set_filter(&mut node, &high, &dest);
+    seam_set_cost(&mut node, &low, 3.0, 1_000);
+    seam_set_cost(&mut node, &high, 1.0, 1_000);
+
+    let cost_low = node.get_peer(&low).unwrap().link_cost();
+    let cost_high = node.get_peer(&high).unwrap().link_cost();
+    assert!(
+        cost_high < cost_low,
+        "fixture: ETX alone must make high cheaper ({cost_high} vs {cost_low})"
+    );
+
+    let hop = node.find_next_hop(&dest).expect("route exists");
+    assert_eq!(
+        hop.node_addr(),
+        &high,
+        "the lower-ETX link must win despite losing the address tie-break"
+    );
+}
+
+/// `NodeRoutingView::peer_link_cost` must carry the SRTT factor.
+///
+/// The mirror of the ETX test: ETX is equal on both peers, so latency is the
+/// only thing that can order them. This reds for a flattened cost, a negated
+/// cost, and a cost that reads only the ETX half.
+#[test]
+fn test_seam_link_cost_srtt_orders_bloom_candidates() {
+    let mut node = make_node();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+    let low = near.min(far);
+    let high = near.max(far);
+
+    seam_set_filter(&mut node, &low, &dest);
+    seam_set_filter(&mut node, &high, &dest);
+    seam_set_cost(&mut node, &low, 1.0, 50_000); // 50 ms -> cost 1.5
+    seam_set_cost(&mut node, &high, 1.0, 1_000); // 1 ms -> cost 1.01
+
+    let cost_low = node.get_peer(&low).unwrap().link_cost();
+    let cost_high = node.get_peer(&high).unwrap().link_cost();
+    assert!(
+        cost_high < cost_low,
+        "fixture: SRTT alone must make high cheaper ({cost_high} vs {cost_low})"
+    );
+
+    let hop = node.find_next_hop(&dest).expect("route exists");
+    assert_eq!(
+        hop.node_addr(),
+        &high,
+        "the lower-latency link must win despite losing the address tie-break"
+    );
+}
+
+/// `NodeRoutingView::peer_coords` must return each peer's *own* coordinates.
+///
+/// The ladder puts the two bloom candidates at *different* distances, so the
+/// winner is decided by the coordinate values the adapter returns and not
+/// merely by whether it returns any: rung2 (distance 2) beats rung3
+/// (distance 3) from inside the bloom set, while the tree fallback would have
+/// answered rung1 (distance 1). Dropping the lookup to `None`, or sourcing it
+/// from the wrong object (our own coordinates rather than the peer's), moves
+/// the answer to rung1.
+#[test]
+fn test_seam_peer_coords_distance_orders_bloom_candidates() {
+    let mut node = make_node();
+    let (rung1, rung2, rung3, dest) = seam_distance_ladder(&mut node);
+
+    // rung1 is the greedy tree winner and deliberately carries no bloom hit.
+    seam_set_filter(&mut node, &rung2, &dest);
+    seam_set_filter(&mut node, &rung3, &dest);
+
+    assert_eq!(node.peers.len(), 3, "fixture: three peers");
+    assert!(
+        !node.get_peer(&rung1).unwrap().may_reach(&dest),
+        "fixture: the tree winner is not a bloom candidate"
+    );
+
+    let hop = node.find_next_hop(&dest).expect("route exists");
+    assert_eq!(
+        hop.node_addr(),
+        &rung2,
+        "the nearer bloom candidate must win: rung1 {rung1:?} is the tree \
+         answer, rung3 {rung3:?} is the farther candidate"
+    );
+}
+
+/// A peer with no tree coordinates is infinitely far and can never be chosen.
+///
+/// A peer that has completed a handshake but whose tree declaration has not yet
+/// arrived is an ordinary runtime state, and it is the state the core maps to
+/// `usize::MAX` in its self-distance check. This exercises the adapter's `None`
+/// arm and reds if the adapter ever fabricates coordinates for a peer the tree
+/// does not know — a fallback to some other peer's coordinates would make this
+/// peer the sole viable bloom candidate and hand it the route.
+#[test]
+fn test_seam_peer_without_tree_coords_is_never_selected() {
+    let mut node = make_node();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+    let tree_pick = near.min(far);
+
+    // A third peer: in the peer map, sendable, holding a bloom hit for dest,
+    // and absent from tree state.
+    let ghost = seam_add_peer(&mut node, 3, TransportId::new(1));
+    seam_set_filter(&mut node, &ghost, &dest);
+
+    assert!(node.get_peer(&ghost).unwrap().can_send());
+    assert!(node.get_peer(&ghost).unwrap().may_reach(&dest));
+    assert!(
+        node.tree_state().peer_coords(&ghost).is_none(),
+        "fixture: ghost has no tree coordinates"
+    );
+
+    let hop = node.find_next_hop(&dest).expect("route exists");
+    assert_ne!(
+        hop.node_addr(),
+        &ghost,
+        "a peer with no tree coordinates must never be selected"
+    );
+    assert_eq!(
+        hop.node_addr(),
+        &tree_pick,
+        "with no viable bloom candidate the tree fallback answers"
+    );
+}
+
+/// Every `NodeRoutingView` read must report the live node state it adapts.
+///
+/// The tests above cover the reads that change a routing decision. This one
+/// covers the residue: reads whose corruption has no behavioural consequence
+/// through `find_next_hop` (a peer enumerated twice cannot displace itself,
+/// since the core's dominance test is a strict-improvement check) and reads
+/// `find_next_hop` never performs at all (`is_congested` and `cached_coords`,
+/// which are reached from the datagram forwarding path).
+///
+/// Assertions are against values this test *set*, not against a second call to
+/// the same production getter the adapter itself calls: a mirror comparison of
+/// the form `view.x(p) == peer.x()` reduces to `f(x) == f(x)` and is blind to
+/// anything the two sides share. The parity loop at the end is the secondary
+/// check, not the primary one.
+#[test]
+fn test_seam_routing_view_reads_match_live_peer_state() {
+    use crate::proto::routing::RoutingView;
+
+    let mut node = make_node();
+    let my_addr = *node.node_addr();
+    let (near, far, dest) = seam_two_equidistant_peers(&mut node);
+
+    // Make the two peers differ on every predicate, in opposite directions, so
+    // no constant in either direction can satisfy the assertions below.
+    seam_set_filter(&mut node, &near, &dest);
+    node.get_peer_mut(&far).unwrap().mark_reconnecting();
+    // Both cost factors off the multiplicative identity: with etx pinned at 1.0
+    // a cost that reads only the latency half is indistinguishable from the
+    // real one, and this assertion would be blind to it.
+    seam_set_cost(&mut node, &near, 2.0, 50_000); // 2.0 * (1.0 + 0.5) -> 3.0
+
+    // A short-TTL entry, so the expiry arm of `cached_coords` is exercised and
+    // not only the present/absent arms.
+    let stale = make_node_addr(201);
+    let stale_coords = TreeCoordinate::from_addrs(vec![stale, near, my_addr]).unwrap();
+    node.coord_cache_mut()
+        .insert_with_ttl(stale, stale_coords, 1_000_000, 10);
+
+    let unknown = make_node_addr(202);
+    let near_coords = TreeCoordinate::from_addrs(vec![near, my_addr]).unwrap();
+    let far_coords = TreeCoordinate::from_addrs(vec![far, dest, near, my_addr]).unwrap();
+
+    let view = NodeRoutingView {
+        coord_cache: node.coord_cache(),
+        peers: &node.peers,
+        tree_state: node.tree_state(),
+        congested: true,
+    };
+
+    // Enumeration: every peer exactly once, and no peer the map does not hold.
+    // A visitor that skips *some* peers is order-nondeterministic through
+    // `find_next_hop`; one that repeats a peer is invisible there entirely.
+    let mut handles = Vec::new();
+    view.for_each_peer(|peer| handles.push(peer));
+    assert_eq!(handles.len(), 2, "each peer visited exactly once");
+    let visited: HashSet<NodeAddr> = handles.iter().map(|p| view.peer_addr(*p)).collect();
+    assert_eq!(
+        visited,
+        node.peers.keys().copied().collect::<HashSet<_>>(),
+        "enumeration must cover exactly the live peer map"
+    );
+
+    let near_h = *handles
+        .iter()
+        .find(|p| view.peer_addr(**p) == near)
+        .unwrap();
+    let far_h = *handles.iter().find(|p| view.peer_addr(**p) == far).unwrap();
+
+    // peer_may_reach: near holds a filter containing dest; far holds none.
+    assert!(view.peer_may_reach(near_h, &dest));
+    assert!(!view.peer_may_reach(far_h, &dest));
+    assert!(
+        !view.peer_may_reach(near_h, &unknown),
+        "the filter is per-destination"
+    );
+
+    // peer_can_send: far was marked reconnecting.
+    assert!(view.peer_can_send(near_h));
+    assert!(!view.peer_can_send(far_h));
+
+    // peer_link_cost: etx 2.0 * (1.0 + 50ms/100) for near; far has no RTT
+    // sample, so it takes the optimistic 1.0 default. Neither factor is at the
+    // identity, so a cost reading only one half of the product is caught.
+    assert_eq!(view.peer_link_cost(near_h), 3.0);
+    assert_eq!(view.peer_link_cost(far_h), 1.0);
+
+    // peer_coords: each peer's own coordinates, as the fixture installed them.
+    assert_eq!(view.peer_coords(near_h), Some(&near_coords));
+    assert_eq!(view.peer_coords(far_h), Some(&far_coords));
+
+    // is_congested, both directions: a constant in either direction is wrong,
+    // and the false-negative direction silently drops the ECN CE mark.
+    assert!(view.is_congested(&near));
+    let calm = NodeRoutingView {
+        coord_cache: node.coord_cache(),
+        peers: &node.peers,
+        tree_state: node.tree_state(),
+        congested: false,
+    };
+    assert!(!calm.is_congested(&near));
+
+    // cached_coords: present, absent, and expired. The expiry arm is what
+    // decides PathBroken-vs-CoordsRequired for a route that has gone away.
+    let now_ms = seam_now_ms();
+    assert_eq!(
+        view.cached_coords(&dest, now_ms).as_ref(),
+        node.coord_cache().get(&dest, now_ms)
+    );
+    assert!(view.cached_coords(&unknown, now_ms).is_none());
+    assert!(
+        view.cached_coords(&stale, 1_000_005).is_some(),
+        "within TTL"
+    );
+    assert!(view.cached_coords(&stale, 1_000_100).is_none(), "past TTL");
+
+    // Secondary parity sweep over the live peer map.
+    for peer in &handles {
+        let addr = view.peer_addr(*peer);
+        let live = node.peers.get(&addr).unwrap();
+        assert_eq!(view.peer_may_reach(*peer, &dest), live.may_reach(&dest));
+        assert_eq!(view.peer_can_send(*peer), live.can_send());
+        assert_eq!(view.peer_link_cost(*peer), live.link_cost());
+        assert_eq!(
+            view.peer_coords(*peer),
+            node.tree_state().peer_coords(&addr)
+        );
+    }
 }
