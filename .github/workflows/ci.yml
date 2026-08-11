@@ -139,16 +139,16 @@ jobs:
     name: Android cross-check (aarch64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain (+ Android target)
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           target: aarch64-linux-android
           components: clippy
           cache: false
           rustflags: ''
       - name: Cache Cargo registry + build
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -158,7 +158,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install cargo-ndk
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
         with:
           tool: cargo-ndk
       - name: Clippy the library for Android
