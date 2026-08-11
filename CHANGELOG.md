@@ -238,6 +238,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The packaged macOS daemon now recreates and binds its control socket at
+  `/var/run/fips/control.sock` instead of falling through to the shared
+  `/tmp/fips-control.sock` path after boot. The previous fallback also made the
+  root daemon attempt to chown `/tmp` itself to the `fips` group because socket
+  setup unconditionally changed the parent directory. A privileged macOS
+  process now selects the private runtime path before its leaf exists, clients
+  follow it once created, and socket setup changes ownership and mode only for
+  a private parent directory it atomically created.
+
 - Nostr NAT traversal signals are now sent only to relays the client pool
   actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox
   relays, the relays its advert nominates for signaling, and our own DM relays,
