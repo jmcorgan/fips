@@ -1,9 +1,18 @@
 //! BLE L2CAP Transport Implementation
 //!
-//! Provides BLE-based transport for FIPS peer communication using L2CAP
-//! Connection-Oriented Channels (CoC) in SeqPacket mode. L2CAP CoC
-//! preserves message boundaries (unlike TCP byte streams), so no FMP
-//! framing is needed — each send/recv is one FIPS packet.
+//! Provides BLE-based transport for FIPS peer communication over L2CAP
+//! Connection-Oriented Channels.
+//!
+//! ## Packet boundaries
+//!
+//! Message-boundary preservation is a property of the *socket type* a
+//! backend uses, not of L2CAP. BlueZ's `SOCK_SEQPACKET` preserves SDU
+//! boundaries; other backends expose an L2CAP channel as a byte stream and
+//! may return a fragment of a packet or several packets coalesced from one
+//! read. The receive path therefore recovers boundaries from the FMP length
+//! prefix via [`stream_read::BleStreamRead`] and
+//! [`crate::transport::framing::read_fmp_packet`], which is a transparent
+//! pass-through on a boundary-preserving backend.
 //!
 //! ## Architecture
 //!
@@ -23,7 +32,9 @@ pub mod io;
 pub mod neighbor;
 pub mod pool;
 pub mod stats;
+pub mod stream_read;
 
+use super::framing::{StreamError, read_fmp_packet};
 use super::{
     ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
@@ -35,10 +46,12 @@ use io::{BleIo, BleScanner, BleStream};
 use neighbor::NeighborBuffer;
 use pool::{BleConnection, ConnectionPool};
 use stats::BleStats;
+use stream_read::BleStreamRead;
 
 use secp256k1::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
@@ -364,9 +377,16 @@ impl<I: BleIo> BleTransport<I> {
             }
         };
 
+        // One reader for the life of the connection: the pubkey exchange and
+        // the receive loop must share it, or bytes the peer coalesced behind
+        // the exchange are dropped at the hand-off.
+        let stream = Arc::new(stream);
+        let recv_mtu = stream.recv_mtu();
+        let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+
         // Pre-handshake pubkey exchange (temporary, pre-XX)
         if let Some(ref our_pubkey) = self.local_pubkey {
-            match pubkey_exchange(&stream, our_pubkey).await {
+            match pubkey_exchange(stream.as_ref(), &mut reader, our_pubkey).await {
                 Ok(peer_pubkey) => {
                     debug!(addr = %addr, "BLE outbound pubkey exchange complete");
                     self.neighbor_buffer
@@ -379,7 +399,8 @@ impl<I: BleIo> BleTransport<I> {
             }
         }
 
-        self.promote_connection(addr, &ble_addr, stream).await
+        self.promote_connection(addr, &ble_addr, stream, reader)
+            .await
     }
 
     /// Promote a newly established stream into the connection pool.
@@ -389,14 +410,14 @@ impl<I: BleIo> BleTransport<I> {
         &self,
         addr: &TransportAddr,
         ble_addr: &BleAddr,
-        stream: I::Stream,
+        stream: Arc<I::Stream>,
+        reader: BleStreamRead<I::Stream>,
     ) -> Result<(), TransportError> {
         let send_mtu = stream.send_mtu();
         let recv_mtu = stream.recv_mtu();
-        let stream = Arc::new(stream);
 
         let recv_task = tokio::spawn(receive_loop(
-            Arc::clone(&stream),
+            reader,
             addr.clone(),
             Arc::clone(&self.pool),
             self.packet_tx.clone(),
@@ -484,9 +505,15 @@ impl<I: BleIo> BleTransport<I> {
 
             match result {
                 Ok(Ok(stream)) => {
+                    let send_mtu = stream.send_mtu();
+                    let recv_mtu = stream.recv_mtu();
+                    let stream = Arc::new(stream);
+                    // One reader across both phases — see `pubkey_exchange`.
+                    let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+
                     // Pre-handshake pubkey exchange (temporary, pre-XX)
                     if let Some(ref our_pubkey) = local_pubkey {
-                        match pubkey_exchange(&stream, our_pubkey).await {
+                        match pubkey_exchange(stream.as_ref(), &mut reader, our_pubkey).await {
                             Ok(peer_pubkey) => {
                                 debug!(addr = %addr_clone, "BLE outbound pubkey exchange complete");
                                 neighbor_buffer.add_peer_with_pubkey(&ble_addr, peer_pubkey);
@@ -501,12 +528,8 @@ impl<I: BleIo> BleTransport<I> {
                         }
                     }
 
-                    let send_mtu = stream.send_mtu();
-                    let recv_mtu = stream.recv_mtu();
-                    let stream = Arc::new(stream);
-
                     let recv_task = tokio::spawn(receive_loop(
-                        Arc::clone(&stream),
+                        reader,
                         addr_clone.clone(),
                         Arc::clone(&pool),
                         packet_tx,
@@ -663,6 +686,13 @@ impl<I: BleIo> Transport for BleTransport<I> {
 ///
 /// Distinguishes the identity exchange from FMP packets (version ≥ 0x01).
 /// Temporary — removed when FMP switches from IK to XX handshake.
+///
+/// Caution: this prefix is *not* distinguishable from an FMP packet by the
+/// framer. `0x00` decodes as FMP version 0, phase 0 (established), with a
+/// payload length read out of the pubkey's own bytes — i.e. arbitrary. Any
+/// code that runs the framer over a connection before the exchange has been
+/// fully consumed will mis-frame badly. Threading one reader through both
+/// phases is what guarantees the ordering.
 const PUBKEY_EXCHANGE_PREFIX: u8 = 0x00;
 
 /// Pre-handshake pubkey exchange message size: `[0x00][pubkey:32]`.
@@ -679,8 +709,16 @@ const PUBKEY_EXCHANGE_TIMEOUT_SECS: u64 = 5;
 ///
 /// Both sides send `[0x00][our_pubkey:32]` and receive the peer's.
 /// Returns the peer's XOnlyPublicKey on success.
-async fn pubkey_exchange<S: BleStream>(
+///
+/// Reads through the connection's `BleStreamRead` rather than calling
+/// `recv` directly, for two reasons. It reassembles an exchange a
+/// stream-oriented backend fragmented, which a single `recv` with an
+/// exact-length check can never do. And anything the peer coalesced behind
+/// the exchange stays buffered in the reader that the receive loop then
+/// takes over, instead of being discarded at the hand-off.
+async fn pubkey_exchange<S: BleStream + 'static>(
     stream: &S,
+    reader: &mut BleStreamRead<S>,
     local_pubkey: &[u8; 32],
 ) -> Result<XOnlyPublicKey, TransportError> {
     // Send our pubkey
@@ -692,15 +730,15 @@ async fn pubkey_exchange<S: BleStream>(
     // Receive peer's pubkey (with timeout to prevent indefinite blocking)
     let mut buf = [0u8; PUBKEY_EXCHANGE_SIZE];
     let timeout = std::time::Duration::from_secs(PUBKEY_EXCHANGE_TIMEOUT_SECS);
-    let n = match tokio::time::timeout(timeout, stream.recv(&mut buf)).await {
-        Ok(result) => result?,
+    match tokio::time::timeout(timeout, reader.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Err(TransportError::RecvFailed(format!(
+                "pubkey exchange: {}",
+                e
+            )));
+        }
         Err(_) => return Err(TransportError::Timeout),
-    };
-    if n != PUBKEY_EXCHANGE_SIZE {
-        return Err(TransportError::RecvFailed(format!(
-            "pubkey exchange: expected {} bytes, got {}",
-            PUBKEY_EXCHANGE_SIZE, n
-        )));
     }
     if buf[0] != PUBKEY_EXCHANGE_PREFIX {
         return Err(TransportError::RecvFailed(format!(
@@ -751,10 +789,13 @@ async fn accept_loop<A>(
 
                 let send_mtu = stream.send_mtu();
                 let recv_mtu = stream.recv_mtu();
+                let stream = Arc::new(stream);
+                // One reader across both phases — see `pubkey_exchange`.
+                let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
                 // Pre-handshake pubkey exchange (temporary, pre-XX)
                 if let Some(ref our_pubkey) = local_pubkey {
-                    match pubkey_exchange(&stream, our_pubkey).await {
+                    match pubkey_exchange(stream.as_ref(), &mut reader, our_pubkey).await {
                         Ok(peer_pubkey) => {
                             debug!(addr = %ta, "BLE inbound pubkey exchange complete");
                             neighbor_buffer.add_peer_with_pubkey(&addr, peer_pubkey);
@@ -780,11 +821,9 @@ async fn accept_loop<A>(
                     }
                 }
 
-                let stream = Arc::new(stream);
-
                 // Spawn receive loop
                 let recv_task = tokio::spawn(receive_loop(
-                    Arc::clone(&stream),
+                    reader,
                     ta.clone(),
                     Arc::clone(&pool),
                     packet_tx.clone(),
@@ -829,8 +868,14 @@ async fn accept_loop<A>(
 }
 
 /// Receive loop: reads packets from a BLE stream and delivers to node.
-async fn receive_loop<S: BleStream>(
-    stream: Arc<S>,
+///
+/// Takes the connection's `BleStreamRead` — already positioned past the
+/// pubkey exchange, and still holding anything the peer coalesced behind it
+/// — and pulls whole FIPS packets out of it using the FMP length prefix.
+/// Boundaries come from the bytes, not from the backend's socket type, so a
+/// fragment is reassembled and a coalesced tail is not lost.
+async fn receive_loop<S: BleStream + 'static>(
+    mut reader: BleStreamRead<S>,
     addr: TransportAddr,
     pool: Arc<Mutex<ConnectionPool<Arc<S>>>>,
     packet_tx: PacketTx,
@@ -838,20 +883,19 @@ async fn receive_loop<S: BleStream>(
     stats: Arc<BleStats>,
     recv_mtu: u16,
 ) {
-    let mut buf = vec![0u8; recv_mtu as usize];
     loop {
-        match stream.recv(&mut buf).await {
-            Ok(0) => {
-                debug!(addr = %addr, "BLE connection closed by peer");
-                break;
-            }
-            Ok(n) => {
-                stats.record_recv(n);
-                let packet = ReceivedPacket::new(transport_id, addr.clone(), buf[..n].to_vec());
+        match read_fmp_packet(&mut reader, recv_mtu).await {
+            Ok(data) => {
+                stats.record_recv(data.len());
+                let packet = ReceivedPacket::new(transport_id, addr.clone(), data);
                 if packet_tx.send(packet).await.is_err() {
                     trace!("BLE packet_tx closed, stopping receive loop");
                     break;
                 }
+            }
+            Err(StreamError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                debug!(addr = %addr, "BLE connection closed by peer");
+                break;
             }
             Err(e) => {
                 debug!(addr = %addr, error = %e, "BLE receive error");
@@ -986,7 +1030,12 @@ async fn scan_probe_loop<I: io::BleIo>(
 
         // Pubkey exchange, then promote connection to pool
         let ta = addr.to_transport_addr();
-        match pubkey_exchange(&stream, &our_pubkey).await {
+        let send_mtu = stream.send_mtu();
+        let recv_mtu = stream.recv_mtu();
+        let stream = Arc::new(stream);
+        // One reader across both phases — see `pubkey_exchange`.
+        let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+        match pubkey_exchange(stream.as_ref(), &mut reader, &our_pubkey).await {
             Ok(peer_pubkey) => {
                 debug!(addr = %addr, "BLE probe complete");
 
@@ -1005,12 +1054,8 @@ async fn scan_probe_loop<I: io::BleIo>(
                 }
 
                 // Promote connection to pool — no second L2CAP connect needed
-                let send_mtu = stream.send_mtu();
-                let recv_mtu = stream.recv_mtu();
-                let stream = Arc::new(stream);
-
                 let recv_task = tokio::spawn(receive_loop(
-                    Arc::clone(&stream),
+                    reader,
                     ta.clone(),
                     Arc::clone(&pool),
                     packet_tx.clone(),
@@ -1064,7 +1109,42 @@ async fn scan_probe_loop<I: io::BleIo>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use io::MockBleIo;
+    use crate::transport::framing::build_established_frame;
+    use io::{MockBleIo, MockBleStream};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    /// Deterministic x-only pubkey for exchange tests.
+    fn test_pubkey(seed: u8) -> [u8; 32] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[seed; 32]).unwrap();
+        sk.public_key(&secp).x_only_public_key().0.serialize()
+    }
+
+    /// Handles a receive-loop test needs to observe: the task, the packets
+    /// it delivers, and the pool it reaps its entry from.
+    type ReceiveLoopHarness = (
+        JoinHandle<()>,
+        tokio::sync::mpsc::Receiver<ReceivedPacket>,
+        Arc<Mutex<ConnectionPool<Arc<MockBleStream>>>>,
+    );
+
+    /// Wire up a receive loop over one end of a mock stream pair.
+    fn spawn_receive_loop(local: MockBleStream) -> ReceiveLoopHarness {
+        let addr = test_addr(2).to_transport_addr();
+        let pool = Arc::new(Mutex::new(ConnectionPool::new(7)));
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let reader = BleStreamRead::new(Arc::new(local), 2048);
+        let task = tokio::spawn(receive_loop(
+            reader,
+            addr,
+            Arc::clone(&pool),
+            tx,
+            TransportId::new(1),
+            Arc::new(BleStats::new()),
+            2048,
+        ));
+        (task, rx, pool)
+    }
 
     fn test_addr(n: u8) -> BleAddr {
         BleAddr {
@@ -1207,5 +1287,168 @@ mod tests {
         // accept_loop (inbound): drops when our_addr < peer_addr
         // Smaller node accepting from larger → drops inbound (outbound wins)
         // This means: smaller always uses outbound, larger always uses inbound
+    }
+
+    // ------------------------------------------------------------------
+    // Packet boundary recovery
+    // ------------------------------------------------------------------
+
+    /// Two whole FMP packets delivered in one `recv` must both arrive.
+    /// Before reframing the tail was silently truncated and lost.
+    #[tokio::test]
+    async fn test_receive_loop_splits_coalesced_packets() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let (task, mut rx, _pool) = spawn_receive_loop(local);
+
+        let first = build_established_frame(16);
+        let second = build_established_frame(48);
+        let mut both = first.clone();
+        both.extend_from_slice(&second);
+        peer.send(&both).await.unwrap();
+
+        assert_eq!(rx.recv().await.unwrap().data, first);
+        assert_eq!(rx.recv().await.unwrap().data, second);
+        task.abort();
+    }
+
+    /// One FMP packet split across three `recv`s arrives once, whole —
+    /// not as three runts that FMP and Noise would reject.
+    #[tokio::test]
+    async fn test_receive_loop_reassembles_fragmented_packet() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let (task, mut rx, _pool) = spawn_receive_loop(local);
+
+        let frame = build_established_frame(64);
+        let third = frame.len() / 3;
+        peer.send(&frame[..third]).await.unwrap();
+        peer.send(&frame[third..2 * third]).await.unwrap();
+        peer.send(&frame[2 * third..]).await.unwrap();
+
+        assert_eq!(rx.recv().await.unwrap().data, frame);
+        assert!(rx.try_recv().is_err(), "no runt packets");
+        task.abort();
+    }
+
+    /// One `send` per packet still yields one packet per `send`, byte for
+    /// byte — the boundary-preserving backend regression.
+    #[tokio::test]
+    async fn test_receive_loop_passes_through_whole_packets() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let (task, mut rx, _pool) = spawn_receive_loop(local);
+
+        let frames: Vec<Vec<u8>> = [8u16, 0, 512]
+            .iter()
+            .map(|n| build_established_frame(*n))
+            .collect();
+        for f in &frames {
+            peer.send(f).await.unwrap();
+        }
+        for f in &frames {
+            assert_eq!(&rx.recv().await.unwrap().data, f);
+        }
+        task.abort();
+    }
+
+    /// A malformed frame closes the connection and drops it from the pool
+    /// rather than spinning the loop.
+    #[tokio::test]
+    async fn test_receive_loop_drops_connection_on_bad_frame() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let ta = test_addr(2).to_transport_addr();
+        let (task, _rx, pool) = spawn_receive_loop(local);
+
+        // Put a pool entry in place so its removal is observable.
+        let (parked, _other) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        pool.lock()
+            .await
+            .insert(
+                ta.clone(),
+                BleConnection {
+                    stream: Arc::new(parked),
+                    recv_task: None,
+                    send_mtu: 2048,
+                    recv_mtu: 2048,
+                    established_at: tokio::time::Instant::now(),
+                    is_static: false,
+                    addr: test_addr(2),
+                },
+            )
+            .unwrap();
+        assert!(pool.lock().await.contains(&ta));
+
+        // 0x16 is a TLS ClientHello record type; it parses as FMP version 1.
+        peer.send(&[0x16, 0x03, 0x01, 0x00]).await.unwrap();
+
+        // The loop exits and clears the pool entry.
+        for _ in 0..50 {
+            if !pool.lock().await.contains(&ta) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!pool.lock().await.contains(&ta));
+        assert!(task.await.is_ok(), "loop exited cleanly");
+    }
+
+    /// A peer that coalesces its first data packet behind the 33-byte
+    /// pubkey exchange must not lose it at the hand-off to the framer.
+    #[tokio::test]
+    async fn test_pubkey_exchange_preserves_coalesced_data() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let local = Arc::new(local);
+        let mut reader = BleStreamRead::new(Arc::clone(&local), 2048);
+
+        let peer_pk = test_pubkey(2);
+        let frame = build_established_frame(24);
+        let mut wire = vec![PUBKEY_EXCHANGE_PREFIX];
+        wire.extend_from_slice(&peer_pk);
+        wire.extend_from_slice(&frame);
+        peer.send(&wire).await.unwrap();
+
+        let got = pubkey_exchange(local.as_ref(), &mut reader, &test_pubkey(1))
+            .await
+            .unwrap();
+        assert_eq!(got.serialize(), peer_pk);
+
+        let packet = read_fmp_packet(&mut reader, 2048).await.unwrap();
+        assert_eq!(packet, frame);
+    }
+
+    /// A fragmented pubkey exchange completes. The old exact-length `recv`
+    /// check could never satisfy this.
+    #[tokio::test]
+    async fn test_pubkey_exchange_reassembles_fragments() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let local = Arc::new(local);
+        let mut reader = BleStreamRead::new(Arc::clone(&local), 2048);
+
+        let peer_pk = test_pubkey(3);
+        let mut wire = vec![PUBKEY_EXCHANGE_PREFIX];
+        wire.extend_from_slice(&peer_pk);
+        peer.send(&wire[..17]).await.unwrap();
+        peer.send(&wire[17..]).await.unwrap();
+
+        let got = pubkey_exchange(local.as_ref(), &mut reader, &test_pubkey(1))
+            .await
+            .unwrap();
+        assert_eq!(got.serialize(), peer_pk);
+    }
+
+    /// A peer that opens with something other than the exchange prefix is
+    /// rejected before the framer ever sees the bytes.
+    #[tokio::test]
+    async fn test_pubkey_exchange_rejects_bad_prefix() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let local = Arc::new(local);
+        let mut reader = BleStreamRead::new(Arc::clone(&local), 2048);
+
+        let mut wire = vec![0xFFu8];
+        wire.extend_from_slice(&test_pubkey(4));
+        peer.send(&wire).await.unwrap();
+
+        let err = pubkey_exchange(local.as_ref(), &mut reader, &test_pubkey(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TransportError::RecvFailed(_)));
     }
 }
