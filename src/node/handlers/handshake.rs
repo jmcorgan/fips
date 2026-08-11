@@ -933,6 +933,35 @@ impl Node {
             // and its pending connection is dropped with it.
             self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
+            // `our_index` is the index WE allocated at msg1 preparation, read
+            // back off the machine above before any disposal — never the
+            // `receiver_idx` the msg2 header supplied. Note what makes that
+            // true: `link_id` came from `pending_outbound[(tid,
+            // header.receiver_idx)]`, an attacker-chosen KEY, and on the rekey
+            // path that same map names a PROMOTED peer's link, whose machine
+            // carries the peer's live session index rather than a rekey index.
+            // What keeps this arm off that state is the leg gate above
+            // (`peer_machines.get(&link_id).is_none_or(|m| m.leg().is_none())`):
+            // every sub-branch under it returns, so only a leg with a live
+            // handshake carrier — a fresh dial — reaches here. If that gate is
+            // ever relaxed, this free returns a live peer's current index to
+            // the pool.
+            if let Some(idx) = our_index {
+                let _ = self.index_allocator.free(idx);
+            }
+            // Put the dial back on the retry schedule. The disposal above takes
+            // this leg out of both reapers, so the stuck-leg sweep that normally
+            // reaches `note_handshake_timeout` never runs for it, and that
+            // reflex is the only thing that seeds `retry_pending` for a
+            // configured peer.
+            //
+            // Targets `dialed_peer`, the dial-time expectation, NOT
+            // `peer_identity` — the completion above already overwrote the
+            // machine's expected identity with the answering static, so reading
+            // that here would reschedule against whoever answered.
+            if let Some(peer) = dialed_peer {
+                self.note_handshake_timeout(peer, packet.timestamp_ms);
+            }
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -946,10 +975,26 @@ impl Node {
             // arrives here — the dial-identity gate above catches it first,
             // and only a dialed == learned == us leg gets this far. This leg
             // never promotes; its machine goes with it (dropping the embedded
-            // pending connection). The index, link, and `pending_outbound`
-            // entry are deliberately NOT freed here (pre-existing shape).
+            // pending connection), and everything else the leg holds — the
+            // index, the link, and the `pending_outbound` entry — goes with it.
+            //
+            // No reschedule fires, unlike the dial-identity gate above: the dial
+            // named ourselves, so there is nothing to retry.
+            //
+            // Link disposal goes through `remove_link`, never a bare
+            // `links.remove` plus `addr_to_link.remove`. We have answered our own
+            // msg1, so `handle_msg1` has already overwritten
+            // `addr_to_link[(tid, self_addr)]` with the INBOUND leg's link;
+            // `remove_link` clears the reverse entry only when it still points at
+            // the link being removed, so it correctly leaves the live inbound
+            // leg's mapping alone. A hand-rolled removal would destroy it.
             debug!(link_id = %link_id, "Discovered self via shared-media beacon, dropping");
+            self.pending_outbound.remove(&key);
             self.remove_peer_machine(link_id);
+            self.remove_link(&link_id);
+            if let Some(idx) = our_index {
+                let _ = self.index_allocator.free(idx);
+            }
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1301,10 +1346,43 @@ impl Node {
             let machine = match self.peer_machines.get_mut(&link_id) {
                 Some(m) => m,
                 None => {
+                    // The pending-inbound entry outlived its machine. `key` was
+                    // written by us at msg1 (`pending_inbound` has one insertion
+                    // site, and the index it carries came straight from
+                    // `index_allocator.allocate()`), so the index named here is
+                    // ours to reclaim — UNLESS this entry is stale enough that
+                    // the index has already been freed and re-drawn for something
+                    // live, in which case freeing it would tear down an unrelated
+                    // session. No path to this arm has been found; the check
+                    // below is unconditional defence-in-depth, not a fix for a
+                    // demonstrated state. Leaving one index leaked on a
+                    // should-not-happen path is strictly better than a remote
+                    // teardown primitive, since `receiver_idx` is a wire field
+                    // the sender chooses.
+                    //
+                    // The link goes regardless: it has no machine on either
+                    // branch, its pending-inbound key is already gone, and
+                    // `LinkId`s come from a monotonic counter
+                    // (`allocate_link_id`) so a stale value can never name a
+                    // different live connection. `remove_link` drops the
+                    // `addr_to_link` reverse entry only if it still points here,
+                    // so a newer leg on the same address is untouched.
                     debug!(
                         link_id = %link_id,
                         "No pending connection for msg3"
                     );
+                    self.remove_link(&link_id);
+                    let orphan_index = header.receiver_idx;
+                    if self.session_index_is_claimed(orphan_index) {
+                        warn!(
+                            link_id = %link_id,
+                            receiver_idx = %orphan_index,
+                            "Orphaned pending-inbound entry names an index claimed by live \
+                             state; leaving it allocated"
+                        );
+                    } else {
+                        let _ = self.index_allocator.free(orphan_index);
+                    }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
@@ -1345,8 +1423,19 @@ impl Node {
                     Ok(()) => {}
                     Err(e) => {
                         warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
+                        // Capture the msg1-allocated index before disposing the
+                        // machine that carries it; a read placed after the
+                        // disposal yields None and the free is silently skipped.
+                        // This arm sits ahead of the inbound ACL gate, so any
+                        // peer able to complete a Noise msg3 reaches it without
+                        // being authorized.
+                        let our_idx_to_free =
+                            self.peer_machines.get(&link_id).and_then(|m| m.our_index());
                         self.remove_link(&link_id);
                         self.remove_peer_machine(link_id);
+                        if let Some(idx) = our_idx_to_free {
+                            let _ = self.index_allocator.free(idx);
+                        }
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -1359,8 +1448,18 @@ impl Node {
                 Some(id) => *id,
                 None => {
                     warn!("Identity not learned from msg3");
+                    // Same capture-before-dispose shape as the negotiation arm
+                    // above. Defensive: `complete_handshake_msg3` sets the
+                    // identity on success, and no path reaching here with `None`
+                    // has been constructed, so this free is by symmetry with its
+                    // siblings rather than by test.
+                    let our_idx_to_free =
+                        self.peer_machines.get(&link_id).and_then(|m| m.our_index());
                     self.remove_link(&link_id);
                     self.remove_peer_machine(link_id);
+                    if let Some(idx) = our_idx_to_free {
+                        let _ = self.index_allocator.free(idx);
+                    }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -1446,6 +1545,14 @@ impl Node {
             }
             self.remove_link(&link_id);
             self.remove_peer_machine(link_id);
+            // The msg1-allocated index, captured above before any disposal and
+            // carried across the `Disconnect` send (`SessionIndex` is `Copy`).
+            // The free deliberately follows the send: the reject signal is built
+            // from state on the machine and is this arm's user-visible
+            // behaviour.
+            if let Some(idx) = our_index {
+                let _ = self.index_allocator.free(idx);
+            }
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1455,6 +1562,10 @@ impl Node {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
             self.remove_link(&link_id);
             self.remove_peer_machine(link_id);
+            // Same msg1-allocated index, same capture point above.
+            if let Some(idx) = our_index {
+                let _ = self.index_allocator.free(idx);
+            }
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;

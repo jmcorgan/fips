@@ -70,10 +70,13 @@ impl std::fmt::Display for SessionIndex {
     }
 }
 
-/// Allocator for session indices within a single transport.
+/// Allocator for session indices, node-global across every transport.
 ///
 /// Manages a pool of random 32-bit indices, tracking which are in use
 /// to prevent collision. Thread-safe for single-threaded async use.
+///
+/// There is exactly one of these per node and its whole state is the `in_use`
+/// set below, so an index value is unique across the node, not per transport.
 #[derive(Debug)]
 pub struct IndexAllocator {
     /// Set of currently allocated indices.

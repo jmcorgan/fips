@@ -389,8 +389,37 @@ impl Node {
             match action {
                 // Abandon rekey cycles that exhausted their retransmission budget.
                 ConnAction::AbandonRekey { peer: node_addr } => {
-                    if let Some(peer) = self.peers.get_mut(&node_addr) {
-                        peer.abandon_rekey();
+                    // `abandon_rekey` hands back whichever index the abandoned
+                    // cycle owned; dropping the return value orphans it, and the
+                    // `pending_outbound` entry seeded at rekey msg1 with it. Same
+                    // shape as the msg3 tie-break loser in `peer_actions`.
+                    //
+                    // The `peers_by_index` removal is shape-parity with those two
+                    // model arms and is a no-op at THIS call site: `AbandonRekey`
+                    // is emitted only from the msg1-resend-budget classification,
+                    // so no rekey msg2 ever arrived and nothing was inserted.
+                    //
+                    // Known exposure, kept for parity with the model arms rather
+                    // than closed here: `transport_id()` is RE-READ, while the
+                    // `pending_outbound` entry was keyed by whatever it was when
+                    // rekey msg1 went out. A roam in between (`set_current_addr`
+                    // overwrites `send.transport_id`) makes the removal miss, so
+                    // the index is freed with a stale entry still pointing at the
+                    // peer's live link. Walked to its end: a later msg2 naming
+                    // that index on the old transport resolves the stale link,
+                    // finds the promoted peer's machine leg-less, finds no peer
+                    // with a matching `rekey_our_index` (this arm cleared it),
+                    // and takes the "not a rekey" arm, which removes the stale
+                    // entry and records a reject. No teardown, no wrong-peer
+                    // effect. Removing by index VALUE would close it outright.
+                    if let Some(peer) = self.peers.get_mut(&node_addr)
+                        && let Some(idx) = peer.abandon_rekey()
+                    {
+                        if let Some(tid) = peer.transport_id() {
+                            self.peers_by_index.remove(&(tid, idx.as_u32()));
+                            self.pending_outbound.remove(&(tid, idx.as_u32()));
+                        }
+                        let _ = self.index_allocator.free(idx);
                     }
                     debug!(
                         peer = %self.peer_display_name(&node_addr),

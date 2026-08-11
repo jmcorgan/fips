@@ -53,6 +53,20 @@ async fn test_outbound_connect_denied_by_denylist() {
 // The equivalent gate on this line runs once msg3 has revealed the initiator's
 // static key; `test_inbound_msg3_denied_by_acl` covers it there.
 
+/// The outbound ACL reject at msg2 must return the dial-time session index.
+///
+/// The index asserted on is `our_index_a`, allocated by hand at the top of this
+/// test and read back off the machine by the arm before it disposes the leg.
+///
+/// The arm is not identified by a stats counter: `bad_state == 1` with
+/// `peer_count() == 0` is produced identically by the dial-identity gate 45
+/// lines above, which also frees the index. What establishes that the ACL arm
+/// is the one reached is structural rather than asserted — the seed below names
+/// `peer_b_identity` as the dialed identity and the msg2 is built from node_b's
+/// own static, so the dial-identity gate returns `Accept` and falls through.
+/// The behavioural evidence that the assertion is attached to the right arm is
+/// the mutation that deletes the ACL arm's free specifically, which reds
+/// `is_allocated` here and nothing else.
 #[tokio::test]
 async fn test_outbound_msg2_denied_after_acl_reload() {
     let (dir, mut node_a) = make_acl_node();
@@ -112,6 +126,15 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     std::fs::write(deny_path(&dir), format!("{}\n", node_b.npub())).unwrap();
     assert!(node_a.reload_peer_acl().await);
 
+    // Control: the leg holds exactly the index allocated above, so a run that
+    // never reached the arm cannot report green on the post-condition.
+    let baseline = node_a.index_allocator.count();
+    assert_eq!(baseline, 1, "the dial allocated exactly one index");
+    assert!(
+        node_a.index_allocator.is_allocated(our_index_a),
+        "control: the leg allocated an index"
+    );
+
     let packet = ReceivedPacket::with_timestamp(transport_id, remote_addr, wire_msg2, 1100);
     node_a.handle_msg2(packet).await;
 
@@ -119,6 +142,15 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
     assert_eq!(node_a.connection_count(), 0);
     assert_eq!(node_a.link_count(), 0);
     assert!(node_a.pending_outbound.is_empty());
+    assert!(
+        !node_a.index_allocator.is_allocated(our_index_a),
+        "the outbound ACL reject must return the index it allocated"
+    );
+    assert_eq!(
+        node_a.index_allocator.count(),
+        baseline - 1,
+        "and must free exactly one"
+    );
 }
 
 /// Inbound rejection at msg3 must also cut down the initiator.
@@ -342,13 +374,15 @@ async fn test_outbound_connect_not_denied_by_allowlist_miss() {
 /// peering-budget slot forever, so that is what this pins, along with the
 /// link and the connection count.
 ///
-/// What it deliberately does NOT pin is session-index hygiene. This arm does
-/// not return the index to the allocator today, unlike the sibling bad-state
-/// arm just above it; that gap is tracked and is left exactly as it is here,
-/// since this change adds tests only. Asserting on `peers_by_index` would
-/// look like coverage of it and would be worthless: nothing maps an index
-/// until promotion, which is downstream of this gate, so such an assertion
-/// holds no matter what the denial cleans up.
+/// Session-index hygiene is pinned at the ALLOCATOR, by name, and not through
+/// `peers_by_index`. The registry assertion that looks like coverage here is
+/// worthless and must not be reintroduced: nothing maps an index until
+/// promotion, which is downstream of this gate, so
+/// `assert!(!peers_by_index.contains_key(..))` holds whether the denial frees
+/// the index or leaks it — its pass value and its failure value coincide.
+/// `debug_assert_peer_maps_coherent()` is no better; it walks `peer_machines`
+/// for carriers and says nothing about the allocator. Naming the index and
+/// asserting `is_allocated` before and after is what discriminates.
 #[tokio::test]
 async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
     use crate::proto::fmp::wire::{Msg2Header, build_msg1, build_msg3};
@@ -395,6 +429,11 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
         .expect("msg1 stores the framed msg2 on the carrier")
         .to_vec();
     assert_eq!(node_b.link_count(), 1);
+    let baseline = node_b.index_allocator.count();
+    assert!(
+        node_b.index_allocator.is_allocated(our_index_b),
+        "control: msg1 allocated the responder's index"
+    );
 
     // A completes on msg2 and answers msg3, which is where its static key —
     // and therefore the denial — first reaches B.
@@ -423,5 +462,14 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
         node_b.stats().handshake.bad_state,
         1,
         "the denial is attributed to the handshake state-machine counter"
+    );
+    assert!(
+        !node_b.index_allocator.is_allocated(our_index_b),
+        "the inbound ACL reject must return the index msg1 allocated"
+    );
+    assert_eq!(
+        node_b.index_allocator.count(),
+        baseline - 1,
+        "and must free exactly one"
     );
 }
