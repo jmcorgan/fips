@@ -617,6 +617,28 @@ with v0.4.x or earlier peers.
   learns the true point. The two rejections are counted separately in the
   session reject statistics.
 
+- The dependency lockfile is refreshed past a set of advisories against the
+  pinned `nostr` 0.44.3 and `nostr-relay-pool` 0.44.1, both of which were also
+  yanked. `nostr` moves to 0.44.8 and `nostr-relay-pool` to 0.44.3; the
+  requirements in `Cargo.toml` already admitted both, so this is a lockfile
+  change and no code changed with it. The advisories that matter here are the
+  relay-pool ones, RUSTSEC-2026-0224 and RUSTSEC-2026-0232, which describe
+  forged events bypassing signature validation and unverified relay events
+  being processed: that is the path this node learns peer adverts on, and it
+  performs no independent verification of its own, so the exposure was a
+  misattributed advert rather than the denial of service the advisory summaries
+  lead with. RUSTSEC-2026-0231 (auth-challenge memory exhaustion) is on the
+  same path, and RUSTSEC-2026-0216 and RUSTSEC-2026-0227 reach the NIP-44
+  decryption of relay-supplied content. The remaining advisories in that set
+  cover NIP-04, NIP-46, NIP-50, NIP-60, NIP-98 and the wallet parsers, none of
+  which this code calls. The refresh was taken over the whole lockfile rather
+  than the two crates alone, which additionally clears RUSTSEC-2026-0204 in
+  `crossbeam-epoch` and leaves no yanked crate in the tree; `cargo audit` now
+  reports no vulnerability, against twelve before. Four warnings remain and are
+  not fixable by a version move: `instant` and `paste` are unmaintained, `lru`
+  0.16.4 carries an unsoundness advisory, and `nostr-relay-pool` itself is now
+  marked unmaintained.
+
 ## [0.4.1] - 2026-07-19
 
 ### Changed
