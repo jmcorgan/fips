@@ -11,7 +11,7 @@
 //! may return a fragment of a packet or several packets coalesced from one
 //! read. The receive path therefore recovers boundaries from the FMP length
 //! prefix via [`stream_read::BleStreamRead`] and
-//! [`crate::transport::framing::read_fmp_packet`], which is a transparent
+//! `crate::transport::framing::read_fmp_packet`, which is a transparent
 //! pass-through on a boundary-preserving backend.
 //!
 //! ## Architecture
@@ -31,6 +31,7 @@ pub mod addr;
 pub mod io;
 pub mod neighbor;
 pub mod pool;
+pub mod psm;
 pub mod stats;
 pub mod stream_read;
 
@@ -59,6 +60,12 @@ use tracing::{debug, info, trace, warn};
 /// Default FIPS L2CAP PSM (Protocol Service Multiplexer).
 ///
 /// 0x0085 (133) is in the dynamic range (0x0080-0x00FF).
+///
+/// This is a request and a fallback, not a guarantee. A backend whose
+/// platform assigns the PSM reports back what it actually bound (see
+/// [`io::BleIo::listen`]), and a peer that advertises its own PSM (see
+/// [`psm`]) is dialled there instead. The configured value is what a peer is
+/// dialled at when it advertises nothing.
 pub const DEFAULT_PSM: u16 = 0x0085;
 
 /// Concrete BLE transport type for use in TransportHandle.
@@ -177,8 +184,13 @@ impl<I: BleIo> BleTransport<I> {
         }
         self.state = TransportState::Starting;
 
-        let psm = self.config.psm();
+        let configured_psm = self.config.psm();
         let adapter = self.io.adapter_name().to_string();
+
+        // The PSM peers should dial us on. Only the listener knows it: a
+        // backend whose platform assigns PSMs reports back something other
+        // than what was requested, and that is what has to be advertised.
+        let mut listener_psm = configured_psm;
 
         // Pre-compute local NodeAddr for cross-probe tie-breaking
         let local_node_addr = self.local_pubkey.and_then(|pk| {
@@ -189,8 +201,9 @@ impl<I: BleIo> BleTransport<I> {
 
         // Start L2CAP listener for inbound connections
         if self.config.accept_connections() {
-            match self.io.listen(psm).await {
-                Ok(acceptor) => {
+            match self.io.listen(configured_psm).await {
+                Ok((acceptor, bound_psm)) => {
+                    listener_psm = bound_psm;
                     let pool = Arc::clone(&self.pool);
                     let packet_tx = self.packet_tx.clone();
                     let transport_id = self.transport_id;
@@ -208,7 +221,12 @@ impl<I: BleIo> BleTransport<I> {
                         Arc::clone(&self.neighbor_buffer),
                         local_node_addr,
                     )));
-                    debug!(adapter = %adapter, psm = psm, "BLE accept loop started");
+                    debug!(
+                        adapter = %adapter,
+                        psm = listener_psm,
+                        requested_psm = configured_psm,
+                        "BLE accept loop started"
+                    );
                 }
                 Err(e) => {
                     warn!(adapter = %adapter, error = %e, "failed to start BLE listener");
@@ -220,11 +238,15 @@ impl<I: BleIo> BleTransport<I> {
 
         // Start continuous advertising
         if self.config.advertise() {
-            if let Err(e) = self.io.start_advertising().await {
+            if let Err(e) = self.io.start_advertising(listener_psm).await {
                 warn!(adapter = %adapter, error = %e, "failed to start BLE advertising");
             } else {
                 self.stats.record_advertisement();
-                debug!(adapter = %adapter, "BLE advertising started (continuous)");
+                debug!(
+                    adapter = %adapter,
+                    psm = listener_psm,
+                    "BLE advertising started (continuous)"
+                );
             }
         }
 
@@ -255,7 +277,7 @@ impl<I: BleIo> BleTransport<I> {
         }
 
         self.state = TransportState::Up;
-        info!(adapter = %adapter, psm = psm, "BLE transport started");
+        info!(adapter = %adapter, psm = listener_psm, "BLE transport started");
         Ok(())
     }
 
@@ -999,7 +1021,7 @@ async fn scan_probe_loop<I: io::BleIo>(
     buffer: Arc<NeighborBuffer>,
     stats: Arc<BleStats>,
     local_pubkey: Option<[u8; 32]>,
-    psm: u16,
+    configured_psm: u16,
     connect_timeout_ms: u64,
     cooldown_secs: u64,
     local_node_addr: Option<NodeAddr>,
@@ -1018,6 +1040,13 @@ async fn scan_probe_loop<I: io::BleIo>(
     // one per rotation, so entries are dropped once their node is no longer in
     // the pool — a peer that genuinely goes away is probed again normally.
     let mut known_node_of: HashMap<BleAddr, NodeAddr> = HashMap::new();
+    // L2CAP listener PSMs read out of peers' advertisements. A peer whose
+    // platform assigns its listener PSM cannot be dialled at a configured
+    // constant, so it publishes the number it actually bound and we dial
+    // that. A peer that advertises nothing is dialled at `configured_psm`,
+    // which is every peer that predates this and every backend that does not
+    // advertise service data.
+    let mut learned_psm: HashMap<BleAddr, u16> = HashMap::new();
     let cooldown = std::time::Duration::from_secs(cooldown_secs);
     let retry_interval = tokio::time::interval(std::time::Duration::from_secs(cooldown_secs));
     tokio::pin!(retry_interval);
@@ -1028,7 +1057,13 @@ async fn scan_probe_loop<I: io::BleIo>(
         let addr = tokio::select! {
             result = scanner.next() => {
                 match result {
-                    Some(a) => a,
+                    Some(advert) => {
+                        if let Some(psm) = advert.psm {
+                            trace!(addr = %advert.addr, psm, "BLE scan: learned peer PSM");
+                            learned_psm.insert(advert.addr.clone(), psm);
+                        }
+                        advert.addr
+                    }
                     None => {
                         debug!("BLE scanner ended");
                         break;
@@ -1102,21 +1137,27 @@ async fn scan_probe_loop<I: io::BleIo>(
             }
         };
 
-        // L2CAP connect
+        // L2CAP connect, at whatever PSM this peer advertised.
+        let dial_psm = learned_psm.get(&addr).copied().unwrap_or(configured_psm);
         let stream = match tokio::time::timeout(
             std::time::Duration::from_millis(connect_timeout_ms),
-            io.connect(&addr, psm),
+            io.connect(&addr, dial_psm),
         )
         .await
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                debug!(addr = %addr, error = %e, "BLE probe connect failed");
+                debug!(addr = %addr, psm = dial_psm, error = %e, "BLE probe connect failed");
+                // A learned PSM that does not answer is stale — forget it, so
+                // the next advert re-learns it and the fallback applies in the
+                // meantime. Costs one retry.
+                learned_psm.remove(&addr);
                 continue;
             }
             Err(_) => {
-                debug!(addr = %addr, "BLE probe connect timeout");
+                debug!(addr = %addr, psm = dial_psm, "BLE probe connect timeout");
                 stats.record_connect_timeout();
+                learned_psm.remove(&addr);
                 continue;
             }
         };
@@ -1732,6 +1773,149 @@ mod tests {
             "a resolved alias of a live peer must not be re-dialled"
         );
 
+        transport.stop_async().await.unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Per-peer listener PSM
+    // ------------------------------------------------------------------
+
+    /// Every `(address, psm)` the transport tried to dial.
+    type DialLog = Arc<std::sync::Mutex<Vec<(BleAddr, u16)>>>;
+
+    /// A scanning transport whose dials all fail, recording the PSM each was
+    /// attempted at.
+    fn psm_probe_transport(
+        dials: DialLog,
+    ) -> (
+        BleTransport<MockBleIo>,
+        tokio::sync::mpsc::Receiver<ReceivedPacket>,
+    ) {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        io.set_connect_handler(move |addr, psm| {
+            dials.lock().unwrap().push((addr.clone(), psm));
+            Err(TransportError::ConnectionRefused)
+        });
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(true),
+            advertise: Some(false),
+            accept_connections: Some(false),
+            probe_cooldown_secs: Some(1),
+            ..Default::default()
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.set_local_pubkey(test_pubkey(1));
+        (transport, rx)
+    }
+
+    /// A peer that advertises its listener PSM is dialled there, not at the
+    /// configured one — the whole point of learning it.
+    #[tokio::test(start_paused = true)]
+    async fn test_advertised_psm_is_dialled() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport
+            .io
+            .inject_scan_advert(io::ScanAdvert::with_psm(test_addr(2), 0x00C1))
+            .await;
+        settle().await;
+
+        assert_eq!(dials.lock().unwrap().as_slice(), &[(test_addr(2), 0x00C1)]);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A legacy UUID-only advertiser carries no PSM, so the configured one is
+    /// used. This is the path every existing peer takes and it must not
+    /// regress.
+    #[tokio::test(start_paused = true)]
+    async fn test_advert_without_a_psm_falls_back_to_the_configured_one() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        settle().await;
+
+        assert_eq!(
+            dials.lock().unwrap().as_slice(),
+            &[(test_addr(2), DEFAULT_PSM)]
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A learned PSM that does not answer is forgotten, so a stale value
+    /// costs one retry rather than making the peer permanently unreachable.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_dial_forgets_the_learned_psm() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport
+            .io
+            .inject_scan_advert(io::ScanAdvert::with_psm(test_addr(2), 0x00C1))
+            .await;
+        settle().await;
+        assert_eq!(dials.lock().unwrap().len(), 1);
+
+        // The retry after the cooldown must not repeat the PSM that failed.
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        settle().await;
+
+        let log = dials.lock().unwrap().clone();
+        assert!(log.len() >= 2, "the address is retried after the cooldown");
+        assert_eq!(log[0], (test_addr(2), 0x00C1));
+        assert!(
+            log[1..].iter().all(|(_, psm)| *psm == DEFAULT_PSM),
+            "retries fall back to the configured PSM: {log:?}"
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The advertisement carries the PSM the listener actually bound, not the
+    /// one that was requested. This is the whole OS-assigned-PSM case, with
+    /// no platform in the assertion.
+    #[tokio::test]
+    async fn test_the_advertised_psm_is_the_one_actually_bound() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        io.set_bound_psm(0x00C1);
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(false),
+            advertise: Some(true),
+            accept_connections: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.start_async().await.unwrap();
+
+        assert_ne!(DEFAULT_PSM, 0x00C1, "test setup: the bound PSM differs");
+        assert_eq!(transport.io.advertised_psm(), Some(0x00C1));
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A backend that binds what it was asked for advertises that — the BlueZ
+    /// path, unchanged.
+    #[tokio::test]
+    async fn test_a_backend_that_honours_the_request_advertises_it() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(false),
+            advertise: Some(true),
+            accept_connections: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.start_async().await.unwrap();
+
+        assert_eq!(transport.io.advertised_psm(), Some(DEFAULT_PSM));
         transport.stop_async().await.unwrap();
     }
 

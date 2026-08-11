@@ -5,7 +5,7 @@
 //! stream-oriented backend may return a fragment of a packet, or several
 //! packets coalesced, from a single read. This adapter turns the
 //! datagram-shaped [`BleStream`] into the [`AsyncRead`] that
-//! [`crate::transport::framing::read_fmp_packet`] expects, buffering bytes
+//! `crate::transport::framing::read_fmp_packet` expects, buffering bytes
 //! left over from one read into the next so packet boundaries are recovered
 //! from the FMP length prefix rather than trusted to the OS.
 //!

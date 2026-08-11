@@ -1,8 +1,9 @@
 //! BLE neighbor detection via advertising and scanning.
 //!
-//! BLE advertisements carry a 128-bit FIPS service UUID for identification.
-//! Post-forklift, advertisements are UUID-only (no identity material);
-//! identity is exchanged during the Noise handshake.
+//! BLE advertisements carry a 128-bit FIPS service UUID for identification,
+//! and optionally the advertiser's L2CAP listener PSM (see `super::psm`).
+//! Post-forklift they carry no identity material; identity is exchanged
+//! during the Noise handshake.
 
 use crate::transport::{DiscoveredPeer, TransportId};
 use secp256k1::XOnlyPublicKey;
