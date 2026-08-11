@@ -141,13 +141,11 @@ pub fn pub_file_path(config_path: &Path) -> PathBuf {
 /// How `/var/run/fips` participates in Unix control-socket resolution.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VarRunPolicy {
-    /// Linux uses `/run/fips` and does not consult `/var/run/fips` separately.
-    Ignore,
-    /// Use `/var/run/fips` only after the service manager has created it.
-    ExistingOnly,
-    /// Select `/var/run/fips` even when its private leaf is not present yet.
-    CreatePrivateDir,
+struct VarRunPolicy {
+    /// Whether an existing `/var/run/fips` directory participates in resolution.
+    consult_existing: bool,
+    /// Whether to select `/var/run/fips` before its private leaf exists.
+    create_private_dir: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -156,22 +154,27 @@ fn default_var_run_policy() -> VarRunPolicy {
     // Selecting the private runtime path before it exists lets ControlSocket
     // create it at every boot; non-root development runs retain XDG and /tmp
     // fallbacks until a packaged daemon has created /var/run/fips.
-    if unsafe { libc::geteuid() } == 0 {
-        VarRunPolicy::CreatePrivateDir
-    } else {
-        VarRunPolicy::ExistingOnly
+    VarRunPolicy {
+        consult_existing: true,
+        create_private_dir: unsafe { libc::geteuid() } == 0,
     }
 }
 
 #[cfg(target_os = "freebsd")]
 fn default_var_run_policy() -> VarRunPolicy {
     // The rc.d service creates /var/run/fips before starting the daemon.
-    VarRunPolicy::ExistingOnly
+    VarRunPolicy {
+        consult_existing: true,
+        create_private_dir: false,
+    }
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
 fn default_var_run_policy() -> VarRunPolicy {
-    VarRunPolicy::Ignore
+    VarRunPolicy {
+        consult_existing: false,
+        create_private_dir: false,
+    }
 }
 
 /// Pure path-selection core used by the host resolver and deterministic tests.
@@ -186,10 +189,10 @@ fn resolve_default_socket_with(
         return format!("/run/fips/{filename}");
     }
 
-    if var_run_policy != VarRunPolicy::Ignore {
+    if var_run_policy.consult_existing {
         let private_var_run = Path::new("/var/run/fips");
         let may_create_private_dir =
-            var_run_policy == VarRunPolicy::CreatePrivateDir && is_dir(Path::new("/var/run"));
+            var_run_policy.create_private_dir && is_dir(Path::new("/var/run"));
         if is_dir(private_var_run) || may_create_private_dir {
             return format!("/var/run/fips/{filename}");
         }
@@ -2079,7 +2082,10 @@ node:
     fn test_privileged_macos_bootstraps_private_var_run_path() {
         let path = resolve_default_socket_with(
             "control.sock",
-            VarRunPolicy::CreatePrivateDir,
+            VarRunPolicy {
+                consult_existing: true,
+                create_private_dir: true,
+            },
             Some(Path::new("/valid/xdg")),
             |candidate| matches!(candidate.to_str(), Some("/var/run" | "/valid/xdg")),
         );
@@ -2092,7 +2098,10 @@ node:
     fn test_non_privileged_macos_uses_xdg_before_private_var_run_exists() {
         let path = resolve_default_socket_with(
             "control.sock",
-            VarRunPolicy::ExistingOnly,
+            VarRunPolicy {
+                consult_existing: true,
+                create_private_dir: false,
+            },
             Some(Path::new("/valid/xdg")),
             |candidate| candidate == Path::new("/valid/xdg"),
         );
@@ -2105,7 +2114,10 @@ node:
     fn test_clients_follow_existing_private_var_run_path() {
         let path = resolve_default_socket_with(
             "control.sock",
-            VarRunPolicy::ExistingOnly,
+            VarRunPolicy {
+                consult_existing: true,
+                create_private_dir: false,
+            },
             Some(Path::new("/valid/xdg")),
             |candidate| matches!(candidate.to_str(), Some("/var/run/fips" | "/valid/xdg")),
         );
@@ -2118,7 +2130,10 @@ node:
     fn test_linux_policy_ignores_var_run_fips() {
         let path = resolve_default_socket_with(
             "control.sock",
-            VarRunPolicy::Ignore,
+            VarRunPolicy {
+                consult_existing: false,
+                create_private_dir: false,
+            },
             Some(Path::new("/valid/xdg")),
             |candidate| matches!(candidate.to_str(), Some("/var/run/fips" | "/valid/xdg")),
         );
