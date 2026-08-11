@@ -57,7 +57,7 @@ impl Node {
     /// The stale/failed predicate and every registry mutation stay shell-side;
     /// the retry-then-teardown choreography is the pure
     /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
-    pub(in crate::node) fn check_timeouts(&mut self) {
+    pub(in crate::node) async fn check_timeouts(&mut self) {
         if self.connection_count() == 0 {
             return;
         }
@@ -99,7 +99,7 @@ impl Node {
                             );
                         }
                     }
-                    self.cleanup_stale_connection(link, now_ms);
+                    self.cleanup_stale_connection(link, now_ms).await;
                 }
                 #[allow(unreachable_patterns)]
                 _ => {}
@@ -109,10 +109,15 @@ impl Node {
 
     /// Remove a handshake connection and all associated state.
     ///
-    /// Frees the session index, removes pending_outbound entry, and cleans up
-    /// the link and address mapping. Does not log — callers provide context-appropriate
-    /// log messages.
-    pub(in crate::node) fn cleanup_stale_connection(&mut self, link_id: LinkId, _now_ms: u64) {
+    /// Frees the session index, removes pending_outbound entry, closes the
+    /// underlying transport connection, and cleans up the link and address
+    /// mapping. Does not log — callers provide context-appropriate log
+    /// messages.
+    pub(in crate::node) async fn cleanup_stale_connection(
+        &mut self,
+        link_id: LinkId,
+        _now_ms: u64,
+    ) {
         // Take the connection off its machine BEFORE disposing the machine
         // (the machine owns it), keeping it readable for the index/link
         // cleanup below. The machine shares the connection's `link_id` and
@@ -145,6 +150,23 @@ impl Node {
             let _ = self.index_allocator.free(idx);
         }
 
+        // Tear down the transport connection, not just the node-side state.
+        // A connection-oriented transport otherwise keeps the socket, its
+        // pool entry and its inbound-slot accounting alive after the node
+        // has forgotten the handshake that socket belonged to, so a peer
+        // that sends msg1 and then stalls holds an inbound slot forever.
+        // Closing twice is harmless: every `close_connection` implementation
+        // is `if let Some(conn) = pool.remove(addr)` and the connectionless
+        // default is a no-op, so the handshake paths that already close and
+        // then drop a link cannot be disturbed by this.
+        if let Some(link) = self.links.get(&link_id) {
+            let tid = link.transport_id();
+            let addr = link.remote_addr().clone();
+            if let Some(transport) = self.transports.get(&tid) {
+                transport.close_connection(&addr).await;
+            }
+        }
+
         // Remove link and addr_to_link
         self.remove_link(&link_id);
         if let Some(transport_id) = transport_id {
@@ -165,7 +187,7 @@ impl Node {
         if self.peer_timers.is_empty() {
             return;
         }
-        self.drive_handshake_timeouts(now_ms);
+        self.drive_handshake_timeouts(now_ms).await;
         self.drive_handshake_retransmits(now_ms).await;
     }
 
@@ -184,7 +206,7 @@ impl Node {
     ///
     /// `check_timeouts` keeps reaping everything else — `is_failed()` legs and the
     /// idle-timeout of legs without a machine timer (inbound legs).
-    fn drive_handshake_timeouts(&mut self, now_ms: u64) {
+    async fn drive_handshake_timeouts(&mut self, now_ms: u64) {
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
         let timer_links: Vec<LinkId> = self
             .peer_timers
@@ -231,7 +253,7 @@ impl Node {
                     self.note_handshake_timeout(peer, now_ms);
                 }
                 debug!(link_id = %link, "Handshake connection timed out");
-                self.cleanup_stale_connection(link, now_ms);
+                self.cleanup_stale_connection(link, now_ms).await;
             }
         }
     }

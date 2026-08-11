@@ -342,7 +342,7 @@ impl Node {
                     crate::instr::tick_entry(instr_on, deadline.into_std(), std::time::Instant::now());
                     instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::WholeTick, {
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTimeouts,
-                        self.check_timeouts());
+                        self.check_timeouts().await);
                         let now_ms = Self::now_ms();
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadPeerAcl,
                         self.reload_peer_acl().await);

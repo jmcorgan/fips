@@ -802,7 +802,7 @@ async fn test_stale_connection_cleanup() {
 
     // Connection was created at time 1000ms. check_timeouts uses SystemTime::now(),
     // which is far beyond the 30s timeout. The connection should be cleaned up.
-    node.check_timeouts();
+    node.check_timeouts().await;
 
     // Verify everything was cleaned up
     assert_eq!(
@@ -895,7 +895,7 @@ async fn test_failed_connection_cleanup() {
     assert_eq!(node.connection_count(), 1);
 
     // Failed connections should be cleaned up immediately regardless of age
-    node.check_timeouts();
+    node.check_timeouts().await;
 
     assert_eq!(
         node.connection_count(),

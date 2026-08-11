@@ -639,6 +639,73 @@ with v0.4.x or earlier peers.
   0.16.4 carries an unsoundness advisory, and `nostr-relay-pool` itself is now
   marked unmaintained.
 
+- The gateway DNS forwarder now validates an upstream answer before it becomes
+  a NAT mapping. It previously accepted whatever datagram arrived: the upstream
+  query reused the client's own transaction ID, the upstream socket was
+  wildcard-bound and never connected, the receive discarded the sender, neither
+  the response ID nor the question section was compared against what was asked,
+  and the returned address was not checked against the mesh prefix. Because the
+  extracted address is installed as a DNAT rule that carries no interface
+  constraint, a forged answer redirected traffic rather than only poisoning a
+  lookup. The upstream query now carries a random transaction ID, the socket is
+  connected so the kernel drops foreign sources, a response must match on ID,
+  question and type or it is discarded while the receive continues against the
+  original deadline, and the address goes through the validating parser with a
+  non-mesh answer refused before any allocation. One deliberate behaviour
+  change: the validation sits before the rcode check, so an upstream answering
+  FORMERR or REFUSED with an empty question section now yields SERVFAIL rather
+  than having its rcode relayed. Checking after the rcode would admit a forged
+  NXDOMAIN. Connecting the socket also means a dead upstream surfaces
+  ECONNREFUSED immediately instead of stalling for five seconds.
+
+- Private key writes no longer follow a symlink, and the key file's mode is
+  enforced rather than merely requested. The single write path opened with
+  create and truncate and no `O_NOFOLLOW`, so a symlink planted at the key path
+  was followed and its target overwritten, and it supplied the mode only
+  through `open(2)`, which the kernel honours on creation and ignores
+  otherwise, so a `fips.key` that already existed at 0644 stayed 0644 through
+  every rewrite. That second half needs no attacker: one `chmod`, or a restore
+  that did not preserve modes, leaves the key readable indefinitely. Both
+  writers now share an open helper carrying `O_NOFOLLOW`, and the private key
+  has its mode applied to the open descriptor before any secret bytes are
+  written. The public key keeps create-time mode instead, since forcing it
+  would reopen an operator-tightened `fips.pub` on every start. On Windows
+  neither protection applies and the file inherits the parent directory's
+  ACLs; that exclusion is deliberate and recorded at both writers.
+
+- An accepted inbound TCP connection no longer holds a slot indefinitely
+  without sending anything. The cap was tested at accept and the pool insert
+  and counter bump followed with no read in between, while the frame reader's
+  reads carried no deadline, so an unauthenticated remote held a slot by
+  connecting and staying silent. Pool keys are `ip:port`, so N sockets from one
+  address took N slots, and at the 256 default that locked out inbound peering
+  for as long as the sockets stayed open. The first frame on an inbound
+  connection now has a deadline, as a module constant rather than a new
+  configuration key, and the onion listener gets the same treatment for the
+  same accept-then-count ordering. Separately, the node's handshake reaper tore
+  down session state without closing the transport connection, so a peer that
+  sent msg1 and then stalled was forgotten by the node while its socket and
+  slot survived; the reaper now closes the connection too. **What this does not
+  close**: the deadline covers the first frame only, so a peer that sends one
+  well-formed frame and then goes silent still holds its slot. Closing that
+  needs a rolling idle deadline.
+
+- Every GitHub Action is pinned to a commit SHA, and the OpenWrt packaging
+  workflow verifies the helper binary it downloads. No reference in the
+  repository was pinned before: all sixty-six named a mutable tag and one named
+  a branch, including the jobs holding the AUR deploy key, the jobs with
+  release write scope, and the packaging jobs that run with a signing key in
+  the environment. Sixty-two are now full commit SHAs with the original tag
+  retained as a trailing comment. Four are left unpinned and justified in one
+  place: two actions read the tool to install from the ref name itself, so a
+  SHA would hand them a hex string where a toolchain name belongs. A guard
+  enforces the form on every sweep, treats an unreadable tree as an error
+  rather than a pass, and documents what it does not cover. The sharper hole
+  was not the tags: the OpenWrt workflow fetched a helper binary from a release
+  URL with no verification at all, in two jobs holding a signing key. That
+  download now checks a per-architecture pinned SHA-256, with the hash
+  provenance recorded honestly, upstream publishing no checksum document.
+
 ## [0.4.1] - 2026-07-19
 
 ### Changed

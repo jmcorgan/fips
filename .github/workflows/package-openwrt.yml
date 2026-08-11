@@ -27,7 +27,7 @@ jobs:
       apk_version: ${{ steps.version.outputs.apk_version }}
       release_channel: ${{ steps.channel.outputs.release_channel }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
@@ -104,13 +104,13 @@ jobs:
             # x86 routers / VMs
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       - name: Install Rust toolchain (stable)
         if: matrix.rust_channel == 'stable'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           target: ${{ matrix.rust_target }}
           cache: false
@@ -124,7 +124,7 @@ jobs:
 
       - name: Cache Cargo registry + build
         if: ${{ env.ACT != 'true' }}
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -247,7 +247,7 @@ jobs:
           ls -lh out/
 
       - name: Upload binaries artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fips-bins-${{ matrix.openwrt_arch }}
           path: out/
@@ -270,7 +270,7 @@ jobs:
             openwrt_arch: x86_64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
@@ -283,24 +283,17 @@ jobs:
           echo "PACKAGE_FILENAME=$PACKAGE_FILENAME" >> $GITHUB_ENV
 
       - name: Download prebuilt binaries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: fips-bins-${{ matrix.openwrt_arch }}
           path: bins
 
+      # nak receives the signing nsec on argv further down, so the download is
+      # staged and checked against a pinned SHA-256 before it is installed.
       - name: Install nak
         shell: bash
         run: |
-          NAK_VERSION="0.16.2"
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64|amd64) NAK_ARCH="amd64" ;;
-            aarch64|arm64) NAK_ARCH="arm64" ;;
-            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-          esac
-          curl -fsSL "https://github.com/fiatjaf/nak/releases/download/v${NAK_VERSION}/nak-v${NAK_VERSION}-linux-${NAK_ARCH}" \
-            -o /usr/local/bin/nak
-          chmod +x /usr/local/bin/nak
+          bash .github/scripts/install-nak.sh
           nak --version
 
       - name: Install jq
@@ -345,6 +338,13 @@ jobs:
             sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
           fi
           shellcheck --version
+
+      # Its own step, and its own shell dialect. The shipped-scripts lint below
+      # runs --shell=sh with the OpenWrt rc.common exclude set, which misfires
+      # on a bash script; install-nak.sh is also not shipped in the package.
+      - name: Lint install-nak.sh
+        shell: bash
+        run: shellcheck --shell=bash .github/scripts/install-nak.sh
 
       - name: Lint shipped shell scripts
         shell: bash
@@ -533,7 +533,7 @@ jobs:
 
       - name: Upload artifact (GitHub only)
         if: ${{ env.ACT != 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ env.PACKAGE_FILENAME }}
           path: dist/${{ env.PACKAGE_FILENAME }}
@@ -688,7 +688,7 @@ jobs:
       APK_TOOLS_COMMIT: "b5a31c0d865342ad80be10d68f1bb3d3ad9b0866"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
@@ -701,7 +701,7 @@ jobs:
           echo "PACKAGE_FILENAME=$PACKAGE_FILENAME" >> $GITHUB_ENV
 
       - name: Download prebuilt binaries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: fips-bins-${{ matrix.openwrt_arch }}
           path: bins
@@ -826,25 +826,18 @@ jobs:
 
       - name: Upload artifact (GitHub only)
         if: ${{ env.ACT != 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ env.PACKAGE_FILENAME }}
           path: dist/${{ env.PACKAGE_FILENAME }}
           retention-days: 30
 
+      # nak receives the signing nsec on argv further down, so the download is
+      # staged and checked against a pinned SHA-256 before it is installed.
       - name: Install nak
         shell: bash
         run: |
-          NAK_VERSION="0.16.2"
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64|amd64) NAK_ARCH="amd64" ;;
-            aarch64|arm64) NAK_ARCH="arm64" ;;
-            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-          esac
-          curl -fsSL "https://github.com/fiatjaf/nak/releases/download/v${NAK_VERSION}/nak-v${NAK_VERSION}-linux-${NAK_ARCH}" \
-            -o /usr/local/bin/nak
-          chmod +x /usr/local/bin/nak
+          bash .github/scripts/install-nak.sh
           nak --version
 
       - name: Install jq
@@ -988,7 +981,7 @@ jobs:
 
     steps:
       - name: Download package artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           # Only the .ipk/.apk packages (named fips_<ver>_<arch>.*), not the
           # fips-bins-* raw-binary artifacts shared between the build jobs.
@@ -1005,7 +998,7 @@ jobs:
             > checksums-openwrt.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/*.ipk

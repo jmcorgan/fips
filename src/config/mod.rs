@@ -239,26 +239,128 @@ pub fn read_key_file(path: &Path) -> Result<String, ConfigError> {
     Ok(nsec)
 }
 
-/// Write a bare bech32 nsec to a key file with restricted permissions.
+/// Open a key or public key file for writing, without following a symlink at
+/// the path.
 ///
-/// On Unix, the file is created with mode 0600 (owner read/write only).
-/// On Windows, the file inherits default ACLs from the parent directory.
-pub fn write_key_file(path: &Path, nsec: &str) -> Result<(), ConfigError> {
-    use std::io::Write;
-
+/// On Unix the open carries `O_NOFOLLOW`, so a symlink pre-planted at `path`
+/// fails the open instead of having its target truncated. When `enforce_mode`
+/// is set, `mode` is then applied to the open descriptor (`fchmod`) before the
+/// caller writes anything, so a file that already existed at a looser mode is
+/// tightened before any secret bytes reach it. The permission change is made
+/// through the descriptor rather than `std::fs::set_permissions`, which
+/// re-resolves the name and would reopen the window the `O_NOFOLLOW` closes.
+///
+/// `O_NOFOLLOW` covers only the *final* path component. An attacker who can
+/// replace an intermediate directory of the key path is unaffected by it.
+///
+/// On Windows neither the mode handling nor the symlink protection applies;
+/// the file inherits the parent directory's ACLs.
+fn open_mode_enforced(
+    path: &Path,
+    mode: u32,
+    enforce_mode: bool,
+) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(mode).custom_flags(libc::O_NOFOLLOW);
     }
 
-    let mut file = opts.open(path).map_err(|e| ConfigError::WriteKeyFile {
+    let file = opts.open(path)?;
+
+    #[cfg(unix)]
+    if enforce_mode {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = (mode, enforce_mode);
+
+    Ok(file)
+}
+
+/// Classify a failure to open a key or public key file for writing.
+///
+/// A refused open is reported as [`ConfigError::KeyPathIsSymlink`] when the
+/// path is in fact a symlink. The check is on the path rather than on the
+/// errno because `O_NOFOLLOW` reports a final-component symlink as `ELOOP` on
+/// Linux and macOS but `EMLINK` on FreeBSD and `EFTYPE` on NetBSD, and this
+/// module's `cfg(unix)` is deliberately broader than Linux.
+fn classify_open_error(path: &Path, source: std::io::Error) -> ConfigError {
+    if path
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return ConfigError::KeyPathIsSymlink {
+            path: path.to_path_buf(),
+        };
+    }
+    ConfigError::WriteKeyFile {
         path: path.to_path_buf(),
-        source: e,
-    })?;
+        source,
+    }
+}
+
+/// Warn about an existing identity key file the daemon will not rewrite.
+///
+/// The persistent path reads an existing key and returns without writing it,
+/// so a mode loosened by an operator `chmod` or by a restore that did not
+/// preserve modes is otherwise never surfaced anywhere. Repairing the mode is
+/// deliberately left to the operator; this only reports it. A symlinked key is
+/// reported too, since the daemon does not manage the target's mode.
+///
+/// Unix only: on Windows the file's ACLs are inherited from the parent
+/// directory and there is no mode to inspect.
+fn warn_unmanaged_key_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(meta) = path.symlink_metadata() else {
+            return;
+        };
+
+        if meta.file_type().is_symlink() {
+            tracing::warn!(
+                path = %path.display(),
+                "Identity key file is a symlink; the daemon does not manage the mode of its target"
+            );
+            return;
+        }
+
+        if meta.is_file() && meta.permissions().mode() & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{:04o}", meta.permissions().mode() & 0o7777),
+                "Identity key file is accessible beyond its owner; expected mode 0600"
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Write a bare bech32 nsec to a key file with restricted permissions.
+///
+/// On Unix, the file is opened with `O_NOFOLLOW` (a symlink at the path is
+/// refused rather than followed) and forced to mode 0600 (owner read/write
+/// only) before any key material is written, so an existing file at a looser
+/// mode is corrected rather than inherited.
+///
+/// Coverage gap: on Windows the file inherits default ACLs from the parent
+/// directory, and neither the mode enforcement nor the symlink protection
+/// applies. The exclusion is deliberate.
+pub fn write_key_file(path: &Path, nsec: &str) -> Result<(), ConfigError> {
+    use std::io::Write;
+
+    let mut file =
+        open_mode_enforced(path, 0o600, true).map_err(|e| classify_open_error(path, e))?;
 
     file.write_all(nsec.as_bytes())
         .map_err(|e| ConfigError::WriteKeyFile {
@@ -275,24 +377,20 @@ pub fn write_key_file(path: &Path, nsec: &str) -> Result<(), ConfigError> {
 
 /// Write a bare bech32 npub to a public key file.
 ///
-/// On Unix, the file is created with mode 0644 (owner read/write, others read).
-/// On Windows, the file inherits default ACLs from the parent directory.
+/// On Unix, the file is opened with `O_NOFOLLOW` (a symlink at the path is
+/// refused rather than followed) and created with mode 0644 (owner
+/// read/write, others read). The mode is applied at creation only: this file
+/// is rewritten on every persistent start, and forcing the mode would reopen
+/// an operator-tightened `fips.pub` to world-readable each time.
+///
+/// Coverage gap: on Windows the file inherits default ACLs from the parent
+/// directory, and neither the mode handling nor the symlink protection
+/// applies. The exclusion is deliberate.
 pub fn write_pub_file(path: &Path, npub: &str) -> Result<(), ConfigError> {
     use std::io::Write;
 
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o644);
-    }
-
-    let mut file = opts.open(path).map_err(|e| ConfigError::WriteKeyFile {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+    let mut file =
+        open_mode_enforced(path, 0o644, false).map_err(|e| classify_open_error(path, e))?;
 
     file.write_all(npub.as_bytes())
         .map_err(|e| ConfigError::WriteKeyFile {
@@ -354,7 +452,14 @@ pub fn resolve_identity(
         if key_path.exists() {
             let nsec = read_key_file(&key_path)?;
             let identity = Identity::from_secret_str(&nsec)?;
-            let _ = write_pub_file(&pub_path, &identity.npub());
+            warn_unmanaged_key_file(&key_path);
+            if let Err(e) = write_pub_file(&pub_path, &identity.npub()) {
+                tracing::warn!(
+                    path = %pub_path.display(),
+                    error = %e,
+                    "Failed to write the public key file"
+                );
+            }
             return Ok(ResolvedIdentity {
                 nsec,
                 source: IdentitySource::KeyFile(key_path),
@@ -378,7 +483,14 @@ pub fn resolve_identity(
                 "Identity key found at the legacy path but not at the current default; \
                  using it so the node keeps its identity — move it to the current path"
             );
-            let _ = write_pub_file(&pub_path, &identity.npub());
+            warn_unmanaged_key_file(&legacy);
+            if let Err(e) = write_pub_file(&pub_path, &identity.npub()) {
+                tracing::warn!(
+                    path = %pub_path.display(),
+                    error = %e,
+                    "Failed to write the public key file"
+                );
+            }
             return Ok(ResolvedIdentity {
                 nsec,
                 source: IdentitySource::KeyFile(legacy),
@@ -396,16 +508,30 @@ pub fn resolve_identity(
 
         match write_key_file(&key_path, &nsec) {
             Ok(()) => {
-                let _ = write_pub_file(&pub_path, &npub);
+                if let Err(e) = write_pub_file(&pub_path, &npub) {
+                    tracing::warn!(
+                        path = %pub_path.display(),
+                        error = %e,
+                        "Failed to write the public key file"
+                    );
+                }
                 Ok(ResolvedIdentity {
                     nsec,
                     source: IdentitySource::Generated(key_path),
                 })
             }
-            Err(_) => Ok(ResolvedIdentity {
-                nsec,
-                source: IdentitySource::Ephemeral,
-            }),
+            Err(e) => {
+                tracing::warn!(
+                    path = %key_path.display(),
+                    error = %e,
+                    "Failed to persist the generated identity key; this node is starting with an \
+                     ephemeral identity and its npub will change on every start"
+                );
+                Ok(ResolvedIdentity {
+                    nsec,
+                    source: IdentitySource::Ephemeral,
+                })
+            }
         }
     } else {
         // Ephemeral mode (default): fresh keypair every start, write key files
@@ -418,8 +544,32 @@ pub fn resolve_identity(
             let _ = std::fs::create_dir_all(parent);
         }
 
-        let _ = write_key_file(&key_path, &nsec);
-        let _ = write_pub_file(&pub_path, &npub);
+        // symlink_metadata rather than exists: a dangling symlink at the key
+        // path reports exists() == false but is still an existing file the
+        // write is about to act on.
+        if key_path.symlink_metadata().is_ok() {
+            tracing::warn!(
+                path = %key_path.display(),
+                config_key = "node.identity.persistent",
+                "An existing key file at this path is being replaced by a fresh ephemeral \
+                 identity; set node.identity.persistent: true to keep the existing identity"
+            );
+        }
+
+        if let Err(e) = write_key_file(&key_path, &nsec) {
+            tracing::warn!(
+                path = %key_path.display(),
+                error = %e,
+                "Failed to write the ephemeral key file"
+            );
+        }
+        if let Err(e) = write_pub_file(&pub_path, &npub) {
+            tracing::warn!(
+                path = %pub_path.display(),
+                error = %e,
+                "Failed to write the public key file"
+            );
+        }
 
         Ok(ResolvedIdentity {
             nsec,
@@ -471,6 +621,9 @@ pub enum ConfigError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    #[error("refusing to write key file through a symlink: {path}")]
+    KeyPathIsSymlink { path: PathBuf },
 
     #[error("identity error: {0}")]
     Identity(#[from] IdentityError),
@@ -1315,6 +1468,221 @@ node:
 
         let metadata = fs::metadata(&pub_path).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o644);
+    }
+
+    /// Collect formatted tracing events on the current thread.
+    ///
+    /// `resolve_identity` reports its identity-loss conditions only in the
+    /// log, so the log is what the tests have to assert on. Installed with
+    /// `tracing::subscriber::with_default`, which is thread-local, so parallel
+    /// tests do not see each other's events.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl LogCapture {
+        fn warnings(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with("WARN"))
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!(" {}={:?}", field.name(), value));
+                }
+            }
+
+            let mut fields = Fields(event.metadata().level().to_string());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, LogCapture) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let out = tracing::subscriber::with_default(subscriber, f);
+        (out, capture)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_key_file_refuses_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let victim = temp_dir.path().join("victim");
+        let key_path = temp_dir.path().join("fips.key");
+
+        fs::write(&victim, "victim contents\n").unwrap();
+        std::os::unix::fs::symlink(&victim, &key_path).unwrap();
+
+        let err = write_key_file(&key_path, "nsec1secret").unwrap_err();
+        assert!(matches!(err, ConfigError::KeyPathIsSymlink { .. }), "{err}");
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim contents\n");
+        assert!(
+            key_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink itself must be left in place, not replaced"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_key_file_fixes_existing_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("fips.key");
+
+        fs::write(&key_path, "nsec1old\n").unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_key_file(&key_path, "nsec1new").unwrap();
+
+        assert_eq!(fs::metadata(&key_path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(read_key_file(&key_path).unwrap(), "nsec1new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_pub_file_refuses_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let victim = temp_dir.path().join("victim");
+        let pub_path = temp_dir.path().join("fips.pub");
+
+        fs::write(&victim, "victim contents\n").unwrap();
+        std::os::unix::fs::symlink(&victim, &pub_path).unwrap();
+
+        let err = write_pub_file(&pub_path, "npub1test").unwrap_err();
+        assert!(matches!(err, ConfigError::KeyPathIsSymlink { .. }), "{err}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim contents\n");
+    }
+
+    #[test]
+    fn test_ephemeral_over_existing_key_warns() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+        let key_path = temp_dir.path().join("fips.key");
+
+        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        let identity = crate::Identity::generate();
+        let existing = crate::encode_nsec(&identity.keypair().secret_key());
+        write_key_file(&key_path, &existing).unwrap();
+
+        let config = Config::load_file(&config_path).unwrap();
+        let (resolved, logs) =
+            capture_logs(|| resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap());
+
+        assert_ne!(resolved.nsec, existing);
+        let warnings = logs.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains(&key_path.display().to_string())
+                    && w.contains("node.identity.persistent")),
+            "expected a warning naming the key path and the config key, got {warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ephemeral_dangling_symlink_detected() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+        let key_path = temp_dir.path().join("fips.key");
+        let target = temp_dir.path().join("absent-target");
+
+        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &key_path).unwrap();
+
+        let config = Config::load_file(&config_path).unwrap();
+        let (_resolved, logs) =
+            capture_logs(|| resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap());
+
+        let warnings = logs.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains(&key_path.display().to_string())),
+            "expected a warning naming the key path, got {warnings:?}"
+        );
+        assert!(
+            !target.exists(),
+            "the write must not have been followed through the dangling symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_persistent_permissive_key_warns() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+        let key_path = temp_dir.path().join("fips.key");
+
+        fs::write(&config_path, "node:\n  identity:\n    persistent: true\n").unwrap();
+        let identity = crate::Identity::generate();
+        let nsec = crate::encode_nsec(&identity.keypair().secret_key());
+        write_key_file(&key_path, &nsec).unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config = Config::load_file(&config_path).unwrap();
+        let (resolved, logs) =
+            capture_logs(|| resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap());
+
+        // The key is still read: this warns, it does not refuse or repair.
+        assert_eq!(resolved.nsec, nsec);
+        let warnings = logs.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains(&key_path.display().to_string()) && w.contains("0644")),
+            "expected a warning naming the key path and its mode, got {warnings:?}"
+        );
+    }
+
+    /// Healthy-path regression guard only. This passes against the pre-fix
+    /// code vacuously, because that code warns about nothing at all, so it is
+    /// not evidence that the fix works: it only catches a future change that
+    /// starts warning on an ordinary first ephemeral start.
+    #[test]
+    fn test_ephemeral_first_run_does_not_warn() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+
+        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+
+        let config = Config::load_file(&config_path).unwrap();
+        let (_resolved, logs) =
+            capture_logs(|| resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap());
+
+        assert!(
+            logs.warnings().is_empty(),
+            "first ephemeral start must be silent, got {:?}",
+            logs.warnings()
+        );
     }
 
     #[test]

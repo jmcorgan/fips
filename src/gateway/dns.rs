@@ -9,7 +9,7 @@
 
 use simple_dns::{CLASS, Packet, PacketFlag, RCODE, ResourceRecord, rdata};
 
-use simple_dns::{QTYPE, TYPE};
+use simple_dns::{QCLASS, QTYPE, TYPE};
 use std::net::{Ipv6Addr, SocketAddr};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -57,16 +57,39 @@ fn extract_aaaa(packet: &Packet) -> Option<Ipv6Addr> {
 }
 
 /// Derive NodeAddr from a FIPS mesh address (fd00::/8).
-/// The NodeAddr is bytes 1-15 of the IPv6 address prepended with the first byte.
-fn node_addr_from_mesh(mesh_addr: Ipv6Addr) -> NodeAddr {
-    let bytes = mesh_addr.octets();
-    // NodeAddr = first 16 bytes of SHA-256(pubkey), which maps to
-    // FipsAddress = fd + NodeAddr[1..16]. So NodeAddr[0] = bytes[1].
-    // Actually, FipsAddress = [0xfd, nodeaddr[0..15]]
-    // So nodeaddr[0..15] = bytes[1..16]
+/// Returns None unless the address carries the FIPS prefix.
+fn node_addr_from_mesh(mesh_addr: Ipv6Addr) -> Option<NodeAddr> {
+    // FipsAddress = [0xfd, node_addr[0..15]], so node_addr[0..15] = bytes[1..16].
+    let bytes = *crate::identity::FipsAddress::from_bytes(mesh_addr.octets())
+        .ok()?
+        .as_bytes();
     let mut node_bytes = [0u8; 16];
     node_bytes[..15].copy_from_slice(&bytes[1..16]);
-    NodeAddr::from_bytes(node_bytes)
+    Some(NodeAddr::from_bytes(node_bytes))
+}
+
+/// Check that an upstream datagram answers the query we actually sent.
+///
+/// Guards against off-path forgery: the transaction ID and question must
+/// match, and the packet must be a response. Names are compared
+/// case-insensitively because DNS names are case-insensitive on the wire
+/// while `simple_dns` compares label bytes exactly.
+fn upstream_response_matches(
+    response: &Packet,
+    upstream_id: u16,
+    upstream_qname: &str,
+    upstream_qclass: QCLASS,
+) -> bool {
+    if !response.has_flags(PacketFlag::RESPONSE) || response.id() != upstream_id {
+        return false;
+    }
+    if response.questions.len() != 1 {
+        return false;
+    }
+    let question = &response.questions[0];
+    question.qtype == QTYPE::TYPE(TYPE::AAAA)
+        && question.qclass == upstream_qclass
+        && question.qname.to_string().to_ascii_lowercase() == upstream_qname
 }
 
 /// Build a REFUSED DNS response.
@@ -209,9 +232,16 @@ async fn handle_query(
     // Build an AAAA query for the daemon regardless of what the client asked
     // (A, AAAA, ANY, etc.).  Mesh addresses are always IPv6, so the daemon
     // only returns useful answers for AAAA queries.
+    // The upstream transaction ID is drawn fresh so that an off-path forger
+    // cannot guess it from the client's query. Client-facing responses keep
+    // the client's own ID.
+    let upstream_id: u16 = rand::random();
+    let question = query.questions.first()?;
+    let upstream_qname = question.qname.to_string().to_ascii_lowercase();
+    let upstream_qclass = question.qclass;
+
     let upstream_query_bytes = {
-        let question = query.questions.first()?;
-        let mut aaaa_query = Packet::new_query(query.id());
+        let mut aaaa_query = Packet::new_query(upstream_id);
         let aaaa_question = simple_dns::Question::new(
             question.qname.clone(),
             QTYPE::TYPE(TYPE::AAAA),
@@ -241,29 +271,50 @@ async fn handle_query(
         }
     };
 
-    if let Err(e) = upstream_socket
-        .send_to(&upstream_query_bytes, upstream)
-        .await
-    {
+    // Connect the socket so the kernel drops datagrams from any source other
+    // than the configured upstream.
+    if let Err(e) = upstream_socket.connect(upstream).await {
+        warn!(error = %e, upstream = %upstream, "Failed to connect upstream socket");
+        return build_servfail(&query);
+    }
+
+    if let Err(e) = upstream_socket.send(&upstream_query_bytes).await {
         warn!(error = %e, "Failed to forward query to daemon");
         return build_servfail(&query);
     }
 
+    // Keep reading until a datagram matches the query we sent, or the deadline
+    // passes. Datagrams that do not match are discarded rather than accepted.
+    let deadline = tokio::time::Instant::now() + UPSTREAM_TIMEOUT;
     let mut resp_buf = vec![0u8; MAX_DNS_SIZE];
-    let resp_len =
-        match tokio::time::timeout(UPSTREAM_TIMEOUT, upstream_socket.recv(&mut resp_buf)).await {
-            Ok(Ok(len)) => len,
-            Ok(Err(e)) => {
-                warn!(error = %e, "Upstream recv error");
-                return build_servfail(&query);
+    let upstream_response_bytes = loop {
+        let resp_len =
+            match tokio::time::timeout_at(deadline, upstream_socket.recv(&mut resp_buf)).await {
+                Ok(Ok(len)) => len,
+                Ok(Err(e)) => {
+                    warn!(error = %e, upstream = %upstream, "Upstream recv error");
+                    return build_servfail(&query);
+                }
+                Err(_) => {
+                    warn!(upstream = %upstream, "Upstream DNS timeout");
+                    return build_servfail(&query);
+                }
+            };
+
+        match Packet::parse(&resp_buf[..resp_len]) {
+            Ok(p) => {
+                if upstream_response_matches(&p, upstream_id, &upstream_qname, upstream_qclass) {
+                    break resp_buf[..resp_len].to_vec();
+                }
+                debug!(name = %fips_name, "Discarding unsolicited upstream datagram");
             }
             Err(_) => {
-                warn!("Upstream DNS timeout");
-                return build_servfail(&query);
+                debug!(name = %fips_name, "Discarding unparseable upstream datagram");
             }
-        };
+        }
+    };
 
-    let upstream_response = match Packet::parse(&resp_buf[..resp_len]) {
+    let upstream_response = match Packet::parse(&upstream_response_bytes) {
         Ok(p) => p,
         Err(_) => return build_servfail(&query),
     };
@@ -292,8 +343,19 @@ async fn handle_query(
         }
     };
 
-    // Derive NodeAddr from mesh address
-    let node_addr = node_addr_from_mesh(mesh_addr);
+    // Derive NodeAddr from mesh address. An answer outside fd00::/8 is not a
+    // mesh address and must never reach the NAT mapping path.
+    let node_addr = match node_addr_from_mesh(mesh_addr) {
+        Some(addr) => addr,
+        None => {
+            warn!(
+                name = %fips_name,
+                mesh_addr = %mesh_addr,
+                "Upstream AAAA is not a FIPS mesh address, rejecting"
+            );
+            return build_servfail(&query);
+        }
+    };
 
     // Allocate virtual IP from pool
     let mut pool_guard = pool.lock().await;
@@ -347,16 +409,271 @@ async fn handle_query(
 mod tests {
     use super::*;
 
+    use simple_dns::{Name, Question};
+    use tokio::sync::mpsc;
+
+    const TEST_TTL: u32 = 60;
+
+    /// Build a client-facing AAAA query.
+    fn build_query(id: u16, qname: &str) -> Vec<u8> {
+        let mut packet = Packet::new_query(id);
+        let question = Question::new(
+            Name::new_unchecked(qname),
+            QTYPE::TYPE(TYPE::AAAA),
+            CLASS::IN.into(),
+            false,
+        );
+        packet.questions.push(question);
+        packet.build_bytes_vec_compressed().unwrap()
+    }
+
+    /// Build an upstream NOERROR AAAA answer.
+    fn build_answer(id: u16, qname: &str, addr: &str) -> Vec<u8> {
+        let mut packet = Packet::new_reply(id);
+        packet.set_flags(PacketFlag::RESPONSE | PacketFlag::RECURSION_AVAILABLE);
+        let name = Name::new_unchecked(qname);
+        packet.questions.push(Question::new(
+            name.clone(),
+            QTYPE::TYPE(TYPE::AAAA),
+            CLASS::IN.into(),
+            false,
+        ));
+        let address: Ipv6Addr = addr.parse().unwrap();
+        packet.answers.push(ResourceRecord::new(
+            name,
+            CLASS::IN,
+            TEST_TTL,
+            rdata::RData::AAAA(rdata::AAAA {
+                address: address.into(),
+            }),
+        ));
+        packet.build_bytes_vec_compressed().unwrap()
+    }
+
+    /// A fake upstream that answers one query with a scripted list of
+    /// datagrams, in order, from its own socket.
+    fn spawn_upstream<F>(socket: UdpSocket, replies: F) -> tokio::task::JoinHandle<()>
+    where
+        F: FnOnce(u16) -> Vec<Vec<u8>> + Send + 'static,
+    {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; MAX_DNS_SIZE];
+            let (len, src) = socket.recv_from(&mut buf).await.unwrap();
+            let observed_id = Packet::parse(&buf[..len]).unwrap().id();
+            for reply in replies(observed_id) {
+                socket.send_to(&reply, src).await.unwrap();
+            }
+        })
+    }
+
+    fn test_pool() -> std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(
+            VirtualIpPool::new("fd01::/112", TEST_TTL as u64, 30).unwrap(),
+        ))
+    }
+
+    /// Assert the response is an AAAA answer whose address came from the pool.
+    fn assert_pool_answer(response: &[u8]) -> Ipv6Addr {
+        let packet = Packet::parse(response).unwrap();
+        assert_eq!(packet.rcode(), RCODE::NoError);
+        let addr = extract_aaaa(&packet).expect("expected an AAAA answer");
+        assert!(
+            addr.octets()[0] == 0xfd && addr.octets()[1] == 0x01,
+            "expected a pool virtual IP, got {addr}"
+        );
+        addr
+    }
+
     #[test]
     fn test_node_addr_from_mesh() {
         // fd00::1 → node_addr bytes should be [0, 0, ..., 0, 1] in positions 0..15
         let mesh: Ipv6Addr = "fd00::1".parse().unwrap();
-        let node = node_addr_from_mesh(mesh);
+        let node = node_addr_from_mesh(mesh).unwrap();
         let bytes = node.as_bytes();
         // mesh = [0xfd, 0, 0, ..., 0, 1]
         // node = bytes[1..16] of mesh = [0, 0, ..., 0, 1] in first 15 bytes
         assert_eq!(bytes[14], 1);
         assert_eq!(bytes[0], 0);
+    }
+
+    #[test]
+    fn test_node_addr_from_mesh_rejects_non_mesh() {
+        let addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert!(node_addr_from_mesh(addr).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_foreign_source_answer_not_accepted() {
+        let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let upstream = upstream_socket.local_addr().unwrap();
+        let foreign = UdpSocket::bind("[::1]:0").await.unwrap();
+
+        // The fake upstream learns the gateway's ephemeral port from the query
+        // it receives, has a third socket forge an answer to that port, then
+        // sends the genuine answer itself.
+        let handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; MAX_DNS_SIZE];
+            let (len, src) = upstream_socket.recv_from(&mut buf).await.unwrap();
+            let observed_id = Packet::parse(&buf[..len]).unwrap().id();
+            let forged = build_answer(observed_id, "test.fips", "2001:db8::1");
+            foreign.send_to(&forged, src).await.unwrap();
+            let genuine = build_answer(observed_id, "test.fips", "fd00::1");
+            upstream_socket.send_to(&genuine, src).await.unwrap();
+        });
+
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let response = handle_query(
+            &build_query(0x1234, "test.fips"),
+            upstream,
+            TEST_TTL,
+            &pool,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+
+        assert_pool_answer(&response);
+        match event_rx.try_recv().unwrap() {
+            PoolEvent::MappingCreated { mesh_addr, .. } => {
+                assert_eq!(mesh_addr, "fd00::1".parse::<Ipv6Addr>().unwrap());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_upstream_id_mismatch_discarded() {
+        let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let upstream = upstream_socket.local_addr().unwrap();
+        let handle = spawn_upstream(upstream_socket, |id| {
+            vec![
+                build_answer(id.wrapping_add(1), "test.fips", "2001:db8::1"),
+                build_answer(id, "test.fips", "fd00::1"),
+            ]
+        });
+
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let response = handle_query(
+            &build_query(0x1234, "test.fips"),
+            upstream,
+            TEST_TTL,
+            &pool,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+
+        assert_pool_answer(&response);
+        match event_rx.try_recv().unwrap() {
+            PoolEvent::MappingCreated { mesh_addr, .. } => {
+                assert_eq!(mesh_addr, "fd00::1".parse::<Ipv6Addr>().unwrap());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upstream_question_mismatch_discarded() {
+        let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let upstream = upstream_socket.local_addr().unwrap();
+        let handle = spawn_upstream(upstream_socket, |id| {
+            vec![
+                build_answer(id, "other.fips", "2001:db8::1"),
+                build_answer(id, "test.fips", "fd00::1"),
+            ]
+        });
+
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let response = handle_query(
+            &build_query(0x1234, "test.fips"),
+            upstream,
+            TEST_TTL,
+            &pool,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+
+        assert_pool_answer(&response);
+        match event_rx.try_recv().unwrap() {
+            PoolEvent::MappingCreated { mesh_addr, .. } => {
+                assert_eq!(mesh_addr, "fd00::1".parse::<Ipv6Addr>().unwrap());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_mesh_aaaa_rejected() {
+        let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let upstream = upstream_socket.local_addr().unwrap();
+        let handle = spawn_upstream(upstream_socket, |id| {
+            vec![build_answer(id, "test.fips", "2001:db8::1")]
+        });
+
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let response = handle_query(
+            &build_query(0x1234, "test.fips"),
+            upstream,
+            TEST_TTL,
+            &pool,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+
+        let packet = Packet::parse(&response).unwrap();
+        assert_eq!(packet.rcode(), RCODE::ServerFailure);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_healthy_path_resolves() {
+        let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let upstream = upstream_socket.local_addr().unwrap();
+        let handle = spawn_upstream(upstream_socket, |id| {
+            vec![build_answer(id, "test.fips", "fd00::1")]
+        });
+
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let response = handle_query(
+            &build_query(0x1234, "test.fips"),
+            upstream,
+            TEST_TTL,
+            &pool,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+
+        assert_pool_answer(&response);
+        match event_rx.try_recv().unwrap() {
+            PoolEvent::MappingCreated { mesh_addr, .. } => {
+                assert_eq!(mesh_addr, "fd00::1".parse::<Ipv6Addr>().unwrap());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

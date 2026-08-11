@@ -196,6 +196,39 @@ pub async fn read_fmp_packet<R: AsyncRead + Unpin>(
 }
 
 // ============================================================================
+// Test Frame Builders
+// ============================================================================
+
+/// Build a minimal established frame with the given payload_len.
+/// Layout: [ver+phase:1][flags:1][payload_len:2 LE][12 bytes header][payload_len bytes][16 bytes tag]
+///
+/// Lives at module scope so the transport modules that share this reader
+/// (tcp, tor) can build wire-shaped frames in their own tests.
+#[cfg(test)]
+pub(crate) fn build_established_frame(payload_len: u16) -> Vec<u8> {
+    let total = PREFIX_SIZE + ESTABLISHED_REMAINING_HEADER + payload_len as usize + AEAD_TAG_SIZE;
+    let mut frame = vec![0u8; total];
+    frame[0] = 0x10; // ver=1, phase=0 (established)
+    frame[1] = 0x00; // flags
+    frame[2..4].copy_from_slice(&payload_len.to_le_bytes());
+    // Fill remaining with pattern for verification
+    for (i, byte) in frame[PREFIX_SIZE..total].iter_mut().enumerate() {
+        *byte = ((PREFIX_SIZE + i) & 0xFF) as u8;
+    }
+    frame
+}
+
+/// Build a msg1 frame (41 bytes total).
+#[cfg(test)]
+pub(crate) fn build_msg1_frame() -> Vec<u8> {
+    let mut frame = vec![0xAA; MSG1_WIRE_SIZE];
+    frame[0] = 0x11; // ver=1, phase=1
+    frame[1] = 0x00; // flags
+    frame[2..4].copy_from_slice(&MSG1_PAYLOAD_LEN.to_le_bytes());
+    frame
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -203,31 +236,6 @@ pub async fn read_fmp_packet<R: AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use std::io::Cursor;
-
-    /// Build a minimal established frame with the given payload_len.
-    /// Layout: [ver+phase:1][flags:1][payload_len:2 LE][12 bytes header][payload_len bytes][16 bytes tag]
-    fn build_established_frame(payload_len: u16) -> Vec<u8> {
-        let total =
-            PREFIX_SIZE + ESTABLISHED_REMAINING_HEADER + payload_len as usize + AEAD_TAG_SIZE;
-        let mut frame = vec![0u8; total];
-        frame[0] = 0x10; // ver=1, phase=0 (established)
-        frame[1] = 0x00; // flags
-        frame[2..4].copy_from_slice(&payload_len.to_le_bytes());
-        // Fill remaining with pattern for verification
-        for (i, byte) in frame[PREFIX_SIZE..total].iter_mut().enumerate() {
-            *byte = ((PREFIX_SIZE + i) & 0xFF) as u8;
-        }
-        frame
-    }
-
-    /// Build a msg1 frame (41 bytes total).
-    fn build_msg1_frame() -> Vec<u8> {
-        let mut frame = vec![0xAA; MSG1_WIRE_SIZE];
-        frame[0] = 0x11; // ver=1, phase=1
-        frame[1] = 0x00; // flags
-        frame[2..4].copy_from_slice(&MSG1_PAYLOAD_LEN.to_le_bytes());
-        frame
-    }
 
     /// Build a msg2 frame (minimum 118 bytes).
     fn build_msg2_frame() -> Vec<u8> {

@@ -1271,6 +1271,16 @@ run_image_scoping() {
     record "image-scoping" $rc
 }
 
+# Every third-party action must be referenced by commit SHA. A tag is a mutable
+# pointer, and the jobs holding the AUR deploy key and the release signing key
+# are exactly the ones worth repointing it for. Static, and it costs nothing.
+run_action_pins() {
+    local rc=0
+    info "[action-pins] Checking that every action is pinned to a commit SHA"
+    "$SCRIPT_DIR/check-action-pins.sh" || rc=$?
+    record "action-pins" $rc
+}
+
 # Every daemon log string a test matches on must still be emitted by src/.
 # A stale one does not fail — it stops observing, and an expect-zero assertion
 # built on it then passes for the wrong reason.
@@ -1325,6 +1335,7 @@ main() {
     run_log_strings
     run_trailing_log
     run_image_scoping
+    run_action_pins
     run_wait_converge
 
     if [[ "$TEST_ONLY" == true ]]; then

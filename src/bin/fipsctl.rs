@@ -436,7 +436,9 @@ fn main() {
             );
         }
 
-        if key_path.exists() && !force {
+        // symlink_metadata rather than exists: a dangling symlink at the key
+        // path reports exists() == false and would slip past the guard.
+        if key_path.symlink_metadata().is_ok() && !force {
             eprintln!("error: key file already exists: {}", key_path.display());
             eprintln!("Use --force to overwrite.");
             std::process::exit(1);
@@ -452,9 +454,11 @@ fn main() {
             std::process::exit(1);
         }
 
+        // Non-fatal: the private key is already on disk by this point, so
+        // failing the whole run here would report failure for a keygen that
+        // did in fact produce the identity.
         if let Err(e) = write_pub_file(&pub_path, &npub) {
-            eprintln!("error: failed to write pub file: {e}");
-            std::process::exit(1);
+            eprintln!("warning: failed to write pub file: {e}");
         }
 
         eprintln!("{npub}");

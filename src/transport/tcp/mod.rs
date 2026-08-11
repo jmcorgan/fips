@@ -81,6 +81,9 @@ pub struct TcpTransport {
     /// fallback when this transport has no explicit `max_inbound_connections`.
     /// `None` means "not provided" — fall through to the built-in default.
     node_max_connections: Option<usize>,
+    /// Deadline from accept to the first complete inbound frame. Defaults to
+    /// `INBOUND_FIRST_FRAME_TIMEOUT`; overridable only from tests.
+    first_frame_timeout: Duration,
     /// Transport statistics.
     stats: Arc<TcpStats>,
 }
@@ -104,8 +107,20 @@ impl TcpTransport {
             accept_task: None,
             local_addr: None,
             node_max_connections: None,
+            first_frame_timeout: INBOUND_FIRST_FRAME_TIMEOUT,
             stats: Arc::new(TcpStats::new()),
         }
+    }
+
+    /// Override the accept-to-first-frame deadline.
+    ///
+    /// Test-only: the accept loop is reachable from the test module only
+    /// through `start_async()`, which reads this field when it builds the
+    /// `AcceptConfig`, so there is no other way to drive the deadline at a
+    /// duration a unit test can wait for.
+    #[cfg(test)]
+    pub(crate) fn set_first_frame_timeout(&mut self, d: Duration) {
+        self.first_frame_timeout = d;
     }
 
     /// Set the node-wide `node.limits.max_connections` value.
@@ -196,6 +211,7 @@ impl TcpTransport {
                 keepalive_secs: self.config.keepalive_secs(),
                 recv_buf: self.config.recv_buf_size(),
                 send_buf: self.config.send_buf_size(),
+                first_frame_timeout: self.first_frame_timeout,
             };
 
             let accept_task = tokio::spawn(async move {
@@ -414,6 +430,10 @@ impl TcpTransport {
                 mtu,
                 recv_stats,
                 Direction::Outbound,
+                // Outbound connections hold no inbound slot and are not
+                // gated on an accept-loop insert.
+                None,
+                None,
             )
             .await;
         });
@@ -663,6 +683,10 @@ impl TcpTransport {
                 mss_mtu,
                 recv_stats,
                 Direction::Outbound,
+                // Outbound connections hold no inbound slot and are not
+                // gated on an accept-loop insert.
+                None,
+                None,
             )
             .await;
         });
@@ -756,6 +780,20 @@ impl Transport for TcpTransport {
 // Accept Loop
 // ============================================================================
 
+/// Deadline from accept to the first complete inbound FMP frame.
+///
+/// An accepted socket takes an inbound pool slot before any byte is read,
+/// so without a deadline a remote that connects and stays silent holds
+/// that slot for as long as it keeps the socket open. The node-layer
+/// reaper cannot see such a socket: no frame means no link and no node
+/// state to time out. The value matches the node-layer handshake reaper
+/// (`handshake_timeout_secs`, `src/config/node.rs:101`), so a peer that
+/// misses this deadline would have been reaped node-side anyway.
+///
+/// Deliberately not a config key: `maint` takes no new operator-facing
+/// TOML surface.
+pub(crate) const INBOUND_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Socket configuration parameters passed to the accept loop.
 struct AcceptConfig {
     mtu: u16,
@@ -764,6 +802,7 @@ struct AcceptConfig {
     keepalive_secs: u64,
     recv_buf: usize,
     send_buf: usize,
+    first_frame_timeout: Duration,
 }
 
 /// TCP accept loop — runs as a spawned task when bind_addr is configured.
@@ -783,6 +822,7 @@ async fn accept_loop(
         keepalive_secs,
         recv_buf,
         send_buf,
+        first_frame_timeout,
     } = cfg;
     debug!(transport_id = %transport_id, "TCP accept loop starting");
 
@@ -859,6 +899,12 @@ async fn accept_loop(
                 let recv_stats = stats.clone();
                 let recv_addr = remote_addr.clone();
 
+                // Readiness barrier: the receive task must not reach its
+                // cleanup path before the pool insert and counter bump below,
+                // or it would remove nothing and leave an orphaned entry with
+                // a permanently incremented inbound counter.
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
                 let recv_task = tokio::spawn(async move {
                     tcp_receive_loop(
                         read_half,
@@ -869,6 +915,8 @@ async fn accept_loop(
                         conn_mtu,
                         recv_stats,
                         Direction::Inbound,
+                        Some(first_frame_timeout),
+                        Some(ready_rx),
                     )
                     .await;
                 });
@@ -883,9 +931,14 @@ async fn accept_loop(
 
                 let mut pool_guard = pool.lock().await;
                 pool_guard.insert(remote_addr.clone(), conn);
+                drop(pool_guard);
 
                 stats.record_connection_accepted();
                 stats.record_pool_inbound_added();
+
+                // Release the receive task now that both the pool entry and
+                // the inbound counter are in place.
+                let _ = ready_tx.send(());
 
                 debug!(
                     transport_id = %transport_id,
@@ -917,6 +970,12 @@ async fn accept_loop(
 /// the cleanup path can decrement the correct `pool_inbound` /
 /// `pool_outbound` counter regardless of whether the matching pool
 /// entry survived to be removed.
+///
+/// `first_frame_timeout` bounds the wait for the *first* complete frame
+/// only, and is `Some` for inbound connections (which hold a capped pool
+/// slot from accept) and `None` for outbound ones. `ready_rx`, when
+/// present, is the accept loop's readiness barrier: the loop must not run
+/// its cleanup before the accept loop has inserted the pool entry.
 #[allow(clippy::too_many_arguments)]
 async fn tcp_receive_loop(
     mut reader: tokio::net::tcp::OwnedReadHalf,
@@ -927,6 +986,8 @@ async fn tcp_receive_loop(
     mtu: u16,
     stats: Arc<TcpStats>,
     direction: Direction,
+    first_frame_timeout: Option<Duration>,
+    ready_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
     debug!(
         transport_id = %transport_id,
@@ -934,38 +995,73 @@ async fn tcp_receive_loop(
         "TCP receive loop starting"
     );
 
-    loop {
-        match read_fmp_packet(&mut reader, mtu).await {
-            Ok(data) => {
-                stats.record_recv(data.len());
+    // An `Err` here means the accept loop went away between the insert and
+    // the signal. Fall through to the cleanup below rather than returning,
+    // so a pooled entry cannot be stranded with the counter incremented.
+    let admitted = match ready_rx {
+        Some(rx) => rx.await.is_ok(),
+        None => true,
+    };
 
-                trace!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    bytes = data.len(),
-                    "TCP packet received"
-                );
+    if admitted {
+        let mut first = true;
+        loop {
+            let read = match first_frame_timeout {
+                // Bound the first read only. A silent remote otherwise holds
+                // its inbound slot for as long as it keeps the socket open.
+                Some(d) if first => {
+                    match tokio::time::timeout(d, read_fmp_packet(&mut reader, mtu)).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            // Not a recv error: `record_recv_error` means
+                            // framing or I/O failure, and folding deadline
+                            // expiries into it corrupts that counter.
+                            debug!(
+                                transport_id = %transport_id,
+                                remote_addr = %remote_addr,
+                                timeout_secs = d.as_secs_f64(),
+                                "No complete frame within the first-frame deadline, dropping inbound connection"
+                            );
+                            break;
+                        }
+                    }
+                }
+                _ => read_fmp_packet(&mut reader, mtu).await,
+            };
+            first = false;
 
-                let packet = ReceivedPacket::new(transport_id, remote_addr.clone(), data);
+            match read {
+                Ok(data) => {
+                    stats.record_recv(data.len());
 
-                if packet_tx.send(packet).await.is_err() {
+                    trace!(
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        bytes = data.len(),
+                        "TCP packet received"
+                    );
+
+                    let packet = ReceivedPacket::new(transport_id, remote_addr.clone(), data);
+
+                    if packet_tx.send(packet).await.is_err() {
+                        debug!(
+                            transport_id = %transport_id,
+                            "Packet channel closed, stopping TCP receive loop"
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    stats.record_recv_error();
+                    // EOF or protocol error — remove connection from pool
                     debug!(
                         transport_id = %transport_id,
-                        "Packet channel closed, stopping TCP receive loop"
+                        remote_addr = %remote_addr,
+                        error = %e,
+                        "TCP receive error, removing connection"
                     );
                     break;
                 }
-            }
-            Err(e) => {
-                stats.record_recv_error();
-                // EOF or protocol error — remove connection from pool
-                debug!(
-                    transport_id = %transport_id,
-                    remote_addr = %remote_addr,
-                    error = %e,
-                    "TCP receive error, removing connection"
-                );
-                break;
             }
         }
     }
@@ -1102,8 +1198,32 @@ fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::framing::build_msg1_frame;
     use crate::transport::packet_channel;
     use tokio::time::{Duration, timeout};
+
+    /// Poll `f` every 10ms until it holds or `limit` elapses.
+    async fn wait_until<F: FnMut() -> bool>(mut f: F, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if f() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn capped_config(max_inbound: usize) -> TcpConfig {
+        TcpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            mtu: Some(1400),
+            max_inbound_connections: Some(max_inbound),
+            ..Default::default()
+        }
+    }
 
     fn make_config() -> TcpConfig {
         TcpConfig {
@@ -1706,5 +1826,325 @@ mod tests {
 
         t1.stop_async().await.unwrap();
         t2.stop_async().await.unwrap();
+    }
+
+    // ========================================================================
+    // Inbound first-frame deadline
+    // ========================================================================
+
+    /// A socket that connects and sends nothing must have its inbound slot
+    /// released by the first-frame deadline.
+    ///
+    /// Break-check: with the `tokio::time::timeout` wrapper removed from the
+    /// first read, the socket parks on an unbounded `read_exact` and the
+    /// count stays at 1 for as long as the peer keeps the socket open, so
+    /// the second assertion fails.
+    #[tokio::test]
+    async fn idle_inbound_socket_releases_its_slot() {
+        let (tx, _rx) = packet_channel(100);
+        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+        transport.set_first_frame_timeout(Duration::from_millis(200));
+        transport.start_async().await.unwrap();
+        let listen = transport.local_addr().unwrap();
+
+        // Connect and say nothing. Held open for the whole test so that any
+        // slot release is the deadline's doing and not a client disconnect.
+        let squatter = TcpStream::connect(listen).await.unwrap();
+
+        assert!(
+            wait_until(
+                || transport.stats().pool_inbound_count() == 1,
+                Duration::from_secs(2)
+            )
+            .await,
+            "an accepted socket should take an inbound slot"
+        );
+        assert!(
+            wait_until(
+                || transport.stats().pool_inbound_count() == 0,
+                Duration::from_secs(2)
+            )
+            .await,
+            "a silent inbound socket should lose its slot at the first-frame deadline"
+        );
+        assert!(
+            transport.pool.lock().await.is_empty(),
+            "the pool entry should go with the slot"
+        );
+
+        drop(squatter);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// With the cap filled by a silent socket, a genuine peer is refused
+    /// until the deadline frees the slot, and admitted afterwards.
+    ///
+    /// Break-check: without the deadline the squatter never releases, so the
+    /// genuine peer's frame is never delivered and the final receive times
+    /// out.
+    #[tokio::test]
+    async fn inbound_cap_recovers_after_first_frame_deadline() {
+        let (tx, mut rx) = packet_channel(100);
+        let mut transport = TcpTransport::new(TransportId::new(1), None, capped_config(1), tx);
+        transport.set_first_frame_timeout(Duration::from_millis(300));
+        transport.start_async().await.unwrap();
+        let listen = transport.local_addr().unwrap();
+
+        let squatter = TcpStream::connect(listen).await.unwrap();
+        assert!(
+            wait_until(
+                || transport.stats().pool_inbound_count() == 1,
+                Duration::from_secs(2)
+            )
+            .await,
+            "the squatter should fill the cap of one"
+        );
+
+        // While the cap is full a genuine peer is rejected outright.
+        let mut early = TcpStream::connect(listen).await.unwrap();
+        let _ = early.write_all(&build_msg1_frame()).await;
+        assert!(
+            timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "a peer arriving while the cap is full must not be admitted"
+        );
+        drop(early);
+
+        // The deadline frees the slot without the squatter disconnecting.
+        assert!(
+            wait_until(
+                || transport.stats().pool_inbound_count() == 0,
+                Duration::from_secs(2)
+            )
+            .await,
+            "the deadline should free the slot the squatter took"
+        );
+
+        let mut genuine = TcpStream::connect(listen).await.unwrap();
+        genuine.write_all(&build_msg1_frame()).await.unwrap();
+        let packet = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout waiting for the genuine peer's frame")
+            .expect("packet channel closed");
+        assert_eq!(packet.data, build_msg1_frame());
+
+        drop(squatter);
+        drop(genuine);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// Regression guard, not evidence that the fix works.
+    ///
+    /// The deadline is scoped to the first iteration, so an established
+    /// connection that then goes quiet cannot be dropped by it: this test
+    /// passes by construction under the current design. It is kept so that a
+    /// future general (every-read) idle deadline cannot silently start
+    /// reaping quiet links without a test going red.
+    #[tokio::test]
+    async fn established_connection_survives_long_idle() {
+        let (tx, mut rx) = packet_channel(100);
+        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+        transport.set_first_frame_timeout(Duration::from_millis(200));
+        transport.start_async().await.unwrap();
+        let listen = transport.local_addr().unwrap();
+
+        let mut peer = TcpStream::connect(listen).await.unwrap();
+        peer.write_all(&build_msg1_frame()).await.unwrap();
+        let packet = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("packet channel closed");
+        assert_eq!(packet.data, build_msg1_frame());
+
+        // Four deadlines' worth of silence after the first frame.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert_eq!(
+            transport.stats().pool_inbound_count(),
+            1,
+            "an established connection must not be dropped by the first-frame deadline"
+        );
+        assert!(!transport.pool.lock().await.is_empty());
+
+        drop(peer);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A genuine peer that is slow to start, but finishes its first frame
+    /// inside the deadline, is admitted.
+    #[tokio::test]
+    async fn slow_first_frame_within_deadline_is_admitted() {
+        let (tx, mut rx) = packet_channel(100);
+        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+        transport.set_first_frame_timeout(Duration::from_secs(1));
+        transport.start_async().await.unwrap();
+        let listen = transport.local_addr().unwrap();
+
+        let mut peer = TcpStream::connect(listen).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        peer.write_all(&build_msg1_frame()).await.unwrap();
+
+        let packet = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("packet channel closed");
+        assert_eq!(packet.data, build_msg1_frame());
+        assert_eq!(transport.stats().pool_inbound_count(), 1);
+
+        drop(peer);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The honest-slow-peer case the wrapper actually kills: a first frame
+    /// that *starts* inside the deadline but completes after it. The
+    /// deadline covers the whole frame, not its first byte, so the drip is
+    /// dropped and its slot released.
+    #[tokio::test]
+    async fn byte_dripped_first_frame_past_deadline_is_dropped() {
+        let (tx, mut rx) = packet_channel(100);
+        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+        transport.set_first_frame_timeout(Duration::from_millis(300));
+        transport.start_async().await.unwrap();
+        let listen = transport.local_addr().unwrap();
+
+        let frame = build_msg1_frame();
+        let mut peer = TcpStream::connect(listen).await.unwrap();
+        // Prefix inside the deadline, remainder well past it.
+        peer.write_all(&frame[..4]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let _ = peer.write_all(&frame[4..]).await;
+
+        assert!(
+            timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .is_err(),
+            "a first frame completing after the deadline must not be delivered"
+        );
+        assert!(
+            wait_until(
+                || transport.stats().pool_inbound_count() == 0,
+                Duration::from_secs(2)
+            )
+            .await,
+            "the dripped connection should have released its slot"
+        );
+
+        drop(peer);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// Break-check for the readiness barrier's error path.
+    ///
+    /// Stands in for an accept loop aborted between the pool insert and the
+    /// `ready_tx.send()`: the sender is dropped, so `ready_rx.await` returns
+    /// `Err`. The receive loop must still fall through to its cleanup, or
+    /// the pooled entry and its inbound-counter increment are stranded with
+    /// no task left to undo them. A bare `return` on the error path fails
+    /// both assertions below.
+    #[tokio::test]
+    async fn receive_loop_cleans_up_when_readiness_signal_is_dropped() {
+        let (tx, _rx) = packet_channel(10);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let client = TcpStream::connect(listen).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+        let remote = TransportAddr::from_string(&peer_addr.to_string());
+        let (read_half, write_half) = server.into_split();
+
+        let pool: ConnectionPool = Arc::new(Mutex::new(HashMap::new()));
+        let stats = Arc::new(TcpStats::new());
+        pool.lock().await.insert(
+            remote.clone(),
+            TcpConnection {
+                writer: Arc::new(Mutex::new(write_half)),
+                recv_task: tokio::spawn(async {}),
+                mtu: 1400,
+                established_at: Instant::now(),
+                direction: Direction::Inbound,
+            },
+        );
+        stats.record_pool_inbound_added();
+        assert_eq!(stats.pool_inbound_count(), 1);
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        drop(ready_tx);
+
+        tcp_receive_loop(
+            read_half,
+            TransportId::new(1),
+            remote.clone(),
+            tx,
+            pool.clone(),
+            1400,
+            stats.clone(),
+            Direction::Inbound,
+            Some(Duration::from_millis(50)),
+            Some(ready_rx),
+        )
+        .await;
+
+        assert!(
+            pool.lock().await.is_empty(),
+            "an aborted accept must not strand a pool entry"
+        );
+        assert_eq!(
+            stats.pool_inbound_count(),
+            0,
+            "an aborted accept must not strand an inbound-counter increment"
+        );
+        drop(client);
+    }
+
+    /// Invariant guard: a deadline that expires immediately still leaves no
+    /// orphaned pool entry or counter increment behind.
+    ///
+    /// This is not a break-check for the readiness barrier. On the
+    /// current-thread test runtime the accept loop queues for the pool lock
+    /// before the spawned receive task can run at all, so the insert wins
+    /// the race with or without the barrier. The barrier's error path is
+    /// break-checked in `receive_loop_cleans_up_when_readiness_signal_is_dropped`.
+    #[tokio::test]
+    async fn zero_deadline_leaves_no_orphaned_pool_entry() {
+        let (tx, _rx) = packet_channel(100);
+        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+        transport.set_first_frame_timeout(Duration::ZERO);
+        transport.start_async().await.unwrap();
+        let listen = transport.local_addr().unwrap();
+
+        // Hold the pool across the accept so the receive task cannot reach
+        // its cleanup while the accept loop is mid-insert.
+        let guard = transport.pool.lock().await;
+        let client = TcpStream::connect(listen).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(guard);
+
+        // Sequence the checks off `connections_accepted`, which the accept
+        // loop bumps only after its insert. Reading the pool counter first
+        // would otherwise observe the pre-accept zero and prove nothing.
+        assert!(
+            wait_until(
+                || transport.stats().snapshot().connections_accepted == 1,
+                Duration::from_secs(2)
+            )
+            .await,
+            "the accept loop should have admitted the connection"
+        );
+        assert!(
+            wait_until(
+                || transport.stats().pool_inbound_count() == 0
+                    && transport
+                        .pool
+                        .try_lock()
+                        .map(|p| p.is_empty())
+                        .unwrap_or(false),
+                Duration::from_secs(2)
+            )
+            .await,
+            "an immediately expired deadline should leave neither a pool entry nor a counter increment"
+        );
+
+        drop(client);
+        transport.stop_async().await.unwrap();
     }
 }
