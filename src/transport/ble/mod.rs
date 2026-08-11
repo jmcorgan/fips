@@ -389,12 +389,19 @@ impl<I: BleIo> BleTransport<I> {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                debug!(addr = %addr, error = %e, "BLE connect-on-send failed");
+                self.stats.record_connect_error();
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-error", error = %e,
+                    "BLE connect-on-send failed"
+                );
                 return Err(TransportError::ConnectionRefused);
             }
             Err(_) => {
                 self.stats.record_connect_timeout();
-                debug!(addr = %addr, "BLE connect-on-send timeout");
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-timeout",
+                    "BLE connect-on-send timeout"
+                );
                 return Err(TransportError::Timeout);
             }
         };
@@ -419,7 +426,11 @@ impl<I: BleIo> BleTransport<I> {
                         .add_peer_with_pubkey(&announced, peer_pubkey);
                 }
                 Err(e) => {
-                    warn!(addr = %addr, error = %e, "BLE outbound pubkey exchange failed");
+                    self.stats.record_pubkey_exchange_failure();
+                    warn!(
+                        addr = %addr, role = "central", outcome = "pubkey-exchange-failed",
+                        error = %e, "BLE outbound pubkey exchange failed"
+                    );
                     return Err(e);
                 }
             }
@@ -551,8 +562,12 @@ impl<I: BleIo> BleTransport<I> {
                                 neighbor_buffer.add_peer_with_pubkey(&announced, peer_pubkey);
                             }
                             Err(e) => {
+                                stats.record_pubkey_exchange_failure();
                                 warn!(
-                                    addr = %addr_clone, error = %e,
+                                    addr = %addr_clone,
+                                    role = "central",
+                                    outcome = "pubkey-exchange-failed",
+                                    error = %e,
                                     "BLE outbound pubkey exchange failed"
                                 );
                                 return;
@@ -599,11 +614,18 @@ impl<I: BleIo> BleTransport<I> {
                     stats.record_connection_established();
                 }
                 Ok(Err(e)) => {
-                    debug!(addr = %addr_clone, error = %e, "BLE connect failed");
+                    stats.record_connect_error();
+                    debug!(
+                        addr = %addr_clone, role = "central", outcome = "connect-error",
+                        error = %e, "BLE connect failed"
+                    );
                 }
                 Err(_) => {
                     stats.record_connect_timeout();
-                    debug!(addr = %addr_clone, "BLE connect timeout");
+                    debug!(
+                        addr = %addr_clone, role = "central", outcome = "connect-timeout",
+                        "BLE connect timeout"
+                    );
                 }
             }
         });
@@ -884,6 +906,8 @@ async fn accept_loop<A>(
                             {
                                 debug!(
                                     addr = %ta,
+                                    role = "peripheral",
+                                    outcome = "duplicate-node-decline",
                                     existing = %existing,
                                     "BLE inbound: peer already connected on another address, dropping duplicate"
                                 );
@@ -897,15 +921,23 @@ async fn accept_loop<A>(
                             if let Some(ref our_addr) = local_node_addr
                                 && our_addr < &peer_node
                             {
+                                stats.record_tiebreaker_drop();
                                 debug!(
                                     addr = %ta,
+                                    role = "peripheral",
+                                    outcome = "tiebreaker-drop",
                                     "BLE inbound tie-breaker: dropping (our addr < peer, outbound wins)"
                                 );
                                 continue;
                             }
                         }
                         Err(e) => {
-                            debug!(addr = %ta, error = %e, "BLE inbound pubkey exchange failed");
+                            stats.record_pubkey_exchange_failure();
+                            debug!(
+                                addr = %ta, role = "peripheral",
+                                outcome = "pubkey-exchange-failed", error = %e,
+                                "BLE inbound pubkey exchange failed"
+                            );
                             continue;
                         }
                     }
@@ -943,8 +975,11 @@ async fn accept_loop<A>(
                         info!(addr = %ta, send_mtu, recv_mtu, "BLE inbound connection accepted");
                     }
                     Err(e) => {
-                        warn!(addr = %ta, error = %e, "BLE pool full, inbound connection rejected");
                         stats.record_connection_rejected();
+                        warn!(
+                            addr = %ta, role = "peripheral", outcome = "pool-rejected",
+                            error = %e, "BLE pool full, inbound connection rejected"
+                        );
                         continue;
                     }
                 }
@@ -1139,6 +1174,9 @@ async fn scan_probe_loop<I: io::BleIo>(
 
         // L2CAP connect, at whatever PSM this peer advertised.
         let dial_psm = learned_psm.get(&addr).copied().unwrap_or(configured_psm);
+        // Stamped here so every outcome below can report how long the peer
+        // took to go from advertisement to conclusion.
+        let probe_started = tokio::time::Instant::now();
         let stream = match tokio::time::timeout(
             std::time::Duration::from_millis(connect_timeout_ms),
             io.connect(&addr, dial_psm),
@@ -1147,7 +1185,12 @@ async fn scan_probe_loop<I: io::BleIo>(
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                debug!(addr = %addr, psm = dial_psm, error = %e, "BLE probe connect failed");
+                stats.record_connect_error();
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-error",
+                    psm = dial_psm, discovery_ms = probe_started.elapsed().as_millis() as u64,
+                    error = %e, "BLE probe connect failed"
+                );
                 // A learned PSM that does not answer is stale — forget it, so
                 // the next advert re-learns it and the fallback applies in the
                 // meantime. Costs one retry.
@@ -1155,8 +1198,12 @@ async fn scan_probe_loop<I: io::BleIo>(
                 continue;
             }
             Err(_) => {
-                debug!(addr = %addr, psm = dial_psm, "BLE probe connect timeout");
                 stats.record_connect_timeout();
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-timeout",
+                    psm = dial_psm, discovery_ms = probe_started.elapsed().as_millis() as u64,
+                    "BLE probe connect timeout"
+                );
                 learned_psm.remove(&addr);
                 continue;
             }
@@ -1179,8 +1226,12 @@ async fn scan_probe_loop<I: io::BleIo>(
                 if let Some(ref our_addr) = local_node_addr
                     && our_addr >= &peer_node
                 {
+                    stats.record_tiebreaker_yield();
                     debug!(
                         addr = %addr,
+                        role = "central",
+                        outcome = "tiebreaker-yield",
+                        discovery_ms = probe_started.elapsed().as_millis() as u64,
                         "BLE probe tie-breaker: yielding to peer's outbound"
                     );
                     let announced = announced_addr(&pool, &peer_node, &addr).await;
@@ -1201,7 +1252,10 @@ async fn scan_probe_loop<I: io::BleIo>(
                 {
                     debug!(
                         addr = %ta,
+                        role = "central",
+                        outcome = "duplicate-node-decline",
                         existing = %existing,
+                        discovery_ms = probe_started.elapsed().as_millis() as u64,
                         "BLE probe: peer already connected on another address, dropping duplicate"
                     );
                     stats.record_duplicate_node_decline();
@@ -1247,11 +1301,18 @@ async fn scan_probe_loop<I: io::BleIo>(
                         debug!(addr = %ta, evicted = %evicted, "BLE probe promoted (evicted peer)");
                     }
                     Ok(None) => {
-                        debug!(addr = %ta, "BLE probe promoted to pool");
+                        debug!(
+                            addr = %ta, role = "central", outcome = "connected",
+                            discovery_ms = probe_started.elapsed().as_millis() as u64,
+                            "BLE probe promoted to pool"
+                        );
                     }
                     Err(e) => {
-                        warn!(addr = %ta, error = %e, "BLE pool full, probe connection dropped");
                         stats.record_connection_rejected();
+                        warn!(
+                            addr = %ta, role = "central", outcome = "pool-rejected",
+                            error = %e, "BLE pool full, probe connection dropped"
+                        );
                     }
                 }
                 drop(pool_guard);
@@ -1262,7 +1323,12 @@ async fn scan_probe_loop<I: io::BleIo>(
                 buffer.add_peer_with_pubkey(&addr, peer_pubkey);
             }
             Err(e) => {
-                debug!(addr = %addr, error = %e, "BLE probe pubkey exchange failed");
+                stats.record_pubkey_exchange_failure();
+                debug!(
+                    addr = %addr, role = "central", outcome = "pubkey-exchange-failed",
+                    discovery_ms = probe_started.elapsed().as_millis() as u64, error = %e,
+                    "BLE probe pubkey exchange failed"
+                );
             }
         }
     }
@@ -1640,9 +1706,45 @@ mod tests {
     }
 
     /// Let spawned loops make progress.
+    ///
+    /// Cooperative only: this hands the scheduler control, it does not move
+    /// the clock. Anything gated on a `tokio::time` timer needs
+    /// [`wait_for`] instead.
     async fn settle() {
         for _ in 0..64 {
             tokio::task::yield_now().await;
+        }
+    }
+
+    /// Wait until `cond` holds, or fail the test.
+    ///
+    /// A fixed number of `yield_now()` calls is not a wait, it is a race
+    /// against the clock, and it loses whenever a loop under test is parked
+    /// on a timer rather than on a channel. `scan_probe_loop` is: before it
+    /// reaches its `select!` it consumes the retry interval's first tick,
+    /// and tokio rounds a timer deadline up to the next whole millisecond of
+    /// its wheel — so unless the runtime clock happens to sit exactly on a
+    /// millisecond boundary, that tick cannot fire until real time crosses
+    /// the next one. No number of yields makes real time pass, so whether a
+    /// yield budget covers the gap depends on how long a yield takes on the
+    /// host: comfortably on a slow one, not at all on a fast one.
+    ///
+    /// Polling the condition with a sleep between attempts removes the
+    /// dependency entirely — the sleep is what lets the timer fire, and the
+    /// condition is what ends the wait. The already-satisfied case still
+    /// costs only a `settle`, so nothing that passes today gets slower.
+    async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            settle().await;
+            if cond() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     }
 
@@ -1935,5 +2037,209 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, TransportError::RecvFailed(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // Connect outcome counters
+    // ------------------------------------------------------------------
+
+    /// A dial that errors is counted as an error, not as a timeout. The two
+    /// are different faults and blur into one useless number if merged.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_refused_dial_counts_as_an_error_not_a_timeout() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        settle().await;
+
+        let snap = transport.stats.snapshot();
+        assert_eq!(snap.connect_errors, 1);
+        assert_eq!(snap.connect_timeouts, 0);
+        assert_eq!(snap.connections_established, 0);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A peer that connects and then sends a bad exchange is counted as a
+    /// pubkey-exchange failure — the link came up and produced nothing
+    /// usable, which is a different fault from never connecting.
+    #[tokio::test]
+    async fn test_a_bad_exchange_counts_as_a_pubkey_exchange_failure() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport =
+            BleTransport::new(TransportId::new(1), None, identity_test_config(), io, tx);
+        transport.set_local_pubkey(test_pubkey(1));
+        transport.start_async().await.unwrap();
+
+        let (ours, peer) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        transport.io.inject_inbound(ours).await;
+        let mut wire = vec![0xFFu8];
+        wire.extend_from_slice(&test_pubkey(2));
+        peer.send(&wire).await.unwrap();
+        settle().await;
+
+        let snap = transport.stats.snapshot();
+        assert_eq!(snap.pubkey_exchange_failures, 1);
+        assert_eq!(snap.connections_accepted, 0);
+        assert_eq!(transport.pool.lock().await.len(), 0);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The tie-breaker pair. Its convention is deterministic in source, but
+    /// nothing recorded whether two nodes actually agreed at runtime, and a
+    /// disagreement leaves every existing counter at zero. Across a pair, one
+    /// yield and one drop is agreement.
+    #[tokio::test]
+    async fn test_tiebreaker_records_one_yield_and_one_drop_across_a_pair() {
+        let (smaller, larger) = pubkeys_ordered_by_node_addr();
+
+        // The node with the LARGER address accepts an inbound from the
+        // smaller: its inbound wins, so nothing is stood down here. Invert it
+        // — the SMALLER node accepting from the larger stands its inbound
+        // down, because its own outbound is meant to win.
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut inbound_side =
+            BleTransport::new(TransportId::new(1), None, identity_test_config(), io, tx);
+        inbound_side.set_local_pubkey(smaller);
+        inbound_side.start_async().await.unwrap();
+
+        let (ours, peer) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        inbound_side.io.inject_inbound(ours).await;
+        peer_side_exchange(&peer, &larger).await;
+        {
+            let stats = Arc::clone(&inbound_side.stats);
+            wait_for("the inbound tie-breaker to conclude", || {
+                stats.snapshot().tiebreaker_drops == 1
+            })
+            .await;
+        }
+
+        let snap = inbound_side.stats.snapshot();
+        assert_eq!(snap.tiebreaker_drops, 1, "our inbound stood down");
+        assert_eq!(snap.tiebreaker_yields, 0);
+        assert_eq!(inbound_side.pool.lock().await.len(), 0);
+        inbound_side.stop_async().await.unwrap();
+
+        // The other side of the same pair: the node with the LARGER address
+        // probing outbound stands its dial down, because the smaller node's
+        // outbound is meant to win.
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let io2 = MockBleIo::new("hci0", test_addr(2));
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel();
+        io2.set_connect_handler(move |addr, psm| {
+            dials.lock().unwrap().push((addr.clone(), psm));
+            let (ours, theirs) = MockBleStream::pair(test_addr(2), addr.clone(), 2048);
+            peer_tx
+                .send(theirs)
+                .map_err(|_| TransportError::ConnectionRefused)?;
+            Ok(ours)
+        });
+        tokio::spawn(async move {
+            let mut alive = Vec::new();
+            while let Some(theirs) = peer_rx.recv().await {
+                peer_side_exchange(&theirs, &smaller).await;
+                alive.push(theirs);
+            }
+        });
+
+        let config = BleConfig {
+            scan: Some(true),
+            accept_connections: Some(false),
+            ..identity_test_config()
+        };
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+        let mut outbound_side = BleTransport::new(TransportId::new(2), None, config, io2, tx2);
+        outbound_side.set_local_pubkey(larger);
+        outbound_side.start_async().await.unwrap();
+
+        outbound_side.io.inject_scan_result(test_addr(1)).await;
+        {
+            let stats = Arc::clone(&outbound_side.stats);
+            wait_for("the outbound tie-breaker to conclude", || {
+                stats.snapshot().tiebreaker_yields == 1
+            })
+            .await;
+        }
+
+        let snap = outbound_side.stats.snapshot();
+        assert_eq!(snap.tiebreaker_yields, 1, "our outbound stood down");
+        assert_eq!(snap.tiebreaker_drops, 0);
+        assert_eq!(outbound_side.pool.lock().await.len(), 0);
+        outbound_side.stop_async().await.unwrap();
+    }
+
+    /// An oversized packet is a caller bug, not a property of the peer's
+    /// link. Folding it into `send_errors` would make that number useless as
+    /// evidence.
+    #[tokio::test]
+    async fn test_mtu_rejection_does_not_count_as_a_send_error() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let transport =
+            BleTransport::new(TransportId::new(1), None, identity_test_config(), io, tx);
+
+        let ta = test_addr(2).to_transport_addr();
+        let (parked, _peer) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        transport
+            .pool
+            .lock()
+            .await
+            .insert(
+                ta.clone(),
+                BleConnection {
+                    stream: Arc::new(parked),
+                    recv_task: None,
+                    send_mtu: 64,
+                    recv_mtu: 64,
+                    established_at: tokio::time::Instant::now(),
+                    is_static: false,
+                    addr: test_addr(2),
+                    node_addr: None,
+                },
+            )
+            .unwrap();
+
+        let err = transport.send_async(&ta, &[0u8; 128]).await.unwrap_err();
+        assert!(matches!(err, TransportError::MtuExceeded { .. }));
+
+        let snap = transport.stats.snapshot();
+        assert_eq!(snap.mtu_exceeded, 1);
+        assert_eq!(snap.send_errors, 0);
+    }
+
+    /// The snapshot is the control-socket contract. Pin every key so a field
+    /// cannot be dropped or renamed without a test saying so.
+    #[test]
+    fn test_snapshot_carries_every_counter() {
+        let value = serde_json::to_value(BleStats::new().snapshot()).unwrap();
+        let object = value.as_object().unwrap();
+        let expected = [
+            "packets_sent",
+            "bytes_sent",
+            "packets_recv",
+            "bytes_recv",
+            "send_errors",
+            "recv_errors",
+            "mtu_exceeded",
+            "connections_established",
+            "connections_accepted",
+            "connections_rejected",
+            "connect_timeouts",
+            "connect_errors",
+            "pubkey_exchange_failures",
+            "tiebreaker_yields",
+            "tiebreaker_drops",
+            "pool_evictions",
+            "advertisements_sent",
+            "scan_results",
+            "duplicate_node_declines",
+        ];
+        for key in expected {
+            assert!(object.contains_key(key), "snapshot lost `{key}`");
+        }
+        assert_eq!(object.len(), expected.len(), "snapshot gained a key");
     }
 }
