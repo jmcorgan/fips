@@ -28,6 +28,19 @@ with v0.4.x or earlier peers.
   in future releases.
 - FMP msg1 reduced from 106 to 33 bytes (ephemeral key only, no
   encrypted static key or DH products).
+- A rekey is now declared explicitly in msg3, by a negotiation TLV naming
+  the session it replaces, instead of being inferred from session age. A
+  rekey and a fresh dial both arrive as a new msg1 on a new link, and the
+  fact that separates them is internal to the initiator, so nothing on the
+  wire carried it: a message-count-triggered rekey fires on a young
+  session, so a real rekey landed below the age floor, was resolved as a
+  cross-connection, and left the two ends of the link on different session
+  indices. The marker uses the index the receiver allocated, so the
+  receiver can match it against its own, and the shell resolves it to
+  none, matching or mismatched. A mismatched marker resends msg2 rather
+  than rejecting, because the initiator has already installed its pending
+  session and will cut over on its own timer while the reject path sends
+  nothing back. The age floor and the session-age snapshot are gone.
 
 #### FMP Node Profiles
 
@@ -216,6 +229,22 @@ with v0.4.x or earlier peers.
 
 ### Changed
 
+- `node.rekey.enabled` now means "initiate rekeys" and nothing else. The
+  responder half of the establish decision was also gated on it, and once the
+  rekey is declared in the msg3 negotiation payload that flag was the only
+  thing that could divert a msg3 whose marker matched the session we hold — it
+  diverted it to a msg2 resend while the initiator had already installed its
+  pending session and would cut over on its own timer regardless. A pair
+  configured with the flag true on one end and false on the other therefore
+  parted company at the initiator's cutover and carried no traffic in either
+  direction until the link-dead timer. Removing that gate exposed a second
+  reading of the same flag: the rekey poll returned early when rekey was
+  disabled, and its drain-expiry arm is the only thing that releases a demoted
+  session and its index, so a node that does not initiate but now accepts a
+  rekey would have pinned the previous session and its allocator index
+  forever. The trigger and the polled cutover stay gated on the flag; the
+  drain no longer is.
+
 - Node health is determined at start completion instead of unconditionally
   reaching a single running state. **Zero transports up is now fatal**: the
   node tears down cleanly and the daemon exits with an error, where it
@@ -349,16 +378,6 @@ with v0.4.x or earlier peers.
   the transport id several peers sharing one adopted transport are
   indistinguishable from several separate adopted transports.
 
-- Inbound msg1 is classified before it is rate limited, and rekey or restart
-  msg1 arriving on an established link now draws on its own token bucket
-  instead of competing with stranger admission for a single shared one. On a
-  node with many peers the shared bucket refused a large share of ordinary
-  rekey traffic: a field node at roughly 245 peers refused 8753 msg1 in 25
-  minutes, and 159 of the 201 distinct sources were peers it already held
-  sessions with. Nodes upgrade with no config change. The `Msg1 rate limited`
-  log line now reports which limb refused, the pending count or the token
-  bucket, which it previously did not distinguish.
-
 - `SessionDatagram::decrement_ttl` and `SessionDatagram::can_forward` now match
   the forwarder's IP hop-limit semantics: `decrement_ttl` decrements first and
   reports false when the result is zero, and `can_forward` is true only at a
@@ -378,6 +397,31 @@ with v0.4.x or earlier peers.
   alias and will be removed at the v2 cutover; migrate to `listen`.
 
 ### Fixed
+
+- A leaf-profile node no longer self-elects as tree root. A leaf holding the
+  smallest node address elected itself, but its peers refuse a non-full node as
+  a parent, so it formed an isolated second root and partitioned the mesh: a
+  multi-hop session from the leaf to a non-adjacent full node then failed,
+  because the far node could not route a handshake reply back into the leaf's
+  separate coordinate tree. A leaf now attaches under its full upstream and
+  holds that subtree's coordinate for its own routing; it never announces that
+  coordinate, reaching peers via the ones carried on its session frames, and
+  the upstream already advertises it in the upstream's bloom filter.
+  `Node::with_identity` also derives the node profile, leaf-only flag and bloom
+  state from the config as `Node::new` does, where it previously hardcoded the
+  full profile and silently dropped a configured leaf or non-routing profile.
+
+- Every XX handshake reject arm now releases the session index and the link it
+  holds. The msg2 self-connect drop and the msg3 reject arms disposed of a leg
+  without returning what that leg had allocated, so each rejected handshake
+  leaked an index and a link entry. One arm is deliberately not fixed like the
+  others: its index comes from the receiver field of the incoming header, which
+  the peer supplies, so freeing it unconditionally would let a hostile peer
+  release an index belonging to an unrelated live session, trading a memory
+  leak for a remote session teardown. That arm frees only after a
+  transport-blind predicate establishes the index is not claimed elsewhere.
+  The outbound ACL-reject arm also regains the reschedule call its dial-gate
+  sibling makes, so a configured peer no longer drops off the dial schedule.
 
 - Nostr NAT traversal signals are now sent only to relays the client pool
   actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox
@@ -535,6 +579,23 @@ with v0.4.x or earlier peers.
   hop after it.
 
 ### Security
+
+- The peer static key is verified on both FMP handshake paths, not only at
+  rekey. Under Noise XX the static is learned during the handshake rather than
+  pinned in advance, and neither path that learns one checked it against what
+  we already knew, so an attacker able to observe and inject on path could
+  substitute their own identity on a fresh dial and on an established link. On
+  a fresh dial we recorded who we meant to reach and then overwrote it with
+  whoever answered without comparing the two, so an attacker who raced the real
+  peer to msg2 became the peer — promotion, the ACL check and the peer registry
+  all ran on the answering identity — and the intended node was never reached.
+  On an established link a rekey msg2 was matched to its peer only by the
+  session index we had put in the cleartext msg1 header, so anyone who saw that
+  header could answer with their own static and take the link over at cutover.
+  Both are now compared before anything is committed, with the dial-time
+  expectation held in a field that has no setter so the handshake cannot
+  overwrite it. Anonymous dials still promote whoever answers, which is what
+  shared-media discovery means.
 
 - The FSP session address is now bound to the peer key the Noise handshake
   authenticated, on both the initial and the rekey path. The responder recorded
