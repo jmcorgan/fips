@@ -6,7 +6,7 @@ use crate::utils::index::SessionIndex;
 use std::time::Duration;
 
 mod acl;
-#[cfg(target_os = "linux")]
+#[cfg(ble_available)]
 mod ble;
 mod bloom;
 mod bloom_poison;

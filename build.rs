@@ -43,7 +43,22 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(bluer_available)");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    if target_os == "linux" && target_env != "musl" {
+    let bluer_available = target_os == "linux" && target_env != "musl";
+    if bluer_available {
         println!("cargo:rustc-cfg=bluer_available");
+    }
+
+    // Whether the BLE transport is compiled at all.
+    //
+    // This is the set of platforms that have a concrete `BleIo` backend, not
+    // the set that could plausibly have one. A platform listed here with no
+    // backend behind it does not get "BLE, degraded" — it gets an in-memory
+    // transport that starts, reports itself up and never peers, with no error
+    // anywhere. Add a platform here only in the same change that adds its
+    // backend; `transport::ble` carries a compile-time tripwire that refuses
+    // a build where the two disagree.
+    println!("cargo:rustc-check-cfg=cfg(ble_available)");
+    if bluer_available || target_os == "android" {
+        println!("cargo:rustc-cfg=ble_available");
     }
 }

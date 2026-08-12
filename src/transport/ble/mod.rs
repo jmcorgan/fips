@@ -16,10 +16,13 @@
 //!
 //! ## Architecture
 //!
-//! Transport logic (pool, neighbor, lifecycle) is separated from the
-//! BlueZ/bluer stack via the `BleIo` trait. `BluerIo` provides the real
-//! implementation (behind `cfg(bluer_available)`); `MockBleIo` provides
-//! an in-memory test double for CI without hardware.
+//! Transport logic (pool, neighbor, lifecycle) is separated from any one
+//! Bluetooth stack via the `BleIo` trait. `BluerIo` drives BlueZ (behind
+//! `cfg(bluer_available)`), [`android_io::AndroidIo`] drives a radio the
+//! embedder supplies, and `MockBleIo` is an in-memory double for tests
+//! without hardware. Which one `DefaultBleTransport` resolves to is decided
+//! by the cascade below, and the whole module is compiled only on platforms
+//! that have one of them — see `ble_available` in `build.rs`.
 //!
 //! ## Connection Pool
 //!
@@ -78,15 +81,40 @@ use tracing::{debug, info, trace, warn};
 /// dialled at when it advertises nothing.
 pub const DEFAULT_PSM: u16 = 0x0085;
 
-/// Concrete BLE transport type for use in TransportHandle.
+/// Concrete BLE transport type for use in `TransportHandle`.
 ///
-/// Production builds on glibc-linux use `BluerIo` (real BlueZ stack).
-/// Test builds, musl-linux, and non-Linux platforms use `MockBleIo`.
+/// Three arms, in priority order: an in-process BlueZ stack where one exists,
+/// otherwise a radio the embedder supplies, otherwise — and *only* in a test
+/// build — the in-memory double.
+///
+/// The mock arm is deliberately not written as "anything that is not BlueZ".
+/// That phrasing is what makes widening the module gate dangerous: a platform
+/// added to `ble_available` without a backend would silently land on an
+/// in-memory transport that compiles, starts, reports [`TransportState::Up`]
+/// and never peers, with nothing anywhere to say so. The tripwire below makes
+/// that state unrepresentable instead.
 #[cfg(all(bluer_available, not(test)))]
 pub type DefaultBleTransport = BleTransport<io::BluerIo>;
 
-#[cfg(any(not(bluer_available), test))]
+#[cfg(all(target_os = "android", not(bluer_available), not(test)))]
+pub type DefaultBleTransport = BleTransport<android_io::AndroidIo>;
+
+#[cfg(test)]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
+
+// The tripwire. This module is only compiled when `ble_available`, so
+// reaching here means a platform declared it has BLE while having no concrete
+// backend to provide it. It cannot fire today; it exists for whoever next
+// widens `ble_available`, and it fails the build rather than shipping a
+// transport that quietly never connects.
+#[cfg(all(not(test), not(bluer_available), not(target_os = "android")))]
+compile_error!(
+    "this target is `ble_available` but has no concrete `BleIo` backend. \
+     Add its backend and an arm to the `DefaultBleTransport` cascade in \
+     src/transport/ble/mod.rs, or drop the target from `ble_available` in \
+     build.rs. Falling back to the in-memory mock in a non-test build would \
+     produce a BLE transport that starts, reports itself up, and never peers."
+);
 
 // ============================================================================
 // BLE Transport
@@ -1354,6 +1382,29 @@ mod tests {
     use crate::transport::framing::build_established_frame;
     use io::{MockBleIo, MockBleStream};
     use secp256k1::{Secp256k1, SecretKey};
+
+    /// The mock backend is a *test* backend. Any target that compiles this
+    /// module must have a real one behind it, or a release build of it would
+    /// ship a BLE transport that starts, reports itself up, and never peers.
+    ///
+    /// The `compile_error!` above is what enforces that in a non-test build —
+    /// and by construction it cannot fire in a test build, which is exactly
+    /// the build everybody runs. This closes that gap: the `cfg!` values below
+    /// are evaluated for the *target*, not for the test profile, so this
+    /// asserts the same condition the tripwire does, from the one place a
+    /// developer will actually see it.
+    #[test]
+    fn a_target_that_compiles_this_module_has_a_real_backend() {
+        let has_concrete_backend = cfg!(bluer_available) || cfg!(target_os = "android");
+        assert!(
+            has_concrete_backend,
+            "target {} is `ble_available` but has no concrete `BleIo` backend, \
+             so a non-test build of it would select the in-memory mock. Add \
+             its backend and an arm to the `DefaultBleTransport` cascade, or \
+             drop it from `ble_available` in build.rs.",
+            std::env::consts::OS,
+        );
+    }
 
     /// Deterministic x-only pubkey for exchange tests.
     fn test_pubkey(seed: u8) -> [u8; 32] {
