@@ -3278,6 +3278,115 @@ fn app_owned_udp_fd_seam_second_arm_replaces_the_first() {
     );
 }
 
+/// The app-owned BLE radio seam. The slot is live from the moment it is armed
+/// — before `start()`, which is when the transport that reads it gets built —
+/// and installing a radio through it is a slot operation, not a node one.
+#[cfg(all(ble_available, any(target_os = "android", test)))]
+#[test]
+fn app_owned_ble_radio_seam_hands_out_a_live_slot_before_start() {
+    use crate::transport::ble::android_io::{AndroidBleBridge, BleRadioSlot};
+
+    let mut node = make_node();
+    let slot: std::sync::Arc<BleRadioSlot> = node.enable_app_owned_ble_radio();
+
+    assert!(
+        !slot.is_installed(),
+        "arming supplies the slot, not a radio to put in it",
+    );
+
+    slot.install(AndroidBleBridge::new(std::sync::Arc::new(
+        test_radio::TestRadio,
+    )));
+    assert!(slot.is_installed(), "the embedder installs whenever it can");
+
+    slot.clear();
+    assert!(!slot.is_installed(), "and can take it away again");
+}
+
+/// Arming twice returns the same slot, so a second call cannot orphan a radio
+/// installed through the first. This is where the seam deliberately differs
+/// from `enable_app_owned_udp_fd`, whose last arming wins: a channel can be
+/// replaced because nothing was delivered on it yet, while a slot may already
+/// be holding the embedder's live radio.
+#[cfg(all(ble_available, any(target_os = "android", test)))]
+#[test]
+fn app_owned_ble_radio_seam_second_arm_returns_the_same_slot() {
+    use crate::transport::ble::android_io::AndroidBleBridge;
+
+    let mut node = make_node();
+    let first = node.enable_app_owned_ble_radio();
+    first.install(AndroidBleBridge::new(std::sync::Arc::new(
+        test_radio::TestRadio,
+    )));
+
+    let second = node.enable_app_owned_ble_radio();
+
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "re-arming must not hand back a different slot",
+    );
+    assert!(
+        second.is_installed(),
+        "the radio installed through the first handle is still there",
+    );
+}
+
+/// The slot is per-node state, which is the whole reason it is not a process
+/// global: two nodes in one process each drive their own radio.
+#[cfg(all(ble_available, any(target_os = "android", test)))]
+#[test]
+fn app_owned_ble_radio_slots_are_per_node() {
+    use crate::transport::ble::android_io::AndroidBleBridge;
+
+    let mut node_a = make_node();
+    let mut node_b = make_node();
+    let slot_a = node_a.enable_app_owned_ble_radio();
+    let slot_b = node_b.enable_app_owned_ble_radio();
+
+    slot_a.install(AndroidBleBridge::new(std::sync::Arc::new(
+        test_radio::TestRadio,
+    )));
+
+    assert!(slot_a.is_installed());
+    assert!(
+        !slot_b.is_installed(),
+        "node B's radio is node B's — no shared or global slot",
+    );
+}
+
+/// A node that never armed the seam has no slot to hand the transport, which
+/// is how a build with the embedder-supplied backend distinguishes "no radio
+/// yet" from "this embedder does not supply one at all".
+#[cfg(all(ble_available, any(target_os = "android", test)))]
+#[test]
+fn app_owned_ble_radio_seam_is_absent_until_armed() {
+    let node = make_node();
+    assert!(node.ble_radio.is_none());
+}
+
+#[cfg(all(ble_available, any(target_os = "android", test)))]
+mod test_radio {
+    use crate::transport::ble::addr::BleAddr;
+    use crate::transport::ble::android_io::AndroidRadio;
+
+    /// A radio that does nothing. These tests are about the seam handing one
+    /// over, not about what it then does — that is covered where the backend
+    /// lives.
+    pub(super) struct TestRadio;
+
+    impl AndroidRadio for TestRadio {
+        fn listen(&self) -> u16 {
+            0
+        }
+        fn connect(&self, _connect_id: i64, _addr: &BleAddr, _psm: u16) {}
+        fn start_advertising(&self, _psm: u16) {}
+        fn stop_advertising(&self) {}
+        fn start_scanning(&self) {}
+        fn stop_scanning(&self) {}
+        fn close_channel(&self, _ch_id: i64) {}
+    }
+}
+
 /// The embedder-facing DNS contract, end to end.
 ///
 /// An embedder that owns the TUN fd (Android `VpnService`) has no system DNS
