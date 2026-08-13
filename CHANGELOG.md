@@ -214,6 +214,12 @@ with v0.4.x or earlier peers.
   `LogsDirectory=fips` was added to the packaged systemd units so the capture
   directory is created and cleaned up declaratively.
 
+- `SECURITY.md`, stating a private channel for vulnerability reports, what a
+  useful report contains, what a reporter can expect back and on what timing,
+  and which branches receive fixes. The repository previously documented no
+  reporting channel at all, so someone with a finding had to guess at an
+  address or open a public issue.
+
 - `node.rate_limit.established_handshake_burst` and
   `node.rate_limit.established_handshake_rate`, the parameters of the new
   established-link msg1 token bucket. Both are optional; omitting them (the
@@ -440,6 +446,12 @@ with v0.4.x or earlier peers.
   follow it once created, and socket setup changes ownership and mode only for
   a private parent directory it creates or recognizes as a canonical FIPS
   runtime directory.
+
+- The maintainer address published in package metadata no longer bounces. The
+  crate authors field, the Debian package maintainer and upstream contact,
+  both AUR PKGBUILD maintainer lines and the FreeBSD package manifest carried
+  an address that no longer accepts mail, so the contact of record in every
+  artifact we ship was unreachable.
 
 - Nostr NAT traversal signals are now sent only to relays the client pool
   actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox

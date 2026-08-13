@@ -92,7 +92,7 @@ comment: "Self-organizing encrypted mesh network on Nostr identities"
 desc: <<EOD
 ${DESC}
 EOD
-maintainer: "jcorgan@corganlabs.com"
+maintainer: "johnathan@corganlabs.com"
 www: "https://fips.network"
 abi: "${ABI}"
 prefix: "/usr/local"

@@ -4,7 +4,7 @@ version = "0.6.0-dev"
 edition = "2024"
 description = "A distributed, decentralized network routing protocol for mesh nodes connecting over arbitrary transports"
 license = "MIT"
-authors = ["Johnathan Corgan <jcorgan@corganlabs.com>"]
+authors = ["Johnathan Corgan <johnathan@corganlabs.com>"]
 repository = "https://github.com/jmcorgan/fips"
 homepage = "https://fips.network"
 readme = "README.md"
@@ -70,7 +70,7 @@ wintun = "0.5"
 windows-service = "0.8.1"
 
 [package.metadata.deb]
-maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"
+maintainer = "Johnathan Corgan <johnathan@corganlabs.com>"
 copyright = "2026 Johnathan Corgan"
 license-file = ["LICENSE", "0"]
 section = "net"
