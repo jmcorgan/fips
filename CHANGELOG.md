@@ -245,7 +245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup unconditionally changed the parent directory. A privileged macOS
   process now selects the private runtime path before its leaf exists, clients
   follow it once created, and socket setup changes ownership and mode only for
-  a private parent directory it atomically created.
+  a private parent directory it creates or recognizes as a canonical FIPS
+  runtime directory.
 
 - Nostr NAT traversal signals are now sent only to relays the client pool
   actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox

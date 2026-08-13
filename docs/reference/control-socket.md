@@ -23,10 +23,12 @@ A Unix domain socket. The default path is resolved in this order:
 3. `$XDG_RUNTIME_DIR/fips/control.sock` otherwise.
 4. `/tmp/fips-control.sock` if none of the above is available.
 
-The daemon sets the socket to group `fips`, mode `0770`. When it creates a
-private parent directory, it sets that directory to group `fips`, mode `0750`.
-It never changes an existing parent directory, because fallback locations such
-as `/tmp` may be shared system state. Members of the `fips` group can connect
+The daemon sets the socket to group `fips`, mode `0770`. It sets a private
+parent directory to group `fips`, mode `0750`, both when it creates that
+directory and when a service manager pre-creates a canonical runtime directory
+(`/run/fips`, `/var/run/fips`, or `$XDG_RUNTIME_DIR/fips`). Existing shared or
+custom parents remain unchanged, so fallback locations such as `/tmp` retain
+their system ownership and mode. Members of the `fips` group can connect
 without root.
 
 The path can be overridden at the daemon side via

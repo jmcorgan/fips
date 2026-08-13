@@ -211,6 +211,31 @@ fn resolve_default_socket_with(
     format!("/tmp/fips-{filename}")
 }
 
+/// Return whether `parent` is one of the private runtime directories used by
+/// the default Unix socket resolver.
+///
+/// This is intentionally stricter than matching any leaf named `fips`: an
+/// explicitly configured existing directory remains operator-owned unless it
+/// is also a canonical resolver candidate.
+#[cfg(unix)]
+fn is_managed_socket_parent_with(
+    parent: &Path,
+    var_run_policy: VarRunPolicy,
+    xdg_runtime_dir: Option<&Path>,
+) -> bool {
+    parent == Path::new("/run/fips")
+        || (var_run_policy.consult_existing && parent == Path::new("/var/run/fips"))
+        || xdg_runtime_dir.is_some_and(|xdg| parent == xdg.join("fips"))
+}
+
+/// Return whether `parent` is a private runtime directory managed by the
+/// default Unix socket resolver on this host.
+#[cfg(unix)]
+pub(crate) fn is_managed_socket_parent(parent: &Path) -> bool {
+    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    is_managed_socket_parent_with(parent, default_var_run_policy(), xdg_runtime_dir.as_deref())
+}
+
 /// Resolve a default Unix-socket path under the canonical order:
 /// `/run/fips/<filename>` → `/var/run/fips/<filename>` on macOS/FreeBSD →
 /// `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
@@ -2139,6 +2164,56 @@ node:
         );
 
         assert_eq!(path, "/valid/xdg/fips/control.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_managed_socket_parent_matches_only_resolver_candidates() {
+        let policy = VarRunPolicy {
+            consult_existing: true,
+            create_private_dir: true,
+        };
+
+        assert!(is_managed_socket_parent_with(
+            Path::new("/run/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(is_managed_socket_parent_with(
+            Path::new("/var/run/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(is_managed_socket_parent_with(
+            Path::new("/valid/xdg/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(!is_managed_socket_parent_with(
+            Path::new("/tmp"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(!is_managed_socket_parent_with(
+            Path::new("/srv/application/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_linux_managed_socket_parent_excludes_var_run() {
+        let linux_policy = VarRunPolicy {
+            consult_existing: false,
+            create_private_dir: false,
+        };
+
+        assert!(!is_managed_socket_parent_with(
+            Path::new("/var/run/fips"),
+            linux_policy,
+            None,
+        ));
     }
 
     /// Mutex serializing tests that mutate `XDG_RUNTIME_DIR`. `cargo test`
