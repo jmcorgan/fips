@@ -8,20 +8,28 @@ length-bounded JSON over a stream socket.
 
 ## Connection
 
-### Linux / macOS
+### Unix
 
 A Unix domain socket. The default path is resolved in this order:
 
 1. `/run/fips/control.sock` (or `/run/fips/gateway.sock` for the
    gateway), if `/run/fips` exists. This is what the `fips.service`
    systemd unit creates.
-2. `$XDG_RUNTIME_DIR/fips/control.sock` otherwise.
-3. `/tmp/fips-control.sock` if neither of the above is available.
+2. On macOS and FreeBSD, `/var/run/fips/control.sock` if its private
+   directory exists. A privileged macOS daemon selects this path before the
+   directory exists and creates it at bind time, so the packaged LaunchDaemon
+   recreates its runtime state after every boot. The FreeBSD rc.d service
+   creates the directory before starting FIPS.
+3. `$XDG_RUNTIME_DIR/fips/control.sock` otherwise.
+4. `/tmp/fips-control.sock` if none of the above is available.
 
-The daemon `chown`s the socket file and its parent directory to the
-`fips` group at bind time and sets mode `0770`. Members of the `fips`
-group can therefore connect without root. Add a user with
-`sudo usermod -aG fips $USER` (re-login required).
+The daemon sets the socket to group `fips`, mode `0770`. It sets a private
+parent directory to group `fips`, mode `0750`, both when it creates that
+directory and when a service manager pre-creates a canonical runtime directory
+(`/run/fips`, `/var/run/fips`, or `$XDG_RUNTIME_DIR/fips`). Existing shared or
+custom parents remain unchanged, so fallback locations such as `/tmp` retain
+their system ownership and mode. Members of the `fips` group can connect
+without root.
 
 The path can be overridden at the daemon side via
 `node.control.socket_path` in the YAML config, and at the client side

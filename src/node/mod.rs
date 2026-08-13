@@ -2990,6 +2990,56 @@ impl Node {
         (outbound_tx, tun_rx)
     }
 
+    /// Address the built-in `.fips` DNS responder is listening on, or `None`
+    /// when it is not running (`dns.enabled = false`, the bind failed, or the
+    /// node is stopped).
+    ///
+    /// This is the companion to [`Self::enable_app_owned_tun`] for embedders
+    /// that own the TUN fd. On a platform with no system DNS socket to point
+    /// at us — an Android `VpnService`, whose `addDnsServer()` takes an address
+    /// with no port and aims the OS resolver *into* the tunnel — `.fips`
+    /// queries arrive as IPv6/UDP packets on the app's own fd. The app can
+    /// forward the DNS payload here and splice the answer back into a reply
+    /// packet, rather than reimplementing resolution:
+    ///
+    /// ```no_run
+    /// # async fn f(node: &fips::Node, query: &[u8]) -> std::io::Result<()> {
+    /// let Some(dns) = node.dns_local_addr() else { return Ok(()) };
+    /// let sock = tokio::net::UdpSocket::bind("[::1]:0").await?;
+    /// sock.send_to(query, dns).await?;          // payload only, no IP/UDP header
+    /// let mut answer = [0u8; 512];
+    /// let (n, _) = sock.recv_from(&mut answer).await?;
+    /// # let _ = n; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Going through the responder rather than resolving in the app is what
+    /// keeps route warming working: answering a `<npub>.fips` query is what
+    /// populates the node's identity cache with that peer's public key, and a
+    /// `FipsAddress` is a truncated hash — the pubkey cannot be recovered from
+    /// the IPv6 address alone. Without a cache entry the first packet to a
+    /// freshly-resolved name is rejected with ICMPv6 "No route". Direct
+    /// neighbours mask this, since their identity comes from the Noise
+    /// handshake and never needed resolving.
+    ///
+    /// Read this **once, after [`Self::start`] returns and before the node is
+    /// moved into a background task** — that is the only window in which an
+    /// embedder running [`Self::run_rx_loop`] holds a `&Node` to call it on, and
+    /// the value is fixed by then: the responder is either up for the rest of
+    /// the node's life or it never came up. The address is read back off the
+    /// bound socket, so a `dns.port = 0` config reports the port the kernel
+    /// actually assigned.
+    ///
+    /// This is a one-shot read, not a liveness feed. `None` distinguishes "no
+    /// responder" from "responder at this address" at that moment; it is not a
+    /// signal an embedder can watch for a responder that dies later, because
+    /// `run_rx_loop` borrows the node exclusively for its whole lifetime.
+    /// Reading live node state from a backgrounded loop is a general gap, not
+    /// one this accessor tries to close.
+    pub fn dns_local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.supervisor.dns_local_addr
+    }
+
     // === Sending ===
 
     /// Encrypt and send a link-layer message to an authenticated peer.

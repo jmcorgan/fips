@@ -54,7 +54,7 @@ peers:       # Static peer list
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.control.enabled` | bool | `true` | Enable the control socket |
-| `node.control.socket_path` | string | *(auto)* | **Linux:** Socket file path. Resolved at daemon startup: `$XDG_RUNTIME_DIR/fips/control.sock` if `XDG_RUNTIME_DIR` is set, else `/run/fips/control.sock` if `/run/fips` can be created (typical when running under the shipped systemd unit), else `/tmp/fips-control.sock`. (Note: the `fipsctl` / `fipstop` clients use a different fallback order — `/run/fips` first if it already exists, then `XDG_RUNTIME_DIR`, then `/tmp` — so when both schemes apply, set this field explicitly to avoid mismatch.) **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. |
+| `node.control.socket_path` | string | *(auto)* | **Unix:** Socket file path. Resolution is shared by daemon and clients: `/run/fips/control.sock` when `/run/fips` exists; then `/var/run/fips/control.sock` on macOS/FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/control.sock`; finally `/tmp/fips-control.sock`. A privileged macOS daemon selects `/var/run/fips/control.sock` even when the private directory must be created after boot. **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. |
 
 The control socket provides access to node state and runtime management
 via the `fipsctl` command-line tool. In addition to read-only status
@@ -62,7 +62,7 @@ queries, `fipsctl connect` and `fipsctl disconnect` enable runtime peer
 management. See the [`fipsctl` reference](cli-fipsctl.md) for the
 command list.
 
-On Linux, the control socket is a Unix domain socket with filesystem
+On Unix, the control socket is a Unix domain socket with filesystem
 permissions (mode 0770, group `fips`). On Windows, it is a TCP listener
 on localhost. TCP does not provide filesystem-level ACLs, so any local
 user can connect to the control port.
@@ -994,7 +994,7 @@ node:
     after_messages: 65536            # rekey after N messages sent
   control:
     enabled: true
-    socket_path: null                # null = auto ($XDG_RUNTIME_DIR → /run/fips → /tmp fallback)
+    socket_path: null                # null = auto (platform runtime dir → XDG → /tmp)
   buffers:
     packet_channel: 1024
     tun_channel: 1024

@@ -692,6 +692,11 @@ pub(crate) struct Supervisor {
     pub(in crate::node) dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
     /// DNS responder task handle.
     pub(in crate::node) dns_task: Option<tokio::task::JoinHandle<()>>,
+    /// Address the DNS responder actually bound, read back from the socket
+    /// after `bind` so a port-0 config resolves to the assigned port. `Some`
+    /// only while the responder is up; published to embedders through
+    /// [`Node::dns_local_addr`](crate::Node::dns_local_addr).
+    pub(in crate::node) dns_local_addr: Option<std::net::SocketAddr>,
 
     /// Node-side driver state for the Nostr overlay peer-rendezvous
     /// subsystem: the engine handle, its startup timestamp, the one-shot
@@ -737,6 +742,7 @@ impl Supervisor {
             tun_shutdown_fd: None,
             dns_identity_rx: None,
             dns_task: None,
+            dns_local_addr: None,
             nostr_rendezvous: crate::nostr::RendezvousDriver::default(),
             lan_rendezvous: None,
             #[cfg(unix)]

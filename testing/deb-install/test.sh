@@ -462,6 +462,26 @@ EOF
         fail "fips.service did not stay up after gateway-enable restart"
     fi
 
+    # systemd removes and recreates RuntimeDirectory=fips across this restart
+    # as root:root 0750. The daemon must restore the fips group on every start,
+    # not only when it created the directory itself.
+    local runtime_access
+    runtime_access=$(docker exec "$name" stat -c '%a %U:%G' /run/fips 2>/dev/null || true)
+    if [ "$runtime_access" = "750 root:fips" ]; then
+        pass "/run/fips ownership restored after service restart"
+    else
+        fail "/run/fips wrong after service restart: '$runtime_access' (expected '750 root:fips')"
+    fi
+
+    if docker exec "$name" bash -c '
+        useradd --system --no-create-home --user-group --groups fips fips-test-client
+        runuser -u fips-test-client -- fipsctl show status >/dev/null
+    '; then
+        pass "non-root fips group member reaches control socket after restart"
+    else
+        fail "non-root fips group member cannot reach control socket after restart"
+    fi
+
     docker exec "$name" systemctl start fips-gateway.service >/dev/null 2>&1 || true
     sleep 3
     if docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null \

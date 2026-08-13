@@ -273,6 +273,11 @@ impl Node {
                 // `PublishState`; other variants are ignored defensively.
                 maybe_child = child_exit_rx.recv() => {
                     if let Some(child) = maybe_child {
+                        // Drop anything the dead child published for embedders
+                        // (e.g. the DNS responder's bound address) before
+                        // republishing health, so nothing outside the node can
+                        // observe an address the listener no longer answers on.
+                        self.retract_child_publications(child);
                         let actions = self
                             .supervisor
                             .fsm

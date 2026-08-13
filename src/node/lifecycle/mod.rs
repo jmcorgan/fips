@@ -1983,6 +1983,12 @@ impl Node {
                             let bind = std::net::SocketAddr::new(ip, self.config().dns.port());
                             match Self::bind_dns_socket(bind) {
                                 Ok(socket) => {
+                                    // Read the bound address back off the socket
+                                    // rather than reusing `bind`: a port-0 config
+                                    // resolves to the kernel-assigned port here,
+                                    // and this is the address an embedder that
+                                    // proxies queries to us has to dial.
+                                    let local_addr = socket.local_addr().unwrap_or(bind);
                                     let dns_channel_size = self.config().node.buffers.dns_channel;
                                     let (identity_tx, identity_rx) =
                                         tokio::sync::mpsc::channel(dns_channel_size);
@@ -2007,7 +2013,7 @@ impl Node {
                                     let mesh_ifindex =
                                         Self::lookup_mesh_ifindex(self.config().tun.name());
                                     info!(
-                                        bind = %bind,
+                                        bind = %local_addr,
                                         hosts = reloader.hosts().len(),
                                         mesh_ifindex = ?mesh_ifindex,
                                         "DNS responder started for .fips domain (auto-reload enabled)"
@@ -2033,6 +2039,7 @@ impl Node {
                                     });
                                     self.supervisor.dns_identity_rx = Some(identity_rx);
                                     self.supervisor.dns_task = Some(handle);
+                                    self.supervisor.dns_local_addr = Some(local_addr);
                                     Event::SubstrateUp { child }
                                 }
                                 Err(e) => {
@@ -2293,6 +2300,10 @@ impl Node {
                         handle.abort();
                         debug!("DNS responder stopped");
                     }
+                    // Retract the published address in the same step that kills
+                    // the listener, so an embedder polling `dns_local_addr()`
+                    // never dials a socket that is already gone.
+                    self.supervisor.dns_local_addr.take();
                 }
                 Child::Nostr => {
                     // Stop Nostr overlay discovery background work and withdraw
@@ -2386,6 +2397,34 @@ impl Node {
         if !packet_taken {
             self.supervisor.packet_tx.take();
             self.packet_rx.take();
+        }
+    }
+
+    /// Retract anything a child published about itself, after it exited on its
+    /// own at runtime (as opposed to being torn down by [`Self::stop`]).
+    ///
+    /// The FSM's `ChildExited` handling only republishes node health; it does
+    /// not touch per-child handles. That is fine for state nobody outside the
+    /// node reads, but not for an address an embedder dials: a stale
+    /// [`Node::dns_local_addr`] would have the app proxying `.fips` queries
+    /// into a socket that is gone, and the only symptom would be resolution
+    /// quietly timing out.
+    ///
+    /// Deliberately narrow — it clears published facts, not handles.
+    /// `dns_task` is left alone because [`Self::reconstruct_supervised_up`]
+    /// reads it to rebuild the teardown set, and aborting an already-finished
+    /// handle there is harmless.
+    ///
+    /// **Dormant for `Dns` as written.** `run_dns_responder` is an unconditional
+    /// loop whose every failure arm continues, so it never returns and the
+    /// `Child::Dns` send that follows it is unreachable — nothing produces the
+    /// event this consumes. The consumer side is correct and lands here so the
+    /// producer fix does not have to rediscover it. A responder that *panics* is
+    /// not covered either way, since the unwind goes past the send rather than
+    /// through it; that is true of every child producer, not just this one.
+    pub(in crate::node) fn retract_child_publications(&mut self, child: Child) {
+        if matches!(child, Child::Dns) {
+            self.supervisor.dns_local_addr.take();
         }
     }
 

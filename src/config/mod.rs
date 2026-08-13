@@ -138,18 +138,119 @@ pub fn pub_file_path(config_path: &Path) -> PathBuf {
         .join(PUB_FILENAME)
 }
 
-/// Resolve a default Unix-socket path under the canonical order:
-/// `/run/fips/<filename>` → `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
+/// How `/var/run/fips` participates in Unix control-socket resolution.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VarRunPolicy {
+    /// Whether an existing `/var/run/fips` directory participates in resolution.
+    consult_existing: bool,
+    /// Whether to select `/var/run/fips` before its private leaf exists.
+    create_private_dir: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn default_var_run_policy() -> VarRunPolicy {
+    // LaunchDaemons run as root unless their plist declares another user.
+    // Selecting the private runtime path before it exists lets ControlSocket
+    // create it at every boot; non-root development runs retain XDG and /tmp
+    // fallbacks until a packaged daemon has created /var/run/fips.
+    VarRunPolicy {
+        consult_existing: true,
+        create_private_dir: unsafe { libc::geteuid() } == 0,
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn default_var_run_policy() -> VarRunPolicy {
+    // The rc.d service creates /var/run/fips before starting the daemon.
+    VarRunPolicy {
+        consult_existing: true,
+        create_private_dir: false,
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
+fn default_var_run_policy() -> VarRunPolicy {
+    VarRunPolicy {
+        consult_existing: false,
+        create_private_dir: false,
+    }
+}
+
+/// Pure path-selection core used by the host resolver and deterministic tests.
+#[cfg(unix)]
+fn resolve_default_socket_with(
+    filename: &str,
+    var_run_policy: VarRunPolicy,
+    xdg_runtime_dir: Option<&Path>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> String {
+    if is_dir(Path::new("/run/fips")) {
+        return format!("/run/fips/{filename}");
+    }
+
+    if var_run_policy.consult_existing {
+        let private_var_run = Path::new("/var/run/fips");
+        let may_create_private_dir =
+            var_run_policy.create_private_dir && is_dir(Path::new("/var/run"));
+        if is_dir(private_var_run) || may_create_private_dir {
+            return format!("/var/run/fips/{filename}");
+        }
+    }
+
+    if let Some(xdg) = xdg_runtime_dir
+        && is_dir(xdg)
+    {
+        return xdg
+            .join("fips")
+            .join(filename)
+            .to_string_lossy()
+            .into_owned();
+    }
+
+    format!("/tmp/fips-{filename}")
+}
+
+/// Return whether `parent` is one of the private runtime directories used by
+/// the default Unix socket resolver.
 ///
-/// `/run/fips` is the packaged convention (`root:fips 0770` directory
-/// created by the daemon at bind time, or by the postinst script).
-/// `XDG_RUNTIME_DIR` covers dev runs where `/run/fips` does not exist.
-/// `/tmp` is the last-resort fallback.
+/// This is intentionally stricter than matching any leaf named `fips`: an
+/// explicitly configured existing directory remains operator-owned unless it
+/// is also a canonical resolver candidate.
+#[cfg(unix)]
+fn is_managed_socket_parent_with(
+    parent: &Path,
+    var_run_policy: VarRunPolicy,
+    xdg_runtime_dir: Option<&Path>,
+) -> bool {
+    parent == Path::new("/run/fips")
+        || (var_run_policy.consult_existing && parent == Path::new("/var/run/fips"))
+        || xdg_runtime_dir.is_some_and(|xdg| parent == xdg.join("fips"))
+}
+
+/// Return whether `parent` is a private runtime directory managed by the
+/// default Unix socket resolver on this host.
+#[cfg(unix)]
+pub(crate) fn is_managed_socket_parent(parent: &Path) -> bool {
+    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    is_managed_socket_parent_with(parent, default_var_run_policy(), xdg_runtime_dir.as_deref())
+}
+
+/// Resolve a default Unix-socket path under the canonical order:
+/// `/run/fips/<filename>` → `/var/run/fips/<filename>` on macOS/FreeBSD →
+/// `$XDG_RUNTIME_DIR/fips/<filename>` → `/tmp/fips-<filename>`.
+///
+/// `/run/fips` is the packaged Linux convention. FreeBSD's rc.d service
+/// creates `/var/run/fips` before starting the daemon. A privileged macOS
+/// daemon selects `/var/run/fips` even when the private leaf does not exist so
+/// it can be recreated at bind time after every boot; non-root macOS clients
+/// select it once the daemon has created it. `XDG_RUNTIME_DIR` covers dev runs,
+/// and `/tmp` is the last-resort fallback.
 ///
 /// Selection is by *existence*, not writability. A fips-group member
 /// whose shell session has not picked up the supplementary group (no
 /// re-login after `usermod -aG fips`) cannot tempfile-probe a
-/// `root:fips 0770` directory but can still connect to a socket inside
+/// `root:fips 0750` directory but can still connect to a socket inside
 /// it once the kernel checks the actual group at `connect(2)` time —
 /// and even where the user genuinely cannot connect, surfacing an
 /// `EACCES` from the socket call is clearer than silently steering
@@ -163,37 +264,20 @@ pub fn pub_file_path(config_path: &Path) -> PathBuf {
 /// is treated as missing.
 #[cfg(unix)]
 pub(crate) fn resolve_default_socket(filename: &str) -> String {
-    // 1. /run/fips — preferred whenever the directory exists.
-    if Path::new("/run/fips").is_dir() {
-        return format!("/run/fips/{filename}");
-    }
-
-    // 1b. /var/run/fips — macOS and FreeBSD have no /run; the FreeBSD
-    //     rc.d script creates this directory at service start.
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    if Path::new("/var/run/fips").is_dir() {
-        return format!("/var/run/fips/{filename}");
-    }
-
-    // 2. $XDG_RUNTIME_DIR/fips/ — only if the variable points at an existing
-    //    directory.
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        let xdg_path = Path::new(&xdg);
-        if xdg_path.is_dir() {
-            return format!("{xdg}/fips/{filename}");
-        }
-    }
-
-    // 3. Last resort: /tmp with a name-mangled prefix so multiple users
-    //    don't collide.
-    format!("/tmp/fips-{filename}")
+    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    resolve_default_socket_with(
+        filename,
+        default_var_run_policy(),
+        xdg_runtime_dir.as_deref(),
+        Path::is_dir,
+    )
 }
 
 /// Default control socket path for fipsctl / fipstop.
 ///
 /// On Unix, delegates to [`resolve_default_socket`] for the canonical
-/// `/run/fips` → `XDG_RUNTIME_DIR` → `/tmp` order. On Windows, returns the
-/// default TCP port ("21210").
+/// platform runtime directory → `XDG_RUNTIME_DIR` → `/tmp` order. On Windows,
+/// returns the default TCP port ("21210").
 pub fn default_control_path() -> PathBuf {
     #[cfg(unix)]
     {
@@ -207,7 +291,7 @@ pub fn default_control_path() -> PathBuf {
 
 /// Default gateway control socket path.
 ///
-/// On Unix, delegates to [`resolve_default_socket`] (same canonical order as
+/// On Unix, delegates to [`resolve_default_socket`] (the same platform order as
 /// the main control socket). The gateway daemon itself uses a hardcoded
 /// `/run/fips/gateway.sock` since gateway operation requires root for
 /// NAT/conntrack management; this client-side resolver falls through
@@ -2401,6 +2485,120 @@ node:
     fn test_udp_accept_connections_default_true() {
         let cfg = UdpConfig::default();
         assert!(cfg.accept_connections());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_privileged_macos_bootstraps_private_var_run_path() {
+        let path = resolve_default_socket_with(
+            "control.sock",
+            VarRunPolicy {
+                consult_existing: true,
+                create_private_dir: true,
+            },
+            Some(Path::new("/valid/xdg")),
+            |candidate| matches!(candidate.to_str(), Some("/var/run" | "/valid/xdg")),
+        );
+
+        assert_eq!(path, "/var/run/fips/control.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_non_privileged_macos_uses_xdg_before_private_var_run_exists() {
+        let path = resolve_default_socket_with(
+            "control.sock",
+            VarRunPolicy {
+                consult_existing: true,
+                create_private_dir: false,
+            },
+            Some(Path::new("/valid/xdg")),
+            |candidate| candidate == Path::new("/valid/xdg"),
+        );
+
+        assert_eq!(path, "/valid/xdg/fips/control.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_clients_follow_existing_private_var_run_path() {
+        let path = resolve_default_socket_with(
+            "control.sock",
+            VarRunPolicy {
+                consult_existing: true,
+                create_private_dir: false,
+            },
+            Some(Path::new("/valid/xdg")),
+            |candidate| matches!(candidate.to_str(), Some("/var/run/fips" | "/valid/xdg")),
+        );
+
+        assert_eq!(path, "/var/run/fips/control.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_linux_policy_ignores_var_run_fips() {
+        let path = resolve_default_socket_with(
+            "control.sock",
+            VarRunPolicy {
+                consult_existing: false,
+                create_private_dir: false,
+            },
+            Some(Path::new("/valid/xdg")),
+            |candidate| matches!(candidate.to_str(), Some("/var/run/fips" | "/valid/xdg")),
+        );
+
+        assert_eq!(path, "/valid/xdg/fips/control.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_managed_socket_parent_matches_only_resolver_candidates() {
+        let policy = VarRunPolicy {
+            consult_existing: true,
+            create_private_dir: true,
+        };
+
+        assert!(is_managed_socket_parent_with(
+            Path::new("/run/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(is_managed_socket_parent_with(
+            Path::new("/var/run/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(is_managed_socket_parent_with(
+            Path::new("/valid/xdg/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(!is_managed_socket_parent_with(
+            Path::new("/tmp"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+        assert!(!is_managed_socket_parent_with(
+            Path::new("/srv/application/fips"),
+            policy,
+            Some(Path::new("/valid/xdg")),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_linux_managed_socket_parent_excludes_var_run() {
+        let linux_policy = VarRunPolicy {
+            consult_existing: false,
+            create_private_dir: false,
+        };
+
+        assert!(!is_managed_socket_parent_with(
+            Path::new("/var/run/fips"),
+            linux_policy,
+            None,
+        ));
     }
 
     /// Mutex serializing tests that mutate `XDG_RUNTIME_DIR`. `cargo test`

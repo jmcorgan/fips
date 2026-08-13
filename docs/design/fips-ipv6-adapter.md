@@ -330,6 +330,47 @@ and the [TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping). The embedder is
 therefore responsible for routing only `fd00::/8` to its TUN (so only mesh-bound
 packets arrive) and for clamping TCP MSS on outbound SYNs.
 
+### App-Owned DNS Path (embedded hosts)
+
+An embedded host that owns the TUN fd generally has no system DNS socket to aim
+at the responder either. On Android, `VpnService.Builder.addDnsServer()` takes an
+address with no port — the resolver always uses 53, which an unprivileged app UID
+cannot bind — and it points the resolver *into* the tunnel, so `.fips` queries
+surface as IPv6/UDP packets on the app's own fd rather than at any socket FIPS
+holds. The [DNS responder](#dns-integration) itself needs no changes for this:
+its bind is a plain UDP socket, and with no system TUN the
+[mesh-interface filter](#mesh-interface-query-filter) self-disables because the
+interface name does not resolve.
+
+`Node::dns_local_addr()` closes the gap. It reports the address read back off the
+bound socket — so a `dns.port = 0` config yields the port the kernel assigned —
+and is `None` when no responder came up. The embedder lifts the DNS payload out
+of the packet it read, sends it to that address over an ordinary UDP socket of
+its own, and splices the answer back into a reply packet.
+
+It is a one-shot read taken after `start()` returns and before the node is moved
+into a background task, because `run_rx_loop` then borrows the node exclusively
+for its whole lifetime and no `&Node` remains to call it on. By that point the
+value is settled: the responder is either up for the rest of the node's life or
+it never came up.
+
+Proxying to the responder rather than resolving in the app is what keeps the
+[identity cache](#identity-cache) warm. Answering a `<npub>.fips` query is what
+registers that peer's public key, and a FIPS address is a truncated hash of a
+hash of the pubkey — the key cannot be recovered from the IPv6 address alone. An
+app that resolves the AAAA itself leaves the cache empty, and the first packet to
+the resolved name is rejected with ICMPv6 Destination Unreachable. Direct
+neighbours mask the omission, since their identity arrives with the Noise
+handshake and never needed resolving.
+
+The address is retracted on `stop()`. A retraction hook for a responder that
+exits on its own at runtime is wired on the consuming side, but is dormant:
+`run_dns_responder` never returns, so nothing produces the `Child::Dns` exit
+event it consumes. Watching a responder that dies mid-run is therefore not
+something an embedder can do today, and would in any case need a way to read
+live node state from a backgrounded `run_rx_loop` — a general gap rather than a
+DNS-specific one.
+
 ## Implementation Status
 
 | Feature | Status |
@@ -343,6 +384,8 @@ packets arrive) and for clamping TCP MSS on outbound SYNs.
 | TCP MSS clamping (SYN + SYN-ACK) | **Implemented** |
 | DNS service (.fips domain) | **Implemented** |
 | DNS responder mesh-interface filter | **Implemented** |
+| App-owned TUN (`Node::enable_app_owned_tun`) | **Implemented** |
+| App-owned DNS path (`Node::dns_local_addr`) | **Implemented** |
 | Port-based service multiplexing (port 256) | **Implemented** |
 | IPv6 header compression (format 0x00) | **Implemented** |
 | Per-destination route MTU (netlink) | Planned |

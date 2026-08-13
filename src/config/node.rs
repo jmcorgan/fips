@@ -872,11 +872,11 @@ impl ControlConfig {
 
     /// Default control socket path.
     ///
-    /// On Unix, delegates to [`super::resolve_default_socket`] for the
-    /// canonical `/run/fips` → `XDG_RUNTIME_DIR` → `/tmp` order shared with
-    /// the client-side `default_control_path`. On Windows, returns a TCP
-    /// port number as a string since Windows does not support Unix domain
-    /// sockets; the control socket listens on localhost at this port.
+    /// On Unix, delegates to [`super::resolve_default_socket`] for the shared
+    /// platform runtime-directory → `XDG_RUNTIME_DIR` → `/tmp` order. On
+    /// Windows, returns a TCP port number as a string since Windows does not
+    /// support Unix domain sockets; the control socket listens on localhost at
+    /// this port.
     fn default_socket_path() -> String {
         #[cfg(unix)]
         {

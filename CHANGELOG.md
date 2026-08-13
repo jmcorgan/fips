@@ -169,6 +169,14 @@ with v0.4.x or earlier peers.
   `fd00::/8`-destined packets and clamp TCP MSS on outbound SYNs. Desktop
   builds are unchanged and no Cargo features are introduced.
 
+- `Node::dns_local_addr()`, the DNS companion to the app-owned TUN seam above.
+  An embedder whose resolver is pointed into the tunnel has no system socket
+  aimed at the built-in `.fips` responder, so the accessor reports the address
+  read back off the bound socket: `dns.port = 0` therefore yields the
+  kernel-assigned port, and it returns `Some` only while the responder is up.
+  Read it once, after `start()` returns and before the node is moved into a
+  background task; it is not a liveness feed (#136).
+
 - A bounded graceful-shutdown drain phase, controlled by the new
   `node.drain_timeout_secs` (default 2s). On the shutdown signal the node
   broadcasts Disconnect to all peers and then keeps serving for that window,
@@ -422,6 +430,16 @@ with v0.4.x or earlier peers.
   transport-blind predicate establishes the index is not claimed elsewhere.
   The outbound ACL-reject arm also regains the reschedule call its dial-gate
   sibling makes, so a configured peer no longer drops off the dial schedule.
+
+- The packaged macOS daemon now recreates and binds its control socket at
+  `/var/run/fips/control.sock` instead of falling through to the shared
+  `/tmp/fips-control.sock` path after boot. The previous fallback also made the
+  root daemon attempt to chown `/tmp` itself to the `fips` group because socket
+  setup unconditionally changed the parent directory. A privileged macOS
+  process now selects the private runtime path before its leaf exists, clients
+  follow it once created, and socket setup changes ownership and mode only for
+  a private parent directory it creates or recognizes as a canonical FIPS
+  runtime directory.
 
 - Nostr NAT traversal signals are now sent only to relays the client pool
   actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox

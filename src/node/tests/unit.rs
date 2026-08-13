@@ -2477,6 +2477,199 @@ async fn start_skips_system_tun_when_app_owned() {
     node.stop().await.unwrap();
 }
 
+/// The embedder-facing DNS contract, end to end.
+///
+/// An embedder that owns the TUN fd (Android `VpnService`) has no system DNS
+/// socket to point at us, so it proxies `.fips` query payloads it lifts out of
+/// its own tunnel to the built-in responder. That requires three things to
+/// hold, and this pins all three:
+///
+/// 1. `dns_local_addr()` publishes where to send — read back off the bound
+///    socket, so a `port = 0` config reports the assigned port, not 0.
+/// 2. The responder answers a proxied query with the right AAAA.
+/// 3. The resolved identity reaches `dns_identity_rx` — the channel
+///    `run_rx_loop` drains into `register_identity`. This is the leg that
+///    populates the identity cache, without which the first packet to a
+///    freshly-resolved `<npub>.fips` is rejected with ICMPv6 "No route".
+#[tokio::test]
+async fn dns_responder_serves_a_proxying_embedder() {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = true;
+    config.dns.bind_addr = Some("::1".to_string());
+    // Port 0: proves the address is read back off the socket rather than
+    // echoed from config — an embedder dialling 0 would reach nothing.
+    config.dns.port = Some(0);
+    // The TUN is app-owned, as it is on the platform this seam serves.
+    let mut node = make_node_with(config);
+    let (_outbound_tx, _tun_rx) = node.enable_app_owned_tun();
+
+    assert!(
+        node.dns_local_addr().is_none(),
+        "no responder before start()",
+    );
+
+    node.start().await.unwrap();
+
+    let dns_addr = node
+        .dns_local_addr()
+        .expect("responder is up, so its address is published");
+    assert_ne!(dns_addr.port(), 0, "must report the kernel-assigned port");
+
+    // Proxy a query the way the embedder would: payload only, no IP/UDP header
+    // (it strips those off the packet it read from its own TUN fd).
+    let peer = Identity::generate();
+    let query = {
+        use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
+        let mut packet = Packet::new_query(0x1234);
+        packet.questions.push(Question::new(
+            Name::new_unchecked(&format!("{}.fips", peer.npub())).into_owned(),
+            QTYPE::TYPE(TYPE::AAAA),
+            QCLASS::CLASS(CLASS::IN),
+            false,
+        ));
+        packet.build_bytes_vec().unwrap()
+    };
+    let client = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+    client.send_to(&query, dns_addr).await.unwrap();
+
+    let mut buf = [0u8; 512];
+    let (len, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.recv_from(&mut buf),
+    )
+    .await
+    .expect("responder answered within the timeout")
+    .unwrap();
+
+    let answer = simple_dns::Packet::parse(&buf[..len]).expect("well-formed DNS response");
+    let rdata = &answer.answers.first().expect("one AAAA answer").rdata;
+    let simple_dns::rdata::RData::AAAA(aaaa) = rdata else {
+        panic!("expected an AAAA record, got {rdata:?}");
+    };
+    assert_eq!(
+        std::net::Ipv6Addr::from(aaaa.address),
+        peer.address().to_ipv6(),
+        "AAAA must be the peer's FipsAddress",
+    );
+
+    // The identity leg. `run_rx_loop` owns the node for its whole life, so the
+    // embedder cannot register identities itself — the responder publishes them
+    // on this channel instead. Drain and register exactly as the rx-loop arm in
+    // `dataplane/rx_loop.rs` does, then assert the cache is populated.
+    let identity = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        node.supervisor
+            .dns_identity_rx
+            .as_mut()
+            .expect("responder installed the identity receiver")
+            .recv(),
+    )
+    .await
+    .expect("identity published within the timeout")
+    .expect("channel is open");
+
+    assert_eq!(identity.node_addr, *peer.node_addr());
+    node.register_identity(identity.node_addr, identity.pubkey);
+    assert!(
+        node.has_cached_identity(peer.node_addr()),
+        "resolving a name must warm the identity cache, or the first packet \
+         to that address is rejected with ICMPv6 \"No route\"",
+    );
+
+    node.stop().await.unwrap();
+    assert!(
+        node.dns_local_addr().is_none(),
+        "the published address must be retracted with the listener",
+    );
+}
+
+/// `retract_child_publications(Dns)` clears the published address.
+///
+/// Scoped to the helper deliberately, and named for that rather than for the
+/// scenario: no responder dies here, and deleting the `run_rx_loop` call site
+/// leaves this green. Driving a real exit through the loop needs the node moved
+/// into a task, which puts `dns_local_addr()` out of reach — and the producer
+/// side cannot deliver `Child::Dns` today regardless, since `run_dns_responder`
+/// never returns.
+///
+/// What it does pin is the behavior the eventual wiring depends on: the FSM's
+/// `ChildExited` handling only republishes node health, so without this
+/// retraction `dns_local_addr()` would keep naming a socket nobody is listening
+/// on, and a proxying embedder would see `.fips` queries silently time out
+/// rather than any error it could act on.
+#[tokio::test]
+async fn retract_child_publications_clears_the_dns_address() {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = true;
+    config.dns.bind_addr = Some("::1".to_string());
+    config.dns.port = Some(0);
+    let mut node = make_node_with(config);
+
+    node.start().await.unwrap();
+    assert!(node.dns_local_addr().is_some(), "responder came up");
+
+    // What `run_rx_loop` does when the DNS task self-reports its exit.
+    node.retract_child_publications(crate::node::lifecycle::supervisor::Child::Dns);
+
+    assert!(
+        node.dns_local_addr().is_none(),
+        "a dead responder must not keep publishing an address to dial",
+    );
+
+    node.stop().await.unwrap();
+}
+
+/// `dns.enabled` with a bind that fails must report `None`, not an address.
+///
+/// This is the third state an embedder has to tell apart, and the one that
+/// would otherwise be indistinguishable from a healthy responder by reading
+/// config alone: DNS is switched on, so `config.dns.bind_addr()` names a
+/// plausible target, but nothing is listening there. A bind failure is only
+/// warned about and leaves the node running, so config is not evidence —
+/// `dns_local_addr()` is.
+///
+/// The failure is forced with `EADDRINUSE` against a socket this test holds
+/// open, rather than by naming an address the host has no interface for.
+/// `bind_dns_socket` sets neither `SO_REUSEADDR` nor `SO_REUSEPORT`, so the
+/// collision is deterministic on Linux and macOS. A non-local address is not:
+/// `net.ipv4.ip_nonlocal_bind = 1` is ordinary on hosts running keepalived or
+/// HAProxy and makes the bind succeed, which reds the test on a developer
+/// machine while CI — at the default `0` — stays green.
+#[tokio::test]
+async fn dns_local_addr_stays_none_when_the_bind_fails() {
+    // Hold the port for the whole test so the responder's bind collides.
+    let squatter = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+    let taken = squatter.local_addr().unwrap();
+
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = true;
+    config.dns.bind_addr = Some("::1".to_string());
+    config.dns.port = Some(taken.port());
+    let mut node = make_node_with(config);
+
+    node.start().await.unwrap();
+
+    assert!(
+        node.dns_local_addr().is_none(),
+        "an unbound responder must not publish an address",
+    );
+
+    node.stop().await.unwrap();
+    drop(squatter);
+}
+
 /// A connection whose handshake failed is retained with BOTH Noise handles
 /// empty, and the stale-connection sweep depends on that: presence of the
 /// pending connection — not presence of a handle — is what marks a machine as
