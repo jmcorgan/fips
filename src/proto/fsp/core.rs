@@ -54,6 +54,17 @@ pub(crate) enum FspAction {
     /// Abandon `addr`'s in-flight rekey cycle (`SessionEntry::abandon_rekey`):
     /// its msg3 went unconfirmed past the retransmission budget.
     AbandonRekey { addr: NodeAddr },
+    /// Drop only `addr`'s armed handshake (`SessionEntry::abandon_handshake`):
+    /// a peer's setup message armed it and the matching msg3 never arrived.
+    ///
+    /// Deliberately not [`AbandonRekey`](Self::AbandonRekey). A completed
+    /// `pending` session beside the handshake is the epoch that peer has
+    /// already moved to — it exists only because a msg3 carrying the session's
+    /// authenticated peer key was accepted, and the sender of that msg3
+    /// promotes the new epoch on a timer gated on nothing this side does.
+    /// Discarding it would make every later frame from that peer
+    /// undecryptable, so the handshake alone is dropped.
+    AbandonHandshake { addr: NodeAddr },
     /// Retransmit `addr`'s retained rekey msg3 (the shell re-reads the payload
     /// from the entry, sends it, then records the retransmission on success).
     ResendSessionMsg3 { addr: NodeAddr },
@@ -77,6 +88,13 @@ pub(crate) enum FspAction {
 
 /// The rekey trigger thresholds, read shell-side from node config.
 pub(crate) struct RekeyCfg {
+    /// Whether this node starts rekeys of its own (`node.rekey.enabled`).
+    ///
+    /// Gates the trigger and nothing else. A peer's setup message is answered
+    /// in either configuration, so a superseded key epoch and a handshake the
+    /// peer armed and abandoned both exist with periodic rekey off; the
+    /// cutover, drain and abandoned-handshake decisions therefore ignore this.
+    pub enabled: bool,
     /// Rekey after this many seconds of session age (before jitter).
     pub after_secs: u64,
     /// Rekey after this many sent messages.
@@ -114,6 +132,12 @@ pub(crate) struct SessionSnapshot {
     /// Local rekey initiation is dampened after a recently received peer rekey
     /// msg1 (pre-evaluated against the dampening timer).
     pub is_dampened: bool,
+    /// A handshake armed by the peer's setup message has passed the handshake
+    /// timeout without its msg3 (pre-evaluated: `last_peer_rekey_ms != 0 &&
+    /// now - last_peer_rekey_ms > handshake_timeout`). False when the entry
+    /// carries no peer-rekey stamp, so a handshake this side armed is never
+    /// aged out on the peer's clock.
+    pub armed_handshake_expired: bool,
     /// Monotonic session age in seconds (`(now - session_start_ms) / 1000`).
     pub elapsed_secs: u64,
     /// Current Noise send counter.
@@ -175,12 +199,18 @@ impl Fsp {
     ///   in-flight rekey, and an elapsed liveness timer cuts over and is
     ///   considered for nothing else.
     /// - Otherwise an expired drain window is completed, and — independently —
-    ///   the rekey trigger fires when the session is neither mid-rekey, holding
-    ///   a pending session, retaining a msg3 payload, nor dampened, and its
-    ///   jittered time threshold or send counter is reached.
+    ///   a handshake the peer armed and never finished is abandoned, which is
+    ///   the last word on that session this tick.
+    /// - Failing both, the rekey trigger fires when the session is neither
+    ///   mid-rekey, holding a pending session, retaining a msg3 payload, nor
+    ///   dampened, and its jittered time threshold or send counter is reached.
+    ///   Only this last decision is gated on `cfg.enabled`: the other three
+    ///   maintain state a peer's setup message can create with periodic rekey
+    ///   switched off.
     ///
     /// Actions are returned phase-grouped (all cutovers, then all drains, then
-    /// all rekey initiations) to preserve the pre-refactor execution order.
+    /// all abandoned handshakes, then all rekey initiations) to preserve the
+    /// pre-refactor execution order.
     pub(crate) fn poll_rekey(
         &self,
         sessions: Vec<SessionSnapshot>,
@@ -188,6 +218,7 @@ impl Fsp {
     ) -> Vec<FspAction> {
         let mut cutovers = Vec::new();
         let mut drains = Vec::new();
+        let mut abandons = Vec::new();
         let mut rekeys = Vec::new();
         for s in sessions {
             // 1. Initiator-side cutover (unconditional liveness timer).
@@ -203,7 +234,20 @@ impl Fsp {
             if s.is_draining && s.drain_expired {
                 drains.push(FspAction::CompleteDrain { addr: s.addr });
             }
-            // 3. Rekey trigger.
+            // 3. Abandon a responder-side handshake the peer never finished.
+            //    A parked one blocks a later genuine setup message through the
+            //    dual-initiation tie-break, so it clears on the handshake
+            //    timeout. Nothing is lost with it: an armed handshake holds no
+            //    key material either side can be using, and a completed
+            //    `pending` beside it survives (see `AbandonHandshake`).
+            if !s.is_rekey_initiator && s.rekey_in_progress && s.armed_handshake_expired {
+                abandons.push(FspAction::AbandonHandshake { addr: s.addr });
+                continue;
+            }
+            // 4. Rekey trigger.
+            if !cfg.enabled {
+                continue;
+            }
             if s.rekey_in_progress || s.has_pending || s.has_rekey_msg3_payload || s.is_dampened {
                 continue;
             }
@@ -213,6 +257,7 @@ impl Fsp {
             }
         }
         cutovers.extend(drains);
+        cutovers.extend(abandons);
         cutovers.extend(rekeys);
         cutovers
     }

@@ -908,6 +908,23 @@ pub(super) async fn run_tree_test_with_mtus(
     converge_nodes(nodes, edges).await
 }
 
+/// Like `run_tree_test` but with a per-node `Config`.
+///
+/// `configs` must have one entry per node. Used by tests that need a
+/// non-default setting on a node in a routable mesh, which cannot be produced
+/// any other way because node config is immutable after construction.
+pub(super) async fn run_tree_test_with_configs(
+    configs: Vec<Config>,
+    edges: &[(usize, usize)],
+) -> Vec<TestNode> {
+    let mut nodes = Vec::new();
+    for config in configs {
+        nodes.push(make_test_node_with_config(config, 1280).await);
+    }
+
+    converge_nodes(nodes, edges).await
+}
+
 /// Drive the given nodes to convergence over `edges` and assert every edge
 /// established a bidirectional peer.
 async fn converge_nodes(mut nodes: Vec<TestNode>, edges: &[(usize, usize)]) -> Vec<TestNode> {
