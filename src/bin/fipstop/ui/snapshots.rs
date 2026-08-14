@@ -908,7 +908,7 @@ fn routing_state_values_aligned() {
         "identity_cache_entries": 5,
         "pending_lookups": [],
         "recent_requests": 7,
-        "forwarding": {},
+        "forwarding": { "warm_malformed_packets": 5, "warm_malformed_bytes": 640 },
         "discovery": {},
         "error_signals": {},
         "congestion": {}
@@ -931,6 +931,18 @@ fn routing_state_values_aligned() {
     assert_eq!(
         coord_val, ident_val,
         "routing state values share a column: {coord:?} vs {ident:?}"
+    );
+
+    // The forwarding helpers fall back to 0 on a missing key, so a mistyped
+    // key would render "0 pkts" forever without failing anything. Assert the
+    // fixture's nonzero value actually reaches the row.
+    let warm = lines
+        .iter()
+        .find(|r| r.contains("Warm Malformed"))
+        .expect("routing state shows the abandoned-warm row");
+    assert!(
+        warm.contains("5 pkts"),
+        "warm-malformed row reads its counter keys: {warm:?}"
     );
 }
 
@@ -1139,7 +1151,7 @@ fn routing_focused_pane_scrolls() {
     // column is the taller of the two, so scrolling fully to the bottom would
     // over-scroll the right column past Congestion; this offset lands the
     // Congestion region inside the short window instead.
-    app1.scroll_offsets.insert((Tab::Routing, 2), 24);
+    app1.scroll_offsets.insert((Tab::Routing, 2), 28);
     let buf1 = testkit::render(100, 20, |frame, area| {
         super::routing::draw(frame, &app1, area);
     });

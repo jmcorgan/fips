@@ -906,6 +906,100 @@ async fn test_originator_stores_path_mtu_in_cache() {
 }
 
 #[tokio::test]
+async fn test_originator_ignores_sub_floor_path_mtu_but_still_caches_coords() {
+    // The path_mtu annotation accumulates hop by hop outside the signed proof,
+    // so any forwarder on the reverse path can lower it. A value below the
+    // actionable floor must be treated as absent rather than stored — but the
+    // coordinates it travelled with are proof-covered and must still land,
+    // otherwise a value-poisoning vector becomes a discovery-denial one.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let target_fips = crate::FipsAddress::from_node_addr(&target);
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    node.register_identity(target, target_identity.pubkey_full());
+
+    let proof_data = LookupResponse::proof_bytes(801, &target, &coords);
+    let proof = target_identity.sign(&proof_data);
+
+    let mut response = LookupResponse::new(801, target, coords.clone(), proof);
+    response.path_mtu = 64;
+
+    let payload = &response.encode()[1..];
+    node.handle_lookup_response(&from, payload).await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    assert!(
+        node.coord_cache().contains(&target, now_ms),
+        "coordinates must still be cached; the proof covers them"
+    );
+    assert_eq!(
+        node.coord_cache().get_entry(&target).unwrap().path_mtu(),
+        None,
+        "a sub-floor annotation must not reach the coordinate cache"
+    );
+    assert_eq!(
+        node.path_mtu_lookup_get(&target_fips),
+        None,
+        "a sub-floor annotation must not reach the MSS clamp lookup"
+    );
+    assert_eq!(
+        node.metrics().errors.lookup_resp_mtu_below_floor.get(),
+        1,
+        "refusing the annotation must be visible on a counter, not only in a log"
+    );
+}
+
+#[tokio::test]
+async fn test_actionable_lookup_response_path_mtu_does_not_bump_below_floor_counter() {
+    // Discriminating half of the sub-floor counter check: the refusal counter
+    // is only useful if an ordinary verified response leaves it alone.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let target_fips = crate::FipsAddress::from_node_addr(&target);
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    node.register_identity(target, target_identity.pubkey_full());
+
+    let proof_data = LookupResponse::proof_bytes(802, &target, &coords);
+    let proof = target_identity.sign(&proof_data);
+
+    let mut response = LookupResponse::new(802, target, coords.clone(), proof);
+    response.path_mtu = 1280;
+
+    let payload = &response.encode()[1..];
+    node.handle_lookup_response(&from, payload).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&target_fips),
+        Some(1280),
+        "an actionable annotation must reach the MSS clamp lookup"
+    );
+    assert_eq!(
+        node.coord_cache().get_entry(&target).unwrap().path_mtu(),
+        Some(1280),
+        "an actionable annotation must reach the coordinate cache"
+    );
+    assert_eq!(
+        node.metrics().errors.lookup_resp_mtu_below_floor.get(),
+        0,
+        "an actionable annotation must not bump the below-floor counter"
+    );
+}
+
+#[tokio::test]
 async fn test_originator_lookup_response_keeps_tighter_path_mtu_lookup() {
     // Regression: a LookupResponse carrying a looser (larger) path_mtu must
     // NOT clobber a tighter (smaller) value already in path_mtu_lookup that a

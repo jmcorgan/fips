@@ -16,6 +16,12 @@
 //! setters accept seconds (matching the node config) and store the value scaled
 //! to milliseconds so the comparisons stay in one unit.
 
+/// Longest dampening episode representable on the monotonic clock, in
+/// milliseconds. A year is indistinguishable from permanent for this
+/// mechanism; the bound is what keeps a hostile `flap_dampening_secs` from
+/// overflowing the stamp.
+const MAX_FLAP_DAMPENING_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+
 /// Flap-dampening / hold-down state for a node's parent selection.
 ///
 /// Groups the flap-detection timers behind a single struct so the tree
@@ -70,7 +76,17 @@ impl FlapDampener {
     ) {
         self.flap_threshold = threshold;
         self.flap_window = window_secs.saturating_mul(1000);
-        self.flap_dampening_duration = dampening_secs.saturating_mul(1000);
+        self.flap_dampening_duration = dampening_secs
+            .saturating_mul(1000)
+            .min(MAX_FLAP_DAMPENING_MS);
+    }
+
+    /// How long a dampening episode suppresses discretionary parent
+    /// switching, in seconds, after the configured value is clamped.
+    ///
+    /// Feeds the log field on the engagement warning.
+    pub(crate) fn dampening_secs(&self) -> u64 {
+        self.flap_dampening_duration / 1000
     }
 
     /// Stamp the time of a parent switch (called on every `set_parent`,
@@ -84,6 +100,17 @@ impl FlapDampener {
     /// Returns true if dampening was just engaged. `now_ms` is the injected
     /// monotonic time in milliseconds.
     pub(crate) fn record_parent_switch(&mut self, now_ms: u64) -> bool {
+        // Retire a lapsed episode here rather than lazily. Clearing the
+        // deadline and the counter together is what makes each episode cost a
+        // fresh threshold of switches inside one window: switches taken during
+        // an episode (mandatory ones bypass the veto) would otherwise carry
+        // into the next window and re-engage on a single switch after lapse.
+        if self.flap_dampening_until.is_some() && !self.is_flap_dampened(now_ms) {
+            self.flap_dampening_until = None;
+            self.flap_count = 0;
+            self.flap_window_start = None;
+        }
+
         // Reset window if expired or not started
         match self.flap_window_start {
             Some(start) if now_ms.saturating_sub(start) < self.flap_window => {
@@ -95,9 +122,11 @@ impl FlapDampener {
             }
         }
 
-        // Check threshold
-        if self.flap_count >= self.flap_threshold && self.flap_dampening_until.is_none() {
-            self.flap_dampening_until = Some(now_ms + self.flap_dampening_duration);
+        // Check threshold. The dampening test is redundant with the retirement
+        // above in this control flow; it is kept so the gate reads correctly on
+        // its own and survives an edit that moves the retirement.
+        if self.flap_count >= self.flap_threshold && !self.is_flap_dampened(now_ms) {
+            self.flap_dampening_until = Some(now_ms.saturating_add(self.flap_dampening_duration));
             return true;
         }
         false

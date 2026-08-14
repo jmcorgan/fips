@@ -72,15 +72,13 @@ pub(crate) fn per_flow_max_mss(
     addr_bytes: &[u8],
     global_max_mss: u16,
 ) -> u16 {
-    use super::icmp::effective_ipv6_mtu;
+    use super::icmp::mss_ceiling;
 
     // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
     // payload (1203) → TCP segment after IPv6+TCP headers (1143).
     // Used as the conservative ceiling for empty-lookup destinations.
     const IPV6_MIN_MTU: u16 = 1280;
-    let conservative_max_mss = effective_ipv6_mtu(IPV6_MIN_MTU)
-        .saturating_sub(40)
-        .saturating_sub(20);
+    let conservative_max_mss = mss_ceiling(IPV6_MIN_MTU);
     let empty_lookup_ceiling = std::cmp::min(global_max_mss, conservative_max_mss);
 
     if addr_bytes.len() != 16 {
@@ -119,9 +117,39 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
-    let path_max_mss = effective_ipv6_mtu(path_mtu)
-        .saturating_sub(40)
-        .saturating_sub(20);
+    let path_max_mss = mss_ceiling(path_mtu);
+    // The actionable floor deliberately does not apply here. Every value a
+    // remote party supplies is refused before it can reach this map, at the
+    // path MTU state machine, the reactive `MtuExceeded` write and the
+    // discovery response, so a small stored value is one the node derived
+    // from its own outgoing link: a configured transport MTU, or the MTU a
+    // BLE connection negotiated, which on that transport is routinely well
+    // under the floor. Such a value is exact rather than suspect, and the
+    // tight clamp it yields is the reason it is stored: discarding it would
+    // advertise the conservative ceiling on a link that cannot carry it, and
+    // a direct link has no forwarder to answer with `MtuExceeded`, so the
+    // flow would stall with no feedback.
+    //
+    // What no provenance rescues is the arithmetic degenerating. At a stored
+    // MTU of 137 or less not one payload byte fits alongside the IPv6 and TCP
+    // headers, and `clamp_tcp_mss` refuses a ceiling of zero, which would
+    // leave the SYN carrying the kernel-natural MSS instead. Fall back to the
+    // conservative ceiling there; any positive result is by construction the
+    // largest segment the stored MTU admits.
+    //
+    // `trace!`, not `warn!`, because this runs on every packet rather than
+    // only on SYNs: one degenerate stored value would otherwise emit a WARN
+    // per packet indefinitely and bury every other warning on the node. The
+    // link promotion path warns once instead.
+    if path_max_mss == 0 {
+        trace!(
+            fips_addr = %fips_addr,
+            path_mtu,
+            empty_lookup_ceiling,
+            "per_flow_max_mss: stored path_mtu leaves no room for a TCP payload byte, using conservative ceiling"
+        );
+        return empty_lookup_ceiling;
+    }
     let result = std::cmp::min(global_max_mss, path_max_mss);
     trace!(
         fips_addr = %fips_addr,
@@ -1631,6 +1659,77 @@ mod tests {
         // global=1360, path_max = 1452-77-60 = 1315; min(1360, 1315) = 1315.
         // 1315 > 1143, so the conservative ceiling did NOT clamp here.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1315);
+    }
+
+    #[test]
+    fn per_flow_stored_mtu_admitting_no_payload_byte_falls_back_to_conservative_ceiling() {
+        // A stored MTU of 137 or less leaves nothing after the 77 bytes of
+        // FIPS encapsulation and the 40 + 20 bytes of IPv6 and TCP header, so
+        // the MSS arithmetic saturates to zero. Returning that zero would be
+        // worse than the fallback: `clamp_tcp_mss` refuses a ceiling of zero,
+        // so the SYN would go out at the kernel-natural MSS, unclamped.
+        for stored in [0u16, 1, 100, 137] {
+            let lookup = empty_lookup();
+            let addr = fips_addr_with_node_byte(0x42);
+            lookup.write().unwrap().insert(addr, stored);
+            assert_eq!(
+                per_flow_max_mss(&lookup, addr.as_bytes(), 1360),
+                1143,
+                "stored path_mtu {stored} admits no payload byte and must be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn per_flow_honors_a_locally_seeded_sub_floor_mtu_instead_of_loosening_to_the_ceiling() {
+        // Only `seed_path_mtu_for_link_peer` can put a sub-floor value in this
+        // map: every remote-supplied path MTU is refused at ingress, at the
+        // path MTU state machine, the reactive `MtuExceeded` write and the
+        // discovery response. A seeded value is therefore the node's own link
+        // measurement, and BLE negotiates one per connection that lands in
+        // this band routinely.
+        //
+        // Applying the remote-value floor here discarded it and advertised
+        // 1143 instead, which a link this narrow cannot carry: every full-size
+        // segment is refused by the transport, a direct link has no forwarder
+        // to answer with `MtuExceeded`, and the flow stalls with no feedback.
+        // The tight clamp is the whole reason the seed exists.
+        //
+        // 138 is the first MTU admitting a payload byte; 240 is a plausible
+        // negotiated BLE value; 255 is one below the remote-value floor. The
+        // whole table is evaluated before asserting, so a regression names
+        // every band it broke rather than only the first.
+        let want = [(138u16, 1u16), (240, 103), (255, 118)];
+        let got: Vec<(u16, u16)> = want
+            .iter()
+            .map(|&(stored, _)| {
+                let lookup = empty_lookup();
+                let addr = fips_addr_with_node_byte(0x42);
+                lookup.write().unwrap().insert(addr, stored);
+                (stored, per_flow_max_mss(&lookup, addr.as_bytes(), 1360))
+            })
+            .collect();
+        assert_eq!(
+            got,
+            want.to_vec(),
+            "each locally seeded path_mtu must clamp tight, not fall back to 1143"
+        );
+    }
+
+    #[test]
+    fn per_flow_stored_mtu_at_the_actionable_floor_is_still_honored() {
+        // The smallest value the node will accept from a remote party still
+        // clamps to its own arithmetic and nothing coarser: 256 - 77 - 40 - 20
+        // = 119. Reintroducing the remote-value floor as a clamp-time guard
+        // would leave this case passing, so it is pinned separately from the
+        // sub-floor table above.
+        let lookup = empty_lookup();
+        let addr = fips_addr_with_node_byte(0x42);
+        lookup
+            .write()
+            .unwrap()
+            .insert(addr, super::super::icmp::MIN_ACTIONABLE_PATH_MTU);
+        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 119);
     }
 
     #[test]

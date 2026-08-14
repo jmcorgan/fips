@@ -129,7 +129,20 @@ impl PathMtuState {
     ///
     /// `now_ms` is the injected monotonic time in milliseconds. Returns `true`
     /// if the effective MTU changed.
+    ///
+    /// A reported value below [`MIN_ACTIONABLE_PATH_MTU`] is ignored entirely.
+    /// The notification carries a remote party's claim about the path, and
+    /// below that floor the claim cannot describe a usable path: acting on it
+    /// drives the send gate into answering every packet with an ICMPv6 Packet
+    /// Too Big instead of sending it. Returning `false` leaves whatever the
+    /// local seed established and correctly reports "no change".
+    ///
+    /// [`MIN_ACTIONABLE_PATH_MTU`]: super::limits::MIN_ACTIONABLE_PATH_MTU
     pub fn apply_notification(&mut self, reported_mtu: u16, now_ms: u64) -> bool {
+        if reported_mtu < super::limits::MIN_ACTIONABLE_PATH_MTU {
+            return false;
+        }
+
         if reported_mtu < self.current_mtu {
             // Decrease: immediate
             self.current_mtu = reported_mtu;
@@ -141,7 +154,7 @@ impl PathMtuState {
         if reported_mtu > self.current_mtu {
             // Increase: track consecutive notifications
             if reported_mtu == self.pending_increase_mtu {
-                self.consecutive_increase_count += 1;
+                self.consecutive_increase_count = self.consecutive_increase_count.saturating_add(1);
             } else {
                 // Different value: reset sequence
                 self.pending_increase_mtu = reported_mtu;

@@ -209,6 +209,23 @@ pub enum SessionReject {
     /// Tracked via
     /// [`SessionStats::rekey_key_mismatch`](crate::node::stats::SessionStats).
     RekeyKeyMismatch,
+    /// A setup message named an established peer while our own rekey of
+    /// that session was in flight, and our address sorted smaller, so the
+    /// tie-break kept us as initiator and their msg1 was dropped. Tracked
+    /// via [`SessionStats::rekey_tiebreak`](crate::node::stats::SessionStats).
+    RekeyTiebreak,
+    /// A setup message named an established peer while our own rekey of
+    /// that session was in flight, and our address sorted larger, so we
+    /// abandoned our rekey and answered as responder. The message carries
+    /// no authenticator, so a sustained rate here means local key rotation
+    /// is being suppressed. Tracked via
+    /// [`SessionStats::rekey_yielded`](crate::node::stats::SessionStats).
+    RekeyYielded,
+    /// A setup message named an established peer that already holds a
+    /// completed rekey awaiting cut-over, so the message was dropped
+    /// rather than arming a second handshake. Tracked via
+    /// [`SessionStats::rekey_pending`](crate::node::stats::SessionStats).
+    RekeyPending,
 }
 
 /// MMP rejection reasons.

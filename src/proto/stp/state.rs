@@ -8,6 +8,20 @@ use super::limits::FlapDampener;
 use super::{CoordEntry, ParentDeclaration, TreeCoordinate};
 use crate::NodeAddr;
 
+/// What a parent-loss recovery did: whether the tree state changed, and
+/// whether the recovery switch was the one that armed a dampening episode.
+///
+/// Crate-internal on purpose. The published entry point is
+/// [`TreeState::handle_parent_lost`], whose `bool` return this type must not
+/// displace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParentLoss {
+    /// Whether the tree state changed and the caller should re-announce.
+    pub(crate) changed: bool,
+    /// Whether the recovery switch armed a flap dampening episode.
+    pub(crate) dampened: bool,
+}
+
 /// Local spanning tree state for a node.
 ///
 /// Contains this node's declaration, coordinates, and view of peers'
@@ -347,6 +361,14 @@ impl TreeState {
             .set_flap_dampening(threshold, window_secs, dampening_secs);
     }
 
+    /// How long a dampening episode suppresses discretionary parent switching,
+    /// after the configured value is clamped.
+    ///
+    /// Crate-internal: it feeds a log field on the engagement warning.
+    pub(crate) fn dampening_secs(&self) -> u64 {
+        self.flap.dampening_secs()
+    }
+
     /// Check if flap dampening is currently active. `now_ms` is the injected
     /// monotonic time in milliseconds.
     pub fn is_flap_dampened(&self, now_ms: u64) -> bool {
@@ -543,6 +565,22 @@ impl TreeState {
         now_secs: u64,
         now_ms: u64,
     ) -> bool {
+        self.recover(peer_costs, now_secs, now_ms).changed
+    }
+
+    /// Handle loss of current parent, reporting whether the recovery switch
+    /// itself armed a flap dampening episode.
+    ///
+    /// Same recovery as [`TreeState::handle_parent_lost`], which delegates
+    /// here. A caller holding a metrics handle uses this one so the
+    /// engagement can be counted and logged; the published signature stays
+    /// `bool`.
+    pub(crate) fn recover(
+        &mut self,
+        peer_costs: &BTreeMap<NodeAddr, f64>,
+        now_secs: u64,
+        now_ms: u64,
+    ) -> ParentLoss {
         // Try to find an alternative parent. The veto is computed at the edge and
         // applied only to a discretionary result; a mandatory switch bypasses it.
         let suppressed = self.is_switch_suppressed(now_ms);
@@ -553,16 +591,23 @@ impl TreeState {
         };
         if let Some(new_parent) = alt {
             let new_seq = self.my_declaration.sequence() + 1;
-            self.set_parent(new_parent, new_seq, now_secs, now_ms);
+            let dampened = self.set_parent(new_parent, new_seq, now_secs, now_ms);
             self.recompute_coords();
-            return true;
+            return ParentLoss {
+                changed: true,
+                dampened,
+            };
         }
 
-        // No alternative: become own root
+        // No alternative: become own root. This branch never calls
+        // `set_parent`, so it cannot arm a dampening episode.
         let new_seq = self.my_declaration.sequence() + 1;
         self.my_declaration = ParentDeclaration::self_root(self.my_node_addr, new_seq, now_secs);
         self.recompute_coords();
-        true
+        ParentLoss {
+            changed: true,
+            dampened: false,
+        }
     }
 
     /// Mutable access to this node's declaration.

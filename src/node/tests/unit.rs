@@ -1803,6 +1803,53 @@ async fn test_seed_path_mtu_inserts_when_empty() {
 }
 
 #[tokio::test]
+async fn test_seeded_narrow_link_mtu_reaches_the_clamp_as_a_tight_ceiling() {
+    // The seed and the SYN-time MSS clamp are two halves of one mechanism: the
+    // seed writes the node's own outgoing link MTU, the clamp reads it. A
+    // narrow link is the case that matters, because BLE negotiates its MTU per
+    // connection and lands below the remote-value floor routinely, and a
+    // direct link has no forwarder to answer an over-large segment with
+    // MtuExceeded. Driving the real seed rather than inserting into the map
+    // pins that the clamp honours what the seed actually stores.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 240).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let peer_addr = make_node_addr(0xEE);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.6:2121");
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+
+    assert_eq!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .copied(),
+        Some(240),
+        "the seed stores a narrow link MTU unchanged"
+    );
+    // 240 - 77 encap - 40 IPv6 - 20 TCP = 103. A clamp that discarded the
+    // seeded value would advertise the 1143 conservative ceiling instead, and
+    // every full-size segment would be refused by the transport with no
+    // feedback to the TCP stack.
+    assert_eq!(
+        crate::upper::tun::per_flow_max_mss(&node.path_mtu_lookup, fips_addr.as_bytes(), 1360),
+        103,
+        "the clamp must honour the seeded link MTU, not fall back to 1143"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
 async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);

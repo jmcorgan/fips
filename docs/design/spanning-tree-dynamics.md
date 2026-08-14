@@ -924,7 +924,8 @@ The primary stability mechanisms are implemented:
   `flap_dampening_secs = 120`): if a node switches parents more than 4
   times within 60s, an extended 120s hold-down is imposed. Mandatory
   switches (parent loss, root change) bypass dampening. The flap counter
-  resets when the window expires naturally.
+  resets when the window expires and again when a dampening episode lapses,
+  so each episode requires a fresh threshold of switches within one window.
 
 These mechanisms compose to bound announcement traffic even under rapid link
 flapping. The hold-down timer limits the rate of parent switches (at most

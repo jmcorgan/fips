@@ -1338,8 +1338,8 @@ async fn rekey_cutover_preserves_data_plane() {
     let cfg1 = crate::config::Config::new();
 
     let mut nodes = vec![
-        make_test_node_with_config(cfg0).await,
-        make_test_node_with_config(cfg1).await,
+        make_test_node_with_config(cfg0, 1280).await,
+        make_test_node_with_config(cfg1, 1280).await,
     ];
 
     // FMP peering + FSP session between the two loopback nodes.
@@ -2557,13 +2557,57 @@ fn build_mtu_exceeded_inner(dest: &NodeAddr, reporter: &NodeAddr, mtu: u16) -> V
     buf
 }
 
+/// Install the half-open entry an inbound SessionSetup creates: keyed on an
+/// address the sender merely claimed, awaiting msg3, not initiated by us.
+///
+/// This is the shape an attacker manufactures with one forged handshake
+/// opening, so a routing signal naming `claimed` must not be admitted by it.
+fn install_halfopen(node: &mut Node, claimed: NodeAddr) {
+    use crate::noise::HandshakeState;
+
+    // This branch's FSP rekey is Noise XX, so the responder is built without
+    // a pinned remote static; the entry's lifecycle state is what the helper
+    // is establishing, not the handshake pattern.
+    let handshake = HandshakeState::new_responder(node.identity().keypair());
+    let placeholder = node.identity().keypair().public_key();
+    let entry = crate::node::session::SessionEntry::new(
+        claimed,
+        placeholder,
+        EndToEndState::AwaitingMsg3(handshake),
+        1000,
+        false,
+    );
+    node.sessions.insert(claimed, entry);
+}
+
+/// Install the entry `initiate_session` creates: an address this node chose
+/// itself, with the handshake still in flight and MMP not yet initialized.
+fn install_initiating(node: &mut Node, remote: &Identity) {
+    use crate::noise::HandshakeState;
+
+    // Noise XX on this branch: the initiator learns the remote static during
+    // the handshake rather than pinning it up front.
+    let handshake = HandshakeState::new_initiator(node.identity().keypair());
+    let remote_addr = *remote.node_addr();
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Initiating(handshake),
+        1000,
+        true,
+    );
+    node.sessions.insert(remote_addr, entry);
+}
+
 #[tokio::test]
 async fn test_handle_mtu_exceeded_writes_path_mtu_lookup_when_empty() {
     use crate::node::tests::spanning_tree::make_test_node;
 
     let mut tn = make_test_node().await;
 
-    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let dest_fips = crate::FipsAddress::from_node_addr(&dest);
 
@@ -2573,7 +2617,7 @@ async fn test_handle_mtu_exceeded_writes_path_mtu_lookup_when_empty() {
     );
 
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
-    tn.node.handle_mtu_exceeded(&inner).await;
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
     assert_eq!(
         tn.node.path_mtu_lookup_get(&dest_fips),
@@ -2588,7 +2632,9 @@ async fn test_handle_mtu_exceeded_tightens_existing_path_mtu_lookup() {
 
     let mut tn = make_test_node().await;
 
-    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let dest_fips = crate::FipsAddress::from_node_addr(&dest);
 
@@ -2597,7 +2643,7 @@ async fn test_handle_mtu_exceeded_tightens_existing_path_mtu_lookup() {
     tn.node.path_mtu_lookup_insert(dest_fips, 1500);
 
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
-    tn.node.handle_mtu_exceeded(&inner).await;
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
     assert_eq!(
         tn.node.path_mtu_lookup_get(&dest_fips),
@@ -2612,7 +2658,9 @@ async fn test_handle_mtu_exceeded_keeps_tighter_existing_path_mtu_lookup() {
 
     let mut tn = make_test_node().await;
 
-    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let dest_fips = crate::FipsAddress::from_node_addr(&dest);
 
@@ -2622,12 +2670,601 @@ async fn test_handle_mtu_exceeded_keeps_tighter_existing_path_mtu_lookup() {
     tn.node.path_mtu_lookup_insert(dest_fips, 1280);
 
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1500);
-    tn.node.handle_mtu_exceeded(&inner).await;
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
     assert_eq!(
         tn.node.path_mtu_lookup_get(&dest_fips),
         Some(1280),
         "MtuExceeded with looser bottleneck must not loosen a tighter existing value"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_mtu_exceeded_below_floor_leaves_path_mtu_lookup_untouched() {
+    use crate::node::tests::spanning_tree::make_test_node;
+
+    // MtuExceeded is an unencrypted signal that any admitted member can send
+    // for any destination this node has bound. A bottleneck this small cannot
+    // describe a real path; storing it would drive the SYN-time MSS clamp to a
+    // single-digit or zero segment size. The session is installed so the
+    // admission gate lets the signal through and the floor is what refuses it;
+    // without one this would pass whether or not the floor exists.
+    let mut tn = make_test_node().await;
+
+    let remote = Identity::generate();
+    install_initiating(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 100);
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        tn.node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "a sub-floor MtuExceeded must leave no path_mtu_lookup entry behind"
+    );
+}
+
+#[tokio::test]
+async fn test_sub_floor_mtu_exceeded_is_counted_separately_from_all_mtu_exceeded() {
+    use crate::node::tests::spanning_tree::make_test_node;
+
+    // `mtu_exceeded` counts every MtuExceeded regardless of value, so the
+    // sub-floor subset is not separable from it. The signal is unencrypted,
+    // unauthenticated and unmetered, so that subset climbing on its own is
+    // the forged-signal signature and needs its own counter.
+    let mut tn = make_test_node().await;
+
+    // Bound the destination so the admission gate admits the signal and the
+    // floor is what classifies it.
+    let remote = Identity::generate();
+    install_initiating(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+
+    assert_eq!(
+        tn.node.metrics().errors.mtu_exceeded_below_floor.get(),
+        0,
+        "counter starts at zero on a fresh node"
+    );
+
+    let inner = build_mtu_exceeded_inner(
+        &dest,
+        &reporter,
+        crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU - 1,
+    );
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        tn.node.metrics().errors.mtu_exceeded_below_floor.get(),
+        1,
+        "a sub-floor MtuExceeded must bump the below-floor counter"
+    );
+
+    // The counter must discriminate: an actionable bottleneck is stored and
+    // must bump only the all-signals counter.
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        tn.node.metrics().errors.mtu_exceeded_below_floor.get(),
+        1,
+        "an actionable MtuExceeded must not bump the below-floor counter"
+    );
+    assert_eq!(
+        tn.node.metrics().errors.mtu_exceeded.get(),
+        2,
+        "the all-signals counter must count both, sub-floor and actionable"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_mtu_exceeded_at_the_floor_still_writes_path_mtu_lookup() {
+    use crate::node::tests::spanning_tree::make_test_node;
+
+    // The guard must reject only what is below the floor. Without this the
+    // floor could be widened arbitrarily and the test above would not notice.
+    let mut tn = make_test_node().await;
+
+    let remote = Identity::generate();
+    install_initiating(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+    let floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU;
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, floor);
+    tn.node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        tn.node.path_mtu_lookup_get(&dest_fips),
+        Some(floor),
+        "a bottleneck exactly at the floor is actionable and must be stored"
+    );
+}
+
+#[tokio::test]
+async fn test_forged_mtu_exceeded_of_zero_does_not_blackhole_the_session() {
+    // The security property itself. MtuExceeded arrives unencrypted with no
+    // sender check, so anyone who can reach this node can inject one. Applied
+    // unfiltered, a reported MTU of zero drives the session's path MTU to
+    // zero, and from then on the TUN send gate answers every packet with an
+    // ICMPv6 Packet Too Big instead of sending it: a total blackhole for that
+    // destination that survives until the daemon restarts.
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_pubkey = nodes[1].node.identity().pubkey_full();
+
+    let src_fips = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst_fips = crate::FipsAddress::from_node_addr(&node1_addr);
+
+    nodes[0]
+        .node
+        .initiate_session(node1_addr, node1_pubkey)
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .state()
+            .is_established()
+    );
+
+    // Forge the signal: an MtuExceeded claiming the path to node 1 carries
+    // nothing at all, reported by a node that is not on the path.
+    let reporter = NodeAddr::from_bytes([0xEE; 16]);
+    let inner = build_mtu_exceeded_inner(&node1_addr, &reporter, 0);
+    nodes[0].node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[0].node.supervisor.tun_tx = Some(tun_tx);
+
+    let payload = vec![0u8; 560];
+    let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, &payload);
+    assert_eq!(ipv6_packet.len(), 600);
+    assert!(
+        ipv6_packet.len() <= nodes[0].node.effective_ipv6_mtu() as usize,
+        "the packet must fit the local MTU, so any PTB comes from the forged signal"
+    );
+
+    nodes[0].node.handle_tun_outbound(ipv6_packet).await;
+
+    let tun_messages: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert!(
+        tun_messages.is_empty(),
+        "a forged MtuExceeded of zero must not turn ordinary packets into \
+         ICMPv6 Packet Too Big; got {} message(s)",
+        tun_messages.len()
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_path_broken_releases_path_mtu_lookup_entry() {
+    use crate::node::tests::spanning_tree::make_test_node;
+    use crate::proto::routing::PathBroken;
+
+    // A PathBroken report declares the path to a destination gone. The stored
+    // path MTU described that path, so it must not be carried onto whatever
+    // path replaces it — otherwise a value learned once (or injected once)
+    // outlives every route change until the daemon restarts.
+    let mut tn = make_test_node().await;
+
+    // The signal is only acted on for a destination this node has itself
+    // bound, so the release is reachable only behind an installed session.
+    // Without one the admission gate refuses the signal and this test would
+    // observe the entry surviving for the wrong reason.
+    let remote = Identity::generate();
+    install_initiating(&mut tn.node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    tn.node.path_mtu_lookup_insert(dest_fips, 700);
+    assert_eq!(tn.node.path_mtu_lookup_get(&dest_fips), Some(700));
+
+    // Build the body the dispatcher would hand the handler: encode() prepends
+    // a 4-byte FSP prefix and a msg_type byte, both already consumed there.
+    let encoded = PathBroken::new(dest, reporter).encode();
+    let inner = &encoded[5..];
+    assert!(
+        PathBroken::decode(inner).is_ok(),
+        "the test body must decode, or the handler returns early and the \
+         assertion below observes nothing"
+    );
+
+    tn.node.handle_path_broken(&reporter, inner).await;
+
+    assert_eq!(
+        tn.node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "PathBroken must release the stored path MTU for the dead path"
+    );
+}
+
+// ============================================================================
+// Routing-signal admission: the named destination must be an address this
+// node bound itself, either by initiating toward it or by completing the
+// handshake that binds an address to a peer's static key. These signals carry
+// no end-to-end authentication, so without that gate any mesh member can name
+// any address and have the effects applied.
+// ============================================================================
+
+#[tokio::test]
+async fn test_mtu_exceeded_naming_a_dest_with_no_session_does_not_touch_path_mtu_lookup() {
+    let mut node = make_node();
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    assert!(
+        node.path_mtu_lookup_get(&dest_fips).is_none(),
+        "lookup should start empty for this destination"
+    );
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "a signal naming an address with no session must not write the clamp"
+    );
+    assert_eq!(node.stats().session.unknown_session, 1);
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.mtu.get(),
+        1,
+        "the refusal must be counted against the MtuExceeded counter"
+    );
+    assert_eq!(
+        errors.unbound.coords.get(),
+        0,
+        "an MtuExceeded refusal must not bump the CoordsRequired counter"
+    );
+    assert_eq!(
+        errors.unbound.broken.get(),
+        0,
+        "an MtuExceeded refusal must not bump the PathBroken counter"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        0,
+        "an absent session is an unbound refusal, not a forged pairing"
+    );
+    assert_eq!(
+        errors.mtu_exceeded.get(),
+        1,
+        "the arrival counter is the denominator and counts refused arrivals too"
+    );
+}
+
+#[tokio::test]
+async fn test_mtu_exceeded_naming_a_dest_whose_entry_is_an_unauthenticated_responder_handshake_is_dropped()
+ {
+    let mut node = make_node();
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    // One forged SessionSetup naming `dest` would leave exactly this entry.
+    install_halfopen(&mut node, dest);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "a half-open entry keyed on a claimed address must not admit the signal"
+    );
+    assert_eq!(node.stats().session.unknown_session, 1);
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.mtu.get(),
+        1,
+        "a half-open entry is an unbound refusal for MtuExceeded"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        0,
+        "a half-open entry is a plausible pairing, not a forged one"
+    );
+}
+
+#[tokio::test]
+async fn test_mtu_exceeded_for_a_session_we_initiated_seeds_path_mtu_lookup_before_establishment() {
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_initiating(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        Some(1280),
+        "an address we chose ourselves must still seed the clamp during handshake"
+    );
+    assert_eq!(
+        node.metrics().errors.unbound.mtu.get(),
+        0,
+        "an admitted signal must not be counted as refused"
+    );
+}
+
+#[tokio::test]
+async fn test_mtu_exceeded_from_a_third_party_forwarder_still_tightens_an_active_session() {
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    // A real transit reporter is neither us nor the destination.
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        Some(1280),
+        "an on-path forwarder's report must still tighten the clamp"
+    );
+    assert_eq!(
+        node.sessions
+            .get(&dest)
+            .and_then(|e| e.mmp())
+            .map(|m| m.path_mtu.current_mtu()),
+        Some(1280),
+        "the session-side path MTU must also decrease"
+    );
+}
+
+#[tokio::test]
+async fn test_path_broken_naming_a_dest_with_no_session_does_not_flush_cached_coords() {
+    use crate::proto::routing::PathBroken;
+
+    let mut node = make_node();
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let coords = node.tree_state().my_coords().clone();
+    node.coord_cache_mut().insert(dest, coords, 1000);
+
+    let encoded = PathBroken::new(dest, reporter).encode();
+    node.handle_path_broken(&reporter, &encoded[5..]).await;
+
+    assert!(
+        node.coord_cache().get(&dest, 1000).is_some(),
+        "a signal naming an address with no session must not flush its coords"
+    );
+    assert_eq!(node.stats().session.unknown_session, 1);
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.broken.get(),
+        1,
+        "the refusal must be counted against the PathBroken counter"
+    );
+    assert_eq!(
+        errors.unbound.mtu.get(),
+        0,
+        "a PathBroken refusal must not bump the MtuExceeded counter"
+    );
+    assert_eq!(
+        errors.unbound.coords.get(),
+        0,
+        "a PathBroken refusal must not bump the CoordsRequired counter"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        0,
+        "an absent session is an unbound refusal, not a forged pairing"
+    );
+}
+
+#[tokio::test]
+async fn test_path_broken_naming_a_dest_whose_entry_is_an_unauthenticated_responder_handshake_does_not_flush_cached_coords()
+ {
+    use crate::proto::routing::PathBroken;
+
+    let mut node = make_node();
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let coords = node.tree_state().my_coords().clone();
+    node.coord_cache_mut().insert(dest, coords, 1000);
+
+    // One forged SessionSetup naming `dest` would leave exactly this entry.
+    install_halfopen(&mut node, dest);
+
+    let encoded = PathBroken::new(dest, reporter).encode();
+    node.handle_path_broken(&reporter, &encoded[5..]).await;
+
+    assert!(
+        node.coord_cache().get(&dest, 1000).is_some(),
+        "a half-open entry keyed on a claimed address must not admit the signal"
+    );
+    assert_eq!(node.stats().session.unknown_session, 1);
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.broken.get(),
+        1,
+        "a half-open entry is an unbound refusal for PathBroken"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        0,
+        "a half-open entry is a plausible pairing, not a forged one"
+    );
+}
+
+#[tokio::test]
+async fn test_path_broken_for_a_session_we_initiated_still_flushes_cached_coords() {
+    use crate::proto::routing::PathBroken;
+
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_initiating(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let coords = node.tree_state().my_coords().clone();
+    node.coord_cache_mut().insert(dest, coords, 1000);
+
+    let encoded = PathBroken::new(dest, reporter).encode();
+    node.handle_path_broken(&reporter, &encoded[5..]).await;
+
+    assert!(
+        node.coord_cache().get(&dest, 1000).is_none(),
+        "handshake-time recovery must still flush coords for an address we chose"
+    );
+}
+
+#[tokio::test]
+async fn test_coords_required_naming_a_dest_with_no_session_is_counted_as_an_unknown_session_reject()
+ {
+    use crate::proto::routing::CoordsRequired;
+
+    let mut node = make_node();
+
+    let dest = NodeAddr::from_bytes([0xCC; 16]);
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+
+    let encoded = CoordsRequired::new(dest, reporter).encode();
+    node.handle_coords_required(&reporter, &encoded[5..]).await;
+    assert_eq!(node.stats().session.unknown_session, 1);
+
+    // The gate runs ahead of the response rate limiter, so a second
+    // identical signal is rejected the same way rather than being
+    // absorbed by rate-limiter state keyed on an attacker-chosen address.
+    node.handle_coords_required(&reporter, &encoded[5..]).await;
+    assert_eq!(node.stats().session.unknown_session, 2);
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.coords.get(),
+        2,
+        "both refusals must be counted against the CoordsRequired counter"
+    );
+    assert_eq!(
+        errors.unbound.broken.get(),
+        0,
+        "a CoordsRequired refusal must not bump the PathBroken counter"
+    );
+    assert_eq!(
+        errors.unbound.mtu.get(),
+        0,
+        "a CoordsRequired refusal must not bump the MtuExceeded counter"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        0,
+        "an absent session is an unbound refusal, not a forged pairing"
+    );
+    assert_eq!(
+        errors.coords_required.get(),
+        2,
+        "the arrival counter is the denominator and counts refused arrivals too"
+    );
+}
+
+#[tokio::test]
+async fn test_mtu_exceeded_whose_claimed_source_is_the_destination_it_names_is_dropped() {
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    // The emitter of a routing signal is by construction a transit node for
+    // the datagram it is reporting on, so it is never that datagram's own
+    // destination. A signal claiming otherwise is malformed.
+    let inner = build_mtu_exceeded_inner(&dest, &dest, 1280);
+    node.handle_mtu_exceeded(&dest, &inner).await;
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "a signal whose claimed source is the destination it names must be dropped"
+    );
+    assert_eq!(node.stats().session.unknown_session, 1);
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.mtu.get(),
+        1,
+        "the refusal must still be counted against the MtuExceeded counter"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        1,
+        "a src equal to the dest it names is a structurally impossible pairing"
+    );
+}
+
+#[tokio::test]
+async fn test_coords_required_naming_this_node_as_the_destination_counts_a_forged_pairing() {
+    use crate::proto::routing::CoordsRequired;
+
+    let mut node = make_node();
+
+    // A datagram addressed to this node is delivered locally before any
+    // forwarding, so no honest transit router ever emits a signal naming
+    // us as the destination. This clause can only be reached by fabrication.
+    let dest = *node.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+
+    let encoded = CoordsRequired::new(dest, reporter).encode();
+    node.handle_coords_required(&reporter, &encoded[5..]).await;
+
+    assert_eq!(node.stats().session.unknown_session, 1);
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.unbound.coords.get(),
+        1,
+        "the refusal must be counted against the CoordsRequired counter"
+    );
+    assert_eq!(
+        errors.unbound.forged.get(),
+        1,
+        "a signal naming this node as the destination is a forged pairing"
+    );
+    assert_eq!(
+        errors.unbound.broken.get(),
+        0,
+        "a CoordsRequired refusal must not bump the PathBroken counter"
+    );
+    assert_eq!(
+        errors.unbound.mtu.get(),
+        0,
+        "a CoordsRequired refusal must not bump the MtuExceeded counter"
     );
 }
 
@@ -2749,6 +3386,132 @@ fn test_handle_path_mtu_notification_no_session_no_op() {
         node.path_mtu_lookup_get(&remote_fips).is_none(),
         "PathMtuNotification with no session must not touch path_mtu_lookup"
     );
+}
+
+#[test]
+fn test_sub_floor_path_mtu_notification_is_ignored_and_counted() {
+    // The state machine returns the same `false` for a sub-floor refusal as
+    // for an ordinary no-change, so without a counter at the caller the
+    // refusal is indistinguishable from the common case. This arrives on the
+    // decrypted path, so a rising count means an authenticated peer is
+    // sending unusable values.
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+    let remote_fips = crate::FipsAddress::from_node_addr(&remote_addr);
+
+    install_established_session_with_mmp(&mut node, &remote);
+
+    assert_eq!(
+        node.metrics().errors.path_mtu_notif_below_floor.get(),
+        0,
+        "counter starts at zero on a fresh node"
+    );
+
+    let body = build_path_mtu_notification_body(crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU - 1);
+    node.handle_session_path_mtu_notification(&remote_addr, &body);
+
+    assert_eq!(
+        node.metrics().errors.path_mtu_notif_below_floor.get(),
+        1,
+        "a sub-floor PathMtuNotification must bump the below-floor counter"
+    );
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        None,
+        "a sub-floor PathMtuNotification must leave no path_mtu_lookup entry"
+    );
+
+    // The counter must discriminate: an actionable value is applied and must
+    // not bump it.
+    let body = build_path_mtu_notification_body(1280);
+    node.handle_session_path_mtu_notification(&remote_addr, &body);
+
+    assert_eq!(
+        node.metrics().errors.path_mtu_notif_below_floor.get(),
+        1,
+        "an actionable PathMtuNotification must not bump the below-floor counter"
+    );
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        Some(1280),
+        "the actionable value must still be applied after a refused one"
+    );
+}
+
+#[tokio::test]
+async fn test_idle_session_purge_keeps_link_peer_path_mtu_seed() {
+    use crate::peer::ActivePeer;
+    use crate::transport::udp::UdpTransport;
+    use crate::transport::{TransportHandle, packet_channel};
+
+    // Releasing on idle expiry must not throw away what local configuration
+    // knows. Idle expiry removes an end-to-end session; the FMP link to a
+    // directly connected peer stays up, and its link MTU is seeded only on
+    // link promotion. A blanket removal here would drop that peer to the
+    // conservative ceiling for every later flow until the link re-handshakes.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let (transport_packet_tx, _transport_packet_rx) = packet_channel(64);
+    let transport_id = TransportId::new(1);
+    let mut udp = UdpTransport::new(
+        transport_id,
+        Some("udp1".to_string()),
+        crate::config::UdpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            mtu: Some(1452),
+            ..Default::default()
+        },
+        transport_packet_tx,
+    );
+    udp.start_async().await.unwrap();
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(udp));
+
+    // A directly connected peer, seeded from its link MTU the way FMP
+    // promotion seeds it, with an end-to-end session on top.
+    let remote = Identity::generate();
+    let remote_addr = *remote.node_addr();
+    let remote_fips = crate::FipsAddress::from_node_addr(&remote_addr);
+    let transport_addr = TransportAddr::from_string("127.0.0.1:2121");
+
+    let peer_identity = PeerIdentity::from_pubkey_full(remote.pubkey_full());
+    let mut peer = ActivePeer::new(peer_identity, LinkId::new(7), 0);
+    peer.set_current_addr(transport_id, transport_addr.clone());
+    node.peers.insert(remote_addr, peer);
+
+    node.seed_path_mtu_for_link_peer(&remote_addr, transport_id, &transport_addr);
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        Some(1452),
+        "precondition: the direct-link seed is in place"
+    );
+
+    let session = make_noise_session(node.identity(), &remote);
+    let entry = crate::node::session::SessionEntry::new(
+        remote_addr,
+        remote.pubkey_full(),
+        EndToEndState::Established(session),
+        1000,
+        true,
+    );
+    node.sessions.insert(remote_addr, entry);
+
+    node.purge_idle_sessions(1000 + 92_000);
+    assert_eq!(node.session_count(), 0, "precondition: the session expired");
+
+    assert_eq!(
+        node.path_mtu_lookup_get(&remote_fips),
+        Some(1452),
+        "idle expiry must leave the locally derived link MTU in place"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
 }
 
 // ============================================================================

@@ -33,8 +33,15 @@
     },
     "error_signals": {
       "coords_required": 0,
+      "lookup_resp_mtu_below_floor": 0,
       "mtu_exceeded": 0,
-      "path_broken": 0
+      "mtu_exceeded_below_floor": 0,
+      "path_broken": 0,
+      "path_mtu_notif_below_floor": 0,
+      "unbound_broken": 0,
+      "unbound_coords": 0,
+      "unbound_forged": 0,
+      "unbound_mtu": 0
     },
     "forwarding": {
       "decode_error_bytes": 0,
@@ -60,7 +67,9 @@
       "route_tree_down_cross": 0,
       "route_tree_up": 0,
       "ttl_exhausted_bytes": 0,
-      "ttl_exhausted_packets": 0
+      "ttl_exhausted_packets": 0,
+      "warm_malformed_bytes": 0,
+      "warm_malformed_packets": 0
     },
     "identity_cache_entries": 0,
     "lookup": {

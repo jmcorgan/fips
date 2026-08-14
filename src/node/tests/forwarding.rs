@@ -1109,3 +1109,90 @@ fn test_sample_transport_congestion() {
     node.sample_transport_congestion();
     assert!(!node.transport_drops[&tid].dropping);
 }
+
+/// Acceptance: an inner FSP payload of 4 to 11 bytes with phase 0x0 and the
+/// CP flag set is dropped rather than panicking the forwarding path. That
+/// window sits between the common prefix parser's 4-byte floor and the
+/// 12-byte header slice the warm path takes, so before the fix the first
+/// iteration panicked with a range start index out of range.
+#[tokio::test]
+async fn test_coord_cache_warming_short_inner_payload_is_dropped_not_panic() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let src_addr = make_node_addr(0x01);
+    let dest_addr = make_node_addr(0x02);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    for extra in 0..=7 {
+        let mut data_payload = vec![0x00, FSP_FLAG_CP, 0x00, 0x00];
+        data_payload.resize(4 + extra, 0x00);
+
+        let dg = SessionDatagram::new(src_addr, dest_addr, data_payload).with_ttl(1);
+        let encoded = dg.encode();
+        node.handle_session_datagram(&from, &encoded[1..], false)
+            .await;
+    }
+
+    assert!(
+        node.coord_cache().get(&src_addr, now_ms).is_none(),
+        "Short inner payload must not warm src coords"
+    );
+    assert!(
+        node.coord_cache().get(&dest_addr, now_ms).is_none(),
+        "Short inner payload must not warm dest coords"
+    );
+    // Anti-vacuity: only a datagram that ran past the warm call reaches the
+    // TTL gate. `received_packets` is charged before decode and so would
+    // count a datagram rejected earlier.
+    assert_eq!(
+        node.metrics().forwarding.ttl_exhausted_packets.get(),
+        8,
+        "each short-inner-payload datagram must run past the warm call to the TTL gate"
+    );
+    // Discriminating: separates "the guard fired" from "coords parsed and
+    // yielded nothing", which the cache assertions above cannot tell apart.
+    assert_eq!(
+        node.metrics().forwarding.warm_malformed_packets.get(),
+        8,
+        "each short-inner-payload datagram must be counted as an abandoned warm attempt"
+    );
+
+    // Inner lengths 12 to 27 document the new 28-byte floor: they do not
+    // panic today either, so this half is not discriminating.
+    for len in 12..=27 {
+        let mut data_payload = vec![0x00, FSP_FLAG_CP, 0x00, 0x00];
+        data_payload.resize(len, 0x00);
+
+        let dg = SessionDatagram::new(src_addr, dest_addr, data_payload).with_ttl(1);
+        let encoded = dg.encode();
+        node.handle_session_datagram(&from, &encoded[1..], false)
+            .await;
+    }
+
+    assert!(
+        node.coord_cache().get(&src_addr, now_ms).is_none(),
+        "Payload below the encrypted minimum must not warm src coords"
+    );
+    assert!(
+        node.coord_cache().get(&dest_addr, now_ms).is_none(),
+        "Payload below the encrypted minimum must not warm dest coords"
+    );
+    assert_eq!(
+        node.metrics().forwarding.ttl_exhausted_packets.get(),
+        24,
+        "every datagram in both loops must reach the TTL gate"
+    );
+    assert_eq!(
+        node.metrics().forwarding.warm_malformed_packets.get(),
+        24,
+        "every datagram in both loops must be counted as an abandoned warm attempt"
+    );
+    assert!(
+        node.metrics().forwarding.warm_malformed_bytes.get() > 0,
+        "the byte counter must move alongside the packet counter"
+    );
+}

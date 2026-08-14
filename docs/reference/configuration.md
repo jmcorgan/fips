@@ -334,7 +334,7 @@ cutover.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.rekey.enabled` | bool | `true` | Enable periodic Noise rekey on all links and sessions |
+| `node.rekey.enabled` | bool | `true` | Initiate periodic Noise rekey on links and sessions. A peer-driven session rekey is still answered when this is off, so session keys can still rotate |
 | `node.rekey.after_secs` | u64 | `120` | Initiate rekey after this many seconds on a session |
 | `node.rekey.after_messages` | u64 | `65536` | Initiate rekey after this many messages sent on a session |
 

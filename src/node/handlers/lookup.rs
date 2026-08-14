@@ -290,10 +290,34 @@ impl Node {
                     now_ms,
                     path_mtu,
                 } => {
-                    self.coord_cache
-                        .insert_with_path_mtu(target, coords, now_ms, path_mtu);
+                    // The annotation is unsigned and accumulates hop by hop, so
+                    // any forwarder on the reverse path can lower it. A value
+                    // below the actionable floor cannot describe a usable path,
+                    // so treat it as absent: cache the coordinates, which are
+                    // what the proof covers, and store no path MTU from this
+                    // response at all.
+                    if path_mtu < crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU {
+                        warn!(
+                            target = %self.peer_display_name(&target),
+                            path_mtu = path_mtu,
+                            floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU,
+                            "LookupResponse carries a path MTU below the actionable floor; \
+                             caching coordinates without it"
+                        );
+                        self.metrics().errors.lookup_resp_mtu_below_floor.inc();
+                        self.coord_cache.insert(target, coords, now_ms);
+                    } else {
+                        self.coord_cache
+                            .insert_with_path_mtu(target, coords, now_ms, path_mtu);
+                    }
                 }
                 LookupAction::WritePathMtu { target, path_mtu } => {
+                    // Refused as absent on the CacheCoords arm the core always
+                    // pairs with this one, so there is nothing to mirror; the
+                    // warning and the counter are emitted there, once.
+                    if path_mtu < crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU {
+                        continue;
+                    }
                     // Mirror path_mtu into the FipsAddress-keyed read-only lookup
                     // map used by the TUN reader/writer at TCP MSS clamp time.
                     let fips_addr = crate::FipsAddress::from_node_addr(&target);
@@ -744,6 +768,22 @@ impl Node {
             return;
         };
         let link_mtu = transport.link_mtu(addr);
+        // A locally derived MTU is deliberately exempt from the actionable
+        // floor, so this seeds the value either way, and a narrow link is not
+        // by itself worth reporting: BLE negotiates its MTU per connection and
+        // lands below the floor routinely, where the tight clamp the seed
+        // produces is exactly what the flow needs. Warn only where the link
+        // admits no TCP payload byte at all, since there the SYN-time clamp
+        // has nothing usable to derive and drops the peer onto the
+        // conservative fallback ceiling for as long as the link stands.
+        if crate::upper::icmp::mss_ceiling(link_mtu) == 0 {
+            warn!(
+                peer = %self.peer_display_name(peer_addr),
+                link_mtu = link_mtu,
+                "Link MTU leaves no room for a TCP payload byte; TCP to this peer \
+                 will not work until the link or the transport's mtu setting changes"
+            );
+        }
         let fips_addr = crate::FipsAddress::from_node_addr(peer_addr);
         let Ok(mut map) = self.path_mtu_lookup.write() else {
             warn!(

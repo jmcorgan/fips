@@ -59,6 +59,13 @@ fn draw_routing_state(
             "Recent Requests",
             helpers::u64_field(data, "recent_requests"),
         ),
+        // Not a drop: the frame is still delivered or forwarded, only the
+        // coordinate-cache warm attempt was abandoned. It belongs here beside
+        // the cache it failed to warm, not in the Dropped section.
+        (
+            "Warm Malformed",
+            fwd_value(data, "warm_malformed_packets", "warm_malformed_bytes"),
+        ),
     ]);
 
     let block = helpers::pane_block(" Routing State ", focused);
@@ -284,6 +291,13 @@ fn draw_routing_stats(
             ("Coords Required", err("coords_required")),
             ("Path Broken", err("path_broken")),
             ("MTU Exceeded", err("mtu_exceeded")),
+            ("PMTU Notif < Floor", err("path_mtu_notif_below_floor")),
+            ("MTU Exceeded < Floor", err("mtu_exceeded_below_floor")),
+            ("Lookup PMTU < Floor", err("lookup_resp_mtu_below_floor")),
+            ("Coords Required Refused", err("unbound_coords")),
+            ("Path Broken Refused", err("unbound_broken")),
+            ("MTU Exceeded Refused", err("unbound_mtu")),
+            ("Forged Pairing", err("unbound_forged")),
         ],
     ));
     right.push(Line::from(""));

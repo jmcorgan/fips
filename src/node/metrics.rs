@@ -67,6 +67,8 @@ pub struct ForwardingMetrics {
     pub received_bytes: Counter,
     pub decode_error_packets: Counter,
     pub decode_error_bytes: Counter,
+    pub warm_malformed_packets: Counter,
+    pub warm_malformed_bytes: Counter,
     pub ttl_exhausted_packets: Counter,
     pub ttl_exhausted_bytes: Counter,
     pub delivered_packets: Counter,
@@ -108,6 +110,22 @@ impl ForwardingMetrics {
     pub fn record_delivered(&self, bytes: usize) {
         self.delivered_packets.inc();
         self.delivered_bytes.add(bytes as u64);
+    }
+
+    /// Record a coordinate-cache warm attempt abandoned because the frame was
+    /// not a well-formed encrypted FSP message.
+    ///
+    /// This is **not** a packet drop. The frame is still delivered or
+    /// forwarded by the normal path; only the opportunistic warm attempt was
+    /// abandoned, so this must never be folded into the rejection family or
+    /// rendered as dropped traffic. `bytes` is the payload size of the frame
+    /// whose warm attempt was abandoned, not volume dropped; it is carried so
+    /// the counter can be rendered as a packets-and-bytes pair like its
+    /// siblings.
+    #[inline]
+    pub fn record_warm_malformed(&self, bytes: usize) {
+        self.warm_malformed_packets.inc();
+        self.warm_malformed_bytes.add(bytes as u64);
     }
 
     /// Record a forwarded (transit) packet of `bytes` payload.
@@ -176,6 +194,8 @@ impl ForwardingMetrics {
             received_bytes: self.received_bytes.get(),
             decode_error_packets: self.decode_error_packets.get(),
             decode_error_bytes: self.decode_error_bytes.get(),
+            warm_malformed_packets: self.warm_malformed_packets.get(),
+            warm_malformed_bytes: self.warm_malformed_bytes.get(),
             ttl_exhausted_packets: self.ttl_exhausted_packets.get(),
             ttl_exhausted_bytes: self.ttl_exhausted_bytes.get(),
             delivered_packets: self.delivered_packets.get(),
@@ -417,12 +437,55 @@ impl CongestionMetrics {
     }
 }
 
+/// Routing signals refused by the sender-binding admission gate, split by
+/// signal type.
+///
+/// The sibling counters on `ErrorMetrics` count arrivals, incremented before
+/// the gate runs; these count the subset that was refused. Read together they
+/// give the refused fraction per signal type, which is what separates a node
+/// nobody is talking to from a node with a genuinely broken path from a node
+/// being fed forged signals.
+#[derive(Default)]
+pub struct UnboundSignals {
+    /// `CoordsRequired` refused because this node has not bound the
+    /// destination address the signal names.
+    pub coords: Counter,
+    /// `PathBroken` refused because this node has not bound the destination
+    /// address the signal names.
+    pub broken: Counter,
+    /// `MtuExceeded` refused because this node has not bound the destination
+    /// address the signal names.
+    pub mtu: Counter,
+    /// Subset of the above whose src/dest pairing is structurally impossible
+    /// for a legitimate emitter: the signal names this node as the
+    /// destination, or claims a source equal to the destination it names.
+    /// Neither can arise from an honest on-path forwarder, so any count here
+    /// is a fabricated signal rather than ordinary session churn.
+    pub forged: Counter,
+}
+
 /// Error-signal metric counters.
 #[derive(Default)]
 pub struct ErrorMetrics {
     pub coords_required: Counter,
     pub path_broken: Counter,
     pub mtu_exceeded: Counter,
+    /// `PathMtuNotification`s ignored for carrying a path MTU below the
+    /// actionable floor. This signal arrives inside an established session
+    /// on the decrypted path, so a rising count means an authenticated peer
+    /// is misconfigured or misbehaving.
+    pub path_mtu_notif_below_floor: Counter,
+    /// `MtuExceeded` signals whose bottleneck was ignored for falling below
+    /// the actionable floor. The signal is unencrypted, unauthenticated and
+    /// unmetered, so a rising count on its own is the forged-signal
+    /// signature; `mtu_exceeded` counts the whole population.
+    pub mtu_exceeded_below_floor: Counter,
+    /// `LookupResponse` path MTU annotations ignored for falling below the
+    /// actionable floor. The response carried a verified proof, so a rising
+    /// count means a forwarder on the reverse path is mangling the unsigned
+    /// annotation.
+    pub lookup_resp_mtu_below_floor: Counter,
+    pub unbound: UnboundSignals,
 }
 
 impl ErrorMetrics {
@@ -432,6 +495,13 @@ impl ErrorMetrics {
             coords_required: self.coords_required.get(),
             path_broken: self.path_broken.get(),
             mtu_exceeded: self.mtu_exceeded.get(),
+            path_mtu_notif_below_floor: self.path_mtu_notif_below_floor.get(),
+            mtu_exceeded_below_floor: self.mtu_exceeded_below_floor.get(),
+            lookup_resp_mtu_below_floor: self.lookup_resp_mtu_below_floor.get(),
+            unbound_coords: self.unbound.coords.get(),
+            unbound_broken: self.unbound.broken.get(),
+            unbound_mtu: self.unbound.mtu.get(),
+            unbound_forged: self.unbound.forged.get(),
         }
     }
 }

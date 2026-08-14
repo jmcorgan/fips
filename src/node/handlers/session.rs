@@ -57,6 +57,35 @@ struct PipelinedSend<'a> {
     dest_coords: Option<&'a crate::proto::stp::TreeCoordinate>,
 }
 
+/// Outcome of the routing-signal admission test.
+///
+/// `Unbound` and `Forged` are both refusals, kept apart because they mean
+/// different things to an operator. `Unbound` is consistent with a benign
+/// race — a signal arriving just after a local session teardown. `Forged`
+/// is not consistent with any honest emitter, so it is the sharper
+/// indicator and is counted separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalVerdict {
+    /// The named destination is an address this node bound itself.
+    Admit,
+    /// The src/dest pairing is structurally impossible for a legitimate
+    /// emitter.
+    Forged,
+    /// No qualifying session entry exists for the named destination.
+    Unbound,
+}
+
+impl SignalVerdict {
+    /// Short stable label for the `verdict` log field.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Forged => "forged",
+            Self::Unbound => "unbound",
+        }
+    }
+}
+
 impl Node {
     /// Handle a locally-delivered session datagram payload.
     ///
@@ -108,13 +137,13 @@ impl Node {
                 let error_body = &inner[1..];
                 match RoutingSignalType::from_byte(error_type) {
                     Some(RoutingSignalType::CoordsRequired) => {
-                        self.handle_coords_required(error_body).await;
+                        self.handle_coords_required(src_addr, error_body).await;
                     }
                     Some(RoutingSignalType::PathBroken) => {
-                        self.handle_path_broken(error_body).await;
+                        self.handle_path_broken(src_addr, error_body).await;
                     }
                     Some(RoutingSignalType::MtuExceeded) => {
-                        self.handle_mtu_exceeded(error_body).await;
+                        self.handle_mtu_exceeded(src_addr, error_body).await;
                     }
                     _ => {
                         debug!(error_type, "Unknown plaintext error signal type");
@@ -1405,6 +1434,23 @@ impl Node {
             return;
         };
 
+        // `apply_notification` refuses a sub-floor value, but it returns the
+        // same `false` it returns for the ordinary "no change" case, which is
+        // the common one. Test the floor here so the refusal is visible: this
+        // arrives on the decrypted service-payload path, so a value this low
+        // means an authenticated peer we hold a session with is sending
+        // something unusable.
+        if notif.path_mtu < crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU {
+            warn!(
+                src = %peer_name,
+                reported_mtu = notif.path_mtu,
+                floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU,
+                "PathMtuNotification reports a path MTU below the actionable floor; ignoring"
+            );
+            self.metrics.errors.path_mtu_notif_below_floor.inc();
+            return;
+        }
+
         let old_mtu = mmp.path_mtu.current_mtu();
         let changed = mmp
             .path_mtu
@@ -1470,13 +1516,58 @@ impl Node {
         }
     }
 
+    /// Whether a routing signal naming `dest`, arriving in a datagram
+    /// claiming source `src`, may be acted on, and if not, which kind of
+    /// refusal it is.
+    ///
+    /// `src` is the SessionDatagram's `src_addr`: a plain wire field,
+    /// authenticated only hop-by-hop by FMP Noise and never end to end. It
+    /// is therefore logged, not trusted. What is enforced here is that this
+    /// node has bound `dest` itself, either by initiating toward it or by
+    /// completing Noise XK, which binds the address to the peer's static
+    /// key (see the address-mismatch check in `handle_session_msg3`). A
+    /// responder entry that is still awaiting msg3 does NOT qualify: it is
+    /// keyed on an address the sender merely claimed, so admitting it would
+    /// let one forged SessionSetup unlock a signal about any address.
+    ///
+    /// The first two clauses reject nothing legitimate, and so return
+    /// `Forged` rather than `Unbound`. A datagram whose destination is this
+    /// node takes the deliver-local branch before any forwarding, so no node
+    /// ever emits a signal naming us as `dest`; and the emitter is by
+    /// construction a transit node for the datagram it is reporting on, so
+    /// it is never itself that datagram's destination.
+    ///
+    /// This narrows who can be targeted; it does not authenticate the
+    /// sender, which nothing short of a wire format change can do.
+    fn signal_verdict(&self, src: &NodeAddr, dest: &NodeAddr) -> SignalVerdict {
+        if dest == self.node_addr() || src == dest {
+            return SignalVerdict::Forged;
+        }
+        if self
+            .sessions
+            .get(dest)
+            .is_some_and(|e| e.is_established() || e.is_initiator())
+        {
+            SignalVerdict::Admit
+        } else {
+            SignalVerdict::Unbound
+        }
+    }
+
     /// Handle a CoordsRequired error signal from a transit router.
     ///
     /// The router couldn't route our packet because it lacks cached
     /// coordinates for the destination. Send a standalone CoordsWarmup
     /// immediately (rate-limited), trigger discovery, and reset the
     /// warmup counter for subsequent data packets.
-    async fn handle_coords_required(&mut self, inner: &[u8]) {
+    ///
+    /// `src_addr` is the datagram's claimed source and is not
+    /// end-to-end authenticated; see `signal_verdict`.
+    pub(in crate::node) async fn handle_coords_required(
+        &mut self,
+        src_addr: &NodeAddr,
+        inner: &[u8],
+    ) {
         self.metrics().errors.coords_required.inc();
 
         let msg = match CoordsRequired::decode(inner) {
@@ -1486,6 +1577,25 @@ impl Node {
                 return;
             }
         };
+
+        // The premise: this signal carries no end-to-end authentication, so
+        // the body's `dest_addr` is attacker-chosen. Everything below acts on
+        // it — warmup send, discovery, warmup-counter reset — so the gate has
+        // to run before any of that, and ahead of the rate limiter, whose
+        // state would otherwise be keyed on an attacker-chosen address.
+        let verdict = self.signal_verdict(src_addr, &msg.dest_addr);
+        if verdict != SignalVerdict::Admit {
+            debug!(src = %src_addr, dest = %msg.dest_addr, reporter = %msg.reporter,
+                signal = "CoordsRequired", verdict = verdict.label(),
+                "Routing signal names an address this node has not bound; dropping");
+            self.metrics().errors.unbound.coords.inc();
+            if verdict == SignalVerdict::Forged {
+                self.metrics().errors.unbound.forged.inc();
+            }
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::UnknownSession));
+            return;
+        }
 
         debug!(
             dest = %msg.dest_addr,
@@ -1544,7 +1654,10 @@ impl Node {
     /// The router has coordinates but still can't route to the destination.
     /// Send a standalone CoordsWarmup immediately (rate-limited), invalidate
     /// cached coordinates, trigger re-discovery, and reset the warmup counter.
-    async fn handle_path_broken(&mut self, inner: &[u8]) {
+    ///
+    /// `src_addr` is the datagram's claimed source and is not
+    /// end-to-end authenticated; see `signal_verdict`.
+    pub(in crate::node) async fn handle_path_broken(&mut self, src_addr: &NodeAddr, inner: &[u8]) {
         self.metrics().errors.path_broken.inc();
 
         let msg = match PathBroken::decode(inner) {
@@ -1554,6 +1667,26 @@ impl Node {
                 return;
             }
         };
+
+        // The premise: this signal carries no end-to-end authentication, so
+        // the body's `dest_addr` is attacker-chosen. `plan_path_broken` emits
+        // its coord-cache invalidation unconditionally, and the path-MTU
+        // release below is likewise unguarded, so both act on whatever address
+        // the body names unless the gate refuses it here, in the shell, which
+        // is the only layer that knows who sent the datagram.
+        let verdict = self.signal_verdict(src_addr, &msg.dest_addr);
+        if verdict != SignalVerdict::Admit {
+            debug!(src = %src_addr, dest = %msg.dest_addr, reporter = %msg.reporter,
+                signal = "PathBroken", verdict = verdict.label(),
+                "Routing signal names an address this node has not bound; dropping");
+            self.metrics().errors.unbound.broken.inc();
+            if verdict == SignalVerdict::Forged {
+                self.metrics().errors.unbound.forged.inc();
+            }
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::UnknownSession));
+            return;
+        }
 
         debug!(
             dest = %msg.dest_addr,
@@ -1597,6 +1730,10 @@ impl Node {
                 _ => {}
             }
         }
+        // The path this destination's stored MTU described is gone, so release
+        // it rather than carrying it onto whatever path replaces it.
+        self.path_mtu_lookup_release(&msg.dest_addr);
+
         if !has_cached_identity {
             debug!(dest = %msg.dest_addr,
                 "Skipping discovery after PathBroken: no cached identity for target");
@@ -1620,7 +1757,10 @@ impl Node {
     /// A transit router couldn't forward our packet because it exceeded the
     /// next-hop transport MTU. Apply the reported bottleneck MTU to our
     /// PathMtuState for the affected session, causing an immediate decrease.
-    pub(in crate::node) async fn handle_mtu_exceeded(&mut self, inner: &[u8]) {
+    ///
+    /// `src_addr` is the datagram's claimed source and is not
+    /// end-to-end authenticated; see `signal_verdict`.
+    pub(in crate::node) async fn handle_mtu_exceeded(&mut self, src_addr: &NodeAddr, inner: &[u8]) {
         self.metrics().errors.mtu_exceeded.inc();
 
         let msg = match MtuExceeded::decode(inner) {
@@ -1630,6 +1770,28 @@ impl Node {
                 return;
             }
         };
+
+        // The premise: this signal carries no end-to-end authentication, so
+        // the body's `dest_addr` is attacker-chosen, and the `path_mtu_lookup`
+        // write further down needs no session, no peer relationship and no
+        // prior state to reach. This gate is about WHICH address may be
+        // written; the floor guard below is about WHAT value may be written.
+        // They are independent refusals — a bound destination can still carry
+        // an unusable value — so neither subsumes the other and each keeps its
+        // own counter.
+        let verdict = self.signal_verdict(src_addr, &msg.dest_addr);
+        if verdict != SignalVerdict::Admit {
+            debug!(src = %src_addr, dest = %msg.dest_addr, reporter = %msg.reporter,
+                signal = "MtuExceeded", verdict = verdict.label(),
+                "Routing signal names an address this node has not bound; dropping");
+            self.metrics().errors.unbound.mtu.inc();
+            if verdict == SignalVerdict::Forged {
+                self.metrics().errors.unbound.forged.inc();
+            }
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::UnknownSession));
+            return;
+        }
 
         let peer_name = self.peer_display_name(&msg.dest_addr);
         debug!(
@@ -1659,12 +1821,32 @@ impl Node {
             }
         }
 
+        // The admission gate above restricts which addresses may be written,
+        // not which values. Any node at any distance may legitimately report a
+        // bottleneck for a destination this node has bound, so refuse to store
+        // one too small to describe a usable path; a stored value that low
+        // drives the SYN-time MSS clamp into single digits or zero.
+        if msg.mtu < crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU {
+            warn!(
+                dest = %peer_name,
+                reporter = %msg.reporter,
+                bottleneck_mtu = msg.mtu,
+                floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU,
+                "MtuExceeded reports a path MTU below the actionable floor; ignoring"
+            );
+            self.metrics().errors.mtu_exceeded_below_floor.inc();
+            return;
+        }
+
         // Mirror the bottleneck into the FipsAddress-keyed lookup used by
         // the TUN reader/writer at TCP MSS clamp time. Discovery's reverse-
         // path response can carry a value too generous for the actual
         // forward path; the reactive signal from a forwarder that actually
         // dropped a packet is authoritative for "what fits". Keep the
         // tighter of existing-or-new — never loosen the clamp.
+        //
+        // The admission gate above, not this block, is what restricts which
+        // addresses can be written here.
         let fips_addr = crate::FipsAddress::from_node_addr(&msg.dest_addr);
         match self.path_mtu_lookup.write() {
             Ok(mut map) => {

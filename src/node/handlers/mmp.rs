@@ -245,8 +245,7 @@ impl Node {
                     "Parent switched after first RTT measurement"
                 );
                 if flap_dampened {
-                    self.metrics().tree.flap_dampened.inc();
-                    warn!("Flap dampening engaged: excessive parent switches detected");
+                    self.note_flap("first-rtt");
                 }
                 self.send_tree_announce_to_all().await;
                 let all_peers: Vec<crate::NodeAddr> = self.peers.keys().copied().collect();

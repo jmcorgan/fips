@@ -40,6 +40,36 @@ pub struct SessionStats {
     /// the key the session was established with. The rekey is
     /// abandoned and the existing session is left intact.
     pub rekey_key_mismatch: u64,
+    /// A setup message naming an already-established peer armed a
+    /// responder-side handshake alongside the running session and a
+    /// SessionAck was sent. The message carries no authenticator, so this
+    /// counts genuine peer restarts and forged setups alike; its rate is
+    /// the signal that something is spraying setup messages, which the
+    /// per-message DEBUG line cannot carry safely at line rate.
+    pub rekey_armed: u64,
+    /// A setup message named an established peer while our own rekey of
+    /// that session was in flight and our address sorted smaller, so the
+    /// tie-break dropped their msg1 and kept us as initiator.
+    pub rekey_tiebreak: u64,
+    /// A setup message named an established peer while our own rekey of
+    /// that session was in flight and our address sorted larger, so we
+    /// abandoned our own rekey and answered as responder. A sustained
+    /// rate here means local key rotation is being suppressed.
+    pub rekey_yielded: u64,
+    /// A setup message named an established peer that already holds a
+    /// completed rekey awaiting cut-over, so the message was dropped
+    /// rather than arming a second handshake.
+    pub rekey_pending: u64,
+    /// A responder-side handshake armed by a peer's setup message passed
+    /// the handshake timeout without a msg3 and was discarded. The
+    /// established session is retained.
+    pub rekey_expired: u64,
+    /// A completed rekey session still waiting for the peer's cut-over was
+    /// replaced by a newer one, completed from a msg3 carrying the same
+    /// authenticated peer key. This drops key material the peer may
+    /// already have adopted, so a sustained rate means one side keeps
+    /// rekeying while the other never appears on the new epoch.
+    pub pending_replaced: u64,
 }
 
 impl SessionStats {
@@ -49,6 +79,12 @@ impl SessionStats {
             bad_state: self.bad_state,
             addr_mismatch: self.addr_mismatch,
             rekey_key_mismatch: self.rekey_key_mismatch,
+            rekey_armed: self.rekey_armed,
+            rekey_tiebreak: self.rekey_tiebreak,
+            rekey_yielded: self.rekey_yielded,
+            rekey_pending: self.rekey_pending,
+            rekey_expired: self.rekey_expired,
+            pending_replaced: self.pending_replaced,
         }
     }
 
@@ -58,6 +94,9 @@ impl SessionStats {
             SessionReject::BadState => self.bad_state += 1,
             SessionReject::AddrMismatch => self.addr_mismatch += 1,
             SessionReject::RekeyKeyMismatch => self.rekey_key_mismatch += 1,
+            SessionReject::RekeyTiebreak => self.rekey_tiebreak += 1,
+            SessionReject::RekeyYielded => self.rekey_yielded += 1,
+            SessionReject::RekeyPending => self.rekey_pending += 1,
         }
     }
 }
@@ -227,6 +266,8 @@ pub struct ForwardingStatsSnapshot {
     pub received_bytes: u64,
     pub decode_error_packets: u64,
     pub decode_error_bytes: u64,
+    pub warm_malformed_packets: u64,
+    pub warm_malformed_bytes: u64,
     pub ttl_exhausted_packets: u64,
     pub ttl_exhausted_bytes: u64,
     pub delivered_packets: u64,
@@ -324,6 +365,12 @@ pub struct SessionStatsSnapshot {
     pub bad_state: u64,
     pub addr_mismatch: u64,
     pub rekey_key_mismatch: u64,
+    pub rekey_armed: u64,
+    pub rekey_tiebreak: u64,
+    pub rekey_yielded: u64,
+    pub rekey_pending: u64,
+    pub rekey_expired: u64,
+    pub pending_replaced: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -348,6 +395,13 @@ pub struct ErrorSignalStatsSnapshot {
     pub coords_required: u64,
     pub path_broken: u64,
     pub mtu_exceeded: u64,
+    pub path_mtu_notif_below_floor: u64,
+    pub mtu_exceeded_below_floor: u64,
+    pub lookup_resp_mtu_below_floor: u64,
+    pub unbound_coords: u64,
+    pub unbound_broken: u64,
+    pub unbound_mtu: u64,
+    pub unbound_forged: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -396,6 +450,33 @@ mod tests {
         stats.record_reject(SessionReject::RekeyKeyMismatch);
         assert_eq!(stats.rekey_key_mismatch, 1);
         assert_eq!(stats.addr_mismatch, 0);
+    }
+
+    #[test]
+    fn session_stats_record_reject_separates_the_three_rekey_arming_refusals() {
+        let mut stats = SessionStats::default();
+        stats.record_reject(SessionReject::RekeyTiebreak);
+        stats.record_reject(SessionReject::RekeyYielded);
+        stats.record_reject(SessionReject::RekeyYielded);
+        stats.record_reject(SessionReject::RekeyPending);
+        assert_eq!(stats.rekey_tiebreak, 1);
+        assert_eq!(stats.rekey_yielded, 2);
+        assert_eq!(stats.rekey_pending, 1);
+        assert_eq!(stats.rekey_armed, 0);
+    }
+
+    #[test]
+    fn session_stats_snapshot_carries_the_rekey_arming_counters() {
+        let mut stats = SessionStats::default();
+        stats.record_reject(SessionReject::RekeyTiebreak);
+        stats.rekey_armed = 7;
+        stats.rekey_expired = 3;
+        stats.pending_replaced = 2;
+        let snap = stats.snapshot();
+        assert_eq!(snap.rekey_tiebreak, 1);
+        assert_eq!(snap.rekey_armed, 7);
+        assert_eq!(snap.rekey_expired, 3);
+        assert_eq!(snap.pending_replaced, 2);
     }
 
     #[test]

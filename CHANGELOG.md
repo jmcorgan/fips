@@ -447,6 +447,53 @@ with v0.4.x or earlier peers.
   a private parent directory it creates or recognizes as a canonical FIPS
   runtime directory.
 
+- A SessionDatagram carrying a truncated inner FSP payload no longer panics the
+  forwarding path. The coordinate-cache warm path sliced the inner payload at
+  the full 12-byte header offset while guarding only with the 4-byte common
+  prefix parser, so an inner payload of 4 to 11 bytes with phase 0x0 and the
+  Coords Present flag set indexed past the end of the slice. Because the
+  receive loop is the process's main future, the panic terminated the daemon
+  rather than a task, and under the packaged systemd unit the node restarted
+  into the same frame. The warm path now applies the same
+  `FspEncryptedHeader` guard the local-delivery path already used, which
+  additionally means a malformed frame carrying a non-zero protocol version or
+  the Unencrypted flag alongside Coords Present is dropped rather than having
+  its body read as coordinates. Any peer that had completed a link handshake
+  could trigger this, and admission is default-open. Frames rejected by that
+  guard are now counted in the forwarding statistics as
+  `warm_malformed_packets` and `warm_malformed_bytes`, visible over the control
+  socket and on the fipstop Routing State pane, so a node being fed malformed
+  frames is distinguishable from a quiet one at the default log level. The
+  count is not a packet drop: the frame is still delivered or forwarded, and
+  only the coordinate-cache warm attempt is abandoned. The existing debug log
+  now also carries the frame's protocol version and flags, which separate a
+  short frame from a bad-version or Unencrypted-flagged one.
+
+- Flap dampening can now engage more than once in the lifetime of a node.
+  The arming check tested whether a dampening deadline had ever been set
+  rather than whether one was still in effect, so the first episode
+  disarmed the mechanism permanently: a node in a second flap storm went on
+  switching parents under hold-down alone, and neither the `flap_dampened`
+  counter nor the "Flap dampening engaged" warning fired again, so the
+  storm was invisible to anyone watching that counter. A lapsed episode is
+  now retired explicitly, clearing both the deadline and the switch
+  counter, so a second episode requires a fresh threshold of switches
+  within one window rather than re-engaging on the first switch after
+  lapse. Hold-down was unaffected throughout and continued to limit
+  discretionary switching, which is why the practical effect at shipped
+  settings was lost visibility and a lost escalation tier rather than
+  unrestrained flapping. Every path that can engage an episode now reports
+  it, including a re-engagement during parent-loss recovery, which was
+  previously silent. The warning names which path armed the episode
+  (`trigger`) and how long discretionary parent switching stays suppressed
+  (`dampening_secs`), using the same `trigger` values as the parent-switch
+  logs beside it, so the two can be read together.
+
+- A `node.tree.flap_dampening_secs` large enough to overflow the monotonic
+  clock no longer panics the node when dampening engages; the value is
+  capped at one year, beyond which an episode is indistinguishable from
+  permanent.
+
 - The maintainer address published in package metadata no longer bounces. The
   crate authors field, the Debian package maintainer and upstream contact,
   both AUR PKGBUILD maintainer lines and the FreeBSD package manifest carried
@@ -627,6 +674,141 @@ with v0.4.x or earlier peers.
   overwrite it. Anonymous dials still promote whoever answers, which is what
   shared-media discovery means.
 
+- The influence a remote party has over path MTU is now bounded, and the
+  per-destination path MTU cache has a way back. The `path_mtu` field is an
+  unsigned per-hop transit annotation carried outside the signed proof, and the
+  `MtuExceeded` and `PathBroken` signals arrive unencrypted with no sender
+  check, so any forwarder — or anyone who can reach the node — could lower it,
+  and it was accepted with no minimum. A single `MtuExceeded` carrying a very
+  small value drove a session's path MTU to zero, after which every packet to
+  that destination was answered with an ICMPv6 Packet Too Big instead of being
+  sent: a blackhole that lasted until the daemon restarted. The same value
+  reached the SYN-time TCP MSS clamp, where anything at or below 137 saturates
+  to a segment size of zero and the band just above it yields single digits.
+  Values below an actionable minimum are now ignored rather than applied or
+  stored, at the three places a remote value is acted on: the path MTU state
+  machine, the reactive `MtuExceeded` write, and the discovery response, whose
+  coordinates are still cached so refusing the annotation cannot become a way
+  to deny discovery. The MSS clamp additionally refuses to write a zero. Each
+  of the three refusals logs a warning and increments its own counter in the
+  error-signal family, so an operator can tell them apart without scraping
+  logs: they carry different meanings, one being an authenticated peer inside
+  an established session, one an unencrypted signal anyone able to reach the
+  node can send at will, and one a verified discovery response whose unsigned
+  annotation a forwarder on the reverse path rewrote. Because those three
+  refusals are the only way a remote value reaches the per-destination store,
+  the SYN-time clamp does not apply the minimum a second time when it reads
+  that store: a small value there is one the node derived from its own outgoing
+  link, which is exact rather than suspect, and BLE in particular negotiates a
+  link MTU per connection that lands under the minimum routinely. The clamp
+  refuses only a stored value admitting no TCP payload byte at all, at 137 or
+  below, where the segment size saturates to zero and the clamp would be
+  skipped entirely; it logs that at trace rather than warn, since it sits on
+  the per-packet path, and the peer's link promotion reports it once instead.
+  A stored per-destination path MTU is released when the path is invalidated by
+  a `PathBroken` report, by session idle expiry, or by handshake timeout, and
+  the link MTU read from the local transport is reseeded in its place, so a
+  directly connected peer does not lose its own measurement along with the
+  remote claim. Locally derived MTUs are not subject to the minimum, at the
+  seed or at the clamp. Legitimate narrow paths are unaffected: adaptation to
+  hops well below the IPv6 minimum, which the mesh does use, continues to work.
+
+- A session setup message naming an already-established peer no longer replaces
+  that peer's session. The handler did this whenever `node.rekey.enabled` was
+  false: it ran a fresh responder handshake and overwrote the entry, discarding
+  the live keys. The message carries no authenticator and its source address is
+  an envelope field, so anyone able to reach a node could name an established
+  peer and take that session down, repeatedly, and hold it down by repeating
+  the message. The established case now always arms the handshake alongside the
+  running session and adopts the new keys only after a msg3 whose authenticated
+  static key matches the key the session was opened with, which is the check
+  the rekey path already applied; a peer that genuinely restarted still
+  re-establishes, and a forged setup leaves the session carrying traffic. This
+  changes no wire format and adds no configuration: a node with rekey disabled
+  already answered such a message, it simply destroyed the session afterwards.
+
+- The session drain sweep and the cut-over that retires an old key epoch now
+  run whether or not periodic rekey is enabled. Both sat behind the
+  periodic-rekey gate, so a node with rekey disabled that adopted new keys held
+  the superseded ones for the life of the session.
+
+- A session rekey armed by a peer's setup message is now abandoned if the
+  matching msg3 never arrives, rather than persisting for the life of the
+  session. A stuck one made the node treat a later genuine setup message as a
+  simultaneous initiation and drop it, which would otherwise have turned the
+  fix above into a lasting block on re-establishment for roughly half of peer
+  pairs. Only the armed handshake expires, and only it: a rekey that completed
+  is the key epoch the peer has already moved to, since it exists only because
+  a msg3 carrying that peer's authenticated key arrived and the sender of that
+  msg3 promotes the new epoch on an unconditional two-second timer. Expiring
+  those keys on any timer would drop every later frame from that peer, so they
+  are now held until the peer's own frame promotes them, a newer completed
+  rekey replaces them, or the session goes away. What the wait does bound is
+  precedence, not the keys: a completed rekey outranks a fresh setup message
+  from that peer only until it has waited a full idle timeout, after which the
+  setup is answered normally, so a peer that restarted while we held such a
+  session is no longer refused for as long as our own sends keep the session
+  from idling out. The handshake timeout logs at INFO, since it costs nothing,
+  and a completed session displaced by a newer one at WARN, since that does
+  throw away keys the peer may hold. Session counters record the arming of a
+  handshake by a setup message, each of the three ways such a message is
+  refused, and each displaced session, so a node under a sustained spray of
+  setup messages shows a rate rather than nothing; the per-message log lines
+  stay at DEBUG because an unauthenticated sender can drive them at line rate.
+  These counters are not yet readable through the control socket.
+
+- Traversal punch targets taken from a peer's offer or answer are now
+  filtered and bounded. A rendezvous-enabled node previously punched every
+  address a signed offer named, including loopback, link-local, multicast,
+  broadcast, unspecified and CGNAT addresses, and placed no limit on how
+  many candidates one offer could carry. Any npub could
+  therefore have a node emit a burst of UDP packets at addresses of the
+  sender's choosing, carrying the node's own source address. Candidates in
+  the never-routable ranges are now rejected, IPv4-mapped IPv6 forms are
+  canonicalized before the check so they cannot slip past it, candidates
+  with port 0 are dropped, private-range candidates are punched only when
+  they share a /24 with one of our own addresses (which is what same-LAN
+  traversal already required of its own path), and the planned target list
+  is capped at eight. A peer's reflexive address is checked against the
+  never-routable ranges but not against the /24 rule, so a deployment whose
+  STUN server sits inside the private network keeps working. A malformed
+  address in a peer's signal now drops that one candidate instead of
+  failing the whole traversal. A node also records what it declined: one
+  log record per planning attempt carries how many candidates the peer
+  offered, how many were planned, the count refused in each class and one
+  sample address, at warning level for the shapes no honest peer produces
+  and at debug level for the routine off-subnet case. Same-LAN and
+  reflexive traversal are otherwise unaffected.
+
+- Traversal offers and answers dated in the future are now rejected. The
+  freshness check measured a message's age with a saturating subtraction, which
+  yields zero for any timestamp ahead of the local clock, so the age test could
+  not fail for a future-dated signal and no other term bounded the issue time
+  from above. A signal claiming to be issued arbitrarily far in the future was
+  accepted as strictly fresh, which voided the property that the freshness
+  window is narrower than the session-id replay window (300s by default) and
+  left the replay cache as the sole defence against a captured offer being
+  replayed. Forward-dating is now tolerated only up to the same 60s of clock
+  skew already allowed in the other direction, and a signal accepted under that
+  grace reports the skew outcome, so the existing clock-skew log fires for a
+  peer whose clock is ahead just as it does for one whose clock is behind. The
+  declared expiry timestamp is also no longer trusted beyond the issue time plus
+  the configured TTL, so a sender cannot widen its own acceptance window by
+  inflating that field. A single timestamp is now acceptable over at most the
+  signalling TTL plus 60s on each side, 240s under the shipped defaults.
+  Rejections are also now distinguishable in the log: a stale signal and a
+  future-dated one no longer share one reason string, and the inbound-offer
+  path, whose only surface was an unattributed debug line below the default log
+  level, now names the peer and the session and warns for the rejection classes
+  that relay delivery lag cannot produce (future-dated, identity-mismatch and
+  malformed offers), leaving an ordinary stale offer quiet. As with the existing
+  inbound rate-limit warning, an unauthenticated remote peer can drive that
+  line. A failure of our own offer's freshness during answer validation is
+  reported against the offer rather than mislabelled as the answer's, and the
+  tolerated-acceptance log now carries the issue and expiry stamps and no longer
+  attributes the acceptance to clock skew, since a peer configured with a longer
+  signalling TTL than ours now reaches it too.
+
 - The FSP session address is now bound to the peer key the Noise handshake
   authenticated, on both the initial and the rekey path. The responder recorded
   a session under the source address carried in the datagram without ever
@@ -735,6 +917,31 @@ with v0.4.x or earlier peers.
   URL with no verification at all, in two jobs holding a signing key. That
   download now checks a per-architecture pinned SHA-256, with the hash
   provenance recorded honestly, upstream publishing no checksum document.
+
+- The three routing signals (`CoordsRequired`, `PathBroken`, `MtuExceeded`) are
+  no longer acted on unless this node has itself bound the destination address
+  they name, either by initiating a session toward it or by completing the
+  Noise handshake that binds an address to a peer's static key. These signals
+  carry no end-to-end authentication, so until now any admitted mesh member
+  could send one naming any address and have its effects applied: a path-MTU
+  clamp written for an arbitrary address, a cached-coordinate flush for an
+  arbitrary address, and a discovery and warmup cycle for an arbitrary address.
+  The `MtuExceeded` case was the sharpest, because its write into the
+  address-keyed path-MTU lookup that the TUN reader consults at TCP MSS clamp
+  time sat outside the session guard and so required no session, no peer
+  relationship and no prior state at all. A half-open session created by an
+  inbound handshake that has not yet proved its address does not admit these
+  signals, so a forged session opening cannot be used to unlock them. Signals
+  from a genuine on-path forwarder are unaffected: the reporter may be any node
+  at any distance. This does not make the sender authentic, which nothing
+  short of a wire format change can do. Rejected signals are counted as
+  unknown-session rejections, and additionally on four new error-signal
+  counters visible through `show routing`, `show metrics` and the fipstop
+  routing pane: `unbound_coords`, `unbound_broken` and `unbound_mtu` give the
+  refused count per signal type, against the existing per-type arrival
+  counters as the denominator, and `unbound_forged` counts the subset whose
+  claimed source and destination pairing no honest forwarder could produce.
+  The drop log line now carries the signal type and the refusal class.
 
 ## [0.4.1] - 2026-07-19
 

@@ -2727,6 +2727,50 @@ impl Node {
         }
     }
 
+    /// Drop the remote-learned path MTU for a destination whose path is no
+    /// longer valid, then restore what is known locally.
+    ///
+    /// Entries in `path_mtu_lookup` come from two sources: values a remote
+    /// party supplied (discovery responses, `MtuExceeded`, path MTU
+    /// notifications) and the link MTU this node reads from its own transport
+    /// configuration for a directly connected peer. When the path is declared
+    /// broken or the session goes away, the remote-supplied value describes a
+    /// path that no longer exists and must not outlive it, but the locally
+    /// derived one is still true. Removing the entry and then re-running the
+    /// link-peer seed keeps the second while discarding the first; a plain
+    /// removal would silently drop a direct peer back to the conservative
+    /// ceiling until its link re-handshakes.
+    fn path_mtu_lookup_release(&self, addr: &NodeAddr) {
+        let fips_addr = crate::FipsAddress::from_node_addr(addr);
+        match self.path_mtu_lookup.write() {
+            Ok(mut map) => {
+                if map.remove(&fips_addr).is_some() {
+                    tracing::debug!(
+                        dest = %self.peer_display_name(addr),
+                        fips_addr = %fips_addr,
+                        "Released path_mtu_lookup entry for an invalidated path"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    fips_addr = %fips_addr,
+                    error = %e,
+                    "path_mtu_lookup write lock poisoned; entry not released"
+                );
+                return;
+            }
+        }
+        // The write guard above must be dropped before the seed runs: it takes
+        // the same lock, and `std::sync::RwLock` is not re-entrant.
+        if let Some(peer) = self.peers.get(addr)
+            && let Some(transport_id) = peer.transport_id()
+            && let Some(transport_addr) = peer.current_addr().cloned()
+        {
+            self.seed_path_mtu_for_link_peer(addr, transport_id, &transport_addr);
+        }
+    }
+
     /// Number of end-to-end sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()

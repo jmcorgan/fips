@@ -12,7 +12,7 @@ use crate::node::reject::ForwardingReject;
 use crate::node::{Node, NodeError, NodeRoutingView};
 use crate::proto::fsp::wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED, FSP_PHASE_MSG1, FSP_PHASE_MSG2,
-    FspCommonPrefix, parse_encrypted_coords,
+    FspCommonPrefix, FspEncryptedHeader, parse_encrypted_coords,
 };
 use crate::proto::fsp::{SessionAck, SessionSetup};
 use crate::proto::link::{SessionDatagram, SessionDatagramRef};
@@ -268,8 +268,25 @@ impl Node {
             FSP_PHASE_ESTABLISHED if prefix.has_coords() => {
                 // CP flag set: coords in cleartext between header and ciphertext.
                 // Parse coords from the cleartext section after the 12-byte header.
-                // inner starts after the 4-byte prefix, so we need 8 more bytes
-                // for the counter (header is 12 total = 4 prefix + 8 counter).
+                // Re-parse with the encrypted-header parser — the same guard the
+                // local-delivery path uses — so the slice below is bounded by
+                // FSP_ENCRYPTED_MIN_SIZE and not by the 4-byte prefix check.
+                if FspEncryptedHeader::parse(datagram.payload).is_none() {
+                    // Counter is the always-on surface; the debug fields are the
+                    // drill-down that separates a short frame from a bad version
+                    // or a U-flagged one. The level stays at debug: any peer past
+                    // the handshake can drive this at line rate.
+                    self.metrics()
+                        .forwarding
+                        .record_warm_malformed(datagram.payload.len());
+                    debug!(
+                        len = datagram.payload.len(),
+                        version = prefix.version,
+                        flags = prefix.flags,
+                        "Not a well-formed encrypted FSP message; not warming coords"
+                    );
+                    return;
+                }
                 let coord_data = &datagram.payload[FSP_HEADER_SIZE..];
                 match parse_encrypted_coords(coord_data) {
                     Ok((src_coords, dest_coords, _bytes_consumed)) => {

@@ -92,6 +92,20 @@ pub(super) enum FreshnessOutcome {
     FreshWithinSkewTolerance,
 }
 
+/// Why a freshness check rejected a signal. The two classes are operationally
+/// different and must not be collapsed into one reason string: one is the
+/// expected consequence of relay lag, the other cannot arise from lag at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FreshnessReject {
+    /// Issued too long ago: past the configured TTL plus skew tolerance.
+    /// Benign; relay delivery delay produces this routinely.
+    Stale,
+    /// Issued further ahead of the local clock than the skew tolerance
+    /// allows. Not reachable through delivery delay, so it means either a
+    /// clock broken past the tolerance or a forged stamp.
+    FutureDated,
+}
+
 pub(super) fn validate_offer_freshness(
     offer: &TraversalOffer,
     now: u64,
@@ -103,8 +117,13 @@ pub(super) fn validate_offer_freshness(
         return Err(BootstrapError::Protocol("invalid-offer".to_string()));
     }
     let outcome = match check_freshness(offer.issued_at, offer.expires_at, now, signal_ttl_ms) {
-        Some(o) => o,
-        None => return Err(BootstrapError::Protocol("expired-offer".to_string())),
+        Ok(o) => o,
+        Err(FreshnessReject::Stale) => {
+            return Err(BootstrapError::Protocol("expired-offer".to_string()));
+        }
+        Err(FreshnessReject::FutureDated) => {
+            return Err(BootstrapError::Protocol("future-dated-offer".to_string()));
+        }
     };
     if offer.sender_npub != actual_sender_npub || offer.recipient_npub != local_npub {
         return Err(BootstrapError::Protocol("identity-mismatch".to_string()));
@@ -187,13 +206,27 @@ pub(super) fn validate_traversal_answer_for_offer(
     }
     let offer_outcome = match check_freshness(offer.issued_at, offer.expires_at, now, signal_ttl_ms)
     {
-        Some(o) => o,
-        None => return Err(BootstrapError::Protocol("expired-answer".to_string())),
+        Ok(o) => o,
+        Err(FreshnessReject::Stale) => {
+            return Err(BootstrapError::Protocol(
+                "expired-offer-in-answer".to_string(),
+            ));
+        }
+        Err(FreshnessReject::FutureDated) => {
+            return Err(BootstrapError::Protocol(
+                "future-dated-offer-in-answer".to_string(),
+            ));
+        }
     };
     let answer_outcome =
         match check_freshness(answer.issued_at, answer.expires_at, now, signal_ttl_ms) {
-            Some(o) => o,
-            None => return Err(BootstrapError::Protocol("expired-answer".to_string())),
+            Ok(o) => o,
+            Err(FreshnessReject::Stale) => {
+                return Err(BootstrapError::Protocol("expired-answer".to_string()));
+            }
+            Err(FreshnessReject::FutureDated) => {
+                return Err(BootstrapError::Protocol("future-dated-answer".to_string()));
+            }
         };
     if offer.session_id != answer.session_id || answer.in_reply_to != offer.nonce {
         return Err(BootstrapError::Protocol("session-mismatch".to_string()));
@@ -246,25 +279,45 @@ pub(super) fn estimate_clock_skew(
     Some(((t2 - t1) + (t3 - t4)) / 2)
 }
 
-/// Returns Some(outcome) if the (issued_at, expires_at) pair is acceptable
+/// Returns Ok(outcome) if the (issued_at, expires_at) pair is acceptable
 /// against `now` under the configured TTL plus `FRESHNESS_SKEW_TOLERANCE_MS`
-/// of clock-skew grace on each side. Returns None if the message is
-/// genuinely outside the tolerated window.
+/// of clock-skew grace on each side. Returns Err with the rejection class if
+/// the message is genuinely outside the tolerated window.
+///
+/// Both sides are bounded. Backwards, a signal is accepted up to
+/// `signal_ttl_ms + FRESHNESS_SKEW_TOLERANCE_MS` after it was issued.
+/// Forwards, a signal issued ahead of the local clock is accepted only within
+/// `FRESHNESS_SKEW_TOLERANCE_MS` and only as tolerated, never as strictly
+/// fresh. The wire `expires_at` is chosen by the sender and is independent of
+/// its `issued_at`, so it is clamped to the issuer's own stamp plus our
+/// configured TTL; a sender may shorten its own expiry but cannot widen the
+/// window we apply. One stamp is therefore acceptable over
+/// `signal_ttl_ms + 2 * FRESHNESS_SKEW_TOLERANCE_MS` of wall clock, whatever
+/// the sender declares.
 fn check_freshness(
     issued_at: u64,
     expires_at: u64,
     now: u64,
     signal_ttl_ms: u64,
-) -> Option<FreshnessOutcome> {
-    let strict_ok = expires_at > now && now.saturating_sub(issued_at) <= signal_ttl_ms;
+) -> Result<FreshnessOutcome, FreshnessReject> {
+    let effective_expiry = expires_at.min(issued_at.saturating_add(signal_ttl_ms));
+    // Exactly one of these is non-zero: a saturating signed age without a
+    // signed type.
+    let ahead = issued_at.saturating_sub(now);
+    let age = now.saturating_sub(issued_at);
+
+    let strict_ok = ahead == 0 && effective_expiry > now && age <= signal_ttl_ms;
     if strict_ok {
-        return Some(FreshnessOutcome::Fresh);
+        return Ok(FreshnessOutcome::Fresh);
     }
-    let tolerated_ok = expires_at.saturating_add(FRESHNESS_SKEW_TOLERANCE_MS) > now
-        && now.saturating_sub(issued_at) <= signal_ttl_ms + FRESHNESS_SKEW_TOLERANCE_MS;
+    if ahead > FRESHNESS_SKEW_TOLERANCE_MS {
+        return Err(FreshnessReject::FutureDated);
+    }
+    let tolerated_ok = effective_expiry.saturating_add(FRESHNESS_SKEW_TOLERANCE_MS) > now
+        && age <= signal_ttl_ms.saturating_add(FRESHNESS_SKEW_TOLERANCE_MS);
     if tolerated_ok {
-        Some(FreshnessOutcome::FreshWithinSkewTolerance)
+        Ok(FreshnessOutcome::FreshWithinSkewTolerance)
     } else {
-        None
+        Err(FreshnessReject::Stale)
     }
 }

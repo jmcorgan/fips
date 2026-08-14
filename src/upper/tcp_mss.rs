@@ -52,6 +52,12 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
         return false;
     }
 
+    // A ceiling of zero carries no information and an MSS option of zero is
+    // not a legal segment size. Refuse the clamp rather than write it.
+    if max_mss == 0 {
+        return false;
+    }
+
     // Get TCP header start
     let tcp_start = 40;
     if ipv6_packet.len() < tcp_start + TCP_HEADER_MIN_LEN {
@@ -234,6 +240,24 @@ mod tests {
         let tcp_start = 40;
         let mss = u16::from_be_bytes([packet[tcp_start + 22], packet[tcp_start + 23]]);
         assert_eq!(mss, 1200);
+    }
+
+    #[test]
+    fn clamp_tcp_mss_with_zero_ceiling_leaves_mss_option_untouched() {
+        // A ceiling of zero reaches here only when something upstream
+        // degenerated. Writing it would put an MSS of 0 in the SYN and wedge
+        // the flow, so the clamp must refuse and report that it did nothing.
+        let src = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let mut packet = make_tcp_syn_packet(src, dst, 1460);
+
+        let modified = clamp_tcp_mss(&mut packet, 0);
+
+        assert!(!modified, "a zero ceiling must not count as a clamp");
+
+        let tcp_start = 40;
+        let mss = u16::from_be_bytes([packet[tcp_start + 22], packet[tcp_start + 23]]);
+        assert_eq!(mss, 1460, "MSS option must be left exactly as it arrived");
     }
 
     #[test]

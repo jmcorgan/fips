@@ -151,11 +151,15 @@ pub(crate) struct SessionEntry {
     rekey_initiator: bool,
     /// Dampening: last time peer sent us a rekey msg1 (Unix ms).
     last_peer_rekey_ms: u64,
-    /// When the FSP rekey handshake completed (initiator sent msg3, Unix ms).
-    /// Drives the initiator's liveness-bound cutover timer. Cleared on
-    /// cutover. The timer is no longer safety-critical: overlapping-epoch
-    /// trial-decrypt covers any cutover skew. It only bounds how long the
-    /// initiator advertises the old K-bit.
+    /// When this side's FSP rekey handshake completed and produced the
+    /// `pending` session (Unix ms): the initiator sending msg3, or the
+    /// responder accepting it. Cleared on cutover.
+    ///
+    /// On the initiator it drives the liveness-bound cutover timer, which
+    /// is no longer safety-critical: overlapping-epoch trial-decrypt covers
+    /// any cutover skew, so it only bounds how long the initiator
+    /// advertises the old K-bit. On the responder it dates the wait for the
+    /// peer's cut-over (`pending_stale`) and never expires the keys.
     rekey_completed_ms: u64,
     /// Encoded SessionMsg3 payload retained for retransmission (initiator).
     /// Set when the rekey initiator sends msg3; cleared once the responder
@@ -319,7 +323,6 @@ impl SessionEntry {
     }
 
     /// Whether this node initiated the Noise handshake.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_initiator(&self) -> bool {
         self.is_initiator
     }
@@ -456,7 +459,8 @@ impl SessionEntry {
         }
     }
 
-    /// When the FSP rekey handshake completed (initiator sent msg3).
+    /// When this side's FSP rekey handshake completed: the initiator
+    /// sending msg3, or the responder accepting it.
     pub(crate) fn rekey_completed_ms(&self) -> u64 {
         self.rekey_completed_ms
     }
@@ -471,7 +475,8 @@ impl SessionEntry {
         self.rekey_jitter_secs
     }
 
-    /// Record when the FSP rekey handshake completed (initiator side).
+    /// Record when this side's FSP rekey handshake completed and the
+    /// `pending` session appeared.
     pub(crate) fn set_rekey_completed_ms(&mut self, ms: u64) {
         self.rekey_completed_ms = ms;
     }
