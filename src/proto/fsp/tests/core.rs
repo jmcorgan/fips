@@ -281,10 +281,10 @@ fn poll_rekey_expiry_reads_the_handshake_flag_and_never_the_pending_flag() {
     let fsp = Fsp::new();
     // A completed rekey waiting for its cutover, with an expired peer stamp
     // and no handshake beside it. `has_pending` must not stand in for
-    // `rekey_in_progress` here: widening the condition to either flag is the
-    // shape the third correction reversed, and it discards the epoch the peer
-    // has already moved to. The other two arms of this snapshot are quiet, so
-    // an empty result can only mean the abandon arm declined.
+    // `rekey_in_progress` here: widening the condition to either flag would
+    // discard the epoch the peer has already moved to. The other two arms of
+    // this snapshot are quiet, so an empty result can only mean the abandon
+    // arm declined.
     let mut s = session_snapshot(11);
     s.has_pending = true;
     s.rekey_in_progress = false;
