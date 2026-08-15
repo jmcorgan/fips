@@ -70,6 +70,21 @@ pub struct SessionStats {
     /// already have adopted, so a sustained rate means one side keeps
     /// rekeying while the other never appears on the new epoch.
     pub pending_replaced: u64,
+    /// An inbound SessionAck failed the XX msg2 read, or its negotiation
+    /// payload, against a session we are initiating. The entry is kept and
+    /// the handshake rolled back, since the message authenticates nothing
+    /// about which peer sent it; a sustained rate is either a broken path to
+    /// the responder or forged acks holding establishment down.
+    pub ack_handshake_failed: u64,
+    /// An inbound SessionAck read msg2 cleanly against a session we are
+    /// initiating, but authenticated under a static key other than the one
+    /// we dialled. The entry is kept: the claimed source address is an
+    /// envelope field, so this is as available to a stranger answering our
+    /// msg1 as it is to a stale npub-to-address mapping.
+    pub ack_identity_mismatch: u64,
+    /// A setup message was refused by the per-link-peer setup limiter,
+    /// before any handshake state was created or any ack sent.
+    pub setup_rate_limited: u64,
 }
 
 impl SessionStats {
@@ -85,6 +100,9 @@ impl SessionStats {
             rekey_pending: self.rekey_pending,
             rekey_expired: self.rekey_expired,
             pending_replaced: self.pending_replaced,
+            ack_handshake_failed: self.ack_handshake_failed,
+            ack_identity_mismatch: self.ack_identity_mismatch,
+            setup_rate_limited: self.setup_rate_limited,
         }
     }
 
@@ -97,6 +115,9 @@ impl SessionStats {
             SessionReject::RekeyTiebreak => self.rekey_tiebreak += 1,
             SessionReject::RekeyYielded => self.rekey_yielded += 1,
             SessionReject::RekeyPending => self.rekey_pending += 1,
+            SessionReject::AckHandshakeFailed => self.ack_handshake_failed += 1,
+            SessionReject::AckIdentityMismatch => self.ack_identity_mismatch += 1,
+            SessionReject::SetupRateLimited => self.setup_rate_limited += 1,
         }
     }
 }
@@ -371,6 +392,9 @@ pub struct SessionStatsSnapshot {
     pub rekey_pending: u64,
     pub rekey_expired: u64,
     pub pending_replaced: u64,
+    pub ack_handshake_failed: u64,
+    pub ack_identity_mismatch: u64,
+    pub setup_rate_limited: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

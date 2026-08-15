@@ -311,7 +311,11 @@ impl Node {
                             .insert_with_path_mtu(target, coords, now_ms, path_mtu);
                     }
                 }
-                LookupAction::WritePathMtu { target, path_mtu } => {
+                LookupAction::WritePathMtu {
+                    target,
+                    now_ms,
+                    path_mtu,
+                } => {
                     // Refused as absent on the CacheCoords arm the core always
                     // pairs with this one, so there is nothing to mirror; the
                     // warning and the counter are emitted there, once.
@@ -323,22 +327,37 @@ impl Node {
                     let fips_addr = crate::FipsAddress::from_node_addr(&target);
                     match self.path_mtu_lookup.write() {
                         Ok(mut map) => match map.get(&fips_addr).copied() {
-                            Some(existing) if existing <= path_mtu => {
+                            Some(existing) if existing.mtu <= path_mtu => {
                                 // Keep the tighter learned value; never loosen
                                 // the clamp. A reactive MtuExceeded or
                                 // PathMtuNotification tighten takes precedence
                                 // over a looser discovery estimate
                                 // (cross-carrier keep-tighter).
+                                //
+                                // This arm deliberately leaves `learned_ms`
+                                // alone. That is what bounds a replayed
+                                // response: the replay of a value already
+                                // stored takes this arm, so the entry still
+                                // expires at first-write plus the TTL rather
+                                // than being pushed out again on every
+                                // injection. Refreshing the stamp here would
+                                // read as a tidy-up and would silently restore
+                                // indefinite pinning.
                                 debug!(
                                     target = %self.peer_display_name(&target),
                                     fips_addr = %fips_addr,
                                     path_mtu = path_mtu,
-                                    existing = existing,
+                                    existing = existing.mtu,
                                     "LookupResponse: keeping tighter existing path_mtu_lookup value"
                                 );
                             }
                             other => {
-                                map.insert(fips_addr, path_mtu);
+                                // The one carrier with no release path, so this
+                                // is the one write that carries a deadline.
+                                map.insert(
+                                    fips_addr,
+                                    crate::upper::tun::PathMtuEntry::learned(path_mtu, now_ms),
+                                );
                                 debug!(
                                     target = %self.peer_display_name(&target),
                                     fips_addr = %fips_addr,
@@ -793,18 +812,20 @@ impl Node {
             return;
         };
         match map.get(&fips_addr).copied() {
-            Some(existing) if existing <= link_mtu => {
+            Some(existing) if existing.mtu <= link_mtu => {
                 // Keep the tighter learned value; never loosen the clamp.
                 debug!(
                     peer = %self.peer_display_name(peer_addr),
                     fips_addr = %fips_addr,
                     link_mtu = link_mtu,
-                    existing = existing,
+                    existing = existing.mtu,
                     "seed_path_mtu_for_link_peer: keeping tighter existing value"
                 );
             }
             other => {
-                map.insert(fips_addr, link_mtu);
+                // Held, not expiring: this describes a link this node can see
+                // for itself, and it is released when the link goes.
+                map.insert(fips_addr, crate::upper::tun::PathMtuEntry::held(link_mtu));
                 debug!(
                     peer = %self.peer_display_name(peer_addr),
                     fips_addr = %fips_addr,

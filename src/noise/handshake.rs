@@ -12,6 +12,11 @@ use std::fmt;
 /// Symmetric state during handshake.
 ///
 /// Maintains the chaining key (ck), handshake hash (h), and current cipher.
+///
+/// `Clone` exists for [`HandshakeState::try_read_message_2`], which has to put
+/// the pre-read state back after a message that mixed material in before
+/// failing to authenticate.
+#[derive(Clone)]
 struct SymmetricState {
     /// Chaining key for key derivation.
     ck: [u8; 32],
@@ -99,6 +104,20 @@ impl SymmetricState {
     fn handshake_hash(&self) -> [u8; 32] {
         self.h
     }
+}
+
+/// The handshake state msg2 overwrites, kept so it can be put back.
+///
+/// Produced by [`HandshakeState::try_read_message_2`] and applied by
+/// [`HandshakeState::restore_message_2`]. Opaque on purpose: the field set is
+/// a hand-maintained mirror of what `read_message_2` writes, and callers have
+/// no business editing it.
+pub struct Message2Rollback {
+    symmetric: SymmetricState,
+    remote_ephemeral: Option<PublicKey>,
+    remote_static: Option<PublicKey>,
+    remote_epoch: Option<[u8; 8]>,
+    progress: HandshakeProgress,
 }
 
 /// Handshake state for the Noise XX pattern.
@@ -430,6 +449,69 @@ impl HandshakeState {
         self.progress = HandshakeProgress::Message2Done;
 
         Ok(())
+    }
+
+    /// Read message 2, leaving the handshake untouched when the message does
+    /// not authenticate, and handing the caller the means to undo a read that
+    /// succeeded.
+    ///
+    /// `read_message_2` mixes the sender's ephemeral into the symmetric state
+    /// before it authenticates anything, so a message that fails partway
+    /// leaves a handshake that can never read the genuine msg2 afterwards. A
+    /// caller that keeps its session entry across a failed read — because the
+    /// message may be a forgery rather than a real peer's corrupt reply —
+    /// needs the pre-read state back.
+    ///
+    /// On failure the pre-read state is restored here. On success the caller
+    /// gets a [`Message2Rollback`] and may restore it later with
+    /// [`HandshakeState::restore_message_2`]. That matters on this line
+    /// because it is XX, not XK: nothing in msg2 binds the sender to the
+    /// identity we dialled, so a read can succeed and the message still be a
+    /// forgery. The checks that catch that — the negotiation payload and the
+    /// static-key comparison — run after the read, and they need the same way
+    /// back that a failed read gets.
+    ///
+    /// The saved set is exactly what `read_message_2` writes: `symmetric`,
+    /// `remote_ephemeral`, `remote_static`, `remote_epoch` and `progress`.
+    /// **That mirror is manual.** A later edit that adds a write to
+    /// `read_message_2` without adding it here silently reintroduces the
+    /// poisoning, and no caller can detect it. `remote_static` is in the set
+    /// where the XK equivalent has no need of it: XX msg2 carries the
+    /// responder's static, stored before the epoch decrypt that can still
+    /// fail.
+    ///
+    /// `symmetric` also covers [`HandshakeState::decrypt_payload`], which
+    /// touches nothing else, so a rollback taken here undoes a failed
+    /// negotiation-payload decrypt as well.
+    pub fn try_read_message_2(&mut self, message: &[u8]) -> Result<Message2Rollback, NoiseError> {
+        let saved = Message2Rollback {
+            symmetric: self.symmetric.clone(),
+            remote_ephemeral: self.remote_ephemeral,
+            remote_static: self.remote_static,
+            remote_epoch: self.remote_epoch,
+            progress: self.progress,
+        };
+
+        match self.read_message_2(message) {
+            Ok(()) => Ok(saved),
+            Err(e) => {
+                self.restore_message_2(saved);
+                Err(e)
+            }
+        }
+    }
+
+    /// Put back the state a [`Message2Rollback`] was taken before.
+    ///
+    /// Leaves the handshake able to read a genuine msg2 elicited by a msg1
+    /// resend, which is the only reason keeping the session entry is worth
+    /// anything.
+    pub fn restore_message_2(&mut self, saved: Message2Rollback) {
+        self.symmetric = saved.symmetric;
+        self.remote_ephemeral = saved.remote_ephemeral;
+        self.remote_static = saved.remote_static;
+        self.remote_epoch = saved.remote_epoch;
+        self.progress = saved.progress;
     }
 
     /// Write message 3 (initiator only).

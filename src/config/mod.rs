@@ -26,6 +26,7 @@ mod peer;
 mod transport;
 
 use crate::node::REKEY_JITTER_SECS;
+use crate::nostr::FRESHNESS_SKEW_TOLERANCE_MS;
 use crate::upper::config::{DnsConfig, TunConfig};
 use crate::{Identity, IdentityError};
 use serde::{Deserialize, Serialize};
@@ -1125,6 +1126,67 @@ impl Config {
                 "`node.rate_limit.established_handshake_rate` is {rate}, but must be a finite value greater than 0; \
                  a non-positive or non-finite refill rate never replenishes the established-link bucket, so rekey msg1 stops being admitted once the initial burst is spent. \
                  Omit the key to derive it from `node.limits.max_peers` and `node.rekey.after_secs`."
+            )));
+        }
+
+        // The per-link session-setup bucket. The same trap as above in a
+        // non-optional field: zero does not disable the limiter, it refuses
+        // every inbound setup message and so refuses every session.
+        if rl.session_setup_burst == 0 {
+            return Err(ConfigError::Validation(
+                "`node.rate_limit.session_setup_burst` is 0, which refuses every inbound SessionSetup rather than disabling the limit. \
+                 Set a positive burst; a very large value effectively disables it."
+                    .to_string(),
+            ));
+        }
+
+        let setup_rate = rl.session_setup_rate;
+        if !(setup_rate.is_finite() && setup_rate > 0.0) {
+            return Err(ConfigError::Validation(format!(
+                "`node.rate_limit.session_setup_rate` is {setup_rate}, but must be a finite value greater than 0; \
+                 a non-positive or non-finite refill rate never replenishes a link's setup bucket, so that link stops establishing sessions once its initial burst is spent."
+            )));
+        }
+
+        // The freshness window backstops session-id replay protection: an
+        // offer evicted from the replay cache must already be too old to pass
+        // the freshness check, or it can be accepted a second time. A signal
+        // is acceptable over `signal_ttl_secs` plus the skew tolerance on each
+        // side, so that span has to stay strictly inside `replay_window_secs`.
+        // Checked regardless of `nostr.enabled`, for the reason the rekey
+        // block above gives: enabling the feature later must not surface a
+        // config error at a surprising moment.
+        let skew_secs = FRESHNESS_SKEW_TOLERANCE_MS / 1000;
+        let freshness_window_secs = nostr.signal_ttl_secs.saturating_add(2 * skew_secs);
+        if freshness_window_secs >= nostr.replay_window_secs {
+            return Err(ConfigError::Validation(format!(
+                "`node.rendezvous.nostr.signal_ttl_secs` is {}, which with {skew_secs}s of clock-skew grace on each side makes a traversal signal acceptable over a {freshness_window_secs}s window, \
+                 but `node.rendezvous.nostr.replay_window_secs` is {}. \
+                 The freshness window must be strictly narrower than the replay window, or a session id evicted from the replay cache is still fresh enough to be accepted a second time. \
+                 Raise `replay_window_secs` above {freshness_window_secs}, or lower `signal_ttl_secs`.",
+                nostr.signal_ttl_secs, nostr.replay_window_secs
+            )));
+        }
+
+        // Zero here is the same trap as `established_handshake_burst`: it
+        // reads as "no limit" and in fact refuses every inbound offer. The
+        // upper bound exists because the per-npub semaphore is built lazily
+        // inside the intake path rather than at startup, so an oversized
+        // value would panic there instead of failing loudly at load.
+        if nostr.max_concurrent_offers_per_npub == 0 {
+            return Err(ConfigError::Validation(
+                "`node.rendezvous.nostr.max_concurrent_offers_per_npub` is 0, which refuses every inbound traversal offer rather than disabling the per-sender limit. \
+                 Omit the key for the default, or set a positive allowance; `max_concurrent_incoming_offers` remains the outer bound."
+                    .to_string(),
+            ));
+        }
+
+        if nostr.max_concurrent_offers_per_npub > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(ConfigError::Validation(format!(
+                "`node.rendezvous.nostr.max_concurrent_offers_per_npub` is {}, which exceeds the maximum {} permits a semaphore can hold. \
+                 Use a value at or below `max_concurrent_incoming_offers`, which is the outer bound anything larger is inert against.",
+                nostr.max_concurrent_offers_per_npub,
+                tokio::sync::Semaphore::MAX_PERMITS
             )));
         }
 
@@ -2458,6 +2520,74 @@ node:
 
         let err = config.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("after_secs"));
+    }
+
+    #[test]
+    fn test_validate_signal_ttl_at_or_above_the_replay_window_margin_rejected() {
+        // 180 is the boundary: 180 + 2 * 60 = 300, which is not strictly less
+        // than the default 300s replay window.
+        for signal_ttl_secs in [180, 181, 3600, u64::MAX] {
+            let mut config = Config::default();
+            config.node.rendezvous.nostr.signal_ttl_secs = signal_ttl_secs;
+
+            match config.validate() {
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(msg.contains("signal_ttl_secs"), "got: {msg}");
+                    assert!(msg.contains("replay_window_secs"), "got: {msg}");
+                }
+                Ok(()) => panic!("signal_ttl_secs = {signal_ttl_secs} should be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_signal_ttl_just_inside_the_replay_window_margin_accepted() {
+        let mut config = Config::default();
+        config.node.rendezvous.nostr.signal_ttl_secs = 179;
+
+        config
+            .validate()
+            .expect("179 + 2 * 60 = 299 leaves the freshness window inside the 300s replay window");
+    }
+
+    #[test]
+    fn test_validate_per_npub_offer_allowance_of_zero_rejected() {
+        let mut config = Config::default();
+        config.node.rendezvous.nostr.max_concurrent_offers_per_npub = 0;
+
+        let err = config.validate().expect_err("validation should fail");
+        assert!(
+            err.to_string().contains("max_concurrent_offers_per_npub"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_per_npub_offer_allowance_of_one_accepted() {
+        let mut config = Config::default();
+        config.node.rendezvous.nostr.max_concurrent_offers_per_npub = 1;
+
+        config
+            .validate()
+            .expect("an allowance of one offer per sender is restrictive but well defined");
+    }
+
+    #[test]
+    fn test_validate_shipped_defaults_satisfy_the_freshness_invariant() {
+        Config::default()
+            .validate()
+            .expect("the shipped defaults must satisfy every validation rule");
+
+        // Stated against the constant rather than a literal, so this reds if
+        // anyone changes FRESHNESS_SKEW_TOLERANCE_MS or either default without
+        // re-checking the relation they jointly have to satisfy.
+        let defaults = Config::default();
+        let nostr = &defaults.node.rendezvous.nostr;
+        assert!(
+            nostr.signal_ttl_secs + 2 * (FRESHNESS_SKEW_TOLERANCE_MS / 1000)
+                < nostr.replay_window_secs
+        );
     }
 
     #[test]

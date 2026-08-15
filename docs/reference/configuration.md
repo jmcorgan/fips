@@ -137,6 +137,8 @@ Handshake rate limiting protects against DoS on the Noise XX handshake path.
 | `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt |
 | `node.rate_limit.established_handshake_burst` | u32 | derived | Burst capacity of the established-link bucket. Derived default is `node.limits.max_peers` (128) |
 | `node.rate_limit.established_handshake_rate` | f64 | derived | Refill rate of that bucket. Derived default is `(max_peers / max(node.rekey.after_secs, 1)) * (1 + handshake_max_resends)`, floored at 1.0/s — 6.4/s at shipped defaults |
+| `node.rate_limit.session_setup_burst` | u32 | `64` | Per-link-peer burst for inbound session-setup messages that would open a new session |
+| `node.rate_limit.session_setup_rate` | f64 | `16.0` | Per-link-peer refill rate for those messages, in tokens per second |
 
 Msg1 whose source matches an established link (rekey and restart
 maintenance traffic) draws on a second bucket rather than competing with
@@ -157,6 +159,25 @@ msg1 but not yet completed msg3 is not promoted, so it draws on the
 stranger bucket for its whole lifetime, including every msg1 retransmit.
 Only traffic from a source already matching a promoted peer reaches the
 established bucket.
+
+The `session_setup_*` pair is a separate limiter on the session layer, not
+the link layer. It is keyed on the authenticated link peer a session datagram
+arrived over, so each neighbour gets its own budget and a flood is
+attributable. Setup messages naming a peer this node is already established
+with (inbound rekey and restart traffic) draw on a second per-link bucket
+derived from `max_peers`, `node.rekey.after_secs` and `handshake_max_resends`,
+exactly as `established_handshake_*` is, so a stranger flood cannot suppress
+rekey traffic sharing the link.
+
+At the defaults one neighbour can force at most
+`session_setup_rate * handshake_timeout_secs` half-open entries (480) and
+`session_setup_rate * (1 + handshake_max_resends)` acks per second (96). The
+node-wide ceiling is still that times the peer count, since the limiter bounds
+each neighbour rather than the aggregate. A legitimate peer whose traffic
+reaches this node over the *same* link as an attacker's shares that
+attacker's stranger bucket, so establishment behind a flooded neighbour is
+refused until the bucket refills; the initiator's own resend schedule (1s, 2s,
+4s, 8s, 16s) covers a short drain.
 
 ### Retry / Backoff (`node.retry.*`)
 
@@ -215,6 +236,7 @@ inert otherwise.
 | `node.discovery.nostr.policy` | string | `"configured_only"` | Advert discovery policy: `disabled`, `configured_only`, `open` |
 | `node.discovery.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
 | `node.discovery.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
+| `node.discovery.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. Zero is rejected, since it refuses every inbound offer rather than disabling the limit |
 | `node.discovery.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic |
 | `node.discovery.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
 | `node.discovery.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
@@ -940,6 +962,8 @@ node:
     handshake_resend_interval_ms: 1000
     handshake_resend_backoff: 2.0
     handshake_max_resends: 5
+    session_setup_burst: 64
+    session_setup_rate: 16.0
   retry:
     max_retries: 5
     base_interval_secs: 5

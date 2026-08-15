@@ -315,9 +315,15 @@ fn on_response_accepted_clears_state_and_emits_effects() {
     match &actions[1] {
         LookupAction::WritePathMtu {
             target: t,
+            now_ms: n,
             path_mtu: p,
         } => {
             assert_eq!(*t, target);
+            assert_eq!(
+                *n, now_ms,
+                "the path-MTU entry must be stamped with the same instant the \
+                 coordinates are cached at, or the clamp outlives its route"
+            );
             assert_eq!(*p, path_mtu);
         }
         _ => panic!("action[1] must be WritePathMtu"),

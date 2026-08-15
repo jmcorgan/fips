@@ -212,11 +212,20 @@ NIP-17 DM relay list (kind 10050), and falls back to `dm_relays` if
 the inbox-relays fetch fails. Each side also publishes its own inbox
 relay list on startup so dialers can discover it.
 
-On the receiving side, an inbound semaphore bounds concurrent offer
-processing at `max_concurrent_incoming_offers`. When the semaphore is
-full, the offer is dropped with a warn log; this is the primary guard
-against offer-spam from a misbehaving or compromised relay. A
-`sessionId` replay cache (bounded by `seen_sessions_max_entries`, with
+On the receiving side, admission is a pair of bounds taken together: a
+per-sender allowance of `max_concurrent_offers_per_npub`, keyed on the
+npub that signed the gift wrap, nested inside a global
+`max_concurrent_incoming_offers`. A sender over its own allowance is
+refused at debug, since by definition it is sending faster than the node
+wants and a record per rejection would turn the spam into log volume; the
+global bound being reached is the operator-visible warn, because that one
+says the node is genuinely saturated. Together they keep one identity
+from holding the whole pool. They do not make the pool inexhaustible:
+nostr identities are free to generate, so an attacker running
+`ceil(max_concurrent_incoming_offers / max_concurrent_offers_per_npub)`
+throwaway npubs still saturates it at the same total offer rate. Raising
+the attacker's cost beyond keypairs would mean pricing the offer itself.
+A `sessionId` replay cache (bounded by `seen_sessions_max_entries`, with
 entries valid for `replay_window_secs`) rejects duplicates.
 
 The responder runs its own STUN query and replies with a
@@ -306,6 +315,7 @@ machinery:
 | Mechanism | Default | What it prevents | Behavior at limit |
 | --- | --- | --- | --- |
 | Offer semaphore (`max_concurrent_incoming_offers`) | 16 | CPU and memory exhaustion from offer spam on DM relays. | Warn log, offer dropped. |
+| Per-npub offer allowance (`max_concurrent_offers_per_npub`) | 4 | One sender identity holding every offer slot and denying traversal onboarding to everyone else. Does not prevent the same denial from several throwaway npubs. | Debug log, offer dropped. |
 | Advert cache (`advert_cache_max_entries`) | 2048 | Memory growth from ambient advert traffic under `policy: open`. | LRU-by-expiry eviction. |
 | Seen-sessions (`seen_sessions_max_entries`) | 2048 | Replay of stale `sessionId` values. | Oldest entry evicted. |
 | Signal TTL (`signal_ttl_secs`) | 120 s | Indefinite in-flight offers on relays. | Expired offers rejected at validation. |

@@ -118,10 +118,16 @@ impl ForwardingMetrics {
     /// This is **not** a packet drop. The frame is still delivered or
     /// forwarded by the normal path; only the opportunistic warm attempt was
     /// abandoned, so this must never be folded into the rejection family or
-    /// rendered as dropped traffic. `bytes` is the payload size of the frame
-    /// whose warm attempt was abandoned, not volume dropped; it is carried so
-    /// the counter can be rendered as a packets-and-bytes pair like its
-    /// siblings.
+    /// rendered as dropped traffic. `bytes` is the outer `SessionDatagram`
+    /// payload of the frame whose warm attempt was abandoned — the buffer
+    /// after `dispatch_link_message` strips the msg_type byte, not the inner
+    /// FSP payload the warm path reads. That is the same basis as
+    /// [`Self::record_received`] and [`Self::record_reject_bytes`], and it has
+    /// to be: all three render through one `fwd_value` row on the fipstop
+    /// Routing tab, where a mixed basis reads as a smaller flood than the one
+    /// actually arriving. It is volume observed, not volume dropped, and is
+    /// carried so the counter can be rendered as a packets-and-bytes pair like
+    /// its siblings.
     #[inline]
     pub fn record_warm_malformed(&self, bytes: usize) {
         self.warm_malformed_packets.inc();

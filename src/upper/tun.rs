@@ -35,12 +35,50 @@ use tracing::{error, warn};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 use tun::Layer;
 
+/// One `path_mtu_lookup` entry: the MTU the TCP MSS clamp reads, plus how
+/// the entry is released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathMtuEntry {
+    /// Path MTU in bytes.
+    pub mtu: u16,
+    /// Unix ms at which a discovery `LookupResponse` supplied this value, or
+    /// `None` for an entry that some event releases instead of a timer.
+    ///
+    /// The discovery carrier is the one with no release path: it writes an
+    /// entry for a destination this node may never open a session with, and
+    /// all three callers of `path_mtu_lookup_release` fire on session state.
+    /// A link MTU this node derived from its own transport, and a value
+    /// learned inside a session, are both released by an event that says the
+    /// thing they describe is gone, so they carry no deadline.
+    pub learned_ms: Option<u64>,
+}
+
+impl PathMtuEntry {
+    /// An entry released by an event rather than a timer: a locally derived
+    /// link MTU, or a value learned inside a session.
+    pub fn held(mtu: u16) -> Self {
+        Self {
+            mtu,
+            learned_ms: None,
+        }
+    }
+
+    /// A remote party's claim stored at `at_ms` for a destination with no
+    /// other release path. Expires.
+    pub fn learned(mtu: u16, at_ms: u64) -> Self {
+        Self {
+            mtu,
+            learned_ms: Some(at_ms),
+        }
+    }
+}
+
 /// Read-only handle to the per-destination path MTU map. Populated by
 /// the discovery handler on `LookupResponse`; read by the TUN reader
 /// (outbound clamp) and writer (inbound clamp) at TCP MSS clamp time.
 /// Keyed by [`FipsAddress`] (16 bytes, the IPv6 form of a fips peer
 /// address).
-pub type PathMtuLookup = Arc<RwLock<HashMap<FipsAddress, u16>>>;
+pub type PathMtuLookup = Arc<RwLock<HashMap<FipsAddress, PathMtuEntry>>>;
 
 /// Compute the effective TCP MSS ceiling for a packet given its peer
 /// address bytes (a 16-byte IPv6 destination on outbound, source on
@@ -107,7 +145,7 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
-    let Some(&path_mtu) = map.get(&fips_addr) else {
+    let Some(entry) = map.get(&fips_addr).copied() else {
         trace!(
             fips_addr = %fips_addr,
             global_max_mss,
@@ -117,6 +155,7 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
+    let path_mtu = entry.mtu;
     let path_max_mss = mss_ceiling(path_mtu);
     // The actionable floor deliberately does not apply here. Every value a
     // remote party supplies is refused before it can reach this map, at the
@@ -1631,7 +1670,10 @@ mod tests {
         // = min(1360, 1143) = 1143.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(addr, 1280);
+        lookup
+            .write()
+            .unwrap()
+            .insert(addr, PathMtuEntry::held(1280));
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1143);
     }
 
@@ -1641,7 +1683,10 @@ mod tests {
         // global 1143 (the smaller of the two).
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(addr, 1452);
+        lookup
+            .write()
+            .unwrap()
+            .insert(addr, PathMtuEntry::held(1452));
         // global=1143 (UDP-1280-derived); path_max = 1452-77-60 = 1315.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1143), 1143);
     }
@@ -1655,7 +1700,10 @@ mod tests {
         // learned value governs.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(addr, 1452);
+        lookup
+            .write()
+            .unwrap()
+            .insert(addr, PathMtuEntry::held(1452));
         // global=1360, path_max = 1452-77-60 = 1315; min(1360, 1315) = 1315.
         // 1315 > 1143, so the conservative ceiling did NOT clamp here.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1315);
@@ -1671,7 +1719,10 @@ mod tests {
         for stored in [0u16, 1, 100, 137] {
             let lookup = empty_lookup();
             let addr = fips_addr_with_node_byte(0x42);
-            lookup.write().unwrap().insert(addr, stored);
+            lookup
+                .write()
+                .unwrap()
+                .insert(addr, PathMtuEntry::held(stored));
             assert_eq!(
                 per_flow_max_mss(&lookup, addr.as_bytes(), 1360),
                 1143,
@@ -1705,7 +1756,10 @@ mod tests {
             .map(|&(stored, _)| {
                 let lookup = empty_lookup();
                 let addr = fips_addr_with_node_byte(0x42);
-                lookup.write().unwrap().insert(addr, stored);
+                lookup
+                    .write()
+                    .unwrap()
+                    .insert(addr, PathMtuEntry::held(stored));
                 (stored, per_flow_max_mss(&lookup, addr.as_bytes(), 1360))
             })
             .collect();
@@ -1725,10 +1779,10 @@ mod tests {
         // sub-floor table above.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, super::super::icmp::MIN_ACTIONABLE_PATH_MTU);
+        lookup.write().unwrap().insert(
+            addr,
+            PathMtuEntry::held(super::super::icmp::MIN_ACTIONABLE_PATH_MTU),
+        );
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 119);
     }
 
@@ -1757,8 +1811,8 @@ mod tests {
         let lookup = empty_lookup();
         let a = fips_addr_with_node_byte(0x10);
         let b = fips_addr_with_node_byte(0x20);
-        lookup.write().unwrap().insert(a, 1280);
-        lookup.write().unwrap().insert(b, 1452);
+        lookup.write().unwrap().insert(a, PathMtuEntry::held(1280));
+        lookup.write().unwrap().insert(b, PathMtuEntry::held(1452));
         assert_eq!(per_flow_max_mss(&lookup, a.as_bytes(), 1360), 1143);
         assert_eq!(per_flow_max_mss(&lookup, b.as_bytes(), 1360), 1315);
     }

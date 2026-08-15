@@ -28,7 +28,7 @@ pub(crate) mod stats_history;
 mod tests;
 mod tree;
 
-use self::rate_limit::HandshakeRateLimiter;
+use self::rate_limit::{HandshakeRateLimiter, SessionSetupRateLimiter};
 use self::reloadable::Reloadable;
 
 /// Half-range of the symmetric jitter applied to the per-session rekey timer.
@@ -357,7 +357,7 @@ pub struct Node {
     /// the TUN reader/writer threads at TCP MSS clamp time so the
     /// SYN/SYN-ACK clamp can use the smaller of the local-egress floor
     /// and the learned per-destination path MTU.
-    path_mtu_lookup: Arc<std::sync::RwLock<HashMap<crate::FipsAddress, u16>>>,
+    path_mtu_lookup: crate::upper::tun::PathMtuLookup,
 
     // === Transports & Links ===
     /// Active transports (owned by Node).
@@ -497,6 +497,8 @@ pub struct Node {
     // === Rate Limiting ===
     /// Rate limiter for msg1 processing (DoS protection).
     msg1_rate_limiter: HandshakeRateLimiter,
+    /// Rate limiter for inbound FSP SessionSetup, keyed on the link peer.
+    setup_rate_limiter: SessionSetupRateLimiter,
     /// Rate limiter for ICMP Packet Too Big messages.
     icmp_rate_limiter: IcmpRateLimiter,
     /// Routing-subsystem state (routing error-signal rate limiter).
@@ -608,6 +610,28 @@ fn build_msg1_rate_limiter(config: &Config) -> HandshakeRateLimiter {
     )
 }
 
+/// Build the per-link session-setup limiter's two bucket sizes.
+///
+/// The stranger bucket is configured directly. The established bucket is
+/// derived exactly as the FMP limiter's is, from `max_peers`, the rekey
+/// period and the resend budget: a hub neighbour can legitimately carry the
+/// rekey traffic of every session this node holds, so that is the population
+/// the per-link bucket has to cover.
+fn build_setup_rate_limiter(config: &Config) -> SessionSetupRateLimiter {
+    let rl = &config.node.rate_limit;
+    let established = rate_limit::derive_established_bucket(
+        config.node.limits.max_peers,
+        config.node.rekey.after_secs,
+        rl.handshake_max_resends,
+        rl.session_setup_burst,
+        rl.session_setup_rate,
+    );
+    SessionSetupRateLimiter::with_params(
+        (rl.session_setup_burst, rl.session_setup_rate),
+        established,
+    )
+}
+
 impl Node {
     /// Create a new node from configuration.
     pub fn new(config: Config) -> Result<Self, NodeError> {
@@ -655,6 +679,7 @@ impl Node {
             config.node.cache.coord_ttl_secs * 1000,
         );
         let msg1_rate_limiter = build_msg1_rate_limiter(&config);
+        let setup_rate_limiter = build_setup_rate_limiter(&config);
 
         let max_connections = config.node.limits.max_connections;
         let max_peers = config.node.limits.max_peers;
@@ -732,6 +757,7 @@ impl Node {
             pending_outbound: HashMap::new(),
             pending_inbound: HashMap::new(),
             msg1_rate_limiter,
+            setup_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
             fmp: Fmp::new(),
@@ -809,6 +835,7 @@ impl Node {
             config.node.cache.coord_ttl_secs * 1000,
         );
         let msg1_rate_limiter = build_msg1_rate_limiter(&config);
+        let setup_rate_limiter = build_setup_rate_limiter(&config);
 
         let max_connections = config.node.limits.max_connections;
         let max_peers = config.node.limits.max_peers;
@@ -883,6 +910,7 @@ impl Node {
             pending_outbound: HashMap::new(),
             pending_inbound: HashMap::new(),
             msg1_rate_limiter,
+            setup_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
             routing: Router::new(),
             fmp: Fmp::new(),
@@ -2710,9 +2738,21 @@ impl Node {
         self.sessions.remove(remote)
     }
 
-    /// Read the path_mtu_lookup entry for a destination FipsAddress.
+    /// Read the path MTU stored for a destination FipsAddress.
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_get(&self, fips_addr: &crate::FipsAddress) -> Option<u16> {
+        self.path_mtu_lookup
+            .read()
+            .ok()
+            .and_then(|map| map.get(fips_addr).map(|e| e.mtu))
+    }
+
+    /// Read the whole path_mtu_lookup entry, including how it is released.
+    #[cfg(test)]
+    pub(crate) fn path_mtu_lookup_entry(
+        &self,
+        fips_addr: &crate::FipsAddress,
+    ) -> Option<crate::upper::tun::PathMtuEntry> {
         self.path_mtu_lookup
             .read()
             .ok()
@@ -2720,10 +2760,32 @@ impl Node {
     }
 
     /// Write a path_mtu_lookup entry directly (for tests that pre-seed the map).
+    ///
+    /// Writes a held entry, which is what a locally derived seed or a
+    /// session-carried value stores, so pre-seeding does not put a test at
+    /// the mercy of the expiry pass. Use `path_mtu_lookup_learn` for the
+    /// discovery-carrier shape.
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_insert(&self, fips_addr: crate::FipsAddress, mtu: u16) {
         if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert(fips_addr, mtu);
+            map.insert(fips_addr, crate::upper::tun::PathMtuEntry::held(mtu));
+        }
+    }
+
+    /// Write an expiring path_mtu_lookup entry directly, as the discovery
+    /// `LookupResponse` carrier does (for tests that drive the expiry pass).
+    #[cfg(test)]
+    pub(crate) fn path_mtu_lookup_learn(
+        &self,
+        fips_addr: crate::FipsAddress,
+        mtu: u16,
+        at_ms: u64,
+    ) {
+        if let Ok(mut map) = self.path_mtu_lookup.write() {
+            map.insert(
+                fips_addr,
+                crate::upper::tun::PathMtuEntry::learned(mtu, at_ms),
+            );
         }
     }
 
@@ -2740,7 +2802,26 @@ impl Node {
     /// link-peer seed keeps the second while discarding the first; a plain
     /// removal would silently drop a direct peer back to the conservative
     /// ceiling until its link re-handshakes.
-    fn path_mtu_lookup_release(&self, addr: &NodeAddr) {
+    ///
+    /// Two stores describe the same dead path, so this releases both: the
+    /// `FipsAddress`-keyed map the TCP MSS clamp reads, and the session's own
+    /// source-side path MTU estimate.
+    fn path_mtu_lookup_release(&mut self, addr: &NodeAddr) {
+        // The session's own source-side estimate described the same dead path,
+        // and the increase ladder is the only thing that would ever raise it
+        // again. Reset it here so the two halves of "this path is gone" stay
+        // together. The two timeout callers remove the session before calling
+        // this, so this arm is reached only from the PathBroken route, where
+        // the session survives the event.
+        //
+        // It runs first so the `&mut self.sessions` borrow ends before the
+        // shared `self.peers` borrow the reseed below takes.
+        if let Some(entry) = self.sessions.get_mut(addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            mmp.path_mtu.reset_source_mtu();
+        }
+
         let fips_addr = crate::FipsAddress::from_node_addr(addr);
         match self.path_mtu_lookup.write() {
             Ok(mut map) => {

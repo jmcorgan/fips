@@ -45,7 +45,7 @@ use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use std::fmt;
 use thiserror::Error;
 
-pub use handshake::HandshakeState;
+pub use handshake::{HandshakeState, Message2Rollback};
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;
 

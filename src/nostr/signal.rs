@@ -11,7 +11,11 @@ use super::types::{BootstrapError, PunchHint, SIGNAL_KIND, TraversalAnswer, Trav
 /// past ~minutes erodes the freshness guarantee that backstops session-id
 /// replay protection. Tightening it below the size of a typical un-NTP'd
 /// drift defeats the purpose. 60s sits comfortably between those.
-pub(super) const FRESHNESS_SKEW_TOLERANCE_MS: u64 = 60_000;
+///
+/// `pub(crate)` because `Config::validate` derives the freshness window from
+/// it rather than restating the number, so changing it here moves the
+/// validation boundary with it.
+pub(crate) const FRESHNESS_SKEW_TOLERANCE_MS: u64 = 60_000;
 
 pub(super) struct SignalEnvelope<T> {
     pub(super) payload: T,

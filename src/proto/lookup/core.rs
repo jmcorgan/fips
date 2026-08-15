@@ -43,7 +43,15 @@ pub(crate) enum LookupAction {
         path_mtu: u16,
     },
     /// Mirror path_mtu into the FipsAddress-keyed TUN-shared lookup map.
-    WritePathMtu { target: NodeAddr, path_mtu: u16 },
+    ///
+    /// `now_ms` stamps the entry's expiry deadline. It is the same instant
+    /// [`Self::CacheCoords`] carries, because the clamp this write feeds must
+    /// not outlive the route it was learned with.
+    WritePathMtu {
+        target: NodeAddr,
+        now_ms: u64,
+        path_mtu: u16,
+    },
     /// Reset the coords-warmup counter if an established session exists.
     ResetWarmupIfEstablished { target: NodeAddr },
     /// Retry queued TUN packets for the target if any are pending.
@@ -294,6 +302,7 @@ pub(crate) fn on_response_accepted(
         },
         LookupAction::WritePathMtu {
             target: *target,
+            now_ms,
             path_mtu,
         },
         LookupAction::ResetWarmupIfEstablished { target: *target },

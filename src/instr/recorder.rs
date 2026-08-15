@@ -60,6 +60,7 @@ pub(crate) enum Step {
     ResendPendingSessionHandshakes,
     ResendPendingSessionMsg3,
     PurgeIdleSessions,
+    PurgeExpiredPathMtu,
     ProcessPendingRetries,
     CheckTreeState,
     CheckBloomState,
@@ -98,6 +99,7 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::ResendPendingSessionHandshakes,
     Step::ResendPendingSessionMsg3,
     Step::PurgeIdleSessions,
+    Step::PurgeExpiredPathMtu,
     Step::ProcessPendingRetries,
     Step::CheckTreeState,
     Step::CheckBloomState,
@@ -131,6 +133,7 @@ impl Step {
             Step::ResendPendingSessionHandshakes => "resend_pending_session_handshakes",
             Step::ResendPendingSessionMsg3 => "resend_pending_session_msg3",
             Step::PurgeIdleSessions => "purge_idle_sessions",
+            Step::PurgeExpiredPathMtu => "purge_expired_path_mtu",
             Step::ProcessPendingRetries => "process_pending_retries",
             Step::CheckTreeState => "check_tree_state",
             Step::CheckBloomState => "check_bloom_state",
@@ -380,13 +383,15 @@ mod tests {
     #[test]
     fn emitted_row_count_matches_build() {
         let emitted = STEPS.iter().filter(|s| s.emitted()).count();
-        // 25 unconditional subsystem steps on this line (24 shared with the
+        // 26 unconditional subsystem steps on this line (25 shared with the
         // master line, plus `resend_pending_fmp_rekey_msg3`, which exists only
         // here) + the whole-tick span, plus the two conditionally-compiled
         // steps where this build has them. The count is pinned deliberately: it
         // is what caught the extra step when the master-line instrumentation
-        // was merged up, rather than letting the tables silently disagree.
-        let mut expected = 26;
+        // was merged up, rather than letting the tables silently disagree — and
+        // it did so again when `purge_expired_path_mtu` arrived with the
+        // path-MTU expiry work, taking the shared count from 24 to 25.
+        let mut expected = 27;
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             expected += 1;
         }

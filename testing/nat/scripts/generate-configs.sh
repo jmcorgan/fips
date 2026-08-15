@@ -102,7 +102,10 @@ node:
         - "$stun_addr"
       signal_ttl_secs: 30
       attempt_timeout_secs: 6
-      replay_window_secs: 60
+      # Must stay above signal_ttl_secs plus 60s of clock-skew grace on each
+      # side, or config validation refuses to start the node. 180 keeps a 30s
+      # margin over the 150s freshness window the 30s TTL implies.
+      replay_window_secs: 180
       punch_start_delay_ms: 500
       punch_interval_ms: 100
       punch_duration_ms: 2500

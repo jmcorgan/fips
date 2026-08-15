@@ -523,13 +523,74 @@ fn planned_remote_endpoints_cap_targets_from_an_oversized_candidate_list() {
     )
     .expect("endpoint planning should succeed");
 
+    // The exact figures are determined by the inputs: the plan is one
+    // reflexive-to-reflexive pair plus 300 reflexive-to-candidate pairs, all
+    // distinct, so the cap lands on exactly MAX_PUNCH_TARGETS. An inequality
+    // here could not tell the cap from a collapse to a single target.
     assert!(tally.capped > 0, "the cap should have discarded targets");
     assert!(tally.suspicious());
-    assert!(
-        endpoints.len() <= 8,
-        "expected at most 8 endpoints, got {}",
-        endpoints.len()
+    assert_eq!(tally.admitted, 8);
+    assert_eq!(endpoints.len(), 8);
+}
+
+/// The IPv6 arm of `is_never_punchable_ip` is exercised as a pure predicate
+/// elsewhere; this drives it end to end through the planner, which is the
+/// path the reflector attack actually uses.
+///
+/// The local address is a ULA so `lan_refs` is non-empty and `same_subnet_24`
+/// is genuinely called with two IPv6 strings. It splits on `.` and requires
+/// four parts, so no IPv6 candidate can ever satisfy the /24 gate and
+/// `fd00::1` is refused off-subnet rather than admitted.
+#[test]
+fn planned_remote_endpoints_reject_never_punchable_ipv6_candidates() {
+    let (endpoints, _tally) = planned_remote_endpoints(
+        &[addr("fd00::2", 62000)],
+        Some(&addr("203.0.113.10", 62000)),
+        &[
+            addr("::1", 63000),
+            addr("::", 63000),
+            addr("ff02::1", 63000),
+            addr("fe80::1", 63000),
+            addr("fd00::1", 63000),
+        ],
+        Some(&addr("198.51.100.20", 63000)),
+    )
+    .expect("endpoint planning should succeed");
+
+    assert_eq!(
+        endpoints,
+        vec!["198.51.100.20:63000".parse::<SocketAddr>().unwrap()]
     );
+}
+
+/// The cap test above uses public candidates so the cap and not the filter is
+/// what bounds the output. The attack shape is the opposite: several hundred
+/// attacker-chosen unroutable addresses. This is the only test that pins the
+/// filter and the cap acting together on that input, and its failure would
+/// mean the reflector is back.
+#[test]
+fn planned_remote_endpoints_bound_an_oversized_list_of_unroutable_candidates() {
+    let mut remotes = Vec::new();
+    for host in 1..=150u8 {
+        remotes.push(addr(&format!("127.0.0.{host}"), 63000));
+        remotes.push(addr(&format!("224.0.0.{host}"), 63000));
+    }
+
+    let (endpoints, tally) = planned_remote_endpoints(
+        &[],
+        Some(&addr("203.0.113.10", 62000)),
+        &remotes,
+        Some(&addr("198.51.100.20", 63000)),
+    )
+    .expect("endpoint planning should succeed");
+
+    assert_eq!(
+        endpoints,
+        vec!["198.51.100.20:63000".parse::<SocketAddr>().unwrap()]
+    );
+    assert_eq!(tally.unroutable, 300);
+    assert_eq!(tally.admitted, 1);
+    assert!(tally.suspicious());
 }
 
 /// Guards the deployment whose STUN server sits inside the private network,

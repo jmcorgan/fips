@@ -357,7 +357,10 @@ impl Node {
                         // distinct resources; the `path_mtu_lookup` cache and the
                         // `nostr_rendezvous` subsystem are deliberately excluded
                         // from `Reloadable` since neither reloads from a backing
-                        // file (see `node::reloadable`).
+                        // file (see `node::reloadable`). The `path_mtu_lookup`
+                        // cache is nevertheless swept on this tick, by
+                        // `purge_expired_path_mtu` below: that is expiry, not
+                        // reload.
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadHostMap,
                         self.reload_host_map().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollPendingConnects,
@@ -378,6 +381,8 @@ impl Node {
                         self.resend_pending_session_msg3(now_ms).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeIdleSessions,
                         self.purge_idle_sessions(now_ms));
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeExpiredPathMtu,
+                        self.purge_expired_path_mtu(now_ms));
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ProcessPendingRetries,
                         self.process_pending_retries(now_ms).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTreeState,

@@ -36,10 +36,23 @@
 //! The concurrency limb (`max_pending`) is deliberately *not* split, so no
 //! equivalent inflation happens there: one counter bounds simultaneous
 //! in-flight handshake state whoever holds the slot.
+//!
+//! ## Why the session-setup limiter *is* keyed, when the msg1 limiter is not
+//!
+//! "Not per-source, since UDP sources are spoofable" is about the FMP link
+//! layer, where the source is a transport address on an unauthenticated
+//! datagram. [`SessionSetupRateLimiter`] sits a layer up and keys on
+//! something different: the FMP link peer the datagram arrived over, which
+//! the hop-by-hop Noise AEAD authenticates and whose population is bounded by
+//! the peer table. Keying on the FSP `src_addr` instead would be the mistake
+//! that sentence warns about, since that field is chosen by the sender and a
+//! single sender can mint an unbounded number of distinct values.
 
+use crate::NodeAddr;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Default burst capacity (max tokens).
 pub const DEFAULT_BURST_CAPACITY: u32 = 100;
@@ -398,6 +411,104 @@ impl HandshakeRateLimiter {
     }
 }
 
+/// How long a link peer's buckets are kept after its last setup message.
+const SETUP_BUCKET_IDLE: Duration = Duration::from_secs(300);
+
+/// One link peer's pair of session-setup buckets.
+struct LinkBuckets {
+    /// Setup messages that would create a new half-open session entry.
+    stranger: TokenBucket,
+    /// Setup messages naming a peer this node already has a session with:
+    /// rekey and restart traffic, which creates no new entry.
+    established: TokenBucket,
+    /// Last time this peer was charged, for idle pruning.
+    seen: Instant,
+}
+
+/// Rate limiter for inbound FSP SessionSetup messages, keyed on the link peer.
+///
+/// The setup path allocates a `SessionEntry` and sends a SessionAck for every
+/// well-formed msg1 naming an address it has no entry for, and the address is
+/// an envelope field the sender picks. Without a limiter one neighbour can
+/// grow the session table at whatever rate it can transmit, and buy a routed
+/// ack per entry to a destination it chooses.
+///
+/// **The key is the FMP link peer the datagram arrived over, never the FSP
+/// `src_addr`.** The link peer is authenticated by the hop-by-hop Noise AEAD
+/// and its population is bounded by the peer table; `src_addr` is chosen by
+/// the sender, so keying on it would let one sender mint a fresh full bucket
+/// per forged message. See the module doc for how this squares with the msg1
+/// limiter being unkeyed.
+///
+/// Two buckets per link, for the same reason [`HandshakeRateLimiter`] has
+/// two: a drained stranger bucket must not also stop an established peer's
+/// rekey msg1 from arming. Suppressed rekey is quiet — nothing errors and no
+/// session drops — so folding both classes into one bucket would let a
+/// sprayer one hop away hold forward-secrecy rotation off for everything
+/// behind that link with no signal but a flat `rekey_armed`.
+///
+/// Idle links are pruned lazily on the admit path. Pruning only ever relaxes
+/// the limit, and it cannot be farmed: earning a fresh bucket costs a full
+/// [`SETUP_BUCKET_IDLE`] of silence on that link, which at any sane sizing is
+/// a far lower sustained rate than simply waiting for the bucket to refill.
+pub struct SessionSetupRateLimiter {
+    /// Per-link-peer buckets, created on first use.
+    buckets: HashMap<NodeAddr, LinkBuckets>,
+    /// Burst and refill rate for a new link's stranger bucket.
+    stranger: (u32, f64),
+    /// Burst and refill rate for a new link's established bucket.
+    established: (u32, f64),
+}
+
+impl SessionSetupRateLimiter {
+    /// Create a limiter whose per-link buckets take the given parameters.
+    ///
+    /// Each pair is `(burst, tokens per second)`.
+    pub fn with_params(stranger: (u32, f64), established: (u32, f64)) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            stranger,
+            established,
+        }
+    }
+
+    /// Charge one setup message of `class` to `link_peer`.
+    ///
+    /// Returns `false` when the class's bucket for that link is empty, in
+    /// which case the caller must drop the message before doing any work.
+    pub fn try_admit(&mut self, link_peer: &NodeAddr, class: Msg1Class) -> bool {
+        let now = Instant::now();
+        let stranger = self.stranger;
+        let established = self.established;
+        let link = self
+            .buckets
+            .entry(*link_peer)
+            .or_insert_with(|| LinkBuckets {
+                stranger: TokenBucket::with_params(stranger.0, stranger.1),
+                established: TokenBucket::with_params(established.0, established.1),
+                seen: now,
+            });
+        link.seen = now;
+
+        let admitted = match class {
+            Msg1Class::Stranger => link.stranger.try_acquire(),
+            Msg1Class::EstablishedLink => link.established.try_acquire(),
+        };
+
+        if admitted {
+            self.buckets
+                .retain(|_, link| now.duration_since(link.seen) < SETUP_BUCKET_IDLE);
+        }
+        admitted
+    }
+
+    /// Number of link peers currently holding buckets.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,5 +834,43 @@ mod tests {
         let (burst, rate) = derive_established_bucket(0, 120, 5, 100, 10.0);
         assert_eq!(burst, 100);
         assert_eq!(rate, 10.0);
+    }
+
+    fn addr(byte: u8) -> NodeAddr {
+        NodeAddr::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn setup_limiter_draining_one_link_leaves_another_links_budget_untouched() {
+        let mut limiter = SessionSetupRateLimiter::with_params((2, 0.001), (2, 0.001));
+        let noisy = addr(0x01);
+        let quiet = addr(0x02);
+
+        assert!(limiter.try_admit(&noisy, Msg1Class::Stranger));
+        assert!(limiter.try_admit(&noisy, Msg1Class::Stranger));
+        assert!(
+            !limiter.try_admit(&noisy, Msg1Class::Stranger),
+            "the noisy link's own bucket must run out"
+        );
+        assert!(
+            limiter.try_admit(&quiet, Msg1Class::Stranger),
+            "a second link peer must not share the first one's budget"
+        );
+        assert_eq!(limiter.len(), 2);
+    }
+
+    #[test]
+    fn setup_limiter_draining_the_stranger_bucket_still_admits_established_peer_setups() {
+        let mut limiter = SessionSetupRateLimiter::with_params((1, 0.001), (1, 0.001));
+        let link = addr(0x01);
+
+        assert!(limiter.try_admit(&link, Msg1Class::Stranger));
+        assert!(!limiter.try_admit(&link, Msg1Class::Stranger));
+        assert!(
+            limiter.try_admit(&link, Msg1Class::EstablishedLink),
+            "rekey traffic must not be starved by a stranger flood on the \
+             same link; suppressed rotation is silent and would show only as \
+             a flat rekey_armed counter"
+        );
     }
 }

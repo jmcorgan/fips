@@ -27,7 +27,7 @@ impl Node {
     /// has already had its msg_type byte stripped by dispatch.
     pub(in crate::node) async fn handle_session_datagram(
         &mut self,
-        _from: &NodeAddr,
+        from: &NodeAddr,
         payload: &[u8],
         incoming_ce: bool,
     ) {
@@ -51,7 +51,7 @@ impl Node {
         // coords a peer put on the wire are equally valid whichever way those
         // go, and the only arrivals this newly warms from are those with an
         // exhausted TTL, whose every insert is already achievable at TTL 1.
-        self.try_warm_coord_cache_ref(&datagram_ref);
+        self.try_warm_coord_cache_ref(&datagram_ref, payload.len());
 
         // Pre-resolve the next hop only for datagrams the core can actually
         // forward: not locally destined, and carrying a TTL that survives the
@@ -107,6 +107,7 @@ impl Node {
                 self.metrics().forwarding.record_delivered(payload.len());
                 self.handle_session_payload(
                     &datagram_ref.src_addr,
+                    from,
                     datagram_ref.payload,
                     datagram_ref.path_mtu,
                     incoming_ce,
@@ -219,7 +220,13 @@ impl Node {
     ///
     /// Decode failures are logged and silently ignored — they don't block
     /// forwarding.
-    fn try_warm_coord_cache_ref(&mut self, datagram: &SessionDatagramRef<'_>) {
+    ///
+    /// `outer_len` is the length of the msg_type-stripped `SessionDatagram`
+    /// buffer this view was decoded from. It is carried in rather than
+    /// reconstructed from the header size so the malformed-frame byte counter
+    /// measures the same population as its siblings — which are charged the
+    /// outer slice — instead of the inner FSP payload.
+    fn try_warm_coord_cache_ref(&mut self, datagram: &SessionDatagramRef<'_>, outer_len: usize) {
         let prefix = match FspCommonPrefix::parse(datagram.payload) {
             Some(p) => p,
             None => return,
@@ -276,11 +283,10 @@ impl Node {
                     // drill-down that separates a short frame from a bad version
                     // or a U-flagged one. The level stays at debug: any peer past
                     // the handshake can drive this at line rate.
-                    self.metrics()
-                        .forwarding
-                        .record_warm_malformed(datagram.payload.len());
+                    self.metrics().forwarding.record_warm_malformed(outer_len);
                     debug!(
                         len = datagram.payload.len(),
+                        outer_len,
                         version = prefix.version,
                         flags = prefix.flags,
                         "Not a well-formed encrypted FSP message; not warming coords"

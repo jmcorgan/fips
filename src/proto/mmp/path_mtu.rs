@@ -179,6 +179,35 @@ impl PathMtuState {
         // No change (equal or increase not yet confirmed)
         false
     }
+
+    /// Forget the source-side path MTU after the path it described is gone.
+    ///
+    /// Called when a destination's path is declared broken. The tightened
+    /// value describes a path that no longer exists, and the increase ladder
+    /// in [`Self::apply_notification`] (three matching higher values spanning
+    /// two notification intervals) is far too slow to recover it on the
+    /// replacement path. Returning to the no-measurement state lets
+    /// [`Self::seed_source_mtu`] re-derive the value from the outbound
+    /// transport on the next send, exactly as a fresh session does.
+    ///
+    /// Returning to `u16::MAX` is not a licence to send oversized packets:
+    /// the TUN outbound path caps every packet at `effective_ipv6_mtu()`
+    /// before it consults the per-destination gate, and that gate is simply
+    /// inert at `u16::MAX` — the state [`Self::new`] already starts in. If
+    /// that earlier cap is ever removed or made conditional, this reset stops
+    /// being safe.
+    ///
+    /// Destination-side observation state (`last_observed_mtu`,
+    /// `observed_changed`, `last_notification_ms`) is deliberately left
+    /// alone: it describes the reverse direction, which this event says
+    /// nothing about, and clearing it would suppress our notifications to the
+    /// peer until a fresh observation arrived.
+    pub fn reset_source_mtu(&mut self) {
+        self.current_mtu = u16::MAX;
+        self.consecutive_increase_count = 0;
+        self.first_increase_ms = None;
+        self.pending_increase_mtu = 0;
+    }
 }
 
 impl Default for PathMtuState {

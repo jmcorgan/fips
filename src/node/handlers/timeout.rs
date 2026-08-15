@@ -7,7 +7,7 @@ use crate::proto::fmp::{
     ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
 };
 use crate::transport::LinkId;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 impl LifecycleView for Node {
     fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
@@ -528,5 +528,93 @@ impl Node {
                 "Idle session removed (no application data)"
             );
         }
+    }
+
+    /// Expire `path_mtu_lookup` entries that nothing else will ever release.
+    ///
+    /// The three callers of `path_mtu_lookup_release` all fire on session
+    /// state, so an entry written by the discovery `LookupResponse` carrier
+    /// for a destination this node never opens a session with has no release
+    /// path at all. Keep-tighter then makes one such response permanent: a
+    /// `path_mtu` of 256 pins that destination's SYN-time MSS clamp at 119
+    /// bytes until the process restarts. Only those entries carry a
+    /// `learned_ms`, and only they are expired here.
+    ///
+    /// The deadline is the coordinate cache's own TTL, because the same
+    /// `LookupResponse` writes both stores: the clamp cannot outlive the
+    /// route it was learned with, and shortening `node.cache.coord_ttl_secs`
+    /// shortens this with it. A TTL of zero disables the pass, matching
+    /// `purge_idle_sessions`.
+    pub(in crate::node) fn purge_expired_path_mtu(&mut self, now_ms: u64) {
+        use crate::upper::tun::PathMtuEntry;
+
+        let ttl_ms = self.config().node.cache.coord_ttl_secs * 1000;
+        if ttl_ms == 0 {
+            return; // disabled
+        }
+        let stale = |e: &PathMtuEntry| {
+            e.learned_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) >= ttl_ms)
+        };
+
+        // Read-scan first: an ordinary tick expires nothing, and the TUN
+        // reader and writer take this lock on every packet.
+        let expired: Vec<crate::FipsAddress> = match self.path_mtu_lookup.read() {
+            Ok(map) => map
+                .iter()
+                .filter(|(_, e)| stale(e))
+                .map(|(a, _)| *a)
+                .collect(),
+            Err(e) => {
+                warn!(error = %e, "path_mtu_lookup read lock poisoned; expiry pass skipped");
+                return;
+            }
+        };
+        if expired.is_empty() {
+            return;
+        }
+
+        match self.path_mtu_lookup.write() {
+            Ok(mut map) => {
+                for addr in &expired {
+                    // Re-test under the write lock. The read guard was dropped
+                    // before this one was taken, so a fresh value may have
+                    // landed in between; without this the pass would delete a
+                    // value that was just learned.
+                    if map.get(addr).is_some_and(stale) {
+                        map.remove(addr);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "path_mtu_lookup write lock poisoned; entries not expired");
+                return;
+            }
+        }
+
+        // Restore what local configuration knows, the same way
+        // `path_mtu_lookup_release` does. A tighter remote claim overwrites a
+        // direct peer's link MTU under keep-tighter, so an expired entry may
+        // be sitting on top of a seed, and a bare removal would drop that peer
+        // to the conservative ceiling until its link re-handshakes.
+        let gone: std::collections::HashSet<crate::FipsAddress> = expired.iter().copied().collect();
+        let seeds: Vec<(
+            crate::NodeAddr,
+            crate::transport::TransportId,
+            crate::transport::TransportAddr,
+        )> = self
+            .peers
+            .iter()
+            .filter(|(addr, _)| gone.contains(&crate::FipsAddress::from_node_addr(addr)))
+            .filter_map(|(addr, p)| Some((*addr, p.transport_id()?, p.current_addr()?.clone())))
+            .collect();
+        for (addr, tid, taddr) in seeds {
+            self.seed_path_mtu_for_link_peer(&addr, tid, &taddr);
+        }
+
+        debug!(
+            expired = expired.len(),
+            "Expired remote-learned path_mtu_lookup entries"
+        );
     }
 }

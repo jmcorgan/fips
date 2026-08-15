@@ -91,6 +91,27 @@ pub struct RateLimitConfig {
     /// `node.rekey.after_secs` and `handshake_max_resends`.
     #[serde(default)]
     pub established_handshake_rate: Option<f64>,
+    /// Per-link-peer burst capacity for inbound FSP SessionSetup messages
+    /// that would open a new session (`node.rate_limit.session_setup_burst`).
+    ///
+    /// 64 absorbs a legitimate reconnect burst arriving behind one
+    /// neighbour. It bounds nothing on its own; `session_setup_rate` is what
+    /// bounds the sustained cost.
+    #[serde(default = "RateLimitConfig::default_session_setup_burst")]
+    pub session_setup_burst: u32,
+    /// Per-link-peer refill rate for those messages, in tokens per second
+    /// (`node.rate_limit.session_setup_rate`).
+    ///
+    /// 16/s caps one neighbour's forced half-open occupancy at
+    /// `rate * handshake_timeout_secs` (480 entries at defaults) and its ack
+    /// amplification at `rate * (1 + handshake_max_resends)` (96 acks/s).
+    ///
+    /// Setup messages naming a peer this node is already established with
+    /// are metered on a separate per-link bucket, derived from
+    /// `node.limits.max_peers` exactly as `established_handshake_*` is, so a
+    /// stranger flood cannot suppress rekey traffic sharing the link.
+    #[serde(default = "RateLimitConfig::default_session_setup_rate")]
+    pub session_setup_rate: f64,
 }
 
 impl Default for RateLimitConfig {
@@ -104,6 +125,8 @@ impl Default for RateLimitConfig {
             handshake_max_resends: 5,
             established_handshake_burst: None,
             established_handshake_rate: None,
+            session_setup_burst: 64,
+            session_setup_rate: 16.0,
         }
     }
 }
@@ -126,6 +149,12 @@ impl RateLimitConfig {
     }
     fn default_handshake_max_resends() -> u32 {
         5
+    }
+    fn default_session_setup_burst() -> u32 {
+        64
+    }
+    fn default_session_setup_rate() -> f64 {
+        16.0
     }
 }
 
@@ -374,6 +403,11 @@ pub struct NostrRendezvousConfig {
     /// Acts as a rate limit against offer spam from relays.
     #[serde(default = "NostrRendezvousConfig::default_max_concurrent_incoming_offers")]
     pub max_concurrent_incoming_offers: usize,
+    /// Max concurrent inbound traversal offers accepted from any one sender
+    /// npub. Sits inside `max_concurrent_incoming_offers`, which remains the
+    /// outer bound.
+    #[serde(default = "NostrRendezvousConfig::default_max_concurrent_offers_per_npub")]
+    pub max_concurrent_offers_per_npub: usize,
     /// Max cached overlay adverts retained from relay traffic.
     /// Bounds memory under ambient advert volume.
     #[serde(default = "NostrRendezvousConfig::default_advert_cache_max_entries")]
@@ -462,6 +496,7 @@ impl Default for NostrRendezvousConfig {
             policy: NostrRendezvousPolicy::default(),
             open_discovery_max_pending: Self::default_open_discovery_max_pending(),
             max_concurrent_incoming_offers: Self::default_max_concurrent_incoming_offers(),
+            max_concurrent_offers_per_npub: Self::default_max_concurrent_offers_per_npub(),
             advert_cache_max_entries: Self::default_advert_cache_max_entries(),
             seen_sessions_max_entries: Self::default_seen_sessions_max_entries(),
             attempt_timeout_secs: Self::default_attempt_timeout_secs(),
@@ -529,6 +564,20 @@ impl NostrRendezvousConfig {
 
     fn default_max_concurrent_incoming_offers() -> usize {
         16
+    }
+
+    /// Four, derived rather than picked. The initiator side already admits at
+    /// most one in-flight traversal per peer npub, so one concurrent offer per
+    /// peer is the honest steady state. An offer is published to and consumed
+    /// from the whole DM relay set, three URLs by default, and whether the
+    /// notification stream deduplicates one event delivered by three relays is
+    /// not established here — if it does not, one honest offer can present as
+    /// three near-simultaneous admissions before the replay check rejects the
+    /// duplicates. Four is that worst-case fan-out plus one, so a retry
+    /// overlapping a still-timing-out attempt is still admitted, and it is a
+    /// quarter of the default global bound.
+    fn default_max_concurrent_offers_per_npub() -> usize {
+        4
     }
 
     fn default_advert_cache_max_entries() -> usize {

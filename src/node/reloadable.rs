@@ -38,13 +38,19 @@
 //!
 //! - `path_mtu_lookup` is an event-driven cache (`Arc<RwLock<HashMap>>`)
 //!   populated from observed path-MTU discovery traffic, not loaded from a
-//!   file. There is nothing to poll. Release is event-driven for the same
-//!   reason: an entry is dropped when the path it describes is declared
+//!   file. There is nothing to poll. Release is mostly event-driven for the
+//!   same reason: an entry is dropped when the path it describes is declared
 //!   invalid (a `PathBroken` report, session idle expiry, or handshake
-//!   timeout) and the locally derived link MTU is reseeded in its place, so
-//!   there is no expiry sweep either. (Its read side could adopt the same
-//!   lock-free `ArcSwap` shape in the future, but that is an optimization, not
-//!   a reload.)
+//!   timeout) and the locally derived link MTU is reseeded in its place. All
+//!   three of those events read session state, which leaves one carrier
+//!   uncovered: a lookup `LookupResponse` writes an entry for a destination
+//!   this node may never open a session with. Those entries, and only those,
+//!   carry a learn time and are expired at the coordinate cache's TTL by
+//!   `purge_expired_path_mtu` on the same tick, which then reseeds any direct
+//!   peer whose entry went. Locally derived link MTUs and values learned
+//!   inside a session carry no deadline. That sweep is expiry, not a reload.
+//!   (The read side could adopt the same lock-free `ArcSwap` shape in the
+//!   future, but that is an optimization, not a reload.)
 //! - `nostr_rendezvous` is an async spawned subsystem, not a snapshot of disk
 //!   state.
 //!

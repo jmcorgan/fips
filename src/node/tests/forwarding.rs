@@ -330,6 +330,13 @@ async fn test_coord_cache_warming_encrypted_msg_with_coords() {
         node.coord_cache().get(&dest_addr, now_ms).is_some(),
         "dest coords not cached from encrypted message"
     );
+    // Changing what the malformed counter charges is close enough to changing
+    // when it fires that the well-formed case is pinned in the same place.
+    assert_eq!(
+        node.metrics().forwarding.warm_malformed_packets.get(),
+        0,
+        "a well-formed CP datagram must not be counted as an abandoned warm attempt"
+    );
 }
 
 #[tokio::test]
@@ -1191,8 +1198,28 @@ async fn test_coord_cache_warming_short_inner_payload_is_dropped_not_panic() {
         24,
         "every datagram in both loops must be counted as an abandoned warm attempt"
     );
-    assert!(
-        node.metrics().forwarding.warm_malformed_bytes.get() > 0,
-        "the byte counter must move alongside the packet counter"
+    // The byte counter shares a fipstop row with `received_bytes` and
+    // `decode_error_bytes`, so it has to measure the same population: the
+    // outer SessionDatagram payload, not the inner FSP one. Two assertions
+    // produced two different ways, because a single one cannot tell "the
+    // basis matches" from "two counters are wrong in the same direction".
+    //
+    // Self-derived: every one of the 24 datagrams reaches the warm guard, as
+    // the two packet counts above already pin, and `record_received` charges
+    // the identical outer slice.
+    assert_eq!(
+        node.metrics().forwarding.warm_malformed_bytes.get(),
+        node.metrics().forwarding.received_bytes.get(),
+        "the byte counter must be charged the same outer payload as its \
+         siblings on the same row"
+    );
+    // Literal cross-check. The first loop sends inner lengths 4..=11, so
+    // outer 39..=46, summing to 340; the second sends inner 12..=27, so
+    // outer 47..=62, summing to 872. Charging the inner payload instead
+    // reads 60 + 312 = 372, about 15% of the wire volume that arrived.
+    assert_eq!(
+        node.metrics().forwarding.warm_malformed_bytes.get(),
+        1212,
+        "24 frames of 39..=46 and 47..=62 outer bytes sum to 1212"
     );
 }

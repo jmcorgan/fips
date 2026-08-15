@@ -442,3 +442,77 @@ fn test_handle_parent_lost_keeps_its_published_bool_return() {
     assert!(published(&mut state, &BTreeMap::new(), 2000, 2000));
     assert!(state.is_root());
 }
+
+#[test]
+fn test_flap_dampening_counter_resets_when_the_episode_lapses_not_when_it_engages() {
+    // Retirement clears the switch counter when a lapsed episode is retired,
+    // not when the episode is armed, so switches taken *during* an episode do
+    // not carry into the next window. Telling those two apart needs an episode
+    // that is genuinely live for at least one switch, which the injected clock
+    // supplies without any real elapsed time.
+    let my_node = make_node_addr(5);
+    let mut state = TreeState::new(my_node, 1000);
+    state.set_flap_dampening(3, 60, 2);
+    state.set_hold_down(0);
+
+    let peer_a = make_node_addr(1);
+    let peer_b = make_node_addr(2);
+    let root = make_node_addr(0);
+
+    state.update_peer(
+        ParentDeclaration::new(peer_a, root, 1, 1000),
+        make_coords(&[1, 0]),
+    );
+    state.update_peer(
+        ParentDeclaration::new(peer_b, root, 1, 1000),
+        make_coords(&[2, 0]),
+    );
+
+    assert!(!state.set_parent(peer_a, 1, 1000, 1000));
+    state.recompute_coords();
+    assert!(!state.set_parent(peer_b, 2, 2000, 2000));
+    state.recompute_coords();
+    assert!(
+        state.set_parent(peer_a, 3, 3000, 3000),
+        "the third switch inside the window must arm an episode"
+    );
+    state.recompute_coords();
+    assert!(
+        state.is_flap_dampened(3000),
+        "a two-second episode must be live immediately after it is armed"
+    );
+
+    // In-episode accumulation: in production a mandatory switch bypasses the
+    // veto and still feeds the counter. `set_parent` is the same entry point
+    // those switches reach, and it must not re-arm the running episode.
+    assert!(
+        !state.set_parent(peer_b, 4, 4000, 4000),
+        "a switch inside a live episode must not re-arm it"
+    );
+    state.recompute_coords();
+    assert!(state.is_flap_dampened(4000));
+
+    assert!(
+        !state.is_flap_dampened(6000),
+        "the episode must have lapsed after its two seconds"
+    );
+
+    // The lapsed episode is retired on the next switch, taking the counter
+    // with it: the in-episode switch must not count toward the next episode.
+    assert!(
+        !state.set_parent(peer_a, 5, 5000, 6000),
+        "retiring a lapsed episode must clear the switch counter"
+    );
+    state.recompute_coords();
+    assert!(
+        !state.set_parent(peer_b, 6, 6000, 7000),
+        "a second episode must cost a fresh threshold of switches"
+    );
+    state.recompute_coords();
+    assert!(
+        state.set_parent(peer_a, 7, 7000, 8000),
+        "a second episode must arm once the fresh threshold is reached"
+    );
+    state.recompute_coords();
+    assert!(state.is_flap_dampened(8000));
+}

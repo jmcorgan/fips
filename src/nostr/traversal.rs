@@ -469,14 +469,26 @@ pub(super) fn nonce() -> String {
 /// step, which is what a resume produces, saturates the punch start delay to
 /// zero so punching begins immediately; the attempt's own bounds are monotonic
 /// `Instant` deadlines, so its length is unaffected. A backward step lengthens
-/// that delay instead and can cost a single punch attempt, which retries. Early
-/// eviction from the replay window cannot admit a replay under the shipped
-/// defaults, because the freshness window a replayed offer would also have to
-/// satisfy (`signal_ttl_secs` plus `FRESHNESS_SKEW_TOLERANCE_MS` on each side,
-/// 240s under the shipped defaults) is strictly narrower than the replay window
-/// itself (`replay_window_secs`, 300s). The margin holds while
-/// `signal_ttl_secs + 120 < replay_window_secs`; nothing in config validation
-/// enforces that relation today.
+/// that delay instead and can cost a single punch attempt, which retries.
+/// Expiry-driven eviction from the replay window cannot admit a replay, because
+/// the freshness window a replayed offer would also have to satisfy
+/// (`signal_ttl_secs` plus `FRESHNESS_SKEW_TOLERANCE_MS` on each side, 240s
+/// under the shipped defaults) is strictly narrower than the replay window
+/// itself (`replay_window_secs`, 300s). `Config::validate` enforces
+/// `signal_ttl_secs + 2 * FRESHNESS_SKEW_TOLERANCE_MS < replay_window_secs`, so
+/// that margin can no longer be configured away.
+///
+/// That covers the expiry route only. `mark_session_seen` also evicts on
+/// capacity, dropping the entries nearest expiry once the cache exceeds
+/// `seen_sessions_max_entries`, and a session id dropped that way stays
+/// replayable for the rest of its freshness window whatever the time relation
+/// is. Nothing bounds that route: whether it is reachable depends on the
+/// admitted-offer rate against the cache size. The shipped defaults leave a
+/// wide margin — filling 2048 entries inside 300s needs about 6.8 admitted
+/// offers per second, against roughly 1.2/s from a 16-slot pool whose permits
+/// are held for the length of an attempt — but raising
+/// `max_concurrent_incoming_offers` narrows it. That admission rate is inferred
+/// from the attempt timeout, not measured.
 pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

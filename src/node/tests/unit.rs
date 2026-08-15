@@ -1790,7 +1790,7 @@ async fn test_seed_path_mtu_inserts_when_empty() {
         .read()
         .unwrap()
         .get(&fips_addr)
-        .copied();
+        .map(|e| e.mtu);
     assert_eq!(
         stored,
         Some(1452),
@@ -1830,7 +1830,7 @@ async fn test_seeded_narrow_link_mtu_reaches_the_clamp_as_a_tight_ceiling() {
             .read()
             .unwrap()
             .get(&fips_addr)
-            .copied(),
+            .map(|e| e.mtu),
         Some(240),
         "the seed stores a narrow link MTU unchanged"
     );
@@ -1868,7 +1868,7 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     node.path_mtu_lookup
         .write()
         .unwrap()
-        .insert(fips_addr, 1280);
+        .insert(fips_addr, crate::upper::tun::PathMtuEntry::held(1280));
 
     node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
 
@@ -1877,7 +1877,7 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
         .read()
         .unwrap()
         .get(&fips_addr)
-        .copied();
+        .map(|e| e.mtu);
     assert_eq!(
         stored,
         Some(1280),
@@ -1907,7 +1907,7 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
     node.path_mtu_lookup
         .write()
         .unwrap()
-        .insert(fips_addr, 1452);
+        .insert(fips_addr, crate::upper::tun::PathMtuEntry::held(1452));
 
     node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
 
@@ -1916,7 +1916,7 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
         .read()
         .unwrap()
         .get(&fips_addr)
-        .copied();
+        .map(|e| e.mtu);
     assert_eq!(
         stored,
         Some(1280),

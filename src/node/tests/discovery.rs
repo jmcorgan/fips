@@ -1038,6 +1038,119 @@ async fn test_originator_lookup_response_keeps_tighter_path_mtu_lookup() {
     );
 }
 
+/// Build a verified LookupResponse for a fresh target and hand it to the
+/// handler, returning the target and its FipsAddress. The identity is
+/// registered so the proof verifies and the originator branch is taken.
+fn make_verified_lookup_response(
+    node: &mut Node,
+    request_id: u64,
+    path_mtu: u16,
+) -> (crate::NodeAddr, crate::FipsAddress, Vec<u8>) {
+    let target_identity = Identity::generate();
+    let target = *target_identity.node_addr();
+    let target_fips = crate::FipsAddress::from_node_addr(&target);
+    let root = make_node_addr(0xF0);
+    let coords = TreeCoordinate::from_addrs(vec![target, root]).unwrap();
+
+    node.register_identity(target, target_identity.pubkey_full());
+
+    let proof_data = LookupResponse::proof_bytes(request_id, &target, &coords);
+    let proof = target_identity.sign(&proof_data);
+    let mut response = LookupResponse::new(request_id, target, coords, proof);
+    response.path_mtu = path_mtu;
+
+    (target, target_fips, response.encode()[1..].to_vec())
+}
+
+#[tokio::test]
+async fn test_lookup_response_path_mtu_expires_without_a_session() {
+    // The discovery carrier writes an entry for a destination this node may
+    // never open a session with, and all three release callers fire on
+    // session state. Without a deadline, one response carrying 256 pins that
+    // destination's SYN-time MSS clamp at 119 bytes until the process
+    // restarts.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let (_target, target_fips, body) = make_verified_lookup_response(&mut node, 803, 256);
+    node.handle_lookup_response(&from, &body).await;
+
+    let entry = node
+        .path_mtu_lookup_entry(&target_fips)
+        .expect("precondition: the response wrote an entry, or the rest observes nothing");
+    assert_eq!(entry.mtu, 256, "precondition: the annotation was stored");
+    let learned_ms = entry
+        .learned_ms
+        .expect("the discovery carrier has no release path, so its entry must carry a learn time");
+    assert_eq!(
+        node.session_count(),
+        0,
+        "precondition: no session exists, so nothing but the deadline would ever release this"
+    );
+
+    let ttl_ms = node.config().node.cache.coord_ttl_secs * 1000;
+    assert!(ttl_ms > 0, "precondition: the expiry pass is not disabled");
+
+    // The healthy half: an entry inside its lifetime must survive an
+    // ordinary tick, or the clamp loses a value it is entitled to.
+    node.purge_expired_path_mtu(learned_ms + ttl_ms - 1);
+    assert_eq!(
+        node.path_mtu_lookup_get(&target_fips),
+        Some(256),
+        "an entry inside its lifetime must survive the expiry pass"
+    );
+
+    node.purge_expired_path_mtu(learned_ms + ttl_ms + 1);
+    assert_eq!(
+        node.path_mtu_lookup_get(&target_fips),
+        None,
+        "past its deadline the entry must go, since nothing else will ever release it"
+    );
+}
+
+#[tokio::test]
+async fn test_replayed_lookup_response_does_not_extend_the_path_mtu_deadline() {
+    // The response carries no replay dedupe, so a captured one can be
+    // re-injected indefinitely. What bounds the damage is that a replay of a
+    // value already stored takes the keep-tighter arm, which does not touch
+    // the learn time: each injection buys one TTL, not one per packet.
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+
+    let (_target, target_fips, body) = make_verified_lookup_response(&mut node, 804, 256);
+    node.handle_lookup_response(&from, &body).await;
+
+    let first = node
+        .path_mtu_lookup_entry(&target_fips)
+        .expect("precondition: the first response wrote an entry");
+    let learned_ms = first
+        .learned_ms
+        .expect("precondition: the entry carries a learn time");
+
+    // Real elapsed wall-clock between replays. The handler stamps its own
+    // `Self::now_ms()`, so a version that refreshed the deadline would be
+    // indistinguishable from one that did not if all three landed in the
+    // same millisecond.
+    for _ in 0..2 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        node.handle_lookup_response(&from, &body).await;
+    }
+
+    assert_eq!(
+        node.path_mtu_lookup_entry(&target_fips),
+        Some(first),
+        "a replay must leave the entry exactly as it was, deadline included"
+    );
+
+    let ttl_ms = node.config().node.cache.coord_ttl_secs * 1000;
+    node.purge_expired_path_mtu(learned_ms + ttl_ms + 1);
+    assert_eq!(
+        node.path_mtu_lookup_get(&target_fips),
+        None,
+        "replaying the same value must not push the deadline out"
+    );
+}
+
 // ============================================================================
 // Integration Tests — min_mtu transit pruning
 // ============================================================================

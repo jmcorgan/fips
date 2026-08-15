@@ -12,13 +12,14 @@ use nostr::prelude::{
 };
 use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
 use serde::Serialize;
-use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
 use super::advert::{AdvertMachine, PublishPlan};
 use super::failure_state::FailureState;
 use super::handoff::EstablishedTraversal;
+use super::offer_admission::{AdmissionReject, OfferAdmission};
 use super::signal::{
     FreshnessOutcome, SignalEnvelope, build_signal_event, create_traversal_answer,
     create_traversal_offer, estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
@@ -204,7 +205,7 @@ pub struct NostrRendezvous {
     advert: AdvertMachine,
     traversal: TraversalMachine,
     pending_answers: Mutex<HashMap<String, oneshot::Sender<SignalEnvelope<TraversalAnswer>>>>,
-    offer_slots: Arc<Semaphore>,
+    admission: OfferAdmission,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
     event_rx: Mutex<mpsc::UnboundedReceiver<BootstrapEvent>>,
     connect_task: Mutex<Option<JoinHandle<()>>>,
@@ -304,7 +305,10 @@ impl NostrRendezvous {
         let pubkey = keys.public_key();
         let npub = crate::encode_npub(&identity.pubkey());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let offer_slots = Arc::new(Semaphore::new(config.max_concurrent_incoming_offers));
+        let admission = OfferAdmission::new(
+            config.max_concurrent_incoming_offers,
+            config.max_concurrent_offers_per_npub,
+        );
 
         let failure_state = FailureState::new(
             config.failure_streak_threshold,
@@ -332,7 +336,7 @@ impl NostrRendezvous {
             advert,
             traversal,
             pending_answers: Mutex::new(HashMap::new()),
-            offer_slots,
+            admission,
             event_tx,
             event_rx: Mutex::new(event_rx),
             connect_task: Mutex::new(None),
@@ -801,13 +805,30 @@ impl NostrRendezvous {
                         && offer.message_type == "offer"
                         && offer.recipient_npub == self.npub
                     {
-                        let Ok(permit) = self.offer_slots.clone().try_acquire_owned() else {
-                            warn!(
-                                sender_npub = %sender_npub,
-                                limit = self.config.max_concurrent_incoming_offers,
-                                "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
-                            );
-                            continue;
+                        let permit = match self.admission.try_admit(&sender_npub) {
+                            Ok(permit) => permit,
+                            Err(AdmissionReject::GlobalFull) => {
+                                warn!(
+                                    sender_npub = %sender_npub,
+                                    limit = self.config.max_concurrent_incoming_offers,
+                                    "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
+                                );
+                                continue;
+                            }
+                            // Debug, not warn: the party that trips this is by
+                            // definition sending faster than the node wants, so
+                            // a record per rejection turns the spam into log
+                            // volume. The global-full arm above stays at warn
+                            // and remains the operator's signal that the node
+                            // is actually saturated.
+                            Err(AdmissionReject::SenderFull) => {
+                                debug!(
+                                    sender_npub = %sender_npub,
+                                    limit = self.config.max_concurrent_offers_per_npub,
+                                    "inbound traversal offer refused: sender is at its per-npub offer allowance"
+                                );
+                                continue;
+                            }
                         };
                         let runtime = Arc::clone(&self);
                         let peer_short = short_npub(&sender_npub);
@@ -1791,7 +1812,10 @@ impl NostrRendezvous {
             .opts(ClientOptions::new().autoconnect(false))
             .build();
         let config = NostrRendezvousConfig::default();
-        let offer_slots = Arc::new(Semaphore::new(config.max_concurrent_incoming_offers));
+        let admission = OfferAdmission::new(
+            config.max_concurrent_incoming_offers,
+            config.max_concurrent_offers_per_npub,
+        );
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let failure_state = FailureState::new(
             config.failure_streak_threshold,
@@ -1818,7 +1842,7 @@ impl NostrRendezvous {
             advert,
             traversal,
             pending_answers: Mutex::new(HashMap::new()),
-            offer_slots,
+            admission,
             event_tx,
             event_rx: Mutex::new(event_rx),
             connect_task: Mutex::new(None),

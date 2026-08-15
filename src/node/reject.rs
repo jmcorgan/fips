@@ -226,6 +226,29 @@ pub enum SessionReject {
     /// rather than arming a second handshake. Tracked via
     /// [`SessionStats::rekey_pending`](crate::node::stats::SessionStats).
     RekeyPending,
+    /// An inbound SessionAck naming a session we are initiating failed the
+    /// XX msg2 read, or the negotiation payload carried with it. Neither
+    /// carries an authenticator tying it to the initiation — on XX a msg2
+    /// read proves the sender holds the static it presented, not that the
+    /// static is the one we dialled — so the entry is kept and the handshake
+    /// rolled back rather than discarded; a sustained rate here is either a
+    /// broken path to the responder or somebody spraying forged acks to hold
+    /// establishment down. Tracked via
+    /// [`SessionStats::ack_handshake_failed`](crate::node::stats::SessionStats).
+    AckHandshakeFailed,
+    /// An inbound SessionAck read msg2 cleanly, but the static key it
+    /// authenticated under is not the key we dialled. Separate from
+    /// [`SessionReject::AckHandshakeFailed`] because it means something
+    /// different: either a stale npub-to-address mapping is being retried,
+    /// or somebody is answering our initiations under their own identity.
+    /// The entry is kept, since the claimed source address is an envelope
+    /// field and the second reading is available to anyone. Tracked via
+    /// [`SessionStats::ack_identity_mismatch`](crate::node::stats::SessionStats).
+    AckIdentityMismatch,
+    /// A setup message was refused by the per-link-peer setup limiter
+    /// before any handshake state was created or any ack sent. Tracked via
+    /// [`SessionStats::setup_rate_limited`](crate::node::stats::SessionStats).
+    SetupRateLimited,
 }
 
 /// MMP rejection reasons.
