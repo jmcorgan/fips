@@ -1616,58 +1616,9 @@ node:
         assert_eq!(metadata.mode() & 0o777, 0o644);
     }
 
-    /// Collect formatted tracing events on the current thread.
-    ///
-    /// `resolve_identity` reports its identity-loss conditions only in the
-    /// log, so the log is what the tests have to assert on. Installed with
-    /// `tracing::subscriber::with_default`, which is thread-local, so parallel
-    /// tests do not see each other's events.
-    #[derive(Clone, Default)]
-    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-
-    impl LogCapture {
-        fn warnings(&self) -> Vec<String> {
-            self.0
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|line| line.starts_with("WARN"))
-                .cloned()
-                .collect()
-        }
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            struct Fields(String);
-            impl tracing::field::Visit for Fields {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    self.0.push_str(&format!(" {}={:?}", field.name(), value));
-                }
-            }
-
-            let mut fields = Fields(event.metadata().level().to_string());
-            event.record(&mut fields);
-            self.0.lock().unwrap().push(fields.0);
-        }
-    }
-
-    fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, LogCapture) {
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let capture = LogCapture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
-        let out = tracing::subscriber::with_default(subscriber, f);
-        (out, capture)
-    }
+    // `resolve_identity` reports its identity-loss conditions only in the log,
+    // so the log is what these tests assert on.
+    use crate::testutil::capture_logs;
 
     #[cfg(unix)]
     #[test]

@@ -285,7 +285,7 @@ fn on_response_accepted_clears_state_and_emits_effects() {
     let coords = TreeCoordinate::root(target);
     let now_ms = 12_345u64;
     let path_mtu = 1400u16;
-    let actions = on_response_accepted(&mut lookup, &target, coords, now_ms, path_mtu);
+    let actions = on_response_accepted(&mut lookup, 7, &target, coords, now_ms, path_mtu);
 
     // Success state must be cleared.
     assert!(
@@ -335,6 +335,36 @@ fn on_response_accepted_clears_state_and_emits_effects() {
     match &actions[3] {
         LookupAction::RetryQueuedPackets { target: t } => assert_eq!(*t, target),
         _ => panic!("action[3] must be RetryQueuedPackets"),
+    }
+}
+
+#[test]
+fn cache_coords_action_carries_the_request_id_the_response_arrived_with() {
+    let target = make_node_addr(0x5A);
+    let mut lookup = empty_lookup();
+
+    // Distinct from now_ms and path_mtu below, so substituting either for the
+    // correlator fails rather than coincidentally matching.
+    let request_id = 0xDEAD_BEEF_0000_0001u64;
+    let now_ms = 12_345u64;
+    let path_mtu = 1400u16;
+    let actions = on_response_accepted(
+        &mut lookup,
+        request_id,
+        &target,
+        TreeCoordinate::root(target),
+        now_ms,
+        path_mtu,
+    );
+
+    match &actions[0] {
+        LookupAction::CacheCoords { request_id: id, .. } => assert_eq!(
+            *id, request_id,
+            "the cache-coords action must carry the correlator of the response it \
+             was planned from, or the shell's sub-floor path-MTU warning cannot \
+             name the exchange its sibling warnings do"
+        ),
+        _ => panic!("action[0] must be CacheCoords"),
     }
 }
 

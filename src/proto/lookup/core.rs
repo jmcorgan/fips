@@ -36,7 +36,13 @@ pub(crate) enum LookupAction {
     /// `bytes` is `Arc`-shared so a fan-out encodes once.
     SendLink { peer: NodeAddr, bytes: Arc<[u8]> },
     /// Cache the verified destination coordinates + path MTU (coord_cache).
+    ///
+    /// `request_id` is the correlator of the response this write came from. The
+    /// shell logs a warning here when `path_mtu` is below the actionable floor,
+    /// and that line is only correlatable with the rest of the exchange if the
+    /// action carries the id — by then the response itself is out of scope.
     CacheCoords {
+        request_id: u64,
         target: NodeAddr,
         coords: crate::TreeCoordinate,
         now_ms: u64,
@@ -286,6 +292,7 @@ pub(crate) fn plan_response_route(lookup: &Lookup, request_id: u64) -> ResponseR
 /// Verification is the shell's job — this runs only after the proof checked out.
 pub(crate) fn on_response_accepted(
     lookup: &mut Lookup,
+    request_id: u64,
     target: &NodeAddr,
     coords: crate::TreeCoordinate,
     now_ms: u64,
@@ -295,6 +302,7 @@ pub(crate) fn on_response_accepted(
     lookup.pending_lookups.remove(target);
     vec![
         LookupAction::CacheCoords {
+            request_id,
             target: *target,
             coords,
             now_ms,

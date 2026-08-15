@@ -930,7 +930,9 @@ async fn test_originator_ignores_sub_floor_path_mtu_but_still_caches_coords() {
     response.path_mtu = 64;
 
     let payload = &response.encode()[1..];
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
     node.handle_lookup_response(&from, payload).await;
+    drop(guard);
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -955,6 +957,21 @@ async fn test_originator_ignores_sub_floor_path_mtu_but_still_caches_coords() {
         node.metrics().errors.lookup_resp_mtu_below_floor.get(),
         1,
         "refusing the annotation must be visible on a counter, not only in a log"
+    );
+
+    // The counter says a refusal happened; only the correlator says which
+    // exchange it happened in. The warning is the sole place that pairing
+    // exists, so the field an operator greps on is asserted here rather than
+    // left to survive on the strength of compiling.
+    let floor_warning = logs
+        .warnings()
+        .into_iter()
+        .find(|line| line.contains("below the actionable floor"))
+        .expect("the sub-floor refusal must be logged at WARN");
+    assert!(
+        floor_warning.contains("request_id=801"),
+        "the sub-floor warning must carry the correlator of the response it \
+         refused, got: {floor_warning}"
     );
 }
 
