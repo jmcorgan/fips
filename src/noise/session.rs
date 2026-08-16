@@ -14,7 +14,7 @@ pub struct NoiseSession {
     send_cipher: CipherState,
     /// Cipher for receiving.
     recv_cipher: CipherState,
-    /// Handshake hash for channel binding.
+    /// Handshake hash.
     handshake_hash: [u8; 32],
     /// Remote peer's static public key.
     remote_static: PublicKey,
@@ -190,7 +190,7 @@ impl NoiseSession {
         self.replay_window.reset();
     }
 
-    /// Get the handshake hash for channel binding.
+    /// Get the handshake hash.
     pub fn handshake_hash(&self) -> &[u8; 32] {
         &self.handshake_hash
     }

@@ -23,6 +23,15 @@ pub trait BleStream: Send + Sync {
     /// Receive data from the L2CAP connection.
     ///
     /// Returns the number of bytes read into `buf`.
+    ///
+    /// A single call must never return bytes drawn from more than one SDU.
+    /// The receive loop emits what one call returns as one FMP frame. A
+    /// concatenation is caught by the frame-length check in the node's
+    /// dispatch only when the leading frame is an established one; where it
+    /// is a handshake frame, that check passes and the buffer is dropped one
+    /// step later by that frame kind's exact-size parse. Returning less than
+    /// a whole SDU is allowed: a truncated frame fails the AEAD tag or the
+    /// exact-size parse regardless.
     fn recv(
         &self,
         buf: &mut [u8],

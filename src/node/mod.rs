@@ -459,19 +459,19 @@ pub struct Node {
     /// live mutable `stats_history` above stays on the tick.
     stats_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::StatsSnapshot>>,
 
-    /// Read-side snapshot of the Category-D derived/routing/cache subsystems
+    /// Read-side snapshot of the derived/routing/cache subsystems
     /// (tree / bloom / coord cache / identity cache + F-queue scalars) that the
     /// `show_tree` / `show_bloom` / `show_cache` / `show_routing` /
     /// `show_identity_cache` queries render off the rx_loop. Published from the
-    /// tick (see [`Self::publish_routing_snapshot`] for the Q1 rationale).
+    /// tick (see [`Self::publish_routing_snapshot`] for the rationale).
     routing_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::RoutingSnapshot>>,
 
-    /// Read-side snapshot of the Category-E per-entity tables (peers / sessions
+    /// Read-side snapshot of the per-entity tables (peers / sessions
     /// / links / connections / transports + mmp) that the `show_peers` /
     /// `show_sessions` / `show_links` / `show_connections` / `show_transports`
     /// / `show_mmp` queries render off the rx_loop. Published from the tick with
     /// `Vec<Arc<Row>>` structural sharing (unchanged rows reused by pointer);
-    /// see [`Self::publish_entities_snapshot`] for the Q1 rationale.
+    /// see [`Self::publish_entities_snapshot`] for the rationale.
     entities_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::EntitySnapshot>>,
 
     // === TUN Interface ===
@@ -1650,11 +1650,11 @@ impl Node {
         };
         self.stats_snapshot.store(std::sync::Arc::new(snapshot));
 
-        // Publish the Category-D routing read view alongside the stats
+        // Publish the routing read view alongside the stats
         // snapshot, from the same tick.
         self.publish_routing_snapshot();
 
-        // Publish the Category-E per-entity read view from the same tick, with
+        // Publish the per-entity read view from the same tick, with
         // `Vec<Arc<Row>>` structural sharing against the previous snapshot.
         self.publish_entities_snapshot();
     }
@@ -1681,7 +1681,7 @@ impl Node {
         None
     }
 
-    /// Project the Category-D derived/routing/cache state into a
+    /// Project the derived/routing/cache state into a
     /// [`RoutingSnapshot`](crate::control::snapshot::RoutingSnapshot) and
     /// publish it via `ArcSwap`, so `show_tree` / `show_bloom` / `show_cache`
     /// / `show_routing` / `show_identity_cache` render off the rx_loop.
@@ -1882,7 +1882,7 @@ impl Node {
         self.routing_snapshot.store(std::sync::Arc::new(snapshot));
     }
 
-    /// Project the Category-E per-entity tables (peers / sessions / links /
+    /// Project the per-entity tables (peers / sessions / links /
     /// connections / transports + mmp) into an
     /// [`EntitySnapshot`](crate::control::snapshot::EntitySnapshot) and publish
     /// it via `ArcSwap`, so `show_peers` / `show_sessions` / `show_links` /
@@ -1908,8 +1908,8 @@ impl Node {
     /// `Arc` is reused (kept by pointer) whenever it matches the prior row by
     /// identity and compares equal by value, so a tick in which only one
     /// peer/session changed re-allocates only that one row, not the whole table.
-    /// This is what keeps the publish cost off the hot path at scale (the exact
-    /// thing the umbrella warns a naive per-tick rebuild would violate).
+    /// This is what keeps the publish cost off the hot path at scale, which a
+    /// naive whole-table rebuild on every tick would not.
     fn publish_entities_snapshot(&self) {
         use crate::control::snapshot as snap;
 

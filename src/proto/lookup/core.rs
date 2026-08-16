@@ -144,8 +144,8 @@ pub(crate) fn plan_forward(request: &mut LookupRequest, rv: &impl RoutingView) -
 /// NOTE: unlike [`plan_forward`], this does NOT fall back to non-tree
 /// (cross-link) bloom-matching peers. That asymmetry is preserved verbatim from
 /// the pre-sans-IO `initiate_lookup` to keep this extraction behavior-neutral;
-/// it is a known origination gap (ISSUE-2026-0059) whose fix adds the fallback
-/// branch as a separate, behavior-changing change.
+/// it is a known origination gap whose fix adds the fallback branch as a
+/// separate, behavior-changing change.
 pub(crate) fn plan_initiate(request: &LookupRequest, rv: &impl RoutingView) -> Vec<LookupAction> {
     let min_mtu = request.min_mtu;
     let targets: Vec<NodeAddr> = rv

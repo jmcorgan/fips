@@ -93,8 +93,10 @@ use tracing::{debug, trace, warn};
 /// inside the worker. That second alloc + ~1.5 KB memcpy per packet at
 /// line rate cost ~150 MB/sec of memory bandwidth on the hot worker.)
 pub(crate) struct FmpSendJob {
-    /// Cloned FMP send cipher. `LessSafeKey` is `Clone` (`ring::aead`)
-    /// — the clone is just a refcount bump on the inner key material.
+    /// Cloned FMP send cipher. `LessSafeKey` is `Clone` (`ring::aead`), but
+    /// the clone is not a refcount bump: `ring` stores the ChaCha20 key
+    /// inline as `[u32; 8]`, so cloning copies the key material outright and
+    /// leaves a second copy that nothing outside `ring` can clear.
     pub cipher: LessSafeKey,
     /// Pre-reserved monotonic counter (via `take_send_counter`).
     pub counter: u64,

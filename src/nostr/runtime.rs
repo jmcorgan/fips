@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::advert::{AdvertMachine, PublishPlan};
 use super::failure_state::FailureState;
@@ -286,7 +287,15 @@ impl NostrRendezvous {
             return Err(BootstrapError::Disabled);
         }
 
-        let keys = nostr::Keys::parse(&hex::encode(identity.keypair().secret_bytes()))
+        // Three copies of the private key are made to reach `Keys::parse`:
+        // the keypair, its raw bytes, and the hex string. Each is bound and
+        // cleared here; `nostr::Keys` clears its own on drop.
+        let mut our_keypair = identity.keypair();
+        let mut secret_bytes = our_keypair.secret_bytes();
+        let secret_hex = Zeroizing::new(hex::encode(secret_bytes));
+        secret_bytes.zeroize();
+        our_keypair.non_secure_erase();
+        let keys = nostr::Keys::parse(secret_hex.as_str())
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
         let client = Client::builder()
             .signer(keys.clone())

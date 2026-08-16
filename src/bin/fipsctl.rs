@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 /// FIPS control client
 #[derive(Parser, Debug)]
@@ -413,11 +414,18 @@ fn main() {
     // Commands that don't require a running daemon
     if let Commands::Keygen { dir, force, stdout } = &cli.command {
         let identity = Identity::generate();
-        let nsec = encode_nsec(&identity.keypair().secret_key());
+        // `keypair()` and `secret_key()` each hand back a whole private key
+        // rather than a handle, so both temporaries are bound and erased. The
+        // nsec is that same key in another encoding, so it is guarded too.
+        let mut our_keypair = identity.keypair();
+        let mut secret_key = our_keypair.secret_key();
+        let nsec = Zeroizing::new(encode_nsec(&secret_key));
+        secret_key.non_secure_erase();
+        our_keypair.non_secure_erase();
         let npub = identity.npub();
 
         if *stdout {
-            println!("{nsec}");
+            println!("{}", nsec.as_str());
             println!("{npub}");
             return;
         }

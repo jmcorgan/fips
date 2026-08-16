@@ -176,7 +176,7 @@ RECONVERGE_STALL=10
 TIMEOUT=5
 CONVERGENCE_PING_TIMEOUT=1
 # Strict-ping retry policy for the per-phase ping_all asserts. Under 1%
-# i.i.d. packet loss (the lab condition surfaced by ISSUE-2026-0028) a
+# i.i.d. packet loss (the lab condition this retry policy is sized for) a
 # single-shot ping fails at roughly 2% per directed pair, so a 20-pair
 # strict assert misses with probability ~1 - (0.98)^20 ≈ 33%, which is
 # below the per-pair loss-math floor but well above the routing-state

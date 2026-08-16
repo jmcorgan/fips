@@ -308,8 +308,11 @@ impl Node {
         };
 
         // Create XX initiator handshake directly (no handshake leg)
-        let our_keypair = self.identity().keypair();
+        // This frame's own copy of the node's long-term private key; the
+        // handshake state keeps its own and clears that on drop.
+        let mut our_keypair = self.identity().keypair();
         let mut hs = HandshakeState::new_initiator(our_keypair);
+        our_keypair.non_secure_erase();
         hs.set_local_epoch(self.startup_epoch());
 
         let noise_msg1 = match hs.write_message_1() {
@@ -810,8 +813,11 @@ impl Node {
         let _dest_pubkey = *entry.remote_pubkey();
 
         // Create Noise XX initiator handshake (rekey: no negotiation payload)
-        let our_keypair = self.identity().keypair();
+        // This frame's own copy of the node's long-term private key; the
+        // handshake state keeps its own and clears that on drop.
+        let mut our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_initiator(our_keypair);
+        our_keypair.non_secure_erase();
         handshake.set_local_epoch(self.startup_epoch());
 
         let msg1 = match handshake.write_message_1() {

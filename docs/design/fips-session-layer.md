@@ -226,7 +226,10 @@ than network addresses. A session survives:
 ### Noise XX Pattern
 
 FSP uses the same Noise XX pattern as the link layer (FMP). The full
-Noise descriptor is `Noise_XX_secp256k1_ChaChaPoly_SHA256`.
+Noise descriptor is `Noise_XX_secp256k1_ChaChaPoly_SHA256`, with one
+deviation recorded in [the security reference](../reference/security.md):
+the handshake AEAD uses an empty associated-data field where standard
+Noise `EncryptAndHash` uses the handshake hash `h`.
 
 The XX pattern (no pre-message):
 

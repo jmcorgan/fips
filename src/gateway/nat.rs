@@ -66,7 +66,7 @@ pub struct NatManager {
     lan_interface: String,
     /// Active mappings keyed by virtual IP.
     mappings: HashMap<Ipv6Addr, NatMapping>,
-    /// Inbound port-forward rules (TASK-2026-0061).
+    /// Inbound port-forward rules.
     port_forwards: Vec<PortForward>,
 }
 
@@ -235,7 +235,7 @@ impl NatManager {
             batch.add(&snat_rule, MsgType::Add);
         }
 
-        // Inbound port-forward rules (TASK-2026-0061). Each forward is
+        // Inbound port-forward rules. Each forward is
         // one DNAT rule in prerouting keyed on (iif fips0, nfproto ipv6,
         // l4proto, th dport). When any forwards are configured, emit a
         // single LAN-side masquerade in postrouting so the LAN target

@@ -1,6 +1,6 @@
 # Compose override that bumps RUST_LOG to trace level on the modules
 # relevant to NAT-traversal handshake-completion flake evidence
-# collection (ISSUE-2026-0027):
+# collection:
 #
 #   - fips::nostr            — overlay advert publish/consume
 #                                          (where the cross-init race begins)

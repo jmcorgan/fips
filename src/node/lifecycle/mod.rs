@@ -638,14 +638,17 @@ impl Node {
         };
 
         // Start the Noise handshake and get message 1
-        let our_keypair = self.identity().keypair();
+        // This frame's own copy of the node's long-term private key; the
+        // handshake state keeps its own and clears that on drop.
+        let mut our_keypair = self.identity().keypair();
         let startup_epoch = self.startup_epoch();
-        let noise_msg1 = match self
+        let start_result = self
             .peer_machines
             .get_mut(&link_id)
             .expect("dial-time machine carries the connection")
-            .start_handshake(our_keypair, startup_epoch, current_time_ms)
-        {
+            .start_handshake(our_keypair, startup_epoch, current_time_ms);
+        our_keypair.non_secure_erase();
+        let noise_msg1 = match start_result {
             Ok(msg) => msg,
             Err(e) => {
                 // Clean up the index, link, and dial-time machine

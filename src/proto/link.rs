@@ -21,10 +21,10 @@ pub enum LinkMessageType {
     /// Payload is opaque to intermediate nodes (end-to-end encrypted).
     SessionDatagram = 0x00,
 
-    // MMP reports (0x01-0x02) — content defined in TASK-2026-0006
-    /// Sender-side MMP report (stub).
+    // MMP reports (0x01-0x02) — payload is an encoded SenderReport or ReceiverReport
+    /// Sender-side MMP report.
     SenderReport = 0x01,
-    /// Receiver-side MMP report (stub).
+    /// Receiver-side MMP report.
     ReceiverReport = 0x02,
 
     // Tree protocol (0x10-0x1F)

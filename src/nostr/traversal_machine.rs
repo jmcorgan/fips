@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn replay_first_then_repeat() {
-        // R1: first id Fresh; same id within window Replay.
+        // First id Fresh; same id within window Replay.
         let m = machine();
         assert_eq!(
             m.note_session_seen("s1", 1000),
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn replay_prunes_expired() {
-        // R2: an entry past its expiry is pruned, so re-seeing it is Fresh.
+        // An entry past its expiry is pruned, so re-seeing it is Fresh.
         let m = machine(); // replay_window_ms = 1_000_000
         assert_eq!(
             m.note_session_seen("s1", 1000),
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn replay_cap_evicts_oldest_by_expiry() {
-        // R3: cap overflow evicts oldest-by-expiry, returns (evicted, retained).
+        // Cap overflow evicts oldest-by-expiry, returns (evicted, retained).
         let m = machine(); // cap = 3, window huge so nothing expires here
         assert_eq!(
             m.note_session_seen("s1", 1),

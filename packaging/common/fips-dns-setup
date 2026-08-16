@@ -117,8 +117,7 @@ EOF
 #   - The IPV6_PKTINFO ifindex attribution behaviour where Linux reports
 #     a packet to fips0's own IPv6 address as arriving on fips0 (despite
 #     loopback delivery), which would otherwise be silently dropped by
-#     the daemon's mesh-interface filter — see ISSUE-2026-0002 in the
-#     project tracker.
+#     the daemon's mesh-interface filter.
 #
 # This backend is the recommended path on every systemd-resolved host
 # that doesn't have native dns-delegate support (systemd >= 258).

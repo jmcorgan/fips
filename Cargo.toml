@@ -26,6 +26,7 @@ sha2 = "0.10"
 hkdf = "0.12"
 ring = "0.17"
 libm = "0.2"
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 rand = "0.10.1"
 crossbeam-channel = "0.5"
 thiserror = "2.0"

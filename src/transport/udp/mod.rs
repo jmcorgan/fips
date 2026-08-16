@@ -415,8 +415,8 @@ impl Transport for UdpTransport {
     /// Whether the transport accepts inbound handshake initiations.
     /// `outbound_only` mode forces this to false; otherwise reflects the
     /// `accept_connections` config field (default: true). Note that the
-    /// hard gate is at the Node level (see ISSUE-2026-0004 fix in
-    /// `src/node/handlers/handshake.rs`); this method is what that gate
+    /// hard gate is at the Node level (in `src/node/handlers/handshake.rs`);
+    /// this method is what that gate
     /// consults for transports that lack runtime-state-based filtering.
     fn accept_connections(&self) -> bool {
         if self.config.outbound_only() {

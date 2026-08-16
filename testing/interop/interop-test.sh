@@ -949,7 +949,7 @@ echo ""
 # versions. A mixed-version bloom/tree-encoding divergence shows up as a
 # node that never produces an in-band estimate (or returns null). Strict
 # band = [0.75N, 1.25N]; polled up to MESH_SIZE_TIMEOUT (the estimate
-# converges over minutes — see ISSUE-2026-0046 on its transient jitter).
+# converges over minutes and is transiently jittery).
 echo "Phase 7: Mesh-size estimate convergence (strict ±25% of true N=$NUM_NODES)"
 PASSED=0; FAILED=0
 ms_lo="$(awk -v n="$NUM_NODES" 'BEGIN{printf "%.2f", 0.75*n}')"

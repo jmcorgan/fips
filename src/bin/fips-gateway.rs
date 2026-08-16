@@ -299,7 +299,7 @@ async fn main() {
         }
     };
 
-    // Install inbound port-forward rules (TASK-2026-0061).
+    // Install inbound port-forward rules.
     if let Err(e) = nat_mgr.set_port_forwards(&gw_config.port_forwards) {
         error!(error = %e, "Failed to install port-forward rules");
         let _ = nat_mgr.cleanup();

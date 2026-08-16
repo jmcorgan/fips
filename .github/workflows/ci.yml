@@ -69,6 +69,8 @@ jobs:
         run: bash testing/check-image-scoping.sh
       - name: Check every action is pinned to a commit SHA
         run: bash testing/check-action-pins.sh
+      - name: Check every source comment resolves in-repo
+        run: bash testing/check-comment-refs.sh
       # Hermetic: synthetic ping functions, no containers, ~45s. Lives beside
       # the other two so both runners gate on it identically — putting it in
       # only one would create exactly the drift check-ci-parity.sh exists to
@@ -515,8 +517,9 @@ jobs:
           # NM+dnsmasq, dns-delegate, no-resolver) across five distros,
           # plus end-to-end scenarios that boot a real fips daemon with a
           # real TUN and assert `dig @127.0.0.53 AAAA <npub>.fips`
-          # returns AAAA. Pins the production DNS bind path that
-          # ISSUE-2026-0002 lived in. Single matrix entry runs all 13
+          # returns AAAA. Pins the production DNS bind path where a
+          # loopback-delivered query was once misattributed to the mesh
+          # interface and dropped. Single matrix entry runs all 13
           # scenarios sequentially; ~7-12 min warm, ~12-15 min cold.
           - suite: dns-resolver
             type: dns-resolver

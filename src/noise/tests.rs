@@ -372,6 +372,30 @@ fn test_cipher_state_nonce_sequence() {
 }
 
 #[test]
+fn cipher_state_drop_impl_clears_the_retained_key() {
+    // Reading the bytes back out of a dropped `CipherState` would mean
+    // reading freed memory, so the drop behaviour is asserted through two
+    // observable proxies instead: that `CipherState` implements
+    // `ZeroizeOnDrop`, and that an explicit `zeroize()` leaves `key`
+    // all-zero while `has_key` is untouched.
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<CipherState>();
+
+    let mut cipher = CipherState::new([7u8; 32]);
+    // `key_bytes` hands back a copy of live key material, so the observation
+    // is bound and cleared rather than left in an unnamed temporary.
+    let mut observed = cipher.key_bytes();
+    assert_eq!(observed, [7u8; 32]);
+    observed.zeroize();
+    assert!(cipher.has_key());
+
+    cipher.zeroize();
+
+    assert_eq!(cipher.key_bytes(), [0u8; 32]);
+    assert!(cipher.has_key());
+}
+
+#[test]
 fn test_session_remote_static() {
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();

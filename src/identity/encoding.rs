@@ -2,6 +2,7 @@
 
 use bech32::{Bech32, Hrp};
 use secp256k1::{SecretKey, XOnlyPublicKey};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::IdentityError;
 
@@ -33,14 +34,25 @@ pub fn decode_npub(npub: &str) -> Result<XOnlyPublicKey, IdentityError> {
 }
 
 /// Encode a secret key as a bech32 nsec string (NIP-19).
+///
+/// The returned string is the private key in another encoding, so it is the
+/// caller's to clear. What this function clears is the raw byte copy
+/// `secret_bytes` hands back, which would otherwise sit in an unnamed
+/// temporary until the end of the statement.
 pub fn encode_nsec(secret_key: &SecretKey) -> String {
-    bech32::encode::<Bech32>(NSEC_HRP, &secret_key.secret_bytes())
-        .expect("nsec encoding cannot fail")
+    let mut secret_bytes = secret_key.secret_bytes();
+    let nsec =
+        bech32::encode::<Bech32>(NSEC_HRP, &secret_bytes).expect("nsec encoding cannot fail");
+    secret_bytes.zeroize();
+    nsec
 }
 
 /// Decode an nsec string to a secret key.
 pub fn decode_nsec(nsec: &str) -> Result<SecretKey, IdentityError> {
     let (hrp, data) = bech32::decode(nsec)?;
+    // `data` is the raw private key. The guard clears it on every exit path,
+    // including the two length and prefix rejections below.
+    let data = Zeroizing::new(data);
 
     if hrp != NSEC_HRP {
         return Err(IdentityError::InvalidNsecPrefix(hrp.to_string()));
@@ -59,7 +71,9 @@ pub fn decode_secret(s: &str) -> Result<SecretKey, IdentityError> {
     if s.starts_with("nsec1") {
         decode_nsec(s)
     } else {
-        let bytes = hex::decode(s)?;
+        // `bytes` is the raw private key; the guard clears it on both the
+        // length rejection and the normal return.
+        let bytes = Zeroizing::new(hex::decode(s)?);
         if bytes.len() != 32 {
             return Err(IdentityError::InvalidNsecLength(bytes.len()));
         }

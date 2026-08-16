@@ -20,6 +20,7 @@ use thiserror::Error;
 pub use address::FipsAddress;
 pub use auth::{AuthChallenge, AuthResponse};
 pub use encoding::{decode_npub, decode_nsec, decode_secret, encode_npub, encode_nsec};
+pub(crate) use local::ErasingKeypair;
 pub use local::Identity;
 pub use node_addr::NodeAddr;
 pub use peer::PeerIdentity;

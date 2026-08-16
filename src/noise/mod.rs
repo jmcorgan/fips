@@ -44,6 +44,7 @@ mod session;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use std::fmt;
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use handshake::{HandshakeState, Message2Rollback};
 pub use replay::ReplayWindow;
@@ -171,21 +172,32 @@ impl fmt::Display for HandshakeProgress {
 /// AEAD is `ring`'s ChaCha20-Poly1305 (BoringSSL backend), which dispatches
 /// to NEON on aarch64 and AVX2/AVX-512 on x86_64. The 32-byte key is
 /// retained alongside a cached `LessSafeKey` so the per-packet AEAD skips
-/// the keyed-cipher construction (key copy + Poly1305 key derivation).
-/// `LessSafeKey` itself doesn't implement `Clone` (deliberate, for safety),
-/// so `CipherState`'s manual `Clone` impl rebuilds the keyed AEAD from the
-/// retained key bytes — cheap for ChaCha20-Poly1305 since the construction
-/// is essentially a key copy plus a constant-time check.
+/// rebuilding the keyed cipher. (It does not skip Poly1305 key derivation,
+/// which is nonce-dependent and happens per message inside seal and open.)
+/// `CipherState`'s manual `Clone` impl rebuilds the keyed AEAD from those
+/// retained bytes, and so does `cipher_clone` for each off-task AEAD worker;
+/// those two are why the bytes are kept. The rebuild is cheap for
+/// ChaCha20-Poly1305: a length check and a conversion of the 32 key bytes
+/// into little-endian words.
+///
+/// Because the key bytes are retained, every clone leaves a second copy in
+/// memory; each copy is cleared when it goes out of scope. Only `key` is
+/// zeroized. `cipher` is skipped because `LessSafeKey`
+/// holds its material behind `ring`'s own API and cannot be cleared from
+/// here; `nonce` and `has_key` are skipped because they are not secret.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct CipherState {
-    /// Encryption key (32 bytes). Retained so we can rebuild the keyed
-    /// AEAD on `Clone` and on `initialize_key` (ring's `UnboundKey` /
-    /// `LessSafeKey` do not implement `Clone`).
+    /// Encryption key (32 bytes). Retained because `Clone` and
+    /// `cipher_clone` rebuild the keyed AEAD from these bytes.
     key: [u8; 32],
     /// Cached keyed AEAD, valid iff `has_key`. None for an un-keyed state.
+    #[zeroize(skip)]
     cipher: Option<LessSafeKey>,
     /// Nonce counter (8 bytes used, 4 bytes zero prefix).
+    #[zeroize(skip)]
     pub(super) nonce: u64,
     /// Whether this cipher has a valid key.
+    #[zeroize(skip)]
     has_key: bool,
 }
 
@@ -207,14 +219,19 @@ impl Clone for CipherState {
 
 impl CipherState {
     /// Create a new cipher state with the given key.
-    pub(crate) fn new(key: [u8; 32]) -> Self {
+    ///
+    /// The parameter is this frame's own copy of live key material, so it is
+    /// cleared before returning. The caller's copy stays the caller's to clear.
+    pub(crate) fn new(mut key: [u8; 32]) -> Self {
         let cipher = Self::build_cipher(&key);
-        Self {
+        let state = Self {
             key,
             cipher,
             nonce: 0,
             has_key: true,
-        }
+        };
+        key.zeroize();
+        state
     }
 
     /// Create an empty cipher state (no key yet).
@@ -228,11 +245,15 @@ impl CipherState {
     }
 
     /// Initialize with a key.
-    pub(super) fn initialize_key(&mut self, key: [u8; 32]) {
+    ///
+    /// The parameter is this frame's own copy of live key material, so it is
+    /// cleared before returning. The caller's copy stays the caller's to clear.
+    pub(super) fn initialize_key(&mut self, mut key: [u8; 32]) {
         self.key = key;
         self.cipher = Self::build_cipher(&key);
         self.nonce = 0;
         self.has_key = true;
+        key.zeroize();
     }
 
     /// Build a ring `LessSafeKey` from raw key bytes. Centralized so the
@@ -383,6 +404,13 @@ impl CipherState {
     /// Check if cipher has a key.
     pub fn has_key(&self) -> bool {
         self.has_key
+    }
+
+    /// Copy out the retained key bytes, so a test can observe zeroization
+    /// without reading freed memory.
+    #[cfg(test)]
+    fn key_bytes(&self) -> [u8; 32] {
+        self.key
     }
 
     /// Clone the underlying keyed AEAD, for off-task AEAD workers.

@@ -58,15 +58,33 @@ idempotent).
 | Curve | secp256k1 | FMP XX, FSP XX, Schnorr signatures |
 | Diffie-Hellman | ECDH on secp256k1 (x-only normalized) | Noise XX (both layers) |
 | AEAD | ChaCha20-Poly1305 | FMP link encryption, FSP session encryption |
-| Hash | SHA-256 | NodeAddr derivation, Noise transcript |
+| Hash | SHA-256 | NodeAddr derivation, Noise key schedule |
 | Key derivation | HKDF-SHA256 | Noise key schedule |
 | Signatures | secp256k1 Schnorr | TreeAnnounce, LookupResponse proof, Nostr adverts |
-| Noise pattern (link) | `Noise_XX_secp256k1_ChaChaPoly_SHA256` | FMP link layer (XX with negotiation payload) |
-| Noise pattern (session) | `Noise_XX_secp256k1_ChaChaPoly_SHA256` | FSP session layer (XX with negotiation payload) |
+| Noise pattern (link) | `Noise_XX_secp256k1_ChaChaPoly_SHA256`, with the deviation below | FMP link layer (XX with negotiation payload) |
+| Noise pattern (session) | `Noise_XX_secp256k1_ChaChaPoly_SHA256`, with the deviation below | FSP session layer (XX with negotiation payload) |
 
 These choices align with the Nostr cryptographic stack
 (secp256k1 + ChaCha20-Poly1305 + SHA-256) and the NIP-44 encrypted
 messaging standard.
+
+### Deviation: Empty Associated Data in the Handshake AEAD
+
+Both Noise patterns above deviate from the standard construction in one
+respect. The handshake AEAD uses an empty associated-data field where
+standard Noise `EncryptAndHash` uses the handshake hash `h`.
+
+The choice was deliberate. Using secp256k1 rather than 25519 already put the
+construction outside standard Noise, so no standard-Noise peer could be
+confused with it, and the transcript hash bought no distinguishing value.
+
+That argument is about domain separation, and on those grounds it holds. It
+does not cover transcript binding, which is the property actually absent.
+Domain separation and DH binding survive through the chaining key `ck`, which
+`mix_key` chains from `ck = h`, seeded from the protocol name in
+`SymmetricState::initialize` (`src/noise/handshake.rs`). The handshake hash
+`h` is maintained at every step and is never fed to the AEAD, so it binds
+nothing.
 
 ## Rekey Defaults
 

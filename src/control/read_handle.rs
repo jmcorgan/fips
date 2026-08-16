@@ -2,27 +2,33 @@
 //! queries can render off the rx_loop hot path instead of round-tripping the
 //! mpsc → rx_loop oneshot.
 //!
-//! This is the stable seam of the control read-isolation milestone
-//! (TASK-2026-0152, phase R0). The handle bundles the state that is already
-//! independently shareable, and grows one `ArcSwap` snapshot cell per phase as
-//! each subsystem's read state is published from its natural mutator:
+//! The handle bundles the node state that is independently shareable, plus one
+//! `ArcSwap` snapshot cell per read subsystem:
 //!
-//! - `context` / `metrics` — already `Arc`-shared (refactor steps B/C).
-//! - `stats` (R2) — `ArcSwap<StatsSnapshot>`: stats_history dual-ring + the
-//!   scalar gauges `show_status` needs, published from the tick.
-//! - `routing` (R3) — `ArcSwap<RoutingSnapshot>`: tree / bloom / coord /
-//!   identity, published from their announce / discovery mutators.
-//! - `entities` (R4) — `ArcSwap<EntitySnapshot>`: peers / sessions / links /
-//!   connections / transports, published per-entity with `Vec<Arc<Row>>`
+//! - `context` / `metrics` — already `Arc`-shared.
+//! - `stats` — `ArcSwap<StatsSnapshot>`: stats_history dual-ring + the scalar
+//!   gauges `show_status` needs, published from the tick.
+//! - `routing` — `ArcSwap<RoutingSnapshot>`: tree / bloom / coord / identity,
+//!   published from the tick.
+//! - `entities` — `ArcSwap<EntitySnapshot>`: peers / sessions / links /
+//!   connections / transports, published from the tick with `Vec<Arc<Row>>`
 //!   structural sharing.
 //!
-//! Publisher placement follows the Q1 rules in
-//! `design/fast-path-refactoring-r0-read-handle.md`: every snapshot is
-//! published at its state's natural mutation site (on-change), never by the
-//! contended rx_loop task it is meant to bypass.
+//! Publisher placement: all three snapshot cells are published from the
+//! periodic tick, which runs as one arm of the rx_loop's `select!`. Publishing
+//! therefore costs the rx_loop; what the handle removes is the read-side round
+//! trip out to the rx_loop and back, not the cost of publishing. The
+//! `publish_routing_snapshot` and `publish_entities_snapshot` doc comments on
+//! `Node` carry the reasoning for the two projections that need coherent
+//! `&Node` access across subsystems.
 //!
-//! R0 ships only the type and the dispatch seam ([`snapshot_dispatch`]); no
-//! query reads the handle yet. Cutover begins in R1.
+//! A projection is a point-in-time copy, not a live view. The entity tables in
+//! particular are mutated on the packet path between ticks, so a reader sees
+//! the state as of the last publish.
+//!
+//! [`snapshot_dispatch`] is the seam: it serves the commands in its match arms
+//! directly from the handle and returns `None` for everything else, so the
+//! caller falls back to the mpsc → rx_loop path.
 
 use std::sync::Arc;
 
@@ -37,9 +43,9 @@ use super::snapshot::{EntitySnapshot, RoutingSnapshot, StatsSnapshot};
 /// Cloneable read-only view of node state for off-loop control serving.
 ///
 /// All fields are `Arc` / `ArcSwap` handles, so cloning is cheap and a clone
-/// can be held by every accepted control connection. Fields are consumed
-/// starting R1 as `show_*` queries cut over to off-loop rendering; until then
-/// they are wired but unread.
+/// can be held by every accepted control connection. The snapshot cells are
+/// read by the `*_from_handle` query functions that [`snapshot_dispatch`]
+/// routes to.
 #[derive(Clone)]
 pub(crate) struct ControlReadHandle {
     /// Effectively-immutable node context (config, identity, limits).
@@ -47,14 +53,14 @@ pub(crate) struct ControlReadHandle {
     /// Metrics registry (counters / gauges) for `show_stats_*`.
     metrics: Arc<MetricsRegistry>,
     /// stats_history dual-ring read copy + the scalar gauges/counts
-    /// `show_status` needs, published from the tick (R2, Q1-b).
+    /// `show_status` needs, published from the tick.
     stats: Arc<ArcSwap<StatsSnapshot>>,
-    /// Category-D derived/routing/cache read view (tree / bloom / coord /
-    /// identity + F-queue scalars), published from the tick (R3).
+    /// Derived/routing/cache read view (tree / bloom / coord /
+    /// identity + F-queue scalars), published from the tick.
     routing: Arc<ArcSwap<RoutingSnapshot>>,
-    /// Category-E per-entity table read view (peers / sessions / links /
+    /// Per-entity table read view (peers / sessions / links /
     /// connections / transports + mmp), published from the tick with
-    /// `Vec<Arc<Row>>` structural sharing (R4).
+    /// `Vec<Arc<Row>>` structural sharing.
     entities: Arc<ArcSwap<EntitySnapshot>>,
 }
 
@@ -90,19 +96,19 @@ impl ControlReadHandle {
     }
 
     /// Load the latest published stats snapshot (the freshest available by
-    /// construction; no IO_TIMEOUT staleness gate, per Q1-e).
+    /// construction; no IO_TIMEOUT staleness gate).
     pub(crate) fn stats(&self) -> arc_swap::Guard<Arc<StatsSnapshot>> {
         self.stats.load()
     }
 
-    /// Load the latest published Category-D routing snapshot (freshest
-    /// available by construction; no staleness gate, per Q1-e).
+    /// Load the latest published routing snapshot (freshest
+    /// available by construction; no staleness gate).
     pub(crate) fn routing(&self) -> arc_swap::Guard<Arc<RoutingSnapshot>> {
         self.routing.load()
     }
 
-    /// Load the latest published Category-E entity snapshot (freshest available
-    /// by construction; no staleness gate, per Q1-e).
+    /// Load the latest published entity snapshot (freshest available
+    /// by construction; no staleness gate).
     pub(crate) fn entities(&self) -> arc_swap::Guard<Arc<EntitySnapshot>> {
         self.entities.load()
     }
@@ -110,14 +116,16 @@ impl ControlReadHandle {
 
 /// Attempt to serve a request entirely from the read handle, off the rx_loop.
 ///
-/// Returns `Some(response)` when the command is a pure-snapshot query that has
-/// been cut over to off-loop rendering, or `None` when it must take the
-/// mpsc → rx_loop path (parameterized queries, mutations, and any query not
-/// yet cut over).
+/// Returns `Some(response)` when the command can be rendered from the bundled
+/// snapshot cells, or `None` when it must take the mpsc → rx_loop path.
 ///
-/// Cutover queries (R1) read only `NodeContext` / `MetricsRegistry` (the state
-/// the read handle already bundles) plus host-OS facts (`/proc`, nftables), so
-/// they render entirely in the control task without touching `Node`.
+/// The queries served here read any of the cells the handle bundles —
+/// `context`, `metrics`, `stats`, `routing`, `entities` — plus host-OS facts
+/// gathered in [`super::listening`] and [`super::firewall_state`], so they
+/// render in the control task without touching `Node`. Taking a parameter is
+/// not what decides it: `show_stats_history` is parameterized and is served
+/// here. What falls back is a query needing live `Node` state the snapshot does
+/// not carry, and every mutation.
 ///
 /// **It now also carries mutating commands**, namely the `profile_tick_*`
 /// family under the `profiling` feature. They are served here rather than on
@@ -158,18 +166,18 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
         )),
         "show_stats_list" => Some(Response::ok(queries::show_stats_list())),
         "show_metrics" => Some(Response::ok(queries::show_metrics_from_handle(handle))),
-        // R5: peer-ACL status, served from the tick-published `StatsSnapshot`.
+        // Peer-ACL status, served from the tick-published `StatsSnapshot`.
         // The ACL is an `arc_swap::ArcSwap<PeerAcl>` reloaded only on the tick;
         // its status projection is captured at the same tick.
         "show_acl" => Some(Response::ok(queries::show_acl_from_handle(handle))),
-        // R2: served from the tick-published `StatsSnapshot` (rings + scalar
+        // Served from the tick-published `StatsSnapshot` (rings + scalar
         // gauges/counts). `show_status` and the two node-level/per-peer series
         // queries carry enough data in the snapshot to render faithfully
         // off-loop, including the parameterized series selectors (the snapshot
         // holds the full rings, so any metric / window / granularity is
         // satisfiable).
         //
-        // R5 closes out the per-peer stats queries: `show_stats_peers` and
+        // The per-peer stats queries: `show_stats_peers` and
         // `show_stats_history_all_peers` now read the snapshot's per-peer
         // `peer_meta` (live `is_active`, resolved npub / display name, captured
         // at publish time) joined against the `history` rings, so they no longer
@@ -188,7 +196,7 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
             handle,
             request.params.as_ref(),
         )),
-        // R3: served from the tick-published `RoutingSnapshot` (tree / bloom /
+        // Served from the tick-published `RoutingSnapshot` (tree / bloom /
         // coord cache / identity cache + F-queue scalars). Display names are
         // resolved at publish time, so these render entirely off-loop. The
         // counter-family `stats` blocks come from the `MetricsRegistry` (also
@@ -200,7 +208,7 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
         "show_identity_cache" => Some(Response::ok(queries::show_identity_cache_from_handle(
             handle,
         ))),
-        // R4: served from the tick-published `EntitySnapshot` (per-entity
+        // Served from the tick-published `EntitySnapshot` (per-entity
         // `Vec<Arc<Row>>` tables with structural sharing). Display names,
         // tree-relationship flags, and Nostr-traversal state are resolved at
         // publish time, so these render entirely off-loop. All six are

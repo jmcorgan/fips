@@ -651,8 +651,11 @@ impl Node {
                         .record_reject(RejectReason::Session(SessionReject::RekeyPending));
                     return;
                 }
-                let our_keypair = self.identity().keypair();
+                // This frame's own copy of the node's long-term private key;
+                // the handshake state keeps its own and clears that on drop.
+                let mut our_keypair = self.identity().keypair();
                 let mut handshake = HandshakeState::new_responder(our_keypair);
+                our_keypair.non_secure_erase();
                 handshake.set_local_epoch(self.startup_epoch());
 
                 if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
@@ -707,8 +710,11 @@ impl Node {
         }
 
         // Create XX responder handshake and process msg1
-        let our_keypair = self.identity().keypair();
+        // This frame's own copy of the node's long-term private key; the
+        // handshake state keeps its own and clears that on drop.
+        let mut our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_responder(our_keypair);
+        our_keypair.non_secure_erase();
         handshake.set_local_epoch(self.startup_epoch());
 
         if let Err(e) = handshake.read_message_1(&setup.handshake_payload) {
@@ -756,7 +762,11 @@ impl Node {
         // Store session entry in AwaitingMsg3 state with ack payload for potential resend.
         // Use a dummy pubkey since we don't know the initiator's identity yet.
         // We use our own pubkey as placeholder; it will be replaced in handle_session_msg3.
-        let placeholder_pubkey = self.identity().keypair().public_key();
+        // `keypair()` hands back a copy of the long-term private key, so the
+        // temporary is bound and erased rather than left to the statement end.
+        let mut our_keypair = self.identity().keypair();
+        let placeholder_pubkey = our_keypair.public_key();
+        our_keypair.non_secure_erase();
         let now_ms = Self::now_ms();
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         let mut entry = SessionEntry::new(
@@ -2188,8 +2198,11 @@ impl Node {
         }
 
         // Create Noise XX initiator handshake
-        let our_keypair = self.identity().keypair();
+        // This frame's own copy of the node's long-term private key; the
+        // handshake state keeps its own and clears that on drop.
+        let mut our_keypair = self.identity().keypair();
         let mut handshake = HandshakeState::new_initiator(our_keypair);
+        our_keypair.non_secure_erase();
         handshake.set_local_epoch(self.startup_epoch());
         let msg1 = handshake
             .write_message_1()

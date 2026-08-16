@@ -1281,6 +1281,18 @@ run_action_pins() {
     record "action-pins" $rc
 }
 
+# Every reference a source comment makes must resolve for a reader who has only
+# this repository. A comment naming a private planning artifact is dead text to
+# everyone outside the workspace holding it, and publishes that workspace's
+# shape to everyone else. A hand-run grep closes the population that exists on
+# the day it runs; this closes it for every commit after.
+run_comment_refs() {
+    local rc=0
+    info "[comment-refs] Checking that every source comment resolves in-repo"
+    "$SCRIPT_DIR/check-comment-refs.sh" || rc=$?
+    record "comment-refs" $rc
+}
+
 # Every daemon log string a test matches on must still be emitted by src/.
 # A stale one does not fail — it stops observing, and an expect-zero assertion
 # built on it then passes for the wrong reason.
@@ -1336,6 +1348,7 @@ main() {
     run_trailing_log
     run_image_scoping
     run_action_pins
+    run_comment_refs
     run_wait_converge
 
     if [[ "$TEST_ONLY" == true ]]; then

@@ -1685,7 +1685,7 @@ async fn test_initiate_peer_connections_schedules_retry_on_no_transport() {
 }
 
 // ============================================================================
-// transport_mtu() — ISSUE-2026-0011 regression coverage
+// transport_mtu() — minimum-across-transports regression coverage
 // ============================================================================
 
 /// Helper: spawn a UdpTransport with the given mtu, started and operational.
@@ -1710,7 +1710,7 @@ async fn make_udp_transport_with_mtu(id: u32, mtu: u16) -> TransportHandle {
 async fn test_transport_mtu_returns_min_across_operational() {
     // Multiple operational transports with varied MTUs. The picker must
     // return the smallest, deterministically, regardless of HashMap
-    // iteration order. This is the core ISSUE-2026-0011 regression test.
+    // iteration order. This is the core regression test for that.
     let mut node = make_node();
     let (packet_tx, packet_rx) = packet_channel(64);
     node.supervisor.packet_tx = Some(packet_tx);

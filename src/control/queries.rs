@@ -2700,8 +2700,8 @@ mod tests {
         assert_snapshot("show_stats_history_all_peers", &render_response(resp));
     }
 
-    /// The five Category-D queries cut over to off-loop serving in R3. Served
-    /// via `snapshot_dispatch`; coverage asserted in
+    /// The five derived/routing/cache queries served off-loop via
+    /// `snapshot_dispatch`; coverage asserted in
     /// `snapshot_dispatch_serves_category_d_queries` below.
     const OFF_LOOP_CATEGORY_D: &[&str] = &[
         "show_tree",
@@ -2711,7 +2711,7 @@ mod tests {
         "show_identity_cache",
     ];
 
-    /// The six Category-E queries cut over to off-loop serving in R4. Served via
+    /// The six per-entity table queries served off-loop via
     /// `snapshot_dispatch`; coverage asserted in
     /// `snapshot_dispatch_serves_category_e_queries`.
     const OFF_LOOP_CATEGORY_E: &[&str] = &[
@@ -2723,7 +2723,7 @@ mod tests {
         "show_mmp",
     ];
 
-    /// Milestone-completion contract: every pure-read `show_*` query is served
+    /// Contract: every pure-read `show_*` query is served
     /// off-loop via `snapshot_dispatch`, and the rx_loop control path carries no
     /// `show_*` arm at all — only the mutating COMMAND handlers (`connect` /
     /// `disconnect`) reach it. This test enumerates the full read surface and
@@ -2797,8 +2797,8 @@ mod tests {
     /// the rx_loop source carries no `queries::dispatch` call and no
     /// `starts_with("show_")` routing branch. Reads the committed source of
     /// `src/node/dataplane/rx_loop.rs` and asserts both markers are absent. This
-    /// is the milestone's "remove `show_*` from the data-plane dispatch path"
-    /// invariant, guarded against regression.
+    /// guards the "no `show_*` on the data-plane dispatch path" invariant
+    /// against regression.
     #[test]
     fn rx_loop_has_no_show_dispatch() {
         let src = include_str!("../node/dataplane/rx_loop.rs");
@@ -2863,10 +2863,10 @@ mod tests {
         }
     }
 
-    /// The R1/R2 scalar-and-series queries are served off-loop via
+    /// The scalar-and-series queries are served off-loop via
     /// `snapshot_dispatch`; mutations return `None` and take the rx_loop COMMAND
     /// path. (`show_stats_peers` / `show_stats_history_all_peers`, formerly
-    /// asserted on-loop here, were cut over in R5 — see
+    /// asserted on-loop here, are now served off-loop too — see
     /// `snapshot_dispatch_serves_every_read_query` for the full read surface.)
     #[test]
     fn snapshot_dispatch_serves_scalar_and_series_queries() {
@@ -2901,7 +2901,7 @@ mod tests {
                 "show_stats_all_history",
                 Some(json!({ "window": "10s", "granularity": "1s" })),
             ),
-            // R3 Category-D cutover.
+            // Derived/routing/cache queries, served off-loop.
             ("show_tree", None),
             ("show_bloom", None),
             ("show_cache", None),
@@ -2923,7 +2923,7 @@ mod tests {
         }
     }
 
-    /// R5 cutover + byte-identity: after a `record_stats_history()` tick the
+    /// Byte-identity: after a `record_stats_history()` tick the
     /// off-loop `show_acl` / `show_stats_peers` / `show_stats_history_all_peers`
     /// renders each equal their on-loop oracle byte-for-byte, and all three are
     /// served off-loop via `snapshot_dispatch`.
@@ -3009,7 +3009,7 @@ mod tests {
         assert_eq!(snap.connection_count, node.connection_count());
         assert_eq!(snap.estimated_mesh_size, node.estimated_mesh_size());
         assert_eq!(snap.effective_ipv6_mtu, node.effective_ipv6_mtu());
-        // R5: the ACL status projection matches the node's live ACL status.
+        // The ACL status projection matches the node's live ACL status.
         assert_eq!(snap.acl_status, node.peer_acl_status());
 
         // Off-loop render must equal the on-loop render byte-for-byte.
@@ -3021,9 +3021,9 @@ mod tests {
         );
     }
 
-    /// The five Category-D queries are served off-loop via `snapshot_dispatch`
-    /// (return `Some` with status ok); everything not cut over stays on the
-    /// rx_loop path (`None`).
+    /// The five derived/routing/cache queries are served off-loop via
+    /// `snapshot_dispatch` (return `Some` with status ok); everything not cut
+    /// over stays on the rx_loop path (`None`).
     #[test]
     fn snapshot_dispatch_serves_category_d_queries() {
         use super::super::protocol::Request;
@@ -3046,7 +3046,7 @@ mod tests {
         }
 
         // Mutations take the rx_loop COMMAND path. (Every read query, including
-        // the per-peer stats-series queries, is served off-loop as of R5.)
+        // the per-peer stats-series queries, is served off-loop.)
         for cmd in ["connect", "disconnect"] {
             assert!(
                 snapshot_dispatch(&req(cmd), &handle).is_none(),
@@ -3056,7 +3056,7 @@ mod tests {
     }
 
     /// The tick-published `RoutingSnapshot` reflects node state, and each
-    /// off-loop Category-D render equals its on-loop render byte-for-byte
+    /// off-loop routing render equals its on-loop render byte-for-byte
     /// (modulo the volatile-key redaction the wire-schema tests already apply).
     #[test]
     fn routing_snapshot_matches_on_loop_after_tick() {
@@ -3115,10 +3115,11 @@ mod tests {
         );
     }
 
-    // ---- R4 Category-E coverage ------------------------------------------
+    // ---- per-entity table coverage ---------------------------------------
 
-    /// The six Category-E queries are served off-loop via `snapshot_dispatch`
-    /// (return `Some` with status ok); mutations take the rx_loop COMMAND path.
+    /// The six per-entity table queries are served off-loop via
+    /// `snapshot_dispatch` (return `Some` with status ok); mutations take the
+    /// rx_loop COMMAND path.
     #[test]
     fn snapshot_dispatch_serves_category_e_queries() {
         use super::super::protocol::Request;
@@ -3141,7 +3142,7 @@ mod tests {
         }
 
         // Mutations take the rx_loop COMMAND path. (Every read query is served
-        // off-loop as of R5.)
+        // off-loop.)
         for cmd in ["connect", "disconnect"] {
             assert!(
                 snapshot_dispatch(&req(cmd), &handle).is_none(),
@@ -3151,7 +3152,7 @@ mod tests {
     }
 
     /// Freshness + fidelity: after a `record_stats_history()` tick (the entity
-    /// publisher site) each off-loop Category-E render equals its on-loop render
+    /// publisher site) each off-loop per-entity render equals its on-loop render
     /// byte-for-byte, and the seeded snapshot is empty before the first tick.
     #[test]
     fn entity_snapshot_matches_on_loop_after_tick() {
@@ -3201,7 +3202,7 @@ mod tests {
         );
     }
 
-    /// Structural sharing (the R4 umbrella mandate): a republish in which only
+    /// Structural sharing: a republish in which only
     /// one row changed re-allocates only that one `Arc<Row>` — every unchanged
     /// row is reused by pointer (`Arc::ptr_eq`). Exercises
     /// [`reconcile_rows`](super::super::snapshot::reconcile_rows), the

@@ -350,15 +350,19 @@ impl Node {
         // Create FMP negotiation payload for msg2 (includes profile, MMP bits, bloom TLV)
         let neg_payload = NegotiationPayload::fmp(1, 1, self.node_profile()).encode();
 
-        let our_keypair = self.identity().keypair();
+        // This frame's own copy of the node's long-term private key; the
+        // handshake state keeps its own and clears that on drop.
+        let mut our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
-        let msg2_response = match machine.receive_handshake_init(
+        let init_result = machine.receive_handshake_init(
             our_keypair,
             self.startup_epoch(),
             noise_msg1,
             Some(&neg_payload),
             packet.timestamp_ms,
-        ) {
+        );
+        our_keypair.non_secure_erase();
+        let msg2_response = match init_result {
             Ok(m) => m,
             Err(e) => {
                 debug!(

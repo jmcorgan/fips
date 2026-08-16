@@ -76,7 +76,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub conntrack: ConntrackConfig,
 
-    /// Inbound mesh port forwarding rules. See TASK-2026-0061.
+    /// Inbound mesh port forwarding rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_forwards: Vec<PortForward>,
 }

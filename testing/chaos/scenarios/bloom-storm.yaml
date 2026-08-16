@@ -72,7 +72,7 @@ netem:
 # `interval_secs`, the policies on the two listed edges are swapped.
 # This drives n04 to alternate parents between n02 and n03 each
 # round. The 4s cadence and 5ms-vs-100ms delta come from the
-# original ISSUE-2026-0019 reproduction harness — they are
+# original reproduction harness for this flap — they are
 # calibrated to produce a parent switch per round under the
 # zero-hysteresis FIPS overrides below.
 link_swap:

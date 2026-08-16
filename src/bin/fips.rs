@@ -10,6 +10,7 @@ use fips::{Config, Node};
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 use tracing_subscriber::{EnvFilter, fmt};
+use zeroize::Zeroize;
 
 /// FIPS mesh network daemon
 #[derive(Parser, Debug)]
@@ -130,7 +131,7 @@ async fn run_daemon(
     fips::node::warn_on_legacy_config_paths();
 
     // Identity provisioning: config nsec > key file > generate ephemeral
-    let resolved = match resolve_identity(&config, &loaded_paths) {
+    let mut resolved = match resolve_identity(&config, &loaded_paths) {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to resolve identity: {}", e);
@@ -150,7 +151,15 @@ async fn run_daemon(
 
     // Create node with resolved identity
     let mut config = config;
-    config.node.identity.nsec = Some(resolved.nsec);
+    // Take the nsec rather than move it: `ResolvedIdentity` clears its copy
+    // on drop, so it cannot be left partially moved. Clear whatever the field
+    // already held first — assigning over it drops the old `String` in place,
+    // which does not run `Drop for IdentityConfig`, so a key that came from
+    // the config file would be freed uncleared.
+    if let Some(mut old) = config.node.identity.nsec.take() {
+        old.zeroize();
+    }
+    config.node.identity.nsec = Some(std::mem::take(&mut resolved.nsec));
     debug!("Creating node");
     let mut node = match Node::new(config) {
         Ok(node) => node,

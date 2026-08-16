@@ -8,6 +8,7 @@ use rand::Rng;
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, ecdh::shared_secret_point};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Symmetric state during handshake.
 ///
@@ -16,13 +17,24 @@ use std::fmt;
 /// `Clone` exists for [`HandshakeState::try_read_message_2`], which has to put
 /// the pre-read state back after a message that mixed material in before
 /// failing to authenticate.
-#[derive(Clone)]
+///
+/// `ck` and `h` are cleared on drop, including on the clone above once it
+/// goes out of scope. `cipher` is skipped because [`CipherState`] clears its
+/// own retained key.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 struct SymmetricState {
     /// Chaining key for key derivation.
     ck: [u8; 32],
-    /// Handshake hash for transcript binding.
+    /// Running SHA-256 accumulator over the handshake transcript.
+    ///
+    /// Maintained by `mix_hash` at every step, but never fed to the AEAD:
+    /// `encrypt_and_hash` passes an empty associated-data field. Nothing in
+    /// production reads it, so it provides no transcript binding today, and
+    /// anything built on `handshake_hash()` (channel binding, an exporter,
+    /// cookie binding) will silently not work until the AAD carries `h`.
     h: [u8; 32],
     /// Current cipher state for encrypting handshake payloads.
+    #[zeroize(skip)]
     cipher: CipherState,
 }
 
@@ -69,6 +81,9 @@ impl SymmetricState {
         let mut key = [0u8; 32];
         key.copy_from_slice(&output[32..64]);
         self.cipher.initialize_key(key);
+        key.zeroize();
+
+        output.zeroize();
     }
 
     /// Encrypt and mix into hash.
@@ -97,10 +112,16 @@ impl SymmetricState {
         k1.copy_from_slice(&output[..32]);
         k2.copy_from_slice(&output[32..64]);
 
-        (CipherState::new(k1), CipherState::new(k2))
+        let ciphers = (CipherState::new(k1), CipherState::new(k2));
+
+        output.zeroize();
+        k1.zeroize();
+        k2.zeroize();
+
+        ciphers
     }
 
-    /// Get the handshake hash (for channel binding).
+    /// Get the handshake hash.
     fn handshake_hash(&self) -> [u8; 32] {
         self.h
     }
@@ -152,9 +173,9 @@ impl HandshakeState {
     /// Create a new XX handshake as initiator.
     ///
     /// XX: neither side knows the other's static key. No pre-message.
-    pub fn new_initiator(static_keypair: Keypair) -> Self {
+    pub fn new_initiator(mut static_keypair: Keypair) -> Self {
         let secp = Secp256k1::new();
-        Self {
+        let state = Self {
             pattern: NoisePattern::Xx,
             role: HandshakeRole::Initiator,
             progress: HandshakeProgress::Initial,
@@ -166,16 +187,22 @@ impl HandshakeState {
             secp,
             local_epoch: None,
             remote_epoch: None,
-        }
+        };
         // No pre-message: neither side's static is mixed into hash.
+
+        // The struct now holds its own copy of the long-term private key and
+        // clears it on drop, so this frame's parameter copy is erased here.
+        static_keypair.non_secure_erase();
+
+        state
     }
 
     /// Create a new XX handshake as responder.
     ///
     /// XX: neither side knows the other's static key. No pre-message.
-    pub fn new_responder(static_keypair: Keypair) -> Self {
+    pub fn new_responder(mut static_keypair: Keypair) -> Self {
         let secp = Secp256k1::new();
-        Self {
+        let state = Self {
             pattern: NoisePattern::Xx,
             role: HandshakeRole::Responder,
             progress: HandshakeProgress::Initial,
@@ -187,8 +214,14 @@ impl HandshakeState {
             secp,
             local_epoch: None,
             remote_epoch: None,
-        }
+        };
         // No pre-message: neither side's static is mixed into hash.
+
+        // The struct now holds its own copy of the long-term private key and
+        // clears it on drop, so this frame's parameter copy is erased here.
+        static_keypair.non_secure_erase();
+
+        state
     }
 
     /// Get our role.
@@ -227,9 +260,15 @@ impl HandshakeState {
         let mut secret_bytes = [0u8; 32];
         rng.fill_bytes(&mut secret_bytes);
 
-        let secret_key =
+        let mut secret_key =
             SecretKey::from_slice(&secret_bytes).expect("32 random bytes is valid secret key");
         self.ephemeral_keypair = Some(Keypair::from_secret_key(&self.secp, &secret_key));
+        secret_bytes.zeroize();
+        // The erase is called non-secure because the private key may sit in
+        // further copies this function cannot name. It still clears the copy
+        // this frame owns; the keypair the key was just stored in is cleared
+        // by `Drop for HandshakeState`.
+        secret_key.non_secure_erase();
     }
 
     /// Perform ECDH between our secret and their public key.
@@ -240,15 +279,26 @@ impl HandshakeState {
     /// may have the wrong parity for the responder's static key. Since P and
     /// -P produce ECDH result points with the same x-coordinate, hashing
     /// only x ensures both sides derive the same shared secret.
+    ///
+    /// `our_secret` is borrowed, so this frame makes no copy of it. Every
+    /// caller below binds the value `Keypair::secret_key` hands back and
+    /// erases that binding once the DH is done, because the returned
+    /// `SecretKey` is a whole private key rather than a handle to one. Those
+    /// erases clear the copies this crate owns; `secp256k1` names its erase
+    /// non-secure because the compiler may hold further copies that no code
+    /// here can name.
     fn ecdh(&self, our_secret: &SecretKey, their_public: &PublicKey) -> [u8; 32] {
         // Get raw (x, y) coordinates (64 bytes) without any hashing
-        let point = shared_secret_point(their_public, our_secret);
+        let mut point = shared_secret_point(their_public, our_secret);
         // Hash only the x-coordinate (first 32 bytes), ignoring y/parity
         let mut hasher = Sha256::new();
         hasher.update(&point[..32]);
-        let hash = hasher.finalize();
+        let mut hash = hasher.finalize();
         let mut result = [0u8; 32];
         result.copy_from_slice(&hash);
+        hash.as_mut_slice().zeroize();
+        point.zeroize();
+        // `result` is moved out, so clearing it belongs to the caller.
         result
     }
 
@@ -368,8 +418,11 @@ impl HandshakeState {
         self.symmetric.mix_hash(&e_pub);
 
         // <- ee: DH(e, re), mix into key
-        let ee = self.ecdh(&ephemeral.secret_key(), &re);
+        let mut sk = ephemeral.secret_key();
+        let mut ee = self.ecdh(&sk, &re);
         self.symmetric.mix_key(&ee);
+        ee.zeroize();
+        sk.non_secure_erase();
 
         // <- s: encrypt our static and send
         let our_static = self.static_keypair.public_key().serialize();
@@ -377,8 +430,11 @@ impl HandshakeState {
         message.extend_from_slice(&encrypted_static);
 
         // <- es: DH(s, re), mix into key
-        let es = self.ecdh(&self.static_keypair.secret_key(), &re);
+        let mut sk = self.static_keypair.secret_key();
+        let mut es = self.ecdh(&sk, &re);
         self.symmetric.mix_key(&es);
+        es.zeroize();
+        sk.non_secure_erase();
 
         // <- epoch: encrypt startup epoch for restart detection
         let encrypted_epoch = self.symmetric.encrypt_and_hash(&epoch)?;
@@ -422,8 +478,11 @@ impl HandshakeState {
 
         // <- ee: DH(e, re), mix into key
         let ephemeral = self.ephemeral_keypair.as_ref().unwrap();
-        let ee = self.ecdh(&ephemeral.secret_key(), &re);
+        let mut sk = ephemeral.secret_key();
+        let mut ee = self.ecdh(&sk, &re);
         self.symmetric.mix_key(&ee);
+        ee.zeroize();
+        sk.non_secure_erase();
 
         // <- s: decrypt responder's static
         let encrypted_static_end = PUBKEY_SIZE + PUBKEY_SIZE + super::TAG_SIZE;
@@ -434,8 +493,11 @@ impl HandshakeState {
         self.remote_static = Some(rs);
 
         // <- es: DH(e, rs), mix into key
-        let es = self.ecdh(&ephemeral.secret_key(), &rs);
+        let mut sk = ephemeral.secret_key();
+        let mut es = self.ecdh(&sk, &rs);
         self.symmetric.mix_key(&es);
+        es.zeroize();
+        sk.non_secure_erase();
 
         // <- epoch: decrypt responder's startup epoch
         let encrypted_epoch = &message[encrypted_static_end..];
@@ -551,8 +613,11 @@ impl HandshakeState {
         message.extend_from_slice(&encrypted_static);
 
         // -> se: DH(s, re), mix into key
-        let se = self.ecdh(&self.static_keypair.secret_key(), &re);
+        let mut sk = self.static_keypair.secret_key();
+        let mut se = self.ecdh(&sk, &re);
         self.symmetric.mix_key(&se);
+        se.zeroize();
+        sk.non_secure_erase();
 
         // -> epoch: encrypt startup epoch for restart detection
         let encrypted_epoch = self.symmetric.encrypt_and_hash(&epoch)?;
@@ -602,8 +667,11 @@ impl HandshakeState {
             .ephemeral_keypair
             .as_ref()
             .expect("should have ephemeral after msg2");
-        let se = self.ecdh(&ephemeral.secret_key(), &rs);
+        let mut sk = ephemeral.secret_key();
+        let mut se = self.ecdh(&sk, &rs);
         self.symmetric.mix_key(&se);
+        se.zeroize();
+        sk.non_secure_erase();
 
         // -> epoch: decrypt initiator's startup epoch
         let encrypted_epoch = &message[encrypted_static_end..];
@@ -669,9 +737,29 @@ impl HandshakeState {
         ))
     }
 
-    /// Get the handshake hash (for channel binding, available after complete).
+    /// Get the handshake hash (available after complete).
     pub fn handshake_hash(&self) -> [u8; 32] {
         self.symmetric.handshake_hash()
+    }
+}
+
+impl Drop for HandshakeState {
+    /// Erase the two private keys this state holds.
+    ///
+    /// `static_keypair` is the node's long-term private key and
+    /// `ephemeral_keypair` is the handshake's own. Both live here for the
+    /// whole handshake, which is longer than in any other frame, so this is
+    /// where clearing them matters most. `Keypair` is `Copy` and so cannot
+    /// clear itself on drop; `HandshakeState` is not, so it does it for both.
+    ///
+    /// This clears the copies this crate owns, not every copy that ever
+    /// existed: `secp256k1` names its erase non-secure because the compiler
+    /// may duplicate or move the bytes to places no code here can name.
+    fn drop(&mut self) {
+        self.static_keypair.non_secure_erase();
+        if let Some(ephemeral) = self.ephemeral_keypair.as_mut() {
+            ephemeral.non_secure_erase();
+        }
     }
 }
 

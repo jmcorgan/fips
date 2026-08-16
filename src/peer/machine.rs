@@ -83,6 +83,7 @@
 
 #![allow(dead_code)]
 
+use crate::identity::ErasingKeypair;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, EstablishSnapshot, Fmp, InboundDecision,
@@ -115,10 +116,24 @@ const RESEND_BACKOFF: f64 = 2.0;
 const REKEY_CADENCE_INTERVAL_MS: u64 = 60_000;
 const REKEY_RESEND_INTERVAL_MS: u64 = 1_000;
 const REKEY_MAX_RESENDS: u32 = 5;
-const REKEY_AFTER_SECS: u64 = 3_600;
-const REKEY_AFTER_MESSAGES: u64 = 1_000_000;
-const DRAIN_WINDOW_MS: u64 = 5_000;
-const LIVENESS_INTERVAL_MS: u64 = 15_000;
+// `REKEY_AFTER_SECS`, `REKEY_AFTER_MESSAGES` and `LIVENESS_INTERVAL_MS` below
+// are placeholders pinned to today's `RekeyConfig` and `NodeConfig` defaults.
+// They are not a wiring to the config: nothing here reads a config value, so
+// an operator override is not tracked. They are what the machine falls back to
+// until it is wired to config. The tie to the defaults is asserted by
+// `rekey_constants_match_the_rekey_config_defaults` and
+// `liveness_interval_matches_the_heartbeat_config_default` rather than stated
+// in these declarations, because `Default for NodeConfig` is an ordinary impl
+// and cannot be called from a `const` initializer.
+const REKEY_AFTER_SECS: u64 = 120;
+const REKEY_AFTER_MESSAGES: u64 = 65_536;
+/// Drain-window deadline armed at rekey cutover. Sourced from the value that
+/// actually governs the live drain so the two cannot drift; the armed timer
+/// is currently stored and never fired (`drive_peer_timers` has no
+/// `DrainExpiry` arm), so this is a stored-value correction, not a live
+/// timing change.
+const DRAIN_WINDOW_MS: u64 = crate::proto::fsp::limits::DRAIN_WINDOW_SECS * 1_000;
+const LIVENESS_INTERVAL_MS: u64 = 10_000;
 const REKEY_DAMPEN_MS: u64 = 30_000;
 const CLOSED_BACKOFF_MS: u64 = 5_000;
 
@@ -777,10 +792,15 @@ impl PeerMachine {
     /// XX msg1 is ephemeral-only (33 bytes) — no identity or epoch.
     pub(crate) fn start_handshake(
         &mut self,
-        our_keypair: Keypair,
+        mut our_keypair: Keypair,
         epoch: [u8; 8],
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
+        // The parameter is this frame's own copy of the node's long-term
+        // private key, and the state checks below return before it is used.
+        // The guard clears it on every exit path.
+        let our_keypair = ErasingKeypair::take(&mut our_keypair);
+
         let msg1 = {
             let direction = self.conn.direction();
             let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
@@ -798,7 +818,9 @@ impl PeerMachine {
             // creates the Noise handshake handle, so there is no
             // `take().expect()` to protect, and its Err path was unreachable in
             // production (one call per fresh outbound handshake).
-            let mut hs = noise::HandshakeState::new_initiator(our_keypair);
+            let mut kp = *our_keypair.get();
+            let mut hs = noise::HandshakeState::new_initiator(kp);
+            kp.non_secure_erase();
             hs.set_local_epoch(epoch);
             let msg1 = hs.write_message_1()?;
 
@@ -821,12 +843,16 @@ impl PeerMachine {
     /// to the returned msg2 bytes.
     pub(crate) fn receive_handshake_init(
         &mut self,
-        our_keypair: Keypair,
+        mut our_keypair: Keypair,
         epoch: [u8; 8],
         message: &[u8],
         negotiation_payload: Option<&[u8]>,
         current_time_ms: u64,
     ) -> Result<Vec<u8>, NoiseError> {
+        // Same as `start_handshake`: the parameter copy outlives two early
+        // returns, so the guard owns it rather than an erase per exit path.
+        let our_keypair = ErasingKeypair::take(&mut our_keypair);
+
         let msg2 = {
             let direction = self.conn.direction();
             let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
@@ -838,7 +864,9 @@ impl PeerMachine {
                 });
             }
 
-            let mut hs = noise::HandshakeState::new_responder(our_keypair);
+            let mut kp = *our_keypair.get();
+            let mut hs = noise::HandshakeState::new_responder(kp);
+            kp.non_secure_erase();
             hs.set_local_epoch(epoch);
 
             // Process XX message 1 (ephemeral only — no identity learned)
@@ -3972,6 +4000,86 @@ mod tests {
             inbound
                 .start_handshake(keypair, make_epoch(), 1100)
                 .is_err()
+        );
+    }
+
+    /// `LIVENESS_INTERVAL_MS` stays pinned to `NodeConfig`'s heartbeat default.
+    ///
+    /// The expectation is read from the default rather than repeated as a
+    /// literal, so raising or lowering `heartbeat_interval_secs` without
+    /// re-pinning the constant reds here instead of drifting unnoticed.
+    #[test]
+    fn liveness_interval_matches_the_heartbeat_config_default() {
+        assert_eq!(
+            LIVENESS_INTERVAL_MS,
+            crate::config::NodeConfig::default().heartbeat_interval_secs * 1_000
+        );
+    }
+
+    /// `REKEY_AFTER_SECS` and `REKEY_AFTER_MESSAGES` stay pinned to
+    /// `RekeyConfig`'s defaults, read from the impl for the same reason.
+    #[test]
+    fn rekey_constants_match_the_rekey_config_defaults() {
+        let defaults = crate::config::RekeyConfig::default();
+        assert_eq!(REKEY_AFTER_SECS, defaults.after_secs);
+        assert_eq!(REKEY_AFTER_MESSAGES, defaults.after_messages);
+    }
+
+    /// A rekey cutover arms the drain timer for the drain window FSP uses.
+    ///
+    /// The expected offset is the literal `10_000`: `DRAIN_WINDOW_SECS` in
+    /// `src/proto/fsp/limits.rs` is 10 seconds, and that is the value this
+    /// deadline is meant to carry. Writing it out rather than reusing
+    /// `DRAIN_WINDOW_MS` is what keeps the assertion able to fail; expressed
+    /// in terms of the constant under test it would move with any re-pointing
+    /// of that constant and assert nothing.
+    #[test]
+    fn drain_expiry_deadline_is_the_configured_drain_window() {
+        let mut alloc = IndexAllocator::new();
+        let id = peer_identity();
+        let addr = *id.node_addr();
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
+        m.state = PeerState::Maintaining {
+            addr,
+            kind: MaintainKind::Rekey(RekeyPhase::PendingCutover),
+        };
+        m.rekey_our_index = Some(SessionIndex::new(0x2222));
+        m.conn.set_our_index(SessionIndex::new(0x1111));
+        m.remote_epoch = Some([9u8; 8]);
+        m.session_established_at_ms = 0;
+
+        let actions = m.step(
+            PeerEvent::Timeout {
+                kind: TimerKind::RekeyCadence,
+            },
+            7_000,
+            &mut alloc,
+        );
+
+        let deadline = actions
+            .iter()
+            .find_map(|a| match a {
+                PeerAction::SetTimer {
+                    kind: TimerKind::DrainExpiry,
+                    at_ms,
+                } => Some(*at_ms),
+                _ => None,
+            })
+            .expect("the cutover must arm a DrainExpiry timer");
+        assert_eq!(deadline, 7_000 + 10_000);
+    }
+
+    /// `DRAIN_WINDOW_MS` is the FSP drain limit in milliseconds.
+    ///
+    /// This is a tautology as the constant is now declared, and is not
+    /// coverage: it is an executable statement of where the value comes from.
+    /// It reds only if a later edit replaces the const expression with a
+    /// literal that disagrees with the limit.
+    #[test]
+    fn drain_window_ms_is_sourced_from_the_fsp_limit() {
+        assert_eq!(
+            DRAIN_WINDOW_MS,
+            crate::proto::fsp::limits::DRAIN_WINDOW_SECS * 1_000
         );
     }
 }

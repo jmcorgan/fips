@@ -103,7 +103,7 @@ pub struct UdpConfig {
     /// unfamiliar addresses. The Node-level gate at
     /// `src/node/handlers/handshake.rs` carves out msg1 from peers
     /// already established on this transport (so rekey continues to
-    /// work) — see ISSUE-2026-0004.
+    /// work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_connections: Option<bool>,
 }

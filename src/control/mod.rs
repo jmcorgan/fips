@@ -78,8 +78,8 @@ where
             match serde_json::from_str::<Request>(line.trim()) {
                 Ok(request) => {
                     // First try to serve the request entirely off-loop from the
-                    // read handle. In R0 this always returns None (no query is
-                    // cut over yet); R1+ adds the per-command snapshot branches.
+                    // read handle. It returns None for any command with no snapshot
+                    // branch, and those fall through to the rx_loop path below.
                     match snapshot_dispatch(&request, &read_handle) {
                         Some(resp) => resp,
                         None => {
