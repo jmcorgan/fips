@@ -279,7 +279,12 @@ pub struct AndroidBleBridge {
     /// Set once each activation has been performed on this radio, so
     /// re-resolving the slot cannot issue it twice.
     listening: AtomicBool,
-    advertising: AtomicBool,
+    /// The PSM currently being advertised on this radio, or `None` when it is
+    /// not advertising. A lock rather than an atomic, so choosing the PSM and
+    /// telling the radio about it are one step: two callers racing here would
+    /// otherwise be free to land in the opposite order and leave the stale one
+    /// on the air. See [`Self::advertise`].
+    advertising: Mutex<Option<u16>>,
     scanning: AtomicBool,
     channels: Mutex<HashMap<i64, ChannelState>>,
     /// In-flight dials, by `connect_id`.
@@ -300,7 +305,7 @@ impl AndroidBleBridge {
             next_id: AtomicI64::new(1),
             local_psm: AtomicU16::new(0),
             listening: AtomicBool::new(false),
-            advertising: AtomicBool::new(false),
+            advertising: Mutex::new(None),
             scanning: AtomicBool::new(false),
             channels: Mutex::new(HashMap::new()),
             connects: Mutex::new(HashMap::new()),
@@ -321,27 +326,90 @@ impl AndroidBleBridge {
     }
 
     /// Open this radio's listener if it has not been opened yet, and report
-    /// the PSM it bound. Idempotent, so re-resolving the slot cannot open a
-    /// second listener on the same radio.
+    /// the PSM it bound. Idempotent on *success*, so re-resolving the slot
+    /// cannot open a second listener on the same radio.
+    ///
+    /// A failed attempt is deliberately not latched. Latching it would leave
+    /// `local_psm` at zero for the life of the radio, so everything downstream
+    /// would fall back to the configured PSM — and nothing would ever be
+    /// listening on it. One radio that lost a race with the Bluetooth stack
+    /// coming up would then be undialable until the service was restarted.
+    /// Nothing here loops, so the retry costs one call per slot resolve.
     fn open_listener(&self) -> u16 {
         if !self.listening.swap(true, Ordering::AcqRel) {
             let psm = self.radio.listen();
+            if psm == 0 {
+                self.listening.store(false, Ordering::Release);
+                debug!("no BLE listener could be opened on the installed radio");
+                return 0;
+            }
             self.local_psm.store(psm, Ordering::Relaxed);
             debug!(psm, "BLE listener opened on the installed radio");
+            // The advertisement can already be on the air carrying the
+            // configured fallback, because `start_advertising` is allowed to
+            // reach a radio whose listener has not opened yet. Now that a real
+            // PSM exists, it has to replace what is being announced.
+            self.readvertise(psm);
         }
         self.local_psm.load(Ordering::Relaxed)
     }
 
-    /// Start advertising `psm` if this radio is not advertising already.
-    fn begin_advertising(&self, psm: u16) {
-        if !self.advertising.swap(true, Ordering::AcqRel) {
-            self.radio.start_advertising(psm);
+    /// Advertise this radio's bound listener PSM, or `fallback` until the
+    /// platform has assigned one.
+    ///
+    /// Choosing between the two happens *under the advertising lock*, in the
+    /// same step as issuing it. Reading the bound PSM first and advertising
+    /// second — as two steps — loses the race the transport's own start
+    /// sequence runs: `listen` resolves an empty slot and reports the
+    /// configured PSM, a radio is installed in the gap, and `start_advertising`
+    /// then reads a zero bound PSM off it. Meanwhile the acceptor adopts that
+    /// same radio, opens its listener and announces the real PSM — after
+    /// which the first caller lands its stale fallback on top, and sticks.
+    ///
+    /// Sticking is what makes this fatal rather than untidy. A peer dials what
+    /// it hears, so an advertisement carrying a PSM nothing is listening on
+    /// makes this node permanently undialable: the platform rejects every
+    /// inbound L2CAP connect request as an unknown PSM, below the application,
+    /// so the node never learns why nobody reaches it.
+    fn advertise(&self, fallback: u16) {
+        let mut advertising = self.advertising.lock().unwrap_or_else(|e| e.into_inner());
+        let bound = self.local_psm.load(Ordering::Relaxed);
+        self.issue_advert(&mut advertising, if bound != 0 { bound } else { fallback });
+    }
+
+    /// Move a *live* advertisement onto `psm`.
+    ///
+    /// Does nothing if this radio was never asked to advertise: opening a
+    /// listener is not itself such a request.
+    fn readvertise(&self, psm: u16) {
+        let mut advertising = self.advertising.lock().unwrap_or_else(|e| e.into_inner());
+        if advertising.is_some() {
+            self.issue_advert(&mut advertising, psm);
         }
+    }
+
+    /// Idempotent on the PSM, not on the call: a *different* PSM re-issues the
+    /// advertisement rather than being swallowed, which is the whole point —
+    /// see [`Self::advertise`]. Repeating the same one does not restart the
+    /// advertiser, so the activations a slot-follower performs on every
+    /// resolve stay free.
+    fn issue_advert(&self, advertising: &mut Option<u16>, psm: u16) {
+        if *advertising == Some(psm) {
+            return;
+        }
+        *advertising = Some(psm);
+        // Told under the lock, so the radio ends up carrying whatever the last
+        // caller to *decide* chose. Releasing first would let a slower caller
+        // land its already-superseded PSM afterwards.
+        // `AndroidRadio::start_advertising` returns immediately by contract, so
+        // nothing blocks here.
+        self.radio.start_advertising(psm);
     }
 
     /// Stop advertising, so a later request starts it again.
     fn end_advertising(&self) {
-        if self.advertising.swap(false, Ordering::AcqRel) {
+        let mut advertising = self.advertising.lock().unwrap_or_else(|e| e.into_inner());
+        if advertising.take().is_some() {
             self.radio.stop_advertising();
         }
     }
@@ -519,6 +587,32 @@ impl AndroidBleBridge {
 // BleIo implementation
 // ============================================================================
 
+/// Reclaims an in-flight dial's slot in [`AndroidBleBridge::connects`] when
+/// the dial goes away.
+///
+/// A dial cannot rely on its own code running to clean up after itself. The
+/// transport bounds the wait with [`tokio::time::timeout`] and, when that
+/// fires, simply *drops* the future — neither arm of the `rx.await` in
+/// [`AndroidIo::connect`] gets to run. Without this the sender would sit in
+/// the map waiting for an answer the embedder may never send, and a node whose
+/// dials keep timing out would grow that map for the life of the process.
+///
+/// Answering a dial removes the entry first, so this is then a no-op.
+struct InFlightDial {
+    bridge: Arc<AndroidBleBridge>,
+    connect_id: i64,
+}
+
+impl Drop for InFlightDial {
+    fn drop(&mut self) {
+        self.bridge
+            .connects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.connect_id);
+    }
+}
+
 /// Map an operation attempted with no radio installed onto a transport error.
 ///
 /// Deliberately an ordinary I/O error rather than `NotSupported`: the radio is
@@ -661,13 +755,15 @@ impl RadioIntent {
     /// Each activation is idempotent per radio, so it does not matter which
     /// slot-follower gets here first after a swap, or how often.
     fn apply(&self, bridge: &AndroidBleBridge) {
-        let mut psm = 0;
         if self.listen.load(Ordering::Relaxed) {
-            psm = bridge.open_listener();
+            bridge.open_listener();
         }
         if self.advertise.load(Ordering::Relaxed) {
-            let fallback = self.advertise_fallback_psm.load(Ordering::Relaxed);
-            bridge.begin_advertising(if psm != 0 { psm } else { fallback });
+            // The bridge picks between its bound PSM and this fallback itself,
+            // under the lock that also issues the advertisement. Deciding out
+            // here would reintroduce the stale-PSM race — see
+            // [`AndroidBleBridge::advertise`].
+            bridge.advertise(self.advertise_fallback_psm.load(Ordering::Relaxed));
         }
         if self.scan.load(Ordering::Relaxed) {
             bridge.begin_scanning();
@@ -848,20 +944,19 @@ impl BleIo for AndroidIo {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(connect_id, tx);
+        // Reclaims the entry however this dial ends — including the ending
+        // that runs no code here at all. See [`InFlightDial`].
+        let _in_flight = InFlightDial {
+            bridge: Arc::clone(&bridge),
+            connect_id,
+        };
         bridge.radio.connect(connect_id, addr, psm);
         // The transport bounds this wait itself, so there is no timeout here.
         match rx.await {
             Ok(ep) => Ok(AndroidStream::from_endpoints(ep, Arc::clone(&bridge.radio))),
-            Err(_) => {
-                bridge
-                    .connects
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&connect_id);
-                Err(TransportError::Io(std::io::Error::other(format!(
-                    "BLE connect to {addr} failed"
-                ))))
-            }
+            Err(_) => Err(TransportError::Io(std::io::Error::other(format!(
+                "BLE connect to {addr} failed"
+            )))),
         }
     }
 
@@ -874,8 +969,11 @@ impl BleIo for AndroidIo {
         // that is not an error: the intent is recorded, and whichever radio
         // turns up next is told to advertise as it is adopted.
         if let Some(bridge) = self.slot.current() {
-            let bound = bridge.local_psm();
-            bridge.begin_advertising(if bound == 0 { psm } else { bound });
+            // `psm` is only a fallback here. The radio may have bound its own
+            // by now — including in the window between this call and the
+            // `listen` that produced `psm` — and the bridge is what resolves
+            // that, atomically with putting it on the air.
+            bridge.advertise(psm);
         }
         Ok(())
     }
@@ -1291,6 +1389,207 @@ mod tests {
             0x00A1,
             "and it advertises its own listener PSM, not the startup fallback",
         );
+    }
+
+    /// A radio installed *between* `listen` and `start_advertising` — the one
+    /// window the transport's start sequence leaves open — is told to
+    /// advertise the configured fallback, because its listener has not been
+    /// opened yet and it has no PSM of its own to offer. The bound PSM arrives
+    /// a moment later, and has to reach the air: an advertisement left
+    /// carrying the fallback points every peer at a PSM nothing is listening
+    /// on, and the platform rejects their connect requests below the
+    /// application, so the node is silently undialable for as long as it runs.
+    #[tokio::test]
+    async fn a_bound_psm_replaces_a_fallback_that_is_already_on_the_air() {
+        let slot = Arc::new(BleRadioSlot::new());
+        let io = AndroidIo::new(Arc::clone(&slot));
+        // Startup with an empty slot: nothing to bind, so the fallback stands.
+        let (mut acceptor, bound) = io.listen(0x0085).await.unwrap();
+        assert_eq!(bound, 0x0085, "no radio, so the request is all there is");
+
+        // The radio turns up here — after `listen` resolved an empty slot and
+        // before the transport gets to `start_advertising`.
+        let radio = MockRadio::with_psm(0x00A1);
+        let bridge = AndroidBleBridge::new(Arc::clone(&radio) as Arc<dyn AndroidRadio>);
+        slot.install(Arc::clone(&bridge));
+
+        io.start_advertising(bound).await.unwrap();
+        assert_eq!(
+            radio.advertised_psm.load(Ordering::Relaxed),
+            0x0085,
+            "with no listener open yet, the fallback is the only PSM there is",
+        );
+
+        // Driving the acceptor adopts the radio, which opens its listener.
+        let accepting = tokio::spawn(async move { acceptor.accept().await });
+        loop {
+            if bridge.deliver_inbound(addr(16), 512, 512) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        accepting.await.unwrap().unwrap();
+
+        assert_eq!(bridge.local_psm(), 0x00A1);
+        assert_eq!(
+            radio.advertised_psm.load(Ordering::Relaxed),
+            0x00A1,
+            "the bound PSM must replace the fallback on the air, not be swallowed \
+             as 'already advertising'",
+        );
+    }
+
+    /// The counterpart: re-issuing is keyed on the PSM changing, so the
+    /// repeated activations a slot-follower performs do not restart the
+    /// advertiser on every resolve.
+    #[tokio::test]
+    async fn re_advertising_the_same_psm_does_not_restart_the_advertiser() {
+        let radio = MockRadio::with_psm(0x00A1);
+        let (slot, bridge) = slot_with(Arc::clone(&radio));
+        let io = AndroidIo::new(Arc::clone(&slot));
+        let (_acceptor, bound) = io.listen(0x0085).await.unwrap();
+        io.start_advertising(bound).await.unwrap();
+        io.start_advertising(bound).await.unwrap();
+        bridge.advertise(0x0085);
+
+        assert_eq!(radio.advertised_psm.load(Ordering::Relaxed), 0x00A1);
+        assert_eq!(
+            radio.advertise_calls.load(Ordering::Relaxed),
+            1,
+            "one PSM, one advertisement",
+        );
+    }
+
+    /// The stale-PSM race the *lock* is for, rather than the swallowed-call
+    /// one above. A caller reaches this radio before its listener is open, so
+    /// the only PSM it can offer is the configured fallback; the listener
+    /// opens underneath it and announces the real one. Whichever order those
+    /// two land in, the radio must be left carrying the bound PSM — which is
+    /// only guaranteed because the choice between bound and fallback is made
+    /// under the same lock that issues the advertisement, not before it.
+    #[tokio::test]
+    async fn a_fallback_decided_before_the_listener_opened_cannot_land_last() {
+        let radio = MockRadio::with_psm(0x00A1);
+        let bridge = AndroidBleBridge::new(Arc::clone(&radio) as Arc<dyn AndroidRadio>);
+
+        // The listener opens first, and nothing is on the air yet, so opening
+        // it does not start an advertisement of its own.
+        assert_eq!(bridge.open_listener(), 0x00A1);
+        assert_eq!(
+            radio.advertise_calls.load(Ordering::Relaxed),
+            0,
+            "opening a listener is not a request to advertise",
+        );
+
+        // Now the caller that was holding the fallback gets there.
+        bridge.advertise(0x0085);
+        assert_eq!(
+            radio.advertised_psm.load(Ordering::Relaxed),
+            0x00A1,
+            "the fallback is a fallback: a bound PSM outranks it, whenever the \
+             caller happened to be handed it",
+        );
+    }
+
+    /// A radio whose listener could not be opened is retried on the next slot
+    /// resolve rather than being written off. Latching the failure would pin
+    /// `local_psm` at zero for the life of the radio, so this node would go on
+    /// advertising a configured PSM nothing is listening on — the same silent
+    /// undialability, reached from the other direction.
+    #[tokio::test]
+    async fn a_listener_that_failed_to_open_is_retried_on_the_next_resolve() {
+        let radio = Arc::new(MockRadio::default()); // listen() reports 0
+        let (slot, bridge) = slot_with(Arc::clone(&radio));
+        let io = AndroidIo::new(Arc::clone(&slot));
+
+        let (_acceptor, bound) = io.listen(0x0085).await.unwrap();
+        assert_eq!(bound, 0x0085, "nothing bound, so the request stands");
+        assert_eq!(radio.listen_calls.load(Ordering::Relaxed), 1);
+
+        // The Bluetooth stack comes up; the next resolve gets a real listener.
+        radio.listen_psm.store(0x00A1, Ordering::Relaxed);
+        let _scanner = io.start_scanning().await.unwrap();
+
+        assert_eq!(radio.listen_calls.load(Ordering::Relaxed), 2, "retried");
+        assert_eq!(bridge.local_psm(), 0x00A1);
+    }
+
+    /// Opening a listener moves a *live* advertisement onto the bound PSM.
+    /// This is the ordering the transport's start sequence actually produces
+    /// when a radio is installed in the gap between `listen` and
+    /// `start_advertising`, and it is the one the old `AtomicBool` swallowed.
+    #[tokio::test]
+    async fn opening_a_listener_moves_a_live_advert_onto_the_bound_psm() {
+        let radio = MockRadio::with_psm(0x00A1);
+        let bridge = AndroidBleBridge::new(Arc::clone(&radio) as Arc<dyn AndroidRadio>);
+
+        bridge.advertise(0x0085);
+        assert_eq!(radio.advertised_psm.load(Ordering::Relaxed), 0x0085);
+
+        bridge.open_listener();
+        assert_eq!(
+            radio.advertised_psm.load(Ordering::Relaxed),
+            0x00A1,
+            "the live advert follows the listener onto its real PSM",
+        );
+        assert_eq!(radio.advertise_calls.load(Ordering::Relaxed), 2);
+    }
+
+    /// A dial the transport gives up on must not leave its entry behind. The
+    /// transport bounds every dial with its own timeout and drops the future
+    /// when it fires, so nothing in `connect` runs — the reclamation has to
+    /// hang off the drop, or a node that keeps timing out grows the in-flight
+    /// map for the life of the process. This is the BLE-side half of the
+    /// Android leak: on the embedder's side the same dial is a socket holding
+    /// an LE connect slot.
+    #[tokio::test]
+    async fn a_dial_the_transport_abandons_reclaims_its_in_flight_slot() {
+        let radio = MockRadio::with_psm(0x0099);
+        let (slot, bridge) = slot_with(Arc::clone(&radio));
+        let io = AndroidIo::new(slot);
+
+        let peer = addr(19);
+        for _ in 0..50 {
+            // A dial that is never answered, dropped the way
+            // `tokio::time::timeout` drops one it has given up on.
+            let mut dial = Box::pin(io.connect(&peer, 0x0085));
+            assert!(futures::poll!(dial.as_mut()).is_pending());
+            drop(dial);
+        }
+
+        assert_eq!(radio.dials().len(), 50, "every dial reached the radio");
+        assert!(
+            bridge
+                .connects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "abandoned dials must not accumulate in the in-flight map",
+        );
+    }
+
+    /// And an answer that arrives for a dial nobody is waiting on any more is
+    /// reported as such rather than silently allocating a channel — otherwise
+    /// the embedder would start a reader and writer over a stream the
+    /// transport had already written off.
+    #[tokio::test]
+    async fn answering_an_abandoned_dial_allocates_nothing() {
+        let radio = MockRadio::with_psm(0x0099);
+        let (slot, bridge) = slot_with(Arc::clone(&radio));
+        let io = AndroidIo::new(slot);
+
+        let peer = addr(20);
+        let mut dial = Box::pin(io.connect(&peer, 0x0085));
+        assert!(futures::poll!(dial.as_mut()).is_pending());
+        let connect_id = radio.dials()[0].0;
+        drop(dial);
+
+        assert_eq!(
+            bridge.deliver_connect_result(connect_id, true, addr(20), 512, 512),
+            0,
+            "nothing is waiting, so the embedder is told to close its socket",
+        );
+        assert!(bridge.lock_channels().is_empty());
     }
 
     /// Replacing a radio re-activates the transport's intent on the new one
