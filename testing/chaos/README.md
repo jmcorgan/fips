@@ -3,10 +3,11 @@
 Automated network testing for FIPS. Generates random or explicit
 topologies, spins up Docker containers, and applies configurable
 stressors (network impairment, link flaps, traffic generation, node
-churn) over a timed simulation run. Scenarios cover general stress
-testing, cost-based parent selection, mixed link technologies
-(fiber/Bluetooth/WiFi), and transport-specific validation (UDP, TCP,
-Ethernet). Logs are collected and analyzed automatically.
+churn) over a timed simulation run. Scenarios cover general stress and
+node churn, discovery over sparse topologies, spanning-tree and
+bloom-propagation regression, transport-specific validation (UDP, TCP,
+Ethernet), and ECN/congestion testing. Logs are collected and analyzed
+automatically.
 
 ## Prerequisites
 
@@ -23,24 +24,56 @@ Ethernet). Logs are collected and analyzed automatically.
 
 ## Available Scenarios
 
-### General stress tests
+### General stress and churn
 
-Random topologies with increasing stressor intensity.
+Random topologies with increasing stressor intensity. All three enable
+netem mutation, link flaps, iperf traffic, node churn and bandwidth
+tiers, and differ in transport mix, density, and whether the peer set
+itself churns. Each takes a `--nodes N` override, so the node counts
+below are defaults rather than fixed sizes.
 
-| Scenario | Nodes | Topology         | Duration | Netem | Link Flaps | Traffic | Node Churn | Bandwidth |
-| -------- | ----- | ---------------- | -------- | ----- | ---------- | ------- | ---------- | --------- |
-| chaos-10 | 10    | random_geometric | 120s     | yes   | yes        | yes     | --         | --        |
-| churn-10 | 10    | random_geometric | 600s     | yes   | yes        | yes     | yes        | --        |
-| churn-20 | 20    | erdos_renyi      | 600s     | yes   | yes        | yes     | yes        | yes       |
+| Scenario         | Nodes | Topology         | Duration | Peer churn |
+| ---------------- | ----- | ---------------- | -------- | ---------- |
+| churn-mixed      | 20    | erdos_renyi      | 600s     | --         |
+| maelstrom        | 20    | erdos_renyi      | 600s     | yes        |
+| maelstrom-sparse | 50    | random_geometric | 600s     | yes        |
 
-- **chaos-10**: Network degradation (5-50ms delay, 0-2% loss), link flaps (max 2
-  down, 10-30s), and iperf traffic (max 3 concurrent). Netem mutates 30% of
-  links every 15-30s between normal and degraded policies.
-- **churn-10**: Extended run with node churn (1 node down at a time, 30-90s).
-  Tests tree re-convergence after node departure/rejoin.
-- **churn-20**: Aggressive scale test. Erdos-Renyi topology, up to 5 nodes down
-  simultaneously, bandwidth tiers (1/10/100/1000 Mbps), `protect_connectivity`
-  disabled (partitions allowed).
+- **churn-mixed**: Mixed transports on one mesh (60% UDP, 20% Ethernet, 20%
+  TCP). Netem mutates 30% of links every 20-45s between normal and degraded
+  policies; link flaps (max 3 down, 10-30s, connectivity protected); node
+  churn (max 5 down, 30-90s, partitions allowed); bandwidth tiers
+  (1/10/100/1000 Mbps). Carries baseline assertions, so a run in which the
+  mesh never formed cannot report success. Local CI runs it as
+  `churn-mixed --nodes 10 --duration 120`, which is the invocation its
+  thresholds are calibrated for.
+- **maelstrom**: The same stressors plus peer-level topology mutation
+  (connect/disconnect every 8-12s) and ephemeral identities on half the
+  nodes, with `coord_ttl_secs: 10` so coordinate cache entries expire during
+  the run. Tests re-convergence when the peer set and the identities behind
+  it both move.
+- **maelstrom-sparse**: 50-node sparse random geometric graph (radius 0.20,
+  roughly 3-4 peers per node), which forces multi-hop routing and heavy
+  discovery use. The short coordinate TTL expires transit-warmed entries, so
+  nodes must rediscover rather than coast on the cache.
+
+### Spanning-tree and bloom propagation
+
+Explicit topology with an induced parent flap. **No runner invokes this
+scenario.** It was retired from both the local and the cloud runner and is
+hand-run only; the files remain in the tree and the retirement is recorded as a
+coverage gap rather than as a migration to other tests.
+
+| Scenario    | Nodes | Topology | Duration | What it tests                   |
+| ----------- | ----- | -------- | -------- | ------------------------------- |
+| bloom-storm | 6     | explicit | 180s     | Bloom rate under sustained flap |
+
+- **bloom-storm**: Six-node depth-4 mesh. The two candidate uplinks at depth 2
+  swap netem delay (5ms against 100ms) every 4s with parent-flap dampening
+  disabled, so the node switches parents each round. Asserts a ceiling on the
+  `stats.bloom.sent` delta per node over the trailing 30s, and a floor of 10
+  parent switches so a harness that never produced a real switch cannot pass
+  trivially. `scenarios/bloom-storm.README.md` carries the bug-class
+  description and the threshold derivation.
 
 ### Cost-based parent selection — retired, now sans-IO unit tests
 
@@ -65,7 +98,7 @@ Explicit topologies exercising non-UDP transports.
 
 | Scenario      | Nodes | Transport      | Shape | Duration | Netem | Link Flaps | What it tests                              |
 | ------------- | ----- | -------------- | ----- | -------- | ----- | ---------- | ------------------------------------------ |
-| ethernet-only | 4     | Ethernet       | Ring  | 90s      | yes   | --         | AF_PACKET transport with beacon discovery  |
+| ethernet-only | 4     | Ethernet       | Ring  | 30s      | yes   | --         | AF_PACKET transport with beacon discovery  |
 | ethernet-mesh | 6     | UDP + Ethernet | Mesh  | 120s     | yes   | yes        | Mixed UDP/Ethernet, netem mutation + flaps |
 | tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps      |
 
@@ -137,27 +170,32 @@ scenario runs.
 | `--duration secs` | Override the scenario's duration     |
 | `--list`          | List available scenarios             |
 
-The scenario argument accepts either a name (`churn-10`) or a file
-path (`scenarios/churn-10.yaml`).
+The scenario argument accepts either a name (`churn-mixed`) or a file
+path (`scenarios/churn-mixed.yaml`). `--list` prints the names that
+resolve.
 
 ## Scenario YAML Format
 
-Annotated example based on `churn-10.yaml`:
+Annotated example based on `churn-mixed.yaml`:
 
 ```yaml
 scenario:
-  name: "churn-10"
+  name: "churn-mixed"
   seed: 42                          # deterministic RNG seed
   duration_secs: 600                # total simulation time
 
 topology:
-  num_nodes: 10
-  algorithm: random_geometric       # or erdos_renyi, chain
+  num_nodes: 20
+  algorithm: erdos_renyi            # or random_geometric, chain, explicit
   params:
-    radius: 0.5                     # algorithm-specific parameter
+    p: 0.3                          # algorithm-specific parameter
   ensure_connected: true            # retry until graph is connected
-  subnet: "172.20.0.0/24"
+  subnet: "172.20.0.0/16"
   ip_start: 10                      # first node gets .10
+  transport_mix:                    # fraction of edges per transport
+    udp: 0.6
+    ethernet: 0.2
+    tcp: 0.2
 
 netem:
   enabled: true
@@ -180,32 +218,43 @@ netem:
 link_flaps:
   enabled: true
   interval_secs: { min: 30, max: 60 }
-  max_down_links: 2
+  max_down_links: 3
   down_duration_secs: { min: 10, max: 30 }
   protect_connectivity: true        # never partition the graph
 
 traffic:
   enabled: true
-  max_concurrent: 3
-  interval_secs: { min: 10, max: 30 }
-  duration_secs: { min: 5, max: 15 }
+  max_concurrent: 10
+  interval_secs: { min: 0, max: 30 }
+  duration_secs: { min: 5, max: 90 }
   parallel_streams: 4
 
 node_churn:
   enabled: true
-  interval_secs: { min: 60, max: 180 }
-  max_down_nodes: 1
+  interval_secs: { min: 60, max: 90 }
+  max_down_nodes: 5
   down_duration_secs: { min: 30, max: 90 }
-  protect_connectivity: true        # never kill the last path
+  protect_connectivity: false       # partitions allowed
 
 bandwidth:
-  enabled: false                    # per-link HTB rate limiting
+  enabled: true                     # per-link HTB rate limiting
   tiers_mbps: [1, 10, 100, 1000]   # each link randomly assigned a tier
+
+assertions:                         # evaluated after the run
+  baseline:
+    min_nodes_reporting: 10
+    max_roots: 6
+    min_nodes_parented: 4
+    min_sessions: 10
 
 logging:
   rust_log: "debug"
   output_dir: "./sim-results"
 ```
+
+The assertion thresholds in the shipped file are calibrated against
+recorded runs at the invocation CI uses, and the file's own comments say
+what they were derived from. Read those before retuning them.
 
 ## Topology Algorithms
 
