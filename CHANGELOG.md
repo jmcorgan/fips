@@ -449,6 +449,36 @@ with v0.4.x or earlier peers.
   reports false when the result is zero, and `can_forward` is true only at a
   TTL of 2 or more.
 
+- Comments throughout the source tree, the packaging files and the test scripts
+  no longer cite internal identifiers, planning documents or private stage names
+  that a reader of the published tree cannot resolve; each now states the thing
+  the citation stood for. A handful of comments that described behaviour the
+  code does not have — the control-plane read path, its snapshot dispatch, and
+  the MMP report types — have been corrected rather than merely reworded. One of
+  the edited files, the DNS setup helper, installs to `/usr/lib/fips` on every
+  packaging path, so its comment reached users. No code changed.
+
+- **Source-breaking for consumers of the library crate**: four public types now
+  implement `Drop`, so their fields can no longer be moved out. `Identity`,
+  `ResolvedIdentity`, `IdentityConfig` and `HandshakeState` each gained one as
+  part of clearing key material at end of scope. `IdentityConfig` is the one
+  most likely to be reached in practice, since it hangs off the public `Config`
+  as `node.identity`, so code that moved the nsec out of a configuration value
+  no longer compiles and needs `Option::take` instead. Nothing about the
+  behaviour of the shipped binaries changes; this affects only callers using
+  `fips` as a library.
+
+- The warning raised when a lookup response carries a path MTU below the
+  actionable floor now names the request it refused, as a `request_id` field on
+  the log line. Every other warning that handler emits already carried the
+  correlator, and this one could not: it is raised while the cached-coordinates
+  effect is applied, after the response itself has gone out of scope. An
+  operator reading the refusal therefore had a counter and a peer name but no
+  way to tie the line to a particular exchange, or to the sibling lines logged
+  for it. **Only the log line changes** — the response is still accepted, the
+  coordinates are still cached, the sub-floor path MTU is still discarded, and
+  the same counter is still charged.
+
 ### Deprecated
 
 - The `discovery` metric-family key (control-socket JSON). It is dual-emitted
@@ -1075,6 +1105,90 @@ with v0.4.x or earlier peers.
   counters as the denominator, and `unbound_forged` counts the subset whose
   claimed source and destination pairing no honest forwarder could produce.
   The drop log line now carries the signal type and the refusal class.
+
+- Private and symmetric key material is now cleared when it goes out of scope.
+  Nothing in the crate erased a key before this: the node's private key sat in
+  the loaded configuration in plaintext for the whole process lifetime, which is
+  the longest any secret lives here, every Noise handshake left its static and
+  ephemeral keypairs, its per-message Diffie-Hellman results and its chaining
+  key in freed memory, and each session's ChaCha20-Poly1305 keys were dropped
+  intact. Clearing now covers the retained cipher key on each cipher state, the
+  chaining key and the handshake hash, the 64-byte HKDF outputs and the two
+  session keys derived from them, the static and ephemeral keypairs a handshake
+  holds for its whole duration, the identity's long-term keypair, the temporary
+  copy each of the fourteen elliptic-curve operations makes from a keypair, the
+  bech32 and hex encodings of a secret, and the private key on its way through
+  configuration — including the config file's whole text, which is treated as
+  secret for as long as it is held, since `node.identity.nsec` is read straight
+  out of it. Two places that assigned over an already-loaded key now clear the
+  old value first: assignment frees the previous string without running the
+  type's clearing destructor, so a configuration that already carried a key left
+  the superseded copy in the heap whenever a second source replaced it. **This
+  clears the copies the crate owns, not every copy that ever existed.** The
+  secp256k1 key types are copyable, so the compiler may duplicate them where no
+  code here can name them, which is why that library calls its own erase
+  non-secure. The hash and key-derivation states, and the cipher keys cached
+  inside `ring`, offer no clearing route at the versions pinned here and are
+  deliberately left alone; the residue any of this leaves needs access to the
+  process's memory, or to a core dump or swap image of it, to read. Adds a
+  dependency on `zeroize`. Nothing on the wire and no configuration changes.
+
+- A link handshake admitted by the established-address waiver is now confirmed
+  against the identity that owns that address, instead of on the address alone.
+  A transport configured with `accept_connections` false still admits an inbound
+  msg1 whose source matches an established peer, so that a peer re-handshaking
+  after a restart or a rekey is not locked out, but nothing checked that the
+  party sourcing from that address was the peer. Any off-path party able to send
+  from it therefore obtained a full link handshake from a node configured to
+  accept none. Once the key exchange reveals the initiator's static key, the
+  handshake is now dropped unless that key belongs to the identity the matched
+  address is attributed to, and dropped as well when the waiver was used and no
+  identity owns the address at all, which fails closed rather than skipping the
+  check for that case. The cheap refusal is unchanged: a stranger reaching a
+  transport that refuses inbound connections is still turned away before any
+  cryptography. Attribution consults both the reverse-address lookup and the
+  scan over established peers rather than stopping at whichever answers first,
+  because the reverse lookup can name a link that no longer exists, and stopping
+  there would refuse a peer the scan can still attribute — permanently, since
+  the confirmation returns above the code that repairs that lookup. Both
+  refusals log at warning level, naming the expected and actual peers, and
+  charge the existing handshake bad-state rejection counter rather than one of
+  their own.
+
+- An inbound frame whose header disagrees with the frame that arrived is now
+  dropped, at the single dispatch point every transport converges on, before the
+  declared length can be used as a parsing input. The 4-byte common prefix
+  carries a payload length that the node never read, so on the datagram
+  transports — UDP, Ethernet and BLE, which deliver one whole frame per packet
+  and where the arrived length is therefore known exactly — nothing compared the
+  two. This closes no known defect, and it is worth being exact about what it
+  drops on a deployed line. The stream transports (TCP, Tor, Nym) read their
+  frame boundary out of that same field, so the comparison holds by construction
+  and never fires for them. A short datagram is a truncated frame, which already
+  failed the AEAD tag or the exact-size handshake parse, so what changes there
+  is which reason it is dropped for rather than whether it is dropped. A frame
+  whose phase the node does not recognize carries no fixed relationship between
+  the two and is left alone rather than rejected on a guess. The drop takes its
+  own rejection reason and its own `payload_len_mismatch` counter rather than
+  reusing the admission one, since it is a framing rejection decided before the
+  phase dispatch and it applies to established data frames as well as to
+  handshakes; that counter is not yet readable through the control socket.
+
+- The security reference now records that both Noise patterns deviate from the
+  standard construction in one respect: the handshake AEAD passes an empty
+  associated-data field where standard Noise `EncryptAndHash` uses the handshake
+  hash `h`. The published tables named `Noise_IK_secp256k1_ChaChaPoly_SHA256`
+  and `Noise_XK_secp256k1_ChaChaPoly_SHA256` unqualified, so anyone auditing the
+  stack against the Noise specification had nothing telling them where to look.
+  Domain separation and Diffie-Hellman binding survive through the chaining key,
+  which is seeded from the protocol name and chained at every step; transcript
+  binding is the property actually absent. Nothing in the daemon reads the
+  handshake hash, so no shipped behaviour rests on it, but the comments that
+  called it transcript binding or channel binding overstated it and now describe
+  what the field is, and the field records that anything later built on it —
+  channel binding, an exporter, cookie binding — will silently not work until
+  the associated data carries `h`. This is a correction to what is documented
+  and claimed; no code behaviour and nothing on the wire changed.
 
 ## [0.4.1] - 2026-07-19
 
