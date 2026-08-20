@@ -183,10 +183,12 @@ mod bluer_impl {
         AdapterEvent, AddressType, DiscoveryFilter, DiscoveryTransport, adv::Advertisement,
     };
     use futures::StreamExt;
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::pin::Pin;
     use tokio::sync::Mutex;
     use tracing::{debug, trace};
+
+    use super::super::psm;
 
     /// FIPS BLE service UUID.
     ///
@@ -194,6 +196,17 @@ mod bluer_impl {
     /// version/variant bits applied.
     pub const FIPS_SERVICE_UUID: bluer::Uuid =
         bluer::Uuid::from_u128(0x9c90_b790_2cc5_42c0_9f87_c9cc_4064_8f4c);
+
+    /// The PSM service-data key as a whole UUID.
+    ///
+    /// BlueZ speaks in full UUIDs, so [`psm::PSM_SERVICE_DATA_UUID16`] is
+    /// expanded through the Bluetooth base UUID
+    /// (`00009C90-0000-1000-8000-00805F9B34FB`). The controller emits it
+    /// back on the air as the 16-bit Service Data AD structure the wire
+    /// layout in [`psm`] specifies.
+    pub const PSM_SERVICE_DATA_UUID: bluer::Uuid = bluer::Uuid::from_u128(
+        ((psm::PSM_SERVICE_DATA_UUID16 as u128) << 96) | 0x0000_0000_0000_1000_8000_0080_5F9B_34FB,
+    );
 
     /// Map a bluer error to a TransportError.
     fn map_err(context: &str, e: bluer::Error) -> TransportError {
@@ -308,11 +321,12 @@ mod bluer_impl {
     }
 
     impl BleScanner for BluerScanner {
-        /// Yields address-only adverts.
+        /// Yields adverts with the PSM and RSSI when BlueZ can supply them.
         ///
-        /// BlueZ does not yet advertise or read the PSM service data (see
-        /// `super::super::psm`), so `psm` and `rssi` are reported as `None`
-        /// and peers are dialled at the configured PSM, exactly as before.
+        /// The PSM comes out of the peer's Service Data AD structure (see
+        /// `super::super::psm`); a peer that advertises none — a legacy
+        /// UUID-only advertiser — yields `psm: None` and is dialled at the
+        /// configured PSM, exactly as before.
         async fn next(&mut self) -> Option<ScanAdvert> {
             loop {
                 match self.events.next().await {
@@ -322,8 +336,18 @@ mod bluer_impl {
                             match device.uuids().await {
                                 Ok(Some(uuids)) if uuids.contains(&FIPS_SERVICE_UUID) => {
                                     let ble_addr = BleAddr::from_bluer(addr, &self.adapter_name);
-                                    debug!(addr = %ble_addr, "BLE scanner: FIPS peer found");
-                                    return Some(ScanAdvert::new(ble_addr));
+                                    let psm =
+                                        device.service_data().await.ok().flatten().and_then(|sd| {
+                                            sd.get(&PSM_SERVICE_DATA_UUID)
+                                                .and_then(|data| psm::decode_psm(data))
+                                        });
+                                    let rssi = device.rssi().await.ok().flatten();
+                                    debug!(addr = %ble_addr, ?psm, ?rssi, "BLE scanner: FIPS peer found");
+                                    return Some(ScanAdvert {
+                                        addr: ble_addr,
+                                        psm,
+                                        rssi,
+                                    });
                                 }
                                 Ok(_) => {
                                     trace!(addr = %addr, "BLE scanner: device without FIPS UUID");
@@ -464,14 +488,23 @@ mod bluer_impl {
             BluerStream::new(conn, remote)
         }
 
-        /// Advertises the FIPS service UUID only; the PSM argument is ignored.
+        /// Advertises the FIPS service UUID and the listener PSM.
         ///
-        /// Making BlueZ advertise the PSM service data is deliberately
-        /// deferred: it needs the `local_name` dropped to stay inside the
-        /// 31-byte legacy PDU (27 + 6 = 33), and it cannot be validated
-        /// without a second radio. Peers therefore dial this node at their
-        /// configured PSM, which is what they did before this seam existed.
-        async fn start_advertising(&self, _psm: u16) -> Result<(), TransportError> {
+        /// The PSM rides the Service Data AD structure specified in
+        /// `super::super::psm`. Emitting it costs the `local_name`: flags
+        /// (3) + 128-bit UUID list (18) + service data (6) fill 27 of the
+        /// 31-byte legacy PDU, and a name no longer fits. Peers that read
+        /// the service data dial the advertised PSM; legacy peers keep
+        /// dialling their configured one, which BlueZ listeners still bind.
+        ///
+        /// `super::super::psm` requires the PSM to ride the primary
+        /// advertisement, never the scan response, so a passive scanner
+        /// still sees it. Nothing here enforces that: BlueZ takes a set of
+        /// AD structures and chooses their placement itself. What keeps the
+        /// requirement holding is the arithmetic above — 27 of 31 bytes
+        /// used, so BlueZ has no reason to spill into the scan response —
+        /// and dropping the name is what makes it hold.
+        async fn start_advertising(&self, psm: u16) -> Result<(), TransportError> {
             let adv = Advertisement {
                 advertisement_type: bluer::adv::Type::Peripheral,
                 service_uuids: {
@@ -479,7 +512,11 @@ mod bluer_impl {
                     s.insert(FIPS_SERVICE_UUID);
                     s
                 },
-                local_name: Some("fips".to_string()),
+                service_data: {
+                    let mut m = BTreeMap::new();
+                    m.insert(PSM_SERVICE_DATA_UUID, psm::encode_psm(psm).to_vec());
+                    m
+                },
                 min_interval: Some(std::time::Duration::from_millis(400)),
                 max_interval: Some(std::time::Duration::from_millis(600)),
                 ..Default::default()
@@ -492,7 +529,7 @@ mod bluer_impl {
                 .map_err(|e| map_err("advertise", e))?;
 
             *self.adv_handle.lock().await = Some(handle);
-            debug!("BLE advertising started");
+            debug!(psm, "BLE advertising started");
             Ok(())
         }
 
@@ -568,6 +605,25 @@ mod bluer_impl {
     fn _assert_bluer_io_send_sync() {
         fn require<T: Send + Sync>() {}
         require::<BluerIo>();
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A wrong shift in the base-UUID expansion would yield a plausible
+        /// UUID that simply never matches any peer — silent discovery
+        /// failure, not a build error. Companion to psm.rs's
+        /// `test_key_is_the_leading_16_bits_of_the_fips_uuid`.
+        #[test]
+        fn psm_service_data_uuid_expands_the_key_over_the_base_uuid() {
+            assert_eq!(
+                PSM_SERVICE_DATA_UUID,
+                "00009C90-0000-1000-8000-00805F9B34FB"
+                    .parse::<bluer::Uuid>()
+                    .unwrap()
+            );
+        }
     }
 }
 

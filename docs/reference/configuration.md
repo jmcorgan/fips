@@ -745,8 +745,15 @@ entries become no-ops. Communicates with BlueZ via D-Bus through the
 
 **Advertising and scanning.** When `advertise` is enabled, the transport
 advertises the FIPS service UUID continuously so that nearby nodes can
-discover and connect via L2CAP. When `scan` is enabled, the transport
-continuously scans for other FIPS nodes' advertisements. Discovered
+discover and connect via L2CAP, plus the L2CAP PSM its listener actually
+bound, as a service-data structure (see `src/transport/ble/psm.rs` for the
+wire layout and why platforms with OS-assigned PSMs need it). The
+advertisement carries no device name — alongside the PSM a name no longer
+fits the 31-byte legacy PDU, so the node shows up in generic Bluetooth
+scanners as an unnamed device with the FIPS UUID. When `scan` is enabled,
+the transport continuously scans for other FIPS nodes' advertisements and
+learns each peer's advertised PSM; a peer that advertises none is dialled
+at the configured `psm`. Discovered
 peers are probed immediately (L2CAP connect + pubkey exchange) with a
 cooldown (`probe_cooldown_secs`) to prevent rapid re-probing of the same
 address. If two nodes probe each other at the same time (cross-probe),
