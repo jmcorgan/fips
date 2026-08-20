@@ -261,6 +261,37 @@ pub struct UpdatePeersOutcome {
     pub unchanged: usize,
 }
 
+/// One bound UDP listen socket, handed to an embedder that armed
+/// [`Node::enable_app_owned_udp_fd`].
+///
+/// A bare descriptor would be enough for the single-listener case and useless
+/// for any other: a node configured with several named UDP instances
+/// ([`TransportInstances::Named`](crate::config::TransportInstances::Named))
+/// delivers one message per instance, and the whole point of the seam — the
+/// embedder associating a socket with one host network — needs to know *which*
+/// socket it is holding. Naming it here rather than making the embedder infer
+/// it from arrival order is deliberate: transports are created from a
+/// `HashMap`, so arrival order carries no meaning, and guessing wrong pins a
+/// lane's socket to another lane's network, which is precisely the fault this
+/// seam exists to correct.
+///
+/// A struct rather than a tuple so the receiving side reads as
+/// `socket.instance` / `socket.fd`, and so a future addition (the bound local
+/// address, say) does not break every embedder.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppOwnedUdpSocket {
+    /// The configured instance name this listener was built from — the key in
+    /// a `Named` UDP config, and the same name a peer address qualifies its
+    /// transport field with (`"udp/aware"`, see
+    /// [`TransportSpec`](crate::config::TransportSpec)). `None` for a
+    /// `Single` config, which has no name to give.
+    pub instance: Option<String>,
+    /// The bound socket's raw descriptor. Borrowed, not owned: FIPS keeps the
+    /// socket, and the fd is valid only while the transport is running.
+    pub fd: std::os::unix::io::RawFd,
+}
+
 /// Key for addr_to_link reverse lookup.
 type AddrKey = (TransportId, TransportAddr);
 
@@ -358,6 +389,18 @@ pub struct Node {
     /// SYN/SYN-ACK clamp can use the smaller of the local-egress floor
     /// and the learned per-destination path MTU.
     path_mtu_lookup: crate::upper::tun::PathMtuLookup,
+    /// Which transport last supplied a *link seed* into `path_mtu_lookup`,
+    /// per destination.
+    ///
+    /// A `PathMtuEntry` is released when the link that seeded it goes away,
+    /// but two links to one peer can be up at the same time — a phone on both
+    /// BLE and Wi-Fi Aware, say. Then nothing releases the first entry and a
+    /// wider seed from the second transport is refused by the never-loosen
+    /// rule forever. Recording the seeding transport is what distinguishes a
+    /// value that still describes the current path from one that describes a
+    /// path the peer has left. Absent for destinations reached over multiple
+    /// hops: those are never link-seeded, so never-loosen applies unchanged.
+    path_mtu_seeded_by: Arc<std::sync::RwLock<HashMap<crate::FipsAddress, TransportId>>>,
 
     // === Transports & Links ===
     /// Active transports (owned by Node).
@@ -780,6 +823,7 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
             #[cfg(unix)]
@@ -930,6 +974,7 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
             #[cfg(unix)]
@@ -3113,6 +3158,77 @@ impl Node {
         self.supervisor.tun_outbound_rx = Some(outbound_rx);
         self.tun_state = TunState::Active;
         (outbound_tx, tun_rx)
+    }
+
+    /// Set up an **app-owned UDP socket option**: FIPS keeps the socket, and
+    /// the embedder gets its raw fd so it can apply a host socket option FIPS
+    /// has no basis to choose. Call this after [`Node::new`] and **before**
+    /// [`Self::start`] — the fd does not exist until the transport binds.
+    ///
+    /// The UDP transport binds one socket and selects the egress path per
+    /// destination address, which assumes the host routes by destination
+    /// alone. Not every host does. Where each socket is instead associated
+    /// with exactly one network interface (or "network") and inbound traffic
+    /// is steered by that association, a peer reachable only over a secondary,
+    /// non-default network is unreachable in a way FIPS can neither see nor
+    /// correct: the address is well-formed, the send succeeds, the peer
+    /// receives our handshake and replies, and the host discards the reply
+    /// before it reaches our socket. Handshake msg1 then retries forever with
+    /// no error surfaced anywhere. Correcting it is a `setsockopt`-class call
+    /// against host-specific network state, on a descriptor the transport
+    /// otherwise keeps entirely private.
+    ///
+    /// ```no_run
+    /// # async fn f(node: &mut fips::Node) -> Result<(), Box<dyn std::error::Error>> {
+    /// let rx = node.enable_app_owned_udp_fd();          // after new(), before start()
+    /// node.start().await?;
+    /// let socket = rx.recv_timeout(std::time::Duration::from_secs(1))?;
+    /// # let _ = (socket.instance, socket.fd); Ok(())
+    /// # }
+    /// ```
+    ///
+    /// One message is sent per UDP transport that successfully binds — the
+    /// usual single-listener configuration therefore yields exactly one, while
+    /// a config with several named UDP listeners yields one per listener, all
+    /// of which an embedder pinning sockets to a network needs. Each message
+    /// carries the instance name its listener was configured under
+    /// ([`AppOwnedUdpSocket::instance`]), which is the only thing that tells
+    /// two otherwise-identical descriptors apart: pinning the wrong socket to
+    /// the wrong network is exactly the fault this seam exists to let an
+    /// embedder fix, so an fd is never handed over unlabelled. A
+    /// [`Self::stop`] followed by another [`Self::start`] delivers the new
+    /// socket's fd on the same channel, since that is a genuinely different
+    /// descriptor. Nothing at all is sent when no UDP transport is configured
+    /// or a configured one fails to bind, so a receive that times out is how
+    /// an embedder tells "no socket" from "here is the socket". Calling this
+    /// twice replaces the first arming: the last receiver wins.
+    ///
+    /// Scope, stated precisely so it is not read as more than it is:
+    ///
+    /// - The fd is the transport's wildcard listen socket. On targets that
+    ///   also run the per-peer connected-UDP fast path (Linux and macOS), the
+    ///   additional `connect()`-ed sockets that path opens per established
+    ///   peer, after `start()` has returned, are not covered by this seam. On
+    ///   targets without that path the wildcard socket is the only UDP socket
+    ///   the transport opens.
+    /// - Transports that adopt a socket supplied from outside (the
+    ///   NAT-traversal bootstrap handoff) do not fire this, since whoever
+    ///   supplied the socket already held its fd and could bind it before
+    ///   handover.
+    /// - FIPS retains ownership. The fd is a borrow valid while the node is
+    ///   running; using it after the transport stops can touch an unrelated
+    ///   reused descriptor.
+    ///
+    /// Unix-only: `RawFd` is a unix concept and the Windows UDP backend has no
+    /// descriptor. The channel is a [`std::sync::mpsc`] one because the
+    /// embedder is not necessarily on a tokio runtime; the sending end lives on
+    /// the supervisor as `udp_fd_tx` and [`Self::start`] fires it from the
+    /// transport-spawn arm, right after the handle reports a successful start.
+    #[cfg(unix)]
+    pub fn enable_app_owned_udp_fd(&mut self) -> std::sync::mpsc::Receiver<AppOwnedUdpSocket> {
+        let (udp_fd_tx, udp_fd_rx) = std::sync::mpsc::channel();
+        self.supervisor.udp_fd_tx = Some(udp_fd_tx);
+        udp_fd_rx
     }
 
     /// Address the built-in `.fips` DNS responder is listening on, or `None`

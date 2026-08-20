@@ -8,7 +8,9 @@
 use super::*;
 use crate::config::{Config, TcpConfig};
 use crate::transport::tcp::TcpTransport;
-use crate::transport::{TransportAddr, TransportHandle, TransportId, packet_channel};
+use crate::transport::{
+    ConnectionState, TransportAddr, TransportHandle, TransportId, packet_channel,
+};
 use spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, verify_tree_convergence,
 };
@@ -392,6 +394,67 @@ async fn test_tcp_oriented_connect_failure_tears_down_link() {
     assert!(
         nodes[0].node.pending_outbound.is_empty(),
         "connect-failure path must not dispatch msg1"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// `api_disconnect` closes the pooled TCP connection, not just the peer.
+///
+/// Regression test: node-side teardown used to leave the socket, its pool
+/// entry and its inbound-slot accounting alive after the node had forgotten
+/// the peer they belonged to.
+#[tokio::test]
+async fn test_api_disconnect_closes_the_tcp_connection() {
+    let mut nodes = vec![make_test_node_tcp().await, make_test_node_tcp().await];
+
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let total = drain_all_packets(&mut nodes, false).await;
+    assert!(total > 0, "should have processed packets");
+
+    let addr_1 = *nodes[1].node.node_addr();
+    let node1_npub = nodes[1].node.npub();
+
+    let peer = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("node 0 should have node 1 as peer");
+    let peer_transport_id = peer.transport_id().expect("peer should have a transport");
+    let peer_addr = peer
+        .current_addr()
+        .expect("peer should have a current address")
+        .clone();
+
+    assert_eq!(
+        nodes[0]
+            .node
+            .transports
+            .get(&peer_transport_id)
+            .unwrap()
+            .connection_state(&peer_addr),
+        ConnectionState::Connected,
+        "the TCP connection should be pooled while the peer is up"
+    );
+
+    nodes[0]
+        .node
+        .api_disconnect(&node1_npub)
+        .await
+        .expect("api_disconnect should succeed");
+
+    assert!(
+        nodes[0].node.get_peer(&addr_1).is_none(),
+        "node 0 should have removed node 1"
+    );
+    assert_eq!(
+        nodes[0]
+            .node
+            .transports
+            .get(&peer_transport_id)
+            .unwrap()
+            .connection_state(&peer_addr),
+        ConnectionState::None,
+        "the pooled TCP connection must not outlive the peer"
     );
 
     cleanup_nodes(&mut nodes).await;

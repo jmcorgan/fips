@@ -103,4 +103,6 @@ pub use proto::fmp::{PromotionResult, cross_connection_winner};
 pub use peer::{ActivePeer, ConnectivityState, PeerError};
 
 // Re-export node types
+#[cfg(unix)]
+pub use node::AppOwnedUdpSocket;
 pub use node::{Node, NodeError, NodeState, UpdatePeersOutcome};

@@ -164,6 +164,17 @@ not reproduced here to avoid duplicating the source.
 | `connect` | `npub` (bech32), `address` (transport endpoint), `transport` (`udp`, `tcp`, `tor`, `nym`, `ethernet`) | Asks the node to dial the peer over the named transport. The named transport must be configured and running. Returns the API result on success or an error string on failure. |
 | `disconnect` | `npub` (bech32) | Asks the node to drop the link to the named peer. |
 
+`connect` on a peer the node is **already connected to** neither tears the
+live link down nor ignores the address: the address is tried as an alternate
+path alongside the existing one, and the peer moves to it only if that
+handshake authenticates. The response carries `refreshed` — `true` when such a
+handshake was started, `false` when the peer is already on this exact path and
+that path is fresh (a successful no-op). A `connect` that starts an ordinary
+dial to a peer the node does not yet hold also reports `refreshed: false`.
+
+`connect` is ephemeral either way: the peer is not written to the config file
+and gets no auto-reconnect, so an attempt that fails leaves no residue.
+
 Both commands run on the daemon's main task and may block briefly
 while the node mutates its state.
 

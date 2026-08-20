@@ -257,6 +257,57 @@ with v0.4.x or earlier peers.
   validation, since it refuses every inbound offer rather than disabling the
   limit. Existing configurations parse unchanged, the key being optional.
 
+- The UDP transport's listen socket descriptor can now be handed to an
+  embedder, for hosts that associate a socket with one interface or network
+  and steer inbound traffic by that association rather than routing by
+  destination address. On such a host a peer reachable only over a secondary
+  network fails in a way FIPS can neither see nor fix: the address is
+  well-formed, the send succeeds, the peer replies, and the host discards the
+  reply before it reaches our socket, so the link retries msg1 forever with no
+  error surfaced anywhere. The correction is a socket option chosen against
+  host state FIPS has no basis to reason about, so the descriptor goes to
+  whoever does. Call `Node::enable_app_owned_udp_fd()` after `Node::new` and
+  before `start()`, and read `AppOwnedUdpSocket { instance, fd }` off the
+  returned channel once the transport is up, following the existing
+  `enable_app_owned_tun` contract. One message is sent per UDP transport that
+  binds, so a multi-listener configuration yields all of them; nothing is sent
+  when no UDP transport is configured or one fails to bind, so an embedder
+  tells "no socket" from "here is the socket" by the receive timing out. The
+  `instance` field is the name the listener was configured under, `None` for a
+  single unnamed instance, and it is what makes more than one listener usable:
+  transports are created by iterating a map, so arrival order is luck, and an
+  embedder whose whole purpose is to bind one socket to one network would
+  otherwise have to guess which socket it just received. Guessing wrong pins
+  one lane's socket to the other lane's network, which is the failure the seam
+  exists to correct. FIPS keeps owning the socket, and
+  the descriptor carries no promise beyond "this is the transport's socket,
+  and it is open now". Two limits: the per-peer connected-UDP sockets that
+  Linux and macOS open after `start()` returns are not covered, and a
+  transport that adopts a socket handed in by the traversal bootstrap does not
+  fire the seam. Unix only, since the Windows UDP backend has no descriptor.
+
+- A peer address may name which *instance* of a transport it belongs to, as
+  `transport: "udp/aware"` rather than `"udp"`, where the part after the slash
+  is the key the transport was configured under. A node running several
+  instances of one type could not be told them apart by a dialer: both bind
+  wildcard sockets, so the address-family test matches either, and selection
+  fell through to the lowest transport id. One socket carried every dial and
+  the other never carried traffic. A bare type is unqualified and matches any
+  instance, which is what every existing configuration and caller produces, so
+  nothing changes for a node that does not use the syntax. A qualified name is
+  never substituted with a different instance: that is the wrong-lane dial the
+  syntax exists to prevent, so an unmatched name fails the address instead, and
+  the same name is what an embedder binds by and what the dialer routes on. The
+  slash is already how FIPS qualifies an instance inside an address
+  (`eth0/aa:bb:...`) and cannot occur in a type name. Only UDP resolves an
+  instance name today; an address that qualifies any other transport type is
+  refused rather than matched loosely. **Because a qualified name never falls
+  back, the configuration validator rejects one that no configured transport
+  answers to**, naming the peer, the instance asked for and the instances that
+  exist. Otherwise the address would simply be skipped at every dial, which is
+  invisible for a peer that has a second address that works: the lane would
+  never carry traffic and nothing above debug logging would say so.
+
 ### Changed
 
 - `node.rekey.enabled` now means "initiate rekeys" and nothing else. The
@@ -360,7 +411,6 @@ with v0.4.x or earlier peers.
   `nostr.*`, `lan.*`). A deployed `node.discovery:` block still loads and is
   folded into the new tables with a one-time deprecation warning; migrate your
   `fips.yaml` to the new keys.
-
 
 - Inbound traversal offers are now admitted against a per-sender allowance as
   well as the global pool. The intake path previously took a permit from a
@@ -817,6 +867,50 @@ with v0.4.x or earlier peers.
   does on its own; no version mix delivers less far. The `TtlExhausted` reject
   counter now charges at the node that makes the decision rather than at the
   hop after it.
+
+- `disconnect` on the control socket now closes the transport connection
+  rather than only the peer. It notified the peer and freed every node-side
+  structure, sessions, indices, links, address mapping, tree and bloom state,
+  and never touched the transport, so on a connection-oriented transport (TCP,
+  Tor, Nym, BLE) the pool entry, the socket and its inbound-slot accounting
+  survived the peer the node had just forgotten, until the far end closed or
+  the receive loop errored. An operator who disconnected a peer to free a slot
+  did not free the slot. No effect on UDP, Ethernet or loopback, whose
+  `close_connection` is the connectionless no-op. Still not addressed:
+  `disconnect` reports `peer not found` for an identity that is only
+  mid-handshake, so withdrawing a peer during its handshake leaves that leg
+  resending msg1 until the handshake timeout bounds it.
+
+- `connect` on the control socket now tries the address it was given for a
+  peer the node is already connected to, instead of reporting success without
+  doing anything. The command built an ephemeral peer configuration and handed
+  it to the ordinary dial path, which returns success the moment the peer is
+  already held, so `fipsctl connect` printed success and the node never
+  attempted the path. An operator moving a peer onto a freshly provisioned
+  link, or a supervising process that has just seen a second path come up, had
+  no way to make the node use it: the peer stayed where it first authenticated
+  until that path died. The address is now tried as an alternate path
+  alongside the live one, through the same helper a runtime peer refresh uses,
+  so promotion happens only after the alternate handshake authenticates and a
+  wrong address cannot displace a healthy link. The response gains an additive
+  `refreshed` field distinguishing "started an alternate-path handshake" from
+  "already on this exact path and it is fresh". `connect` stays ephemeral: the
+  peer is not written to configuration and gets no auto-reconnect.
+
+- A path MTU measured on one link no longer clamps a peer that has moved to
+  another. Every writer of the per-destination path-MTU cache keeps the
+  smaller of the existing and incoming value, which is right while a peer
+  stays put, but the entry is keyed by destination alone. So a peer first
+  reached over a narrow link stayed clamped to that link's ceiling for the
+  lifetime of the process: when it later became reachable over a wider
+  transport, promotion re-seeded, the seed saw a tighter existing value and
+  declined, and traffic kept running at the old link's ceiling on a link that
+  could carry far more, with nothing reporting it because the clamp was doing
+  exactly what it was told. The node now records which transport last seeded
+  each destination and treats a seed from a different one as authoritative
+  rather than as a loosening to refuse. Re-seeding the same transport still
+  keeps the tighter value, so repeated promotion does not reset discovery, and
+  a destination with no prior seed is unchanged.
 
 ### Security
 

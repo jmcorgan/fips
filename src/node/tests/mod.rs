@@ -11,6 +11,7 @@ mod ble;
 mod bloom;
 mod bloom_poison;
 mod bootstrap;
+mod control;
 mod decrypt_failure;
 mod disconnect;
 mod discovery;

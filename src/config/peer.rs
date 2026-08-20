@@ -22,6 +22,74 @@ pub enum ConnectPolicy {
     Manual,
 }
 
+/// The separator between a transport type and an instance name in a
+/// [`PeerAddress::transport`] field (`"udp/aware"`).
+///
+/// `/` rather than `:` or `.`: it is already how FIPS qualifies an instance
+/// inside an *address* (`"eth0/aa:bb:cc:dd:ee:ff"` for Ethernet,
+/// `"hci0/AA:BB:…"` for BLE), and it cannot occur in a transport type name,
+/// so the split is unambiguous.
+const INSTANCE_SEPARATOR: char = '/';
+
+/// A [`PeerAddress::transport`] field, split into a transport *type* and an
+/// optional *instance name*.
+///
+/// A node can run several instances of one transport type
+/// ([`TransportInstances::Named`](crate::config::TransportInstances::Named)) —
+/// two UDP sockets, say, one pinned to infrastructure Wi-Fi and one to a Wi-Fi
+/// Aware data path. Both bind wildcard sockets, so the dialer's address-family
+/// test cannot tell them apart: every dial would deterministically take the
+/// same instance and the other socket would never carry traffic. Qualifying
+/// the transport field with the configured instance name says which one an
+/// address belongs to.
+///
+/// Syntax: `"<type>"` or `"<type>/<instance>"`, where `<instance>` is the key
+/// the transport was configured under. A bare type is *unqualified* and
+/// matches any instance of that type, which is what every existing config and
+/// caller produces — so this is purely additive.
+///
+/// ```
+/// use fips::config::TransportSpec;
+///
+/// assert_eq!(TransportSpec::parse("udp").instance, None);
+/// assert_eq!(TransportSpec::parse("udp/aware").kind, "udp");
+/// assert_eq!(TransportSpec::parse("udp/aware").instance, Some("aware"));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportSpec<'a> {
+    /// The transport type name, as reported by `TransportType::name`.
+    pub kind: &'a str,
+    /// The required instance name, or `None` to match any instance.
+    pub instance: Option<&'a str>,
+}
+
+impl<'a> TransportSpec<'a> {
+    /// Split a transport field into type and optional instance name.
+    ///
+    /// A field with no separator, an empty type, or an empty instance is
+    /// treated as an unqualified type — malformed input degrades to the
+    /// pre-existing behaviour rather than becoming an unmatchable name.
+    pub fn parse(field: &'a str) -> Self {
+        match field.split_once(INSTANCE_SEPARATOR) {
+            Some((kind, instance)) if !kind.is_empty() && !instance.is_empty() => Self {
+                kind,
+                instance: Some(instance),
+            },
+            _ => Self {
+                kind: field,
+                instance: None,
+            },
+        }
+    }
+
+    /// Whether a transport of type `kind` configured under `name` satisfies
+    /// this spec. An unqualified spec accepts any instance; a qualified one
+    /// accepts only an exact name match, and never falls back.
+    pub fn matches(&self, kind: &str, name: Option<&str>) -> bool {
+        self.kind == kind && self.instance.is_none_or(|want| name == Some(want))
+    }
+}
+
 /// A transport-specific address for reaching a peer.
 ///
 /// Each peer can have multiple addresses across different transports,
@@ -29,7 +97,8 @@ pub enum ConnectPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerAddress {
-    /// Transport type (e.g., "udp", "tor", "ethernet").
+    /// Transport type (e.g., "udp", "tor", "ethernet"), optionally qualified
+    /// with a named instance (`"udp/aware"`) — see [`TransportSpec`].
     pub transport: String,
 
     /// Transport-specific address string.
@@ -105,6 +174,12 @@ impl PeerAddress {
     pub fn with_seen_at_ms(mut self, seen_at_ms: u64) -> Self {
         self.seen_at_ms = Some(seen_at_ms);
         self
+    }
+
+    /// The [`transport`](Self::transport) field split into type and optional
+    /// instance name.
+    pub fn spec(&self) -> TransportSpec<'_> {
+        TransportSpec::parse(&self.transport)
     }
 }
 
@@ -200,5 +275,66 @@ impl PeerConfig {
     /// Check if this peer should auto-connect on startup.
     pub fn is_auto_connect(&self) -> bool {
         matches!(self.connect_policy, ConnectPolicy::AutoConnect)
+    }
+}
+
+#[cfg(test)]
+mod transport_spec_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_type_is_unqualified_and_matches_any_instance() {
+        let spec = TransportSpec::parse("udp");
+        assert_eq!(spec.kind, "udp");
+        assert_eq!(spec.instance, None);
+        assert!(spec.matches("udp", None), "an unnamed Single instance");
+        assert!(spec.matches("udp", Some("aware")), "a named instance");
+        assert!(!spec.matches("tcp", None), "a different transport type");
+    }
+
+    #[test]
+    fn a_qualified_type_matches_only_that_instance() {
+        let spec = TransportSpec::parse("udp/aware");
+        assert_eq!(spec.kind, "udp");
+        assert_eq!(spec.instance, Some("aware"));
+        assert!(spec.matches("udp", Some("aware")));
+        assert!(
+            !spec.matches("udp", Some("lan")),
+            "a different instance must not be substituted"
+        );
+        assert!(
+            !spec.matches("udp", None),
+            "an unnamed instance cannot satisfy a named request"
+        );
+        assert!(!spec.matches("tcp", Some("aware")));
+    }
+
+    #[test]
+    fn malformed_fields_degrade_to_an_unqualified_type() {
+        // Neither half may be empty; anything else keeps the whole string as
+        // the type, so a typo fails the type test rather than silently
+        // matching some instance.
+        for field in ["udp/", "/aware", "/"] {
+            let spec = TransportSpec::parse(field);
+            assert_eq!(spec.kind, field, "{field}");
+            assert_eq!(spec.instance, None, "{field}");
+        }
+    }
+
+    #[test]
+    fn only_the_first_separator_splits() {
+        let spec = TransportSpec::parse("udp/a/b");
+        assert_eq!(spec.kind, "udp");
+        assert_eq!(spec.instance, Some("a/b"));
+    }
+
+    #[test]
+    fn peer_address_exposes_its_spec() {
+        let addr = PeerAddress::new("udp/aware", "[fe80::1%7]:4872");
+        assert_eq!(addr.spec().instance, Some("aware"));
+        assert_eq!(
+            PeerAddress::new("udp", "1.2.3.4:2121").spec().instance,
+            None
+        );
     }
 }

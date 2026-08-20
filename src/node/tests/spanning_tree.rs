@@ -56,6 +56,26 @@ pub(super) async fn lock_large_network_test() -> tokio::sync::MutexGuard<'static
     LARGE_NETWORK_TEST_LOCK.lock().await
 }
 
+/// Register a second loopback address that delivers to the node already
+/// listening on `existing`.
+///
+/// Gives a test node a second reachable path without a second transport:
+/// packets sent to the returned address land in the same node's receive
+/// channel. Used by the alternate-path tests, whose point is that the node
+/// dialing it must treat the new address as a different path to the same
+/// peer.
+pub(super) fn add_loopback_alias(existing: &TransportAddr) -> TransportAddr {
+    let tx = LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .get(existing)
+        .expect("existing loopback address must be registered")
+        .clone();
+    let alias = next_loopback_addr();
+    LOOPBACK_REGISTRY.lock().unwrap().insert(alias.clone(), tx);
+    alias
+}
+
 /// A test node bundling a Node with its transport and packet channel.
 pub(super) struct TestNode {
     pub(super) node: Node,

@@ -844,6 +844,26 @@ impl TransportHandle {
         }
     }
 
+    /// Get the raw file descriptor of the bound socket (UDP only, returns None
+    /// for other transports and before the transport has started). Unix-only,
+    /// since `RawFd` is a unix concept and the Windows UDP backend has no
+    /// descriptor.
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        match self {
+            TransportHandle::Udp(t) => t.raw_fd(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => None,
+            TransportHandle::Tcp(_) => None,
+            TransportHandle::Tor(_) => None,
+            TransportHandle::Nym(_) => None,
+            #[cfg(target_os = "linux")]
+            TransportHandle::Ble(_) => None,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => None,
+        }
+    }
+
     /// Get the interface name (Ethernet only, returns None for other transports).
     pub fn interface_name(&self) -> Option<&str> {
         match self {

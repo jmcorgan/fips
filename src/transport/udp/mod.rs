@@ -85,6 +85,20 @@ impl UdpTransport {
         self.local_addr
     }
 
+    /// Raw file descriptor of the bound listen socket, or `None` before
+    /// `start_async` has bound one.
+    ///
+    /// Unix-only: `RawFd` is a unix concept and the Windows backend is built
+    /// on `tokio::net::UdpSocket` with no descriptor to hand out. The socket
+    /// stays owned by the transport, so the descriptor is a borrow with no
+    /// lifetime promise beyond "this is the transport's socket, and it is
+    /// open right now".
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        use std::os::unix::io::AsRawFd;
+        self.socket.as_ref().map(|socket| socket.as_raw_fd())
+    }
+
     /// Configured recv buffer size — used when opening per-peer
     /// `ConnectedPeerSocket`s so they get the same buffer ceiling as
     /// the wildcard listen socket.

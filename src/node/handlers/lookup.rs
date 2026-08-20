@@ -775,6 +775,19 @@ impl Node {
     /// `path_mtu_lookup` empty for their FipsAddress, causing
     /// `per_flow_max_mss` to fall back to the global ceiling and the
     /// SYN-time TCP MSS clamp to over-estimate the effective path.
+    ///
+    /// The never-loosen rule is scoped to a single link. A tighter value is
+    /// evidence about the path it was measured on, so re-seeding from a
+    /// *different* transport than the one that last seeded this destination
+    /// replaces it outright: the peer has moved, and the old measurement
+    /// describes a path it no longer uses. Without that, a peer once
+    /// reachable only over a low-MTU link stays clamped to it for the process
+    /// lifetime even after moving to a wider one.
+    ///
+    /// A destination with no prior seed keeps the never-loosen rule unchanged
+    /// — nothing yet says which link its value describes, so a value learned
+    /// from discovery or from reactive `MtuExceeded` is assumed to be about
+    /// the link now being seeded and is not discarded.
     pub(in crate::node) fn seed_path_mtu_for_link_peer(
         &self,
         peer_addr: &NodeAddr,
@@ -814,9 +827,33 @@ impl Node {
             );
             return;
         };
+        // Taken while `path_mtu_lookup` is held. This is the only site that
+        // locks both, so no lock-order inversion is reachable.
+        let Ok(mut seeded_by) = self.path_mtu_seeded_by.write() else {
+            warn!(
+                peer = %self.peer_display_name(peer_addr),
+                "seed_path_mtu_for_link_peer: path_mtu_seeded_by write lock poisoned"
+            );
+            return;
+        };
+        // Only a *prior seed from another transport* proves the peer has
+        // moved. With no prior seed the existing value came from discovery or
+        // reactive learning about the path we are seeding now, so the
+        // never-loosen rule still applies to it.
+        let prior_seed = seeded_by.get(&fips_addr).copied();
+        let relinked = prior_seed.is_some_and(|prior| prior != transport_id);
+        // Recorded whether or not the value changes: the next seed needs to
+        // know which link this one described, otherwise a peer whose first
+        // seed was declined never registers a link at all and a later move
+        // cannot be detected.
+        seeded_by.insert(fips_addr, transport_id);
         match map.get(&fips_addr).copied() {
-            Some(existing) if existing.mtu <= link_mtu => {
-                // Keep the tighter learned value; never loosen the clamp.
+            Some(existing) if !relinked && existing.mtu <= link_mtu => {
+                // Keep the tighter learned value; never loosen within a link.
+                // `relinked` is the case upstream's held/release lifecycle does
+                // not reach: two links to one peer can be up at once, so the
+                // old entry is never released and a wider seed from the new
+                // transport would otherwise be refused forever.
                 debug!(
                     peer = %self.peer_display_name(peer_addr),
                     fips_addr = %fips_addr,
@@ -834,6 +871,9 @@ impl Node {
                     fips_addr = %fips_addr,
                     link_mtu = link_mtu,
                     prior = ?other,
+                    prior_transport = ?prior_seed,
+                    transport_id = %transport_id,
+                    relinked = relinked,
                     map_len = map.len(),
                     "seed_path_mtu_for_link_peer: wrote link MTU"
                 );

@@ -41,7 +41,7 @@ pub use node::{
     NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy, RateLimitConfig, RekeyConfig,
     RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
-pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
+pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
     BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, TcpConfig, TorConfig,
     TransportInstances, TransportsConfig, UdpConfig,
@@ -1137,6 +1137,52 @@ impl Config {
                          fips cannot reach external peers from a loopback-bound socket. \
                          Use bind_addr: \"0.0.0.0:2121\" (with kernel-firewall hardening if exposure is a concern), or set outbound_only: true.",
                         cfg.bind_addr()
+                    )));
+                }
+            }
+        }
+
+        // Reject a peer address naming a transport instance that no
+        // configured transport answers to. A qualified name deliberately never
+        // falls back: substituting a different instance is the wrong-lane dial
+        // the syntax exists to prevent, so the dialer refuses the address and
+        // says so at debug. Where the peer has a second address that does
+        // resolve, that refusal is invisible — the lane is simply never used,
+        // which is the failure the instance names were introduced to fix. A
+        // typo, a renamed transport, or a `Named` config collapsed back to
+        // `Single` all land here, and all of them are cheaper to find at
+        // startup than in a packet capture.
+        for peer in &self.peers {
+            for addr in &peer.addresses {
+                let spec = addr.spec();
+                let Some(want) = spec.instance else {
+                    continue;
+                };
+                if spec.kind != "udp" {
+                    return Err(ConfigError::Validation(format!(
+                        "peer `{}` has address `{}` on transport `{}`, but only `udp` resolves an instance name; \
+                         for any other type the dialer would have to pick an arbitrary instance, which is the wrong-lane dial the syntax exists to prevent. \
+                         Drop the `/{want}` qualifier to match any instance of `{}`.",
+                        peer.npub, addr.addr, addr.transport, spec.kind
+                    )));
+                }
+                let configured: Vec<&str> = self
+                    .transports
+                    .udp
+                    .iter()
+                    .filter_map(|(name, _)| name)
+                    .collect();
+                if !configured.contains(&want) {
+                    let known = if configured.is_empty() {
+                        "no named udp instances are configured (the udp transport is a single unnamed instance)".to_string()
+                    } else {
+                        format!("configured udp instances are: {}", configured.join(", "))
+                    };
+                    return Err(ConfigError::Validation(format!(
+                        "peer `{}` has address `{}` on transport `{}`, but no udp transport is configured under the instance name `{want}`; \
+                         a qualified name is never substituted, so this address would be skipped at every dial and the peer reached only over its other addresses, if it has any. \
+                         {known}.",
+                        peer.npub, addr.addr, addr.transport
                     )));
                 }
             }
@@ -2353,6 +2399,114 @@ node:
         assert!(!is_loopback_addr_str("[fd00::1]:2121"));
         assert!(!is_loopback_addr_str("core-vm.tail65015.ts.net:2121"));
         assert!(!is_loopback_addr_str("example.com:443"));
+    }
+
+    #[test]
+    fn test_a_peer_address_naming_a_configured_udp_instance_passes_validation() {
+        let mut config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                addresses: vec![PeerAddress::new("udp/aware", "203.0.113.1:2121")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.transports.udp = TransportInstances::Named(HashMap::from([
+            ("aware".to_string(), UdpConfig::default()),
+            ("infra".to_string(), UdpConfig::default()),
+        ]));
+
+        config
+            .validate()
+            .expect("an instance name that matches a configured transport must validate");
+    }
+
+    #[test]
+    fn test_a_peer_address_naming_an_unconfigured_udp_instance_is_rejected() {
+        let mut config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                addresses: vec![PeerAddress::new("udp/awre", "203.0.113.1:2121")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.transports.udp = TransportInstances::Named(HashMap::from([
+            ("aware".to_string(), UdpConfig::default()),
+            ("infra".to_string(), UdpConfig::default()),
+        ]));
+
+        let err = config
+            .validate()
+            .expect_err("a typo in an instance name must not validate");
+        let text = err.to_string();
+        assert!(
+            text.contains("awre"),
+            "the error must name the instance asked for: {text}"
+        );
+        assert!(
+            text.contains("aware") && text.contains("infra"),
+            "the error must list the instances that do exist: {text}"
+        );
+    }
+
+    #[test]
+    fn test_an_unqualified_peer_address_still_validates_against_named_instances() {
+        let mut config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                addresses: vec![PeerAddress::new("udp", "203.0.113.1:2121")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.transports.udp =
+            TransportInstances::Named(HashMap::from([("aware".to_string(), UdpConfig::default())]));
+
+        config
+            .validate()
+            .expect("a bare type matches any instance and must stay valid");
+    }
+
+    #[test]
+    fn test_a_qualified_peer_address_is_rejected_when_the_udp_transport_is_unnamed() {
+        let mut config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                addresses: vec![PeerAddress::new("udp/aware", "203.0.113.1:2121")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.transports.udp = TransportInstances::Single(UdpConfig::default());
+
+        let err = config
+            .validate()
+            .expect_err("a Single config has no instance name to match and must not validate");
+        assert!(
+            err.to_string().contains("no named udp instances"),
+            "the error must say why nothing matched: {err}"
+        );
+    }
+
+    #[test]
+    fn test_a_qualified_peer_address_on_a_non_udp_transport_is_rejected() {
+        let config = Config {
+            peers: vec![PeerConfig {
+                npub: "npub1peer".to_string(),
+                addresses: vec![PeerAddress::new("ethernet/eth0", "eth0/aa:bb:cc:dd:ee:ff")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("only udp resolves an instance name, so any other type must be refused");
+        assert!(
+            err.to_string().contains("only `udp` resolves"),
+            "the error must say which transport types support the syntax: {err}"
+        );
     }
 
     #[test]

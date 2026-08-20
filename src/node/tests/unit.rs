@@ -1256,6 +1256,69 @@ fn active_peer_same_path_discovery_refreshes_stale_peer() {
     ));
 }
 
+/// An instance-qualified candidate is the peer's *current* path only when it
+/// names the instance the peer is actually on. Without this, every qualified
+/// address looked like a different path from the `"udp"` a transport reports as
+/// its type, so a platform lane that re-pushes its peers — Wi-Fi Aware does, on
+/// every data-path callback — would re-dial a peer it is already connected to,
+/// for as long as it stayed connected.
+#[tokio::test]
+async fn an_instance_qualified_candidate_matches_only_its_own_instance() {
+    let mut listeners = std::collections::HashMap::new();
+    for name in ["main", "backup"] {
+        listeners.insert(
+            name.to_string(),
+            crate::config::UdpConfig {
+                bind_addr: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Named(listeners);
+    config.dns.enabled = false;
+
+    let mut node = make_node_with(config);
+    node.start().await.unwrap();
+
+    let main_id = *node
+        .transports
+        .iter()
+        .find(|(_, handle)| handle.name() == Some("main"))
+        .expect("the `main` listener came up")
+        .0;
+
+    let peer_full = Identity::generate();
+    let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
+    let peer_node_addr = *peer_identity.node_addr();
+    let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
+    active_peer.set_current_addr(main_id, TransportAddr::from_string("127.0.0.1:9"));
+    node.peers.insert(peer_node_addr, active_peer);
+
+    let matches = |transport: &str| {
+        let candidate = crate::config::PeerAddress::new(transport, "127.0.0.1:9");
+        node.active_peer_candidate_is_fresh_enough_to_skip(
+            &peer_node_addr,
+            std::slice::from_ref(&candidate),
+        )
+    };
+
+    assert!(
+        matches("udp"),
+        "an unqualified candidate still matches, as it always did",
+    );
+    assert!(
+        matches("udp/main"),
+        "the instance the peer is on is the same path, not an alternative",
+    );
+    assert!(
+        !matches("udp/backup"),
+        "a different instance is a genuinely different path",
+    );
+
+    node.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn node_context_mirrors_config_and_immutable_facades() {
     let mut node = make_node();
@@ -1945,6 +2008,142 @@ async fn test_seed_path_mtu_noop_for_unknown_transport() {
     );
 }
 
+/// The upgrade case, and the reason the seeding transport is tracked.
+///
+/// A peer first reachable only over a narrow link, then moving to a wider
+/// one, must not stay clamped to the narrow link's MTU. Every writer of
+/// `path_mtu_lookup` keeps the tighter value, so without recording which link
+/// a value described, the low MTU outlives the link it came from and pins the
+/// peer for the process lifetime.
+#[tokio::test]
+async fn test_seed_path_mtu_reseeds_when_peer_moves_to_wider_transport() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let narrow = make_udp_transport_with_mtu(1, 1280).await;
+    let wide = make_udp_transport_with_mtu(2, 1452).await;
+    node.transports.insert(TransportId::new(1), narrow);
+    node.transports.insert(TransportId::new(2), wide);
+
+    let peer_addr = make_node_addr(0xE1);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let narrow_addr = TransportAddr::from_string("10.0.0.6:2121");
+    let wide_addr = TransportAddr::from_string("10.0.0.7:2121");
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &narrow_addr);
+    assert_eq!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .map(|e| e.mtu),
+        Some(1280),
+        "first seed takes the narrow link's MTU"
+    );
+
+    // The peer moves to the wider transport.
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(2), &wide_addr);
+    assert_eq!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .map(|e| e.mtu),
+        Some(1452),
+        "a seed from a different transport must replace a value describing \
+         the link the peer has left"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+/// A value learned *about the narrow link* is discarded on the move too — it
+/// measured a path the peer no longer uses.
+#[tokio::test]
+async fn test_seed_path_mtu_discards_learned_value_from_abandoned_link() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let narrow = make_udp_transport_with_mtu(1, 1280).await;
+    let wide = make_udp_transport_with_mtu(2, 1452).await;
+    node.transports.insert(TransportId::new(1), narrow);
+    node.transports.insert(TransportId::new(2), wide);
+
+    let peer_addr = make_node_addr(0xE2);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let narrow_addr = TransportAddr::from_string("10.0.0.8:2121");
+    let wide_addr = TransportAddr::from_string("10.0.0.9:2121");
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &narrow_addr);
+    // Reactive MtuExceeded tightens further, still on the narrow link.
+    node.path_mtu_lookup
+        .write()
+        .unwrap()
+        .insert(fips_addr, crate::upper::tun::PathMtuEntry::held(900));
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(2), &wide_addr);
+    assert_eq!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .map(|e| e.mtu),
+        Some(1452),
+        "a tighter value measured on the abandoned link must not clamp the new one"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+/// The guard against over-loosening. Promotion re-seeds on every handshake,
+/// so discarding a tighter learned value on a *same-link* re-seed would reset
+/// genuine PMTU discovery repeatedly and the estimate would never converge.
+#[tokio::test]
+async fn test_seed_path_mtu_keeps_tighter_value_when_reseeding_same_transport() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let peer_addr = make_node_addr(0xE3);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.10:2121");
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    // Reactive learning tightens the same link.
+    node.path_mtu_lookup
+        .write()
+        .unwrap()
+        .insert(fips_addr, crate::upper::tun::PathMtuEntry::held(1200));
+
+    // Re-promotion on the same transport.
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    assert_eq!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .map(|e| e.mtu),
+        Some(1200),
+        "re-seeding the same link must not undo reactive learning"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
 // === Outbound admission gate tests ===
 
 /// Inject `count` synthetic active peers into `node.peers` so peer_count()
@@ -2522,6 +2721,240 @@ async fn start_skips_system_tun_when_app_owned() {
     assert_eq!(node.tun_state(), crate::upper::tun::TunState::Active);
 
     node.stop().await.unwrap();
+}
+
+/// Config for the app-owned-UDP-fd tests: one loopback UDP transport on an
+/// ephemeral port and no DNS, mirroring `make_healthy_node`.
+#[cfg(unix)]
+fn udp_loopback_config() -> crate::Config {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    config
+}
+
+/// App-owned UDP fd seam: the embedder gets the descriptor of the socket the
+/// transport actually bound, and gets it only once the bind has happened —
+/// there is no fd to hand out before `start()`.
+#[cfg(unix)]
+#[tokio::test]
+async fn app_owned_udp_fd_seam_delivers_the_bound_socket() {
+    let mut node = make_node_with(udp_loopback_config());
+    let rx = node.enable_app_owned_udp_fd();
+
+    assert!(
+        rx.try_recv().is_err(),
+        "nothing is delivered at arm time — the socket is not bound until start()",
+    );
+
+    node.start().await.unwrap();
+
+    let socket = rx
+        .try_recv()
+        .expect("the seam fires once the UDP socket is bound");
+    let live_fd = node
+        .transports
+        .values()
+        .next()
+        .expect("the loopback UDP transport came up")
+        .raw_fd();
+    assert_eq!(
+        Some(socket.fd),
+        live_fd,
+        "the delivered fd must be the live transport's socket, not some other descriptor",
+    );
+    assert_eq!(
+        socket.instance, None,
+        "a `Single` UDP config has no instance name to report",
+    );
+
+    assert!(
+        rx.try_recv().is_err(),
+        "one UDP transport bound means exactly one delivery",
+    );
+
+    node.stop().await.unwrap();
+}
+
+/// One message per UDP transport that binds: an embedder pinning sockets to a
+/// network needs every listener's fd, not just the first, so the seam does not
+/// latch after the first send.
+#[cfg(unix)]
+#[tokio::test]
+async fn app_owned_udp_fd_seam_delivers_every_udp_listener_that_binds() {
+    let mut listeners = std::collections::HashMap::new();
+    for name in ["main", "backup"] {
+        listeners.insert(
+            name.to_string(),
+            crate::config::UdpConfig {
+                bind_addr: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Named(listeners);
+    config.dns.enabled = false;
+
+    let mut node = make_node_with(config);
+    let rx = node.enable_app_owned_udp_fd();
+    node.start().await.unwrap();
+
+    let mut delivered: Vec<_> = rx
+        .try_iter()
+        .map(|socket| (socket.instance, socket.fd))
+        .collect();
+    delivered.sort_unstable();
+    let mut live: Vec<_> = node
+        .transports
+        .values()
+        .filter_map(|handle| {
+            handle
+                .raw_fd()
+                .map(|fd| (handle.name().map(str::to_string), fd))
+        })
+        .collect();
+    live.sort_unstable();
+    assert_eq!(
+        delivered, live,
+        "every UDP listener that bound must be handed out, not just the first",
+    );
+    assert_eq!(delivered.len(), 2, "both named listeners bound");
+
+    // The label is what makes two descriptors usable: an embedder pins each
+    // socket to a different network, and arrival order — the transports come
+    // out of a `HashMap` — cannot tell it which is which.
+    let names: Vec<_> = delivered
+        .iter()
+        .map(|(instance, _)| instance.as_deref())
+        .collect();
+    assert!(
+        names.contains(&Some("main")) && names.contains(&Some("backup")),
+        "each fd names the configured instance it belongs to, got {names:?}",
+    );
+    assert_ne!(
+        delivered[0].1, delivered[1].1,
+        "two instances are two distinct sockets",
+    );
+
+    node.stop().await.unwrap();
+}
+
+/// No UDP transport means no fd: the channel stays silent rather than
+/// delivering a sentinel, so a receive that times out is how an embedder tells
+/// "there is no socket" from "here is the socket".
+#[cfg(unix)]
+#[tokio::test]
+async fn app_owned_udp_fd_seam_stays_silent_without_a_udp_transport() {
+    let mut config = crate::Config::new();
+    config.dns.enabled = false;
+    let mut node = make_node_with(config);
+    let rx = node.enable_app_owned_udp_fd();
+
+    // A node with no transports configured fails bring-up with
+    // `NoOperationalTransports`; asserted so this test cannot silently stop
+    // exercising the no-UDP path if that outcome ever changes.
+    let started = node.start().await;
+    assert!(
+        started.is_err(),
+        "a transportless node has no operational transports",
+    );
+
+    assert!(
+        rx.try_recv().is_err(),
+        "no UDP transport means no fd is ever delivered",
+    );
+}
+
+/// A UDP transport that never bound has no fd to hand out. The bind address is
+/// deliberately unparseable — a busy port would not do it, since
+/// `UdpRawSocket::open` sets `SO_REUSEADDR`/`SO_REUSEPORT` before binding.
+#[cfg(unix)]
+#[tokio::test]
+async fn app_owned_udp_fd_seam_stays_silent_when_the_udp_transport_fails_to_start() {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("not-a-socket-addr".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    let mut node = make_node_with(config);
+    let rx = node.enable_app_owned_udp_fd();
+
+    // Transport-start failure is warn-and-continue; the node's overall start
+    // outcome is not what this test pins.
+    let _ = node.start().await;
+
+    assert!(
+        rx.try_recv().is_err(),
+        "a UDP transport that never bound has no fd to hand out",
+    );
+}
+
+/// The seam is per-`Node` state with a fresh channel per arming, so an embedder
+/// that tears the mesh down and rebuilds the node — a radio off→on cycle — gets
+/// the new socket on the new node's channel, with nothing shared between them.
+#[cfg(unix)]
+#[tokio::test]
+async fn app_owned_udp_fd_seam_rearms_on_a_rebuilt_node() {
+    let mut node_a = make_node_with(udp_loopback_config());
+    let rx_a = node_a.enable_app_owned_udp_fd();
+    node_a.start().await.unwrap();
+    rx_a.try_recv()
+        .expect("node A's socket reached node A's rx");
+    node_a.stop().await.unwrap();
+    drop(node_a);
+
+    let mut node_b = make_node_with(udp_loopback_config());
+    let rx_b = node_b.enable_app_owned_udp_fd();
+    node_b.start().await.unwrap();
+    rx_b.try_recv()
+        .expect("node B's socket reached node B's rx");
+
+    // Nothing from B reaches A's channel. (A is dropped, so this is
+    // `Disconnected` rather than `Empty`; the specific variant is not part of
+    // the contract, only that no fd arrives.)
+    assert!(
+        rx_a.try_recv().is_err(),
+        "the channels are per-node — no shared or global arming state",
+    );
+
+    node_b.stop().await.unwrap();
+}
+
+/// Arming twice on the same node replaces the first arming: the last receiver
+/// wins and the earlier one is disconnected. Asserted by firing through the
+/// installed sender directly, so the test needs no real bind.
+#[cfg(unix)]
+#[test]
+fn app_owned_udp_fd_seam_second_arm_replaces_the_first() {
+    let mut node = make_node_with(udp_loopback_config());
+    let rx1 = node.enable_app_owned_udp_fd();
+    let rx2 = node.enable_app_owned_udp_fd();
+
+    let sent = crate::node::AppOwnedUdpSocket {
+        instance: Some("aware".to_string()),
+        fd: 7,
+    };
+    node.supervisor
+        .udp_fd_tx
+        .as_ref()
+        .expect("the second arming installed a sender")
+        .send(sent.clone())
+        .expect("the surviving receiver is live");
+
+    assert_eq!(
+        rx2.try_recv().ok(),
+        Some(sent),
+        "the last receiver armed is the one the node feeds",
+    );
+    assert!(
+        rx1.try_recv().is_err(),
+        "the replaced receiver gets nothing",
+    );
 }
 
 /// The embedder-facing DNS contract, end to end.
