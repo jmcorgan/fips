@@ -56,7 +56,37 @@ LABEL="com.corganlabs.fips-ci=1"
 NODE_NAME="fips-native-api-node-$$"
 GATED_NAME="fips-native-api-gated-$$"
 SURFACE="fips-native-surface-$$"
-SOCK_DIR="$(mktemp -d)"
+# Root for every temporary directory this harness bind-mounts into a
+# container. It has to be somewhere the Docker daemon can resolve, which /tmp
+# is not always.
+#
+# A bind-mount source is resolved by the daemon in the host's mount namespace,
+# never in this script's. Under a service sandbox that gives the unit a private
+# /tmp — systemd's PrivateTmp=, which the CI worker on the builder sets — a path
+# from `mktemp -d` exists only here. The daemon finds nothing at it and creates
+# an empty directory instead, so a socket the container binds lands where this
+# script cannot see it, and a file mount such as fips.yaml arrives as a
+# directory, which the daemon reports as EISDIR. Neither says what happened:
+# the first surfaces as "socket never appeared" and the second as a node that
+# will not start. The suite failed both ways on the builder while passing on
+# GitHub, whose runner has no such sandbox.
+#
+# The worktree is the same path in both namespaces, so putting these
+# directories under it removes the question. /target is already ignored, and
+# the run's pid keeps concurrent runs out of each other's way.
+TMP_ROOT="$REPO_ROOT/target/native-api-tmp/$$"
+mkdir -p "$TMP_ROOT"
+
+# Create a temporary directory the Docker daemon can also see.
+#
+# Use this, not `mktemp -d`, for anything that becomes a bind-mount source.
+# Directories that stay on this side of the boundary, such as a build context
+# the CLI reads itself, do not need it.
+shared_tmpdir() {
+    mktemp -d "$TMP_ROOT/XXXXXXXX"
+}
+
+SOCK_DIR="$(shared_tmpdir)"
 IMAGE=""
 BUILT_IMAGE=""
 
@@ -91,7 +121,7 @@ cleanup() {
     docker rm -f "$GATED_NAME" >/dev/null 2>&1
     docker rm -f "$SURFACE" >/dev/null 2>&1
     [[ -n "$BUILT_IMAGE" ]] && docker rmi -f "$BUILT_IMAGE" >/dev/null 2>&1
-    rm -rf "$SOCK_DIR"
+    rm -rf "$TMP_ROOT"
     return 0
 }
 trap cleanup EXIT
@@ -689,7 +719,7 @@ gate_refusal() {
 check_debug_commands_gated() {
     log "The debug commands are refused where the gate is closed"
     local gated_dir
-    gated_dir="$(mktemp -d)"
+    gated_dir="$(shared_tmpdir)"
     start_node "$GATED_NAME" node-debug-off.yaml "$gated_dir"
     if ! wait_for_socket "$gated_dir/api.sock"; then
         fail "the gated node never bound its socket, so nothing here proves anything"
@@ -1055,11 +1085,11 @@ check_end_to_end() {
         return 1
     fi
 
-    DIR_A="$(mktemp -d)"
-    DIR_B="$(mktemp -d)"
+    DIR_A="$(shared_tmpdir)"
+    DIR_B="$(shared_tmpdir)"
     local cfg_a cfg_b
-    cfg_a="$(mktemp -d)"
-    cfg_b="$(mktemp -d)"
+    cfg_a="$(shared_tmpdir)"
+    cfg_b="$(shared_tmpdir)"
     write_node_config "$cfg_a" "$nsec_a" "$npub_b" "$NODE_B"
     write_node_config "$cfg_b" "$nsec_b" "$npub_a" "$NODE_A"
 
@@ -1358,7 +1388,7 @@ check_control_reports_the_flow() {
 check_disabled_by_default() {
     log "No socket appears when the API is not enabled"
     local off_dir
-    off_dir="$(mktemp -d)"
+    off_dir="$(shared_tmpdir)"
     start_node "${NODE_NAME}-off" node-api-off.yaml "$off_dir"
 
     # The daemon must be proved alive before the absence of a socket means
